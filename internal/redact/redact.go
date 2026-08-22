@@ -26,15 +26,18 @@ type Redactor struct {
 	rules []rule
 }
 
-var tokenCandidate = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
+var (
+	tokenCandidate = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
+	stableID       = regexp.MustCompile(`^(?:msg_|rs_|ctc_|ctco_|ev-)(?:[A-Za-z0-9]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$`)
+)
 
 func Default() Redactor {
 	return Redactor{rules: []rule{
-		{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----`)},
+		{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\z)`)},
 		{"bearer", regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)},
 		{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
-		{"connection_url", regexp.MustCompile(`(?i)\b(postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
-		{"named_secret", regexp.MustCompile(`(?i)\b(api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret)\b\s*[:=]\s*[^\s,;]+`)},
+		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
+		{"named_secret", regexp.MustCompile(`(?i)\b"?(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret)"?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;\[]+)`)},
 	}}
 }
 
@@ -72,12 +75,7 @@ func (r Redactor) Text(input string) Result {
 }
 
 func isStableID(value string) bool {
-	for _, prefix := range []string{"msg_", "rs_", "ctc_", "ctco_", "ev-"} {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
+	return stableID.MatchString(value)
 }
 
 func entropy(value string) float64 {

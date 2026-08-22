@@ -45,3 +45,56 @@ func TestDefaultPreservesStableItemID(t *testing.T) {
 		t.Fatal("stable item ID was changed")
 	}
 }
+
+func TestDefaultRedactsConventionalNamedSecretsWithQuotedValues(t *testing.T) {
+	inputs := []string{
+		`MY_API_KEY = "canary value with suffix" trailing`,
+		`{"password": "canary password with spaces", "safe": true}`,
+		`service_access_token='canary token with spaces' trailing`,
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if strings.Contains(strings.ToLower(result.Text), "canary") {
+			t.Fatalf("named-secret case %d leaked", i)
+		}
+		if !strings.Contains(result.Text, "[REDACTED:NAMED_SECRET]") {
+			t.Fatalf("named-secret case %d was not redacted", i)
+		}
+	}
+}
+
+func TestDefaultRejectsStableIDPrefixImpostor(t *testing.T) {
+	input := "msg_q7Vx2Pm9Lk4Nz8Rc1Ya6Wt3Hu5Jd0Sf7Bg2Ke9UiExtra"
+	result := Default().Text(input)
+	if result.Text == input || len(result.Findings) != 1 || result.Findings[0].Rule != "high_entropy_token" {
+		t.Fatal("stable-ID prefix impostor bypassed entropy redaction")
+	}
+}
+
+func TestDefaultRedactsTruncatedPrivateKey(t *testing.T) {
+	input := "before -----BEGIN PRIVATE KEY-----\nCANARYTRUNCATEDPRIVATEKEY"
+	result := Default().Text(input)
+	if strings.Contains(strings.ToLower(result.Text), "canary") || !strings.Contains(result.Text, "[REDACTED:PRIVATE_KEY]") {
+		t.Fatal("truncated private key leaked")
+	}
+}
+
+func TestDefaultRedactsGenericCredentialURLButPreservesNormalURL(t *testing.T) {
+	credentialURL := "https://admin:canary-password@example.test/path"
+	result := Default().Text(credentialURL)
+	if strings.Contains(strings.ToLower(result.Text), "canary") || !strings.Contains(result.Text, "[REDACTED:CONNECTION_URL]") {
+		t.Fatal("generic credential URL leaked")
+	}
+
+	normalURL := "https://example.test/path?q=public"
+	if got := Default().Text(normalURL).Text; got != normalURL {
+		t.Fatal("normal URL was changed")
+	}
+}
+
+func TestDefaultCountsBearerOnce(t *testing.T) {
+	result := Default().Text("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.synthetic.signature")
+	if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "bearer", Count: 1}) {
+		t.Fatal("bearer finding count was not semantically accurate")
+	}
+}
