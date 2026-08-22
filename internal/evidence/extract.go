@@ -49,18 +49,19 @@ type Extractor struct {
 	currentCWD    string
 	warningCounts map[string]int
 	usedIDs       map[string]struct{}
-	initErr       error
 	full          bool
 }
 
-func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) *Extractor {
+func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
+	if err := limits.Validate(); err != nil {
+		return nil, err
+	}
 	x := &Extractor{
 		redactor:      redactor,
 		limits:        limits,
 		currentCWD:    cwd,
 		warningCounts: make(map[string]int),
 		usedIDs:       make(map[string]struct{}),
-		initErr:       limits.Validate(),
 	}
 
 	safeSessionID, sessionFindings := x.redact(sessionID)
@@ -76,15 +77,15 @@ func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limit
 		Events:        []Item{},
 	}
 	x.refreshWarnings()
-	return x
+	if packetTextRunes(x.packet) > limits.MaxPacketRunes {
+		return nil, fmt.Errorf("%w: max packet runes smaller than schema envelope", ErrInvalidLimits)
+	}
+	return x, nil
 }
 
 func (x *Extractor) Add(record session.Record) error {
 	if x == nil {
 		return ErrInvalidLimits
-	}
-	if x.initErr != nil {
-		return x.initErr
 	}
 	if x.full {
 		return ErrPacketFull
@@ -99,20 +100,17 @@ func (x *Extractor) Add(record session.Record) error {
 			return errors.New("malformed turn_context payload")
 		}
 		if payload.CWD == "" || payload.CWD == x.currentCWD {
-			x.advance(record.Line)
-			return nil
+			return x.advance(record.Line)
 		}
 		if err := x.append(record, "cwd_change", "", "", payload.CWD, ""); err != nil {
 			return err
 		}
 		x.currentCWD = payload.CWD
-		x.advance(record.Line)
 		return nil
 	case "response_item":
 		return x.addResponseItem(record)
 	default:
-		x.advance(record.Line)
-		return nil
+		return x.advance(record.Line)
 	}
 }
 
@@ -127,6 +125,15 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 	var err error
 	switch header.Type {
 	case "message":
+		var messageHeader struct {
+			Role string `json:"role"`
+		}
+		if err := json.Unmarshal(record.Payload, &messageHeader); err != nil {
+			return errors.New("malformed message payload")
+		}
+		if messageHeader.Role != "user" && messageHeader.Role != "assistant" {
+			return x.advance(record.Line)
+		}
 		var payload struct {
 			ID      string `json:"id"`
 			Role    string `json:"role"`
@@ -138,10 +145,6 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			return errors.New("malformed message payload")
 		}
-		if payload.Role != "user" && payload.Role != "assistant" {
-			x.advance(record.Line)
-			return nil
-		}
 		parts := make([]string, 0, len(payload.Content))
 		for _, content := range payload.Content {
 			if content.Type == "input_text" || content.Type == "output_text" {
@@ -149,8 +152,7 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 			}
 		}
 		if len(parts) == 0 {
-			x.advance(record.Line)
-			return nil
+			return x.advance(record.Line)
 		}
 		err = x.append(record, "message", payload.ID, payload.Role, strings.Join(parts, "\n"), "")
 	case "custom_tool_call":
@@ -173,13 +175,11 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 		}
 		err = x.append(record, "tool_result", payload.ID, "", payload.Output, "")
 	default:
-		x.advance(record.Line)
-		return nil
+		return x.advance(record.Line)
 	}
 	if err != nil {
 		return err
 	}
-	x.advance(record.Line)
 	return nil
 }
 
@@ -216,11 +216,13 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 	candidate := x.Packet()
 	candidate.Events = append(candidate.Events, item)
 	candidate.Warnings = warningsWith(x.warningCounts, findings)
+	advancePacket(&candidate, record.Line)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
 	}
 
 	x.packet.Events = append(x.packet.Events, item)
+	x.packet.ToCursor = candidate.ToCursor
 	x.usedIDs[item.ID] = struct{}{}
 	x.mergeFindings(findings)
 	x.refreshWarnings()
@@ -301,14 +303,29 @@ func formatWarnings(counts map[string]int) []string {
 }
 
 func (x *Extractor) markFull() error {
+	candidate := x.Packet()
+	candidate.HasMore = true
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return fmt.Errorf("%w: packet state exceeds max packet runes", ErrInvalidLimits)
+	}
 	x.full = true
-	x.packet.HasMore = true
+	x.packet.HasMore = candidate.HasMore
 	return ErrPacketFull
 }
 
-func (x *Extractor) advance(line int) {
-	if line > x.packet.ToCursor {
-		x.packet.ToCursor = line
+func (x *Extractor) advance(line int) error {
+	candidate := x.Packet()
+	advancePacket(&candidate, line)
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return x.markFull()
+	}
+	x.packet.ToCursor = candidate.ToCursor
+	return nil
+}
+
+func advancePacket(packet *Packet, line int) {
+	if line > packet.ToCursor {
+		packet.ToCursor = line
 	}
 }
 

@@ -46,8 +46,17 @@ func messageRecord(t *testing.T, line int, id, role, text string) session.Record
 	return session.Record{Line: line, Timestamp: testTimestamp, Type: "response_item", Payload: payload, SourceHash: testHash}
 }
 
+func newExtractor(t *testing.T, sessionID, cwd string, from int, limits Limits) *Extractor {
+	t.Helper()
+	x, err := New(sessionID, cwd, from, redact.Default(), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return x
+}
+
 func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
-	x := New("s1", "/work/project", 1, redact.Default(), DefaultLimits())
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	inputs := []session.Record{
 		record(t, 1, `{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"goal"},{"type":"image_url","text":"hidden"}]}`),
 		record(t, 2, `{"type":"message","id":"a1","role":"assistant","content":[{"type":"output_text","text":"result"}]}`),
@@ -83,7 +92,7 @@ func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
 }
 
 func TestExtractorExcludesUnsafeAndUnknownContent(t *testing.T) {
-	x := New("s1", "/work/project", 1, redact.Default(), DefaultLimits())
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	inputs := []session.Record{
 		record(t, 1, `{"type":"message","id":"d1","role":"developer","content":[{"type":"input_text","text":"developer-canary"}]}`),
 		record(t, 2, `{"type":"message","id":"s1","role":"system","content":[{"type":"input_text","text":"system-canary"}]}`),
@@ -113,7 +122,7 @@ func TestExtractorExcludesUnsafeAndUnknownContent(t *testing.T) {
 }
 
 func TestExtractorMalformedPayloadErrorDoesNotEchoPayload(t *testing.T) {
-	x := New("s1", "/work/project", 1, redact.Default(), DefaultLimits())
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	secret := "malformed-canary"
 	err := x.Add(record(t, 1, `{"type":"message","role":"user","content":"`+secret))
 	if err == nil {
@@ -127,8 +136,26 @@ func TestExtractorMalformedPayloadErrorDoesNotEchoPayload(t *testing.T) {
 	}
 }
 
+func TestExtractorSkipsExcludedMessageBeforeDecodingContent(t *testing.T) {
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
+	inputs := []session.Record{
+		record(t, 1, `{"type":"message","id":"d1","role":"developer","content":"excluded-canary"}`),
+		record(t, 2, `{"type":"message","id":"s1","role":"system","content":{"nested":"excluded-canary"}}`),
+		record(t, 3, `{"type":"message","id":"x1","role":"future_role","content":42}`),
+	}
+	for _, input := range inputs {
+		if err := x.Add(input); err != nil {
+			t.Fatalf("excluded role %d decoded content: %v", input.Line, err)
+		}
+	}
+	packet := x.Packet()
+	if len(packet.Events) != 0 || packet.ToCursor != 3 {
+		t.Fatalf("excluded messages changed evidence: %+v", packet)
+	}
+}
+
 func TestExtractorRedactsEveryPersistenceVisibleTextField(t *testing.T) {
-	x := New("session "+canary, "/work/"+canary, 1, redact.Default(), DefaultLimits())
+	x := newExtractor(t, "session "+canary, "/work/"+canary, 1, DefaultLimits())
 	payload, err := json.Marshal(map[string]any{
 		"type":   "custom_tool_call",
 		"id":     "item " + canary,
@@ -168,7 +195,7 @@ func TestExtractorRedactsEveryPersistenceVisibleTextField(t *testing.T) {
 }
 
 func TestExtractorBoundsUnicodeSummaryIncludingMarker(t *testing.T) {
-	x := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 5, MaxPacketRunes: 1000})
+	x := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 5, MaxPacketRunes: 1000})
 	if err := x.Add(messageRecord(t, 1, "u", "user", "甲乙丙丁戊己庚")); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +206,7 @@ func TestExtractorBoundsUnicodeSummaryIncludingMarker(t *testing.T) {
 }
 
 func TestExtractorRedactsBeforeTruncating(t *testing.T) {
-	x := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 24, MaxPacketRunes: 1000})
+	x := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 24, MaxPacketRunes: 1000})
 	if err := x.Add(messageRecord(t, 1, "u", "user", strings.Repeat("x", 30)+" OPENAI_API_KEY="+canary)); err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +220,7 @@ func TestExtractorRedactsBeforeTruncating(t *testing.T) {
 }
 
 func TestExtractorPacketTextLimitHasExactBoundary(t *testing.T) {
-	base := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
+	base := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
 	input := messageRecord(t, 1, "u", "user", "甲乙")
 	if err := base.Add(input); err != nil {
 		t.Fatal(err)
@@ -204,12 +231,12 @@ func TestExtractorPacketTextLimitHasExactBoundary(t *testing.T) {
 	}
 	exact := utf8.RuneCount(encoded)
 
-	atLimit := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: exact})
+	atLimit := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: exact})
 	if err := atLimit.Add(input); err != nil {
 		t.Fatalf("exact limit rejected: %v", err)
 	}
 
-	belowLimit := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: exact - 1})
+	belowLimit := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: exact - 1})
 	if err := belowLimit.Add(input); !errors.Is(err, ErrPacketFull) {
 		t.Fatalf("below exact limit err=%v", err)
 	}
@@ -220,7 +247,7 @@ func TestExtractorPacketTextLimitHasExactBoundary(t *testing.T) {
 }
 
 func TestExtractorPacketLimitCountsMetadataAndWarnings(t *testing.T) {
-	plain := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
+	plain := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
 	if err := plain.Add(messageRecord(t, 1, "u", "user", "visible")); err != nil {
 		t.Fatal(err)
 	}
@@ -230,20 +257,78 @@ func TestExtractorPacketLimitCountsMetadataAndWarnings(t *testing.T) {
 	}
 	plainRunes := utf8.RuneCount(encoded)
 
-	withMetadata := New("session-name", "/longer/project/path", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: plainRunes})
+	withMetadata := newExtractor(t, "session-name", "/longer/project/path", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: plainRunes})
 	err = withMetadata.Add(messageRecord(t, 1, "u", "user", "visible"))
 	if !errors.Is(err, ErrPacketFull) {
 		t.Fatalf("metadata was not counted: err=%v packet=%+v", err, withMetadata.Packet())
 	}
 
-	withWarning := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: plainRunes})
+	withWarning := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: plainRunes})
 	if err := withWarning.Add(messageRecord(t, 1, "u", "user", "OPENAI_API_KEY="+canary)); !errors.Is(err, ErrPacketFull) {
 		t.Fatalf("warning was not counted: err=%v packet=%+v", err, withWarning.Packet())
 	}
 }
 
+func TestExtractorMeasuresAcceptedCursorInProspectivePacket(t *testing.T) {
+	input := messageRecord(t, 10, "u", "user", "visible")
+	probe := newExtractor(t, "s", "/", 1, DefaultLimits())
+	if err := probe.Add(input); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(probe.Packet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := utf8.RuneCount(encoded) - 1
+
+	x := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: limit})
+	if err := x.Add(input); !errors.Is(err, ErrPacketFull) {
+		t.Fatalf("cursor digit growth bypassed packet limit: err=%v packet=%+v", err, x.Packet())
+	}
+	packet := x.Packet()
+	if packet.ToCursor != 0 || !packet.HasMore || len(packet.Events) != 0 {
+		t.Fatalf("rejected event mutated accepted boundary: %+v", packet)
+	}
+	encoded, err = json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := utf8.RuneCount(encoded); got > limit {
+		t.Fatalf("full packet has %d runes, limit %d", got, limit)
+	}
+}
+
+func TestExtractorMeasuresSkippedCursorInProspectivePacket(t *testing.T) {
+	input := record(t, 1000, `{"type":"reasoning","id":"skip"}`)
+	probe := newExtractor(t, "s", "/", 1, DefaultLimits())
+	if err := probe.Add(input); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(probe.Packet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := utf8.RuneCount(encoded) - 1
+
+	x := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: limit})
+	if err := x.Add(input); !errors.Is(err, ErrPacketFull) {
+		t.Fatalf("skipped cursor digit growth bypassed packet limit: err=%v packet=%+v", err, x.Packet())
+	}
+	packet := x.Packet()
+	if packet.ToCursor != 0 || !packet.HasMore || len(packet.Events) != 0 {
+		t.Fatalf("rejected skipped record mutated boundary: %+v", packet)
+	}
+	encoded, err = json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := utf8.RuneCount(encoded); got > limit {
+		t.Fatalf("full packet has %d runes, limit %d", got, limit)
+	}
+}
+
 func TestExtractorFullDoesNotAdvancePastRejectedEvent(t *testing.T) {
-	x := New("s1", "/work/project", 1, redact.Default(), Limits{MaxEvents: 2, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
+	x := newExtractor(t, "s1", "/work/project", 1, Limits{MaxEvents: 2, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
 	inputs := []session.Record{
 		messageRecord(t, 1, "u1", "user", "one"),
 		record(t, 2, `{"type":"reasoning","id":"skip"}`),
@@ -279,12 +364,35 @@ func TestExtractorRejectsInvalidLimitsWithoutPanicking(t *testing.T) {
 		{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: -1},
 	}
 	for _, limits := range cases {
-		x := New("s", "/", 1, redact.Default(), limits)
-		if err := x.Add(messageRecord(t, 1, "u", "user", "text")); err == nil {
-			t.Fatalf("limits %+v were accepted", limits)
+		x, err := New("s", "/", 1, redact.Default(), limits)
+		if x != nil || !errors.Is(err, ErrInvalidLimits) {
+			t.Fatalf("limits %+v: extractor=%v err=%v", limits, x, err)
 		}
-		if got := x.Packet(); len(got.Events) != 0 || got.ToCursor != 0 {
-			t.Fatalf("invalid limits mutated packet: %+v", got)
+	}
+}
+
+func TestNewRejectsPacketLimitBelowEnvelopeAndAcceptsExactEquality(t *testing.T) {
+	envelope := Packet{
+		SchemaVersion: 1,
+		SessionID:     "s",
+		CWD:           "/",
+		FromCursor:    1,
+		ToCursor:      0,
+		Events:        []Item{},
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := utf8.RuneCount(encoded)
+
+	if x, err := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: exact}); err != nil || x == nil {
+		t.Fatalf("exact envelope limit rejected: extractor=%v err=%v", x, err)
+	}
+	for _, limit := range []int{exact - 1, 1} {
+		x, err := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: limit})
+		if x != nil || !errors.Is(err, ErrInvalidLimits) {
+			t.Fatalf("impossible packet limit %d: extractor=%v err=%v", limit, x, err)
 		}
 	}
 }
@@ -300,7 +408,7 @@ func TestNilExtractorDoesNotPanic(t *testing.T) {
 }
 
 func TestPacketReturnsIndependentDeterministicSnapshot(t *testing.T) {
-	x := New("s1", "/work/project", 1, redact.Default(), DefaultLimits())
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	if err := x.Add(messageRecord(t, 1, "u1", "user", "OPENAI_API_KEY="+canary)); err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +431,7 @@ func TestPacketReturnsIndependentDeterministicSnapshot(t *testing.T) {
 
 func TestExtractorGeneratesUniqueStableEventIDsForDuplicateItemIDs(t *testing.T) {
 	build := func() Packet {
-		x := New("s1", "/work/project", 1, redact.Default(), DefaultLimits())
+		x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 		if err := x.Add(messageRecord(t, 1, "duplicate", "user", "one")); err != nil {
 			t.Fatal(err)
 		}
