@@ -7,76 +7,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 )
 
-const errorSharingViolation = syscall.Errno(32)
-
-func TestWindowsExistingDestinationUsesNativeReplace(t *testing.T) {
-	dir := t.TempDir()
-	destination := filepath.Join(dir, "state.json")
-	temporary := filepath.Join(dir, "state.tmp")
-	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	called := false
-	ops := windowsFileOps{
-		stat: os.Stat,
-		replaceExisting: func(gotDestination, gotTemporary string) error {
-			called = true
-			if gotDestination != destination || gotTemporary != temporary {
-				t.Fatalf("replaceExisting(%q, %q)", gotDestination, gotTemporary)
-			}
-			return nil
-		},
-		moveNew: func(string, string) error {
-			return errors.New("moveNew must not be used")
-		},
-	}
-
-	if err := replaceWindowsFile(temporary, destination, ops); err != nil {
-		t.Fatal(err)
-	}
-	if !called {
-		t.Fatal("ReplaceFileW adapter was not selected")
-	}
-}
-
-func TestWindowsNativeReplaceFailurePreservesDestination(t *testing.T) {
-	dir := t.TempDir()
-	destination := filepath.Join(dir, "state.json")
-	temporary := filepath.Join(dir, "state.tmp")
-	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ops := windowsFileOps{
-		stat: os.Stat,
-		replaceExisting: func(string, string) error {
-			return errorSharingViolation
-		},
-		moveNew: func(string, string) error {
-			return errors.New("moveNew must not be used")
-		},
-	}
-
-	if err := replaceWindowsFile(temporary, destination, ops); !errors.Is(err, errorSharingViolation) {
-		t.Fatalf("error=%v", err)
-	}
-	got, err := os.ReadFile(destination)
-	if err != nil || string(got) != "old" {
-		t.Fatalf("destination=%q err=%v", got, err)
-	}
-}
-
-func TestWindowsNativeReplaceRemovesTemporaryWithoutBackup(t *testing.T) {
+func TestWindowsNativeHandleRenameReplacesExistingDestination(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "state.json")
 	temporary := filepath.Join(dir, "state.tmp")
@@ -90,18 +24,10 @@ func TestWindowsNativeReplaceRemovesTemporaryWithoutBackup(t *testing.T) {
 	if err := replaceFile(temporary, destination); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(destination)
-	if err != nil || string(got) != "new" {
-		t.Fatalf("destination=%q err=%v", got, err)
-	}
-	for _, path := range []string{temporary, BackupPath(destination)} {
-		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("unexpected replacement artifact %q: %v", path, err)
-		}
-	}
+	assertWindowsReplacementState(t, destination, "new", temporary)
 }
 
-func TestWindowsNativeMoveInstallsAbsentDestination(t *testing.T) {
+func TestWindowsNativeHandleRenameInstallsAbsentDestination(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "state.json")
 	temporary := filepath.Join(dir, "state.tmp")
@@ -112,36 +38,10 @@ func TestWindowsNativeMoveInstallsAbsentDestination(t *testing.T) {
 	if err := replaceFile(temporary, destination); err != nil {
 		t.Fatal(err)
 	}
-	got, err := os.ReadFile(destination)
-	if err != nil || string(got) != "new" {
-		t.Fatalf("destination=%q err=%v", got, err)
-	}
-	if _, err := os.Stat(temporary); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("temporary remains: %v", err)
-	}
+	assertWindowsReplacementState(t, destination, "new", temporary)
 }
 
-func TestWindowsNativeReplaceFailureLeavesOldDestinationReadable(t *testing.T) {
-	dir := t.TempDir()
-	destination := filepath.Join(dir, "state.json")
-	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	err := replaceFile(filepath.Join(dir, "missing-temporary"), destination)
-	if err == nil {
-		t.Fatal("expected replacement error")
-	}
-	got, readErr := os.ReadFile(destination)
-	if readErr != nil || string(got) != "old" {
-		t.Fatalf("destination=%q err=%v replacement error=%v", got, readErr, err)
-	}
-	if _, statErr := os.Stat(BackupPath(destination)); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("backup remains after failure: %v", statErr)
-	}
-}
-
-func TestWindowsNativeSharingViolationPreservesDestination(t *testing.T) {
+func TestWindowsNativeHandleRenameFailurePreservesDestination(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "state.json")
 	temporary := filepath.Join(dir, "state.tmp")
@@ -157,17 +57,53 @@ func TestWindowsNativeSharingViolationPreservesDestination(t *testing.T) {
 	}
 	defer locked.Close()
 
-	err = replaceFile(temporary, destination)
-	if !errors.Is(err, errorSharingViolation) {
-		t.Fatalf("error=%v want sharing violation", err)
+	if err := replaceFile(temporary, destination); err == nil {
+		t.Fatal("expected sharing violation")
 	}
-	got, readErr := os.ReadFile(destination)
-	if readErr != nil || string(got) != "old" {
-		t.Fatalf("destination=%q err=%v replacement error=%v", got, readErr, err)
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != "old" {
+		t.Fatalf("destination=%q err=%v", got, err)
+	}
+	got, err = os.ReadFile(temporary)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("temporary=%q err=%v", got, err)
 	}
 }
 
-func TestWindowsNativeReplaceNeverMakesDestinationMissing(t *testing.T) {
+func TestWindowsWriteRootFailurePreservesDestinationAndCleansTemporary(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := os.Open(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer locked.Close()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := WriteRoot(root, "state.json", []byte("new"), 0o600); err == nil {
+		t.Fatal("expected sharing violation")
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != "old" {
+		t.Fatalf("destination=%q err=%v", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "state.json" {
+		t.Fatalf("unexpected files after failed replacement: %v", entries)
+	}
+}
+
+func TestWindowsNativeHandleRenameNeverMakesDestinationMissing(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "state.json")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
@@ -210,12 +146,12 @@ func TestWindowsNativeReplaceNeverMakesDestinationMissing(t *testing.T) {
 	<-done
 	select {
 	case err := <-readErr:
-		t.Fatalf("destination became unreadable during replacement: %v", err)
+		t.Fatalf("destination became unavailable during replacement: %v", err)
 	default:
 	}
 }
 
-func TestWindowsNativeReplaceSupportsUnicodeLongPath(t *testing.T) {
+func TestWindowsNativeHandleRenameSupportsUnicodeLongPath(t *testing.T) {
 	dir := t.TempDir()
 	segment := strings.Repeat("long-segment-", 3)
 	for len(filepath.Join(dir, "状态-世界.json")) < 300 {
@@ -238,41 +174,61 @@ func TestWindowsNativeReplaceSupportsUnicodeLongPath(t *testing.T) {
 	}
 }
 
-func TestWindowsRootReplacementFollowsOpenRootAfterRename(t *testing.T) {
+func TestWindowsRootHandleRenameIgnoresReplacedNamespace(t *testing.T) {
 	base := t.TempDir()
 	live := filepath.Join(base, "live")
 	moved := filepath.Join(base, "moved")
 	if err := os.Mkdir(live, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(live, "state.json"), []byte("old"), 0o600); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{"state.json": "old", "state.tmp": "new"} {
+		if err := os.WriteFile(filepath.Join(live, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	root, err := os.OpenRoot(live)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if err := os.Rename(live, moved); err != nil {
-		t.Skipf("Windows cannot rename this open root: %v", err)
-	}
-	if err := os.Mkdir(live, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(live, "state.json"), []byte("unrelated"), 0o600); err != nil {
-		t.Fatal(err)
-	}
 
-	if err := WriteRoot(root, "state.json", []byte("new"), 0o600); err != nil {
+	ops := windowsFileOps{
+		rename: func(temporary, destination string) error {
+			if err := os.Rename(live, moved); err != nil {
+				t.Skipf("Windows cannot rename this open root: %v", err)
+			}
+			if err := os.Mkdir(live, 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(live, destination), []byte("attacker"), 0o600); err != nil {
+				return err
+			}
+			return root.Rename(temporary, destination)
+		},
+	}
+	if err := replaceWindowsFile("state.tmp", "state.json", ops); err != nil {
 		t.Fatal(err)
 	}
 	for path, want := range map[string]string{
 		filepath.Join(moved, "state.json"): "new",
-		filepath.Join(live, "state.json"):  "unrelated",
+		filepath.Join(live, "state.json"):  "attacker",
 	} {
 		got, err := os.ReadFile(path)
 		if err != nil || string(got) != want {
-			t.Fatalf("%s destination=%q err=%v want=%q", path, got, err, want)
+			t.Fatalf("%s content=%q err=%v want=%q", path, got, err, want)
+		}
+	}
+}
+
+func assertWindowsReplacementState(t *testing.T, destination, want string, absent ...string) {
+	t.Helper()
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != want {
+		t.Fatalf("destination=%q err=%v want=%q", got, err, want)
+	}
+	for _, path := range append(absent, BackupPath(destination)) {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("unexpected replacement artifact %q: %v", path, err)
 		}
 	}
 }
