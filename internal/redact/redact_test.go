@@ -143,3 +143,30 @@ func TestDefaultPreservesHarmlessJSONAndCamelCaseFields(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultRedactsControlAndMultilineNamedSecretValues(t *testing.T) {
+	cases := []struct {
+		input    string
+		neighbor string
+	}{
+		{"password=alpha\x00bravo; mode=public", "; mode=public"},
+		{"password=\"alpha\x00bravo\", \"mode\":\"public\"", `, "mode":"public"`},
+		{"password=\"alpha\nbravo\"\nmode=public", "\nmode=public"},
+		{"password=\"alpha\r\nbravo\"\r\nmode=public", "\r\nmode=public"},
+		{"password=alpha\nbravo\nmode=public", "\nmode=public"},
+		{"password=alpha\r\nbravo\r\nmode=public", "\r\nmode=public"},
+		{"password=\"alpha\nbravo\nmode=public", "\nmode=public"},
+	}
+	for i, tc := range cases {
+		result := Default().Text(tc.input)
+		if strings.Contains(result.Text, "alpha") || strings.Contains(result.Text, "bravo") {
+			t.Fatalf("control or multiline case %d leaked", i)
+		}
+		if !strings.Contains(result.Text, tc.neighbor) {
+			t.Fatalf("control or multiline case %d swallowed neighboring field", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("control or multiline case %d had inaccurate findings", i)
+		}
+	}
+}
