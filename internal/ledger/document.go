@@ -85,6 +85,9 @@ func (d *Document) SetReserved(fields map[string]any) error {
 	if err := validateFrontmatter(&d.Frontmatter); err != nil {
 		return err
 	}
+	if err := validateExistingReservedFields(&d.Frontmatter); err != nil {
+		return err
+	}
 
 	for _, key := range []string{"id", "entity_type", "project_id", "revision"} {
 		if _, ok := fields[key]; !ok {
@@ -182,6 +185,46 @@ func validateReservedValue(key string, value any) error {
 		}
 	default:
 		return fmt.Errorf("%w: invalid %s", ErrReservedFieldChanged, key)
+	}
+	return nil
+}
+
+func validateExistingReservedFields(mapping *yaml.Node) error {
+	entityType, err := requiredString(mapping, "entity_type")
+	if err != nil {
+		return err
+	}
+	if entityType != "decision" && entityType != "open_loop" && entityType != "session" {
+		return fmt.Errorf("%w: invalid entity_type", ErrReservedFieldChanged)
+	}
+
+	if node, ok := mappingValue(mapping, "source_sessions"); ok {
+		if node.Kind != yaml.SequenceNode || node.Tag != "!!seq" {
+			return fmt.Errorf("%w: invalid source_sessions", ErrReservedFieldChanged)
+		}
+		seen := make(map[string]struct{}, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode || item.Tag != "!!str" || item.Value == "" {
+				return fmt.Errorf("%w: invalid source_sessions", ErrReservedFieldChanged)
+			}
+			if _, exists := seen[item.Value]; exists {
+				return fmt.Errorf("%w: duplicate source_sessions", ErrReservedFieldChanged)
+			}
+			seen[item.Value] = struct{}{}
+		}
+	}
+
+	if node, ok := mappingValue(mapping, "sync_status"); ok {
+		if node.Kind != yaml.ScalarNode || node.Tag != "!!str" || (node.Value != "synced" && node.Value != "conflicted") {
+			return fmt.Errorf("%w: invalid sync_status", ErrReservedFieldChanged)
+		}
+	}
+	for _, key := range []string{"sync_hash", "base_hash", "project_hash", "vault_hash", "source_hash"} {
+		if node, ok := mappingValue(mapping, key); ok {
+			if node.Kind != yaml.ScalarNode || node.Tag != "!!str" || !lowercaseSHA256.MatchString(node.Value) {
+				return fmt.Errorf("%w: invalid %s", ErrReservedFieldChanged, key)
+			}
+		}
 	}
 	return nil
 }
@@ -444,6 +487,7 @@ func parseSections(body string) (string, []Section, error) {
 	var fence byte
 	var fenceLength int
 	var html htmlBlock
+	var paragraphOpen bool
 
 	for start := 0; start < len(body); {
 		end := strings.IndexByte(body[start:], '\n')
@@ -468,20 +512,33 @@ func parseSections(body string) (string, []Section, error) {
 				if marker, count := fenceMarker(trimmed); marker == fence && count >= fenceLength && strings.Trim(strings.TrimLeft(trimmed, string(marker)), " \t") == "" {
 					fence, fenceLength = 0, 0
 				}
-			} else if marker, count := fenceMarker(trimmed); count >= 3 {
-				if fence == 0 {
-					fence, fenceLength = marker, count
-				}
+			} else if marker, count := fenceMarker(trimmed); count >= 3 && validFenceOpener(trimmed, marker, count) {
+				fence, fenceLength = marker, count
+				paragraphOpen = false
 			} else if candidate, ok := startHTMLBlock(trimmed); ok {
 				html = candidate
+				paragraphOpen = false
 				if !html.endsOnBlank && strings.Contains(strings.ToLower(trimmed), html.endMarker) {
 					html = htmlBlock{}
 				}
+			} else if !paragraphOpen && isCompleteType7HTMLTagLine(trimmed) {
+				html = htmlBlock{kind: htmlUntilBlank, endsOnBlank: true}
 			} else {
 				if name, ok := sectionName(trimmed); ok {
 					headings = append(headings, heading{start: start, end: end, name: name, text: line})
+					paragraphOpen = false
+				} else if strings.TrimSpace(line) == "" {
+					paragraphOpen = false
+				} else if isATXBlockHeading(trimmed) || isSetextHeadingUnderline(trimmed) {
+					paragraphOpen = false
+				} else {
+					paragraphOpen = true
 				}
 			}
+		} else if strings.TrimSpace(line) == "" {
+			paragraphOpen = false
+		} else {
+			paragraphOpen = true
 		}
 		if end == len(body) {
 			break
@@ -513,6 +570,155 @@ func parseSections(body string) (string, []Section, error) {
 		return body, sections, nil
 	}
 	return body[:headings[0].start], sections, nil
+}
+
+func isATXBlockHeading(line string) bool {
+	count := 0
+	for count < len(line) && line[count] == '#' {
+		count++
+	}
+	return count >= 1 && count <= 6 && (count == len(line) || line[count] == ' ' || line[count] == '\t')
+}
+
+func isSetextHeadingUnderline(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || (line[0] != '=' && line[0] != '-') {
+		return false
+	}
+	for index := 1; index < len(line); index++ {
+		if line[index] != line[0] {
+			return false
+		}
+	}
+	return true
+}
+
+func isCompleteType7HTMLTagLine(line string) bool {
+	if len(line) < 3 || line[0] != '<' {
+		return false
+	}
+	if line[1] == '/' {
+		index, ok := consumeHTMLTagName(line, 2)
+		if !ok {
+			return false
+		}
+		index = skipHTMLSpace(line, index)
+		return index < len(line) && line[index] == '>' && onlyHTMLSpace(line, index+1)
+	}
+
+	index, ok := consumeHTMLTagName(line, 1)
+	if !ok {
+		return false
+	}
+	for {
+		if index >= len(line) {
+			return false
+		}
+		if line[index] == '>' {
+			return onlyHTMLSpace(line, index+1)
+		}
+		if line[index] == '/' && index+1 < len(line) && line[index+1] == '>' {
+			return onlyHTMLSpace(line, index+2)
+		}
+		if line[index] != ' ' && line[index] != '\t' {
+			return false
+		}
+		index = skipHTMLSpace(line, index)
+		if index >= len(line) {
+			return false
+		}
+		if line[index] == '>' {
+			return onlyHTMLSpace(line, index+1)
+		}
+		if line[index] == '/' && index+1 < len(line) && line[index+1] == '>' {
+			return onlyHTMLSpace(line, index+2)
+		}
+
+		var attributeOK bool
+		index, attributeOK = consumeHTMLAttributeName(line, index)
+		if !attributeOK {
+			return false
+		}
+		afterName := index
+		afterSpace := skipHTMLSpace(line, index)
+		if afterSpace < len(line) && line[afterSpace] == '=' {
+			index = skipHTMLSpace(line, afterSpace+1)
+			var valueOK bool
+			index, valueOK = consumeHTMLAttributeValue(line, index)
+			if !valueOK {
+				return false
+			}
+		} else {
+			index = afterName
+		}
+	}
+}
+
+func consumeHTMLTagName(line string, index int) (int, bool) {
+	if index >= len(line) || !isASCIILetter(line[index]) {
+		return index, false
+	}
+	index++
+	for index < len(line) && (isASCIILetter(line[index]) || isASCIIDigit(line[index]) || line[index] == '-') {
+		index++
+	}
+	return index, true
+}
+
+func consumeHTMLAttributeName(line string, index int) (int, bool) {
+	if index >= len(line) || !(isASCIILetter(line[index]) || line[index] == '_' || line[index] == ':') {
+		return index, false
+	}
+	index++
+	for index < len(line) {
+		value := line[index]
+		if !(isASCIILetter(value) || isASCIIDigit(value) || value == '_' || value == '.' || value == ':' || value == '-') {
+			break
+		}
+		index++
+	}
+	return index, true
+}
+
+func consumeHTMLAttributeValue(line string, index int) (int, bool) {
+	if index >= len(line) {
+		return index, false
+	}
+	if line[index] == '\'' || line[index] == '"' {
+		quote := line[index]
+		index++
+		for index < len(line) && line[index] != quote {
+			index++
+		}
+		if index == len(line) {
+			return index, false
+		}
+		return index + 1, true
+	}
+	start := index
+	for index < len(line) && !strings.ContainsRune(" \t\n\"'=<>`", rune(line[index])) {
+		index++
+	}
+	return index, index > start
+}
+
+func skipHTMLSpace(line string, index int) int {
+	for index < len(line) && (line[index] == ' ' || line[index] == '\t') {
+		index++
+	}
+	return index
+}
+
+func onlyHTMLSpace(line string, index int) bool {
+	return skipHTMLSpace(line, index) == len(line)
+}
+
+func isASCIILetter(value byte) bool {
+	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isASCIIDigit(value byte) bool {
+	return value >= '0' && value <= '9'
 }
 
 type htmlBlockKind uint8
@@ -645,6 +851,10 @@ func fenceMarker(line string) (byte, int) {
 		count++
 	}
 	return marker, count
+}
+
+func validFenceOpener(line string, marker byte, count int) bool {
+	return marker != '`' || !strings.ContainsRune(line[count:], '`')
 }
 
 func normalizeSectionBody(body string) string {

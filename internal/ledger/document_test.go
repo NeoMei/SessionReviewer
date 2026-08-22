@@ -257,6 +257,76 @@ func TestDocumentSetReservedRejectsInvalidMachineValuesAtomically(t *testing.T) 
 	}
 }
 
+func TestDocumentSetReservedRejectsMalformedExistingReservedNodesAtomically(t *testing.T) {
+	validHash := strings.Repeat("a", 64)
+	tests := map[string]string{
+		"duplicate source sessions": "source_sessions: [same, same]\n",
+		"empty source session":      "source_sessions: ['']\n",
+		"tagged source session":     "source_sessions: [!user session-1]\n",
+		"mapped source sessions":    "source_sessions: {one: session-1}\n",
+		"unknown sync status":       "sync_status: pending\n",
+		"tagged sync status":        "sync_status: !user synced\n",
+		"mapped sync status":        "sync_status: {value: synced}\n",
+		"short sync hash":           "sync_hash: abc\n",
+		"tagged sync hash":          "sync_hash: !user " + validHash + "\n",
+		"mapped sync hash":          "sync_hash: {value: " + validHash + "}\n",
+		"short base hash":           "base_hash: abc\n",
+		"uppercase project hash":    "project_hash: " + strings.Repeat("A", 64) + "\n",
+		"mapped vault hash":         "vault_hash: {value: " + validHash + "}\n",
+		"tagged source hash":        "source_hash: !user " + validHash + "\n",
+	}
+	for name, reserved := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+reserved+"---\n\n# T\n"))
+			before, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = doc.SetReserved(map[string]any{
+				"id":          "decision-1",
+				"entity_type": "decision",
+				"project_id":  "project-1111111111111111",
+				"revision":    3,
+			})
+			if !errors.Is(err, ErrReservedFieldChanged) {
+				t.Fatalf("err=%v", err)
+			}
+			after, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("malformed existing reserved node was partially mutated:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+
+	t.Run("unsupported existing entity type", func(t *testing.T) {
+		src := strings.Replace(validFrontmatter, "entity_type: decision", "entity_type: plugin", 1) + "---\n\n# T\n"
+		doc := mustParseDocument(t, []byte(src))
+		before, err := doc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = doc.SetReserved(map[string]any{
+			"id":          "decision-1",
+			"entity_type": "plugin",
+			"project_id":  "project-1111111111111111",
+			"revision":    3,
+		})
+		if !errors.Is(err, ErrReservedFieldChanged) {
+			t.Fatalf("err=%v", err)
+		}
+		after, err := doc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(before, after) {
+			t.Fatalf("unsupported existing entity type was partially mutated:\nbefore:\n%s\nafter:\n%s", before, after)
+		}
+	})
+}
+
 func TestDocumentSetEditableOnlyUpdatesEditableFields(t *testing.T) {
 	src := []byte(validFrontmatter + "title: Old\nstatus: proposed\ntags: [old]\ncustom: keep\nsource_sessions: [session-1]\n---\n\n# User heading\n\nNarrative.\n")
 	doc := mustParseDocument(t, src)
@@ -452,6 +522,82 @@ Keep.
 			}
 		}
 	})
+}
+
+func TestDocumentSectionScannerRecognizesCommonMarkType7HTMLBlocks(t *testing.T) {
+	tests := map[string]struct {
+		body string
+		want []string
+	}{
+		"custom open tag starts block": {
+			body: "<x-widget disabled data-label=\"a > b\">\n## Hidden open\n</x-widget>\n\n## Real open\n",
+			want: []string{"Real open"},
+		},
+		"custom closing tag starts block": {
+			body: "</x-widget>\n## Hidden close\n\n## Real close\n",
+			want: []string{"Real close"},
+		},
+		"custom tag after another heading starts block": {
+			body: "# Document title\n<x-widget>\n## Hidden after title\n</x-widget>\n\n## Real after title\n",
+			want: []string{"Real after title"},
+		},
+		"custom tag after setext heading starts block": {
+			body: "Document title\n==============\n<x-widget>\n## Hidden after setext\n</x-widget>\n\n## Real after setext\n",
+			want: []string{"Real after setext"},
+		},
+		"type seven cannot interrupt paragraph": {
+			body: "Paragraph text.\n<x-widget>\n## Actual after paragraph\n",
+			want: []string{"Actual after paragraph"},
+		},
+		"incomplete tag does not start block": {
+			body: "<x-widget data-label=\n## Actual after incomplete\n",
+			want: []string{"Actual after incomplete"},
+		},
+		"inline open and close is paragraph text": {
+			body: "<x-widget></x-widget>\n## Actual after inline\n",
+			want: []string{"Actual after inline"},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n"+test.body))
+			got := make([]string, 0, len(doc.Sections))
+			for _, section := range doc.Sections {
+				got = append(got, section.Name)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("sections=%v want=%v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDocumentSectionScannerValidatesFenceInfoStrings(t *testing.T) {
+	tests := map[string]struct {
+		body string
+		want []string
+	}{
+		"backtick in backtick info invalidates opener": {
+			body: "``` markdown`invalid\n## Recognized after invalid opener\n```\n",
+			want: []string{"Recognized after invalid opener"},
+		},
+		"backtick in tilde info remains valid": {
+			body: "~~~ markdown`valid\n## Hidden in tilde fence\n~~~\n## Visible after tilde fence\n",
+			want: []string{"Visible after tilde fence"},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n"+test.body))
+			got := make([]string, 0, len(doc.Sections))
+			for _, section := range doc.Sections {
+				got = append(got, section.Name)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("sections=%v want=%v", got, test.want)
+			}
+		})
+	}
 }
 
 func TestDocumentRejectsMalformedInput(t *testing.T) {
