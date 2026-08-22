@@ -16,6 +16,23 @@ func TestResolveByExplicitID(t *testing.T) {
 	}
 }
 
+func TestResolveExplicitIDRejectsDuplicateCandidates(t *testing.T) {
+	candidates := []Candidate{
+		{ID: "s1", Path: "/sessions/one.jsonl"},
+		{ID: "s1", Path: "/sessions/two.jsonl"},
+	}
+	_, err := Resolve(candidates, ResolveOptions{SessionID: "s1"})
+	requireErrorContains(t, err, "duplicate", "/sessions/one.jsonl", "/sessions/two.jsonl")
+}
+
+func TestResolveExplicitIDBypassesFreshness(t *testing.T) {
+	candidate := Candidate{ID: "s1", Path: "one", ModTime: time.Time{}}
+	got, err := Resolve([]Candidate{candidate}, ResolveOptions{SessionID: "s1"})
+	if err != nil || got.Path != "one" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
 func TestResolveCurrentRejectsAmbiguousSameProjectSessions(t *testing.T) {
 	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
 	candidates := []Candidate{
@@ -26,6 +43,65 @@ func TestResolveCurrentRejectsAmbiguousSameProjectSessions(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("err=%v", err)
 	}
+}
+
+func TestResolveCurrentRejectsEqualModTimesAtZeroWindow(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidates := []Candidate{
+		{ID: "s1", CWD: "/work/project", ModTime: now.Add(-time.Minute)},
+		{ID: "s2", CWD: "/work/project", ModTime: now.Add(-time.Minute)},
+	}
+	_, err := Resolve(candidates, ResolveOptions{CWD: "/work/project", Now: now})
+	requireErrorContains(t, err, "ambiguous", "s1", "s2")
+}
+
+func TestResolveCurrentRejectsNegativeAmbiguityWindow(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	_, err := Resolve(nil, ResolveOptions{CWD: "/work/project", Now: now, AmbiguityWindow: -time.Second})
+	requireErrorContains(t, err, "ambiguity window", "negative")
+}
+
+func TestResolveCurrentAllowsExactPositiveAmbiguityBoundary(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidates := []Candidate{
+		{ID: "newer", CWD: "/work/project", ModTime: now.Add(-time.Minute)},
+		{ID: "older", CWD: "/work/project", ModTime: now.Add(-6 * time.Minute)},
+	}
+	got, err := Resolve(candidates, ResolveOptions{CWD: "/work/project", Now: now, AmbiguityWindow: 5 * time.Minute})
+	if err != nil || got.ID != "newer" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func TestResolveCurrentRequiresNow(t *testing.T) {
+	_, err := Resolve([]Candidate{{ID: "s1", CWD: "/work/project", ModTime: time.Now()}}, ResolveOptions{CWD: "/work/project"})
+	requireErrorContains(t, err, "current time", "required")
+}
+
+func TestResolveCurrentRejectsStaleModTime(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidate := Candidate{ID: "stale", CWD: "/work/project", ModTime: now.Add(-24*time.Hour - time.Nanosecond)}
+	_, err := Resolve([]Candidate{candidate}, ResolveOptions{CWD: "/work/project", Now: now})
+	requireErrorContains(t, err, "stale", "stale", "24h")
+}
+
+func TestResolveCurrentRejectsFutureModTime(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidate := Candidate{ID: "future", CWD: "/work/project", ModTime: now.Add(5*time.Minute + time.Nanosecond)}
+	_, err := Resolve([]Candidate{candidate}, ResolveOptions{CWD: "/work/project", Now: now})
+	requireErrorContains(t, err, "future", "future", "modification time")
+}
+
+func TestResolveCurrentRejectsFutureStartedAt(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidate := Candidate{
+		ID:        "future-start",
+		CWD:       "/work/project",
+		ModTime:   now,
+		StartedAt: now.Add(5*time.Minute + time.Nanosecond),
+	}
+	_, err := Resolve([]Candidate{candidate}, ResolveOptions{CWD: "/work/project", Now: now})
+	requireErrorContains(t, err, "future-start", "future", "start time")
 }
 
 func TestDiscoverReadsOnlyJSONLSessionMetadata(t *testing.T) {
@@ -60,10 +136,88 @@ func TestDiscoverStopsAfterSessionMetadata(t *testing.T) {
 	}
 }
 
+func TestDiscoverRejectsMalformedJSONBeforeMetadata(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout.jsonl")
+	content := "not-json\n" +
+		`{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/work/project"}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Discover(root)
+	requireErrorContains(t, err, path, "malformed", "1")
+}
+
+func TestDiscoverRejectsMissingSessionIDWithPathAndLine(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout.jsonl")
+	content := `{"timestamp":"2026-08-22T09:59:00Z","type":"event","payload":{}}` + "\n" +
+		`{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"  ","cwd":"/work/project"}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Discover(root)
+	requireErrorContains(t, err, path, "line 2", "session id")
+}
+
+func TestDiscoverPayloadDecodeErrorIncludesPathAndLine(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout.jsonl")
+	content := `{"timestamp":"2026-08-22T09:59:00Z","type":"event","payload":{}}` + "\n" +
+		`{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":"invalid"}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Discover(root)
+	requireErrorContains(t, err, path, "line 2", "metadata")
+}
+
+func TestDiscoverRejectsSymlinkRoot(t *testing.T) {
+	target := t.TempDir()
+	root := filepath.Join(t.TempDir(), "sessions-link")
+	if err := os.Symlink(target, root); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := Discover(root)
+	requireErrorContains(t, err, root, "symlink or reparse point")
+}
+
+func TestDiscoverRejectsSymlinkFile(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "target.jsonl")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "rollout.jsonl")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := Discover(root)
+	requireErrorContains(t, err, path, "symlink or reparse point")
+}
+
 func TestResolveNormalizesWindowsPaths(t *testing.T) {
-	candidates := []Candidate{{ID: "s1", CWD: `C:\项目\Repo`, ModTime: time.Now()}}
-	got, err := Resolve(candidates, ResolveOptions{CWD: `c:/项目/repo`, GOOS: "windows", AmbiguityWindow: time.Minute})
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidates := []Candidate{{ID: "s1", CWD: `C:\项目\Repo`, ModTime: now}}
+	got, err := Resolve(candidates, ResolveOptions{CWD: `c:/项目/repo`, GOOS: "windows", Now: now, AmbiguityWindow: time.Minute})
 	if err != nil || got.ID != "s1" {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func requireErrorContains(t *testing.T, err error, parts ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error containing %q", parts)
+	}
+	for _, part := range parts {
+		if !strings.Contains(err.Error(), part) {
+			t.Fatalf("error %q does not contain %q", err, part)
+		}
 	}
 }
