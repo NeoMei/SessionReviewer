@@ -15,6 +15,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
@@ -44,6 +45,129 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 	if code != 2 || !strings.Contains(errOut.String(), `unknown command "unknown"`) {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
+}
+
+func TestRunHelpListsEveryFoundationCommand(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"help"}, &out, &errOut); code != 0 {
+		t.Fatalf("code=%d err=%q", code, errOut.String())
+	}
+	for _, text := range []string{"init", "prepare review", "prepare checkpoint", "version", "--sessions-root", "--current-session-id"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("help=%q missing %q", out.String(), text)
+		}
+	}
+}
+
+func TestRunRootHelpAliasesAreCompleteAndUseStdout(t *testing.T) {
+	for _, alias := range []string{"help", "-h", "--help"} {
+		t.Run(alias, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := Run([]string{alias}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			for _, text := range []string{
+				"Usage:", "Commands:", "Options:", "Examples:",
+				"--project", "--vault", "--data-dir", "--write",
+				"--sessions-root", "--cwd", "--session", "--current-session-id", "--output", "--from-start",
+			} {
+				if !strings.Contains(out.String(), text) {
+					t.Fatalf("help=%q missing %q", out.String(), text)
+				}
+			}
+		})
+	}
+}
+
+func TestRunSubcommandHelpIsCompleteAndUsesStdout(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "init",
+			args: []string{"init", "--help"},
+			want: []string{"Usage:", "Options:", "Examples:", "init", "--project", "--vault", "--data-dir", "--write"},
+		},
+		{
+			name: "prepare overview",
+			args: []string{"prepare", "--help"},
+			want: []string{"Usage:", "Modes:", "Examples:", "prepare review", "prepare checkpoint"},
+		},
+		{
+			name: "prepare review",
+			args: []string{"prepare", "review", "--help"},
+			want: []string{"Usage:", "Options:", "Examples:", "prepare review", "--sessions-root", "--cwd", "--session", "--current-session-id", "--data-dir", "--output", "--from-start"},
+		},
+		{
+			name: "prepare checkpoint",
+			args: []string{"prepare", "checkpoint", "-h"},
+			want: []string{"Usage:", "Options:", "Examples:", "prepare checkpoint", "--sessions-root", "--cwd", "--session", "--current-session-id", "--data-dir", "--output"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			if code := Run(test.args, &out, &errOut); code != 0 || errOut.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			for _, text := range test.want {
+				if !strings.Contains(out.String(), text) {
+					t.Fatalf("help=%q missing %q", out.String(), text)
+				}
+			}
+		})
+	}
+}
+
+func TestRunHelpWordsUsedAsFlagValuesAreNotHelpRequests(t *testing.T) {
+	t.Run("init project path", func(t *testing.T) {
+		root := t.TempDir()
+		projectRoot := filepath.Join(root, "help")
+		vaultRoot := filepath.Join(root, "vault")
+		dataRoot := filepath.Join(root, "data")
+		for _, path := range []string{projectRoot, vaultRoot} {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		oldWorkingDirectory, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chdir(root); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+
+		var out, errOut bytes.Buffer
+		code := Run([]string{"init", "--project", "help", "--vault", vaultRoot, "--data-dir", dataRoot}, &out, &errOut)
+		if code != 0 || !strings.Contains(out.String(), "action:") || errOut.Len() != 0 {
+			t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+		}
+	})
+
+	t.Run("prepare session id", func(t *testing.T) {
+		root := t.TempDir()
+		projectRoot := filepath.Join(root, "project")
+		dataRoot := filepath.Join(root, "data")
+		sessionsRoot := filepath.Join(root, "sessions")
+		for _, path := range []string{projectRoot, dataRoot, sessionsRoot} {
+			if err := os.MkdirAll(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		writeCLISession(t, sessionsRoot, "help", projectRoot)
+		writeCLIConfig(t, dataRoot, projectRoot)
+		output := filepath.Join(root, "packet.json")
+		if got := runPrepareAndReadSessionID(t, []string{
+			"--session", "help", "--sessions-root", sessionsRoot, "--cwd", projectRoot,
+			"--data-dir", dataRoot, "--output", output,
+		}, output); got != "help" {
+			t.Fatalf("session_id=%q", got)
+		}
+	})
 }
 
 func TestRunInitRequiresProjectAndVault(t *testing.T) {
@@ -100,7 +224,7 @@ func TestRunInitFailureDoesNotLeakUnpreviewedPaths(t *testing.T) {
 	}
 }
 
-func TestWriteInitDiagnosticClassifiesActionableFailuresWithoutDisclosure(t *testing.T) {
+func TestWriteDiagnosticClassifiesInitFailuresWithoutDisclosure(t *testing.T) {
 	const canary = "CUSTOMER-PRIVATE-PATH"
 	tests := []struct {
 		name     string
@@ -117,7 +241,36 @@ func TestWriteInitDiagnosticClassifiesActionableFailuresWithoutDisclosure(t *tes
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if code := writeInitDiagnostic(&out, test.err); code != 1 {
+			if code := writeDiagnostic(&out, "init", test.err); code != 1 {
+				t.Fatalf("code=%d", code)
+			}
+			got := out.String()
+			if !strings.Contains(got, test.code) || !strings.Contains(got, test.hintPart) || strings.Contains(got, canary) {
+				t.Fatalf("diagnostic=%q", got)
+			}
+		})
+	}
+}
+
+func TestWriteDiagnosticClosedPrepareMappingsDoNotDiscloseCauses(t *testing.T) {
+	const canary = "PRIVATE-PATH-SESSION-SOURCE-CANARY"
+	tests := []struct {
+		name     string
+		err      error
+		code     string
+		hintPart string
+	}{
+		{name: "session not found", err: fmt.Errorf("%s: %w", canary, prepare.ErrSessionNotFound), code: "E_SESSION_NOT_FOUND", hintPart: "check --session"},
+		{name: "session ambiguous", err: fmt.Errorf("%s: %w", canary, prepare.ErrSessionAmbiguous), code: "E_SESSION_AMBIGUOUS", hintPart: "--current-session-id"},
+		{name: "project not initialized", err: fmt.Errorf("%s: %w", canary, prepare.ErrProjectNotInitialized), code: "E_PROJECT_NOT_INITIALIZED", hintPart: "session-reviewer init"},
+		{name: "unsafe output", err: fmt.Errorf("%s: %w", canary, prepare.ErrUnsafeOutput), code: "E_OUTPUT_UNSAFE", hintPart: "outside session/data roots"},
+		{name: "cursor drift", err: fmt.Errorf("%s: %w", canary, prepare.ErrCursorSourceDrift), code: "E_CURSOR_DRIFT", hintPart: "prepare review --from-start"},
+		{name: "unknown", err: errors.New(canary), code: "E_PREPARE_FAILED", hintPart: "session-reviewer help"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if code := writeDiagnostic(&out, "prepare", test.err); code != 1 {
 				t.Fatalf("code=%d", code)
 			}
 			got := out.String()
@@ -132,6 +285,131 @@ func TestRunPrepareRequiresMode(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run([]string{"prepare"}, &out, &errOut); code != 2 || !strings.Contains(errOut.String(), "requires review or checkpoint") {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestRunPrepareNotFoundGivesSafeSelectionHint(t *testing.T) {
+	base := t.TempDir()
+	sessions := filepath.Join(base, "customer-secret-sessions")
+	projectRoot := filepath.Join(base, "project")
+	dataRoot := filepath.Join(base, "data")
+	for _, path := range []string{sessions, projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "project-1111111111111111", Root: projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"prepare", "review", "--session", "missing", "--sessions-root", sessions, "--cwd", projectRoot, "--data-dir", dataRoot, "--output", filepath.Join(t.TempDir(), "packet.json")}, &out, &errOut)
+	if code != 1 || !strings.Contains(errOut.String(), "E_SESSION_NOT_FOUND") || !strings.Contains(errOut.String(), "check --session") || strings.Contains(errOut.String(), sessions) {
+		t.Fatalf("code=%d stderr=%q", code, errOut.String())
+	}
+}
+
+func TestRunPrepareAmbiguousGivesSafeExplicitSelectionHint(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "customer-secret-sessions")
+	projectRoot := filepath.Join(root, "customer-secret-project")
+	dataRoot := filepath.Join(root, "data")
+	for _, path := range []string{sessions, projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"source-canary-one", "source-canary-two"} {
+		writeCLISession(t, sessions, id, projectRoot)
+		path := filepath.Join(sessions, id+".jsonl")
+		if err := os.Chtimes(path, time.Now(), time.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLIConfig(t, dataRoot, projectRoot)
+	setCurrentEnv(t, platform.Env{})
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"prepare", "review", "--sessions-root", sessions, "--cwd", projectRoot, "--data-dir", dataRoot, "--output", filepath.Join(root, "packet.json")}, &out, &errOut)
+	if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_SESSION_AMBIGUOUS") || !strings.Contains(errOut.String(), "--session") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, canary := range []string{sessions, projectRoot, "source-canary-one", "source-canary-two"} {
+		if strings.Contains(errOut.String(), canary) {
+			t.Fatalf("stderr disclosed %q: %q", canary, errOut.String())
+		}
+	}
+}
+
+func TestRunPrepareUninitializedGivesSafeInitHint(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "sessions")
+	projectRoot := filepath.Join(root, "customer-secret-project")
+	dataRoot := filepath.Join(root, "data")
+	for _, path := range []string{sessions, projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLISession(t, sessions, "source-canary", projectRoot)
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"prepare", "review", "--session", "source-canary", "--sessions-root", sessions, "--cwd", projectRoot, "--data-dir", dataRoot, "--output", filepath.Join(root, "packet.json")}, &out, &errOut)
+	if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_PROJECT_NOT_INITIALIZED") || !strings.Contains(errOut.String(), "session-reviewer init") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, canary := range []string{projectRoot, "source-canary"} {
+		if strings.Contains(errOut.String(), canary) {
+			t.Fatalf("stderr disclosed %q: %q", canary, errOut.String())
+		}
+	}
+}
+
+func TestRunPrepareUnsafeOutputGivesSafePathHint(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "customer-secret-sessions")
+	projectRoot := filepath.Join(root, "project")
+	dataRoot := filepath.Join(root, "customer-secret-data")
+	for _, path := range []string{sessions, projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"prepare", "review", "--session", "source-canary", "--sessions-root", sessions, "--cwd", projectRoot, "--data-dir", dataRoot, "--output", filepath.Join(sessions, "packet.json")}, &out, &errOut)
+	if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_OUTPUT_UNSAFE") || !strings.Contains(errOut.String(), "outside session/data roots") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, canary := range []string{sessions, dataRoot, "source-canary"} {
+		if strings.Contains(errOut.String(), canary) {
+			t.Fatalf("stderr disclosed %q: %q", canary, errOut.String())
+		}
+	}
+}
+
+func TestRunPrepareUnknownFailureUsesStaticFallback(t *testing.T) {
+	root := t.TempDir()
+	missingSessions := filepath.Join(root, "customer-secret-missing-sessions")
+	projectRoot := filepath.Join(root, "project")
+	dataRoot := filepath.Join(root, "data")
+	for _, path := range []string{projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"prepare", "review", "--session", "source-canary", "--sessions-root", missingSessions, "--cwd", projectRoot, "--data-dir", dataRoot, "--output", filepath.Join(root, "packet.json")}, &out, &errOut)
+	if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_PREPARE_FAILED") || !strings.Contains(errOut.String(), "session-reviewer help") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, canary := range []string{missingSessions, "source-canary"} {
+		if strings.Contains(errOut.String(), canary) {
+			t.Fatalf("stderr disclosed %q: %q", canary, errOut.String())
+		}
 	}
 }
 

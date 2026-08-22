@@ -39,7 +39,13 @@ type Options struct {
 	afterLoadConfig   func() error
 }
 
-var ErrCursorSourceDrift = errors.New("accepted cursor no longer matches session source")
+var (
+	ErrCursorSourceDrift     = errors.New("accepted cursor no longer matches session source")
+	ErrSessionNotFound       = errors.New("selected session was not found")
+	ErrSessionAmbiguous      = errors.New("current session is ambiguous")
+	ErrProjectNotInitialized = errors.New("selected project is not initialized")
+	ErrUnsafeOutput          = errors.New("evidence output path is unsafe")
+)
 
 func Run(opts Options) (evidence.Packet, error) {
 	if err := validateOptions(&opts); err != nil {
@@ -52,7 +58,7 @@ func Run(opts Options) (evidence.Packet, error) {
 	defer dataDir.Close()
 	output, err := prepareOutputTarget(opts.Output, opts.SessionsRoot, dataDir)
 	if err != nil {
-		return evidence.Packet{}, err
+		return evidence.Packet{}, fmt.Errorf("%w: %w", ErrUnsafeOutput, err)
 	}
 	defer output.close()
 	if opts.afterOpenDataDir != nil {
@@ -73,6 +79,12 @@ func Run(opts Options) (evidence.Packet, error) {
 		Now: opts.Now, AmbiguityWindow: opts.AmbiguityWindow, PathsEqual: pathsEqual,
 	})
 	if err != nil {
+		if opts.SessionID != "" && !discoveryContainsSessionID(discovery, opts.SessionID) {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
+		}
+		if opts.SessionID == "" && strings.HasPrefix(err.Error(), "ambiguous current session:") {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionAmbiguous, err)
+		}
 		return evidence.Packet{}, err
 	}
 	sameProject, err := sameProjectDirectory(opts.GOOS, chosen.CWD, opts.CWD)
@@ -99,7 +111,7 @@ func Run(opts Options) (evidence.Packet, error) {
 		return evidence.Packet{}, err
 	}
 	if mapping.ID == "" {
-		return evidence.Packet{}, fmt.Errorf("selected project is not initialized")
+		return evidence.Packet{}, ErrProjectNotInitialized
 	}
 	if err := validateIdentifier(mapping.ID, "project id"); err != nil {
 		return evidence.Packet{}, err
@@ -157,13 +169,13 @@ func Run(opts Options) (evidence.Packet, error) {
 	}
 	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: streamFrom, MaxRecordBytes: opts.MaxRecordBytes}, visit)
 	if errors.Is(streamErr, ErrCursorSourceDrift) {
-		return evidence.Packet{}, ErrCursorSourceDrift
+		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor hash does not match the selected source", ErrCursorSourceDrift)
 	}
 	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) {
 		return evidence.Packet{}, fmt.Errorf("extract session evidence from %q: %w", chosen.Path, streamErr)
 	}
 	if !cursorValidated {
-		return evidence.Packet{}, ErrCursorSourceDrift
+		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor line is absent from the selected source", ErrCursorSourceDrift)
 	}
 	packet := x.Packet()
 	if summary.MalformedLines > 0 {
@@ -177,9 +189,23 @@ func Run(opts Options) (evidence.Packet, error) {
 		return evidence.Packet{}, fmt.Errorf("encode evidence packet: %w", err)
 	}
 	if err := output.write(append(b, '\n')); err != nil {
-		return evidence.Packet{}, fmt.Errorf("write evidence packet: %w", err)
+		return evidence.Packet{}, fmt.Errorf("%w: write evidence packet: %w", ErrUnsafeOutput, err)
 	}
 	return packet, nil
+}
+
+func discoveryContainsSessionID(discovery session.Discovery, sessionID string) bool {
+	for _, candidate := range discovery.Candidates {
+		if candidate.ID == sessionID {
+			return true
+		}
+	}
+	for _, issue := range discovery.Issues {
+		if issue.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
 }
 
 func validateOptions(opts *Options) error {
