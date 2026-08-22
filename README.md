@@ -9,7 +9,7 @@ SessionReviewer 的当前基础版本把本机 Codex session JSONL 流式转换�
 - 从源码构建需要 Go 1.26
 - 不需要管理员权限，也不需要单独配置 OpenAI API key
 
-仓库 CI 配置在 macOS Intel x64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。本仓库目前不把这些自动化结果表述为完整的 Windows 原生端到端人工验收。
+仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。本仓库目前不把这些自动化结果表述为完整的 Windows 原生端到端人工验收。
 
 ## 构建、测试与用户级安装
 
@@ -119,7 +119,7 @@ session-reviewer.exe prepare review `
 
 - `project is not initialized`：先在真实项目根目录运行 `init`，并确认使用同一个 `--data-dir`。
 - `ambiguous current session`：使用 `--session <session-id>` 明确选择；工具不会静默猜测。
-- cursor 损坏或需要完整复查：使用 `prepare review --from-start`。该命令绕过 cursor 且不修复它，便于后续显式恢复。
+- cursor 损坏、已接受行被截断/改写，或需要完整复查：使用 `prepare review --from-start`。常规增量准备会校验 cursor 行的源哈希并在漂移时失败关闭；`--from-start` 绕过 cursor 读取与校验，且不修复它，便于后续显式恢复。
 - `output path is inside a protected data root`：把 `--output` 改到项目工作目录等独立位置。
 - root redirected/invalid：使用实际存在的物理目录，移除路径中的符号链接、junction 或 reparse point。
 - packet 的 `has_more` 为 `true`：不要手工假定整段已接受；保留 packet，交给未来的验证/apply 流程成功提交 cursor 后再准备下一段。

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -76,6 +77,10 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		FromStart: *fromStart, Now: time.Now(), AmbiguityWindow: 5 * time.Minute,
 	})
 	if err != nil {
+		if errors.Is(err, prepare.ErrCursorSourceDrift) {
+			fmt.Fprintln(stderr, "prepare failed: accepted session source changed; use prepare review --from-start for recovery")
+			return 1
+		}
 		fmt.Fprintln(stderr, "prepare failed")
 		return 1
 	}

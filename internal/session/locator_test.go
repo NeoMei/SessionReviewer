@@ -16,6 +16,13 @@ func TestResolveByExplicitID(t *testing.T) {
 	}
 }
 
+func TestResolveExplicitIDIgnoresNegativeAmbiguityWindow(t *testing.T) {
+	got, err := Resolve([]Candidate{{ID: "s1", Path: "one"}}, ResolveOptions{SessionID: "s1", AmbiguityWindow: -time.Second})
+	if err != nil || got.ID != "s1" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
 func TestResolveExplicitIDRejectsDuplicateCandidates(t *testing.T) {
 	candidates := []Candidate{
 		{ID: "s1", Path: "/sessions/one.jsonl"},
@@ -78,11 +85,13 @@ func TestResolveCurrentRequiresNow(t *testing.T) {
 	requireErrorContains(t, err, "current time", "required")
 }
 
-func TestResolveCurrentRejectsStaleModTime(t *testing.T) {
+func TestResolveCurrentAcceptsSoleMultiDayCandidate(t *testing.T) {
 	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
-	candidate := Candidate{ID: "stale", CWD: "/work/project", ModTime: now.Add(-24*time.Hour - time.Nanosecond)}
-	_, err := Resolve([]Candidate{candidate}, ResolveOptions{CWD: "/work/project", Now: now})
-	requireErrorContains(t, err, "stale", "stale", "24h")
+	candidate := Candidate{ID: "weekend", CWD: "/work/project", ModTime: now.Add(-72 * time.Hour)}
+	got, err := Resolve([]Candidate{candidate}, ResolveOptions{CWD: "/work/project", Now: now})
+	if err != nil || got.ID != "weekend" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
 }
 
 func TestResolveCurrentRejectsFutureModTime(t *testing.T) {

@@ -264,26 +264,19 @@ func TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB(t *te
 		t.Fatalf("first allowlisted summary is not bounded and redacted: %q", firstEvent.Summary)
 	}
 	wantWarning := fmt.Sprintf("redacted:named_secret:%d", len(packet.Events))
-	if !containsFoundationString(packet.Warnings, wantWarning) {
-		t.Fatalf("warnings=%v want=%q", packet.Warnings, wantWarning)
+	wantWarnings := []string{"redacted:high_entropy_token:1", wantWarning}
+	if !reflect.DeepEqual(packet.Warnings, wantWarnings) {
+		t.Fatalf("warnings=%v want=%v", packet.Warnings, wantWarnings)
 	}
 	for index, event := range packet.Events {
 		wantLine := tailStartLine + index
-		if event.Kind != "tool_result" || event.JSONLLine != wantLine || len(event.SourceHash) != 64 || event.ID == "" {
+		if event.Kind != "tool_result" || event.JSONLLine != wantLine || len(event.SourceHash) != 64 || event.ID == "" ||
+			!strings.Contains(event.Summary, "[REDACTED:NAMED_SECRET]") || !strings.Contains(event.Summary, "…[TRUNCATED]") {
 			t.Fatalf("event %d has invalid allowlist/provenance fields: %+v", index, event)
 		}
 	}
 	allocated := memoryAfter.TotalAlloc - memoryBefore.TotalAlloc
 	t.Logf("fixture_bytes=%d prefix_bytes=%d output_bytes=%d output_runes=%d events=%d to_cursor=%d duration=%s approx_total_alloc_bytes=%d", info.Size(), prefixBytes, len(output), outputRunes, len(packet.Events), packet.ToCursor, duration.Round(time.Millisecond), allocated)
-}
-
-func containsFoundationString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 type cursorFileSnapshot struct {

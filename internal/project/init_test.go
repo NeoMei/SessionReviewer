@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -113,12 +114,12 @@ func TestInitializeRejectsPhysicalContainmentThroughAliasedAncestor(t *testing.T
 	}
 
 	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: t.TempDir()})
-	if err == nil || !strings.Contains(err.Error(), "must not contain") {
+	if err == nil || (!strings.Contains(err.Error(), "must not contain") && !strings.Contains(err.Error(), "symlink or reparse point")) {
 		t.Fatalf("err=%v", err)
 	}
 }
 
-func TestInitializeCanonicalRootAliasReusesMapping(t *testing.T) {
+func TestInitializeRejectsCanonicalRootAlias(t *testing.T) {
 	realBase := t.TempDir()
 	aliasBase := filepath.Join(t.TempDir(), "alias")
 	if err := os.Symlink(realBase, aliasBase); err != nil {
@@ -131,16 +132,13 @@ func TestInitializeCanonicalRootAliasReusesMapping(t *testing.T) {
 	}
 	vault := t.TempDir()
 	data := t.TempDir()
-	first, err := Initialize(InitOptions{ProjectRoot: realRoot, VaultRoot: vault, DataDir: data})
+	_, err := Initialize(InitOptions{ProjectRoot: realRoot, VaultRoot: vault, DataDir: data})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := Initialize(InitOptions{ProjectRoot: aliasRoot, VaultRoot: vault, DataDir: data, Random: errorReader{}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.ProjectID != second.ProjectID {
-		t.Fatalf("ids differ: %q %q", first.ProjectID, second.ProjectID)
+	_, err = Initialize(InitOptions{ProjectRoot: aliasRoot, VaultRoot: vault, DataDir: data, Random: errorReader{}})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("err=%v", err)
 	}
 	cfg, err := config.Load(filepath.Join(data, "config.toml"))
 	if err != nil {
@@ -299,14 +297,193 @@ func TestInitializeRecoversMappingWithoutOverview(t *testing.T) {
 	}
 }
 
-func TestAcquireInitLockDoesNotDeleteUnknownLock(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.toml.lock")
+func TestInitializeRecoversBackupOnlyConfigWithoutLosingMappings(t *testing.T) {
+	firstRoot, secondRoot, vault, data := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	configPath := filepath.Join(data, "config.toml")
+	want := config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "project-1111111111111111", Root: firstRoot, VaultRoot: vault}}}
+	if err := config.Save(configPath, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(configPath, configPath+".session-reviewer-backup"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Initialize(InitOptions{ProjectRoot: secondRoot, VaultRoot: t.TempDir(), DataDir: data, Random: bytes.NewReader(bytes.Repeat([]byte{0x22}, 16))}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Projects) != 2 || got.Projects[0] != want.Projects[0] {
+		t.Fatalf("mappings=%+v", got.Projects)
+	}
+}
+
+func TestInitializeUsesBackupOnlyOverviewIdentity(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	wantID := "project-3333333333333333"
+	writeTestOverview(t, root, wantID)
+	path := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	if err := os.Rename(path, path+".session-reviewer-backup"); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, Random: errorReader{}})
+	if err != nil || result.ProjectID != wantID {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestInitializeUsesValidOverviewBackupWhenPrimaryIsInvalid(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	wantID := "project-4444444444444444"
+	writeTestOverview(t, root, wantID)
+	path := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	if err := os.Rename(path, path+".session-reviewer-backup"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("---\nproject_id: invalid\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, Random: errorReader{}})
+	if err != nil || result.ProjectID != wantID {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestInitializeRejectsRedirectedAncestor(t *testing.T) {
+	base, realBase := t.TempDir(), t.TempDir()
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(realBase, alias); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	root := filepath.Join(alias, "project")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestInitializeProjectRootReplacementCannotRedirectOverviewWrite(t *testing.T) {
+	base, root, moved, outside := t.TempDir(), "", "", ""
+	root = filepath.Join(base, "project")
+	moved = filepath.Join(base, "moved")
+	outside = filepath.Join(base, "outside")
+	for _, dir := range []string{root, outside} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: t.TempDir(), beforeOverviewWrite: func() error {
+		if err := os.Rename(root, moved); err != nil {
+			return err
+		}
+		return os.Symlink(outside, root)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "docs", "session-review", "project-overview.md")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "docs")); !os.IsNotExist(err) {
+		t.Fatalf("outside write: %v", err)
+	}
+}
+
+func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	moved := filepath.Join(base, "moved")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{data, outside} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: t.TempDir(), VaultRoot: t.TempDir(), DataDir: data, beforeConfigWrite: func() error {
+		if err := os.Rename(data, moved); err != nil {
+			return err
+		}
+		return os.Symlink(outside, data)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("outside write: %v", err)
+	}
+}
+
+func TestInitializeLockReleasedAfterSubprocessCrash(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestInitSubprocessHelper$")
+	cmd.Env = append(os.Environ(), "SESSION_REVIEWER_INIT_HELPER=crash", "SESSION_REVIEWER_INIT_PROJECT="+root, "SESSION_REVIEWER_INIT_VAULT="+vault, "SESSION_REVIEWER_INIT_DATA="+data)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("helper did not crash")
+	}
+	if _, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data}); err != nil {
+		t.Fatalf("lock survived crashed owner: %v", err)
+	}
+}
+
+func TestInitializeTwoProcessesSerializeOneMapping(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	commands := make([]*exec.Cmd, 2)
+	for i := range commands {
+		commands[i] = exec.Command(os.Args[0], "-test.run=^TestInitSubprocessHelper$")
+		commands[i].Env = append(os.Environ(), "SESSION_REVIEWER_INIT_HELPER=normal", "SESSION_REVIEWER_INIT_PROJECT="+root, "SESSION_REVIEWER_INIT_VAULT="+vault, "SESSION_REVIEWER_INIT_DATA="+data)
+		if err := commands[i].Start(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range commands {
+		if err := command.Wait(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.Load(filepath.Join(data, "config.toml"))
+	if err != nil || len(cfg.Projects) != 1 {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
+	}
+}
+
+func TestInitSubprocessHelper(t *testing.T) {
+	mode := os.Getenv("SESSION_REVIEWER_INIT_HELPER")
+	if mode == "" {
+		return
+	}
+	opts := InitOptions{ProjectRoot: os.Getenv("SESSION_REVIEWER_INIT_PROJECT"), VaultRoot: os.Getenv("SESSION_REVIEWER_INIT_VAULT"), DataDir: os.Getenv("SESSION_REVIEWER_INIT_DATA")}
+	if mode == "crash" {
+		opts.afterLock = func() error { os.Exit(23); return nil }
+	}
+	if _, err := Initialize(opts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAcquireInitLockUsesPersistentFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml.lock")
 	if err := os.WriteFile(path, []byte("unknown-owner"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := acquireInitLock(path, 20*time.Millisecond)
-	if err == nil || !strings.Contains(err.Error(), "refusing to remove") {
-		t.Fatalf("err=%v", err)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	lock, err := acquireInitLock(root, "config.toml.lock", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lock.release(); err != nil {
+		t.Fatal(err)
 	}
 	b, readErr := os.ReadFile(path)
 	if readErr != nil || string(b) != "unknown-owner" {

@@ -37,6 +37,8 @@ type Options struct {
 	afterOpenSession  func() error
 }
 
+var ErrCursorSourceDrift = errors.New("accepted cursor no longer matches session source")
+
 func Run(opts Options) (evidence.Packet, error) {
 	if err := validateOptions(&opts); err != nil {
 		return evidence.Packet{}, err
@@ -102,8 +104,9 @@ func Run(opts Options) (evidence.Packet, error) {
 	}
 
 	from := 1
+	var stored cursor.Cursor
 	if !opts.FromStart {
-		stored, err := readCursor(opts.DataDir, mapping.ID, chosen.ID)
+		stored, err = readCursor(opts.DataDir, mapping.ID, chosen.ID)
 		if err != nil {
 			return evidence.Packet{}, err
 		}
@@ -116,9 +119,34 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err != nil {
 		return evidence.Packet{}, err
 	}
-	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: from, MaxRecordBytes: opts.MaxRecordBytes}, x.Add)
+	cursorValidated := stored.LastLine == 0
+	visit := x.Add
+	streamFrom := from
+	if !opts.FromStart && stored.LastLine > 0 {
+		streamFrom = stored.LastLine
+		visit = func(record session.Record) error {
+			if record.Line == stored.LastLine {
+				if record.SourceHash != stored.LastHash {
+					return ErrCursorSourceDrift
+				}
+				cursorValidated = true
+				return nil
+			}
+			if record.Line > stored.LastLine {
+				return x.Add(record)
+			}
+			return nil
+		}
+	}
+	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: streamFrom, MaxRecordBytes: opts.MaxRecordBytes}, visit)
+	if errors.Is(streamErr, ErrCursorSourceDrift) {
+		return evidence.Packet{}, ErrCursorSourceDrift
+	}
 	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) {
-		return evidence.Packet{}, fmt.Errorf("extract session evidence: %w", streamErr)
+		return evidence.Packet{}, fmt.Errorf("extract session evidence from %q: %w", chosen.Path, streamErr)
+	}
+	if !cursorValidated {
+		return evidence.Packet{}, ErrCursorSourceDrift
 	}
 	packet := x.Packet()
 	if summary.MalformedLines > 0 {
@@ -202,7 +230,7 @@ func validateOptions(opts *Options) error {
 }
 
 func findConfiguredProject(cfg config.Config, goos, cwd string) (config.ProjectMapping, error) {
-	if goos == "windows" || goos != runtime.GOOS {
+	if goos != runtime.GOOS {
 		normalized := platform.NormalizePath(goos, cwd)
 		var match config.ProjectMapping
 		matches := 0
@@ -248,7 +276,7 @@ func findConfiguredProject(cfg config.Config, goos, cwd string) (config.ProjectM
 }
 
 func sameProjectDirectory(goos, first, second string) (bool, error) {
-	if goos == "windows" || goos != runtime.GOOS {
+	if goos != runtime.GOOS {
 		return platform.NormalizePath(goos, first) == platform.NormalizePath(goos, second), nil
 	}
 	return pathguard.SameDirectory(first, second)

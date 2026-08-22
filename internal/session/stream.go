@@ -20,7 +20,11 @@ func Stream(path string, opts DecodeOptions, visit func(Record) error) (DecodeSu
 		return DecodeSummary{}, err
 	}
 	defer f.Close()
-	return StreamFile(f, opts, visit)
+	summary, err := StreamFile(f, opts, visit)
+	if err != nil {
+		return summary, fmt.Errorf("stream session %q: %w", path, err)
+	}
+	return summary, nil
 }
 
 func StreamFile(file *os.File, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {

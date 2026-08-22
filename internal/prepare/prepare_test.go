@@ -3,6 +3,7 @@ package prepare
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +15,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/session"
 )
 
 func TestRunPreparesCurrentCheckpointWithoutAdvancingCursor(t *testing.T) {
@@ -124,11 +126,77 @@ func (f runFixture) commitCursor(t *testing.T, line int) cursor.Cursor {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	current := cursor.Cursor{SessionID: "s1", LastLine: line, LastHash: strings.Repeat("a", 64), UpdatedAt: f.now}
+	current := cursor.Cursor{SessionID: "s1", LastLine: line, LastHash: f.sourceHash(t, line), UpdatedAt: f.now}
 	if err := (cursor.Store{Root: root}).Commit("s1", cursor.Cursor{}, current); err != nil {
 		t.Fatal(err)
 	}
 	return current
+}
+
+func (f runFixture) sourceHash(t *testing.T, line int) string {
+	t.Helper()
+	var hash string
+	_, err := session.Stream(filepath.Join(f.sessions, "s1.jsonl"), session.DecodeOptions{FromLine: line}, func(record session.Record) error {
+		if record.Line == line {
+			hash = record.SourceHash
+			return session.ErrStop
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, session.ErrStop) {
+		t.Fatal(err)
+	}
+	if hash == "" {
+		t.Fatalf("line %d has no valid record", line)
+	}
+	return hash
+}
+
+func TestRunRejectsCursorSourceHashMismatch(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 2)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"changed"}]}}`), f.now)
+	_, err := Run(f.options("checkpoint"))
+	if !errors.Is(err, ErrCursorSourceDrift) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(f.output); !os.IsNotExist(statErr) {
+		t.Fatalf("output created: %v", statErr)
+	}
+}
+
+func TestRunRejectsCursorBeyondTruncatedSession(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 2)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot), f.now)
+	_, err := Run(f.options("checkpoint"))
+	if !errors.Is(err, ErrCursorSourceDrift) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunRejectsMalformedCursorRecord(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 2)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot, "{"), f.now)
+	_, err := Run(f.options("checkpoint"))
+	if !errors.Is(err, ErrCursorSourceDrift) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestRunReviewFromStartBypassesCursorSourceValidation(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 1)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"changed"}]}}`), f.now)
+	opts := f.options("review")
+	opts.FromStart = true
+	packet, err := Run(opts)
+	if err != nil || packet.FromCursor != 1 {
+		t.Fatalf("packet=%+v err=%v", packet, err)
+	}
 }
 
 func TestRunCheckpointStartsAfterExistingCursorWithoutChangingIt(t *testing.T) {
@@ -452,7 +520,7 @@ func TestRunReadOnlyCursorFallbackDoesNotRepairState(t *testing.T) {
 	if err := os.WriteFile(primary, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	state := cursor.Cursor{SessionID: "s1", LastLine: 1, LastHash: strings.Repeat("a", 64), UpdatedAt: f.now}
+	state := cursor.Cursor{SessionID: "s1", LastLine: 1, LastHash: f.sourceHash(t, 1), UpdatedAt: f.now}
 	body, _ := json.Marshal(state)
 	if err := os.WriteFile(backup, body, 0o600); err != nil {
 		t.Fatal(err)
@@ -799,6 +867,9 @@ func TestFindConfiguredProjectDoesNotSkipMalformedOrMissingCurrentRoot(t *testin
 }
 
 func TestFindConfiguredProjectPreservesWindowsNormalization(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("lexical Windows simulation is exercised only on non-Windows hosts")
+	}
 	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{
 		{ID: "stale", Root: `D:\Deleted`},
 		{ID: "valid", Root: `c:/projects/sessionreviewer`},
@@ -806,5 +877,17 @@ func TestFindConfiguredProjectPreservesWindowsNormalization(t *testing.T) {
 	mapping, err := findConfiguredProject(cfg, "windows", `C:\Projects\SessionReviewer`)
 	if err != nil || mapping.ID != "valid" {
 		t.Fatalf("mapping=%+v err=%v", mapping, err)
+	}
+}
+
+func TestFindConfiguredProjectPhysicallyValidatesUnrelatedEntries(t *testing.T) {
+	current := t.TempDir()
+	nonDirectory := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(nonDirectory, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "unsafe", Root: nonDirectory}, {ID: "valid", Root: current}}}
+	if _, err := findConfiguredProject(cfg, runtime.GOOS, current); err == nil {
+		t.Fatal("unsafe unrelated mapping was ignored")
 	}
 }

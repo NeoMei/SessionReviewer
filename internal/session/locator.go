@@ -17,10 +17,7 @@ import (
 
 var ErrStop = errors.New("stop stream")
 
-const (
-	maxCurrentSessionAge = 24 * time.Hour
-	futureClockSkew      = 5 * time.Minute
-)
+const futureClockSkew = 5 * time.Minute
 
 type Candidate struct {
 	ID        string
@@ -136,7 +133,7 @@ func discoverCandidateFile(file *os.File, path string) (Candidate, bool, error) 
 		return Candidate{}, false, fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s)", path, summary.MalformedLines)
 	}
 	if err != nil && !errors.Is(err, ErrStop) {
-		return Candidate{}, false, err
+		return Candidate{}, false, fmt.Errorf("stream session %q: %w", path, err)
 	}
 	return candidate, candidate.ID != "", nil
 }
@@ -167,9 +164,6 @@ func OpenCandidate(root string, candidate Candidate) (*os.File, error) {
 }
 
 func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
-	if opts.AmbiguityWindow < 0 {
-		return Candidate{}, fmt.Errorf("ambiguity window must not be negative")
-	}
 	if opts.SessionID != "" {
 		var matches []Candidate
 		for _, candidate := range candidates {
@@ -188,6 +182,9 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 			return Candidate{}, fmt.Errorf("duplicate session id %q found at paths: %s", opts.SessionID, strings.Join(paths, ", "))
 		}
 		return matches[0], nil
+	}
+	if opts.AmbiguityWindow < 0 {
+		return Candidate{}, fmt.Errorf("ambiguity window must not be negative")
 	}
 	if opts.Now.IsZero() {
 		return Candidate{}, fmt.Errorf("current time is required to resolve the current session")
@@ -208,14 +205,11 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 		return Candidate{}, fmt.Errorf("no session matches working directory %q", opts.CWD)
 	}
 
-	oldestAllowed := opts.Now.Add(-maxCurrentSessionAge)
 	latestAllowed := opts.Now.Add(futureClockSkew)
 	var matches []Candidate
 	var rejected []string
 	for _, candidate := range cwdMatches {
 		switch {
-		case candidate.ModTime.Before(oldestAllowed):
-			rejected = append(rejected, fmt.Sprintf("session %q is stale: modification time exceeds the 24h current-session age limit", candidate.ID))
 		case candidate.ModTime.After(latestAllowed):
 			rejected = append(rejected, fmt.Sprintf("session %q has a future modification time beyond the 5m clock-skew allowance", candidate.ID))
 		case !candidate.StartedAt.IsZero() && candidate.StartedAt.After(latestAllowed):
