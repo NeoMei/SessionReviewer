@@ -32,3 +32,11 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
 }
+
+func TestRunInitRequiresProjectAndVault(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := Run([]string{"init"}, &out, &errOut)
+	if code != 2 || !strings.Contains(errOut.String(), "init requires --project and --vault") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
