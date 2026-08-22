@@ -15,17 +15,33 @@ import (
 const defaultMaxRecordBytes = 64 << 20
 
 func Stream(path string, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {
-	if opts.MaxRecordBytes == 0 {
-		opts.MaxRecordBytes = defaultMaxRecordBytes
-	}
-
 	f, err := os.Open(path)
 	if err != nil {
 		return DecodeSummary{}, err
 	}
 	defer f.Close()
+	return StreamFile(f, opts, visit)
+}
 
-	reader := bufio.NewReaderSize(f, 64<<10)
+func StreamFile(file *os.File, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {
+	if file == nil {
+		return DecodeSummary{}, fmt.Errorf("session file is required")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return DecodeSummary{}, fmt.Errorf("seek session file: %w", err)
+	}
+	return StreamReader(file, opts, visit)
+}
+
+func StreamReader(source io.Reader, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {
+	if source == nil {
+		return DecodeSummary{}, fmt.Errorf("session reader is required")
+	}
+	if opts.MaxRecordBytes == 0 {
+		opts.MaxRecordBytes = defaultMaxRecordBytes
+	}
+
+	reader := bufio.NewReaderSize(source, 64<<10)
 	var summary DecodeSummary
 	var offset int64
 	for {

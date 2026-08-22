@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -578,5 +579,134 @@ func TestRunRejectsCursorIncrementOverflow(t *testing.T) {
 	}
 	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
 		t.Fatalf("output created for overflowing cursor: %v", err)
+	}
+}
+
+func TestRunRejectsSessionRootWithSymlinkAncestor(t *testing.T) {
+	f := newRunFixture(t, "")
+	aliasRoot := filepath.Join(f.root, "alias-root")
+	if err := os.Symlink(f.root, aliasRoot); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	opts := f.options("review")
+	opts.SessionsRoot = filepath.Join(aliasRoot, "sessions")
+	if _, err := Run(opts); err == nil {
+		t.Fatal("expected session-root ancestor symlink rejection")
+	}
+	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
+		t.Fatalf("output created: %v", err)
+	}
+}
+
+func TestRunRejectsSessionReplacementBeforeOpen(t *testing.T) {
+	for _, kind := range []string{"regular", "symlink", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newRunFixture(t, "")
+			sessionPath := filepath.Join(f.sessions, "s1.jsonl")
+			originalPath := filepath.Join(f.root, "discovered.jsonl")
+			replacementPath := filepath.Join(f.root, "replacement.jsonl")
+			replacement := sessionBody(f.projectRoot,
+				`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"replacement"}]}}`)
+			if err := os.WriteFile(replacementPath, []byte(replacement), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := f.options("review")
+			opts.beforeOpenSession = func() error {
+				if err := os.Rename(sessionPath, originalPath); err != nil {
+					return err
+				}
+				switch kind {
+				case "regular":
+					return os.WriteFile(sessionPath, []byte(replacement), 0o600)
+				case "symlink":
+					return os.Symlink(replacementPath, sessionPath)
+				case "hardlink":
+					return os.Link(replacementPath, sessionPath)
+				default:
+					panic("unknown replacement kind")
+				}
+			}
+			if _, err := Run(opts); err == nil {
+				t.Fatal("expected changed session identity rejection")
+			}
+			if _, err := os.Stat(f.output); !os.IsNotExist(err) {
+				t.Fatalf("output created: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunStreamsPinnedSessionAfterPathReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not permit replacing an open file in this test")
+	}
+	f := newRunFixture(t, "")
+	sessionPath := filepath.Join(f.sessions, "s1.jsonl")
+	originalPath := filepath.Join(f.root, "opened.jsonl")
+	replacement := sessionBody(f.projectRoot,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"replacement"}]}}`)
+	opts := f.options("review")
+	hookCalled := false
+	opts.afterOpenSession = func() error {
+		hookCalled = true
+		if err := os.Rename(sessionPath, originalPath); err != nil {
+			return err
+		}
+		return os.WriteFile(sessionPath, []byte(replacement), 0o600)
+	}
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hookCalled {
+		t.Fatal("after-open hook was not called")
+	}
+	if len(packet.Events) != 1 || packet.Events[0].Summary != "goal" {
+		t.Fatalf("streamed replacement instead of opened file: %+v", packet)
+	}
+}
+
+func TestRunExplicitSessionAcceptsPhysicalDarwinCWDAlias(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin physical identity behavior")
+	}
+	f := newRunFixture(t, "")
+	alias, ok := caseAliasPath(t, f.projectRoot)
+	if !ok {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	opts := f.options("review")
+	opts.GOOS = "darwin"
+	opts.CWD = alias
+	opts.SessionID = "s1"
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.ProjectID != "p1" || packet.SessionID != "s1" {
+		t.Fatalf("packet=%+v", packet)
+	}
+}
+
+func TestRunMatchesConfiguredProjectByPhysicalDarwinIdentity(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin physical identity behavior")
+	}
+	f := newRunFixture(t, "")
+	alias, ok := caseAliasPath(t, f.projectRoot)
+	if !ok {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	if err := config.Save(filepath.Join(f.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "p1", Root: alias}}}); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options("review")
+	opts.GOOS = "darwin"
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.ProjectID != "p1" {
+		t.Fatalf("packet=%+v", packet)
 	}
 }

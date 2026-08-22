@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
@@ -28,6 +29,9 @@ type Candidate struct {
 	Source    string
 	StartedAt time.Time
 	ModTime   time.Time
+	fileInfo  os.FileInfo
+	rootInfo  os.FileInfo
+	relative  string
 }
 
 type ResolveOptions struct {
@@ -36,22 +40,22 @@ type ResolveOptions struct {
 	GOOS            string
 	Now             time.Time
 	AmbiguityWindow time.Duration
+	PathsEqual      func(string, string) bool
 }
 
 func Discover(root string) ([]Candidate, error) {
-	rootInfo, err := os.Lstat(root)
+	directory, err := pathguard.Open(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sessions path %q is redirected or invalid: %w", root, err)
 	}
-	if isSymlinkOrReparse(rootInfo) {
-		return nil, fmt.Errorf("sessions path %q is a symlink or reparse point", root)
-	}
+	defer directory.Close()
 
 	var candidates []Candidate
-	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+	err = fs.WalkDir(directory.Root.FS(), ".", func(relative string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
+		path := filepath.Join(directory.Path, filepath.FromSlash(relative))
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -63,24 +67,36 @@ func Discover(root string) ([]Candidate, error) {
 			return nil
 		}
 
-		candidate, found, err := discoverCandidate(path)
+		file, identity, err := directory.OpenRegular(relative)
 		if err != nil {
-			return err
+			return fmt.Errorf("open session candidate %q: %w", path, err)
+		}
+		candidate, found, discoverErr := discoverCandidateFile(file, path)
+		closeErr := file.Close()
+		if discoverErr != nil {
+			return discoverErr
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 		if !found {
 			return nil
 		}
-		candidate.ModTime = info.ModTime()
+		candidate.Path = path
+		candidate.ModTime = identity.ModTime()
+		candidate.fileInfo = identity
+		candidate.rootInfo = directory.Info()
+		candidate.relative = relative
 		candidates = append(candidates, candidate)
 		return nil
 	})
 	return candidates, err
 }
 
-func discoverCandidate(path string) (Candidate, bool, error) {
+func discoverCandidateFile(file *os.File, path string) (Candidate, bool, error) {
 	var candidate Candidate
 	var metadataLine int
-	summary, err := Stream(path, DecodeOptions{MaxRecordBytes: 64 << 20}, func(record Record) error {
+	summary, err := StreamFile(file, DecodeOptions{MaxRecordBytes: 64 << 20}, func(record Record) error {
 		if record.Type != "session_meta" {
 			return nil
 		}
@@ -125,6 +141,31 @@ func discoverCandidate(path string) (Candidate, bool, error) {
 	return candidate, candidate.ID != "", nil
 }
 
+// OpenCandidate opens exactly the regular file observed during discovery. The
+// returned handle remains bound to those bytes even if the pathname changes.
+func OpenCandidate(root string, candidate Candidate) (*os.File, error) {
+	if candidate.fileInfo == nil || candidate.rootInfo == nil || candidate.relative == "" {
+		return nil, fmt.Errorf("session candidate has no discovery identity")
+	}
+	directory, err := pathguard.Open(root)
+	if err != nil {
+		return nil, fmt.Errorf("open sessions root: %w", err)
+	}
+	defer directory.Close()
+	if !os.SameFile(directory.Info(), candidate.rootInfo) {
+		return nil, fmt.Errorf("sessions root changed after discovery")
+	}
+	file, identity, err := directory.OpenRegular(candidate.relative)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(identity, candidate.fileInfo) {
+		_ = file.Close()
+		return nil, fmt.Errorf("session file changed after discovery")
+	}
+	return file, nil
+}
+
 func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 	if opts.AmbiguityWindow < 0 {
 		return Candidate{}, fmt.Errorf("ambiguity window must not be negative")
@@ -155,7 +196,11 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 	normalizedCWD := platform.NormalizePath(opts.GOOS, opts.CWD)
 	var cwdMatches []Candidate
 	for _, candidate := range candidates {
-		if platform.NormalizePath(opts.GOOS, candidate.CWD) == normalizedCWD {
+		matches := platform.NormalizePath(opts.GOOS, candidate.CWD) == normalizedCWD
+		if opts.PathsEqual != nil {
+			matches = opts.PathsEqual(candidate.CWD, opts.CWD)
+		}
+		if matches {
 			cwdMatches = append(cwdMatches, candidate)
 		}
 	}

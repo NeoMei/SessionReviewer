@@ -5,15 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
-	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 type outputTarget struct {
-	anchor      *os.Root
+	anchor      *pathguard.Directory
 	parentPath  string
 	relativeDir string
 	name        string
@@ -28,77 +27,39 @@ func prepareOutputTarget(path, sessionsRoot, dataDir string) (*outputTarget, err
 	if name == "." || name == string(filepath.Separator) || name == "" {
 		return nil, fmt.Errorf("invalid output path")
 	}
-	for _, protected := range []string{sessionsRoot, dataDir} {
-		protected, err = filepath.Abs(protected)
-		if err != nil {
-			return nil, fmt.Errorf("invalid protected root")
-		}
-		if pathInside(runtime.GOOS, protected, absolute) {
-			return nil, fmt.Errorf("output path is inside a protected data root")
-		}
-	}
-
 	parent := filepath.Dir(absolute)
-	anchorPath := parent
-	for {
-		info, statErr := os.Lstat(anchorPath)
-		if statErr == nil {
-			if isSymlinkOrReparse(info) || !info.IsDir() {
-				return nil, fmt.Errorf("output parent is redirected or not a directory")
-			}
-			break
-		}
-		if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("inspect output parent: %w", statErr)
-		}
-		next := filepath.Dir(anchorPath)
-		if next == anchorPath {
-			return nil, fmt.Errorf("output parent does not exist")
-		}
-		anchorPath = next
-	}
-
-	physicalAnchor, err := filepath.EvalSymlinks(anchorPath)
+	anchor, remaining, err := pathguard.OpenDeepest(parent)
 	if err != nil {
 		return nil, fmt.Errorf("inspect output parent: %w", err)
 	}
-	relativeOutput, err := filepath.Rel(anchorPath, absolute)
-	if err != nil || relativeOutput == ".." || strings.HasPrefix(relativeOutput, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("invalid output path")
-	}
-	physicalOutput := filepath.Join(physicalAnchor, relativeOutput)
+	keepAnchor := false
+	defer func() {
+		if !keepAnchor {
+			_ = anchor.Close()
+		}
+	}()
 	for _, protected := range []string{sessionsRoot, dataDir} {
-		physicalProtected, err := filepath.EvalSymlinks(protected)
+		protectedRoot, err := pathguard.Open(protected)
 		if err != nil {
 			return nil, fmt.Errorf("inspect protected root: %w", err)
 		}
-		if pathInside(runtime.GOOS, physicalProtected, physicalOutput) {
+		inside := anchor.ContainsIdentity(protectedRoot.Info())
+		_ = protectedRoot.Close()
+		if inside {
 			return nil, fmt.Errorf("output path is inside a protected data root")
 		}
 	}
-
-	root, err := os.OpenRoot(anchorPath)
-	if err != nil {
-		return nil, fmt.Errorf("open output parent: %w", err)
+	relativeDir := filepath.Join(remaining...)
+	if relativeDir == "" {
+		relativeDir = "."
 	}
-	opened, openErr := root.Stat(".")
-	anchored, anchorErr := os.Lstat(anchorPath)
-	if openErr != nil || anchorErr != nil || isSymlinkOrReparse(anchored) || !os.SameFile(opened, anchored) {
-		_ = root.Close()
-		return nil, fmt.Errorf("output parent changed while opening")
-	}
-	relativeDir, err := filepath.Rel(anchorPath, parent)
-	if err != nil {
-		_ = root.Close()
-		return nil, fmt.Errorf("invalid output parent")
-	}
-	target := &outputTarget{anchor: root, parentPath: parent, relativeDir: relativeDir, name: name}
+	target := &outputTarget{anchor: anchor, parentPath: parent, relativeDir: relativeDir, name: name}
 	if relativeDir == "." {
-		if err := validateOutputEntry(root, name); err != nil {
-			_ = root.Close()
+		if err := validateOutputEntry(anchor.Root, name); err != nil {
 			return nil, err
 		}
 	}
+	keepAnchor = true
 	return target, nil
 }
 
@@ -140,9 +101,9 @@ func (target *outputTarget) write(data []byte) error {
 
 func (target *outputTarget) openParent() (*os.Root, bool, error) {
 	if target.relativeDir == "." {
-		return target.anchor, false, nil
+		return target.anchor.Root, false, nil
 	}
-	current := target.anchor
+	current := target.anchor.Root
 	owned := false
 	components := strings.Split(target.relativeDir, string(filepath.Separator))
 	for _, component := range components {
@@ -204,17 +165,4 @@ func validateOutputEntry(root *os.Root, name string) error {
 		return fmt.Errorf("output file is a symlink, reparse point, or non-regular file")
 	}
 	return nil
-}
-
-func pathInside(goos, root, candidate string) bool {
-	root = platform.NormalizePath(goos, root)
-	candidate = platform.NormalizePath(goos, candidate)
-	if root == candidate {
-		return true
-	}
-	separator := string(filepath.Separator)
-	if goos == "windows" {
-		separator = "/"
-	}
-	return strings.HasPrefix(candidate, strings.TrimSuffix(root, separator)+separator)
 }

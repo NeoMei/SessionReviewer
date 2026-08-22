@@ -14,24 +14,27 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
 
 type Options struct {
-	Mode            string
-	SessionsRoot    string
-	SessionID       string
-	CWD             string
-	DataDir         string
-	Output          string
-	GOOS            string
-	FromStart       bool
-	Now             time.Time
-	AmbiguityWindow time.Duration
-	Limits          evidence.Limits
-	MaxRecordBytes  int
+	Mode              string
+	SessionsRoot      string
+	SessionID         string
+	CWD               string
+	DataDir           string
+	Output            string
+	GOOS              string
+	FromStart         bool
+	Now               time.Time
+	AmbiguityWindow   time.Duration
+	Limits            evidence.Limits
+	MaxRecordBytes    int
+	beforeOpenSession func() error
+	afterOpenSession  func() error
 }
 
 func Run(opts Options) (evidence.Packet, error) {
@@ -47,14 +50,22 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("discover sessions: %w", err)
 	}
+	pathsEqual := func(first, second string) bool {
+		same, _ := sameProjectDirectory(opts.GOOS, first, second)
+		return same
+	}
 	chosen, err := session.Resolve(candidates, session.ResolveOptions{
 		SessionID: opts.SessionID, CWD: opts.CWD, GOOS: opts.GOOS,
-		Now: opts.Now, AmbiguityWindow: opts.AmbiguityWindow,
+		Now: opts.Now, AmbiguityWindow: opts.AmbiguityWindow, PathsEqual: pathsEqual,
 	})
 	if err != nil {
 		return evidence.Packet{}, err
 	}
-	if platform.NormalizePath(opts.GOOS, chosen.CWD) != platform.NormalizePath(opts.GOOS, opts.CWD) {
+	sameProject, err := sameProjectDirectory(opts.GOOS, chosen.CWD, opts.CWD)
+	if err != nil {
+		return evidence.Packet{}, fmt.Errorf("validate selected session project: %w", err)
+	}
+	if !sameProject {
 		return evidence.Packet{}, fmt.Errorf("selected session belongs to a different project")
 	}
 	if err := validateIdentifier(chosen.ID, "session id"); err != nil {
@@ -74,6 +85,21 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err := validateIdentifier(mapping.ID, "project id"); err != nil {
 		return evidence.Packet{}, err
 	}
+	if opts.beforeOpenSession != nil {
+		if err := opts.beforeOpenSession(); err != nil {
+			return evidence.Packet{}, fmt.Errorf("prepare session open: %w", err)
+		}
+	}
+	sessionFile, err := session.OpenCandidate(opts.SessionsRoot, chosen)
+	if err != nil {
+		return evidence.Packet{}, fmt.Errorf("open selected session: %w", err)
+	}
+	defer sessionFile.Close()
+	if opts.afterOpenSession != nil {
+		if err := opts.afterOpenSession(); err != nil {
+			return evidence.Packet{}, fmt.Errorf("prepare session stream: %w", err)
+		}
+	}
 
 	from := 1
 	if !opts.FromStart {
@@ -90,7 +116,7 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err != nil {
 		return evidence.Packet{}, err
 	}
-	summary, streamErr := session.Stream(chosen.Path, session.DecodeOptions{FromLine: from, MaxRecordBytes: opts.MaxRecordBytes}, x.Add)
+	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: from, MaxRecordBytes: opts.MaxRecordBytes}, x.Add)
 	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) {
 		return evidence.Packet{}, fmt.Errorf("extract session evidence: %w", streamErr)
 	}
@@ -161,28 +187,29 @@ func validateOptions(opts *Options) error {
 		{label: "working directory", path: &opts.CWD},
 		{label: "data directory", path: &opts.DataDir},
 	} {
-		info, err := os.Lstat(*field.path)
-		if err != nil {
-			return fmt.Errorf("invalid %s: %w", field.label, err)
-		}
-		if isSymlinkOrReparse(info) || !info.IsDir() {
-			return fmt.Errorf("invalid %s", field.label)
-		}
 		absolute, err := filepath.Abs(*field.path)
 		if err != nil {
 			return fmt.Errorf("invalid %s", field.label)
 		}
+		directory, err := pathguard.Open(absolute)
+		if err != nil {
+			return fmt.Errorf("invalid %s: %w", field.label, err)
+		}
+		_ = directory.Close()
 		*field.path = absolute
 	}
 	return nil
 }
 
 func findConfiguredProject(cfg config.Config, goos, cwd string) (config.ProjectMapping, error) {
-	normalized := platform.NormalizePath(goos, cwd)
 	var match config.ProjectMapping
 	matches := 0
 	for _, project := range cfg.Projects {
-		if platform.NormalizePath(goos, project.Root) != normalized {
+		same, err := sameProjectDirectory(goos, project.Root, cwd)
+		if err != nil {
+			return config.ProjectMapping{}, fmt.Errorf("validate configured project mapping: %w", err)
+		}
+		if !same {
 			continue
 		}
 		match = project
@@ -192,6 +219,13 @@ func findConfiguredProject(cfg config.Config, goos, cwd string) (config.ProjectM
 		return config.ProjectMapping{}, fmt.Errorf("configured project mapping is ambiguous")
 	}
 	return match, nil
+}
+
+func sameProjectDirectory(goos, first, second string) (bool, error) {
+	if goos == "windows" || goos != runtime.GOOS {
+		return platform.NormalizePath(goos, first) == platform.NormalizePath(goos, second), nil
+	}
+	return pathguard.SameDirectory(first, second)
 }
 
 var safeIdentifier = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
