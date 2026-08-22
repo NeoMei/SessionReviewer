@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
+	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
@@ -148,6 +151,7 @@ func TestRunCheckpointRejectsFromStart(t *testing.T) {
 }
 
 func TestRunPrepareSuccessIsSilentAndWritesEvidence(t *testing.T) {
+	setCurrentEnv(t, platform.Env{})
 	root := t.TempDir()
 	sessions := filepath.Join(root, "sessions")
 	data := filepath.Join(root, "data")
@@ -180,6 +184,151 @@ func TestRunPrepareSuccessIsSilentAndWritesEvidence(t *testing.T) {
 	if _, err := os.Stat(output); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRunPrepareSessionRootFlagOverridesEnvironment(t *testing.T) {
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "project")
+	dataRoot := filepath.Join(root, "data")
+	flagSessions := filepath.Join(root, "flag-sessions")
+	envSessions := filepath.Join(root, "env-sessions")
+	for _, dir := range []string{projectRoot, dataRoot, flagSessions, envSessions} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCLISession(t, flagSessions, "flag-session", projectRoot)
+	writeCLISession(t, envSessions, "env-session", projectRoot)
+	writeCLIConfig(t, dataRoot, projectRoot)
+	setCurrentEnv(t, platform.Env{GOOS: "darwin", Home: filepath.Join(root, "home"), SessionReviewerSessionsRoot: envSessions})
+
+	output := filepath.Join(root, "packet.json")
+	got := runPrepareAndReadSessionID(t, []string{
+		"--session", "flag-session",
+		"--sessions-root", flagSessions,
+		"--cwd", projectRoot,
+		"--data-dir", dataRoot,
+		"--output", output,
+	}, output)
+	if got != "flag-session" {
+		t.Fatalf("session_id=%q", got)
+	}
+}
+
+func TestRunPrepareCurrentSessionIDPrecedence(t *testing.T) {
+	tests := []struct {
+		name      string
+		ids       []string
+		args      []string
+		threadID  string
+		sessionID string
+		want      string
+	}{
+		{
+			name:     "session flag overrides every current-session input",
+			ids:      []string{"explicit", "current", "thread", "environment"},
+			args:     []string{"--session", "explicit", "--current-session-id", "current"},
+			threadID: "thread", sessionID: "environment", want: "explicit",
+		},
+		{
+			name:     "current-session flag overrides environment",
+			ids:      []string{"current", "thread", "environment"},
+			args:     []string{"--current-session-id", "current"},
+			threadID: "thread", sessionID: "environment", want: "current",
+		},
+		{
+			name:     "thread environment overrides session environment",
+			ids:      []string{"thread", "environment"},
+			threadID: "thread", sessionID: "environment", want: "thread",
+		},
+		{
+			name:      "session environment is used after thread environment",
+			ids:       []string{"environment"},
+			sessionID: "environment", want: "environment",
+		},
+		{
+			name: "cwd and time fallback remains available",
+			ids:  []string{"fallback"},
+			want: "fallback",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			projectRoot := filepath.Join(root, "project")
+			dataRoot := filepath.Join(root, "data")
+			sessionsRoot := filepath.Join(root, "sessions")
+			for _, dir := range []string{projectRoot, dataRoot, sessionsRoot} {
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, id := range test.ids {
+				writeCLISession(t, sessionsRoot, id, projectRoot)
+			}
+			writeCLIConfig(t, dataRoot, projectRoot)
+			setCurrentEnv(t, platform.Env{
+				GOOS:                        "darwin",
+				Home:                        filepath.Join(root, "home"),
+				SessionReviewerSessionsRoot: sessionsRoot,
+				CodexThreadID:               test.threadID,
+				CodexSessionID:              test.sessionID,
+			})
+
+			output := filepath.Join(root, "packet.json")
+			args := append([]string{}, test.args...)
+			args = append(args,
+				"--cwd", projectRoot,
+				"--data-dir", dataRoot,
+				"--output", output,
+			)
+			if got := runPrepareAndReadSessionID(t, args, output); got != test.want {
+				t.Fatalf("session_id=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
+func setCurrentEnv(t *testing.T, env platform.Env) {
+	t.Helper()
+	original := currentEnv
+	currentEnv = func() platform.Env { return env }
+	t.Cleanup(func() { currentEnv = original })
+}
+
+func writeCLISession(t *testing.T, sessionsRoot, id, projectRoot string) {
+	t.Helper()
+	body := `{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"` + filepath.ToSlash(projectRoot) + `"}}` + "\n" +
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"message-` + id + `","role":"user","content":[{"type":"input_text","text":"safe"}]}}` + "\n"
+	if err := os.WriteFile(filepath.Join(sessionsRoot, id+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeCLIConfig(t *testing.T, dataRoot, projectRoot string) {
+	t.Helper()
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "p1", Root: projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runPrepareAndReadSessionID(t *testing.T, args []string, output string) string {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	args = append([]string{"prepare", "review"}, args...)
+	if code := Run(args, &out, &errOut); code != 0 || out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	contents, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var packet evidence.Packet
+	if err := json.Unmarshal(contents, &packet); err != nil {
+		t.Fatal(err)
+	}
+	return packet.SessionID
 }
 
 func TestRunPrepareFailureDoesNotPrintSessionContent(t *testing.T) {

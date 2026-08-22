@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"runtime"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 )
+
+var currentEnv = platform.CurrentEnv
 
 func runPrepare(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -29,6 +30,7 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 	sessionsRoot := flags.String("sessions-root", "", "Codex sessions root")
 	cwd := flags.String("cwd", "", "project working directory")
 	sessionID := flags.String("session", "", "explicit session ID")
+	currentSessionID := flags.String("current-session-id", "", "current Codex thread/session ID; --session overrides it")
 	dataRoot := flags.String("data-dir", "", "machine data directory")
 	output := flags.String("output", "", "evidence output path")
 	fromStart := flags.Bool("from-start", false, "ignore accepted cursor")
@@ -47,6 +49,7 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "prepare requires --output")
 		return 2
 	}
+	env := currentEnv()
 	if *cwd == "" {
 		resolved, err := os.Getwd()
 		if err != nil {
@@ -55,23 +58,29 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		}
 		*cwd = resolved
 	}
-	if *sessionsRoot == "" {
-		home, err := os.UserHomeDir()
+	root, err := platform.ResolveSessionsRoot(*sessionsRoot, env)
+	if err != nil {
+		fmt.Fprintln(stderr, "prepare failed")
+		return 1
+	}
+	*sessionsRoot = root.Path
+	if *sessionID == "" {
+		resolvedID, _, err := platform.ResolveCurrentSessionID(*currentSessionID, env)
 		if err != nil {
 			fmt.Fprintln(stderr, "prepare failed")
 			return 1
 		}
-		*sessionsRoot = filepath.Join(home, ".codex", "sessions")
+		*sessionID = resolvedID
 	}
 	if *dataRoot == "" {
-		resolved, err := platform.DataDir(platform.CurrentEnv())
+		resolved, err := platform.DataDir(env)
 		if err != nil {
 			fmt.Fprintln(stderr, "prepare failed")
 			return 1
 		}
 		*dataRoot = resolved
 	}
-	_, err := prepare.Run(prepare.Options{
+	_, err = prepare.Run(prepare.Options{
 		Mode: mode, SessionsRoot: *sessionsRoot, SessionID: *sessionID,
 		CWD: *cwd, DataDir: *dataRoot, Output: *output, GOOS: runtime.GOOS,
 		FromStart: *fromStart, Now: time.Now(), AmbiguityWindow: 5 * time.Minute,

@@ -10,18 +10,66 @@ import (
 )
 
 type Env struct {
-	GOOS         string
-	Home         string
-	LocalAppData string
+	GOOS                        string
+	Home                        string
+	LocalAppData                string
+	SessionReviewerSessionsRoot string
+	CodexHome                   string
+	CodexThreadID               string
+	CodexSessionID              string
+}
+
+type SessionRoot struct {
+	Path   string
+	Source string
 }
 
 func CurrentEnv() Env {
 	home, _ := os.UserHomeDir()
 	return Env{
-		GOOS:         runtime.GOOS,
-		Home:         home,
-		LocalAppData: os.Getenv("LOCALAPPDATA"),
+		GOOS:                        runtime.GOOS,
+		Home:                        home,
+		LocalAppData:                os.Getenv("LOCALAPPDATA"),
+		SessionReviewerSessionsRoot: os.Getenv("SESSION_REVIEWER_SESSIONS_ROOT"),
+		CodexHome:                   os.Getenv("CODEX_HOME"),
+		CodexThreadID:               os.Getenv("CODEX_THREAD_ID"),
+		CodexSessionID:              os.Getenv("CODEX_SESSION_ID"),
 	}
+}
+
+func ResolveSessionsRoot(flagValue string, env Env) (SessionRoot, error) {
+	candidates := []SessionRoot{
+		{Path: flagValue, Source: "flag"},
+		{Path: env.SessionReviewerSessionsRoot, Source: "SESSION_REVIEWER_SESSIONS_ROOT"},
+	}
+	if env.CodexHome != "" {
+		candidates = append(candidates, SessionRoot{Path: filepath.Join(env.CodexHome, "sessions"), Source: "CODEX_HOME"})
+	}
+	if env.Home != "" {
+		candidates = append(candidates, SessionRoot{Path: filepath.Join(env.Home, ".codex", "sessions"), Source: "conventional"})
+	}
+	for _, candidate := range candidates {
+		if strings.TrimSpace(candidate.Path) != "" {
+			return candidate, nil
+		}
+	}
+	return SessionRoot{}, fmt.Errorf("cannot resolve Codex sessions root; use --sessions-root or set SESSION_REVIEWER_SESSIONS_ROOT")
+}
+
+func ResolveCurrentSessionID(flagValue string, env Env) (string, string, error) {
+	for _, candidate := range []struct {
+		value  string
+		source string
+	}{
+		{value: flagValue, source: "flag"},
+		{value: env.CodexThreadID, source: "CODEX_THREAD_ID"},
+		{value: env.CodexSessionID, source: "CODEX_SESSION_ID"},
+	} {
+		if strings.TrimSpace(candidate.value) != "" {
+			return candidate.value, candidate.source, nil
+		}
+	}
+	return "", "cwd-and-time", nil
 }
 
 func DataDir(env Env) (string, error) {
