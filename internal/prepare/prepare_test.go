@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -164,11 +165,14 @@ func (f runFixture) cursorBytes(t *testing.T) ([]byte, string) {
 
 func (f runFixture) requireFailurePreservesOutputAndCursor(t *testing.T, opts Options, before []byte, cursorPath string, errorParts ...string) {
 	t.Helper()
-	_, err := Run(opts)
+	packet, err := Run(opts)
 	for _, part := range errorParts {
 		if err == nil || !strings.Contains(err.Error(), part) {
 			t.Fatalf("error %q does not contain %q", err, part)
 		}
+	}
+	if !reflect.DeepEqual(packet, evidence.Packet{}) {
+		t.Fatalf("failure returned packet: %+v", packet)
 	}
 	if _, statErr := os.Stat(f.output); !os.IsNotExist(statErr) {
 		t.Fatalf("output created: %v", statErr)
@@ -198,6 +202,18 @@ func TestRunExplicitSessionRejectsSelectedCorruptCandidateWithoutOutputOrCursorA
 	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
 		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"goal"}]}}`,
 		"{broken-selected-candidate"), f.now)
+	opts := f.options("checkpoint")
+	opts.SessionID = "s1"
+	f.requireFailurePreservesOutputAndCursor(t, opts, before, cursorPath, "selected session candidate is corrupt")
+}
+
+func TestRunExplicitSessionScansPastConflictingMetadataWithoutPacketOutputOrCursorAdvance(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 1)
+	before, cursorPath := f.cursorBytes(t)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"session_meta","payload":{"id":"other","cwd":"`+filepath.ToSlash(f.projectRoot)+`"}}`,
+		"{malformed-after-conflicting-metadata"), f.now)
 	opts := f.options("checkpoint")
 	opts.SessionID = "s1"
 	f.requireFailurePreservesOutputAndCursor(t, opts, before, cursorPath, "selected session candidate is corrupt")

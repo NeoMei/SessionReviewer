@@ -125,9 +125,6 @@ func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candi
 			}
 			return nil
 		}
-		if candidate.ID == "" && strings.TrimSpace(meta.ID) != "" {
-			candidate.ID = meta.ID
-		}
 		if strings.TrimSpace(meta.ID) == "" {
 			if metadataErr == nil {
 				metadataErr = fmt.Errorf("decode session metadata in %q at line %d: session id is missing or blank", path, record.Line)
@@ -146,31 +143,41 @@ func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candi
 			if record.Timestamp != "" {
 				startedAt, err := time.Parse(time.RFC3339Nano, record.Timestamp)
 				if err != nil {
-					metadataErr = fmt.Errorf("decode session timestamp in %q at line %d: %w", path, record.Line, err)
+					if metadataErr == nil {
+						metadataErr = fmt.Errorf("decode session timestamp in %q at line %d: %w", path, record.Line, err)
+					}
 				} else {
 					candidate.StartedAt = startedAt
 				}
 			}
+			if selectedSessionID != "" && candidate.ID != selectedSessionID {
+				return ErrStop
+			}
+			return nil
 		}
-		if selectedSessionID != "" && meta.ID != selectedSessionID {
-			return ErrStop
+		if meta.ID != candidate.ID && metadataErr == nil {
+			metadataErr = fmt.Errorf("decode session metadata in %q at line %d: conflicting session id", path, record.Line)
 		}
 		return nil
 	})
 	issue := func(issueErr error) (Candidate, bool, *DiscoveryIssue) {
 		return Candidate{}, false, &DiscoveryIssue{Path: path, SessionID: candidate.ID, Err: issueErr}
 	}
-	if metadataErr != nil {
-		return issue(metadataErr)
-	}
+	issueErr := metadataErr
 	if summary.MalformedLines > 0 {
+		var malformedErr error
 		if metadataLine > 0 {
-			return issue(fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s) in candidate with metadata at line %d", path, summary.MalformedLines, metadataLine))
+			malformedErr = fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s) in candidate with metadata at line %d", path, summary.MalformedLines, metadataLine)
+		} else {
+			malformedErr = fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s)", path, summary.MalformedLines)
 		}
-		return issue(fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s)", path, summary.MalformedLines))
+		issueErr = errors.Join(issueErr, malformedErr)
 	}
 	if err != nil && !errors.Is(err, ErrStop) {
-		return issue(fmt.Errorf("stream session %q: %w", path, err))
+		issueErr = errors.Join(issueErr, fmt.Errorf("stream session %q: %w", path, err))
+	}
+	if issueErr != nil {
+		return issue(issueErr)
 	}
 	return candidate, candidate.ID != "", nil
 }

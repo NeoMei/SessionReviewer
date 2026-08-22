@@ -255,6 +255,44 @@ func TestDiscoverExplicitIDRejectsSelectedCorruptCandidate(t *testing.T) {
 	}
 }
 
+func TestDiscoverExplicitIDScansSelectedCandidatePastConflictingMetadata(t *testing.T) {
+	root := t.TempDir()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project"}}` + "\n" +
+		`{"timestamp":"2026-08-22T00:01:00Z","type":"session_meta","payload":{"id":"other","cwd":"/project"}}` + "\n" +
+		"{malformed-after-conflicting-metadata\n"
+	path := filepath.Join(root, "selected.jsonl")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Issues) != 1 || discovery.Issues[0].SessionID != "wanted" {
+		t.Fatalf("discovery=%+v", discovery)
+	}
+	requireErrorContains(t, discovery.Issues[0].Err, path, "conflicting session id", "malformed")
+	_, err = ResolveDiscovery(discovery, ResolveOptions{SessionID: "wanted"})
+	requireErrorContains(t, err, "selected session candidate is corrupt")
+}
+
+func TestDiscoverExplicitIDRejectsConflictingRepeatedMetadata(t *testing.T) {
+	root := t.TempDir()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project"}}` + "\n" +
+		`{"timestamp":"2026-08-22T00:01:00Z","type":"session_meta","payload":{"id":"other","cwd":"/project"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "selected.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Issues) != 1 || discovery.Issues[0].SessionID != "wanted" {
+		t.Fatalf("discovery=%+v", discovery)
+	}
+	requireErrorContains(t, discovery.Issues[0].Err, "conflicting session id")
+}
+
 func TestDiscoverExplicitIDRejectsCorruptDuplicateCandidate(t *testing.T) {
 	root := t.TempDir()
 	writeCandidate(t, root, "one.jsonl", "wanted", "/project")
