@@ -19,17 +19,11 @@ func replaceFile(temporary, destination string) error {
 		return fmt.Errorf("open replacement root: %w", err)
 	}
 	defer root.Close()
-	// Use the same handle-relative operation as WriteRoot so path replacement
-	// cannot redirect the rename after the directory has been opened.
-	return replaceWindowsFile(filepath.Base(temporary), filepath.Base(destination), windowsFileOps{
-		rename: root.Rename,
-	})
+	// Use the same handle-relative operations as WriteRoot so namespace
+	// replacement cannot redirect installation after the directory is opened.
+	return replaceWindowsFile(filepath.Base(temporary), filepath.Base(destination), windowsRootFileOps(root))
 }
 
 func replaceRootFile(root *os.Root, temporary, destination string) error {
-	// On Windows, os.Root.Rename uses directory handles and
-	// FileRenameInformationEx with replacement semantics.
-	return replaceWindowsFile(temporary, destination, windowsFileOps{
-		rename: root.Rename,
-	})
+	return replaceWindowsFile(temporary, destination, windowsRootFileOps(root))
 }

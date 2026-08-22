@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -68,6 +69,148 @@ func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {
 	}
 }
 
+func TestWriteRootPinsImmediateParentAcrossOrdinaryDirectorySubstitution(t *testing.T) {
+	base := t.TempDir()
+	rootPath := filepath.Join(base, "root")
+	parentPath := filepath.Join(rootPath, "nested")
+	movedParentPath := filepath.Join(rootPath, "moved")
+	if err := os.MkdirAll(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parentPath, "state.json"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	err = writeRootWithParentOpener(root, filepath.Join("nested", "state.json"), []byte("new"), 0o600,
+		func(path string) (*os.Root, error) {
+			if path != "nested" {
+				t.Fatalf("open parent path=%q want=nested", path)
+			}
+			parent, err := root.OpenRoot(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.Rename(parentPath, movedParentPath); err != nil {
+				parent.Close()
+				t.Skipf("renaming an open parent is unavailable: %v", err)
+			}
+			if err := os.Mkdir(parentPath, 0o700); err != nil {
+				parent.Close()
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(parentPath, "state.json"), []byte("attacker"), 0o600); err != nil {
+				parent.Close()
+				return nil, err
+			}
+			return parent, nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(movedParentPath, "state.json"): "new",
+		filepath.Join(parentPath, "state.json"):      "attacker",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s content=%q err=%v want=%q", path, got, err, want)
+		}
+	}
+	for _, dir := range []string{movedParentPath, parentPath} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != "state.json" {
+			t.Fatalf("unexpected files in %s: %v", dir, entries)
+		}
+	}
+}
+
+func TestWriteRootSupportsLongNestedRelativePath(t *testing.T) {
+	base := t.TempDir()
+	root, err := os.OpenRoot(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	segments := make([]string, 0, 16)
+	for len(filepath.Join(append(segments, "状态-世界.json")...)) < 320 {
+		segments = append(segments, "nested-"+strings.Repeat("x", 24))
+	}
+	parent := filepath.Join(segments...)
+	if err := os.MkdirAll(filepath.Join(base, parent), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	relative := filepath.Join(parent, "状态-世界.json")
+	if err := WriteRoot(root, relative, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(base, relative))
+	if err != nil || string(got) != "new" {
+		t.Fatalf("destination=%q err=%v", got, err)
+	}
+}
+
+func TestWriteRootFailureCleansTemporaryFromPinnedImmediateParent(t *testing.T) {
+	base := t.TempDir()
+	rootPath := filepath.Join(base, "root")
+	parentPath := filepath.Join(rootPath, "nested")
+	movedParentPath := filepath.Join(rootPath, "moved")
+	if err := os.MkdirAll(filepath.Join(parentPath, "target"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	err = writeRootWithParentOpener(root, filepath.Join("nested", "target"), []byte("new"), 0o600,
+		func(path string) (*os.Root, error) {
+			parent, err := root.OpenRoot(path)
+			if err != nil {
+				return nil, err
+			}
+			if err := os.Rename(parentPath, movedParentPath); err != nil {
+				parent.Close()
+				t.Skipf("renaming an open parent is unavailable: %v", err)
+			}
+			if err := os.Mkdir(parentPath, 0o700); err != nil {
+				parent.Close()
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(parentPath, "attacker"), []byte("unchanged"), 0o600); err != nil {
+				parent.Close()
+				return nil, err
+			}
+			return parent, nil
+		})
+	if err == nil {
+		t.Fatal("expected replacing a directory with a file to fail")
+	}
+	entries, err := os.ReadDir(movedParentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "target" || !entries[0].IsDir() {
+		t.Fatalf("unexpected files in retained parent after failure: %v", entries)
+	}
+	entries, err = os.ReadDir(parentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "attacker" {
+		t.Fatalf("replacement parent changed during cleanup: %v", entries)
+	}
+}
+
 func TestBackupPathMatchesReplacementProtocol(t *testing.T) {
 	if got, want := BackupPath("state.json"), "state.json.session-reviewer-backup"; got != want {
 		t.Fatalf("BackupPath()=%q want=%q", got, want)
@@ -77,6 +220,12 @@ func TestBackupPathMatchesReplacementProtocol(t *testing.T) {
 func TestReplaceWindowsFileUsesSingleRelativeRename(t *testing.T) {
 	called := 0
 	ops := windowsFileOps{
+		destinationExists: func(gotDestination string) (bool, error) {
+			if gotDestination != "nested/state.json" {
+				t.Fatalf("destinationExists(%q)", gotDestination)
+			}
+			return true, nil
+		},
 		rename: func(gotTemporary, gotDestination string) error {
 			called++
 			if gotTemporary != "nested/state.tmp" || gotDestination != "nested/state.json" {
@@ -106,6 +255,7 @@ func TestReplaceWindowsFileRenameFailurePreservesDestination(t *testing.T) {
 	}
 	replaceErr := errors.New("sharing violation")
 	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return true, nil },
 		rename: func(string, string) error {
 			return replaceErr
 		},
@@ -140,6 +290,7 @@ func TestReplaceWindowsFileAnchoredRenameIgnoresReplacedNamespace(t *testing.T) 
 	defer root.Close()
 
 	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return true, nil },
 		rename: func(temporary, destination string) error {
 			if err := os.Rename(live, moved); err != nil {
 				t.Skipf("renaming an open root is unavailable: %v", err)
@@ -195,6 +346,7 @@ func TestReplaceWindowsFileAnchoredRenameRejectsReparseSubstitution(t *testing.T
 	defer root.Close()
 
 	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return true, nil },
 		rename: func(temporary, destination string) error {
 			if err := os.Rename(sub, moved); err != nil {
 				return err
@@ -219,5 +371,123 @@ func TestReplaceWindowsFileAnchoredRenameRejectsReparseSubstitution(t *testing.T
 		if readErr != nil || string(got) != want {
 			t.Fatalf("%s content=%q err=%v want=%q", path, got, readErr, want)
 		}
+	}
+}
+
+func TestReplaceWindowsFileAbsentDestinationUsesNoClobberLink(t *testing.T) {
+	linked := false
+	removed := false
+	ops := windowsFileOps{
+		destinationExists: func(gotDestination string) (bool, error) {
+			if gotDestination != "state.json" {
+				t.Fatalf("destinationExists(%q)", gotDestination)
+			}
+			return false, nil
+		},
+		rename: func(string, string) error {
+			t.Fatal("absent destination must not use replacing rename")
+			return nil
+		},
+		link: func(gotTemporary, gotDestination string) error {
+			linked = true
+			if gotTemporary != "state.tmp" || gotDestination != "state.json" {
+				t.Fatalf("link(%q, %q)", gotTemporary, gotDestination)
+			}
+			return nil
+		},
+		remove: func(gotTemporary string) error {
+			removed = true
+			if gotTemporary != "state.tmp" {
+				t.Fatalf("remove(%q)", gotTemporary)
+			}
+			return nil
+		},
+	}
+
+	if err := replaceWindowsFile("state.tmp", "state.json", ops); err != nil {
+		t.Fatal(err)
+	}
+	if !linked || !removed {
+		t.Fatalf("linked=%v removed=%v", linked, removed)
+	}
+}
+
+func TestReplaceWindowsFileAbsentRacingCreatorIsNotClobbered(t *testing.T) {
+	creatorContent := "creator"
+	linkErr := os.ErrExist
+	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return false, nil },
+		rename: func(string, string) error {
+			t.Fatal("racing creator must not be replaced")
+			return nil
+		},
+		link: func(string, string) error {
+			if creatorContent != "creator" {
+				t.Fatalf("creator content changed before link: %q", creatorContent)
+			}
+			return linkErr
+		},
+		remove: func(string) error {
+			t.Fatal("failed link must leave temporary cleanup to the caller")
+			return nil
+		},
+	}
+
+	err := replaceWindowsFile("state.tmp", "state.json", ops)
+	if !errors.Is(err, linkErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if creatorContent != "creator" {
+		t.Fatalf("racing creator was clobbered: %q", creatorContent)
+	}
+}
+
+func TestReplaceWindowsFileAbsentUnsupportedHardLinkFailsSafely(t *testing.T) {
+	unsupported := errors.New("hard links unsupported")
+	renameCalled := false
+	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return false, nil },
+		rename: func(string, string) error {
+			renameCalled = true
+			return nil
+		},
+		link: func(string, string) error { return unsupported },
+		remove: func(string) error {
+			t.Fatal("failed link must not remove the temporary")
+			return nil
+		},
+	}
+
+	err := replaceWindowsFile("state.tmp", "state.json", ops)
+	if !errors.Is(err, unsupported) {
+		t.Fatalf("error=%v", err)
+	}
+	if renameCalled {
+		t.Fatal("unsafe replacing fallback was used")
+	}
+}
+
+func TestReplaceWindowsFileTreatsDanglingLinkAsExistingEntry(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "state.json")
+	temporary := filepath.Join(dir, "state.tmp")
+	if err := os.Symlink("missing-target", destination); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	if err := replaceWindowsFile("state.tmp", "state.json", windowsRootFileOps(root)); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("destination=%q err=%v", got, err)
 	}
 }

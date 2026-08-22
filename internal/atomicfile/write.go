@@ -32,14 +32,30 @@ func WriteRoot(root *os.Root, path string, data []byte, perm fs.FileMode) (retEr
 	if root == nil {
 		return fmt.Errorf("atomic file root is required")
 	}
-	tmp, tmpName, err := createRootTemp(root, filepath.Dir(path))
+	return writeRootWithParentOpener(root, path, data, perm, root.OpenRoot)
+}
+
+func writeRootWithParentOpener(root *os.Root, path string, data []byte, perm fs.FileMode, openParent func(string) (*os.Root, error)) error {
+	if root == nil {
+		return fmt.Errorf("atomic file root is required")
+	}
+	parent, err := openParent(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("open destination parent: %w", err)
+	}
+	defer parent.Close()
+	return writeRootAtParent(parent, filepath.Base(path), data, perm)
+}
+
+func writeRootAtParent(parent *os.Root, name string, data []byte, perm fs.FileMode) (retErr error) {
+	tmp, tmpName, err := createRootTemp(parent)
 	if err != nil {
 		return err
 	}
 	defer func() {
 		_ = tmp.Close()
 		if retErr != nil {
-			_ = root.Remove(tmpName)
+			_ = parent.Remove(tmpName)
 		}
 	}()
 	if err = tmp.Chmod(perm); err != nil {
@@ -54,16 +70,16 @@ func WriteRoot(root *os.Root, path string, data []byte, perm fs.FileMode) (retEr
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return replaceRootFile(root, tmpName, path)
+	return replaceRootFile(parent, tmpName, name)
 }
 
-func createRootTemp(root *os.Root, dir string) (*os.File, string, error) {
+func createRootTemp(root *os.Root) (*os.File, string, error) {
 	for range 100 {
 		var random [16]byte
 		if _, err := rand.Read(random[:]); err != nil {
 			return nil, "", fmt.Errorf("generate temporary name: %w", err)
 		}
-		name := filepath.Join(dir, ".session-reviewer-"+hex.EncodeToString(random[:]))
+		name := ".session-reviewer-" + hex.EncodeToString(random[:])
 		file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			return file, name, nil

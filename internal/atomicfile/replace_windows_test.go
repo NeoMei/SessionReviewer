@@ -27,7 +27,7 @@ func TestWindowsNativeHandleRenameReplacesExistingDestination(t *testing.T) {
 	assertWindowsReplacementState(t, destination, "new", temporary)
 }
 
-func TestWindowsNativeHandleRenameInstallsAbsentDestination(t *testing.T) {
+func TestWindowsNativeHandleLinkInstallsAbsentDestination(t *testing.T) {
 	dir := t.TempDir()
 	destination := filepath.Join(dir, "state.json")
 	temporary := filepath.Join(dir, "state.tmp")
@@ -39,6 +39,52 @@ func TestWindowsNativeHandleRenameInstallsAbsentDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertWindowsReplacementState(t, destination, "new", temporary)
+}
+
+func TestWindowsNativeAbsentRacingCreatorIsNotClobbered(t *testing.T) {
+	dir := t.TempDir()
+	temporary := filepath.Join(dir, "state.tmp")
+	destination := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) {
+			creator, err := root.OpenFile("state.json", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+			if err != nil {
+				return false, err
+			}
+			if _, err := creator.Write([]byte("creator")); err != nil {
+				creator.Close()
+				return false, err
+			}
+			if err := creator.Close(); err != nil {
+				return false, err
+			}
+			return false, nil
+		},
+		rename: root.Rename,
+		link:   root.Link,
+		remove: root.Remove,
+	}
+
+	err = replaceWindowsFile("state.tmp", "state.json", ops)
+	if !errors.Is(err, os.ErrExist) {
+		t.Fatalf("error=%v want already exists", err)
+	}
+	got, err := os.ReadFile(destination)
+	if err != nil || string(got) != "creator" {
+		t.Fatalf("destination=%q err=%v", got, err)
+	}
+	got, err = os.ReadFile(temporary)
+	if err != nil || string(got) != "new" {
+		t.Fatalf("temporary=%q err=%v", got, err)
+	}
 }
 
 func TestWindowsNativeHandleRenameFailurePreservesDestination(t *testing.T) {
@@ -193,6 +239,7 @@ func TestWindowsRootHandleRenameIgnoresReplacedNamespace(t *testing.T) {
 	defer root.Close()
 
 	ops := windowsFileOps{
+		destinationExists: func(string) (bool, error) { return true, nil },
 		rename: func(temporary, destination string) error {
 			if err := os.Rename(live, moved); err != nil {
 				t.Skipf("Windows cannot rename this open root: %v", err)
