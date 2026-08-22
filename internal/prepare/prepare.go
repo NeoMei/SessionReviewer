@@ -148,6 +148,9 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err != nil {
 		return evidence.Packet{}, err
 	}
+	if err := x.SetExpectedCursor(evidence.CursorBoundary{Line: stored.LastLine, SourceHash: stored.LastHash}); err != nil {
+		return evidence.Packet{}, fmt.Errorf("bind evidence packet to accepted cursor: %w", err)
+	}
 	cursorValidated := stored.LastLine == 0
 	visit := x.Add
 	streamFrom := from

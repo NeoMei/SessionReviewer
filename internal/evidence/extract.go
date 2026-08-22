@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -18,6 +19,8 @@ var (
 	ErrPacketFull    = errors.New("evidence packet is full")
 	ErrInvalidLimits = errors.New("invalid evidence limits")
 )
+
+var lowercaseSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 const truncationMarker = "…[TRUNCATED]"
 
@@ -77,7 +80,7 @@ func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redac
 	x.mergeFindings(sessionFindings)
 	x.mergeFindings(cwdFindings)
 	x.packet = Packet{
-		SchemaVersion: 1,
+		SchemaVersion: 2,
 		ProjectID:     safeProjectID,
 		SessionID:     safeSessionID,
 		CWD:           safeCWD,
@@ -90,6 +93,33 @@ func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redac
 		return nil, fmt.Errorf("%w: max packet runes smaller than schema envelope", ErrInvalidLimits)
 	}
 	return x, nil
+}
+
+// SetExpectedCursor binds the packet to the accepted cursor snapshot that
+// immediately precedes FromCursor.
+func (x *Extractor) SetExpectedCursor(boundary CursorBoundary) error {
+	if x == nil {
+		return ErrInvalidLimits
+	}
+	if boundary.Line < 0 || boundary.Line != x.packet.FromCursor-1 {
+		return fmt.Errorf("invalid expected cursor line")
+	}
+	if boundary.Line == 0 {
+		if boundary.SourceHash != "" {
+			return fmt.Errorf("invalid expected cursor hash at line zero")
+		}
+	} else if !lowercaseSHA256.MatchString(boundary.SourceHash) {
+		return fmt.Errorf("invalid expected cursor source hash")
+	}
+	candidate := x.Packet()
+	candidate.ExpectedCursor = boundary
+	candidate.NextCursor = boundary
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return fmt.Errorf("%w: expected cursor exceeds packet limit", ErrInvalidLimits)
+	}
+	x.packet.ExpectedCursor = boundary
+	x.packet.NextCursor = boundary
+	return nil
 }
 
 func (x *Extractor) Add(record session.Record) error {
@@ -109,7 +139,7 @@ func (x *Extractor) Add(record session.Record) error {
 			return errors.New("malformed turn_context payload")
 		}
 		if payload.CWD == "" || payload.CWD == x.currentCWD {
-			return x.advance(record.Line)
+			return x.advance(record)
 		}
 		if err := x.append(record, "cwd_change", "", "", payload.CWD, ""); err != nil {
 			return err
@@ -119,7 +149,7 @@ func (x *Extractor) Add(record session.Record) error {
 	case "response_item":
 		return x.addResponseItem(record)
 	default:
-		return x.advance(record.Line)
+		return x.advance(record)
 	}
 }
 
@@ -141,7 +171,7 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 			return errors.New("malformed message payload")
 		}
 		if messageHeader.Role != "user" && messageHeader.Role != "assistant" {
-			return x.advance(record.Line)
+			return x.advance(record)
 		}
 		var payload struct {
 			ID      string `json:"id"`
@@ -161,7 +191,7 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 			}
 		}
 		if len(parts) == 0 {
-			return x.advance(record.Line)
+			return x.advance(record)
 		}
 		err = x.append(record, "message", payload.ID, payload.Role, strings.Join(parts, "\n"), "")
 	case "custom_tool_call":
@@ -184,7 +214,7 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 		}
 		err = x.append(record, "tool_result", payload.ID, "", payload.Output, "")
 	default:
-		return x.advance(record.Line)
+		return x.advance(record)
 	}
 	if err != nil {
 		return err
@@ -225,13 +255,14 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 	candidate := x.Packet()
 	candidate.Events = append(candidate.Events, item)
 	candidate.Warnings = warningsWith(x.warningCounts, findings)
-	advancePacket(&candidate, record.Line)
+	advancePacket(&candidate, record)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
 	}
 
 	x.packet.Events = append(x.packet.Events, item)
 	x.packet.ToCursor = candidate.ToCursor
+	x.packet.NextCursor = candidate.NextCursor
 	x.usedIDs[item.ID] = struct{}{}
 	x.mergeFindings(findings)
 	x.refreshWarnings()
@@ -336,19 +367,21 @@ func (x *Extractor) markFull() error {
 	return ErrPacketFull
 }
 
-func (x *Extractor) advance(line int) error {
+func (x *Extractor) advance(record session.Record) error {
 	candidate := x.Packet()
-	advancePacket(&candidate, line)
+	advancePacket(&candidate, record)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
 	}
 	x.packet.ToCursor = candidate.ToCursor
+	x.packet.NextCursor = candidate.NextCursor
 	return nil
 }
 
-func advancePacket(packet *Packet, line int) {
-	if line > packet.ToCursor {
-		packet.ToCursor = line
+func advancePacket(packet *Packet, record session.Record) {
+	if record.Line > packet.ToCursor {
+		packet.ToCursor = record.Line
+		packet.NextCursor = CursorBoundary{Line: record.Line, SourceHash: record.SourceHash}
 	}
 }
 

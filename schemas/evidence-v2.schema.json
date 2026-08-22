@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/evidence-v2.schema.json",
+  "title": "SessionReviewer evidence packet v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "session_id",
+    "cwd",
+    "from_cursor",
+    "to_cursor",
+    "expected_cursor",
+    "next_cursor",
+    "has_more",
+    "events"
+  ],
+  "properties": {
+    "schema_version": { "const": 2 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "cwd": { "type": "string", "minLength": 1 },
+    "from_cursor": { "type": "integer", "minimum": 1 },
+    "to_cursor": { "type": "integer", "minimum": 0 },
+    "expected_cursor": { "$ref": "#/$defs/cursor_boundary" },
+    "next_cursor": { "$ref": "#/$defs/cursor_boundary" },
+    "has_more": { "type": "boolean" },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "cursor_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 0 },
+        "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "oneOf": [
+        {
+          "properties": { "line": { "const": 0 } },
+          "not": { "required": ["source_hash"] }
+        },
+        {
+          "properties": { "line": { "minimum": 1 } },
+          "required": ["source_hash"]
+        }
+      ]
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "timestamp", "jsonl_line", "source_hash", "kind", "summary"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "item_id": { "type": "string" },
+        "timestamp": { "type": "string" },
+        "jsonl_line": { "type": "integer", "minimum": 1 },
+        "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "kind": { "enum": ["message", "tool_call", "tool_result", "cwd_change"] },
+        "role": { "enum": ["user", "assistant"] },
+        "tool_name": { "type": "string" },
+        "summary": { "type": "string" }
+      }
+    }
+  }
+}

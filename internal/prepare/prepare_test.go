@@ -51,6 +51,9 @@ func TestRunPreparesCurrentCheckpointWithoutAdvancingCursor(t *testing.T) {
 	if packet.ProjectID != "p1" || packet.SessionID != "s1" || len(packet.Events) != 1 {
 		t.Fatalf("packet=%+v", packet)
 	}
+	if packet.SchemaVersion != 2 || packet.ExpectedCursor != (evidence.CursorBoundary{}) || packet.NextCursor != (evidence.CursorBoundary{Line: 2, SourceHash: packet.Events[0].SourceHash}) {
+		t.Fatalf("packet boundaries=%+v -> %+v", packet.ExpectedCursor, packet.NextCursor)
+	}
 	if _, err := os.Stat(filepath.Join(data, "projects", "p1", "cursors", "s1.json")); !os.IsNotExist(err) {
 		t.Fatalf("cursor advanced during prepare: %v", err)
 	}
@@ -442,6 +445,9 @@ func TestRunCheckpointStartsAfterExistingCursorWithoutChangingIt(t *testing.T) {
 	if packet.FromCursor != 3 || packet.ToCursor != 3 || len(packet.Events) != 1 || packet.Events[0].Summary != "new" {
 		t.Fatalf("packet=%+v", packet)
 	}
+	if packet.ExpectedCursor != (evidence.CursorBoundary{Line: wantCursor.LastLine, SourceHash: wantCursor.LastHash}) || packet.NextCursor != (evidence.CursorBoundary{Line: 3, SourceHash: packet.Events[0].SourceHash}) {
+		t.Fatalf("packet boundaries=%+v -> %+v", packet.ExpectedCursor, packet.NextCursor)
+	}
 	after, err := os.ReadFile(cursorPath)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("cursor changed: before=%q after=%q err=%v", before, after, err)
@@ -496,7 +502,8 @@ func TestRunEmptyPacketStartsAtCursorPlusOne(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if packet.FromCursor != 3 || packet.ToCursor != 2 || packet.HasMore || packet.Events == nil || len(packet.Events) != 0 {
+	want := evidence.CursorBoundary{Line: 2, SourceHash: f.sourceHash(t, 2)}
+	if packet.FromCursor != 3 || packet.ToCursor != 2 || packet.ExpectedCursor != want || packet.NextCursor != want || packet.HasMore || packet.Events == nil || len(packet.Events) != 0 {
 		t.Fatalf("packet=%+v", packet)
 	}
 }
@@ -522,6 +529,9 @@ func TestRunPacketFullIsSuccessfulSegmentedOutput(t *testing.T) {
 	}
 	if !packet.HasMore || packet.ToCursor != 2 || len(packet.Events) != 1 || packet.Events[0].Summary != "first" {
 		t.Fatalf("packet=%+v", packet)
+	}
+	if packet.NextCursor != (evidence.CursorBoundary{Line: 2, SourceHash: packet.Events[0].SourceHash}) {
+		t.Fatalf("full packet advanced past consumed boundary: %+v", packet.NextCursor)
 	}
 }
 

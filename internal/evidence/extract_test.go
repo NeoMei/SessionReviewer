@@ -1,8 +1,10 @@
 package evidence
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -107,7 +109,7 @@ func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
 	}
 
 	got := x.Packet()
-	if got.SchemaVersion != 1 || got.FromCursor != 1 || got.ToCursor != 5 || got.HasMore {
+	if got.SchemaVersion != 2 || got.FromCursor != 1 || got.ToCursor != 5 || got.HasMore {
 		t.Fatalf("packet header=%+v", got)
 	}
 	if len(got.Events) != 5 {
@@ -136,7 +138,7 @@ func TestExtractorExcludesUnsafeAndUnknownContent(t *testing.T) {
 		record(t, 4, `{"type":"encrypted_content","id":"e1","content":"encrypted-canary"}`),
 		record(t, 5, `{"type":"compaction","id":"c1","summary":"compaction-canary"}`),
 		record(t, 6, `{"type":"future_unknown","payload":"unknown-canary"}`),
-		{Line: 7, Type: "session_meta", Payload: json.RawMessage(`{"environment":"environment-canary"}`)},
+		{Line: 7, Type: "session_meta", Payload: json.RawMessage(`{"environment":"environment-canary"}`), SourceHash: testHash},
 	}
 	for _, input := range inputs {
 		if err := x.Add(input); err != nil {
@@ -207,7 +209,7 @@ func TestExtractorRedactsEveryPersistenceVisibleTextField(t *testing.T) {
 		Timestamp:  "timestamp " + canary,
 		Type:       "response_item",
 		Payload:    payload,
-		SourceHash: "source " + canary,
+		SourceHash: testHash,
 	}
 	if err := x.Add(input); err != nil {
 		t.Fatal(err)
@@ -409,12 +411,14 @@ func TestExtractorRejectsInvalidLimitsWithoutPanicking(t *testing.T) {
 
 func TestNewRejectsPacketLimitBelowEnvelopeAndAcceptsExactEquality(t *testing.T) {
 	envelope := Packet{
-		SchemaVersion: 1,
-		SessionID:     "s",
-		CWD:           "/",
-		FromCursor:    1,
-		ToCursor:      0,
-		Events:        []Item{},
+		SchemaVersion:  2,
+		SessionID:      "s",
+		CWD:            "/",
+		FromCursor:     1,
+		ToCursor:       0,
+		ExpectedCursor: CursorBoundary{},
+		NextCursor:     CursorBoundary{},
+		Events:         []Item{},
 	}
 	encoded, err := json.Marshal(envelope)
 	if err != nil {
@@ -482,5 +486,121 @@ func TestExtractorGeneratesUniqueStableEventIDsForDuplicateItemIDs(t *testing.T)
 	}
 	if first.Events[0].ID != second.Events[0].ID || first.Events[1].ID != second.Events[1].ID {
 		t.Fatalf("event IDs are not stable: %+v vs %+v", first.Events, second.Events)
+	}
+}
+
+func TestPacketTracksExcludedRecordBoundary(t *testing.T) {
+	x, err := NewWithProjectID("project-1111111111111111", "s1", "/p", 3, redact.Default(), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := x.SetExpectedCursor(CursorBoundary{Line: 2, SourceHash: strings.Repeat("a", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	r := session.Record{Line: 3, Type: "response_item", SourceHash: strings.Repeat("b", 64), Payload: json.RawMessage(`{"type":"reasoning"}`)}
+	if err := x.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := x.Packet().NextCursor; got.Line != 3 || got.SourceHash != r.SourceHash {
+		t.Fatalf("boundary=%+v", got)
+	}
+}
+
+func TestDigestChangesWithCursorHash(t *testing.T) {
+	p := Packet{SchemaVersion: 2, ProjectID: "p1", SessionID: "s1", Events: []Item{}, NextCursor: CursorBoundary{Line: 1, SourceHash: strings.Repeat("a", 64)}}
+	a, err := Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.NextCursor.SourceHash = strings.Repeat("b", 64)
+	b, err := Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("digest ignored cursor hash")
+	}
+}
+
+func TestSetExpectedCursorEnforcesConditionalHashRules(t *testing.T) {
+	tests := []struct {
+		name     string
+		from     int
+		boundary CursorBoundary
+		wantErr  bool
+	}{
+		{name: "line zero permits empty hash", from: 1, boundary: CursorBoundary{}},
+		{name: "line zero rejects hash", from: 1, boundary: CursorBoundary{SourceHash: strings.Repeat("a", 64)}, wantErr: true},
+		{name: "negative line", from: 1, boundary: CursorBoundary{Line: -1}, wantErr: true},
+		{name: "positive line requires hash", from: 2, boundary: CursorBoundary{Line: 1}, wantErr: true},
+		{name: "positive line rejects uppercase hex", from: 2, boundary: CursorBoundary{Line: 1, SourceHash: strings.Repeat("A", 64)}, wantErr: true},
+		{name: "positive line accepts lowercase hex", from: 2, boundary: CursorBoundary{Line: 1, SourceHash: strings.Repeat("a", 64)}},
+		{name: "boundary must precede from cursor", from: 3, boundary: CursorBoundary{Line: 1, SourceHash: strings.Repeat("a", 64)}, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			x := newExtractor(t, "s1", "/p", test.from, DefaultLimits())
+			err := x.SetExpectedCursor(test.boundary)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("SetExpectedCursor(%+v) err=%v wantErr=%t", test.boundary, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestPacketFullBoundaryStopsAtLastFullyConsumedRecord(t *testing.T) {
+	x := newExtractor(t, "s1", "/p", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 2000})
+	if err := x.SetExpectedCursor(CursorBoundary{}); err != nil {
+		t.Fatal(err)
+	}
+	skipped := record(t, 1, `{"type":"reasoning"}`)
+	skipped.SourceHash = strings.Repeat("a", 64)
+	accepted := messageRecord(t, 2, "u1", "user", "accepted")
+	accepted.SourceHash = strings.Repeat("b", 64)
+	rejected := messageRecord(t, 3, "u2", "user", "rejected")
+	rejected.SourceHash = strings.Repeat("c", 64)
+	if err := x.Add(skipped); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Add(accepted); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Add(rejected); !errors.Is(err, ErrPacketFull) {
+		t.Fatalf("err=%v", err)
+	}
+	packet := x.Packet()
+	if packet.NextCursor != (CursorBoundary{Line: 2, SourceHash: accepted.SourceHash}) || packet.ToCursor != 2 || !packet.HasMore {
+		t.Fatalf("packet=%+v", packet)
+	}
+}
+
+func TestDigestIsCanonicalJSONOfExactPacket(t *testing.T) {
+	p := Packet{
+		SchemaVersion:  2,
+		ProjectID:      "p1",
+		SessionID:      "s1",
+		CWD:            "/p",
+		FromCursor:     1,
+		ToCursor:       0,
+		ExpectedCursor: CursorBoundary{},
+		NextCursor:     CursorBoundary{},
+		Events:         []Item{},
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(b)
+	want := "sha256:" + fmt.Sprintf("%x", sum)
+	first, err := Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Digest(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != want || second != want {
+		t.Fatalf("digest first=%q second=%q want=%q json=%s", first, second, want, b)
 	}
 }
