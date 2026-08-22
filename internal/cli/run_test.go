@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +46,52 @@ func TestRunInitRequiresProjectAndVault(t *testing.T) {
 	code := Run([]string{"init"}, &out, &errOut)
 	if code != 2 || !strings.Contains(errOut.String(), "init requires --project and --vault") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunInitPreviewsWithoutWritingUntilWriteFlag(t *testing.T) {
+	projectRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	dataRoot := filepath.Join(t.TempDir(), "data")
+	args := []string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot}
+	var out, errOut bytes.Buffer
+	if code := Run(args, &out, &errOut); code != 0 || !strings.Contains(out.String(), "action: create") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	if _, err := os.Stat(filepath.Join(projectRoot, "docs")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("preview wrote docs: %v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run(append(args, "--write"), &out, &errOut); code != 0 || !strings.Contains(out.String(), "written: true") {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunInitFailureDoesNotLeakUnpreviewedPaths(t *testing.T) {
+	projectRoot := t.TempDir()
+	vaultRoot := filepath.Join(t.TempDir(), "customer-secret-vault")
+	ownerRoot := filepath.Join(t.TempDir(), "customer-secret-owner")
+	dataRoot := t.TempDir()
+	for _, path := range []string{vaultRoot, ownerRoot, filepath.Join(projectRoot, "docs", "session-review")} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const projectID = "project-1111111111111111"
+	if err := os.WriteFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"), []byte("---\nproject_id: "+projectID+"\n---\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: projectID, Root: ownerRoot, VaultRoot: vaultRoot,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot, "--write"}, &out, &errOut)
+	if code != 1 || !strings.Contains(errOut.String(), "init failed") || strings.Contains(errOut.String(), ownerRoot) || strings.Contains(errOut.String(), vaultRoot) {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
 	}
 }
 

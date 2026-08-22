@@ -16,6 +16,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	projectRoot := flags.String("project", "", "project root")
 	vaultRoot := flags.String("vault", "", "Obsidian vault root")
 	dataRoot := flags.String("data-dir", "", "machine data directory")
+	write := flags.Bool("write", false, "perform the previewed writes")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
@@ -31,16 +32,26 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 		}
 		*dataRoot = resolved
 	}
-	result, err := project.Initialize(project.InitOptions{
+	options := project.InitOptions{
 		ProjectRoot: *projectRoot,
 		VaultRoot:   *vaultRoot,
 		DataDir:     *dataRoot,
 		GOOS:        runtime.GOOS,
-	})
+	}
+	preview, err := project.PreviewInitialization(options)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, "init failed")
 		return 1
 	}
-	fmt.Fprintf(stdout, "project_id: %s\nledger: %s\nconfig: %s\n", result.ProjectID, result.LedgerRoot, result.ConfigPath)
+	fmt.Fprintf(stdout, "action: %s\nproject_id: %s\nledger: %s\nconfig: %s\nwritten: false\n", preview.Action, preview.ProjectID, preview.LedgerRoot, preview.ConfigPath)
+	if !*write {
+		return 0
+	}
+	result, err := project.Initialize(options)
+	if err != nil {
+		fmt.Fprintln(stderr, "init failed")
+		return 1
+	}
+	fmt.Fprintf(stdout, "project_id: %s\nledger: %s\nconfig: %s\nwritten: true\n", result.ProjectID, result.LedgerRoot, result.ConfigPath)
 	return 0
 }

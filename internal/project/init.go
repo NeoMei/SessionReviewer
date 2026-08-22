@@ -38,31 +38,73 @@ type InitResult struct {
 	ConfigPath string
 }
 
+type InitPreview struct {
+	ProjectID   string
+	ProjectRoot string
+	VaultRoot   string
+	LedgerRoot  string
+	ConfigPath  string
+	Action      string
+}
+
+type initializationPaths struct {
+	projectRoot string
+	vaultRoot   string
+	dataRoot    string
+	ledgerRoot  string
+	configPath  string
+}
+
+type initializationRoots struct {
+	project *pathguard.Directory
+	vault   *pathguard.Directory
+}
+
+func PreviewInitialization(opts InitOptions) (InitPreview, error) {
+	paths, err := resolveInitializationPaths(opts)
+	if err != nil {
+		return InitPreview{}, err
+	}
+	roots, err := openInitializationRoots(opts.GOOS, paths)
+	if err != nil {
+		return InitPreview{}, err
+	}
+	defer roots.close()
+
+	preview := InitPreview{
+		ProjectRoot: paths.projectRoot,
+		VaultRoot:   paths.vaultRoot,
+		LedgerRoot:  paths.ledgerRoot,
+		ConfigPath:  paths.configPath,
+		Action:      "create",
+	}
+	cfg, err := config.Load(paths.configPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return InitPreview{}, err
+	}
+	if err == nil {
+		mapped, found, findErr := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
+		if findErr != nil {
+			return InitPreview{}, findErr
+		}
+		if found {
+			preview.ProjectID = mapped.ID
+			preview.Action = "reuse"
+		}
+	}
+	return preview, nil
+}
+
 func Initialize(opts InitOptions) (result InitResult, retErr error) {
-	root, err := filepath.Abs(opts.ProjectRoot)
+	paths, err := resolveInitializationPaths(opts)
 	if err != nil {
 		return InitResult{}, err
 	}
-	vault, err := filepath.Abs(opts.VaultRoot)
+	preflightRoots, err := openInitializationRoots(opts.GOOS, paths)
 	if err != nil {
 		return InitResult{}, err
 	}
-	projectDir, err := pathguard.Open(root)
-	if err != nil {
-		return InitResult{}, fmt.Errorf("project root is a symlink or reparse point, or invalid: %w", err)
-	}
-	defer projectDir.Close()
-	vaultDir, err := pathguard.Open(vault)
-	if err != nil {
-		return InitResult{}, fmt.Errorf("vault root is a symlink or reparse point, or invalid: %w", err)
-	}
-	defer vaultDir.Close()
-	if inside(opts.GOOS, root, vault) || inside(opts.GOOS, vault, root) {
-		return InitResult{}, fmt.Errorf("project and vault must not contain one another")
-	}
-	if projectDir.ContainsIdentity(vaultDir.Info()) || vaultDir.ContainsIdentity(projectDir.Info()) {
-		return InitResult{}, fmt.Errorf("project and vault must not contain one another")
-	}
+	preflightRoots.close()
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -70,16 +112,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		opts.Random = rand.Reader
 	}
 
-	dataPath, err := filepath.Abs(opts.DataDir)
-	if err != nil {
-		return InitResult{}, err
-	}
-	dataDir, err := openOrCreateDirectory(dataPath, 0o700)
+	dataDir, err := openOrCreateDirectory(paths.dataRoot, 0o700)
 	if err != nil {
 		return InitResult{}, fmt.Errorf("data root is a symlink or reparse point, or invalid: %w", err)
 	}
 	defer dataDir.Close()
-	configPath := filepath.Join(dataPath, "config.toml")
 	lock, err := acquireInitLock(dataDir.Root, "config.toml.lock", initTransactionLockTimeout)
 	if err != nil {
 		return InitResult{}, err
@@ -92,22 +129,26 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, err
 		}
 	}
+	roots, err := openInitializationRoots(opts.GOOS, paths)
+	if err != nil {
+		return InitResult{}, err
+	}
+	defer roots.close()
 
 	cfg, err := config.LoadRoot(dataDir.Root, "config.toml")
 	if err != nil {
 		return InitResult{}, err
 	}
-	ledger := filepath.Join(root, "docs", "session-review")
-	overviewID, overviewExists, err := readOverviewID(projectDir.Root, filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md")))
+	overviewID, overviewExists, err := readOverviewID(roots.project.Root, filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md")))
 	if err != nil {
 		return InitResult{}, err
 	}
-	existing, mapped, err := findProject(cfg, opts.GOOS, root, projectDir.Info())
+	existing, mapped, err := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
 	if err != nil {
 		return InitResult{}, err
 	}
 	if mapped {
-		sameVault, err := samePhysicalPath(existing.VaultRoot, vault)
+		sameVault, err := samePhysicalPath(existing.VaultRoot, paths.vaultRoot)
 		if err != nil {
 			return InitResult{}, err
 		}
@@ -126,17 +167,17 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 					return InitResult{}, err
 				}
 			}
-			if err := writeOverview(projectDir.Root, overviewBody(existing.ID, opts.Now(), root)); err != nil {
+			if err := writeOverview(roots.project.Root, overviewBody(existing.ID, opts.Now(), paths.projectRoot)); err != nil {
 				return InitResult{}, err
 			}
 		}
-		return InitResult{ProjectID: existing.ID, LedgerRoot: ledger, ConfigPath: configPath}, nil
+		return InitResult{ProjectID: existing.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
 			return InitResult{}, fmt.Errorf("project ID %q already belongs to another project root %q", overviewID, owner.Root)
 		}
-		cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: overviewID, Root: root, VaultRoot: vault})
+		cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: overviewID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot})
 		if opts.beforeConfigWrite != nil {
 			if err := opts.beforeConfigWrite(); err != nil {
 				return InitResult{}, err
@@ -145,7 +186,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
 			return InitResult{}, err
 		}
-		return InitResult{ProjectID: overviewID, LedgerRoot: ledger, ConfigPath: configPath}, nil
+		return InitResult{ProjectID: overviewID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
 
 	raw := make([]byte, 8)
@@ -158,10 +199,10 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, err
 		}
 	}
-	if err := writeOverview(projectDir.Root, overviewBody(id, opts.Now(), root)); err != nil {
+	if err := writeOverview(roots.project.Root, overviewBody(id, opts.Now(), paths.projectRoot)); err != nil {
 		return InitResult{}, err
 	}
-	cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: id, Root: root, VaultRoot: vault})
+	cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: id, Root: paths.projectRoot, VaultRoot: paths.vaultRoot})
 	if opts.beforeConfigWrite != nil {
 		if err := opts.beforeConfigWrite(); err != nil {
 			return InitResult{}, err
@@ -170,7 +211,53 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
 		return InitResult{}, err
 	}
-	return InitResult{ProjectID: id, LedgerRoot: ledger, ConfigPath: configPath}, nil
+	return InitResult{ProjectID: id, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+}
+
+func resolveInitializationPaths(opts InitOptions) (initializationPaths, error) {
+	root, err := filepath.Abs(opts.ProjectRoot)
+	if err != nil {
+		return initializationPaths{}, err
+	}
+	vault, err := filepath.Abs(opts.VaultRoot)
+	if err != nil {
+		return initializationPaths{}, err
+	}
+	data, err := filepath.Abs(opts.DataDir)
+	if err != nil {
+		return initializationPaths{}, err
+	}
+	return initializationPaths{
+		projectRoot: root,
+		vaultRoot:   vault,
+		dataRoot:    data,
+		ledgerRoot:  filepath.Join(root, "docs", "session-review"),
+		configPath:  filepath.Join(data, "config.toml"),
+	}, nil
+}
+
+func openInitializationRoots(goos string, paths initializationPaths) (initializationRoots, error) {
+	projectDir, err := pathguard.Open(paths.projectRoot)
+	if err != nil {
+		return initializationRoots{}, fmt.Errorf("project root is a symlink or reparse point, or invalid: %w", err)
+	}
+	vaultDir, err := pathguard.Open(paths.vaultRoot)
+	if err != nil {
+		_ = projectDir.Close()
+		return initializationRoots{}, fmt.Errorf("vault root is a symlink or reparse point, or invalid: %w", err)
+	}
+	roots := initializationRoots{project: projectDir, vault: vaultDir}
+	if inside(goos, paths.projectRoot, paths.vaultRoot) || inside(goos, paths.vaultRoot, paths.projectRoot) ||
+		projectDir.ContainsIdentity(vaultDir.Info()) || vaultDir.ContainsIdentity(projectDir.Info()) {
+		roots.close()
+		return initializationRoots{}, fmt.Errorf("project and vault must not contain one another")
+	}
+	return roots, nil
+}
+
+func (roots initializationRoots) close() {
+	_ = roots.project.Close()
+	_ = roots.vault.Close()
 }
 
 func findProject(cfg config.Config, goos, root string, rootInfo os.FileInfo) (config.ProjectMapping, bool, error) {

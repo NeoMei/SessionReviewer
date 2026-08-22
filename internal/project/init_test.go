@@ -52,6 +52,66 @@ func TestInitializeCreatesStableProjectAndMapping(t *testing.T) {
 	}
 }
 
+func TestPreviewInitializationDoesNotCreateDataOrLedger(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	vault := filepath.Join(base, "vault")
+	data := filepath.Join(base, "machine")
+	for _, path := range []string{root, vault} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	preview, err := PreviewInitialization(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Action != "create" || preview.LedgerRoot != filepath.Join(root, "docs", "session-review") {
+		t.Fatalf("preview=%+v", preview)
+	}
+	for _, path := range []string{data, filepath.Join(root, "docs")} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s exists: %v", path, err)
+		}
+	}
+}
+
+func TestInitializeRevalidatesRootsAfterAcquiringTransactionLock(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	outside := filepath.Join(base, "outside")
+	for _, path := range []string{root, outside} {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := PreviewInitialization(InitOptions{ProjectRoot: root, VaultRoot: outside, DataDir: filepath.Join(base, "data")}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root,
+		VaultRoot:   outside,
+		DataDir:     filepath.Join(base, "data"),
+		afterLock: func() error {
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Symlink(outside, root)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("err=%v", err)
+	}
+	for _, path := range []string{filepath.Join(moved, "docs"), filepath.Join(outside, "docs")} {
+		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("write escaped revalidation at %s: %v", path, statErr)
+		}
+	}
+}
+
 func TestInitializeRejectsNestedVaultAndProject(t *testing.T) {
 	root := t.TempDir()
 	vault := filepath.Join(root, "vault")
