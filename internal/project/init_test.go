@@ -270,6 +270,24 @@ func TestInitializeRecoversOverviewWithoutMapping(t *testing.T) {
 	}
 }
 
+func TestInitializeRejectsOverviewIDClaimedByAnotherRoot(t *testing.T) {
+	first, second, firstVault, secondVault, data := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	wantID := "project-1111111111111111"
+	writeTestOverview(t, second, wantID)
+	if err := config.Save(filepath.Join(data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: wantID, Root: first, VaultRoot: firstVault,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: second, VaultRoot: secondVault, DataDir: data})
+	if err == nil || !strings.Contains(err.Error(), "already belongs to another project root") {
+		t.Fatalf("err=%v", err)
+	}
+	if got, _ := config.Load(filepath.Join(data, "config.toml")); len(got.Projects) != 1 {
+		t.Fatalf("projects=%+v", got.Projects)
+	}
+}
+
 func TestInitializeRecoversMappingWithoutOverview(t *testing.T) {
 	root := t.TempDir()
 	vault := t.TempDir()

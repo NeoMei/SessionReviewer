@@ -133,7 +133,30 @@ func validate(cfg Config) error {
 	if cfg.Version != 1 {
 		return errors.New("unsupported config version")
 	}
+	return cfg.ValidateProjectIDs()
+}
+
+func (c Config) ValidateProjectIDs() error {
+	seen := make(map[string]string, len(c.Projects))
+	for _, project := range c.Projects {
+		if project.ID == "" {
+			return errors.New("configured project ID is empty")
+		}
+		if firstRoot, found := seen[project.ID]; found {
+			return fmt.Errorf("project ID is mapped more than once: %q and %q", firstRoot, project.Root)
+		}
+		seen[project.ID] = project.Root
+	}
 	return nil
+}
+
+func (c Config) ProjectByID(id string) (ProjectMapping, bool) {
+	for _, project := range c.Projects {
+		if project.ID == id {
+			return project, true
+		}
+	}
+	return ProjectMapping{}, false
 }
 
 func (c Config) FindProject(goos, root string) (ProjectMapping, bool) {

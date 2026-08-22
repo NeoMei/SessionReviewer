@@ -127,3 +127,26 @@ func TestFindProjectUsesTargetWindowsPathSemantics(t *testing.T) {
 		t.Fatalf("got=%+v ok=%v", got, ok)
 	}
 }
+
+func TestConfigRejectsDuplicateProjectIDAcrossRoots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	err := Save(path, Config{Version: 1, Projects: []ProjectMapping{
+		{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/vault/one"},
+		{ID: "project-1111111111111111", Root: "/work/two", VaultRoot: "/vault/two"},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "project ID is mapped more than once") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestLoadRejectsDuplicateProjectIDAcrossRoots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "version = 1\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = '/one'\nvault_root = '/v1'\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = '/two'\nvault_root = '/v2'\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "configuration state and recovery backup are invalid") {
+		t.Fatalf("err=%v", err)
+	}
+}

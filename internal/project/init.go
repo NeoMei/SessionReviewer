@@ -133,6 +133,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{ProjectID: existing.ID, LedgerRoot: ledger, ConfigPath: configPath}, nil
 	}
 	if overviewExists {
+		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
+			return InitResult{}, fmt.Errorf("project ID %q already belongs to another project root %q", overviewID, owner.Root)
+		}
 		cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: overviewID, Root: root, VaultRoot: vault})
 		if opts.beforeConfigWrite != nil {
 			if err := opts.beforeConfigWrite(); err != nil {
