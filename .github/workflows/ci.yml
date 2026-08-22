@@ -26,7 +26,7 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test ./...
-      - run: go test -race ./... -skip '^TestFoundationLargeSession'
+      - run: go test -race ./... -skip '^TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB$'
       - run: go test ./internal/prepare -run '^TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree$' -count=2
       - run: go vet ./...
       - run: go build ./cmd/session-reviewer

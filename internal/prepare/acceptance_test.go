@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -131,7 +132,7 @@ func messageRecord(id, role, text string) map[string]any {
 	})
 }
 
-func TestFoundationLargeSessionIsFullyStreamedBoundedAndSafe(t *testing.T) {
+func TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB(t *testing.T) {
 	fixture := newFoundationFixture(t)
 	file, err := os.OpenFile(fixture.sessionPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -150,7 +151,8 @@ func TestFoundationLargeSessionIsFullyStreamedBoundedAndSafe(t *testing.T) {
 		"DEVELOPER-FOUNDATION-CANARY",
 		"SYSTEM-FOUNDATION-CANARY",
 		"REASONING-FOUNDATION-CANARY",
-		"ENCRYPTED-FOUNDATION-CANARY",
+		"ENCRYPTED-CONTENT-FOUNDATION-CANARY",
+		"COMPACTION-FOUNDATION-CANARY",
 		"UNKNOWN-FOUNDATION-CANARY",
 		"sk-foundation-canary-123456789012345678901234567890",
 	}
@@ -158,15 +160,16 @@ func TestFoundationLargeSessionIsFullyStreamedBoundedAndSafe(t *testing.T) {
 		messageRecord("developer", "developer", seededCanaries[0]),
 		messageRecord("system", "system", seededCanaries[1]),
 		responseItem("reasoning", "reasoning", map[string]any{"summary": seededCanaries[2]}),
-		responseItem("compaction", "encrypted", map[string]any{"encrypted_content": seededCanaries[3]}),
-		responseItem("future_unknown", "unknown", map[string]any{"content": seededCanaries[4]}),
+		responseItem("encrypted_content", "encrypted", map[string]any{"encrypted_content": seededCanaries[3]}),
+		responseItem("compaction", "compaction", map[string]any{"content": seededCanaries[4]}),
+		responseItem("future_unknown", "unknown", map[string]any{"content": seededCanaries[5]}),
 	}
 	for _, record := range excluded {
 		written += int64(writeJSONLine(t, writer, record))
 	}
 
 	largeUnknown := responseItem("future_unknown", "bulk", map[string]any{
-		"content": strings.Repeat("x", 256<<10) + " " + seededCanaries[4],
+		"content": strings.Repeat("x", 256<<10) + " " + seededCanaries[5],
 	})
 	largeLine, err := json.Marshal(largeUnknown)
 	if err != nil {
@@ -184,9 +187,17 @@ func TestFoundationLargeSessionIsFullyStreamedBoundedAndSafe(t *testing.T) {
 		written += int64(count)
 		bulkRecords++
 	}
-	writeJSONLine(t, writer, responseItem("custom_tool_call_output", "safe-output", map[string]any{
-		"output": "OPENAI_API_KEY=" + seededCanaries[5],
-	}))
+	prefixBytes := written
+	if prefixBytes <= minimumFixtureBytes {
+		t.Fatalf("pre-evidence prefix_bytes=%d, want >%d", prefixBytes, minimumFixtureBytes)
+	}
+	tailStartLine := 1 + len(excluded) + bulkRecords + 1
+	const tailRecords = 400
+	for index := range tailRecords {
+		writeJSONLine(t, writer, responseItem("custom_tool_call_output", fmt.Sprintf("tail-%03d", index), map[string]any{
+			"output": "OPENAI_API_KEY=" + seededCanaries[6] + "; result=" + strings.Repeat("allowlisted-tail-", 100),
+		}))
+	}
 	if err := writer.Flush(); err != nil {
 		_ = file.Close()
 		t.Fatal(err)
@@ -218,21 +229,61 @@ func TestFoundationLargeSessionIsFullyStreamedBoundedAndSafe(t *testing.T) {
 	}
 
 	limits := evidence.DefaultLimits()
-	if got := utf8.RuneCount(bytes.TrimSuffix(output, []byte{'\n'})); got > limits.MaxPacketRunes {
-		t.Fatalf("output_runes=%d max_packet_runes=%d", got, limits.MaxPacketRunes)
+	trimmedOutput := bytes.TrimSuffix(output, []byte{'\n'})
+	marshaledPacket, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if bytes.Contains(bytes.ToLower(output), []byte("canary")) {
-		t.Fatal("seeded canary leaked into evidence output")
+	if !bytes.Equal(trimmedOutput, marshaledPacket) {
+		t.Fatal("persisted packet bytes differ from the returned packet")
 	}
-	wantToCursor := 1 + len(excluded) + bulkRecords + 1
-	if packet.HasMore || packet.ToCursor != wantToCursor || len(packet.Events) != 1 || packet.Events[0].Kind != "tool_result" {
-		t.Fatalf("packet did not consume the complete fixture safely: %+v", packet)
+	outputRunes := utf8.RuneCount(trimmedOutput)
+	if outputRunes > limits.MaxPacketRunes || len(output) > limits.MaxPacketRunes*utf8.UTFMax+1 {
+		t.Fatalf("output_runes=%d output_bytes=%d max_packet_runes=%d", outputRunes, len(output), limits.MaxPacketRunes)
 	}
-	if packet.Events[0].JSONLLine != packet.ToCursor {
-		t.Fatalf("last event line=%d to_cursor=%d", packet.Events[0].JSONLLine, packet.ToCursor)
+	if outputRunes < limits.MaxPacketRunes-2*limits.MaxSummaryRunes || len(output) < 250000 {
+		t.Fatalf("packet did not materially exercise its bound: runes=%d bytes=%d", outputRunes, len(output))
+	}
+	for index, canary := range seededCanaries {
+		if bytes.Contains(output, []byte(canary)) {
+			t.Fatalf("seeded canary %d leaked into evidence output", index)
+		}
+	}
+	if !packet.HasMore || len(packet.Events) < 100 {
+		t.Fatalf("packet did not reach a substantial full segment: has_more=%v events=%d", packet.HasMore, len(packet.Events))
+	}
+	firstEvent := packet.Events[0]
+	lastEvent := packet.Events[len(packet.Events)-1]
+	totalLines := 1 + len(excluded) + bulkRecords + tailRecords
+	if packet.FromCursor != 1 || firstEvent.JSONLLine != tailStartLine || lastEvent.JSONLLine != packet.ToCursor || packet.ToCursor >= totalLines {
+		t.Fatalf("unexpected late-tail provenance: from=%d first_line=%d last_line=%d to=%d total=%d", packet.FromCursor, firstEvent.JSONLLine, lastEvent.JSONLLine, packet.ToCursor, totalLines)
+	}
+	if firstEvent.Kind != "tool_result" || firstEvent.Summary == "" ||
+		!strings.Contains(firstEvent.Summary, "[REDACTED:NAMED_SECRET]") ||
+		!strings.Contains(firstEvent.Summary, "…[TRUNCATED]") {
+		t.Fatalf("first allowlisted summary is not bounded and redacted: %q", firstEvent.Summary)
+	}
+	wantWarning := fmt.Sprintf("redacted:named_secret:%d", len(packet.Events))
+	if !containsFoundationString(packet.Warnings, wantWarning) {
+		t.Fatalf("warnings=%v want=%q", packet.Warnings, wantWarning)
+	}
+	for index, event := range packet.Events {
+		wantLine := tailStartLine + index
+		if event.Kind != "tool_result" || event.JSONLLine != wantLine || len(event.SourceHash) != 64 || event.ID == "" {
+			t.Fatalf("event %d has invalid allowlist/provenance fields: %+v", index, event)
+		}
 	}
 	allocated := memoryAfter.TotalAlloc - memoryBefore.TotalAlloc
-	t.Logf("fixture_bytes=%d output_bytes=%d duration=%s approx_total_alloc_bytes=%d", info.Size(), len(output), duration.Round(time.Millisecond), allocated)
+	t.Logf("fixture_bytes=%d prefix_bytes=%d output_bytes=%d output_runes=%d events=%d to_cursor=%d duration=%s approx_total_alloc_bytes=%d", info.Size(), prefixBytes, len(output), outputRunes, len(packet.Events), packet.ToCursor, duration.Round(time.Millisecond), allocated)
+}
+
+func containsFoundationString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 type cursorFileSnapshot struct {

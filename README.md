@@ -132,7 +132,9 @@ session-reviewer.exe prepare review `
 
 - semantic conclusions 或自动总结；
 - proposal `apply` 与完整 Markdown ledger；
-- Mermaid diagram、`resume`、`history` 或 watcher；
-- Obsidian sync Skill、冲突处理或发布安装包。
+- Mermaid diagram、`resume`、`history` 或语义 session-review Skill；
+- deterministic `session-reviewer sync`、three-way conflict engine、后台 watcher 或发布安装包。
 
-计划中的 Obsidian 混合模型以 repository 内的 ledger 为 canonical source。Obsidian 编辑只能由用户显式触发 Skill，通过 base / repository / Obsidian 的 three-way proposal，再经验证后的 apply 流程同步回 repository。它不是自动双向文件镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。
+计划中的 Obsidian 混合模型以 repository 内的 ledger 为 canonical source。普通编辑同步由确定性本地引擎处理：用户可显式运行 `session-reviewer sync`，无模型的后台 watcher 也可同步非冲突编辑。引擎对每个稳定实体比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）；单边变更可直接应用到另一边，不同字段变更可自动合并，同一字段冲突则保留两边并生成显式 conflict note。
+
+Skill/模型用于语义 session review，并生成交给引擎验证的 proposal/apply；普通的确定性 Obsidian 同步不需要模型。该模型不是无状态、逐文件互相覆盖的镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。
