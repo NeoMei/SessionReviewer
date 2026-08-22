@@ -1771,9 +1771,9 @@ func runPreparedFixture(t *testing.T, sourcePath, cwd string) []byte {
 
 - [x] **Step 2: Run acceptance tests before final documentation**
 
-Run: `go test ./internal/prepare -run 'TestLargeSession|TestPrepareSameInput' -v`
+Run: `go test ./internal/prepare -run '^(TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB|TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree)$' -count=1 -v`
 
-Expected: PASS only after all earlier tasks are correctly integrated. The >20 MB test remains an always-on release gate.
+Expected: exactly these two tests run and PASS only after all earlier tasks are correctly integrated. The >20 MB test remains an always-on release gate.
 
 - [x] **Step 3: Write the foundation README**
 
@@ -1820,7 +1820,7 @@ Add these commands after the normal test step in `.github/workflows/ci.yml`:
 
 ```yaml
       - run: go test -race ./...
-      - run: go test ./internal/prepare -run 'TestPrepareSameInput' -count=2
+      - run: go test ./internal/prepare -run '^TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree$' -count=2
 ```
 
 Run locally:
@@ -1877,7 +1877,7 @@ Foundation hardening evidence:
 
 The final Task 6 contract supersedes the earlier path-based Windows adapter design: an existing destination uses handle-relative `os.Root.Rename`; an absent destination uses rooted `Link` followed by `Remove`, with no replacing fallback. This records atomic visibility and no-clobber behavior, not universal filesystem crash durability. The current local host can cross-compile the Windows implementation and tests but cannot supply a native Windows runtime receipt; that receipt remains pending for the current commit, as does full Windows end-to-end release acceptance.
 
-The standalone Go CLI makes no model or OpenAI API calls and performs no automatic Git mutation. Initialization previews without writing unless `--write` is present; session-root precedence is flag, `SESSION_REVIEWER_SESSIONS_ROOT`, `CODEX_HOME/sessions`, then the conventional home path; current-session-ID precedence is `--session`, `--current-session-id`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, then conservative cwd/time inference. A selected ID ignores unrelated corrupt JSONL, while corruption in the selected or duplicate candidate set fails closed. CLI failures cross the process boundary as stable codes with recovery actions and without source content or sensitive paths.
+The standalone Go CLI makes no model or OpenAI API calls and performs no automatic Git mutation. Initialization previews without writing unless `--write` is present; session-root precedence is flag, `SESSION_REVIEWER_SESSIONS_ROOT`, `CODEX_HOME/sessions`, then the conventional home path; current-session-ID precedence is `--session`, `--current-session-id`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, then conservative cwd/time inference. A selected ID ignores unrelated corrupt JSONL, while corruption in the selected or duplicate candidate set fails closed. Operational `init`/`prepare` failures routed through the diagnostic mapper cross the process boundary as stable codes with recovery actions and without source content or sensitive paths; syntax and usage errors remain plain usage text with exit code 2.
 
 ## Foundation Completion Gate
 

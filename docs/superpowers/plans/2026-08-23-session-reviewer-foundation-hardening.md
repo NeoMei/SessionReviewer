@@ -4,7 +4,7 @@
 
 **Goal:** Close the deterministic foundation's identity, discovery, initialization, diagnostics, and Windows durability gaps before proposal application is built on top of it.
 
-**Architecture:** Keep the Go CLI deterministic and dependency-light, but make discovery inputs explicit and typed: platform policy resolves roots and runtime session identifiers, session discovery records per-file health, and initialization separates a read-only preview from mutation. Failures cross the CLI boundary as stable safe codes, while internal causes remain available to tests; Windows replacement stays anchored to an opened `os.Root`, using handle-relative rename for an existing destination and no-clobber link installation for an absent destination.
+**Architecture:** Keep the Go CLI deterministic and dependency-light, but make discovery inputs explicit and typed: platform policy resolves roots and runtime session identifiers, session discovery records per-file health, and initialization separates a read-only preview from mutation. Operational `init`/`prepare` failures routed through the diagnostic mapper cross the CLI boundary as stable safe codes, while syntax and usage errors remain plain usage text and internal causes remain available to tests; Windows replacement stays anchored to an opened `os.Root`, using handle-relative rename for an existing destination and no-clobber link installation for an absent destination.
 
 **Tech Stack:** Go 1.26, Go standard library, `github.com/pelletier/go-toml/v2 v2.4.3`, GitHub Actions on native macOS and Windows runners.
 
@@ -797,7 +797,7 @@ The next plan may begin only after a fresh run proves:
 - session-root precedence is flag, `SESSION_REVIEWER_SESSIONS_ROOT`, `CODEX_HOME/sessions`, then `<home>/.codex/sessions`;
 - current-session ID precedence is `--session`, `--current-session-id`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, then cwd/time inference;
 - explicit session selection ignores unrelated corrupt JSONL while selected and duplicate corrupt candidates fail closed;
-- every CLI error exposes a stable code and recovery action without leaking source content or sensitive paths;
+- every operational `init`/`prepare` failure routed through the diagnostic mapper exposes a stable code and recovery action without leaking source content or sensitive paths; syntax and usage errors remain plain usage text with exit code 2;
 - native Windows tests exercise rooted existing replacement and no-clobber absent installation, while docs do not overstate crash durability or full end-to-end acceptance;
 - the original foundation checklist and README reflect the code and fresh verification evidence;
 - the Go CLI contains no model client and no automatic Git mutation.

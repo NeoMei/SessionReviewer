@@ -131,7 +131,7 @@ Codex sessions root 按以下顺序解析：`--sessions-root`，`SESSION_REVIEWE
 - root redirected/invalid：使用实际存在的物理目录，移除路径中的符号链接、junction 或 reparse point。
 - packet 的 `has_more` 为 `true`：不要手工假定整段已接受；保留 packet，交给未来的验证/apply 流程成功提交 cursor 后再准备下一段。
 
-准备失败不会推进 cursor，也不会用半成品覆盖既有 evidence 文件。CLI 诊断使用稳定错误码和 `recovery` 操作，不把原始 session 内容、内部原因或敏感路径复制到 stdout/stderr。
+准备失败不会推进 cursor，也不会用半成品覆盖既有 evidence 文件。进入诊断映射的 `init`/`prepare` 运行失败使用稳定错误码和 `recovery` 操作，不把原始 session 内容、内部原因或敏感路径复制到 stdout/stderr。命令语法和用法错误仍输出普通用法文本并以状态码 2 退出，不使用该稳定诊断格式。
 
 ## 当前限制与后续模型
 
