@@ -34,6 +34,56 @@ func TestStoreCommitAndReload(t *testing.T) {
 	}
 }
 
+func TestLoadReadOnlyRootUsesPinnedDataRootWithoutCreatingState(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	moved := filepath.Join(base, "moved")
+	decoy := filepath.Join(base, "decoy")
+	for _, dir := range []string{filepath.Join(data, "projects", "p1", "cursors"), filepath.Join(decoy, "projects", "p1", "cursors")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data, "projects", "p1", "cursors", "s1.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	decoyCursor := Cursor{SessionID: "s1", LastLine: 2, LastHash: strings.Repeat("b", 64)}
+	decoyBody, err := json.Marshal(decoyCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "projects", "p1", "cursors", "s1.json"), decoyBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Rename(data, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, data); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	got, err := LoadReadOnlyRoot(root, "p1", "s1")
+	if err != nil || got != want {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(moved, "projects", "p1", "cursors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "s1.json" {
+		t.Fatalf("read created state: %v", entries)
+	}
+}
+
 func TestStoreLoadReadOnlyUsesBackupWithoutRepairingFiles(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	cursors := filepath.Join(store.Root, "cursors")

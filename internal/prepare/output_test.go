@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 func caseAliasPath(t *testing.T, path string) (string, bool) {
@@ -22,6 +24,16 @@ func caseAliasPath(t *testing.T, path string) (string, bool) {
 		return "", false
 	}
 	return alias, true
+}
+
+func prepareTestOutputTarget(t *testing.T, path, sessions, data string) (*outputTarget, error) {
+	t.Helper()
+	pinned, err := pathguard.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	return prepareOutputTarget(path, sessions, pinned)
 }
 
 func TestOutputTargetRejectsSymlinkInEveryExistingAncestor(t *testing.T) {
@@ -61,7 +73,7 @@ func TestOutputTargetRejectsSymlinkInEveryExistingAncestor(t *testing.T) {
 			outputParts := append([]string{link}, test.tail...)
 			output := filepath.Join(append(outputParts, "packet.json")...)
 
-			if target, err := prepareOutputTarget(output, sessions, data); err == nil {
+			if target, err := prepareTestOutputTarget(t, output, sessions, data); err == nil {
 				target.close()
 				t.Fatal("expected ancestor symlink rejection")
 			}
@@ -83,10 +95,34 @@ func TestOutputTargetUsesPhysicalIdentityForProtectedRoots(t *testing.T) {
 		if !ok {
 			t.Skip("test filesystem is case-sensitive")
 		}
-		if target, err := prepareOutputTarget(filepath.Join(alias, "packet.json"), sessions, data); err == nil {
+		if target, err := prepareTestOutputTarget(t, filepath.Join(alias, "packet.json"), sessions, data); err == nil {
 			target.close()
 			t.Fatalf("accepted casing alias into protected root: %s", alias)
 		}
+	}
+}
+
+func TestOutputTargetUsesPinnedDataIdentityAfterRename(t *testing.T) {
+	base := t.TempDir()
+	data := filepath.Join(base, "data")
+	moved := filepath.Join(base, "moved")
+	sessions := filepath.Join(base, "sessions")
+	for _, dir := range []string{data, sessions} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pinned, err := pathguard.Open(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.Close()
+	if err := os.Rename(data, moved); err != nil {
+		t.Fatal(err)
+	}
+	if target, err := prepareOutputTarget(filepath.Join(moved, "packet.json"), sessions, pinned); err == nil {
+		target.close()
+		t.Fatal("accepted output inside renamed pinned data root")
 	}
 }
 
@@ -100,7 +136,7 @@ func TestOutputTargetAllowsSimilarlyPrefixedSibling(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	target, err := prepareOutputTarget(filepath.Join(sibling, "packet.json"), sessions, data)
+	target, err := prepareTestOutputTarget(t, filepath.Join(sibling, "packet.json"), sessions, data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +160,7 @@ func TestOutputTargetRejectsParentReplacementRace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	target, err := prepareOutputTarget(filepath.Join(live, "packet.json"), sessions, data)
+	target, err := prepareTestOutputTarget(t, filepath.Join(live, "packet.json"), sessions, data)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +196,7 @@ func TestOutputTargetRejectsNewSymlinkParentRace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	target, err := prepareOutputTarget(filepath.Join(base, "new-parent", "packet.json"), sessions, data)
+	target, err := prepareTestOutputTarget(t, filepath.Join(base, "new-parent", "packet.json"), sessions, data)
 	if err != nil {
 		t.Fatal(err)
 	}

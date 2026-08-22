@@ -35,6 +35,8 @@ type Options struct {
 	MaxRecordBytes    int
 	beforeOpenSession func() error
 	afterOpenSession  func() error
+	afterOpenDataDir  func() error
+	afterLoadConfig   func() error
 }
 
 var ErrCursorSourceDrift = errors.New("accepted cursor no longer matches session source")
@@ -43,11 +45,21 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err := validateOptions(&opts); err != nil {
 		return evidence.Packet{}, err
 	}
-	output, err := prepareOutputTarget(opts.Output, opts.SessionsRoot, opts.DataDir)
+	dataDir, err := pathguard.Open(opts.DataDir)
+	if err != nil {
+		return evidence.Packet{}, fmt.Errorf("invalid data directory: %w", err)
+	}
+	defer dataDir.Close()
+	output, err := prepareOutputTarget(opts.Output, opts.SessionsRoot, dataDir)
 	if err != nil {
 		return evidence.Packet{}, err
 	}
 	defer output.close()
+	if opts.afterOpenDataDir != nil {
+		if err := opts.afterOpenDataDir(); err != nil {
+			return evidence.Packet{}, fmt.Errorf("prepare data root: %w", err)
+		}
+	}
 	candidates, err := session.Discover(opts.SessionsRoot)
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("discover sessions: %w", err)
@@ -73,9 +85,14 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err := validateIdentifier(chosen.ID, "session id"); err != nil {
 		return evidence.Packet{}, err
 	}
-	cfg, err := config.Load(filepath.Join(opts.DataDir, "config.toml"))
+	cfg, err := config.LoadRoot(dataDir.Root, "config.toml")
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("load configuration: %w", err)
+	}
+	if opts.afterLoadConfig != nil {
+		if err := opts.afterLoadConfig(); err != nil {
+			return evidence.Packet{}, fmt.Errorf("prepare configuration snapshot: %w", err)
+		}
 	}
 	mapping, err := findConfiguredProject(cfg, opts.GOOS, chosen.CWD)
 	if err != nil {
@@ -106,7 +123,7 @@ func Run(opts Options) (evidence.Packet, error) {
 	from := 1
 	var stored cursor.Cursor
 	if !opts.FromStart {
-		stored, err = readCursor(opts.DataDir, mapping.ID, chosen.ID)
+		stored, err = readCursorRoot(dataDir.Root, mapping.ID, chosen.ID)
 		if err != nil {
 			return evidence.Packet{}, err
 		}
@@ -213,7 +230,6 @@ func validateOptions(opts *Options) error {
 	}{
 		{label: "sessions root", path: &opts.SessionsRoot},
 		{label: "working directory", path: &opts.CWD},
-		{label: "data directory", path: &opts.DataDir},
 	} {
 		absolute, err := filepath.Abs(*field.path)
 		if err != nil {
@@ -226,6 +242,11 @@ func validateOptions(opts *Options) error {
 		_ = directory.Close()
 		*field.path = absolute
 	}
+	absoluteData, err := filepath.Abs(opts.DataDir)
+	if err != nil {
+		return fmt.Errorf("invalid data directory")
+	}
+	opts.DataDir = absoluteData
 	return nil
 }
 
@@ -300,12 +321,6 @@ func validateIdentifier(value, label string) error {
 	return nil
 }
 
-func readCursor(dataDir, projectID, sessionID string) (cursor.Cursor, error) {
-	root := filepath.Join(dataDir, "projects", projectID)
-	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
-		return cursor.Cursor{}, nil
-	} else if err != nil {
-		return cursor.Cursor{}, err
-	}
-	return (cursor.Store{Root: root}).LoadReadOnly(sessionID)
+func readCursorRoot(dataRoot *os.Root, projectID, sessionID string) (cursor.Cursor, error) {
+	return cursor.LoadReadOnlyRoot(dataRoot, projectID, sessionID)
 }

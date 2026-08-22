@@ -18,7 +18,10 @@ type outputTarget struct {
 	name        string
 }
 
-func prepareOutputTarget(path, sessionsRoot, dataDir string) (*outputTarget, error) {
+func prepareOutputTarget(path, sessionsRoot string, dataDir *pathguard.Directory) (*outputTarget, error) {
+	if dataDir == nil || dataDir.Info() == nil {
+		return nil, fmt.Errorf("inspect protected root: data directory is required")
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("invalid output path")
@@ -38,16 +41,14 @@ func prepareOutputTarget(path, sessionsRoot, dataDir string) (*outputTarget, err
 			_ = anchor.Close()
 		}
 	}()
-	for _, protected := range []string{sessionsRoot, dataDir} {
-		protectedRoot, err := pathguard.Open(protected)
-		if err != nil {
-			return nil, fmt.Errorf("inspect protected root: %w", err)
-		}
-		inside := anchor.ContainsIdentity(protectedRoot.Info())
-		_ = protectedRoot.Close()
-		if inside {
-			return nil, fmt.Errorf("output path is inside a protected data root")
-		}
+	protectedSessions, err := pathguard.Open(sessionsRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect protected root: %w", err)
+	}
+	insideSessions := anchor.ContainsIdentity(protectedSessions.Info())
+	_ = protectedSessions.Close()
+	if insideSessions || anchor.ContainsIdentity(dataDir.Info()) {
+		return nil, fmt.Errorf("output path is inside a protected data root")
 	}
 	relativeDir := filepath.Join(remaining...)
 	if relativeDir == "" {

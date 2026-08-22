@@ -152,6 +152,131 @@ func (f runFixture) sourceHash(t *testing.T, line int) string {
 	return hash
 }
 
+func replaceDataPath(t *testing.T, dataPath, decoyPath string) string {
+	t.Helper()
+	moved := dataPath + "-moved"
+	if err := os.Rename(dataPath, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoyPath, dataPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	return moved
+}
+
+func TestRunPinsDataRootBeforeConfigurationLoad(t *testing.T) {
+	f := newRunFixture(t, "")
+	decoy := filepath.Join(f.root, "decoy-data")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(decoy, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "decoy", Root: f.projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	var moved string
+	opts := f.options("review")
+	opts.afterOpenDataDir = func() error { moved = replaceDataPath(t, f.data, decoy); return nil }
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.ProjectID != "p1" {
+		t.Fatalf("mixed replacement config: %+v", packet)
+	}
+	if _, err := os.Stat(filepath.Join(moved, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunUsesSamePinnedDataSnapshotForConfigAndCursor(t *testing.T) {
+	f := newRunFixture(t, sessionBody("PROJECT",
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"old"}]}}`,
+		`{"timestamp":"2026-08-22T10:02:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"new"}]}}`))
+	path := filepath.Join(f.sessions, "s1.jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.ReplaceAll(body, []byte("PROJECT"), []byte(filepath.ToSlash(f.projectRoot)))
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, f.now, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.commitCursor(t, 1)
+	decoy := filepath.Join(f.root, "decoy-data")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(decoy, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "p1", Root: f.projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	decoyProject := filepath.Join(decoy, "projects", "p1")
+	if err := os.MkdirAll(decoyProject, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoyCursor := cursor.Cursor{SessionID: "s1", LastLine: 2, LastHash: f.sourceHash(t, 2), UpdatedAt: f.now}
+	if err := (cursor.Store{Root: decoyProject}).Commit("s1", cursor.Cursor{}, decoyCursor); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options("checkpoint")
+	opts.afterLoadConfig = func() error {
+		if err := os.Rename(f.data, f.data+"-moved"); err != nil {
+			return err
+		}
+		return os.Rename(decoy, f.data)
+	}
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.FromCursor != 2 || len(packet.Events) != 2 || packet.Events[0].Summary != "old" {
+		t.Fatalf("mixed config/cursor snapshot: %+v", packet)
+	}
+}
+
+func TestRunFromStartDoesNotTouchCursorAfterDataReplacement(t *testing.T) {
+	f := newRunFixture(t, "")
+	decoy := filepath.Join(f.root, "decoy-data")
+	if err := os.Mkdir(decoy, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(decoy, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "p1", Root: f.projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	cursorDir := filepath.Join(decoy, "projects", "p1", "cursors")
+	if err := os.MkdirAll(cursorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursorDir, "s1.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options("review")
+	opts.FromStart = true
+	opts.afterLoadConfig = func() error { replaceDataPath(t, f.data, decoy); return nil }
+	if _, err := Run(opts); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(cursorDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "s1.json" {
+		t.Fatalf("from-start touched cursor state: %v", entries)
+	}
+}
+
+func TestRunReleasesPinnedDataRoot(t *testing.T) {
+	f := newRunFixture(t, "")
+	if _, err := Run(f.options("review")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(f.data, f.data+"-moved"); err != nil {
+		t.Fatalf("data root handle leaked after Run: %v", err)
+	}
+}
+
 func TestRunRejectsCursorSourceHashMismatch(t *testing.T) {
 	f := newRunFixture(t, "")
 	f.commitCursor(t, 2)
