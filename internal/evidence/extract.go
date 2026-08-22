@@ -53,6 +53,12 @@ type Extractor struct {
 }
 
 func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
+	return NewWithProjectID("", sessionID, cwd, from, redactor, limits)
+}
+
+// NewWithProjectID constructs an extractor whose packet-size accounting includes
+// the final project identifier from the beginning of extraction.
+func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
@@ -64,12 +70,15 @@ func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limit
 		usedIDs:       make(map[string]struct{}),
 	}
 
+	safeProjectID, projectFindings := x.redact(projectID)
 	safeSessionID, sessionFindings := x.redact(sessionID)
 	safeCWD, cwdFindings := x.redact(cwd)
+	x.mergeFindings(projectFindings)
 	x.mergeFindings(sessionFindings)
 	x.mergeFindings(cwdFindings)
 	x.packet = Packet{
 		SchemaVersion: 1,
+		ProjectID:     safeProjectID,
 		SessionID:     safeSessionID,
 		CWD:           safeCWD,
 		FromCursor:    from,
@@ -240,6 +249,20 @@ func (x *Extractor) Packet() Packet {
 	}
 	snapshot.Warnings = append([]string(nil), x.packet.Warnings...)
 	return snapshot
+}
+
+// AddWarning appends a structural warning without bypassing packet bounds.
+func (x *Extractor) AddWarning(warning string) error {
+	if x == nil || warning == "" {
+		return ErrInvalidLimits
+	}
+	candidate := x.Packet()
+	candidate.Warnings = append(candidate.Warnings, warning)
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return x.markFull()
+	}
+	x.packet.Warnings = candidate.Warnings
+	return nil
 }
 
 func (x *Extractor) eventID(line int, sourceHash, kind, itemID string) string {

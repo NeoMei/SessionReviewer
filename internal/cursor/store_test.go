@@ -34,6 +34,38 @@ func TestStoreCommitAndReload(t *testing.T) {
 	}
 }
 
+func TestStoreLoadReadOnlyUsesBackupWithoutRepairingFiles(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	cursors := filepath.Join(store.Root, "cursors")
+	if err := os.Mkdir(cursors, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(cursors, "s1.json")
+	backup := filepath.Join(cursors, "s1.json.session-reviewer-backup")
+	if err := os.WriteFile(destination, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := Cursor{SessionID: "s1", LastLine: 7, LastHash: validHash}
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.LoadReadOnly("s1")
+	if err != nil || got != want {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if body, err := os.ReadFile(destination); err != nil || string(body) != "{" {
+		t.Fatalf("primary was repaired: body=%q err=%v", body, err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("backup was removed: %v", err)
+	}
+}
+
 func TestStoreRejectsStaleCommit(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	current := Cursor{SessionID: "s1", LastLine: 10, LastHash: strings.Repeat("a", 64)}

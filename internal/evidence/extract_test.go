@@ -55,6 +55,42 @@ func newExtractor(t *testing.T, sessionID, cwd string, from int, limits Limits) 
 	return x
 }
 
+func TestNewWithProjectIDCountsProjectInPacketLimit(t *testing.T) {
+	probe, err := NewWithProjectID("p1", "s1", "/work", 1, redact.Default(), DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(probe.Packet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	limits.MaxPacketRunes = utf8.RuneCount(encoded) - 1
+	if _, err := NewWithProjectID("p1", "s1", "/work", 1, redact.Default(), limits); !errors.Is(err, ErrInvalidLimits) {
+		t.Fatalf("project metadata was not counted: %v", err)
+	}
+}
+
+func TestExtractorAddWarningHonorsPacketLimit(t *testing.T) {
+	probe := newExtractor(t, "s1", "/work", 1, DefaultLimits())
+	if err := probe.AddWarning("malformed_jsonl_lines:1"); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(probe.Packet())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := DefaultLimits()
+	limits.MaxPacketRunes = utf8.RuneCount(encoded) - 1
+	x := newExtractor(t, "s1", "/work", 1, limits)
+	if err := x.AddWarning("malformed_jsonl_lines:1"); !errors.Is(err, ErrPacketFull) {
+		t.Fatalf("err=%v packet=%+v", err, x.Packet())
+	}
+	if len(x.Packet().Warnings) != 0 {
+		t.Fatalf("rejected warning persisted: %+v", x.Packet())
+	}
+}
+
 func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
 	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	inputs := []session.Record{

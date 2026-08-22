@@ -70,6 +70,25 @@ func (s Store) Load(sessionID string) (result Cursor, retErr error) {
 	return root.loadLocked(sessionID)
 }
 
+// LoadReadOnly reads the best valid cursor state under the normal transaction
+// lock but never repairs, replaces, or removes cursor state files.
+func (s Store) LoadReadOnly(sessionID string) (result Cursor, retErr error) {
+	root, err := s.open(sessionID, false)
+	if err != nil {
+		return Cursor{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, root.close()) }()
+	if root.dirMissing {
+		return Cursor{}, nil
+	}
+	lock, err := acquireCursorLock(root.cursors, root.lockName)
+	if err != nil {
+		return Cursor{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	return root.loadReadOnlyLocked(sessionID)
+}
+
 func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err := validateCursor(expected, sessionID, true); err != nil {
 		return fmt.Errorf("invalid expected cursor: %w", err)
@@ -271,6 +290,31 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 			return Cursor{}, fmt.Errorf("restore cursor backup: %w", err)
 		}
 		return backup, nil
+	}
+	return Cursor{}, fmt.Errorf("cursor state and recovery backup are corrupt")
+}
+
+func (root *storeRoot) loadReadOnlyLocked(sessionID string) (Cursor, error) {
+	destinationInfo, destinationFound, err := regularEntry(root.cursors, root.cursorName, "cursor file")
+	if err != nil {
+		return Cursor{}, err
+	}
+	backupInfo, backupFound, err := regularEntry(root.cursors, root.backupName, "cursor backup")
+	if err != nil {
+		return Cursor{}, err
+	}
+	if !destinationFound && !backupFound {
+		return Cursor{}, nil
+	}
+	if destinationFound {
+		if destination, err := readCursor(root.cursors, root.cursorName, sessionID, destinationInfo); err == nil {
+			return destination, nil
+		}
+	}
+	if backupFound {
+		if backup, err := readCursor(root.cursors, root.backupName, sessionID, backupInfo); err == nil {
+			return backup, nil
+		}
 	}
 	return Cursor{}, fmt.Errorf("cursor state and recovery backup are corrupt")
 }
