@@ -202,13 +202,39 @@ func validateOptions(opts *Options) error {
 }
 
 func findConfiguredProject(cfg config.Config, goos, cwd string) (config.ProjectMapping, error) {
+	if goos == "windows" || goos != runtime.GOOS {
+		normalized := platform.NormalizePath(goos, cwd)
+		var match config.ProjectMapping
+		matches := 0
+		for _, project := range cfg.Projects {
+			if platform.NormalizePath(goos, project.Root) != normalized {
+				continue
+			}
+			match = project
+			matches++
+		}
+		if matches > 1 {
+			return config.ProjectMapping{}, fmt.Errorf("configured project mapping is ambiguous")
+		}
+		return match, nil
+	}
+	current, err := pathguard.Open(cwd)
+	if err != nil {
+		return config.ProjectMapping{}, fmt.Errorf("validate requested project root: %w", err)
+	}
+	defer current.Close()
 	var match config.ProjectMapping
 	matches := 0
 	for _, project := range cfg.Projects {
-		same, err := sameProjectDirectory(goos, project.Root, cwd)
+		mapped, err := pathguard.Open(project.Root)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
 		if err != nil {
 			return config.ProjectMapping{}, fmt.Errorf("validate configured project mapping: %w", err)
 		}
+		same := os.SameFile(mapped.Info(), current.Info())
+		_ = mapped.Close()
 		if !same {
 			continue
 		}

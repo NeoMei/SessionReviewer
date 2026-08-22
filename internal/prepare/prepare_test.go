@@ -710,3 +710,101 @@ func TestRunMatchesConfiguredProjectByPhysicalDarwinIdentity(t *testing.T) {
 		t.Fatalf("packet=%+v", packet)
 	}
 }
+
+func TestFindConfiguredProjectSkipsMissingMappingsInAnyOrder(t *testing.T) {
+	current := t.TempDir()
+	stale := filepath.Join(t.TempDir(), "deleted")
+	valid := config.ProjectMapping{ID: "valid", Root: current}
+	missing := config.ProjectMapping{ID: "stale", Root: stale}
+	for _, test := range []struct {
+		name     string
+		projects []config.ProjectMapping
+	}{
+		{name: "stale-first", projects: []config.ProjectMapping{missing, valid}},
+		{name: "stale-last", projects: []config.ProjectMapping{valid, missing}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mapping, err := findConfiguredProject(config.Config{Version: 1, Projects: test.projects}, runtime.GOOS, current)
+			if err != nil || mapping.ID != "valid" {
+				t.Fatalf("mapping=%+v err=%v", mapping, err)
+			}
+		})
+	}
+}
+
+func TestRunReportsNotInitializedWhenAllMappingsAreMissing(t *testing.T) {
+	f := newRunFixture(t, "")
+	stale := filepath.Join(f.root, "deleted-project")
+	if err := config.Save(filepath.Join(f.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "stale", Root: stale}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFindConfiguredProjectKeepsPhysicalAliasAmbiguityWithStaleMapping(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin physical identity behavior")
+	}
+	current := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(current, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias, ok := caseAliasPath(t, current)
+	if !ok {
+		t.Skip("test filesystem is case-sensitive")
+	}
+	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{
+		{ID: "stale", Root: filepath.Join(t.TempDir(), "deleted")},
+		{ID: "one", Root: current},
+		{ID: "two", Root: alias},
+	}}
+	if _, err := findConfiguredProject(cfg, "darwin", current); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFindConfiguredProjectFailsClosedForUnsafeMapping(t *testing.T) {
+	current := t.TempDir()
+	link := filepath.Join(t.TempDir(), "mapped-link")
+	if err := os.Symlink(t.TempDir(), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{
+		{ID: "unsafe", Root: link},
+		{ID: "valid", Root: current},
+	}}
+	if _, err := findConfiguredProject(cfg, runtime.GOOS, current); err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestFindConfiguredProjectDoesNotSkipMalformedOrMissingCurrentRoot(t *testing.T) {
+	current := t.TempDir()
+	for _, test := range []struct {
+		name string
+		cfg  config.Config
+		cwd  string
+	}{
+		{name: "malformed-mapping", cfg: config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "bad", Root: "bad\x00path"}, {ID: "valid", Root: current}}}, cwd: current},
+		{name: "missing-current", cfg: config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "stale", Root: filepath.Join(t.TempDir(), "deleted")}}}, cwd: filepath.Join(t.TempDir(), "missing-current")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := findConfiguredProject(test.cfg, runtime.GOOS, test.cwd); err == nil {
+				t.Fatal("expected mapping validation error")
+			}
+		})
+	}
+}
+
+func TestFindConfiguredProjectPreservesWindowsNormalization(t *testing.T) {
+	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{
+		{ID: "stale", Root: `D:\Deleted`},
+		{ID: "valid", Root: `c:/projects/sessionreviewer`},
+	}}
+	mapping, err := findConfiguredProject(cfg, "windows", `C:\Projects\SessionReviewer`)
+	if err != nil || mapping.ID != "valid" {
+		t.Fatalf("mapping=%+v err=%v", mapping, err)
+	}
+}

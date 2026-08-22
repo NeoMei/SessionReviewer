@@ -19,13 +19,16 @@ type Directory struct {
 }
 
 func Open(path string) (*Directory, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("directory path is required")
+	}
 	directory, remaining, err := OpenDeepest(path)
 	if err != nil {
 		return nil, err
 	}
 	if len(remaining) != 0 {
 		_ = directory.Close()
-		return nil, fmt.Errorf("directory does not exist")
+		return nil, fmt.Errorf("directory does not exist: %w", os.ErrNotExist)
 	}
 	return directory, nil
 }
