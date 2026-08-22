@@ -205,26 +205,27 @@ func namedSecretValueEnd(text string, start int) (int, bool) {
 	if start >= len(text) {
 		return start, false
 	}
+	pemRanges := privateKeyEnvelopeRanges(text, start)
 	switch text[start] {
 	case '"', '\'':
-		if end := quotedValueEnd(text, start, text[start]); end >= 0 {
+		if end := quotedValueEnd(text, start, text[start], pemRanges); end >= 0 {
 			return end, true
 		}
 	case '[':
-		if end := structuredValueEnd(text, start, '[', ']'); end >= 0 {
+		if end := structuredValueEnd(text, start, '[', ']', pemRanges); end >= 0 {
 			return end, true
 		}
 	case '{':
-		if end := structuredValueEnd(text, start, '{', '}'); end >= 0 {
+		if end := structuredValueEnd(text, start, '{', '}', pemRanges); end >= 0 {
 			return end, true
 		}
 	default:
-		if end := safeValueBoundary(text, start); end < len(text) {
+		if end := safeValueBoundary(text, start, pemRanges); end < len(text) {
 			return end, true
 		}
 		return len(text), true
 	}
-	if end := safeValueBoundary(text, start+1); end < len(text) {
+	if end := safeValueBoundary(text, start+1, pemRanges); end < len(text) {
 		return end, true
 	}
 	return len(text), false
@@ -245,9 +246,14 @@ func privateKeyEnvelopeEnd(text string, start int) (int, bool, bool) {
 	return len(text), true, false
 }
 
-func quotedValueEnd(text string, start int, quote byte) int {
+func quotedValueEnd(text string, start int, quote byte, pemRanges []textRange) int {
 	escaped := false
 	for i := start + 1; i < len(text); i++ {
+		if end, ok := protectedRangeEndAt(i, pemRanges); ok {
+			i = end - 1
+			escaped = false
+			continue
+		}
 		if escaped {
 			escaped = false
 			continue
@@ -263,11 +269,16 @@ func quotedValueEnd(text string, start int, quote byte) int {
 	return -1
 }
 
-func structuredValueEnd(text string, start int, open, close byte) int {
+func structuredValueEnd(text string, start int, open, close byte, pemRanges []textRange) int {
 	depth := 0
 	var quote byte
 	escaped := false
 	for i := start; i < len(text); i++ {
+		if end, ok := protectedRangeEndAt(i, pemRanges); ok {
+			i = end - 1
+			escaped = false
+			continue
+		}
 		if quote != 0 {
 			if escaped {
 				escaped = false
@@ -297,10 +308,9 @@ func structuredValueEnd(text string, start int, open, close byte) int {
 	return -1
 }
 
-func safeValueBoundary(text string, start int) int {
+func safeValueBoundary(text string, start int, pemRanges []textRange) int {
 	// Malformed values remain secret until a structurally clear next field or
 	// container close. Whitespace and control bytes alone are not safe boundaries.
-	pemRanges := privateKeyEnvelopeRanges(text, start)
 	boundary := len(text)
 	for _, match := range nextFieldBoundary.FindAllStringIndex(text[start:], -1) {
 		candidate := start + match[0]
@@ -353,6 +363,15 @@ func indexInRanges(index int, ranges []textRange) bool {
 		}
 	}
 	return false
+}
+
+func protectedRangeEndAt(index int, ranges []textRange) (int, bool) {
+	for _, current := range ranges {
+		if index == current.start {
+			return current.end, true
+		}
+	}
+	return 0, false
 }
 
 func appendSegment(segments *[]textSegment, text string, protected bool) {

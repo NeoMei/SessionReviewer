@@ -306,3 +306,41 @@ func TestDefaultOuterNamedSecretConsumesMalformedEmbeddedPEMToEnd(t *testing.T) 
 		}
 	}
 }
+
+func TestDefaultOuterDelimitersIgnoreEmbeddedPEMContents(t *testing.T) {
+	cases := []struct {
+		input    string
+		neighbor string
+	}{
+		{"password=\"prefix-canary -----BEGIN PRIVATE KEY-----\nBODY\"=internal\n-----END PRIVATE KEY----- suffix-canary\"; mode=public", "; mode=public"},
+		{"password={prefix-canary {nested: value} -----BEGIN PRIVATE KEY-----\nBODY}=internal\n-----END PRIVATE KEY----- suffix-canary}; mode=public", "; mode=public"},
+		{"password=[prefix-canary [nested] -----BEGIN RSA PRIVATE KEY-----\r\nBODY]=internal\r\n-----END RSA PRIVATE KEY----- suffix-canary]; mode=public", "; mode=public"},
+		{"password=\"escaped \\\" prefix-canary -----BEGIN OPENSSH PRIVATE KEY-----\nBODY\"=internal\n-----END OPENSSH PRIVATE KEY----- suffix-canary\"\nmode=public", "\nmode=public"},
+		{"password={prefix-canary -----BEGIN PRIVATE KEY-----\nFIRST}=internal\n-----END PRIVATE KEY----- between-canary -----BEGIN RSA PRIVATE KEY-----\nSECOND}=internal\n-----END RSA PRIVATE KEY----- suffix-canary}; mode=public", "; mode=public"},
+	}
+	for i, tc := range cases {
+		result := Default().Text(tc.input)
+		if strings.Contains(strings.ToLower(result.Text), "canary") || strings.Contains(result.Text, "internal") || strings.Contains(result.Text, "BODY") || strings.Contains(result.Text, "PRIVATE KEY") {
+			t.Fatalf("delimited embedded PEM case %d leaked", i)
+		}
+		if strings.ContainsRune(result.Text, '\x00') || !strings.Contains(result.Text, tc.neighbor) {
+			t.Fatalf("delimited embedded PEM case %d retained residue or swallowed its neighbor", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("delimited embedded PEM case %d had inaccurate findings", i)
+		}
+	}
+}
+
+func TestDefaultOuterDelimitersConsumeMismatchedPEMToEnd(t *testing.T) {
+	inputs := []string{
+		"password=\"prefix-canary -----BEGIN RSA PRIVATE KEY-----\nBODY\"=internal\n-----END PRIVATE KEY----- suffix-canary\"; mode=public",
+		"password=[prefix-canary -----BEGIN RSA PRIVATE KEY-----\r\nBODY]=internal\r\n-----END PRIVATE KEY----- suffix-canary]; mode=public",
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if result.Text != "[REDACTED:NAMED_SECRET]" || len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("mismatched delimited PEM case %d was not conservatively redacted", i)
+		}
+	}
+}
