@@ -4,6 +4,7 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -36,21 +37,36 @@ func Default() Redactor {
 		{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\z)`)},
 		{"bearer", regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)},
 		{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
-		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
-		{"named_secret", regexp.MustCompile(`(?i)\b"?(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret)"?\s*[:=]\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;\[]+)`)},
+		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\x00\s/@:]+:[^\x00\s/@]+@[^\x00\s]+`)},
+		{"named_secret", regexp.MustCompile(`\b"?(?:(?i:(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret))|(?:[a-z][A-Za-z0-9]*(?:ApiKey|AccessToken|AuthToken|Authorization|Cookie|Password|Secret)))"?\s*[:=]\s*(?:"(?:\\.|[^\x00"\\\r\n])*(?:"|(?m:$))|'(?:\\.|[^\x00'\\\r\n])*(?:'|(?m:$))|\[[^\x00\]\r\n]*(?:\]|(?m:$))|\{[^\x00}\r\n]*(?:}|(?m:$))|[^\x00\s,;\[{"']+)`)},
 	}}
 }
 
 func (r Redactor) Text(input string) Result {
 	text := input
 	counts := map[string]int{}
+	placeholderStem := "\x00SESSION_REVIEWER_REDACTION"
+	for strings.Contains(input, placeholderStem) {
+		placeholderStem += "_"
+	}
+	type replacement struct {
+		placeholder string
+		marker      string
+	}
+	replacements := make([]replacement, 0, len(r.rules))
 	for _, rule := range r.rules {
 		matches := rule.re.FindAllStringIndex(text, -1)
 		if len(matches) == 0 {
 			continue
 		}
 		counts[rule.name] += len(matches)
-		text = rule.re.ReplaceAllString(text, "[REDACTED:"+strings.ToUpper(rule.name)+"]")
+		placeholder := placeholderStem + strconv.Itoa(len(replacements)) + "\x00"
+		marker := "[REDACTED:" + strings.ToUpper(rule.name) + "]"
+		replacements = append(replacements, replacement{placeholder: placeholder, marker: marker})
+		text = rule.re.ReplaceAllString(text, placeholder)
+	}
+	for _, replacement := range replacements {
+		text = strings.ReplaceAll(text, replacement.placeholder, replacement.marker)
 	}
 
 	text = tokenCandidate.ReplaceAllStringFunc(text, func(value string) string {

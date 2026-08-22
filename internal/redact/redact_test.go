@@ -98,3 +98,48 @@ func TestDefaultCountsBearerOnce(t *testing.T) {
 		t.Fatal("bearer finding count was not semantically accurate")
 	}
 }
+
+func TestDefaultRedactsUnclosedQuotedNamedSecretThroughEnd(t *testing.T) {
+	input := `password="alpha bravo with no closing quote`
+	result := Default().Text(input)
+	if strings.Contains(result.Text, "alpha") || strings.Contains(result.Text, "bravo") || !strings.Contains(result.Text, "[REDACTED:NAMED_SECRET]") {
+		t.Fatal("unclosed quoted named secret leaked")
+	}
+}
+
+func TestDefaultRedactsCamelCaseSecretKey(t *testing.T) {
+	input := `{"openaiApiKey":"short canary"}`
+	result := Default().Text(input)
+	if strings.Contains(strings.ToLower(result.Text), "canary") || !strings.Contains(result.Text, "[REDACTED:NAMED_SECRET]") {
+		t.Fatal("camelCase secret key leaked")
+	}
+}
+
+func TestDefaultRedactsBracketedNamedSecretValue(t *testing.T) {
+	input := `password=[short-canary]`
+	result := Default().Text(input)
+	if strings.Contains(strings.ToLower(result.Text), "canary") || !strings.Contains(result.Text, "[REDACTED:NAMED_SECRET]") {
+		t.Fatal("bracketed named secret leaked")
+	}
+}
+
+func TestDefaultCountsQuotedAuthorizationBearerOnce(t *testing.T) {
+	result := Default().Text(`{"authorization":"Bearer eyJhbGciOiJIUzI1NiJ9.synthetic.signature"}`)
+	if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "bearer", Count: 1}) {
+		t.Fatal("quoted bearer finding count was not semantically accurate")
+	}
+}
+
+func TestDefaultPreservesHarmlessJSONAndCamelCaseFields(t *testing.T) {
+	inputs := []string{
+		`{"monkey":"public value","secretary":"public"}`,
+		`{"apiKeyboard":"public","authorizationMode":"public"}`,
+		`{"passwordHint":"public","cookiePolicy":"public"}`,
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if result.Text != input || len(result.Findings) != 0 {
+			t.Fatalf("harmless structured case %d was changed", i)
+		}
+	}
+}
