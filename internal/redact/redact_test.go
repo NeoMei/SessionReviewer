@@ -267,3 +267,42 @@ func TestDefaultBarePrivateKeyStillUsesPrivateKeyRule(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultOuterNamedSecretSkipsEmbeddedPEMBoundaries(t *testing.T) {
+	cases := []struct {
+		input    string
+		neighbor string
+	}{
+		{"password=before-canary -----BEGIN PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY-----\nmode=public", "\nmode=public"},
+		{"password=-----BEGIN PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY----- after-canary; mode=public", "; mode=public"},
+		{"password=before-canary -----BEGIN RSA PRIVATE KEY-----\r\nBODYLINE=\r\n-----END RSA PRIVATE KEY----- after-canary; mode=public", "; mode=public"},
+		{"password=\"before-canary -----BEGIN OPENSSH PRIVATE KEY-----\nBODYLINE=\n-----END OPENSSH PRIVATE KEY----- after-canary\"; mode=public", "; mode=public"},
+		{"password=before-canary -----BEGIN PRIVATE KEY-----\nFIRSTBODY=\n-----END PRIVATE KEY----- between-canary -----BEGIN RSA PRIVATE KEY-----\nSECONDBODY=\n-----END RSA PRIVATE KEY----- after-canary; mode=public", "; mode=public"},
+		{"\"password\":before-canary -----BEGIN PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY----- after-canary, \"mode\":\"public\"", `, "mode":"public"`},
+	}
+	for i, tc := range cases {
+		result := Default().Text(tc.input)
+		if strings.Contains(strings.ToLower(result.Text), "canary") || strings.Contains(result.Text, "BODY") || strings.Contains(result.Text, "PRIVATE KEY") {
+			t.Fatalf("embedded PEM case %d leaked", i)
+		}
+		if strings.ContainsRune(result.Text, '\x00') || !strings.Contains(result.Text, tc.neighbor) {
+			t.Fatalf("embedded PEM case %d retained residue or swallowed its neighbor", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("embedded PEM case %d had inaccurate findings", i)
+		}
+	}
+}
+
+func TestDefaultOuterNamedSecretConsumesMalformedEmbeddedPEMToEnd(t *testing.T) {
+	inputs := []string{
+		"password=before-canary -----BEGIN PRIVATE KEY-----\nBODYLINE=\nmode=public",
+		"password=before-canary -----BEGIN RSA PRIVATE KEY-----\r\nBODYLINE=\r\n-----END PRIVATE KEY-----\r\nmode=public",
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if result.Text != "[REDACTED:NAMED_SECRET]" || len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("malformed embedded PEM case %d was not conservatively redacted", i)
+		}
+	}
+}

@@ -103,7 +103,7 @@ func applyPrivateKeyRule(segments []textSegment, counts map[string]int) []textSe
 				break
 			}
 			start := cursor + begin[0]
-			end, _ := privateKeyEnvelopeEnd(segment.text, start)
+			end, _, _ := privateKeyEnvelopeEnd(segment.text, start)
 			appendSegment(&result, segment.text[cursor:start], false)
 			appendSegment(&result, "[REDACTED:PRIVATE_KEY]", true)
 			counts["private_key"]++
@@ -205,9 +205,6 @@ func namedSecretValueEnd(text string, start int) (int, bool) {
 	if start >= len(text) {
 		return start, false
 	}
-	if end, ok := privateKeyEnvelopeEnd(text, start); ok {
-		return end, end < len(text)
-	}
 	switch text[start] {
 	case '"', '\'':
 		if end := quotedValueEnd(text, start, text[start]); end >= 0 {
@@ -233,19 +230,19 @@ func namedSecretValueEnd(text string, start int) (int, bool) {
 	return len(text), false
 }
 
-func privateKeyEnvelopeEnd(text string, start int) (int, bool) {
+func privateKeyEnvelopeEnd(text string, start int) (int, bool, bool) {
 	begin := privateKeyBegin.FindStringIndex(text[start:])
 	if begin == nil || begin[0] != 0 {
-		return start, false
+		return start, false, false
 	}
 	headerEnd := start + begin[1]
 	header := text[start:headerEnd]
 	label := strings.TrimSuffix(strings.TrimPrefix(header, "-----BEGIN "), "-----")
 	endMarker := "-----END " + label + "-----"
 	if offset := strings.Index(text[headerEnd:], endMarker); offset >= 0 {
-		return headerEnd + offset + len(endMarker), true
+		return headerEnd + offset + len(endMarker), true, true
 	}
-	return len(text), true
+	return len(text), true, false
 }
 
 func quotedValueEnd(text string, start int, quote byte) int {
@@ -303,21 +300,59 @@ func structuredValueEnd(text string, start int, open, close byte) int {
 func safeValueBoundary(text string, start int) int {
 	// Malformed values remain secret until a structurally clear next field or
 	// container close. Whitespace and control bytes alone are not safe boundaries.
+	pemRanges := privateKeyEnvelopeRanges(text, start)
 	boundary := len(text)
 	for _, match := range nextFieldBoundary.FindAllStringIndex(text[start:], -1) {
+		candidate := start + match[0]
+		if indexInRanges(candidate, pemRanges) {
+			continue
+		}
 		matchEnd := start + match[1]
 		if matchEnd+1 < len(text) && text[matchEnd-1] == ':' && text[matchEnd:matchEnd+2] == "//" {
 			continue
 		}
-		boundary = start + match[0]
+		boundary = candidate
 		break
 	}
 	for i := start; i < boundary; i++ {
-		if text[i] == '}' || text[i] == ']' {
+		if (text[i] == '}' || text[i] == ']') && !indexInRanges(i, pemRanges) {
 			return i
 		}
 	}
 	return boundary
+}
+
+type textRange struct {
+	start int
+	end   int
+}
+
+func privateKeyEnvelopeRanges(text string, start int) []textRange {
+	var ranges []textRange
+	cursor := start
+	for cursor < len(text) {
+		begin := privateKeyBegin.FindStringIndex(text[cursor:])
+		if begin == nil {
+			break
+		}
+		pemStart := cursor + begin[0]
+		pemEnd, _, complete := privateKeyEnvelopeEnd(text, pemStart)
+		ranges = append(ranges, textRange{start: pemStart, end: pemEnd})
+		if !complete {
+			break
+		}
+		cursor = pemEnd
+	}
+	return ranges
+}
+
+func indexInRanges(index int, ranges []textRange) bool {
+	for _, current := range ranges {
+		if index >= current.start && index < current.end {
+			return true
+		}
+	}
+	return false
 }
 
 func appendSegment(segments *[]textSegment, text string, protected bool) {
