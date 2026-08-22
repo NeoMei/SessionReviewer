@@ -36,13 +36,13 @@ var (
 	tokenCandidate        = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
 	stableID              = regexp.MustCompile(`^(?:msg_|rs_|ctc_|ctco_|ev-)(?:[A-Za-z0-9]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$`)
 	bearerCredential      = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)
+	privateKeyBegin       = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
 	namedSecretAssignment = regexp.MustCompile(`\b"?(?:(?i:(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret))|(?:[a-z][A-Za-z0-9]*(?:ApiKey|AccessToken|AuthToken|Authorization|Cookie|Password|Secret)))"?\s*[:=][ \t]*`)
 	nextFieldBoundary     = regexp.MustCompile(`(?:[,;][ \t]*|\r?\n[ \t]*|[ \t]+)"?[A-Za-z_][A-Za-z0-9_.-]*"?[ \t]*[:=]`)
 )
 
 func Default() Redactor {
 	return Redactor{rules: []rule{
-		{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\z)`)},
 		{"bearer", bearerCredential},
 		{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
 		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
@@ -53,6 +53,7 @@ func (r Redactor) Text(input string) Result {
 	counts := map[string]int{}
 	segments := []textSegment{{text: input}}
 	segments = applyNamedSecretRule(segments, counts)
+	segments = applyPrivateKeyRule(segments, counts)
 	for _, rule := range r.rules {
 		segments = applyRegexpRule(segments, rule, counts)
 	}
@@ -84,6 +85,31 @@ func (r Redactor) Text(input string) Result {
 	result := Result{Text: text.String()}
 	for _, key := range keys {
 		result.Findings = append(result.Findings, Finding{Rule: key, Count: counts[key]})
+	}
+	return result
+}
+
+func applyPrivateKeyRule(segments []textSegment, counts map[string]int) []textSegment {
+	result := make([]textSegment, 0, len(segments))
+	for _, segment := range segments {
+		if segment.protected {
+			result = append(result, segment)
+			continue
+		}
+		cursor := 0
+		for cursor < len(segment.text) {
+			begin := privateKeyBegin.FindStringIndex(segment.text[cursor:])
+			if begin == nil {
+				break
+			}
+			start := cursor + begin[0]
+			end, _ := privateKeyEnvelopeEnd(segment.text, start)
+			appendSegment(&result, segment.text[cursor:start], false)
+			appendSegment(&result, "[REDACTED:PRIVATE_KEY]", true)
+			counts["private_key"]++
+			cursor = end
+		}
+		appendSegment(&result, segment.text[cursor:], false)
 	}
 	return result
 }
@@ -179,6 +205,9 @@ func namedSecretValueEnd(text string, start int) (int, bool) {
 	if start >= len(text) {
 		return start, false
 	}
+	if end, ok := privateKeyEnvelopeEnd(text, start); ok {
+		return end, end < len(text)
+	}
 	switch text[start] {
 	case '"', '\'':
 		if end := quotedValueEnd(text, start, text[start]); end >= 0 {
@@ -202,6 +231,21 @@ func namedSecretValueEnd(text string, start int) (int, bool) {
 		return end, true
 	}
 	return len(text), false
+}
+
+func privateKeyEnvelopeEnd(text string, start int) (int, bool) {
+	begin := privateKeyBegin.FindStringIndex(text[start:])
+	if begin == nil || begin[0] != 0 {
+		return start, false
+	}
+	headerEnd := start + begin[1]
+	header := text[start:headerEnd]
+	label := strings.TrimSuffix(strings.TrimPrefix(header, "-----BEGIN "), "-----")
+	endMarker := "-----END " + label + "-----"
+	if offset := strings.Index(text[headerEnd:], endMarker); offset >= 0 {
+		return headerEnd + offset + len(endMarker), true
+	}
+	return len(text), true
 }
 
 func quotedValueEnd(text string, start int, quote byte) int {

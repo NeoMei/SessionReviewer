@@ -210,3 +210,60 @@ func TestDefaultAuthorizationUsesBearerRuleOnlyForWholeLogicalValue(t *testing.T
 		t.Fatal("authorization suffix had inaccurate findings")
 	}
 }
+
+func TestDefaultOuterNamedSecretConsumesCompletePEMBlock(t *testing.T) {
+	cases := []struct {
+		input    string
+		neighbor string
+	}{
+		{"password=-----BEGIN PRIVATE KEY-----\nINNERPRIVATEKEY=\nHeader: value\n-----END PRIVATE KEY-----\nmode=public", "\nmode=public"},
+		{"password=-----BEGIN RSA PRIVATE KEY-----\r\nFIRSTBODYLINE=\r\nMetadata: value\r\nSECONDBODYLINE==\r\n-----END RSA PRIVATE KEY-----\r\nmode=public", "\r\nmode=public"},
+		{"password=-----BEGIN OPENSSH PRIVATE KEY-----\nBody-Label: value\nANOTHERBODYLINE=\n-----END OPENSSH PRIVATE KEY-----\nmode=public", "\nmode=public"},
+	}
+	for i, tc := range cases {
+		result := Default().Text(tc.input)
+		if strings.Contains(result.Text, "PRIVATE KEY") || strings.Contains(result.Text, "BODY") || strings.ContainsRune(result.Text, '\x00') {
+			t.Fatalf("named PEM case %d leaked or retained residue", i)
+		}
+		if !strings.Contains(result.Text, tc.neighbor) {
+			t.Fatalf("named PEM case %d swallowed neighboring field", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("named PEM case %d had inaccurate findings", i)
+		}
+	}
+}
+
+func TestDefaultOuterNamedSecretConsumesTruncatedOrMalformedPEMToEnd(t *testing.T) {
+	inputs := []string{
+		"password=-----BEGIN PRIVATE KEY-----\nBODYLINE=\nMetadata: value",
+		"password=-----BEGIN PRIVATE KEY-----\r\nBODYLINE=\r\n-----END CERTIFICATE-----\r\nmode=public",
+		"password=-----BEGIN RSA PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY-----\nmode=public",
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if result.Text != "[REDACTED:NAMED_SECRET]" || len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("malformed named PEM case %d was not conservatively redacted", i)
+		}
+	}
+}
+
+func TestDefaultBarePrivateKeyStillUsesPrivateKeyRule(t *testing.T) {
+	inputs := []string{
+		"-----BEGIN PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY-----\nmode=public",
+		"-----BEGIN RSA PRIVATE KEY-----\r\nBODYLINE=\r\nMetadata: value",
+		"-----BEGIN RSA PRIVATE KEY-----\nBODYLINE=\n-----END PRIVATE KEY-----\nmode=public",
+	}
+	for i, input := range inputs {
+		result := Default().Text(input)
+		if strings.Contains(result.Text, "BODY") || strings.ContainsRune(result.Text, '\x00') {
+			t.Fatalf("bare PEM case %d leaked or retained residue", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "private_key", Count: 1}) {
+			t.Fatalf("bare PEM case %d had inaccurate findings", i)
+		}
+		if i == 2 && result.Text != "[REDACTED:PRIVATE_KEY]" {
+			t.Fatalf("bare PEM case %d accepted a mismatched END label", i)
+		}
+	}
+}
