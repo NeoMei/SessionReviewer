@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -50,11 +51,97 @@ func messageRecord(t *testing.T, line int, id, role, text string) session.Record
 
 func newExtractor(t *testing.T, sessionID, cwd string, from int, limits Limits) *Extractor {
 	t.Helper()
-	x, err := New(sessionID, cwd, from, redact.Default(), limits)
+	x, err := NewWithProjectID("p1", sessionID, cwd, from, redact.Default(), limits)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if from == 1 {
+		if err := x.SetExpectedCursor(CursorBoundary{}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return x
+}
+
+func TestExtractorPreservesValidRepeatedHexProvenanceVerbatim(t *testing.T) {
+	hash := strings.Repeat("0123456789abcdef", 4)
+	x := newExtractor(t, "s1", "/p", 1, DefaultLimits())
+	if err := x.SetExpectedCursor(CursorBoundary{}); err != nil {
+		t.Fatal(err)
+	}
+	r := messageRecord(t, 1, "u1", "user", "visible")
+	r.SourceHash = hash
+	if err := x.Add(r); err != nil {
+		t.Fatal(err)
+	}
+	packet := x.Packet()
+	if packet.Events[0].SourceHash != hash || packet.NextCursor.SourceHash != hash {
+		t.Fatalf("provenance changed: event=%q cursor=%q", packet.Events[0].SourceHash, packet.NextCursor.SourceHash)
+	}
+}
+
+func TestExtractorRejectsInvalidOrNonMonotonicRecordBoundariesWithoutAdvancing(t *testing.T) {
+	x := newExtractor(t, "s1", "/p", 1, DefaultLimits())
+	if err := x.SetExpectedCursor(CursorBoundary{}); err != nil {
+		t.Fatal(err)
+	}
+	valid := record(t, 1, `{"type":"reasoning"}`)
+	if err := x.Add(valid); err != nil {
+		t.Fatal(err)
+	}
+	want := x.Packet()
+	tests := []session.Record{
+		{Line: 0, Type: "session_meta", SourceHash: testHash, Payload: json.RawMessage(`{}`)},
+		{Line: 2, Type: "session_meta", Payload: json.RawMessage(`{}`)},
+		{Line: 2, Type: "session_meta", SourceHash: "abc", Payload: json.RawMessage(`{}`)},
+		{Line: 2, Type: "session_meta", SourceHash: strings.Repeat("A", 64), Payload: json.RawMessage(`{}`)},
+		{Line: 1, Type: "session_meta", SourceHash: testHash, Payload: json.RawMessage(`{}`)},
+		{Line: -1, Type: "session_meta", SourceHash: testHash, Payload: json.RawMessage(`{}`)},
+	}
+	for _, r := range tests {
+		if err := x.Add(r); err == nil {
+			t.Fatalf("accepted boundary %+v", r)
+		}
+		if got := x.Packet(); !reflect.DeepEqual(got, want) {
+			t.Fatalf("failure advanced packet: got=%+v want=%+v", got, want)
+		}
+	}
+}
+
+func TestNewWithProjectIDRejectsEmptyProjectIdentity(t *testing.T) {
+	if x, err := NewWithProjectID("", "s1", "/p", 1, redact.Default(), DefaultLimits()); err == nil || x != nil {
+		t.Fatalf("extractor=%v err=%v", x, err)
+	}
+}
+
+func TestNewWithProjectIDRejectsSchemaInvalidIdentityAndRange(t *testing.T) {
+	tests := []struct {
+		project, session, cwd string
+		from                  int
+	}{
+		{project: "p1", cwd: "/p", from: 1},
+		{project: "p1", session: "s1", from: 1},
+		{project: "p1", session: "s1", cwd: "/p", from: 0},
+	}
+	for _, test := range tests {
+		if x, err := NewWithProjectID(test.project, test.session, test.cwd, test.from, redact.Default(), DefaultLimits()); err == nil || x != nil {
+			t.Fatalf("accepted invalid constructor input: %+v extractor=%v err=%v", test, x, err)
+		}
+	}
+}
+
+func TestSetExpectedCursorCannotResetConsumedBoundary(t *testing.T) {
+	x := newExtractor(t, "s1", "/p", 1, DefaultLimits())
+	if err := x.Add(record(t, 1, `{"type":"reasoning"}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := x.Packet()
+	if err := x.SetExpectedCursor(CursorBoundary{}); err == nil {
+		t.Fatal("reset consumed boundary")
+	}
+	if got := x.Packet(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("boundary reset: got=%+v want=%+v", got, want)
+	}
 }
 
 func TestNewWithProjectIDCountsProjectInPacketLimit(t *testing.T) {
@@ -402,7 +489,7 @@ func TestExtractorRejectsInvalidLimitsWithoutPanicking(t *testing.T) {
 		{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: -1},
 	}
 	for _, limits := range cases {
-		x, err := New("s", "/", 1, redact.Default(), limits)
+		x, err := NewWithProjectID("p1", "s", "/", 1, redact.Default(), limits)
 		if x != nil || !errors.Is(err, ErrInvalidLimits) {
 			t.Fatalf("limits %+v: extractor=%v err=%v", limits, x, err)
 		}
@@ -412,6 +499,7 @@ func TestExtractorRejectsInvalidLimitsWithoutPanicking(t *testing.T) {
 func TestNewRejectsPacketLimitBelowEnvelopeAndAcceptsExactEquality(t *testing.T) {
 	envelope := Packet{
 		SchemaVersion:  2,
+		ProjectID:      "p1",
 		SessionID:      "s",
 		CWD:            "/",
 		FromCursor:     1,
@@ -426,11 +514,11 @@ func TestNewRejectsPacketLimitBelowEnvelopeAndAcceptsExactEquality(t *testing.T)
 	}
 	exact := utf8.RuneCount(encoded)
 
-	if x, err := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: exact}); err != nil || x == nil {
+	if x, err := NewWithProjectID("p1", "s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: exact}); err != nil || x == nil {
 		t.Fatalf("exact envelope limit rejected: extractor=%v err=%v", x, err)
 	}
 	for _, limit := range []int{exact - 1, 1} {
-		x, err := New("s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: limit})
+		x, err := NewWithProjectID("p1", "s", "/", 1, redact.Default(), Limits{MaxEvents: 1, MaxSummaryRunes: 1, MaxPacketRunes: limit})
 		if x != nil || !errors.Is(err, ErrInvalidLimits) {
 			t.Fatalf("impossible packet limit %d: extractor=%v err=%v", limit, x, err)
 		}

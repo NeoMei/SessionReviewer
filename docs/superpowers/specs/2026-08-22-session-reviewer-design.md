@@ -354,21 +354,27 @@ The following machine identity fields are reserved: `id`, `entity_type`, `projec
 The engine first creates a bounded, redacted evidence packet:
 
 ```bash
-session-reviewer extract --current --output evidence.json
+session-reviewer prepare checkpoint --sessions-root <sessions-root> --output evidence.json
 ```
 
 Example envelope:
 
 ```json
 {
+  "schema_version": 2,
   "project_id": "project-session-reviewer",
   "session_id": "01a02971-...",
+  "cwd": "/path/to/project",
   "from_cursor": 120,
   "to_cursor": 486,
-  "events": [],
-  "existing_entities": []
+  "expected_cursor": {"line": 119, "source_hash": "<64 lowercase hex>"},
+  "next_cursor": {"line": 486, "source_hash": "<64 lowercase hex>"},
+  "has_more": false,
+  "events": []
 }
 ```
+
+The packet digest is `sha256:` plus the lowercase SHA-256 of the deterministic compact JSON encoding of that exact envelope. `prepare` reads but never mutates the accepted cursor; a later apply stage compares `expected_cursor` and commits `next_cursor` only after durable semantic writes.
 
 The Skill produces a JSON-Schema-conforming proposal:
 

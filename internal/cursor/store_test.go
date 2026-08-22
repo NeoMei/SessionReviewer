@@ -34,6 +34,29 @@ func TestStoreCommitAndReload(t *testing.T) {
 	}
 }
 
+func TestStoreNormalizesLegacyUppercaseHashes(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	upper := strings.Repeat("AB", 32)
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: upper}
+	if err := store.Commit("s1", Cursor{}, next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadReadOnly("s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastHash != strings.ToLower(upper) {
+		t.Fatalf("hash=%q", got.LastHash)
+	}
+	body, err := os.ReadFile(filepath.Join(store.Root, "cursors", "s1.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(upper)) {
+		t.Fatalf("uppercase hash persisted: %s", body)
+	}
+}
+
 func TestLoadReadOnlyRootUsesPinnedDataRootWithoutCreatingState(t *testing.T) {
 	base := t.TempDir()
 	data := filepath.Join(base, "data")

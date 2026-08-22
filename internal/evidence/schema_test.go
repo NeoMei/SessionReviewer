@@ -35,4 +35,9 @@ func TestEvidenceV2SchemaHasStrictConditionalCursorHashes(t *testing.T) {
 			t.Fatalf("cursor condition %s missing", contract)
 		}
 	}
+	for _, contract := range []string{`"cursor_boundary":{"type":"object","additionalProperties":false`, `"event":{"type":"object","additionalProperties":false`, `"required":["id","timestamp","jsonl_line","source_hash","kind","summary"]`} {
+		if !strings.Contains(compact, contract) {
+			t.Fatalf("strict nested schema contract %s missing", contract)
+		}
+	}
 }

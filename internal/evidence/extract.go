@@ -53,15 +53,15 @@ type Extractor struct {
 	warningCounts map[string]int
 	usedIDs       map[string]struct{}
 	full          bool
-}
-
-func New(sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
-	return NewWithProjectID("", sessionID, cwd, from, redactor, limits)
+	expectedSet   bool
 }
 
 // NewWithProjectID constructs an extractor whose packet-size accounting includes
 // the final project identifier from the beginning of extraction.
 func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
+	if projectID == "" || sessionID == "" || cwd == "" || from < 1 {
+		return nil, fmt.Errorf("project id, session id, cwd, and positive from cursor are required")
+	}
 	if err := limits.Validate(); err != nil {
 		return nil, err
 	}
@@ -104,6 +104,9 @@ func (x *Extractor) SetExpectedCursor(boundary CursorBoundary) error {
 	if boundary.Line < 0 || boundary.Line != x.packet.FromCursor-1 {
 		return fmt.Errorf("invalid expected cursor line")
 	}
+	if x.packet.ToCursor != boundary.Line {
+		return fmt.Errorf("expected cursor cannot replace a consumed boundary")
+	}
 	if boundary.Line == 0 {
 		if boundary.SourceHash != "" {
 			return fmt.Errorf("invalid expected cursor hash at line zero")
@@ -119,6 +122,7 @@ func (x *Extractor) SetExpectedCursor(boundary CursorBoundary) error {
 	}
 	x.packet.ExpectedCursor = boundary
 	x.packet.NextCursor = boundary
+	x.expectedSet = true
 	return nil
 }
 
@@ -128,6 +132,15 @@ func (x *Extractor) Add(record session.Record) error {
 	}
 	if x.full {
 		return ErrPacketFull
+	}
+	if !x.expectedSet {
+		return fmt.Errorf("expected cursor is required before adding records")
+	}
+	if record.Line <= 0 || record.Line <= x.packet.NextCursor.Line {
+		return fmt.Errorf("record line is not strictly beyond the current boundary")
+	}
+	if !lowercaseSHA256.MatchString(record.SourceHash) {
+		return fmt.Errorf("record source hash is not a lowercase SHA-256 digest")
 	}
 
 	switch record.Type {
@@ -229,15 +242,14 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 
 	safeItemID, itemFindings := x.redact(itemID)
 	safeTimestamp, timestampFindings := x.redact(record.Timestamp)
-	safeSourceHash, hashFindings := x.redact(record.SourceHash)
+	safeSourceHash := record.SourceHash
 	safeToolName, toolFindings := x.redact(toolName)
 	safeSummary, summaryFindings := x.redact(summary)
 	safeSummary = bound(safeSummary, x.limits.MaxSummaryRunes)
 
-	findings := make([]redact.Finding, 0, len(itemFindings)+len(timestampFindings)+len(hashFindings)+len(toolFindings)+len(summaryFindings))
+	findings := make([]redact.Finding, 0, len(itemFindings)+len(timestampFindings)+len(toolFindings)+len(summaryFindings))
 	findings = append(findings, itemFindings...)
 	findings = append(findings, timestampFindings...)
-	findings = append(findings, hashFindings...)
 	findings = append(findings, toolFindings...)
 	findings = append(findings, summaryFindings...)
 

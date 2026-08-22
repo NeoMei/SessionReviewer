@@ -104,11 +104,11 @@ session-reviewer.exe prepare review `
   --from-start
 ```
 
-`checkpoint` 从已接受 cursor 的下一行准备证据；`review --from-start` 忽略 cursor，从第 1 行重放。`--from-start` 只适用于 `review`。
+`checkpoint` 从已接受 cursor 的下一行准备证据；`review --from-start` 忽略 cursor，从第 1 行重放。`--from-start` 只适用于 `review`。输出为 schema v2：`expected_cursor` 精确绑定 prepare 读到的 accepted cursor，`next_cursor` 精确绑定 packet 已完整消费的最后一条 JSONL 记录；正数行的两个边界都携带该行的 64 位小写 SHA-256。packet digest 是对完整 packet 的确定性紧凑 JSON 字节计算的 `sha256:<hex>`。
 
 Codex sessions root 按以下顺序解析：`--sessions-root`，`SESSION_REVIEWER_SESSIONS_ROOT`，`$CODEX_HOME/sessions`，最后是用户目录下的 `.codex/sessions`。当未传 `--session` 时，当前 session ID 依次取 `--current-session-id`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；全部缺失时才使用 cwd 和时间窗口保守推断。完整的 ID 优先级是 `--session` 最高，然后才是上述当前-session 来源。
 
-重要语义：`prepare` 永远不会创建、推进、修复或提交 accepted cursor。packet 满时会返回 `has_more: true`，`to_cursor` 停在最后一个已进入 packet 的记录；未来的 apply 阶段只有在语义变更成功持久化后才会提交 cursor，因此下一段可从首个未接受记录恢复。
+重要语义：`prepare` 永远不会创建、推进、修复或提交 accepted cursor。packet 满时会返回 `has_more: true`，`next_cursor` 和兼容字段 `to_cursor` 都停在最后一个已完整消费的记录，不会跨过因 packet 已满而被拒绝的记录。未来的 apply 阶段只有在语义变更成功持久化后才会以 `expected_cursor` 做 CAS 并提交 `next_cursor`。
 
 ## 输出与隐私边界
 

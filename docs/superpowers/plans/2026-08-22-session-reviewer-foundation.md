@@ -1,5 +1,7 @@
 # SessionReviewer Cross-Platform Foundation Implementation Plan
 
+> Historical plan note: evidence packet snippets below describe the original schema v1 milestone. The current executable contract is schema v2 with exact `expected_cursor` and `next_cursor` line/source-hash boundaries; old `to_cursor + 1` snippets are not the current protocol.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the deterministic macOS/Windows foundation that initializes a project, locates Codex sessions, streams and redacts JSONL records, emits bounded evidence packets, and preserves cursor state for later Skill-driven semantic workflows.

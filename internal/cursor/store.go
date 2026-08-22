@@ -93,6 +93,7 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err := validateCursor(expected, sessionID, true); err != nil {
 		return fmt.Errorf("invalid expected cursor: %w", err)
 	}
+	expected.LastHash = strings.ToLower(expected.LastHash)
 	root, err := s.open(sessionID, true)
 	if err != nil {
 		return err
@@ -117,6 +118,7 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err := validateCursor(next, sessionID, false); err != nil {
 		return fmt.Errorf("invalid next cursor: %w", err)
 	}
+	next.LastHash = strings.ToLower(next.LastHash)
 	if next.LastLine < current.LastLine {
 		return fmt.Errorf("invalid next cursor: last line decreases")
 	}
@@ -462,6 +464,7 @@ func readCursor(root *os.Root, name, sessionID string, before os.FileInfo) (Curs
 	if err := validateCursor(current, sessionID, false); err != nil {
 		return Cursor{}, fmt.Errorf("cursor state is invalid: %w", err)
 	}
+	current.LastHash = strings.ToLower(current.LastHash)
 	return current, nil
 }
 
