@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,14 +124,14 @@ func TestDiscoverReadsOnlyJSONLSessionMetadata(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Discover(root)
+	discovery, err := Discover(root, "")
 	wantStartedAt := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
-	if err != nil || len(got) != 1 || got[0].ID != "s1" || !got[0].StartedAt.Equal(wantStartedAt) {
-		t.Fatalf("got=%+v err=%v", got, err)
+	if err != nil || len(discovery.Candidates) != 1 || discovery.Candidates[0].ID != "s1" || !discovery.Candidates[0].StartedAt.Equal(wantStartedAt) {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
 }
 
-func TestDiscoverStopsAfterSessionMetadata(t *testing.T) {
+func TestDiscoverExplicitIDStopsAfterUnrelatedSessionMetadata(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "rollout.jsonl")
 	content := `{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"/work/项目"}}` + "\n" +
@@ -139,9 +140,9 @@ func TestDiscoverStopsAfterSessionMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := Discover(root)
-	if err != nil || len(got) != 1 || got[0].ID != "s1" {
-		t.Fatalf("got=%+v err=%v", got, err)
+	discovery, err := Discover(root, "wanted")
+	if err != nil || len(discovery.Candidates) != 1 || discovery.Candidates[0].ID != "s1" || len(discovery.Issues) != 0 {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
 	}
 }
 
@@ -154,8 +155,14 @@ func TestDiscoverRejectsMalformedJSONBeforeMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Discover(root)
-	requireErrorContains(t, err, path, "malformed", "1")
+	discovery, err := Discover(root, "")
+	if err != nil || len(discovery.Issues) != 1 {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	requireErrorContains(t, discovery.Issues[0].Err, path, "malformed", "1")
+	if discovery.Issues[0].SessionID != "s1" {
+		t.Fatalf("issue=%+v", discovery.Issues[0])
+	}
 }
 
 func TestDiscoverRejectsMissingSessionIDWithPathAndLine(t *testing.T) {
@@ -167,8 +174,11 @@ func TestDiscoverRejectsMissingSessionIDWithPathAndLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Discover(root)
-	requireErrorContains(t, err, path, "line 2", "session id")
+	discovery, err := Discover(root, "")
+	if err != nil || len(discovery.Issues) != 1 {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	requireErrorContains(t, discovery.Issues[0].Err, path, "line 2", "session id")
 }
 
 func TestDiscoverPayloadDecodeErrorIncludesPathAndLine(t *testing.T) {
@@ -180,8 +190,11 @@ func TestDiscoverPayloadDecodeErrorIncludesPathAndLine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Discover(root)
-	requireErrorContains(t, err, path, "line 2", "metadata")
+	discovery, err := Discover(root, "")
+	if err != nil || len(discovery.Issues) != 1 {
+		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+	requireErrorContains(t, discovery.Issues[0].Err, path, "line 2", "metadata")
 }
 
 func TestDiscoverRejectsSymlinkRoot(t *testing.T) {
@@ -191,7 +204,7 @@ func TestDiscoverRejectsSymlinkRoot(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, err := Discover(root)
+	_, err := Discover(root, "")
 	requireErrorContains(t, err, root, "symlink or reparse point")
 }
 
@@ -206,8 +219,74 @@ func TestDiscoverRejectsSymlinkFile(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	_, err := Discover(root)
+	_, err := Discover(root, "")
 	requireErrorContains(t, err, path, "symlink or reparse point")
+}
+
+func TestDiscoverExplicitIDIgnoresUnrelatedCorruptFile(t *testing.T) {
+	root := t.TempDir()
+	writeCandidate(t, root, "selected.jsonl", "wanted", "/project")
+	if err := os.WriteFile(filepath.Join(root, "broken.jsonl"), []byte("{not-json\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveDiscovery(discovery, ResolveOptions{SessionID: "wanted"})
+	if err != nil || got.ID != "wanted" {
+		t.Fatalf("got=%+v err=%v issues=%+v", got, err, discovery.Issues)
+	}
+}
+
+func TestDiscoverExplicitIDRejectsSelectedCorruptCandidate(t *testing.T) {
+	root := t.TempDir()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project"}}` + "\n{broken\n"
+	if err := os.WriteFile(filepath.Join(root, "selected.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveDiscovery(discovery, ResolveOptions{SessionID: "wanted"})
+	if err == nil || !strings.Contains(err.Error(), "selected session candidate is corrupt") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestDiscoverExplicitIDRejectsCorruptDuplicateCandidate(t *testing.T) {
+	root := t.TempDir()
+	writeCandidate(t, root, "one.jsonl", "wanted", "/project")
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project"}}` + "\n{broken\n"
+	if err := os.WriteFile(filepath.Join(root, "two.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = ResolveDiscovery(discovery, ResolveOptions{SessionID: "wanted"})
+	if err == nil || !strings.Contains(err.Error(), "duplicate session id") {
+		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveDiscoveryCurrentRejectsAnyIssue(t *testing.T) {
+	discovery := Discovery{
+		Candidates: []Candidate{{ID: "healthy", CWD: "/project"}},
+		Issues:     []DiscoveryIssue{{Path: "/sessions/broken.jsonl", Err: errors.New("malformed JSONL record")}},
+	}
+	_, err := ResolveDiscovery(discovery, ResolveOptions{CWD: "/project", Now: time.Now()})
+	requireErrorContains(t, err, "current-session discovery", "corrupt candidates", "select a session explicitly")
+}
+
+func writeCandidate(t *testing.T, root, name, id, cwd string) {
+	t.Helper()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"` + id + `","cwd":"` + cwd + `"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestResolveNormalizesWindowsPaths(t *testing.T) {

@@ -60,7 +60,7 @@ func Run(opts Options) (evidence.Packet, error) {
 			return evidence.Packet{}, fmt.Errorf("prepare data root: %w", err)
 		}
 	}
-	candidates, err := session.Discover(opts.SessionsRoot)
+	discovery, err := session.Discover(opts.SessionsRoot, opts.SessionID)
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("discover sessions: %w", err)
 	}
@@ -68,7 +68,7 @@ func Run(opts Options) (evidence.Packet, error) {
 		same, _ := sameProjectDirectory(opts.GOOS, first, second)
 		return same
 	}
-	chosen, err := session.Resolve(candidates, session.ResolveOptions{
+	chosen, err := session.ResolveDiscovery(discovery, session.ResolveOptions{
 		SessionID: opts.SessionID, CWD: opts.CWD, GOOS: opts.GOOS,
 		Now: opts.Now, AmbiguityWindow: opts.AmbiguityWindow, PathsEqual: pathsEqual,
 	})

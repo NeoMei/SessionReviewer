@@ -31,6 +31,17 @@ type Candidate struct {
 	relative  string
 }
 
+type DiscoveryIssue struct {
+	Path      string
+	SessionID string
+	Err       error
+}
+
+type Discovery struct {
+	Candidates []Candidate
+	Issues     []DiscoveryIssue
+}
+
 type ResolveOptions struct {
 	SessionID       string
 	CWD             string
@@ -40,14 +51,14 @@ type ResolveOptions struct {
 	PathsEqual      func(string, string) bool
 }
 
-func Discover(root string) ([]Candidate, error) {
+func Discover(root, selectedSessionID string) (Discovery, error) {
 	directory, err := pathguard.Open(root)
 	if err != nil {
-		return nil, fmt.Errorf("sessions path %q is redirected or invalid: %w", root, err)
+		return Discovery{}, fmt.Errorf("sessions path %q is redirected or invalid: %w", root, err)
 	}
 	defer directory.Close()
 
-	var candidates []Candidate
+	var discovery Discovery
 	err = fs.WalkDir(directory.Root.FS(), ".", func(relative string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -68,13 +79,14 @@ func Discover(root string) ([]Candidate, error) {
 		if err != nil {
 			return fmt.Errorf("open session candidate %q: %w", path, err)
 		}
-		candidate, found, discoverErr := discoverCandidateFile(file, path)
+		candidate, found, issue := discoverCandidateFile(file, path, selectedSessionID)
 		closeErr := file.Close()
-		if discoverErr != nil {
-			return discoverErr
-		}
 		if closeErr != nil {
 			return closeErr
+		}
+		if issue != nil {
+			discovery.Issues = append(discovery.Issues, *issue)
+			return nil
 		}
 		if !found {
 			return nil
@@ -84,20 +96,23 @@ func Discover(root string) ([]Candidate, error) {
 		candidate.fileInfo = identity
 		candidate.rootInfo = directory.Info()
 		candidate.relative = relative
-		candidates = append(candidates, candidate)
+		discovery.Candidates = append(discovery.Candidates, candidate)
 		return nil
 	})
-	return candidates, err
+	if err != nil {
+		return Discovery{}, err
+	}
+	return discovery, nil
 }
 
-func discoverCandidateFile(file *os.File, path string) (Candidate, bool, error) {
+func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candidate, bool, *DiscoveryIssue) {
 	var candidate Candidate
 	var metadataLine int
+	var metadataErr error
 	summary, err := StreamFile(file, DecodeOptions{MaxRecordBytes: 64 << 20}, func(record Record) error {
 		if record.Type != "session_meta" {
 			return nil
 		}
-		metadataLine = record.Line
 
 		var meta struct {
 			ID     string `json:"id"`
@@ -105,35 +120,57 @@ func discoverCandidateFile(file *os.File, path string) (Candidate, bool, error) 
 			Source string `json:"source"`
 		}
 		if err := json.Unmarshal(record.Payload, &meta); err != nil {
-			return fmt.Errorf("decode session metadata in %q at line %d: %w", path, record.Line, err)
+			if metadataErr == nil {
+				metadataErr = fmt.Errorf("decode session metadata in %q at line %d: %w", path, record.Line, err)
+			}
+			return nil
+		}
+		if candidate.ID == "" && strings.TrimSpace(meta.ID) != "" {
+			candidate.ID = meta.ID
 		}
 		if strings.TrimSpace(meta.ID) == "" {
-			return fmt.Errorf("decode session metadata in %q at line %d: session id is missing or blank", path, record.Line)
+			if metadataErr == nil {
+				metadataErr = fmt.Errorf("decode session metadata in %q at line %d: session id is missing or blank", path, record.Line)
+			}
+			return nil
 		}
 
-		candidate = Candidate{
-			ID:     meta.ID,
-			Path:   path,
-			CWD:    meta.CWD,
-			Source: meta.Source,
-		}
-		if record.Timestamp != "" {
-			startedAt, err := time.Parse(time.RFC3339Nano, record.Timestamp)
-			if err != nil {
-				return fmt.Errorf("decode session timestamp in %q at line %d: %w", path, record.Line, err)
+		if metadataLine == 0 {
+			metadataLine = record.Line
+			candidate = Candidate{
+				ID:     meta.ID,
+				Path:   path,
+				CWD:    meta.CWD,
+				Source: meta.Source,
 			}
-			candidate.StartedAt = startedAt
+			if record.Timestamp != "" {
+				startedAt, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+				if err != nil {
+					metadataErr = fmt.Errorf("decode session timestamp in %q at line %d: %w", path, record.Line, err)
+				} else {
+					candidate.StartedAt = startedAt
+				}
+			}
 		}
-		return ErrStop
+		if selectedSessionID != "" && meta.ID != selectedSessionID {
+			return ErrStop
+		}
+		return nil
 	})
+	issue := func(issueErr error) (Candidate, bool, *DiscoveryIssue) {
+		return Candidate{}, false, &DiscoveryIssue{Path: path, SessionID: candidate.ID, Err: issueErr}
+	}
+	if metadataErr != nil {
+		return issue(metadataErr)
+	}
 	if summary.MalformedLines > 0 {
 		if metadataLine > 0 {
-			return Candidate{}, false, fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s) before metadata at line %d", path, summary.MalformedLines, metadataLine)
+			return issue(fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s) in candidate with metadata at line %d", path, summary.MalformedLines, metadataLine))
 		}
-		return Candidate{}, false, fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s)", path, summary.MalformedLines)
+		return issue(fmt.Errorf("discover session metadata in %q: %d malformed JSONL record(s)", path, summary.MalformedLines))
 	}
 	if err != nil && !errors.Is(err, ErrStop) {
-		return Candidate{}, false, fmt.Errorf("stream session %q: %w", path, err)
+		return issue(fmt.Errorf("stream session %q: %w", path, err))
 	}
 	return candidate, candidate.ID != "", nil
 }
@@ -232,4 +269,33 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 		}
 	}
 	return matches[0], nil
+}
+
+func ResolveDiscovery(discovery Discovery, opts ResolveOptions) (Candidate, error) {
+	if opts.SessionID == "" && len(discovery.Issues) > 0 {
+		return Candidate{}, fmt.Errorf("current-session discovery contains corrupt candidates; select a session explicitly")
+	}
+
+	matches := 0
+	for _, candidate := range discovery.Candidates {
+		if candidate.ID == opts.SessionID {
+			matches++
+		}
+	}
+	selectedIssues := 0
+	for _, issue := range discovery.Issues {
+		if issue.SessionID == opts.SessionID {
+			selectedIssues++
+		}
+	}
+	if opts.SessionID != "" && selectedIssues > 0 && matches+selectedIssues > 1 {
+		return Candidate{}, fmt.Errorf("duplicate session id %q includes a corrupt candidate", opts.SessionID)
+	}
+	if selectedIssues == 1 {
+		return Candidate{}, fmt.Errorf("selected session candidate is corrupt")
+	}
+	if selectedIssues > 1 {
+		return Candidate{}, fmt.Errorf("duplicate session id %q includes corrupt candidates", opts.SessionID)
+	}
+	return Resolve(discovery.Candidates, opts)
 }

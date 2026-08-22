@@ -152,6 +152,77 @@ func (f runFixture) sourceHash(t *testing.T, line int) string {
 	return hash
 }
 
+func (f runFixture) cursorBytes(t *testing.T) ([]byte, string) {
+	t.Helper()
+	path := filepath.Join(f.data, "projects", "p1", "cursors", "s1.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body, path
+}
+
+func (f runFixture) requireFailurePreservesOutputAndCursor(t *testing.T, opts Options, before []byte, cursorPath string, errorParts ...string) {
+	t.Helper()
+	_, err := Run(opts)
+	for _, part := range errorParts {
+		if err == nil || !strings.Contains(err.Error(), part) {
+			t.Fatalf("error %q does not contain %q", err, part)
+		}
+	}
+	if _, statErr := os.Stat(f.output); !os.IsNotExist(statErr) {
+		t.Fatalf("output created: %v", statErr)
+	}
+	after, readErr := os.ReadFile(cursorPath)
+	if readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("cursor changed: before=%q after=%q err=%v", before, after, readErr)
+	}
+}
+
+func TestRunExplicitSessionIgnoresUnrelatedCorruptCandidate(t *testing.T) {
+	f := newRunFixture(t, "")
+	const canary = "UNRELATED-CORRUPTION-CANARY"
+	f.writeSession(t, "broken.jsonl", "{not-json-"+canary+"\n", f.now)
+	opts := f.options("review")
+	opts.SessionID = "s1"
+	packet, err := Run(opts)
+	if err != nil || packet.SessionID != "s1" {
+		t.Fatalf("packet=%+v err=%v", packet, err)
+	}
+}
+
+func TestRunExplicitSessionRejectsSelectedCorruptCandidateWithoutOutputOrCursorAdvance(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 1)
+	before, cursorPath := f.cursorBytes(t)
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"goal"}]}}`,
+		"{broken-selected-candidate"), f.now)
+	opts := f.options("checkpoint")
+	opts.SessionID = "s1"
+	f.requireFailurePreservesOutputAndCursor(t, opts, before, cursorPath, "selected session candidate is corrupt")
+}
+
+func TestRunExplicitSessionRejectsCorruptDuplicateWithoutOutputOrCursorAdvance(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 1)
+	before, cursorPath := f.cursorBytes(t)
+	f.writeSession(t, "duplicate.jsonl", sessionBody(f.projectRoot, "{broken-duplicate"), f.now)
+	opts := f.options("checkpoint")
+	opts.SessionID = "s1"
+	f.requireFailurePreservesOutputAndCursor(t, opts, before, cursorPath, "duplicate session id")
+}
+
+func TestRunInferredSessionRejectsAnyCorruptCandidateWithoutOutputOrCursorAdvance(t *testing.T) {
+	f := newRunFixture(t, "")
+	f.commitCursor(t, 1)
+	before, cursorPath := f.cursorBytes(t)
+	const canary = "INFERRED-CORRUPTION-CANARY"
+	f.writeSession(t, "broken.jsonl", "{not-json-"+canary+"\n", f.now)
+	f.requireFailurePreservesOutputAndCursor(t, f.options("checkpoint"), before, cursorPath,
+		"current-session discovery contains corrupt candidates", "select a session explicitly")
+}
+
 func replaceDataPath(t *testing.T, dataPath, decoyPath string) string {
 	t.Helper()
 	moved := dataPath + "-moved"
@@ -301,14 +372,13 @@ func TestRunRejectsCursorBeyondTruncatedSession(t *testing.T) {
 	}
 }
 
-func TestRunRejectsMalformedCursorRecord(t *testing.T) {
+func TestRunRejectsMalformedCandidateBeforeCursorValidation(t *testing.T) {
 	f := newRunFixture(t, "")
 	f.commitCursor(t, 2)
+	before, cursorPath := f.cursorBytes(t)
 	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot, "{"), f.now)
-	_, err := Run(f.options("checkpoint"))
-	if !errors.Is(err, ErrCursorSourceDrift) {
-		t.Fatalf("err=%v", err)
-	}
+	f.requireFailurePreservesOutputAndCursor(t, f.options("checkpoint"), before, cursorPath,
+		"current-session discovery contains corrupt candidates")
 }
 
 func TestRunReviewFromStartBypassesCursorSourceValidation(t *testing.T) {
@@ -438,7 +508,7 @@ func TestRunPacketFullIsSuccessfulSegmentedOutput(t *testing.T) {
 	}
 }
 
-func TestRunCountsMalformedLinesWithoutLeakingTheirContents(t *testing.T) {
+func TestRunRejectsMalformedCandidateWithoutLeakingItsContents(t *testing.T) {
 	const canary = "MALFORMED-CANARY-DO-NOT-LEAK"
 	f := newRunFixture(t, sessionBody("PROJECT",
 		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"d1","role":"developer","content":[{"type":"input_text","text":"DEVELOPER-CANARY"}]}}`,
@@ -452,16 +522,15 @@ func TestRunCountsMalformedLinesWithoutLeakingTheirContents(t *testing.T) {
 	if err := os.Chtimes(path, f.now, f.now); err != nil {
 		t.Fatal(err)
 	}
-	packet, err := Run(f.options("review"))
-	if err != nil {
-		t.Fatal(err)
+	_, err := Run(f.options("review"))
+	if err == nil || !strings.Contains(err.Error(), "current-session discovery contains corrupt candidates") {
+		t.Fatalf("err=%v", err)
 	}
-	encoded, err := json.Marshal(packet)
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(err.Error(), canary) || strings.Contains(err.Error(), "DEVELOPER-CANARY") || strings.Contains(err.Error(), "UNKNOWN-CANARY") {
+		t.Fatalf("error leaked candidate contents: %v", err)
 	}
-	if !containsString(packet.Warnings, "malformed_jsonl_lines:1") || strings.Contains(string(encoded), "CANARY") {
-		t.Fatalf("packet=%s", encoded)
+	if _, statErr := os.Stat(f.output); !os.IsNotExist(statErr) {
+		t.Fatalf("output created: %v", statErr)
 	}
 }
 
