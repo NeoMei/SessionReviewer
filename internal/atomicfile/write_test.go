@@ -2,11 +2,9 @@ package atomicfile
 
 import (
 	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestWriteReplacesFileAndLeavesNoTemporaryFile(t *testing.T) {
@@ -50,7 +48,7 @@ func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {
 	}
 	defer root.Close()
 	if err := os.Rename(live, moved); err != nil {
-		t.Fatal(err)
+		t.Skipf("renaming an open root is unavailable: %v", err)
 	}
 	if err := os.Symlink(outside, live); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -76,88 +74,98 @@ func TestBackupPathMatchesReplacementProtocol(t *testing.T) {
 	}
 }
 
-func TestWindowsReplacementPreservesBackupWhenInstallAndRollbackFail(t *testing.T) {
-	const (
-		temporary   = "state.tmp"
-		destination = "state.json"
-		backup      = destination + ".session-reviewer-backup"
-	)
-	installErr := errors.New("install failed")
-	rollbackErr := errors.New("rollback failed")
-	files := map[string]string{temporary: "new", destination: "old"}
-	renames := 0
+func TestReplaceWindowsFileSelectsReplaceForExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "state.json")
+	temporary := filepath.Join(dir, "state.tmp")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	replaced := false
 	ops := windowsFileOps{
-		stat: func(name string) (fs.FileInfo, error) {
-			if _, ok := files[name]; !ok {
-				return nil, os.ErrNotExist
+		stat: os.Stat,
+		replaceExisting: func(gotDestination, gotTemporary string) error {
+			replaced = true
+			if gotDestination != destination || gotTemporary != temporary {
+				t.Fatalf("replaceExisting(%q, %q)", gotDestination, gotTemporary)
 			}
-			return fakeFileInfo{name: name}, nil
-		},
-		rename: func(oldpath, newpath string) error {
-			renames++
-			switch renames {
-			case 2:
-				return installErr
-			case 3:
-				return rollbackErr
-			}
-			files[newpath] = files[oldpath]
-			delete(files, oldpath)
 			return nil
 		},
-		remove: func(name string) error {
-			delete(files, name)
+		moveNew: func(string, string) error {
+			return errors.New("moveNew must not be used")
+		},
+	}
+
+	if err := replaceWindowsFile(temporary, destination, ops); err != nil {
+		t.Fatal(err)
+	}
+	if !replaced {
+		t.Fatal("replaceExisting was not selected")
+	}
+}
+
+func TestReplaceWindowsFileSelectsMoveForAbsentDestination(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "state.json")
+	temporary := filepath.Join(dir, "state.tmp")
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := false
+	ops := windowsFileOps{
+		stat: os.Stat,
+		replaceExisting: func(string, string) error {
+			return errors.New("replaceExisting must not be used")
+		},
+		moveNew: func(gotTemporary, gotDestination string) error {
+			moved = true
+			if gotTemporary != temporary || gotDestination != destination {
+				t.Fatalf("moveNew(%q, %q)", gotTemporary, gotDestination)
+			}
 			return nil
+		},
+	}
+
+	if err := replaceWindowsFile(temporary, destination, ops); err != nil {
+		t.Fatal(err)
+	}
+	if !moved {
+		t.Fatal("moveNew was not selected")
+	}
+}
+
+func TestReplaceWindowsFileFailurePreservesExistingDestination(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "state.json")
+	temporary := filepath.Join(dir, "state.tmp")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(temporary, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replaceErr := errors.New("sharing violation")
+	ops := windowsFileOps{
+		stat: os.Stat,
+		replaceExisting: func(string, string) error {
+			return replaceErr
+		},
+		moveNew: func(string, string) error {
+			return errors.New("moveNew must not be used")
 		},
 	}
 
 	err := replaceWindowsFile(temporary, destination, ops)
-	if !errors.Is(err, installErr) || !errors.Is(err, rollbackErr) {
-		t.Fatalf("error does not preserve install and rollback failures: %v", err)
-	}
-	if got := files[backup]; got != "old" {
-		t.Fatalf("recoverable backup=%q files=%v", got, files)
-	}
-}
-
-func TestWindowsReplacementPreservesBothFilesWhenStaleBackupCleanupFails(t *testing.T) {
-	cleanupErr := errors.New("cleanup failed")
-	files := map[string]string{
-		"state.tmp":                          "new",
-		"state.json":                         "current",
-		"state.json.session-reviewer-backup": "recoverable",
-	}
-	ops := windowsFileOps{
-		stat: func(name string) (fs.FileInfo, error) {
-			if _, ok := files[name]; !ok {
-				return nil, os.ErrNotExist
-			}
-			return fakeFileInfo{name: name}, nil
-		},
-		rename: func(oldpath, newpath string) error {
-			files[newpath] = files[oldpath]
-			delete(files, oldpath)
-			return nil
-		},
-		remove: func(string) error { return cleanupErr },
-	}
-
-	err := replaceWindowsFile("state.tmp", "state.json", ops)
-	if !errors.Is(err, cleanupErr) {
+	if !errors.Is(err, replaceErr) {
 		t.Fatalf("error=%v", err)
 	}
-	if files["state.json"] != "current" || files["state.json.session-reviewer-backup"] != "recoverable" {
-		t.Fatalf("durable files changed after cleanup failure: %v", files)
+	got, readErr := os.ReadFile(destination)
+	if readErr != nil || string(got) != "old" {
+		t.Fatalf("destination=%q err=%v", got, readErr)
 	}
 }
-
-type fakeFileInfo struct {
-	name string
-}
-
-func (f fakeFileInfo) Name() string     { return f.name }
-func (fakeFileInfo) Size() int64        { return 0 }
-func (fakeFileInfo) Mode() fs.FileMode  { return 0 }
-func (fakeFileInfo) ModTime() time.Time { return time.Time{} }
-func (fakeFileInfo) IsDir() bool        { return false }
-func (fakeFileInfo) Sys() any           { return nil }

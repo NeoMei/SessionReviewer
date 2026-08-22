@@ -28,6 +28,9 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test ./...
+      - name: Stress native Windows replacement
+        if: runner.os == 'Windows'
+        run: go test ./internal/atomicfile -run '^TestWindows' -count=20
       - run: go test -race ./... -skip '^TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB$'
       - run: go test ./internal/prepare -run '^TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree$' -count=2
       - run: go vet ./...
