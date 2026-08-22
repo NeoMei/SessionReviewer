@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -491,5 +492,25 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 				t.Fatalf("nested roots accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestFoundationHardeningSelectedSessionIsIndependentAndIncremental(t *testing.T) {
+	fixture := newFoundationFixture(t)
+	fixture.writeSession(t, messageRecord("u1", "user", "first accepted packet"))
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "unrelated-corrupt.jsonl"), []byte("{broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := fixture.options("review")
+	first, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.SessionID != foundationSessionID || first.FromCursor != 1 {
+		t.Fatalf("packet=%+v", first)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.data, "projects", foundationProjectID, "cursors", foundationSessionID+".json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("prepare advanced cursor: %v", err)
 	}
 }

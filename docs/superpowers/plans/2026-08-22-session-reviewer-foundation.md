@@ -88,7 +88,7 @@ README.md                           Foundation commands and scope
 - Consumes: process arguments and standard streams.
 - Produces: `cli.Run(args []string, stdout, stderr io.Writer) int`; later tasks add subcommands through this router.
 
-- [ ] **Step 1: Write the failing CLI contract test**
+- [x] **Step 1: Write the failing CLI contract test**
 
 ```go
 // internal/cli/run_test.go
@@ -128,13 +128,13 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `go test ./internal/cli -run 'TestRun' -v`
 
 Expected: FAIL because `go.mod` and `Run` do not exist.
 
-- [ ] **Step 3: Add the minimal module and command router**
+- [x] **Step 3: Add the minimal module and command router**
 
 ```go
 // go.mod
@@ -214,13 +214,13 @@ jobs:
       - run: go build ./cmd/session-reviewer
 ```
 
-- [ ] **Step 4: Format and verify locally**
+- [x] **Step 4: Format and verify locally**
 
 Run: `gofmt -w cmd/session-reviewer/main.go internal/cli/run.go internal/cli/run_test.go && go test ./... && go vet ./... && go build ./cmd/session-reviewer`
 
 Expected: all commands exit 0; tests report `ok .../internal/cli`.
 
-- [ ] **Step 5: Commit the bootstrap**
+- [x] **Step 5: Commit the bootstrap**
 
 ```bash
 git add go.mod .github/workflows/ci.yml cmd/session-reviewer/main.go internal/cli/run.go internal/cli/run_test.go
@@ -241,7 +241,7 @@ git commit -m "chore: bootstrap cross-platform CLI"
 - Consumes: `platform.Env{GOOS, Home, LocalAppData}`, paths from local/session metadata, and a target filename.
 - Produces: `platform.DataDir(Env) (string, error)`, `platform.CurrentEnv() Env`, `platform.NormalizePath(goos, value string) string`, and `atomicfile.Write(path string, data []byte, perm fs.FileMode) error`.
 
-- [ ] **Step 1: Write failing platform and atomic-write tests**
+- [x] **Step 1: Write failing platform and atomic-write tests**
 
 ```go
 // internal/platform/paths_test.go
@@ -309,13 +309,13 @@ func TestWriteReplacesFileAndLeavesNoTemporaryFile(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/platform ./internal/atomicfile -v`
 
 Expected: FAIL because both packages are missing.
 
-- [ ] **Step 3: Implement explicit platform policy and same-directory replacement**
+- [x] **Step 3: Implement explicit platform policy and same-directory replacement**
 
 ```go
 // internal/platform/paths.go
@@ -472,13 +472,13 @@ func TestWindowsReplaceRemovesBackup(t *testing.T) {
 
 The existing replacement test is platform-neutral and therefore runs natively in the Windows CI matrix. Do not use shell commands for replacement.
 
-- [ ] **Step 4: Run tests and cross-compile**
+- [x] **Step 4: Run tests and cross-compile**
 
 Run: `gofmt -w internal/platform internal/atomicfile && go test ./internal/platform ./internal/atomicfile && GOOS=windows GOARCH=amd64 go build ./cmd/session-reviewer`
 
 Expected: tests pass and `session-reviewer.exe` builds.
 
-- [ ] **Step 5: Commit the platform foundation**
+- [x] **Step 5: Commit the platform foundation**
 
 ```bash
 git add internal/platform internal/atomicfile
@@ -503,7 +503,7 @@ git commit -m "feat: add cross-platform data paths and atomic writes"
 - Consumes: `config.Config`, project root, vault root, data directory, target GOOS, clock, and random reader.
 - Produces: `config.Load(path)`, `config.Save(path, cfg)`, `config.FindProject(goos, root)`, and `project.Initialize(InitOptions) (InitResult, error)`.
 
-- [ ] **Step 1: Add TOML and write failing initialization tests**
+- [x] **Step 1: Add TOML and write failing initialization tests**
 
 Run: `go get github.com/pelletier/go-toml/v2@v2.4.3`
 
@@ -558,13 +558,13 @@ func TestInitializeRejectsSymlinkedRoot(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/config ./internal/project ./internal/cli -v`
 
 Expected: FAIL because configuration and initialization types are missing.
 
-- [ ] **Step 3: Implement config storage and idempotent initialization**
+- [x] **Step 3: Implement config storage and idempotent initialization**
 
 ```go
 // internal/config/config.go
@@ -723,13 +723,13 @@ Add this case to the `switch args[0]` statement in `internal/cli/run.go` before 
 
 Add `TestRunInitRequiresProjectAndVault` to `run_test.go`; call `Run([]string{"init"},...)` and assert exit code 2 plus `init requires --project and --vault`. Print only the project ID and created paths; never print environment contents.
 
-- [ ] **Step 4: Verify idempotence and CLI behavior**
+- [x] **Step 4: Verify idempotence and CLI behavior**
 
 Run: `gofmt -w internal/config internal/project internal/cli && go test ./internal/config ./internal/project ./internal/cli -v && go test ./...`
 
 Expected: all tests pass; running init twice in a temporary project returns the same project ID and does not duplicate the TOML mapping.
 
-- [ ] **Step 5: Commit initialization**
+- [x] **Step 5: Commit initialization**
 
 ```bash
 git add go.mod go.sum internal/config internal/project internal/cli
@@ -750,7 +750,7 @@ git commit -m "feat: initialize project identity and vault mapping"
 - Consumes: a session file, `session.DecodeOptions`, and a visitor callback.
 - Produces: `session.Stream(path, opts, visit) (DecodeSummary, error)` with line, offset, hash, timestamp, type, and raw payload provenance.
 
-- [ ] **Step 1: Create a sanitized fixture and failing decoder tests**
+- [x] **Step 1: Create a sanitized fixture and failing decoder tests**
 
 ```jsonl
 {"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"session-1","cwd":"/work/项目","source":"vscode"}}
@@ -790,13 +790,13 @@ func TestStreamRejectsOversizedRecord(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `go test ./internal/session -run 'TestStream' -v`
 
 Expected: FAIL because `Record` and `Stream` are undefined.
 
-- [ ] **Step 3: Implement a bounded line reader**
+- [x] **Step 3: Implement a bounded line reader**
 
 ```go
 // internal/session/record.go
@@ -869,13 +869,13 @@ func Stream(path string, opts DecodeOptions, visit func(Record) error) (DecodeSu
 }
 ```
 
-- [ ] **Step 4: Verify fixture, malformed-line, and large-line behavior**
+- [x] **Step 4: Verify fixture, malformed-line, and large-line behavior**
 
 Run: `gofmt -w internal/session && go test ./internal/session -v && go test ./...`
 
 Expected: valid lines are visited in order; malformed lines increment the summary; records above 64 MiB fail before JSON decoding.
 
-- [ ] **Step 5: Commit the streaming parser**
+- [x] **Step 5: Commit the streaming parser**
 
 ```bash
 git add internal/session testdata/sessions/minimal.jsonl
@@ -894,7 +894,7 @@ git commit -m "feat: stream Codex session records"
 - Consumes: sessions root, current working directory, optional explicit session ID, current time, and OS path policy.
 - Produces: `session.Discover(root) ([]Candidate, error)` and `session.Resolve(candidates, ResolveOptions) (Candidate, error)`.
 
-- [ ] **Step 1: Write failing discovery and ambiguity tests**
+- [x] **Step 1: Write failing discovery and ambiguity tests**
 
 ```go
 // internal/session/locator_test.go
@@ -935,13 +935,13 @@ func TestDiscoverReadsOnlyJSONLSessionMetadata(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/session -run 'TestResolve|TestDiscover' -v`
 
 Expected: FAIL because locator types are missing.
 
-- [ ] **Step 3: Implement metadata-only discovery and explicit ambiguity**
+- [x] **Step 3: Implement metadata-only discovery and explicit ambiguity**
 
 ```go
 // internal/session/locator.go
@@ -1012,13 +1012,13 @@ func TestResolveNormalizesWindowsPaths(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Verify conservative resolution**
+- [x] **Step 4: Verify conservative resolution**
 
 Run: `gofmt -w internal/session && go test ./internal/session -run 'TestResolve|TestDiscover|TestNormalize' -v`
 
 Expected: explicit ID wins; one clear current candidate resolves; candidates inside the ambiguity window return an error containing both IDs.
 
-- [ ] **Step 5: Commit session discovery**
+- [x] **Step 5: Commit session discovery**
 
 ```bash
 git add internal/session/locator.go internal/session/locator_test.go
@@ -1037,7 +1037,7 @@ git commit -m "feat: discover and resolve local sessions"
 - Consumes: arbitrary message or tool text.
 - Produces: `redact.Default().Text(input string) Result`, where `Result.Text` is safe to persist and `Result.Findings` contains only rule names and counts, never raw matches.
 
-- [ ] **Step 1: Write canary non-disclosure tests**
+- [x] **Step 1: Write canary non-disclosure tests**
 
 ```go
 // internal/redact/redact_test.go
@@ -1069,13 +1069,13 @@ func TestDefaultPreservesSessionAndItemIDs(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/redact -v`
 
 Expected: FAIL because the package does not exist.
 
-- [ ] **Step 3: Implement ordered recognizers with non-secret findings**
+- [x] **Step 3: Implement ordered recognizers with non-secret findings**
 
 ```go
 // internal/redact/redact.go
@@ -1156,13 +1156,13 @@ func TestDefaultPreservesStableItemID(t *testing.T) {
 
 Entropy handling stays separate from format recognizers because its false-positive profile is different.
 
-- [ ] **Step 4: Run leak-focused tests**
+- [x] **Step 4: Run leak-focused tests**
 
 Run: `gofmt -w internal/redact && go test ./internal/redact -v && go test ./...`
 
 Expected: no assertion output includes raw canaries; all tests pass.
 
-- [ ] **Step 5: Commit redaction**
+- [x] **Step 5: Commit redaction**
 
 ```bash
 git add internal/redact
@@ -1182,7 +1182,7 @@ git commit -m "feat: redact secrets from persisted evidence"
 - Consumes: normalized `session.Record` values, a `redact.Redactor`, and explicit `evidence.Limits`.
 - Produces: `evidence.Extractor.Add(record)`, `evidence.Extractor.Packet() Packet`, `evidence.ErrPacketFull`, and schema version 1 JSON with provenance and warnings.
 
-- [ ] **Step 1: Write failing inclusion, exclusion, and bounding tests**
+- [x] **Step 1: Write failing inclusion, exclusion, and bounding tests**
 
 ```go
 // internal/evidence/extract_test.go
@@ -1242,13 +1242,13 @@ func TestExtractorStopsBeforePacketLimit(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/evidence -v`
 
 Expected: FAIL because evidence types and extractor are missing.
 
-- [ ] **Step 3: Implement the stable packet contract and allowlist**
+- [x] **Step 3: Implement the stable packet contract and allowlist**
 
 ```go
 // internal/evidence/types.go
@@ -1362,13 +1362,13 @@ func TestPacketJSONContainsNoSeededCanary(t *testing.T) {
 
 `ErrPacketFull` is a successful segmentation boundary: callers serialize the current packet with `has_more: true` and resume from `to_cursor + 1` only after the packet is semantically accepted.
 
-- [ ] **Step 4: Verify extraction policy**
+- [x] **Step 4: Verify extraction policy**
 
 Run: `gofmt -w internal/evidence && go test ./internal/evidence -v && go test ./...`
 
 Expected: user, assistant, tool-call, tool-result, and CWD-change events are included; developer/reasoning records are absent; all summaries are bounded and redacted.
 
-- [ ] **Step 5: Commit the evidence contract**
+- [x] **Step 5: Commit the evidence contract**
 
 ```bash
 git add internal/evidence
@@ -1387,7 +1387,7 @@ git commit -m "feat: emit redacted evidence packets"
 - Consumes: data root, session ID, expected cursor, and next cursor.
 - Produces: `cursor.Store.Load(sessionID)`, `cursor.Store.Commit(sessionID, expected, next)`, and `cursor.ErrStale`.
 
-- [ ] **Step 1: Write failing cursor durability tests**
+- [x] **Step 1: Write failing cursor durability tests**
 
 ```go
 // internal/cursor/store_test.go
@@ -1437,13 +1437,13 @@ func TestStoreReportsCorruptJSON(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/cursor -v`
 
 Expected: FAIL because `Store`, `Cursor`, and `ErrStale` are undefined.
 
-- [ ] **Step 3: Implement atomic compare-and-swap storage**
+- [x] **Step 3: Implement atomic compare-and-swap storage**
 
 ```go
 // internal/cursor/store.go
@@ -1492,13 +1492,13 @@ func (s Store) path(sessionID string) (string, error) {
 
 Task 9's integration test checks the remaining invariant: merely preparing evidence never creates or advances a cursor file.
 
-- [ ] **Step 4: Verify stale and durability behavior**
+- [x] **Step 4: Verify stale and durability behavior**
 
 Run: `gofmt -w internal/cursor && go test ./internal/cursor -v && go test ./...`
 
 Expected: compare-and-swap accepts the exact current cursor and rejects stale writers with `ErrStale`.
 
-- [ ] **Step 5: Commit cursor storage**
+- [x] **Step 5: Commit cursor storage**
 
 ```bash
 git add internal/cursor
@@ -1520,7 +1520,7 @@ git commit -m "feat: persist session cursors safely"
 - Consumes: `prepare.Options{Mode, SessionsRoot, SessionID, CWD, DataDir, Output, FromStart, GOOS}`.
 - Produces: `prepare.Run(options) (evidence.Packet, error)` and CLI commands that atomically write JSON evidence without advancing cursors.
 
-- [ ] **Step 1: Write a failing end-to-end prepare test**
+- [x] **Step 1: Write a failing end-to-end prepare test**
 
 ```go
 // internal/prepare/prepare_test.go
@@ -1555,13 +1555,13 @@ func TestRunPreparesCurrentCheckpointWithoutAdvancingCursor(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `go test ./internal/prepare ./internal/cli -v`
 
 Expected: FAIL because the prepare orchestrator and command route do not exist.
 
-- [ ] **Step 3: Implement orchestration and command flags**
+- [x] **Step 3: Implement orchestration and command flags**
 
 ```go
 // internal/prepare/prepare.go
@@ -1683,13 +1683,13 @@ func TestRunCheckpointRejectsFromStart(t *testing.T) {
 
 The CLI must not print event summaries to stdout or stderr.
 
-- [ ] **Step 4: Run full tests and both platform builds**
+- [x] **Step 4: Run full tests and both platform builds**
 
 Run: `gofmt -w internal/prepare internal/cli && go test ./... && go vet ./... && go build ./cmd/session-reviewer && GOOS=windows GOARCH=amd64 go build -o /tmp/session-reviewer.exe ./cmd/session-reviewer`
 
 Expected: all tests and vet pass; both binaries build; prepare writes evidence but no cursor.
 
-- [ ] **Step 5: Commit preparation workflows**
+- [x] **Step 5: Commit preparation workflows**
 
 ```bash
 git add internal/prepare internal/cli
@@ -1709,7 +1709,7 @@ git commit -m "feat: prepare review and checkpoint evidence"
 - Consumes: all foundation packages and generated large fixtures.
 - Produces: a release gate demonstrating bounded evidence, no canary leakage, idempotent prepare output, no cursor advance, and successful macOS/Windows builds.
 
-- [ ] **Step 1: Write failing foundation acceptance tests**
+- [x] **Step 1: Write failing foundation acceptance tests**
 
 ```go
 // internal/prepare/acceptance_test.go
@@ -1769,13 +1769,13 @@ func runPreparedFixture(t *testing.T, sourcePath, cwd string) []byte {
 }
 ```
 
-- [ ] **Step 2: Run acceptance tests before final documentation**
+- [x] **Step 2: Run acceptance tests before final documentation**
 
 Run: `go test ./internal/prepare -run 'TestLargeSession|TestPrepareSameInput' -v`
 
 Expected: PASS only after all earlier tasks are correctly integrated. The >20 MB test remains an always-on release gate.
 
-- [ ] **Step 3: Write the foundation README**
+- [x] **Step 3: Write the foundation README**
 
 ````markdown
 # SessionReviewer
@@ -1814,7 +1814,7 @@ Preparing evidence never advances the accepted cursor. A later Skill-driven appl
 Raw sessions remain local. Evidence excludes developer/system messages and hidden reasoning, bounds tool output, and redacts likely secrets before persistence.
 ````
 
-- [ ] **Step 4: Strengthen CI and run final verification**
+- [x] **Step 4: Strengthen CI and run final verification**
 
 Add these commands after the normal test step in `.github/workflows/ci.yml`:
 
@@ -1838,12 +1838,46 @@ git diff --check
 
 Expected: every command exits 0; the two cross-platform binaries exist; `git diff --check` prints nothing.
 
-- [ ] **Step 5: Commit the accepted foundation**
+- [x] **Step 5: Commit the accepted foundation**
 
 ```bash
 git add README.md .github/workflows/ci.yml internal/prepare/acceptance_test.go
 git commit -m "test: verify foundation scale and security"
 ```
+
+## Implementation Status (reconciled 2026-08-23)
+
+The deterministic foundation and its follow-up hardening are implemented through `05766c4`. Tasks 1-10 in this original plan are complete in the current repository. Checked boxes record the implementation history of each task; the fresh verification commands below remain the authority for the current checkout, and the historical illustrative code snippets are not a substitute for the current source contracts.
+
+Original foundation evidence:
+
+| Task | Implementation and repair commits |
+| --- | --- |
+| 1 | `47594ee` |
+| 2 | `a74b5fd`, `b102e39` |
+| 3 | `6855d88`, `ef9c488` |
+| 4 | `bfe5a5b` |
+| 5 | `e98cac6`, `134b63c` |
+| 6 | `360dd10`, `def61f0`, `e11b7fa`, `8ba1370`, `9257b41`, `d36dff8`, `2dc5422`, `1c79bae` |
+| 7 | `d6f2141`, `36690de` |
+| 8 | `82ebb12`, `bbb9ea7` |
+| 9 | `59996c5`, `15172dd`, `4d172a0` |
+| 10 and final review | `385582a`, `2a12b0e`, `6d3f8d1`, `ddee5c7` |
+
+Foundation hardening evidence:
+
+| Hardening task | Implementation and repair commits |
+| --- | --- |
+| 1: globally unique project IDs | `fded734` |
+| 2: preview-only initialization and locked revalidation | `9b534b1`, `621ec00` |
+| 3: session-root and current-session-ID precedence | `260ec0d` |
+| 4: selected-session corruption isolation | `635bd48`, `9f9cec8` |
+| 5: safe actionable diagnostics | `9909b2a`, `906e883` |
+| 6: rooted Windows replacement and no-clobber installation | `3acc549`, `d991228`, `05766c4` |
+
+The final Task 6 contract supersedes the earlier path-based Windows adapter design: an existing destination uses handle-relative `os.Root.Rename`; an absent destination uses rooted `Link` followed by `Remove`, with no replacing fallback. This records atomic visibility and no-clobber behavior, not universal filesystem crash durability. The current local host can cross-compile the Windows implementation and tests but cannot supply a native Windows runtime receipt; that receipt remains pending for the current commit, as does full Windows end-to-end release acceptance.
+
+The standalone Go CLI makes no model or OpenAI API calls and performs no automatic Git mutation. Initialization previews without writing unless `--write` is present; session-root precedence is flag, `SESSION_REVIEWER_SESSIONS_ROOT`, `CODEX_HOME/sessions`, then the conventional home path; current-session-ID precedence is `--session`, `--current-session-id`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, then conservative cwd/time inference. A selected ID ignores unrelated corrupt JSONL, while corruption in the selected or duplicate candidate set fails closed. CLI failures cross the process boundary as stable codes with recovery actions and without source content or sensitive paths.
 
 ## Foundation Completion Gate
 

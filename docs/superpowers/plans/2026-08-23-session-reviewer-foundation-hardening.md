@@ -4,7 +4,7 @@
 
 **Goal:** Close the deterministic foundation's identity, discovery, initialization, diagnostics, and Windows durability gaps before proposal application is built on top of it.
 
-**Architecture:** Keep the Go CLI deterministic and dependency-light, but make discovery inputs explicit and typed: platform policy resolves roots and runtime session identifiers, session discovery records per-file health, and initialization separates a read-only preview from mutation. Failures cross the CLI boundary as stable safe codes, while internal causes remain available to tests; Windows replacement uses the operating system replacement primitive for an existing destination instead of describing a multi-rename sequence as atomic.
+**Architecture:** Keep the Go CLI deterministic and dependency-light, but make discovery inputs explicit and typed: platform policy resolves roots and runtime session identifiers, session discovery records per-file health, and initialization separates a read-only preview from mutation. Failures cross the CLI boundary as stable safe codes, while internal causes remain available to tests; Windows replacement stays anchored to an opened `os.Root`, using handle-relative rename for an existing destination and no-clobber link installation for an absent destination.
 
 **Tech Stack:** Go 1.26, Go standard library, `github.com/pelletier/go-toml/v2 v2.4.3`, GitHub Actions on native macOS and Windows runners.
 
@@ -42,8 +42,8 @@ internal/cli/diagnostic.go                Stable user-safe errors and recovery h
 internal/cli/run.go                       Complete root help and command routing
 internal/cli/prepare.go                   Root/session discovery and actionable safe failures
 internal/cli/run_test.go                  Help, precedence, identifiers, and non-leakage tests
-internal/atomicfile/replace_windows.go     Native `ReplaceFileW`/`MoveFileExW` adapter
-internal/atomicfile/replace_windows_logic.go Injectable Windows replacement state machine
+internal/atomicfile/replace_windows.go     Rooted Windows replacement adapter
+internal/atomicfile/replace_windows_logic.go Injectable rooted rename/link state machine
 internal/atomicfile/replace_windows_test.go Native replacement and interrupted-state tests
 .github/workflows/ci.yml                  Native Windows replacement gate
 README.md                                 Truthful preview, precedence, identifier, and durability docs
@@ -599,7 +599,9 @@ git commit -m "feat: add safe actionable CLI diagnostics"
 
 **Interfaces:**
 - Consumes: same-directory temporary and destination paths from `atomicfile.WriteRoot`.
-- Produces: existing `replaceFile` and `replaceRootFile` signatures; existing destinations use native `ReplaceFileW`, absent destinations use `MoveFileExW(MOVEFILE_WRITE_THROUGH)`, and failures leave the old destination readable.
+- Produces: existing `replaceFile` and `replaceRootFile` signatures; existing destinations use handle-relative `os.Root.Rename`, absent destinations use rooted `Link` followed by `Remove`, racing creators are not clobbered, and reported replacement failures leave the old destination readable.
+
+**Final implementation note:** The path-based `ReplaceFileW`/`MoveFileExW` design preserved below is the initial Task 6 TDD target, not the final contract. Review found partial-failure and namespace-confinement gaps. Commits `d991228` and `05766c4` replaced it with rooted operations and pinned the immediate parent for the complete write lifecycle. Native Windows execution for the current commit still requires a CI receipt.
 
 - [ ] **Step 1: Write native Windows durability tests**
 
@@ -703,7 +705,7 @@ Remove the backup/rollback claim and logic from the Windows adapter. `ReplaceFil
 
 Run: `gofmt -w internal/atomicfile/replace_windows.go internal/atomicfile/replace_windows_logic.go internal/atomicfile/replace_windows_test.go && go test ./internal/atomicfile -count=1 && GOOS=windows GOARCH=amd64 go test -c -o /tmp/atomicfile-windows.test.exe ./internal/atomicfile && GOOS=windows GOARCH=amd64 go build -o /tmp/session-reviewer.exe ./cmd/session-reviewer`
 
-Expected: POSIX logic tests PASS and both Windows artifacts compile. Native CI additionally passes `go test ./internal/atomicfile -run '^TestWindows' -count=20` with no missing destination, leftover backup, or lost old content after injected failure.
+Expected: platform-independent rooted-operation tests PASS and both Windows artifacts compile. Native CI additionally passes `go test ./internal/atomicfile -run '^TestWindows' -count=20`, covering rooted existing replacement, absent installation, racing-creator preservation, failure preservation, cleanup, observation, and long Unicode paths.
 
 - [ ] **Step 5: Commit truthful Windows replacement**
 
@@ -754,12 +756,14 @@ Add this status block immediately before `## Foundation Completion Gate` in `doc
 ```markdown
 ## Implementation Status (reconciled 2026-08-23)
 
-The deterministic foundation is implemented through `ddee5c7`, including follow-up durability and acceptance repairs. Tasks 1-10 are complete in the current repository. The fresh verification commands below remain the authority for the current checkout; checked boxes record implementation history, not a permanent claim that later changes cannot regress behavior.
+The deterministic foundation and hardening Tasks 1-6 are implemented through `05766c4`, including follow-up durability, confinement, and acceptance repairs. Tasks 1-10 of the original plan are complete in the current repository. The fresh verification commands below remain the authority for the current checkout; checked boxes record implementation history, not a permanent claim that later changes cannot regress behavior.
 
-Evidence commits: `bbb9ea7`, `59996c5`, `15172dd`, `4d172a0`, `385582a`, `2a12b0e`, `6d3f8d1`, `ddee5c7`.
+Original-plan evidence commits: `47594ee`, `a74b5fd`, `b102e39`, `6855d88`, `ef9c488`, `bfe5a5b`, `e98cac6`, `134b63c`, `360dd10`, `def61f0`, `e11b7fa`, `8ba1370`, `9257b41`, `d36dff8`, `2dc5422`, `1c79bae`, `d6f2141`, `36690de`, `82ebb12`, `bbb9ea7`, `59996c5`, `15172dd`, `4d172a0`, `385582a`, `2a12b0e`, `6d3f8d1`, `ddee5c7`.
+
+Hardening evidence commits: `fded734`, `9b534b1`, `621ec00`, `260ec0d`, `635bd48`, `9f9cec8`, `9909b2a`, `906e883`, `3acc549`, `d991228`, `05766c4`.
 ```
 
-Update `README.md` so initialization shows a preview command followed by the same command with `--write`; document the exact root precedence and `--current-session-id`/environment fallback; distinguish selected candidate corruption from unrelated corruption; state that Windows existing-file replacement uses `ReplaceFileW`, new-file installation uses `MoveFileExW`, and full native end-to-end release acceptance is still pending. Retain the explicit statements that the CLI has no model calls and performs no Git mutation.
+Update `README.md` so initialization shows a preview command followed by the same command with `--write`; document the exact root precedence and `--current-session-id`/environment fallback; distinguish selected candidate corruption from unrelated corruption; state that Windows existing-file replacement uses handle-relative `os.Root.Rename`, absent-file installation uses rooted `Link` plus `Remove` without clobbering a racing creator, and full native end-to-end release acceptance is still pending. Retain the explicit statements that the CLI has no model calls and performs no Git mutation.
 
 - [ ] **Step 4: Run the complete fresh gate on the current checkout**
 
@@ -775,7 +779,7 @@ GOOS=windows GOARCH=amd64 go build -o /tmp/session-reviewer.exe ./cmd/session-re
 git diff --check
 ```
 
-Expected: every command exits 0. Then inspect `git status --short`: only the files named in this plan are modified before the commit. Native Windows CI must pass before this task is considered complete; cross-compilation alone is not Windows runtime evidence.
+Expected: every local command exits 0. Then inspect `git status --short`: only Task 7 reconciliation files are modified before the commit. Cross-compilation alone is not Windows runtime evidence; the documentation commit may be created with the native Windows receipt explicitly pending, but the full native completion gate must not be claimed until the current commit has a passing Windows CI receipt.
 
 - [ ] **Step 5: Commit documentation and acceptance reconciliation**
 
@@ -794,7 +798,7 @@ The next plan may begin only after a fresh run proves:
 - current-session ID precedence is `--session`, `--current-session-id`, `CODEX_THREAD_ID`, `CODEX_SESSION_ID`, then cwd/time inference;
 - explicit session selection ignores unrelated corrupt JSONL while selected and duplicate corrupt candidates fail closed;
 - every CLI error exposes a stable code and recovery action without leaking source content or sensitive paths;
-- native Windows tests exercise `ReplaceFileW` behavior, while docs do not overstate crash durability or full end-to-end acceptance;
+- native Windows tests exercise rooted existing replacement and no-clobber absent installation, while docs do not overstate crash durability or full end-to-end acceptance;
 - the original foundation checklist and README reflect the code and fresh verification evidence;
 - the Go CLI contains no model client and no automatic Git mutation.
 
