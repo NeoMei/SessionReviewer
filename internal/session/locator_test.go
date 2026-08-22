@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,24 @@ func TestResolveCurrentRejectsAmbiguousSameProjectSessions(t *testing.T) {
 	_, err := Resolve(candidates, ResolveOptions{CWD: `/work/项目`, Now: now, AmbiguityWindow: 5 * time.Minute})
 	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestResolveCurrentAmbiguitySentinelSurvivesNestedWrapping(t *testing.T) {
+	now := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidates := []Candidate{
+		{ID: "source-canary-one", CWD: "/work/project", ModTime: now.Add(-time.Minute)},
+		{ID: "source-canary-two", CWD: "/work/project", ModTime: now.Add(-2 * time.Minute)},
+	}
+	_, err := Resolve(candidates, ResolveOptions{CWD: "/work/project", Now: now, AmbiguityWindow: 5 * time.Minute})
+	wrapped := fmt.Errorf("outer resolution context: %w", err)
+	if !errors.Is(wrapped, ErrSessionAmbiguous) {
+		t.Fatalf("nested error does not preserve ambiguity sentinel: %v", wrapped)
+	}
+	for _, detail := range []string{"ambiguous", "source-canary-one", "source-canary-two"} {
+		if !strings.Contains(err.Error(), detail) {
+			t.Fatalf("internal error %q missing %q", err, detail)
+		}
 	}
 }
 

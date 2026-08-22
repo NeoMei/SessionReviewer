@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -590,6 +591,11 @@ func TestRunRejectsNoSessionAndAmbiguousSession(t *testing.T) {
 	f.writeSession(t, "two.jsonl", strings.Replace(body, `"id":"s1"`, `"id":"two"`, 1), f.now.Add(-time.Millisecond))
 	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous err=%v", err)
+	} else {
+		wrapped := fmt.Errorf("outer prepare context: %w", err)
+		if !errors.Is(wrapped, ErrSessionAmbiguous) || !errors.Is(wrapped, session.ErrSessionAmbiguous) {
+			t.Fatalf("nested ambiguity sentinels lost: %v", wrapped)
+		}
 	}
 }
 

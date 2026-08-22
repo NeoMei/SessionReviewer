@@ -178,6 +178,42 @@ func TestRunInitRequiresProjectAndVault(t *testing.T) {
 	}
 }
 
+func TestRunInitRejectsPositionalArgumentsBeforePreviewOrWrite(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		write bool
+	}{
+		{name: "preview"},
+		{name: "write", write: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			projectRoot := t.TempDir()
+			vaultRoot := t.TempDir()
+			dataRoot := filepath.Join(t.TempDir(), "data")
+			args := []string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot}
+			if test.write {
+				args = append(args, "--write")
+			}
+			args = append(args, "unexpected")
+
+			var out, errOut bytes.Buffer
+			code := Run(args, &out, &errOut)
+			if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), "init does not accept positional arguments") {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			for _, root := range []string{projectRoot, vaultRoot} {
+				entries, err := os.ReadDir(root)
+				if err != nil || len(entries) != 0 {
+					t.Fatalf("root=%q entries=%v err=%v", root, entries, err)
+				}
+			}
+			if _, err := os.Stat(dataRoot); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("data root created: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunInitPreviewsWithoutWritingUntilWriteFlag(t *testing.T) {
 	projectRoot := t.TempDir()
 	vaultRoot := t.TempDir()

@@ -41,6 +41,10 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "init does not accept positional arguments")
+		return 2
+	}
 	if *projectRoot == "" || *vaultRoot == "" {
 		fmt.Fprintln(stderr, "init requires --project and --vault")
 		return 2

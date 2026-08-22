@@ -15,7 +15,10 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
-var ErrStop = errors.New("stop stream")
+var (
+	ErrStop             = errors.New("stop stream")
+	ErrSessionAmbiguous = errors.New("current session is ambiguous")
+)
 
 const futureClockSkew = 5 * time.Minute
 
@@ -272,7 +275,7 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 	if len(matches) > 1 {
 		lead := matches[0].ModTime.Sub(matches[1].ModTime)
 		if lead == 0 || lead < opts.AmbiguityWindow {
-			return Candidate{}, fmt.Errorf("ambiguous current session: %s and %s", matches[0].ID, matches[1].ID)
+			return Candidate{}, fmt.Errorf("%w: %s and %s", ErrSessionAmbiguous, matches[0].ID, matches[1].ID)
 		}
 	}
 	return matches[0], nil

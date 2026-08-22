@@ -82,7 +82,7 @@ func Run(opts Options) (evidence.Packet, error) {
 		if opts.SessionID != "" && !discoveryContainsSessionID(discovery, opts.SessionID) {
 			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 		}
-		if opts.SessionID == "" && strings.HasPrefix(err.Error(), "ambiguous current session:") {
+		if opts.SessionID == "" && errors.Is(err, session.ErrSessionAmbiguous) {
 			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionAmbiguous, err)
 		}
 		return evidence.Packet{}, err
