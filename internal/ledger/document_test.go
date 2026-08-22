@@ -186,14 +186,16 @@ func TestDocumentRejectsRevisionOverflow(t *testing.T) {
 }
 
 func TestDocumentSetReservedUpdatesRevisionAndSourcesAtomically(t *testing.T) {
-	doc := mustParseDocument(t, []byte(validFrontmatter+"source_sessions: [old]\nsync_hash: old-hash\n---\n\n# T\n"))
+	oldHash := strings.Repeat("a", 64)
+	newHash := strings.Repeat("b", 64)
+	doc := mustParseDocument(t, []byte(validFrontmatter+"source_sessions: [old]\nsync_hash: "+oldHash+"\n---\n\n# T\n"))
 	err := doc.SetReserved(map[string]any{
 		"id":              "decision-1",
 		"entity_type":     "decision",
 		"project_id":      "project-1111111111111111",
 		"revision":        3,
 		"source_sessions": []string{"old", "new"},
-		"sync_hash":       "new-hash",
+		"sync_hash":       newHash,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -202,10 +204,56 @@ func TestDocumentSetReservedUpdatesRevisionAndSourcesAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"revision: 3", "source_sessions: [old, new]", "sync_hash: new-hash"} {
+	for _, want := range []string{"revision: 3", "source_sessions: [old, new]", "sync_hash: " + newHash} {
 		if !bytes.Contains(got, []byte(want)) {
 			t.Fatalf("render missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestDocumentSetReservedRejectsInvalidMachineValuesAtomically(t *testing.T) {
+	validHash := strings.Repeat("a", 64)
+	tests := map[string]map[string]any{
+		"empty source session":        {"source_sessions": []string{""}},
+		"duplicate source session":    {"source_sessions": []string{"same", "same"}},
+		"untyped source session list": {"source_sessions": []any{"session-1"}},
+		"empty sync status":           {"sync_status": ""},
+		"unknown sync status":         {"sync_status": "pending"},
+		"non-string sync status":      {"sync_status": 1},
+		"short sync hash":             {"sync_hash": "abc"},
+		"uppercase base hash":         {"base_hash": strings.Repeat("A", 64)},
+		"non-hex project hash":        {"project_hash": strings.Repeat("g", 64)},
+		"non-string vault hash":       {"vault_hash": 7},
+		"empty source hash":           {"source_hash": ""},
+	}
+	for name, invalid := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"source_sessions: [old]\nsync_status: synced\nsync_hash: "+validHash+"\n---\n\n# T\n"))
+			before, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			update := map[string]any{
+				"id":              "decision-1",
+				"entity_type":     "decision",
+				"project_id":      "project-1111111111111111",
+				"revision":        3,
+				"source_sessions": []string{"old", "new"},
+			}
+			for key, value := range invalid {
+				update[key] = value
+			}
+			if err := doc.SetReserved(update); !errors.Is(err, ErrReservedFieldChanged) {
+				t.Fatalf("err=%v", err)
+			}
+			after, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("invalid reserved update partially mutated document:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
 	}
 }
 
@@ -270,6 +318,36 @@ func TestDocumentUpsertSectionPreservesHeadingAndAppendsNewSection(t *testing.T)
 	}
 }
 
+func TestDocumentUpsertSectionRejectsControlCharactersWithoutMutation(t *testing.T) {
+	for name, sectionName := range map[string]string{
+		"empty":           "   ",
+		"newline":         "Bad\nInjected",
+		"carriage return": "Bad\rInjected",
+		"tab":             "Bad\tInjected",
+		"NUL":             "Bad\x00Injected",
+		"DEL":             "Bad\x7fInjected",
+		"Unicode control": "Bad\u0085Injected",
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n\n# T\n"))
+			before, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := doc.UpsertSection(sectionName, "body\n"); !errors.Is(err, ErrInvalidSectionName) {
+				t.Fatalf("err=%v", err)
+			}
+			after, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("invalid section name mutated document:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
 func TestDocumentNormalizesCRLFAndFinalNewline(t *testing.T) {
 	src := []byte(strings.ReplaceAll(validFrontmatter+"title: T\n---\n\n# T\n\n## Notes\n\nBody.\n\n", "\n", "\r\n"))
 	doc := mustParseDocument(t, src)
@@ -291,6 +369,89 @@ func TestDocumentNormalizesCRLFAndFinalNewline(t *testing.T) {
 	if !bytes.Equal(got, again) {
 		t.Fatalf("normalized render unstable:\nfirst=%q\nsecond=%q", got, again)
 	}
+}
+
+func TestDocumentRenderSeparatesSectionHeadingsFromPriorContent(t *testing.T) {
+	tests := map[string][]byte{
+		"preamble": []byte(validFrontmatter + "---\nPreamble without newline"),
+		"section":  []byte(validFrontmatter + "---\n## Existing\nBody without newline"),
+	}
+	for name, src := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, src)
+			doc.UpsertSection("Added", "New body.\n")
+			got, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(got, []byte("without newline\n## Added")) {
+				t.Fatalf("heading was joined to prior content:\n%s", got)
+			}
+			parsed := mustParseDocument(t, got)
+			again, err := parsed.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, again) {
+				t.Fatalf("render is unstable:\nfirst:\n%s\nsecond:\n%s", got, again)
+			}
+		})
+	}
+}
+
+func TestDocumentSectionScannerHonorsMarkdownBlockBoundaries(t *testing.T) {
+	t.Run("ATX headings allow zero through three leading spaces", func(t *testing.T) {
+		src := []byte(validFrontmatter + "---\n## Zero\nA\n ## One\nB\n  ## Two\nC\n   ## Three\nD\n    ## Indented code\nE\n")
+		doc := mustParseDocument(t, src)
+		got := make([]string, 0, len(doc.Sections))
+		for _, section := range doc.Sections {
+			got = append(got, section.Name)
+		}
+		want := []string{"Zero", "One", "Two", "Three"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("sections=%v want=%v", got, want)
+		}
+	})
+
+	t.Run("headings inside raw HTML remain narrative", func(t *testing.T) {
+		src := []byte(validFrontmatter + `---
+<script type="text/javascript">
+## Script fake
+    </script>
+<PRE>
+## Pre fake
+</PRE>
+<style>
+## Style fake
+</style>
+~~~markdown
+## Fence fake
+~~~
+<!-- comment starts
+## Comment fake
+-->
+<DIV class="wrapper">
+## Block fake
+</DIV>
+{{four-space-blank}}
+## Real section
+Keep.
+`)
+		src = []byte(strings.Replace(string(src), "{{four-space-blank}}", "    ", 1))
+		doc := mustParseDocument(t, src)
+		if len(doc.Sections) != 1 || doc.Sections[0].Name != "Real section" {
+			t.Fatalf("raw HTML headings became sections: %+v", doc.Sections)
+		}
+		got, err := doc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"## Script fake", "## Pre fake", "## Style fake", "## Fence fake", "## Comment fake", "## Block fake"} {
+			if !bytes.Contains(got, []byte(want)) {
+				t.Fatalf("raw HTML narrative lost %q:\n%s", want, got)
+			}
+		}
+	})
 }
 
 func TestDocumentRejectsMalformedInput(t *testing.T) {
@@ -349,6 +510,14 @@ func TestEntitySchemaIsPermissiveAndConditional(t *testing.T) {
 	}
 	compact := strings.NewReplacer(" ", "", "\n", "", "\t", "").Replace(string(body))
 	for _, contract := range []string{
+		`"entity_type":{"type":"string","enum":["decision","open_loop","session"]}`,
+		`"source_sessions":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}}`,
+		`"sync_status":{"type":"string","enum":["synced","conflicted"]}`,
+		`"sync_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}`,
+		`"base_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}`,
+		`"project_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}`,
+		`"vault_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}`,
+		`"source_hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}`,
 		`"entity_type":{"const":"decision"}`,
 		`"entity_type":{"const":"open_loop"}`,
 		`"entity_type":{"const":"session"}`,

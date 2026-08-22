@@ -7,7 +7,7 @@
   "required": ["id", "entity_type", "project_id", "revision"],
   "properties": {
     "id": { "type": "string", "minLength": 1 },
-    "entity_type": { "type": "string", "minLength": 1 },
+    "entity_type": { "type": "string", "enum": ["decision", "open_loop", "session"] },
     "project_id": { "type": "string", "minLength": 1 },
     "revision": { "type": "integer", "minimum": 1 },
     "title": { "type": "string" },
@@ -18,8 +18,15 @@
     },
     "source_sessions": {
       "type": "array",
+      "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
-    }
+    },
+    "sync_status": { "type": "string", "enum": ["synced", "conflicted"] },
+    "sync_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "base_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "project_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "vault_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
   },
   "allOf": [
     {

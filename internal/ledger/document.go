@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -25,6 +27,8 @@ var (
 	ErrInvalidDocument      = errors.New("invalid ledger document")
 	ErrReservedFieldChanged = errors.New("reserved ledger field changed")
 	ErrEditableField        = errors.New("field is not editable")
+	ErrInvalidSectionName   = errors.New("invalid section name")
+	lowercaseSHA256         = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 type Section struct {
@@ -118,6 +122,9 @@ func (d *Document) SetReserved(fields map[string]any) error {
 		if key == "id" || key == "entity_type" || key == "project_id" {
 			continue
 		}
+		if err := validateReservedValue(key, value); err != nil {
+			return err
+		}
 		node, err := encodeValue(value)
 		if err != nil {
 			return fmt.Errorf("%w: invalid %s", ErrReservedFieldChanged, key)
@@ -138,6 +145,43 @@ func (d *Document) SetReserved(fields map[string]any) error {
 		if node, ok := nodes[key]; ok {
 			setMappingValue(&d.Frontmatter, key, node)
 		}
+	}
+	return nil
+}
+
+func validateReservedValue(key string, value any) error {
+	switch key {
+	case "revision":
+		if _, ok := value.(int); !ok {
+			return fmt.Errorf("%w: invalid revision", ErrReservedFieldChanged)
+		}
+	case "source_sessions":
+		values, ok := value.([]string)
+		if !ok {
+			return fmt.Errorf("%w: invalid source_sessions", ErrReservedFieldChanged)
+		}
+		seen := make(map[string]struct{}, len(values))
+		for _, item := range values {
+			if item == "" {
+				return fmt.Errorf("%w: invalid source_sessions", ErrReservedFieldChanged)
+			}
+			if _, exists := seen[item]; exists {
+				return fmt.Errorf("%w: duplicate source_sessions", ErrReservedFieldChanged)
+			}
+			seen[item] = struct{}{}
+		}
+	case "sync_status":
+		status, ok := value.(string)
+		if !ok || (status != "synced" && status != "conflicted") {
+			return fmt.Errorf("%w: invalid sync_status", ErrReservedFieldChanged)
+		}
+	case "sync_hash", "base_hash", "project_hash", "vault_hash", "source_hash":
+		hash, ok := value.(string)
+		if !ok || !lowercaseSHA256.MatchString(hash) {
+			return fmt.Errorf("%w: invalid %s", ErrReservedFieldChanged, key)
+		}
+	default:
+		return fmt.Errorf("%w: invalid %s", ErrReservedFieldChanged, key)
 	}
 	return nil
 }
@@ -192,22 +236,24 @@ func (d *Document) SetEditable(fields map[string]any) error {
 	return nil
 }
 
-func (d *Document) UpsertSection(name, body string) {
+func (d *Document) UpsertSection(name, body string) error {
 	if d == nil {
-		return
+		return fmt.Errorf("%w: nil document", ErrInvalidDocument)
 	}
-	name = canonicalSectionName(name)
-	if name == "" {
-		return
+	var err error
+	name, err = validatedSectionName(name)
+	if err != nil {
+		return err
 	}
 	body = normalizeSectionBody(body)
 	for i := range d.Sections {
 		if d.Sections[i].Name == name {
 			d.Sections[i].Body = body
-			return
+			return nil
 		}
 	}
 	d.Sections = append(d.Sections, Section{Name: name, Heading: "## " + name, Body: body})
+	return nil
 }
 
 func (d Document) Render() ([]byte, error) {
@@ -243,11 +289,18 @@ func (d Document) Render() ([]byte, error) {
 	out.WriteString("---\n")
 	out.Write(yamlBody.Bytes())
 	out.WriteString("---\n")
-	out.WriteString(normalizeLineEndings(d.Preamble))
+	preamble := normalizeLineEndings(d.Preamble)
+	out.WriteString(preamble)
+	endsWithNewline := preamble == "" || strings.HasSuffix(preamble, "\n")
 	for _, section := range d.Sections {
+		if !endsWithNewline {
+			out.WriteByte('\n')
+		}
 		out.WriteString(normalizeLineEndings(section.Heading))
 		out.WriteByte('\n')
-		out.WriteString(normalizeLineEndings(section.Body))
+		body := normalizeLineEndings(section.Body)
+		out.WriteString(body)
+		endsWithNewline = body == "" || strings.HasSuffix(body, "\n")
 	}
 
 	rendered := strings.TrimRight(out.String(), "\n") + "\n"
@@ -390,6 +443,7 @@ func parseSections(body string) (string, []Section, error) {
 	var headings []heading
 	var fence byte
 	var fenceLength int
+	var html htmlBlock
 
 	for start := 0; start < len(body); {
 		end := strings.IndexByte(body[start:], '\n')
@@ -401,15 +455,30 @@ func parseSections(body string) (string, []Section, error) {
 		line := body[start:end]
 		trimmed := strings.TrimLeft(line, " ")
 		indent := len(line) - len(trimmed)
-		if indent <= 3 {
-			if marker, count := fenceMarker(trimmed); count >= 3 {
-				if fence == 0 {
-					fence, fenceLength = marker, count
-				} else if marker == fence && count >= fenceLength && strings.Trim(strings.TrimLeft(trimmed, string(marker)), " \t") == "" {
+		if html.kind != htmlNone {
+			if html.endsOnBlank {
+				if strings.TrimSpace(line) == "" {
+					html = htmlBlock{}
+				}
+			} else if strings.Contains(strings.ToLower(line), html.endMarker) {
+				html = htmlBlock{}
+			}
+		} else if indent <= 3 {
+			if fence != 0 {
+				if marker, count := fenceMarker(trimmed); marker == fence && count >= fenceLength && strings.Trim(strings.TrimLeft(trimmed, string(marker)), " \t") == "" {
 					fence, fenceLength = 0, 0
 				}
-			} else if fence == 0 {
-				if name, ok := sectionName(line); ok {
+			} else if marker, count := fenceMarker(trimmed); count >= 3 {
+				if fence == 0 {
+					fence, fenceLength = marker, count
+				}
+			} else if candidate, ok := startHTMLBlock(trimmed); ok {
+				html = candidate
+				if !html.endsOnBlank && strings.Contains(strings.ToLower(trimmed), html.endMarker) {
+					html = htmlBlock{}
+				}
+			} else {
+				if name, ok := sectionName(trimmed); ok {
 					headings = append(headings, heading{start: start, end: end, name: name, text: line})
 				}
 			}
@@ -446,6 +515,92 @@ func parseSections(body string) (string, []Section, error) {
 	return body[:headings[0].start], sections, nil
 }
 
+type htmlBlockKind uint8
+
+const (
+	htmlNone htmlBlockKind = iota
+	htmlUntilMarker
+	htmlUntilBlank
+)
+
+type htmlBlock struct {
+	kind        htmlBlockKind
+	endMarker   string
+	endsOnBlank bool
+}
+
+func startHTMLBlock(line string) (htmlBlock, bool) {
+	lower := strings.ToLower(line)
+	for _, tag := range []string{"script", "pre", "style", "textarea"} {
+		prefix := "<" + tag
+		if strings.HasPrefix(lower, prefix) && htmlTagBoundary(lower, len(prefix)) {
+			return htmlBlock{kind: htmlUntilMarker, endMarker: "</" + tag + ">"}, true
+		}
+	}
+	for _, marker := range []struct {
+		start string
+		end   string
+	}{
+		{"<!--", "-->"},
+		{"<?", "?>"},
+		{"<![cdata[", "]]>"},
+	} {
+		if strings.HasPrefix(lower, marker.start) {
+			return htmlBlock{kind: htmlUntilMarker, endMarker: marker.end}, true
+		}
+	}
+	if strings.HasPrefix(line, "<!") && len(line) > 2 && line[2] >= 'A' && line[2] <= 'Z' {
+		return htmlBlock{kind: htmlUntilMarker, endMarker: ">"}, true
+	}
+	if tag, ok := leadingHTMLTag(lower); ok {
+		if _, exists := commonMarkBlockTags[tag]; exists {
+			return htmlBlock{kind: htmlUntilBlank, endsOnBlank: true}, true
+		}
+	}
+	return htmlBlock{}, false
+}
+
+func leadingHTMLTag(line string) (string, bool) {
+	if len(line) < 2 || line[0] != '<' {
+		return "", false
+	}
+	index := 1
+	if index < len(line) && line[index] == '/' {
+		index++
+	}
+	start := index
+	for index < len(line) && ((line[index] >= 'a' && line[index] <= 'z') || (line[index] >= '0' && line[index] <= '9')) {
+		index++
+	}
+	if index == start || !htmlTagBoundary(line, index) {
+		return "", false
+	}
+	return line[start:index], true
+}
+
+func htmlTagBoundary(line string, index int) bool {
+	if index == len(line) {
+		return true
+	}
+	switch line[index] {
+	case ' ', '\t', '>', '/':
+		return true
+	default:
+		return false
+	}
+}
+
+var commonMarkBlockTags = map[string]struct{}{
+	"address": {}, "article": {}, "aside": {}, "base": {}, "basefont": {}, "blockquote": {}, "body": {},
+	"caption": {}, "center": {}, "col": {}, "colgroup": {}, "dd": {}, "details": {}, "dialog": {}, "dir": {},
+	"div": {}, "dl": {}, "dt": {}, "fieldset": {}, "figcaption": {}, "figure": {}, "footer": {}, "form": {},
+	"frame": {}, "frameset": {}, "h1": {}, "h2": {}, "h3": {}, "h4": {}, "h5": {}, "h6": {}, "head": {},
+	"header": {}, "hr": {}, "html": {}, "iframe": {}, "legend": {}, "li": {}, "link": {}, "main": {}, "menu": {},
+	"menuitem": {}, "nav": {}, "noframes": {}, "ol": {}, "optgroup": {}, "option": {}, "p": {}, "param": {},
+	"search": {}, "section": {}, "summary": {}, "table": {}, "tbody": {}, "td": {}, "tfoot": {}, "th": {},
+	"thead": {}, "title": {}, "tr": {}, "track": {}, "ul": {},
+}
+
 func sectionName(line string) (string, bool) {
 	if !strings.HasPrefix(line, "## ") && !strings.HasPrefix(line, "##\t") {
 		return "", false
@@ -465,6 +620,19 @@ func canonicalSectionName(name string) string {
 		return parsed
 	}
 	return ""
+}
+
+func validatedSectionName(name string) (string, error) {
+	for _, value := range name {
+		if unicode.IsControl(value) {
+			return "", ErrInvalidSectionName
+		}
+	}
+	name = canonicalSectionName(name)
+	if name == "" {
+		return "", ErrInvalidSectionName
+	}
+	return name, nil
 }
 
 func fenceMarker(line string) (byte, int) {
