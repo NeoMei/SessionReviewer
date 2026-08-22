@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
+	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
 
@@ -90,8 +92,36 @@ func TestRunInitFailureDoesNotLeakUnpreviewedPaths(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	code := Run([]string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot, "--write"}, &out, &errOut)
-	if code != 1 || !strings.Contains(errOut.String(), "init failed") || strings.Contains(errOut.String(), ownerRoot) || strings.Contains(errOut.String(), vaultRoot) {
+	if code != 1 || !strings.Contains(errOut.String(), "E_INIT_IDENTITY_CONFLICT") || !strings.Contains(errOut.String(), "recovery:") || strings.Contains(errOut.String(), ownerRoot) || strings.Contains(errOut.String(), vaultRoot) {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestWriteInitDiagnosticClassifiesActionableFailuresWithoutDisclosure(t *testing.T) {
+	const canary = "CUSTOMER-PRIVATE-PATH"
+	tests := []struct {
+		name     string
+		err      error
+		code     string
+		hintPart string
+	}{
+		{name: "invalid root", err: fmt.Errorf("%s: %w", canary, project.ErrInvalidInitializationRoot), code: "E_INIT_ROOT_INVALID", hintPart: "check --project, --vault, and --data-dir"},
+		{name: "nested roots", err: fmt.Errorf("%s: %w", canary, project.ErrNestedInitializationRoots), code: "E_INIT_ROOTS_NESTED", hintPart: "choose separate roots"},
+		{name: "corrupt config", err: fmt.Errorf("%s: %w", canary, project.ErrCorruptInitializationConfig), code: "E_INIT_CONFIG_CORRUPT", hintPart: "restore config.toml"},
+		{name: "identity conflict", err: fmt.Errorf("%s: %w", canary, project.ErrConflictingInitializationIdentity), code: "E_INIT_IDENTITY_CONFLICT", hintPart: "use the mapped --vault"},
+		{name: "state changed", err: fmt.Errorf("%s: %w", canary, project.ErrInitializationStateChanged), code: "E_INIT_STATE_CHANGED", hintPart: "rerun init preview"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var out bytes.Buffer
+			if code := writeInitDiagnostic(&out, test.err); code != 1 {
+				t.Fatalf("code=%d", code)
+			}
+			got := out.String()
+			if !strings.Contains(got, test.code) || !strings.Contains(got, test.hintPart) || strings.Contains(got, canary) {
+				t.Fatalf("diagnostic=%q", got)
+			}
+		})
 	}
 }
 

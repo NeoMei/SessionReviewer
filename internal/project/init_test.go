@@ -77,6 +77,42 @@ func TestPreviewInitializationDoesNotCreateDataOrLedger(t *testing.T) {
 	}
 }
 
+func TestPreviewInitializationClassifiesActionableFailures(t *testing.T) {
+	t.Run("invalid root", func(t *testing.T) {
+		_, err := PreviewInitialization(InitOptions{
+			ProjectRoot: filepath.Join(t.TempDir(), "missing"),
+			VaultRoot:   t.TempDir(),
+			DataDir:     t.TempDir(),
+		})
+		if !errors.Is(err, ErrInvalidInitializationRoot) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("nested roots", func(t *testing.T) {
+		root := t.TempDir()
+		vault := filepath.Join(root, "vault")
+		if err := os.Mkdir(vault, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := PreviewInitialization(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: t.TempDir()})
+		if !errors.Is(err, ErrNestedInitializationRoots) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("corrupt config", func(t *testing.T) {
+		root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+		if err := os.WriteFile(filepath.Join(data, "config.toml"), []byte("not = [valid"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := PreviewInitialization(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data})
+		if !errors.Is(err, ErrCorruptInitializationConfig) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
 func TestInitializeRevalidatesRootsAfterAcquiringTransactionLock(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
@@ -105,10 +141,28 @@ func TestInitializeRevalidatesRootsAfterAcquiringTransactionLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "symlink or reparse point") {
 		t.Fatalf("err=%v", err)
 	}
+	if !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("err=%v does not classify the preview/write race", err)
+	}
 	for _, path := range []string{filepath.Join(moved, "docs"), filepath.Join(outside, "docs")} {
 		if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("write escaped revalidation at %s: %v", path, statErr)
 		}
+	}
+}
+
+func TestInitializeClassifiesConflictingIdentity(t *testing.T) {
+	firstRoot, root, firstVault, vault, data := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	const projectID = "project-1111111111111111"
+	writeTestOverview(t, root, projectID)
+	if err := config.Save(filepath.Join(data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: projectID, Root: firstRoot, VaultRoot: firstVault,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data})
+	if !errors.Is(err, ErrConflictingInitializationIdentity) {
+		t.Fatalf("err=%v", err)
 	}
 }
 

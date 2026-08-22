@@ -20,6 +20,14 @@ import (
 
 const initTransactionLockTimeout = 10 * time.Second
 
+var (
+	ErrInvalidInitializationRoot         = errors.New("initialization root is invalid or missing")
+	ErrNestedInitializationRoots         = errors.New("project and vault must not contain one another")
+	ErrCorruptInitializationConfig       = errors.New("initialization configuration is invalid")
+	ErrConflictingInitializationIdentity = errors.New("initialization identity conflicts with existing state")
+	ErrInitializationStateChanged        = errors.New("initialization state changed")
+)
+
 type InitOptions struct {
 	ProjectRoot         string
 	VaultRoot           string
@@ -80,12 +88,12 @@ func PreviewInitialization(opts InitOptions) (InitPreview, error) {
 	}
 	cfg, err := config.Load(paths.configPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return InitPreview{}, err
+		return InitPreview{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
 	if err == nil {
 		mapped, found, findErr := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
 		if findErr != nil {
-			return InitPreview{}, findErr
+			return InitPreview{}, initializationError(ErrConflictingInitializationIdentity, findErr)
 		}
 		if found {
 			preview.ProjectID = mapped.ID
@@ -114,12 +122,12 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 
 	dataDir, err := openOrCreateDirectory(paths.dataRoot, 0o700)
 	if err != nil {
-		return InitResult{}, fmt.Errorf("data root is a symlink or reparse point, or invalid: %w", err)
+		return InitResult{}, initializationError(ErrInvalidInitializationRoot, fmt.Errorf("data root is a symlink or reparse point, or invalid: %w", err))
 	}
 	defer dataDir.Close()
 	lock, err := acquireInitLock(dataDir.Root, "config.toml.lock", initTransactionLockTimeout)
 	if err != nil {
-		return InitResult{}, err
+		return InitResult{}, initializationError(ErrInitializationStateChanged, err)
 	}
 	defer func() {
 		retErr = errors.Join(retErr, lock.release())
@@ -131,35 +139,35 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	}
 	roots, err := openInitializationRoots(opts.GOOS, paths)
 	if err != nil {
-		return InitResult{}, err
+		return InitResult{}, initializationError(ErrInitializationStateChanged, err)
 	}
 	defer roots.close()
 
 	cfg, err := config.LoadRoot(dataDir.Root, "config.toml")
 	if err != nil {
-		return InitResult{}, err
+		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
 	overviewID, overviewExists, err := readOverviewID(roots.project.Root, filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md")))
 	if err != nil {
-		return InitResult{}, err
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	existing, mapped, err := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
 	if err != nil {
-		return InitResult{}, err
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	if mapped {
 		sameVault, err := samePhysicalPath(existing.VaultRoot, paths.vaultRoot)
 		if err != nil {
-			return InitResult{}, err
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 		}
 		if !sameVault {
-			return InitResult{}, fmt.Errorf("project is already mapped to a different vault")
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("project is already mapped to a different vault"))
 		}
 		if !validProjectID(existing.ID) {
-			return InitResult{}, fmt.Errorf("mapped project ID %q is invalid", existing.ID)
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("mapped project ID %q is invalid", existing.ID))
 		}
 		if overviewExists && overviewID != existing.ID {
-			return InitResult{}, fmt.Errorf("project overview ID %q does not match mapped ID %q", overviewID, existing.ID)
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project overview ID %q does not match mapped ID %q", overviewID, existing.ID))
 		}
 		if !overviewExists {
 			if opts.beforeOverviewWrite != nil {
@@ -175,7 +183,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
-			return InitResult{}, fmt.Errorf("project ID %q already belongs to another project root %q", overviewID, owner.Root)
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project ID %q already belongs to another project root %q", overviewID, owner.Root))
 		}
 		cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: overviewID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot})
 		if opts.beforeConfigWrite != nil {
@@ -217,15 +225,15 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 func resolveInitializationPaths(opts InitOptions) (initializationPaths, error) {
 	root, err := filepath.Abs(opts.ProjectRoot)
 	if err != nil {
-		return initializationPaths{}, err
+		return initializationPaths{}, initializationError(ErrInvalidInitializationRoot, err)
 	}
 	vault, err := filepath.Abs(opts.VaultRoot)
 	if err != nil {
-		return initializationPaths{}, err
+		return initializationPaths{}, initializationError(ErrInvalidInitializationRoot, err)
 	}
 	data, err := filepath.Abs(opts.DataDir)
 	if err != nil {
-		return initializationPaths{}, err
+		return initializationPaths{}, initializationError(ErrInvalidInitializationRoot, err)
 	}
 	return initializationPaths{
 		projectRoot: root,
@@ -239,20 +247,24 @@ func resolveInitializationPaths(opts InitOptions) (initializationPaths, error) {
 func openInitializationRoots(goos string, paths initializationPaths) (initializationRoots, error) {
 	projectDir, err := pathguard.Open(paths.projectRoot)
 	if err != nil {
-		return initializationRoots{}, fmt.Errorf("project root is a symlink or reparse point, or invalid: %w", err)
+		return initializationRoots{}, initializationError(ErrInvalidInitializationRoot, fmt.Errorf("project root is a symlink or reparse point, or invalid: %w", err))
 	}
 	vaultDir, err := pathguard.Open(paths.vaultRoot)
 	if err != nil {
 		_ = projectDir.Close()
-		return initializationRoots{}, fmt.Errorf("vault root is a symlink or reparse point, or invalid: %w", err)
+		return initializationRoots{}, initializationError(ErrInvalidInitializationRoot, fmt.Errorf("vault root is a symlink or reparse point, or invalid: %w", err))
 	}
 	roots := initializationRoots{project: projectDir, vault: vaultDir}
 	if inside(goos, paths.projectRoot, paths.vaultRoot) || inside(goos, paths.vaultRoot, paths.projectRoot) ||
 		projectDir.ContainsIdentity(vaultDir.Info()) || vaultDir.ContainsIdentity(projectDir.Info()) {
 		roots.close()
-		return initializationRoots{}, fmt.Errorf("project and vault must not contain one another")
+		return initializationRoots{}, ErrNestedInitializationRoots
 	}
 	return roots, nil
+}
+
+func initializationError(kind, cause error) error {
+	return fmt.Errorf("%w: %v", kind, cause)
 }
 
 func (roots initializationRoots) close() {
