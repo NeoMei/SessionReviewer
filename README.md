@@ -1,0 +1,138 @@
+# SessionReviewer
+
+SessionReviewer 的当前基础版本把本机 Codex session JSONL 流式转换为有界、脱敏的 evidence packet，供后续 Codex Skill 做项目历史整理。CLI 只负责确定性提取和文件安全，不会自行生成决策、结论或项目语义。
+
+## 要求与支持范围
+
+- macOS 13+：Intel 与 Apple Silicon
+- Windows 10 22H2+ 或 Windows 11：x64；Windows ARM 不在 v1 范围内
+- 从源码构建需要 Go 1.26
+- 不需要管理员权限，也不需要单独配置 OpenAI API key
+
+仓库 CI 配置在 macOS Intel x64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。本仓库目前不把这些自动化结果表述为完整的 Windows 原生端到端人工验收。
+
+## 构建、测试与用户级安装
+
+macOS：
+
+```bash
+go test ./...
+go vet ./...
+mkdir -p ./bin
+go build -o ./bin/session-reviewer ./cmd/session-reviewer
+
+mkdir -p "$HOME/.local/bin"
+install -m 0755 ./bin/session-reviewer "$HOME/.local/bin/session-reviewer"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Windows PowerShell：
+
+```powershell
+go test ./...
+go vet ./...
+New-Item -ItemType Directory -Force .\bin | Out-Null
+go build -o .\bin\session-reviewer.exe .\cmd\session-reviewer
+
+$dest = Join-Path $env:LOCALAPPDATA "SessionReviewer\bin"
+New-Item -ItemType Directory -Force $dest | Out-Null
+Copy-Item .\bin\session-reviewer.exe $dest
+$env:Path = "$dest;$env:Path"
+```
+
+最后一行只更新当前 PowerShell 会话。需要长期从任意终端调用时，请把该用户目录加入用户级 `PATH`；无需修改系统级 `PATH`。
+
+## 初始化项目
+
+项目根目录和 Obsidian vault 根目录必须已经存在、彼此独立，且不能通过符号链接、junction 或 reparse point 重定向。
+
+macOS：
+
+```bash
+mkdir -p "/path/to/project" "/path/to/vault"
+cd "/path/to/project"
+session-reviewer init --project . --vault "/path/to/vault"
+```
+
+Windows PowerShell：
+
+```powershell
+New-Item -ItemType Directory -Force C:\Work\Project | Out-Null
+New-Item -ItemType Directory -Force C:\Users\Me\Vault | Out-Null
+Set-Location C:\Work\Project
+session-reviewer.exe init --project . --vault C:\Users\Me\Vault
+```
+
+`init` 创建稳定的项目 ID、`docs/session-review/project-overview.md` 和本机配置映射。重复执行返回同一项目 ID，不重复映射；project 与 vault 任一方向的嵌套都会被拒绝。默认本机数据目录为：
+
+- macOS：`~/.local/share/session-reviewer/`
+- Windows：`%LOCALAPPDATA%\SessionReviewer\`
+
+可用 `--data-dir <path>` 显式覆盖。
+
+## 准备 evidence packet
+
+macOS：
+
+```bash
+cd "/path/to/project"
+session-reviewer prepare checkpoint \
+  --sessions-root "$HOME/.codex/sessions" \
+  --output ./evidence.json
+
+session-reviewer prepare review \
+  --session <session-id> \
+  --sessions-root "$HOME/.codex/sessions" \
+  --output ./evidence-from-start.json \
+  --from-start
+```
+
+Windows PowerShell：
+
+```powershell
+Set-Location C:\Work\Project
+session-reviewer.exe prepare checkpoint `
+  --sessions-root "$HOME\.codex\sessions" `
+  --output .\evidence.json
+
+session-reviewer.exe prepare review `
+  --session <session-id> `
+  --sessions-root "$HOME\.codex\sessions" `
+  --output .\evidence-from-start.json `
+  --from-start
+```
+
+`checkpoint` 从已接受 cursor 的下一行准备证据；`review --from-start` 忽略 cursor，从第 1 行重放。`--from-start` 只适用于 `review`。
+
+重要语义：`prepare` 永远不会创建、推进、修复或提交 accepted cursor。packet 满时会返回 `has_more: true`，`to_cursor` 停在最后一个已进入 packet 的记录；未来的 apply 阶段只有在语义变更成功持久化后才会提交 cursor，因此下一段可从首个未接受记录恢复。
+
+## 输出与隐私边界
+
+- 原始 session 文件只读打开，保持在本机；CLI 不复制或修改原始 JSONL。
+- evidence 采用 allowlist：保留 user/assistant 可见消息、有限的工具调用/结果元数据和工作目录变化。
+- developer、system、hidden reasoning、encrypted/opaque compaction 和未知记录类型不会进入 evidence。
+- 文本在持久化前进行 likely-secret 脱敏，单条摘要、事件数和最终 packet 都有上限；CLI 不把事件内容打印到 stdout/stderr。
+- 脱敏覆盖常见 token、命名 secret、连接 URL、私钥和高熵候选，但它不是对任意敏感信息的形式化证明。evidence 仍应作为本地敏感项目资料保管，并在分享前检查。
+- 输出使用同目录原子替换；失败时保留原输出。输出不得位于 raw sessions 或本机 data 目录内，也不能经过符号链接、junction/reparse point 或非普通文件。
+
+## 常见错误与恢复
+
+- `project is not initialized`：先在真实项目根目录运行 `init`，并确认使用同一个 `--data-dir`。
+- `ambiguous current session`：使用 `--session <session-id>` 明确选择；工具不会静默猜测。
+- cursor 损坏或需要完整复查：使用 `prepare review --from-start`。该命令绕过 cursor 且不修复它，便于后续显式恢复。
+- `output path is inside a protected data root`：把 `--output` 改到项目工作目录等独立位置。
+- root redirected/invalid：使用实际存在的物理目录，移除路径中的符号链接、junction 或 reparse point。
+- packet 的 `has_more` 为 `true`：不要手工假定整段已接受；保留 packet，交给未来的验证/apply 流程成功提交 cursor 后再准备下一段。
+
+准备失败不会推进 cursor，也不会用半成品覆盖既有 evidence 文件。
+
+## 当前限制与后续模型
+
+当前仓库只完成 deterministic foundation。它尚不提供：
+
+- semantic conclusions 或自动总结；
+- proposal `apply` 与完整 Markdown ledger；
+- Mermaid diagram、`resume`、`history` 或 watcher；
+- Obsidian sync Skill、冲突处理或发布安装包。
+
+计划中的 Obsidian 混合模型以 repository 内的 ledger 为 canonical source。Obsidian 编辑只能由用户显式触发 Skill，通过 base / repository / Obsidian 的 three-way proposal，再经验证后的 apply 流程同步回 repository。它不是自动双向文件镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。
