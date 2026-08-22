@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/entity-v1.schema.json",
+  "title": "SessionReviewer editable entity frontmatter v1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "entity_type", "project_id", "revision"],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "entity_type": { "type": "string", "minLength": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "revision": { "type": "integer", "minimum": 1 },
+    "title": { "type": "string" },
+    "status": { "type": "string" },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "source_sessions": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "entity_type": { "const": "decision" } },
+        "required": ["entity_type"]
+      },
+      "then": {
+        "required": ["title", "status"],
+        "properties": {
+          "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
+          "supersedes": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "entity_type": { "const": "open_loop" } },
+        "required": ["entity_type"]
+      },
+      "then": {
+        "required": ["title", "status"],
+        "properties": {
+          "status": { "enum": ["open", "blocked", "resolved", "abandoned", "archived"] }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "entity_type": { "const": "session" } },
+        "required": ["entity_type"]
+      },
+      "then": {
+        "required": ["session_id"],
+        "properties": {
+          "session_id": { "type": "string", "minLength": 1 }
+        }
+      }
+    }
+  ]
+}
