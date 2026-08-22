@@ -2,6 +2,7 @@ package cursor
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -124,6 +125,23 @@ func TestStoreRejectsUnsafeSessionIDs(t *testing.T) {
 			}
 			if err := store.Commit(id, Cursor{}, Cursor{SessionID: id}); err == nil {
 				t.Fatalf("Commit(%q) accepted an unsafe session ID", id)
+			}
+		})
+	}
+}
+
+func TestStoreRejectsWindowsReservedDeviceSessionIDs(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	for _, id := range []string{
+		"CON", "con.txt", "CON.", "PRN", "AUX.json", "nul", "NUL...",
+		"COM1", "com9.log", "LPT1", "lpt9.txt",
+	} {
+		t.Run(id, func(t *testing.T) {
+			if _, err := store.Load(id); err == nil {
+				t.Fatalf("Load(%q) accepted a Windows device alias", id)
+			}
+			if err := store.Commit(id, Cursor{}, Cursor{SessionID: id}); err == nil {
+				t.Fatalf("Commit(%q) accepted a Windows device alias", id)
 			}
 		})
 	}
@@ -282,6 +300,50 @@ func TestStoreRejectsSymlinkCursorFile(t *testing.T) {
 	}
 }
 
+func TestProtectCursorDirectoryCannotBeRedirectedByRootReplacement(t *testing.T) {
+	base := t.TempDir()
+	live := filepath.Join(base, "live")
+	moved := filepath.Join(base, "moved")
+	outside := filepath.Join(base, "outside")
+	for _, root := range []string{live, outside} {
+		if err := os.Mkdir(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(root, "cursors"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(filepath.Join(root, "cursors"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := (Store{Root: live}).open("s1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	if err := os.Rename(live, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, live); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := protectCursorDirectory(root.cursors); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]os.FileMode{
+		filepath.Join(moved, "cursors"):   0o700,
+		filepath.Join(outside, "cursors"): 0o755,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode=%#o want=%#o", path, got, want)
+		}
+	}
+}
+
 func TestStoreRejectsCaseCollidingSessionID(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	if err := store.Commit("Session", Cursor{}, Cursor{SessionID: "Session"}); err != nil {
@@ -361,7 +423,7 @@ func TestStoreFailedCommitLeavesPreviousBytesIntact(t *testing.T) {
 	}
 }
 
-func TestStoreRefusesToGuessWhetherCrashLockIsStale(t *testing.T) {
+func TestStoreReusesUnlockedCrashLockFile(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	dir := filepath.Join(store.Root, "cursors")
 	if err := os.Mkdir(dir, 0o700); err != nil {
@@ -377,19 +439,154 @@ func TestStoreRefusesToGuessWhetherCrashLockIsStale(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := store.Commit("s1", Cursor{}, Cursor{SessionID: "s1"})
-	if err == nil || !strings.Contains(err.Error(), "refusing automatic stale or crashed lock recovery") {
-		t.Fatalf("expected conservative crash-lock error, got %v", err)
+	if err := store.Commit("s1", Cursor{}, Cursor{SessionID: "s1"}); err != nil {
+		t.Fatalf("unlocked crash lock file wedged the session: %v", err)
 	}
-	after, readErr := os.ReadFile(lockPath)
-	if readErr != nil {
-		t.Fatal(readErr)
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("persistent advisory lock file missing: %v", err)
 	}
-	if string(after) != string(lockBytes) {
-		t.Fatalf("crash lock was modified: got %q", after)
+}
+
+func TestStoreRecoversAfterLockOwnerProcessCrash(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	if err := os.Mkdir(filepath.Join(store.Root, "cursors"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if _, statErr := os.Stat(filepath.Join(dir, "s1.json")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("cursor changed while crash lock remained: %v", statErr)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestStoreCrashLockHelper$")
+	cmd.Env = append(os.Environ(),
+		"SESSION_REVIEWER_CURSOR_CRASH_HELPER=1",
+		"SESSION_REVIEWER_CURSOR_ROOT="+store.Root,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("crash helper failed: %v\n%s", err, output)
+	}
+	if err := store.Commit("s1", Cursor{}, Cursor{SessionID: "s1"}); err != nil {
+		t.Fatalf("crashed owner wedged the session: %v", err)
+	}
+}
+
+func TestStoreCrashLockHelper(t *testing.T) {
+	if os.Getenv("SESSION_REVIEWER_CURSOR_CRASH_HELPER") != "1" {
+		return
+	}
+	root, err := os.OpenRoot(filepath.Join(os.Getenv("SESSION_REVIEWER_CURSOR_ROOT"), "cursors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acquireCursorLock(root, ".s1.lock"); err != nil {
+		t.Fatal(err)
+	}
+	os.Exit(0)
+}
+
+func TestStoreLoadWaitsForTransactionAndRecoversBackup(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	current := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := store.Commit("s1", Cursor{}, current); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(store.Root, "cursors")
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	lock, err := acquireCursorLock(root, ".s1.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "s1.json")
+	backup := path + ".session-reviewer-backup"
+	if err := os.Rename(path, backup); err != nil {
+		_ = lock.release()
+		t.Fatal(err)
+	}
+
+	type loadResult struct {
+		cursor Cursor
+		err    error
+	}
+	loaded := make(chan loadResult, 1)
+	go func() {
+		cursor, err := store.Load("s1")
+		loaded <- loadResult{cursor: cursor, err: err}
+	}()
+	select {
+	case result := <-loaded:
+		_ = lock.release()
+		t.Fatalf("Load escaped the transaction lock: got=%+v err=%v", result.cursor, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lock.release(); err != nil {
+		t.Fatal(err)
+	}
+	result := <-loaded
+	if result.err != nil || result.cursor != current {
+		t.Fatalf("recovered cursor=%+v err=%v", result.cursor, result.err)
+	}
+	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("backup remains after recovery: %v", err)
+	}
+}
+
+func TestStoreReconcilesInterruptedReplacementStates(t *testing.T) {
+	current := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	next := Cursor{SessionID: "s1", LastLine: 2, LastHash: strings.Repeat("b", 64)}
+	encode := func(t *testing.T, cursor Cursor) []byte {
+		t.Helper()
+		b, err := json.Marshal(cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	for _, test := range []struct {
+		name        string
+		destination []byte
+		backup      []byte
+		temporary   []byte
+		want        Cursor
+		wantError   bool
+	}{
+		{name: "backup only", backup: encode(t, current), want: current},
+		{name: "valid backup wins over uncommitted temp", backup: encode(t, current), temporary: encode(t, next), want: current},
+		{name: "valid destination wins over stale corrupt backup", destination: encode(t, next), backup: []byte("corrupt"), want: next},
+		{name: "valid backup replaces corrupt destination", destination: []byte("corrupt"), backup: encode(t, current), want: current},
+		{name: "corrupt backup with valid temp is not guessed", backup: []byte("corrupt"), temporary: encode(t, next), wantError: true},
+		{name: "corrupt destination and backup", destination: []byte("corrupt-new"), backup: []byte("corrupt-old"), wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := Store{Root: t.TempDir()}
+			dir := filepath.Join(store.Root, "cursors")
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "s1.json")
+			for name, body := range map[string][]byte{
+				path:                              test.destination,
+				path + ".session-reviewer-backup": test.backup,
+				filepath.Join(dir, ".session-reviewer-test-temp"): test.temporary,
+			} {
+				if body != nil {
+					if err := os.WriteFile(name, body, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			got, err := store.Load("s1")
+			if test.wantError {
+				if err == nil {
+					t.Fatalf("got=%+v, expected corruption error", got)
+				}
+				return
+			}
+			if err != nil || got != test.want {
+				t.Fatalf("got=%+v err=%v want=%+v", got, err, test.want)
+			}
+			if _, err := os.Stat(path + ".session-reviewer-backup"); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("backup remains after reconciliation: %v", err)
+			}
+		})
 	}
 }
 

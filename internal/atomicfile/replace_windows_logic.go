@@ -14,7 +14,7 @@ type windowsFileOps struct {
 }
 
 func replaceWindowsFile(temporary, destination string, ops windowsFileOps) error {
-	backup := destination + ".session-reviewer-backup"
+	backup := BackupPath(destination)
 	destinationExists, err := windowsPathExists(destination, ops.stat)
 	if err != nil {
 		return fmt.Errorf("inspect replacement destination: %w", err)

@@ -28,6 +28,54 @@ func TestWriteReplacesFileAndLeavesNoTemporaryFile(t *testing.T) {
 	}
 }
 
+func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {
+	base := t.TempDir()
+	live := filepath.Join(base, "live")
+	moved := filepath.Join(base, "moved")
+	outside := filepath.Join(base, "outside")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(live, "state.json"), filepath.Join(outside, "state.json")} {
+		if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.Rename(live, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, live); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	if err := WriteRoot(root, "state.json", []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		filepath.Join(moved, "state.json"):   "new",
+		filepath.Join(outside, "state.json"): "old",
+	} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("%s content=%q err=%v want=%q", path, got, err, want)
+		}
+	}
+}
+
+func TestBackupPathMatchesReplacementProtocol(t *testing.T) {
+	if got, want := BackupPath("state.json"), "state.json.session-reviewer-backup"; got != want {
+		t.Fatalf("BackupPath()=%q want=%q", got, want)
+	}
+}
+
 func TestWindowsReplacementPreservesBackupWhenInstallAndRollbackFail(t *testing.T) {
 	const (
 		temporary   = "state.tmp"

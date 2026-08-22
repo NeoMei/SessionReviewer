@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,64 +40,55 @@ type Store struct {
 	Root string
 }
 
-type storePaths struct {
-	root       string
-	dir        string
-	cursor     string
-	lock       string
-	rootInfo   os.FileInfo
-	dirInfo    os.FileInfo
+type storeRoot struct {
+	data       *os.Root
+	cursors    *os.Root
+	cursorName string
+	backupName string
+	lockName   string
 	dirMissing bool
 }
 
 type cursorLock struct {
-	path string
 	file *os.File
 }
 
-func (s Store) Load(sessionID string) (Cursor, error) {
-	paths, err := s.inspectPaths(sessionID, false)
+func (s Store) Load(sessionID string) (result Cursor, retErr error) {
+	root, err := s.open(sessionID, false)
 	if err != nil {
 		return Cursor{}, err
 	}
-	if paths.dirMissing {
+	defer func() { retErr = errors.Join(retErr, root.close()) }()
+	if root.dirMissing {
 		return Cursor{}, nil
 	}
-
-	current, _, err := readCursor(paths.cursor, sessionID)
+	lock, err := acquireCursorLock(root.cursors, root.lockName)
 	if err != nil {
 		return Cursor{}, err
 	}
-	if err := paths.verifyDirectories(); err != nil {
-		return Cursor{}, err
-	}
-	return current, nil
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	return root.loadLocked(sessionID)
 }
 
 func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err := validateCursor(expected, sessionID, true); err != nil {
 		return fmt.Errorf("invalid expected cursor: %w", err)
 	}
-
-	paths, err := s.inspectPaths(sessionID, true)
+	root, err := s.open(sessionID, true)
 	if err != nil {
 		return err
 	}
-	lock, err := acquireCursorLock(paths.lock)
+	defer func() { retErr = errors.Join(retErr, root.close()) }()
+	lock, err := acquireCursorLock(root.cursors, root.lockName)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		retErr = errors.Join(retErr, lock.release())
-	}()
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 
-	if err := paths.verifyDirectories(); err != nil {
+	if err := rejectCaseCollision(root.cursors, root.cursorName, root.backupName, root.lockName); err != nil {
 		return err
 	}
-	if err := rejectCaseCollision(paths.dir, filepath.Base(paths.cursor), filepath.Base(paths.lock)); err != nil {
-		return err
-	}
-	current, currentInfo, err := readCursor(paths.cursor, sessionID)
+	current, err := root.loadLocked(sessionID)
 	if err != nil {
 		return err
 	}
@@ -120,74 +112,187 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("encode cursor state: %w", err)
 	}
-	if err := paths.verifyTarget(currentInfo); err != nil {
-		return err
-	}
-	if err := atomicfile.Write(paths.cursor, append(b, '\n'), 0o600); err != nil {
+	if err := atomicfile.WriteRoot(root.cursors, root.cursorName, append(b, '\n'), 0o600); err != nil {
 		return fmt.Errorf("persist cursor state: %w", err)
 	}
-	if err := paths.verifyWrittenTarget(); err != nil {
-		return err
+	if _, found, err := regularEntry(root.cursors, root.cursorName, "cursor file"); err != nil || !found {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("cursor file is missing after commit")
 	}
 	return nil
 }
 
-func (s Store) inspectPaths(sessionID string, createDir bool) (storePaths, error) {
+func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 	if err := validateSessionID(sessionID); err != nil {
-		return storePaths{}, err
+		return nil, err
 	}
-	rootInfo, err := validateDirectory(s.Root, "data root")
+	rootInfo, err := validateRootPath(s.Root)
 	if err != nil {
-		return storePaths{}, err
+		return nil, err
+	}
+	data, err := os.OpenRoot(s.Root)
+	if err != nil {
+		return nil, fmt.Errorf("open data root: %w", err)
+	}
+	openedRootInfo, err := data.Stat(".")
+	if err != nil || !os.SameFile(rootInfo, openedRootInfo) {
+		_ = data.Close()
+		return nil, fmt.Errorf("data root changed while opening")
 	}
 
-	paths := storePaths{
-		root:     s.Root,
-		dir:      filepath.Join(s.Root, "cursors"),
-		cursor:   filepath.Join(s.Root, "cursors", sessionID+".json"),
-		lock:     filepath.Join(s.Root, "cursors", "."+strings.ToLower(sessionID)+".lock"),
-		rootInfo: rootInfo,
+	root := &storeRoot{
+		data:       data,
+		cursorName: sessionID + ".json",
+		backupName: atomicfile.BackupPath(sessionID + ".json"),
+		lockName:   "." + strings.ToLower(sessionID) + ".lock",
 	}
-	dirInfo, err := validateDirectory(paths.dir, "cursor directory")
+	cursorInfo, err := data.Lstat("cursors")
 	if errors.Is(err, os.ErrNotExist) && !createDir {
-		paths.dirMissing = true
-		return paths, nil
+		root.dirMissing = true
+		return root, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := os.Mkdir(paths.dir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return storePaths{}, fmt.Errorf("create cursor directory: %w", err)
+		if err := data.Mkdir("cursors", 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			_ = root.close()
+			return nil, fmt.Errorf("create cursor directory: %w", err)
 		}
-		dirInfo, err = validateDirectory(paths.dir, "cursor directory")
+		cursorInfo, err = data.Lstat("cursors")
 	}
 	if err != nil {
-		return storePaths{}, err
+		_ = root.close()
+		return nil, fmt.Errorf("inspect cursor directory: %w", err)
+	}
+	if isSymlinkOrReparse(cursorInfo) || !cursorInfo.IsDir() {
+		_ = root.close()
+		return nil, fmt.Errorf("cursor directory is a symlink, reparse point, or non-directory")
+	}
+	cursors, err := data.OpenRoot("cursors")
+	if err != nil {
+		_ = root.close()
+		return nil, fmt.Errorf("open cursor directory: %w", err)
+	}
+	root.cursors = cursors
+	openedCursorInfo, err := cursors.Stat(".")
+	if err != nil || !os.SameFile(cursorInfo, openedCursorInfo) {
+		_ = root.close()
+		return nil, fmt.Errorf("cursor directory changed while opening")
 	}
 	if createDir {
-		if err := os.Chmod(paths.dir, 0o700); err != nil {
-			return storePaths{}, fmt.Errorf("protect cursor directory: %w", err)
+		if err := protectCursorDirectory(cursors); err != nil {
+			_ = root.close()
+			return nil, err
 		}
 	}
-	paths.dirInfo = dirInfo
-	if err := paths.verifyDirectories(); err != nil {
-		return storePaths{}, err
+	if err := rejectCaseCollision(cursors, root.cursorName, root.backupName, root.lockName); err != nil {
+		_ = root.close()
+		return nil, err
 	}
-	if err := rejectCaseCollision(paths.dir, filepath.Base(paths.cursor), filepath.Base(paths.lock)); err != nil {
-		return storePaths{}, err
+	for name, label := range map[string]string{
+		root.cursorName: "cursor file",
+		root.backupName: "cursor backup",
+		root.lockName:   "cursor lock",
+	} {
+		if _, _, err := regularEntry(cursors, name, label); err != nil {
+			_ = root.close()
+			return nil, err
+		}
 	}
-	if err := validateOptionalRegular(paths.cursor, "cursor file"); err != nil {
-		return storePaths{}, err
+	return root, nil
+}
+
+func protectCursorDirectory(root *os.Root) error {
+	directory, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("open cursor directory for protection: %w", err)
 	}
-	if err := validateOptionalRegular(paths.lock, "cursor lock"); err != nil {
-		return storePaths{}, err
+	chmodErr := directory.Chmod(0o700)
+	closeErr := directory.Close()
+	if err := errors.Join(chmodErr, closeErr); err != nil {
+		return fmt.Errorf("protect cursor directory: %w", err)
 	}
-	return paths, nil
+	return nil
+}
+
+func (root *storeRoot) close() error {
+	if root == nil {
+		return nil
+	}
+	var err error
+	if root.cursors != nil {
+		err = errors.Join(err, root.cursors.Close())
+	}
+	if root.data != nil {
+		err = errors.Join(err, root.data.Close())
+	}
+	return err
+}
+
+func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
+	destinationInfo, destinationFound, err := regularEntry(root.cursors, root.cursorName, "cursor file")
+	if err != nil {
+		return Cursor{}, err
+	}
+	backupInfo, backupFound, err := regularEntry(root.cursors, root.backupName, "cursor backup")
+	if err != nil {
+		return Cursor{}, err
+	}
+	if !destinationFound && !backupFound {
+		return Cursor{}, nil
+	}
+
+	var destination Cursor
+	var destinationErr error
+	if destinationFound {
+		destination, destinationErr = readCursor(root.cursors, root.cursorName, sessionID, destinationInfo)
+	}
+	var backup Cursor
+	var backupErr error
+	if backupFound {
+		backup, backupErr = readCursor(root.cursors, root.backupName, sessionID, backupInfo)
+	}
+
+	if destinationFound && destinationErr == nil {
+		if backupFound {
+			if err := root.cursors.Remove(root.backupName); err != nil {
+				return Cursor{}, fmt.Errorf("remove stale cursor backup: %w", err)
+			}
+		}
+		return destination, nil
+	}
+	if backupFound && backupErr == nil {
+		if destinationFound {
+			if err := root.cursors.Remove(root.cursorName); err != nil {
+				return Cursor{}, fmt.Errorf("remove corrupt replacement cursor: %w", err)
+			}
+		}
+		if err := root.cursors.Rename(root.backupName, root.cursorName); err != nil {
+			return Cursor{}, fmt.Errorf("restore cursor backup: %w", err)
+		}
+		return backup, nil
+	}
+	return Cursor{}, fmt.Errorf("cursor state and recovery backup are corrupt")
 }
 
 func validateSessionID(sessionID string) error {
-	if sessionID == "" || sessionID == "." || sessionID == ".." || !safeID.MatchString(sessionID) {
+	if sessionID == "" || sessionID == "." || sessionID == ".." || !safeID.MatchString(sessionID) || windowsReservedName(sessionID) {
 		return fmt.Errorf("invalid session id")
 	}
 	return nil
+}
+
+func windowsReservedName(name string) bool {
+	name = strings.TrimRight(name, " .")
+	if dot := strings.IndexByte(name, '.'); dot >= 0 {
+		name = name[:dot]
+	}
+	name = strings.ToUpper(name)
+	switch name {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(name) == 4 && (strings.HasPrefix(name, "COM") || strings.HasPrefix(name, "LPT")) && name[3] >= '1' && name[3] <= '9'
 }
 
 func validateCursor(cursor Cursor, sessionID string, allowMissing bool) error {
@@ -216,61 +321,30 @@ func cursorEqual(first, second Cursor) bool {
 		first.UpdatedAt.Equal(second.UpdatedAt)
 }
 
-func validateDirectory(path, label string) (os.FileInfo, error) {
+func validateRootPath(path string) (os.FileInfo, error) {
 	if path == "" {
-		return nil, fmt.Errorf("%s is required", label)
+		return nil, fmt.Errorf("data root is required")
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", label, err)
+		return nil, fmt.Errorf("inspect data root: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("%s is a symlink or reparse point", label)
+	if isSymlinkOrReparse(info) || !info.IsDir() {
+		return nil, fmt.Errorf("data root is a symlink, reparse point, or non-directory")
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", label)
-	}
-	if redirected, err := pathIsRedirected(path); err != nil {
-		return nil, fmt.Errorf("inspect %s: %w", label, err)
-	} else if redirected {
-		return nil, fmt.Errorf("%s is a symlink or reparse point", label)
-	}
-	return info, nil
-}
-
-func validateOptionalRegular(path, label string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect %s: %w", label, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("%s is a symlink or reparse point", label)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", label)
-	}
-	if redirected, err := pathIsRedirected(path); err != nil {
-		return fmt.Errorf("inspect %s: %w", label, err)
-	} else if redirected {
-		return fmt.Errorf("%s is a symlink or reparse point", label)
-	}
-	return nil
-}
-
-func pathIsRedirected(path string) (bool, error) {
 	physical, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		return false, err
+		return nil, fmt.Errorf("inspect data root: %w", err)
 	}
 	physicalParent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
-		return false, err
+		return nil, fmt.Errorf("inspect data root parent: %w", err)
 	}
 	expected := filepath.Join(physicalParent, filepath.Base(path))
-	return !samePath(physical, expected), nil
+	if !samePath(physical, expected) {
+		return nil, fmt.Errorf("data root is a symlink or reparse point")
+	}
+	return info, nil
 }
 
 func samePath(first, second string) bool {
@@ -282,8 +356,22 @@ func samePath(first, second string) bool {
 	return first == second
 }
 
-func rejectCaseCollision(dir string, allowed ...string) error {
-	entries, err := os.ReadDir(dir)
+func regularEntry(root *os.Root, name, label string) (os.FileInfo, bool, error) {
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if isSymlinkOrReparse(info) || !info.Mode().IsRegular() {
+		return nil, true, fmt.Errorf("%s is a symlink, reparse point, or non-regular file", label)
+	}
+	return info, true, nil
+}
+
+func rejectCaseCollision(root *os.Root, allowed ...string) error {
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return fmt.Errorf("inspect cursor directory: %w", err)
 	}
@@ -297,152 +385,108 @@ func rejectCaseCollision(dir string, allowed ...string) error {
 	return nil
 }
 
-func readCursor(path, sessionID string) (Cursor, os.FileInfo, error) {
-	before, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return Cursor{}, nil, nil
-	}
-	if err != nil {
-		return Cursor{}, nil, fmt.Errorf("inspect cursor file: %w", err)
-	}
-	if err := validateOptionalRegular(path, "cursor file"); err != nil {
-		return Cursor{}, nil, err
-	}
+func readCursor(root *os.Root, name, sessionID string, before os.FileInfo) (Cursor, error) {
 	if before.Size() > maxCursorBytes {
-		return Cursor{}, nil, fmt.Errorf("cursor state is corrupt")
+		return Cursor{}, fmt.Errorf("cursor state is corrupt")
 	}
-
-	file, err := os.Open(path)
+	file, err := root.Open(name)
 	if err != nil {
-		return Cursor{}, nil, fmt.Errorf("open cursor state: %w", err)
+		return Cursor{}, fmt.Errorf("open cursor state: %w", err)
 	}
 	defer file.Close()
 	opened, err := file.Stat()
 	if err != nil {
-		return Cursor{}, nil, fmt.Errorf("inspect open cursor state: %w", err)
+		return Cursor{}, fmt.Errorf("inspect open cursor state: %w", err)
 	}
-	if !os.SameFile(before, opened) {
-		return Cursor{}, nil, fmt.Errorf("cursor file changed while opening")
+	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
+		return Cursor{}, fmt.Errorf("cursor file changed while opening")
 	}
-
 	decoder := json.NewDecoder(io.LimitReader(file, maxCursorBytes+1))
 	decoder.DisallowUnknownFields()
 	var current Cursor
 	if err := decoder.Decode(&current); err != nil {
-		return Cursor{}, nil, fmt.Errorf("cursor state is corrupt")
+		return Cursor{}, fmt.Errorf("cursor state is corrupt")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return Cursor{}, nil, fmt.Errorf("cursor state is corrupt")
+		return Cursor{}, fmt.Errorf("cursor state is corrupt")
 	}
-	after, err := os.Lstat(path)
-	if err != nil || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
-		return Cursor{}, nil, fmt.Errorf("cursor file changed while reading")
+	after, found, err := regularEntry(root, name, "cursor file")
+	if err != nil || !found || !os.SameFile(opened, after) {
+		return Cursor{}, fmt.Errorf("cursor file changed while reading")
 	}
 	if err := validateCursor(current, sessionID, false); err != nil {
-		return Cursor{}, nil, fmt.Errorf("cursor state is invalid: %w", err)
+		return Cursor{}, fmt.Errorf("cursor state is invalid: %w", err)
 	}
-	return current, opened, nil
+	return current, nil
 }
 
-func (paths storePaths) verifyDirectories() error {
-	rootInfo, err := validateDirectory(paths.root, "data root")
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(paths.rootInfo, rootInfo) {
-		return fmt.Errorf("data root changed during cursor operation")
-	}
-	if paths.dirMissing {
-		return nil
-	}
-	dirInfo, err := validateDirectory(paths.dir, "cursor directory")
-	if err != nil {
-		return err
-	}
-	if !os.SameFile(paths.dirInfo, dirInfo) {
-		return fmt.Errorf("cursor directory changed during cursor operation")
-	}
-	return nil
-}
-
-func (paths storePaths) verifyTarget(previous os.FileInfo) error {
-	if err := paths.verifyDirectories(); err != nil {
-		return err
-	}
-	current, err := os.Lstat(paths.cursor)
-	if previous == nil && errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("cursor file changed before commit")
-	}
-	if previous == nil || current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(previous, current) {
-		return fmt.Errorf("cursor file changed before commit")
-	}
-	return nil
-}
-
-func (paths storePaths) verifyWrittenTarget() error {
-	if err := paths.verifyDirectories(); err != nil {
-		return err
-	}
-	return validateOptionalRegular(paths.cursor, "cursor file")
-}
-
-func acquireCursorLock(path string) (*cursorLock, error) {
+func acquireCursorLock(root *os.Root, name string) (*cursorLock, error) {
 	deadline := time.Now().Add(lockTimeout)
 	for {
-		file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err == nil {
-			if _, err := fmt.Fprintf(file, "pid=%d\ncreated=%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("initialize cursor lock: %w", err)
-			}
-			if err := file.Sync(); err != nil {
-				_ = file.Close()
-				_ = os.Remove(path)
-				return nil, fmt.Errorf("sync cursor lock: %w", err)
-			}
-			return &cursorLock{path: path, file: file}, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("acquire cursor lock: %w", err)
-		}
-		if err := validateOptionalRegular(path, "cursor lock"); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
+		file, err := openStableLockFile(root, name)
+		if err != nil {
 			return nil, err
 		}
+		locked, err := tryPlatformLock(file)
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("acquire cursor lock: %w", err)
+		}
+		if locked {
+			return &cursorLock{file: file}, nil
+		}
+		_ = file.Close()
 		if !time.Now().Before(deadline) {
-			return nil, fmt.Errorf("cursor lock remains held; refusing automatic stale or crashed lock recovery")
+			return nil, fmt.Errorf("cursor transaction remains locked by a live owner")
 		}
 		time.Sleep(lockPollInterval)
 	}
 }
 
+func openStableLockFile(root *os.Root, name string) (*os.File, error) {
+	for {
+		before, found, err := regularEntry(root, name, "cursor lock")
+		if err != nil {
+			return nil, err
+		}
+		flags := os.O_RDWR
+		if !found {
+			flags |= os.O_CREATE | os.O_EXCL
+		}
+		file, err := root.OpenFile(name, flags, 0o600)
+		if errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("open cursor lock: %w", err)
+		}
+		opened, err := file.Stat()
+		if err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("inspect open cursor lock: %w", err)
+		}
+		after, afterFound, err := regularEntry(root, name, "cursor lock")
+		if err != nil || !afterFound || !os.SameFile(opened, after) || (found && !os.SameFile(before, opened)) {
+			_ = file.Close()
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := file.Chmod(0o600); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("protect cursor lock: %w", err)
+		}
+		return file, nil
+	}
+}
+
 func (lock *cursorLock) release() error {
-	owned, err := lock.file.Stat()
-	if err != nil {
-		_ = lock.file.Close()
-		return fmt.Errorf("inspect owned cursor lock: %w", err)
+	if lock == nil || lock.file == nil {
+		return nil
 	}
-	current, err := os.Lstat(lock.path)
-	if err != nil {
-		_ = lock.file.Close()
-		return fmt.Errorf("inspect cursor lock before release: %w", err)
-	}
-	if current.Mode()&os.ModeSymlink != 0 || !os.SameFile(owned, current) {
-		_ = lock.file.Close()
-		return fmt.Errorf("cursor lock ownership changed; refusing to remove it")
-	}
-	if err := lock.file.Close(); err != nil {
-		return fmt.Errorf("close cursor lock: %w", err)
-	}
-	if err := os.Remove(lock.path); err != nil {
-		return fmt.Errorf("remove cursor lock: %w", err)
-	}
-	return nil
+	unlockErr := unlockPlatformLock(lock.file)
+	closeErr := lock.file.Close()
+	return errors.Join(unlockErr, closeErr)
 }
