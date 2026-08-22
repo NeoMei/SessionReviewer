@@ -35,6 +35,7 @@ type textSegment struct {
 var (
 	tokenCandidate        = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
 	stableID              = regexp.MustCompile(`^(?:msg_|rs_|ctc_|ctco_|ev-)(?:[A-Za-z0-9]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$`)
+	bearerCredential      = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)
 	namedSecretAssignment = regexp.MustCompile(`\b"?(?:(?i:(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret))|(?:[a-z][A-Za-z0-9]*(?:ApiKey|AccessToken|AuthToken|Authorization|Cookie|Password|Secret)))"?\s*[:=][ \t]*`)
 	nextFieldBoundary     = regexp.MustCompile(`(?:[,;][ \t]*|\r?\n[ \t]*|[ \t]+)"?[A-Za-z_][A-Za-z0-9_.-]*"?[ \t]*[:=]`)
 )
@@ -42,7 +43,7 @@ var (
 func Default() Redactor {
 	return Redactor{rules: []rule{
 		{"private_key", regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----(?:.*?-----END [A-Z ]*PRIVATE KEY-----|.*\z)`)},
-		{"bearer", regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)},
+		{"bearer", bearerCredential},
 		{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
 		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
 	}}
@@ -51,10 +52,10 @@ func Default() Redactor {
 func (r Redactor) Text(input string) Result {
 	counts := map[string]int{}
 	segments := []textSegment{{text: input}}
+	segments = applyNamedSecretRule(segments, counts)
 	for _, rule := range r.rules {
 		segments = applyRegexpRule(segments, rule, counts)
 	}
-	segments = applyNamedSecretRule(segments, counts)
 
 	for i := range segments {
 		if segments[i].protected {
@@ -114,32 +115,64 @@ func applyRegexpRule(segments []textSegment, current rule, counts map[string]int
 
 func applyNamedSecretRule(segments []textSegment, counts map[string]int) []textSegment {
 	result := make([]textSegment, 0, len(segments))
-	for i, segment := range segments {
+	for _, segment := range segments {
 		if segment.protected {
 			result = append(result, segment)
 			continue
 		}
-		followedByProtected := i+1 < len(segments) && segments[i+1].protected
-		cursor := 0
-		for cursor < len(segment.text) {
-			assignment := namedSecretAssignment.FindStringIndex(segment.text[cursor:])
+		emitted := 0
+		search := 0
+		for search < len(segment.text) {
+			assignment := namedSecretAssignment.FindStringIndex(segment.text[search:])
 			if assignment == nil {
 				break
 			}
-			start := cursor + assignment[0]
-			valueStart := cursor + assignment[1]
-			end, complete := namedSecretValueEnd(segment.text, valueStart)
-			if !complete && end == len(segment.text) && followedByProtected {
-				break
+			start := search + assignment[0]
+			valueStart := search + assignment[1]
+			end, _ := namedSecretValueEnd(segment.text, valueStart)
+			if prefersBearerRule(segment.text[start:valueStart], segment.text[valueStart:end]) {
+				search = end
+				continue
 			}
-			appendSegment(&result, segment.text[cursor:start], false)
+			appendSegment(&result, segment.text[emitted:start], false)
 			appendSegment(&result, "[REDACTED:NAMED_SECRET]", true)
 			counts["named_secret"]++
-			cursor = end
+			emitted = end
+			search = end
 		}
-		appendSegment(&result, segment.text[cursor:], false)
+		appendSegment(&result, segment.text[emitted:], false)
 	}
 	return result
+}
+
+func prefersBearerRule(assignment, value string) bool {
+	separator := strings.LastIndexAny(assignment, ":=")
+	if separator < 0 {
+		return false
+	}
+	key := strings.ToLower(strings.Trim(strings.TrimSpace(assignment[:separator]), `"'`))
+	isAuthorization := key == "auth" || key == "authorization" ||
+		strings.HasSuffix(key, "_auth") || strings.HasSuffix(key, "-auth") ||
+		strings.HasSuffix(key, "_authorization") || strings.HasSuffix(key, "-authorization") ||
+		strings.HasSuffix(key, "authorization")
+	if !isAuthorization {
+		return false
+	}
+	value = strings.TrimLeft(value, " \t")
+	var quote byte
+	if len(value) > 0 && (value[0] == '"' || value[0] == '\'') {
+		quote = value[0]
+		value = value[1:]
+	}
+	match := bearerCredential.FindStringIndex(value)
+	if match == nil || match[0] != 0 {
+		return false
+	}
+	remainder := value[match[1]:]
+	if quote != 0 {
+		return len(remainder) > 0 && remainder[0] == quote && strings.TrimSpace(remainder[1:]) == ""
+	}
+	return strings.TrimSpace(remainder) == ""
 }
 
 func namedSecretValueEnd(text string, start int) (int, bool) {
@@ -227,8 +260,13 @@ func safeValueBoundary(text string, start int) int {
 	// Malformed values remain secret until a structurally clear next field or
 	// container close. Whitespace and control bytes alone are not safe boundaries.
 	boundary := len(text)
-	if match := nextFieldBoundary.FindStringIndex(text[start:]); match != nil {
+	for _, match := range nextFieldBoundary.FindAllStringIndex(text[start:], -1) {
+		matchEnd := start + match[1]
+		if matchEnd+1 < len(text) && text[matchEnd-1] == ':' && text[matchEnd:matchEnd+2] == "//" {
+			continue
+		}
 		boundary = start + match[0]
+		break
 	}
 	for i := start; i < boundary; i++ {
 		if text[i] == '}' || text[i] == ']' {

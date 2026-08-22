@@ -170,3 +170,43 @@ func TestDefaultRedactsControlAndMultilineNamedSecretValues(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultOuterNamedSecretDominatesNestedRecognizers(t *testing.T) {
+	cases := []struct {
+		input    string
+		neighbor string
+	}{
+		{`password="Bearer eyJhbGciOiJIUzI1NiJ9.synthetic.signature short-canary"; mode=public`, "; mode=public"},
+		{`password="before-canary https://admin:inner-canary@example.test/path after-canary"; mode=public`, "; mode=public"},
+		{"password=\"before-canary\n-----BEGIN PRIVATE KEY-----\nINNERPRIVATEKEY\n-----END PRIVATE KEY-----\nafter-canary\"\nmode=public", "\nmode=public"},
+		{`password="before-canary q7Vx2Pm9Lk4Nz8Rc1Ya6Wt3Hu5Jd0Sf7Bg2Ke9Ui after-canary"; mode=public`, "; mode=public"},
+		{"password=\"Bearer eyJhbGciOiJIUzI1NiJ9.synthetic.signature short-canary\nwrapped-canary\nmode=public", "\nmode=public"},
+		{`password=before-canary https://admin:inner-canary@example.test/path after-canary; mode=public`, "; mode=public"},
+	}
+	for i, tc := range cases {
+		result := Default().Text(tc.input)
+		if strings.Contains(strings.ToLower(result.Text), "canary") {
+			t.Fatalf("nested named-secret case %d leaked", i)
+		}
+		if strings.ContainsRune(result.Text, '\x00') {
+			t.Fatalf("nested named-secret case %d retained internal residue", i)
+		}
+		if !strings.Contains(result.Text, tc.neighbor) {
+			t.Fatalf("nested named-secret case %d swallowed neighboring field", i)
+		}
+		if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+			t.Fatalf("nested named-secret case %d had inaccurate findings", i)
+		}
+	}
+}
+
+func TestDefaultAuthorizationUsesBearerRuleOnlyForWholeLogicalValue(t *testing.T) {
+	input := `{"authorization":"Bearer eyJhbGciOiJIUzI1NiJ9.synthetic.signature short-canary","mode":"public"}`
+	result := Default().Text(input)
+	if strings.Contains(strings.ToLower(result.Text), "canary") || !strings.Contains(result.Text, `,"mode":"public"`) {
+		t.Fatal("authorization suffix was not safely bounded")
+	}
+	if len(result.Findings) != 1 || result.Findings[0] != (Finding{Rule: "named_secret", Count: 1}) {
+		t.Fatal("authorization suffix had inaccurate findings")
+	}
+}
