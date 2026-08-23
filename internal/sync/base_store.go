@@ -55,6 +55,10 @@ type BaseStore struct {
 }
 
 func (s BaseStore) Load(entityID string) (BaseRecord, bool, error) {
+	return s.loadWithFinalVerifyHook(entityID, nil)
+}
+
+func (s BaseStore) loadWithFinalVerifyHook(entityID string, beforeFinalVerify func() error) (BaseRecord, bool, error) {
 	if !stableBaseID.MatchString(entityID) {
 		return BaseRecord{}, false, errors.New("invalid merge-base entity ID")
 	}
@@ -75,13 +79,17 @@ func (s BaseStore) Load(entityID string) (BaseRecord, bool, error) {
 			}
 		}
 	}
-	if verifyErr := verifyBaseDirectoryIdentity(s.Root, bases); verifyErr != nil {
+	if verifyErr := verifyBaseDirectoryIdentityWithHook(s.Root, bases, beforeFinalVerify); verifyErr != nil {
 		return BaseRecord{}, false, errors.Join(err, verifyErr)
 	}
 	return record, recordFound, err
 }
 
 func (s BaseStore) List() ([]BaseRecord, error) {
+	return s.listWithFinalVerifyHook(nil)
+}
+
+func (s BaseStore) listWithFinalVerifyHook(beforeFinalVerify func() error) ([]BaseRecord, error) {
 	bases, found, err := s.openBaseDirectory(false)
 	if err != nil || !found {
 		return nil, err
@@ -91,13 +99,17 @@ func (s BaseStore) List() ([]BaseRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := verifyBaseDirectoryIdentity(s.Root, bases); err != nil {
+	if err := verifyBaseDirectoryIdentityWithHook(s.Root, bases, beforeFinalVerify); err != nil {
 		return nil, err
 	}
 	return records, nil
 }
 
 func (s BaseStore) Commit(expectedContentHash string, next BaseRecord) (retErr error) {
+	return s.commitWithFinalVerifyHook(expectedContentHash, next, nil)
+}
+
+func (s BaseStore) commitWithFinalVerifyHook(expectedContentHash string, next BaseRecord, beforeFinalVerify func() error) (retErr error) {
 	if err := validateBaseRecord(next, next.EntityID); err != nil {
 		return err
 	}
@@ -111,7 +123,9 @@ func (s BaseStore) Commit(expectedContentHash string, next BaseRecord) (retErr e
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
-	defer func() { retErr = errors.Join(retErr, verifyBaseDirectoryIdentity(s.Root, bases)) }()
+	defer func() {
+		retErr = errors.Join(retErr, verifyBaseDirectoryIdentityWithHook(s.Root, bases, beforeFinalVerify))
+	}()
 
 	primaryName := baseRecordName(next.EntityID)
 	backupName := atomicfile.BackupPath(primaryName)
@@ -214,13 +228,18 @@ func (s BaseStore) openBaseDirectory(create bool) (*os.Root, bool, error) {
 			_ = bases.Close()
 			return nil, false, errors.New("cannot protect merge-base directory")
 		}
+		opened, err = bases.Stat(".")
+		if err != nil || !os.SameFile(before, opened) || !privateStateMode(opened, 0o700) {
+			_ = bases.Close()
+			return nil, false, errors.New("cannot verify merge-base directory permissions")
+		}
 	} else if !privateStateMode(opened, 0o700) {
 		_ = bases.Close()
 		return nil, false, errors.New("merge-base directory permissions are not private")
 	}
 	after, err := s.Root.Lstat(baseDirectoryName)
 	rootAfter, rootErr := s.Root.Stat(".")
-	if err != nil || rootErr != nil || !os.SameFile(before, after) || !os.SameFile(rootBefore, rootAfter) || isStateRedirect(after) || !after.IsDir() {
+	if err != nil || rootErr != nil || !os.SameFile(before, after) || !os.SameFile(rootBefore, rootAfter) || isStateRedirect(after) || !after.IsDir() || !privateStateMode(opened, 0o700) || !privateStateMode(after, 0o700) {
 		_ = bases.Close()
 		return nil, false, errors.New("merge-base directory changed while opening")
 	}
@@ -468,11 +487,11 @@ func verifyBaseDirectoryIdentity(parent, bases *os.Root) error {
 		return errors.New("merge-base parent and pinned directory are required")
 	}
 	pinned, err := bases.Stat(".")
-	if err != nil || pinned == nil || !pinned.IsDir() || isStateRedirect(pinned) {
+	if err != nil || pinned == nil || !pinned.IsDir() || isStateRedirect(pinned) || !privateStateMode(pinned, 0o700) {
 		return errors.New("pinned merge-base directory is invalid")
 	}
 	namespace, err := parent.Lstat(baseDirectoryName)
-	if err != nil || namespace == nil || !namespace.IsDir() || isStateRedirect(namespace) || !os.SameFile(pinned, namespace) {
+	if err != nil || namespace == nil || !namespace.IsDir() || isStateRedirect(namespace) || !os.SameFile(pinned, namespace) || !privateStateMode(namespace, 0o700) {
 		return errors.New("merge-base directory namespace identity changed")
 	}
 	reopened, err := parent.OpenRoot(baseDirectoryName)
@@ -481,10 +500,19 @@ func verifyBaseDirectoryIdentity(parent, bases *os.Root) error {
 	}
 	defer reopened.Close()
 	opened, err := reopened.Stat(".")
-	if err != nil || !os.SameFile(namespace, opened) || !os.SameFile(pinned, opened) {
+	if err != nil || !os.SameFile(namespace, opened) || !os.SameFile(pinned, opened) || !opened.IsDir() || isStateRedirect(opened) || !privateStateMode(opened, 0o700) {
 		return errors.New("merge-base directory changed while re-opening")
 	}
 	return nil
+}
+
+func verifyBaseDirectoryIdentityWithHook(parent, bases *os.Root, beforeFinalVerify func() error) error {
+	if beforeFinalVerify != nil {
+		if err := beforeFinalVerify(); err != nil {
+			return err
+		}
+	}
+	return verifyBaseDirectoryIdentity(parent, bases)
 }
 
 func validateBaseRecord(record BaseRecord, expectedEntityID string) error {

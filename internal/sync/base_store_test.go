@@ -546,6 +546,60 @@ func TestBaseStoreRevalidatesPinnedDirectoryNamespace(t *testing.T) {
 	}
 }
 
+func TestBaseStoreVerifierRejectsPublicPinnedDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows privateStateMode validates redirects and type, not POSIX mode bits")
+	}
+	data := t.TempDir()
+	if err := os.Mkdir(filepath.Join(data, baseDirectoryName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	bases, err := root.OpenRoot(baseDirectoryName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bases.Close()
+	if err := os.Chmod(filepath.Join(data, baseDirectoryName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyBaseDirectoryIdentity(root, bases); err == nil {
+		t.Fatal("public merge-base directory passed final identity verification")
+	}
+}
+
+func TestBaseStoreOperationsRejectDirectoryPermissionChangeAtFinalVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows privateStateMode validates redirects and type, not POSIX mode bits")
+	}
+	for _, operation := range []string{"Load", "List", "Commit"} {
+		t.Run(operation, func(t *testing.T) {
+			data, root, _, first := baseStoreWithRecord(t)
+			defer root.Close()
+			store := BaseStore{Root: root}
+			beforeFinalVerify := func() error {
+				return os.Chmod(filepath.Join(data, baseDirectoryName), 0o755)
+			}
+			var err error
+			switch operation {
+			case "Load":
+				_, _, err = store.loadWithFinalVerifyHook(first.EntityID, beforeFinalVerify)
+			case "List":
+				_, err = store.listWithFinalVerifyHook(beforeFinalVerify)
+			case "Commit":
+				err = store.commitWithFinalVerifyHook(first.ContentHash, validBaseRecord(first.EntityID, first.RelativePath, "next"), beforeFinalVerify)
+			}
+			if err == nil {
+				t.Fatalf("%s accepted merge-base directory permission change", operation)
+			}
+		})
+	}
+}
+
 func TestBaseStoreRejectsWhenPrimaryAndBackupAreCorrupt(t *testing.T) {
 	data := t.TempDir()
 	if err := os.Mkdir(filepath.Join(data, "merge-bases"), 0o700); err != nil {
