@@ -80,7 +80,9 @@ func ResumeLedgerOnly(projectRoot string) (ResumeCard, error) {
 // construct a card, so the renderer itself also fails closed on output growth.
 func (card ResumeCard) Markdown() string {
 	out := newRecoveryMarkdownBuilder()
-	out.raw("# Resume\n\n")
+	if !out.raw("# Resume\n\n") {
+		return out.finish()
+	}
 	if !out.field("Project", card.ProjectID) || !out.field("Goal", card.Goal) || !out.field("Stop point", card.StopPoint) || !out.field("Last verified", card.LastVerified) {
 		return out.finish()
 	}
@@ -436,17 +438,18 @@ func newRecoveryMarkdownBuilder() *recoveryMarkdownBuilder {
 	return &out
 }
 
-func (out *recoveryMarkdownBuilder) raw(value string) {
+func (out *recoveryMarkdownBuilder) raw(value string) bool {
 	if out.overflow || len(value) > maxRecoveryMarkdownBytes-out.text.Len() {
 		out.overflow = true
-		return
+		return false
 	}
 	out.text.WriteString(value)
+	return true
 }
 
-func (out *recoveryMarkdownBuilder) escaped(value string) {
+func (out *recoveryMarkdownBuilder) escaped(value string) bool {
 	if out.overflow {
-		return
+		return false
 	}
 	separatorPending := false
 	for index := 0; index < len(value); {
@@ -458,73 +461,68 @@ func (out *recoveryMarkdownBuilder) escaped(value string) {
 			continue
 		}
 		if separatorPending {
-			out.raw(" ")
-			if out.overflow {
-				return
+			if !out.raw(" ") {
+				return false
 			}
 			separatorPending = false
 		}
 		switch r {
 		case '\\':
-			out.raw("\\\\")
-			if out.overflow {
-				return
+			if !out.raw("\\\\") {
+				return false
 			}
 			continue
 		case '&':
-			out.raw("&amp;")
-			if out.overflow {
-				return
+			if !out.raw("&amp;") {
+				return false
 			}
 			if end, entityLike := entityLikeTerminator(value, start); entityLike {
-				out.raw(value[index:end])
+				if !out.raw(value[index:end]) {
+					return false
+				}
 				index = end
-			}
-			if out.overflow {
-				return
 			}
 			continue
 		case '<':
-			out.raw("&lt;")
-			if out.overflow {
-				return
+			if !out.raw("&lt;") {
+				return false
 			}
 			continue
 		case '>':
-			out.raw("&gt;")
-			if out.overflow {
-				return
+			if !out.raw("&gt;") {
+				return false
 			}
 			continue
 		}
 		if isASCIIPunctuation(r) {
-			out.raw("\\")
-			if out.overflow {
-				return
+			if !out.raw("\\") {
+				return false
 			}
 		}
 		var encoded [utf8.UTFMax]byte
 		encodedSize := utf8.EncodeRune(encoded[:], r)
-		out.raw(string(encoded[:encodedSize]))
-		if out.overflow {
-			return
+		if !out.raw(string(encoded[:encodedSize])) {
+			return false
 		}
 	}
+	return true
 }
 
-func (out *recoveryMarkdownBuilder) escapedList(values []string, separator string) {
+func (out *recoveryMarkdownBuilder) escapedList(values []string, separator string) bool {
 	for index, value := range values {
 		if out.overflow {
-			return
+			return false
 		}
 		if index != 0 {
-			out.raw(separator)
-			if out.overflow {
-				return
+			if !out.raw(separator) {
+				return false
 			}
 		}
-		out.escaped(value)
+		if !out.escaped(value) {
+			return false
+		}
 	}
+	return true
 }
 
 func isASCIIPunctuation(r rune) bool {
@@ -576,10 +574,7 @@ func (out *recoveryMarkdownBuilder) field(name, value string) bool {
 	if strings.TrimSpace(value) == "" {
 		return true
 	}
-	out.raw("**" + name + ":** ")
-	out.escaped(value)
-	out.raw("\n\n")
-	return !out.overflow
+	return out.raw("**"+name+":** ") && out.escaped(value) && out.raw("\n\n")
 }
 
 func (out *recoveryMarkdownBuilder) section(name string, values []string) bool {
@@ -589,17 +584,15 @@ func (out *recoveryMarkdownBuilder) section(name string, values []string) bool {
 	if len(values) == 0 {
 		return true
 	}
-	out.raw("## " + name + "\n\n")
+	if !out.raw("## " + name + "\n\n") {
+		return false
+	}
 	for _, value := range values {
-		if out.overflow {
+		if !out.raw("- ") || !out.escaped(value) || !out.raw("\n") {
 			return false
 		}
-		out.raw("- ")
-		out.escaped(value)
-		out.raw("\n")
 	}
-	out.raw("\n")
-	return !out.overflow
+	return out.raw("\n")
 }
 
 func (out *recoveryMarkdownBuilder) finish() string {

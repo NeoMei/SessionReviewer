@@ -53,88 +53,86 @@ func HistoryLedgerOnly(projectRoot string) (HistoryView, error) {
 
 func (view HistoryView) Markdown() string {
 	out := newRecoveryMarkdownBuilder()
-	out.raw("# Project history\n\n")
+	if !out.raw("# Project history\n\n") {
+		return out.finish()
+	}
 	if !out.field("Project", view.ProjectID) {
 		return out.finish()
 	}
 	if len(view.Timeline) != 0 {
-		out.raw("## Timeline\n\n")
+		if !out.raw("## Timeline\n\n") {
+			return out.finish()
+		}
 		for _, event := range view.Timeline {
-			out.raw("- ")
-			out.escaped(event.OccurredAt)
-			out.raw(" | ")
-			out.escaped(event.Title)
-			out.raw(" | ")
-			out.escaped(string(event.Class))
-			if strings.TrimSpace(event.Summary) != "" {
-				out.raw(" | ")
-				out.escaped(event.Summary)
+			if !out.raw("- ") || !out.escaped(event.OccurredAt) || !out.raw(" | ") || !out.escaped(event.Title) || !out.raw(" | ") || !out.escaped(string(event.Class)) {
+				return out.finish()
 			}
-			out.raw("\n")
-			if out.overflow {
+			if strings.TrimSpace(event.Summary) != "" {
+				if !out.raw(" | ") || !out.escaped(event.Summary) {
+					return out.finish()
+				}
+			}
+			if !out.raw("\n") {
 				return out.finish()
 			}
 		}
-		out.raw("\n")
+		if !out.raw("\n") {
+			return out.finish()
+		}
 	}
 	if len(view.Decisions) != 0 {
-		out.raw("## Decisions\n\n")
+		if !out.raw("## Decisions\n\n") {
+			return out.finish()
+		}
 		for _, decision := range view.Decisions {
-			out.raw("- ")
-			out.escaped(decision.Title)
-			out.raw(" [")
-			out.escaped(decision.ID)
-			out.raw("; ")
-			out.escaped(decision.Status)
-			out.raw("]\n")
-			if len(decision.Supersedes) != 0 {
-				out.raw("  - Supersedes: ")
-				out.escapedList(decision.Supersedes, ", ")
-				out.raw("\n")
-			}
-			if out.overflow {
+			if !out.raw("- ") || !out.escaped(decision.Title) || !out.raw(" [") || !out.escaped(decision.ID) || !out.raw("; ") || !out.escaped(decision.Status) || !out.raw("]\n") {
 				return out.finish()
 			}
+			if len(decision.Supersedes) != 0 {
+				if !out.raw("  - Supersedes: ") || !out.escapedList(decision.Supersedes, ", ") || !out.raw("\n") {
+					return out.finish()
+				}
+			}
 		}
-		out.raw("\n")
+		if !out.raw("\n") {
+			return out.finish()
+		}
 	}
 	if len(view.OpenLoops) != 0 {
-		out.raw("## Open loops\n\n")
+		if !out.raw("## Open loops\n\n") {
+			return out.finish()
+		}
 		for _, loop := range view.OpenLoops {
-			out.raw("- ")
-			out.escaped(loop.Title)
-			out.raw(" [")
-			out.escaped(loop.ID)
-			out.raw("; ")
-			out.escaped(loop.Status)
-			out.raw("]\n")
-			if out.overflow {
+			if !out.raw("- ") || !out.escaped(loop.Title) || !out.raw(" [") || !out.escaped(loop.ID) || !out.raw("; ") || !out.escaped(loop.Status) || !out.raw("]\n") {
 				return out.finish()
 			}
 		}
-		out.raw("\n")
+		if !out.raw("\n") {
+			return out.finish()
+		}
 	}
 	if len(view.Themes) != 0 {
-		out.raw("## Themes\n\n")
+		if !out.raw("## Themes\n\n") {
+			return out.finish()
+		}
 		for _, theme := range view.Themes {
-			out.raw("- ")
-			out.escaped(theme.Name)
-			out.raw("\n")
-			if len(theme.DecisionIDs) != 0 {
-				out.raw("  - Decisions: ")
-				out.escapedList(theme.DecisionIDs, ", ")
-				out.raw("\n")
-			}
-			if len(theme.OpenLoopIDs) != 0 {
-				out.raw("  - Open loops: ")
-				out.escapedList(theme.OpenLoopIDs, ", ")
-				out.raw("\n")
-			}
-			if out.overflow {
+			if !out.raw("- ") || !out.escaped(theme.Name) || !out.raw("\n") {
 				return out.finish()
 			}
+			if len(theme.DecisionIDs) != 0 {
+				if !out.raw("  - Decisions: ") || !out.escapedList(theme.DecisionIDs, ", ") || !out.raw("\n") {
+					return out.finish()
+				}
+			}
+			if len(theme.OpenLoopIDs) != 0 {
+				if !out.raw("  - Open loops: ") || !out.escapedList(theme.OpenLoopIDs, ", ") || !out.raw("\n") {
+					return out.finish()
+				}
+			}
 		}
-		out.raw("\n")
+		if !out.raw("\n") {
+			return out.finish()
+		}
 	}
 	return out.finish()
 }
