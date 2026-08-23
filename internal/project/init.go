@@ -1,7 +1,6 @@
 package project
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -41,7 +39,10 @@ type InitOptions struct {
 	Now                 func() time.Time
 	Random              io.Reader
 	beforeOverviewWrite func() error
+	afterOverviewWrite  func() error
+	afterStateComponent func(string) error
 	beforeConfigWrite   func() error
+	afterConfigWrite    func() error
 	afterLock           func() error
 	caseDetector        func(*os.Root) (platform.CaseMode, error)
 }
@@ -205,6 +206,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
 				return InitResult{}, err
 			}
+			if opts.afterConfigWrite != nil {
+				if err := opts.afterConfigWrite(); err != nil {
+					return InitResult{}, err
+				}
+			}
 		}
 		return InitResult{ProjectID: updated.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
@@ -216,7 +222,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err != nil {
 			return InitResult{}, err
 		}
-		if err := ensureProjectSyncState(dataDir.Root, mapping.ID); err != nil {
+		if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, true, opts.afterStateComponent); err != nil {
 			return InitResult{}, err
 		}
 		cfg.Projects = append(cfg.Projects, mapping)
@@ -227,6 +233,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		}
 		if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
 			return InitResult{}, err
+		}
+		if opts.afterConfigWrite != nil {
+			if err := opts.afterConfigWrite(); err != nil {
+				return InitResult{}, err
+			}
 		}
 		return InitResult{ProjectID: overviewID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
@@ -240,37 +251,42 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, err
 	}
-	createdState, err := createNewProjectSyncState(dataDir.Root, mapping.ID)
+	stateExists, err := projectSyncStateExists(dataDir.Root, mapping.ID)
 	if err != nil {
 		return InitResult{}, err
 	}
-	var createdOverview newOverviewCreation
-	rollback := func(cause error) error {
-		var cleanupErr error
-		cleanupErr = errors.Join(cleanupErr, rollbackNewOverview(roots.project.Root, createdOverview))
-		cleanupErr = errors.Join(cleanupErr, rollbackNewProjectSyncState(dataDir.Root, createdState))
-		return errors.Join(cause, cleanupErr)
+	if stateExists {
+		return InitResult{}, fmt.Errorf("generated project state already exists")
 	}
 	if opts.beforeOverviewWrite != nil {
 		if err := opts.beforeOverviewWrite(); err != nil {
-			return InitResult{}, rollback(err)
+			return InitResult{}, err
 		}
 	}
-	createdOverview, err = createNewOverview(roots.project.Root, overviewBody(id, opts.Now(), paths.projectRoot))
-	if err != nil {
-		return InitResult{}, rollback(err)
+	if err := writeOverview(roots.project.Root, overviewBody(id, opts.Now(), paths.projectRoot)); err != nil {
+		return InitResult{}, err
+	}
+	if opts.afterOverviewWrite != nil {
+		if err := opts.afterOverviewWrite(); err != nil {
+			return InitResult{}, err
+		}
+	}
+	if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, false, opts.afterStateComponent); err != nil {
+		return InitResult{}, err
 	}
 	cfg.Projects = append(cfg.Projects, mapping)
 	if opts.beforeConfigWrite != nil {
 		if err := opts.beforeConfigWrite(); err != nil {
-			return InitResult{}, rollback(err)
+			return InitResult{}, err
 		}
 	}
 	if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
-		if !configContainsProject(dataDir.Root, mapping) {
-			return InitResult{}, rollback(err)
-		}
 		return InitResult{}, err
+	}
+	if opts.afterConfigWrite != nil {
+		if err := opts.afterConfigWrite(); err != nil {
+			return InitResult{}, err
+		}
 	}
 	return InitResult{ProjectID: id, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 }
@@ -479,341 +495,225 @@ func detectCaseMode(root *os.Root) (mode platform.CaseMode, retErr error) {
 	return platform.CaseInsensitive, nil
 }
 
-type newProjectStateCreation struct {
-	projectID   string
-	projectInfo os.FileInfo
-	directories map[string]os.FileInfo
-	lockInfo    os.FileInfo
-}
+var initializationStateComponents = []string{"merge-bases", "queue", "transactions", "locks"}
 
-type newOverviewCreation struct {
-	relative string
-	info     os.FileInfo
-	body     []byte
-}
-
-func createNewProjectSyncState(dataRoot *os.Root, projectID string) (newProjectStateCreation, error) {
-	if !validProjectID(projectID) {
-		return newProjectStateCreation{}, fmt.Errorf("invalid project ID %q", projectID)
+func projectSyncStateExists(dataRoot *os.Root, projectID string) (bool, error) {
+	projectsInfo, err := dataRoot.Lstat("projects")
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	if err := ensurePrivateRootDirectory(dataRoot, "projects"); err != nil {
-		return newProjectStateCreation{}, fmt.Errorf("ensure projects state root: %w", err)
+	if err != nil || !projectsInfo.IsDir() || projectsInfo.Mode()&os.ModeSymlink != 0 {
+		return false, errors.New("projects state root is redirected or not a directory")
 	}
 	projectsRoot, err := openStableRoot(dataRoot, "projects")
 	if err != nil {
-		return newProjectStateCreation{}, err
+		return false, err
 	}
 	defer projectsRoot.Close()
-	if _, err := projectsRoot.Lstat(projectID); err == nil {
-		return newProjectStateCreation{}, fmt.Errorf("generated project state already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return newProjectStateCreation{}, err
+	_, err = projectsRoot.Lstat(projectID)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	if err := projectsRoot.Mkdir(projectID, 0o700); err != nil {
-		return newProjectStateCreation{}, fmt.Errorf("create generated project state: %w", err)
+	return err == nil, err
+}
+
+func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allowExisting bool, afterComponent func(string) error) error {
+	if !validProjectID(projectID) {
+		return fmt.Errorf("invalid project ID %q", projectID)
 	}
-	creation := newProjectStateCreation{projectID: projectID, directories: make(map[string]os.FileInfo, 4)}
-	fail := func(cause error) (newProjectStateCreation, error) {
-		return newProjectStateCreation{}, errors.Join(cause, rollbackNewProjectSyncState(dataRoot, creation))
+	if err := ensurePrivateRootDirectory(dataRoot, "projects"); err != nil {
+		return fmt.Errorf("ensure projects state root: %w", err)
 	}
-	creation.projectInfo, err = projectsRoot.Lstat(projectID)
+	projectsRoot, err := openStableRoot(dataRoot, "projects")
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	if err := atomicfile.SyncRootDirectory(projectsRoot); err != nil {
-		return fail(err)
+	defer projectsRoot.Close()
+
+	_, err = projectsRoot.Lstat(projectID)
+	projectExists := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if projectExists && !allowExisting {
+		return fmt.Errorf("generated project state already exists")
+	}
+	if !projectExists {
+		if err := ensurePrivateRootDirectory(projectsRoot, projectID); err != nil {
+			return fmt.Errorf("ensure project state root: %w", err)
+		}
+	} else if err := validateStrictPrivateDirectory(projectsRoot, projectID); err != nil {
+		return fmt.Errorf("invalid initialization scaffold root: %w", err)
 	}
 	projectRoot, err := openStableRoot(projectsRoot, projectID)
 	if err != nil {
-		return fail(err)
+		return err
 	}
-	failProject := func(cause error) (newProjectStateCreation, error) {
-		return fail(errors.Join(cause, projectRoot.Close()))
+	defer projectRoot.Close()
+	if err := requireAllowedRootEntries(projectRoot, initializationStateComponents); err != nil {
+		return fmt.Errorf("initialization scaffold has unexpected content: %w", err)
 	}
-	projectFile, err := projectRoot.Open(".")
-	if err != nil {
-		return failProject(err)
-	}
-	if err := projectFile.Chmod(0o700); err != nil {
-		_ = projectFile.Close()
-		return failProject(err)
-	}
-	if err := projectFile.Close(); err != nil {
-		return failProject(err)
-	}
-	for _, relative := range []string{"merge-bases", "queue", "transactions", "locks"} {
-		if err := ensurePrivateRootDirectory(projectRoot, relative); err != nil {
-			return failProject(fmt.Errorf("ensure project state directory %q: %w", relative, err))
+
+	for _, relative := range initializationStateComponents {
+		info, statErr := projectRoot.Lstat(relative)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := ensurePrivateRootDirectory(projectRoot, relative); err != nil {
+				return fmt.Errorf("ensure project state directory %q: %w", relative, err)
+			}
+		} else if statErr != nil {
+			return statErr
+		} else if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("initialization scaffold component %q is redirected or not a directory", relative)
+		} else if err := validateStrictPrivateDirectory(projectRoot, relative); err != nil {
+			return fmt.Errorf("invalid initialization scaffold component %q: %w", relative, err)
 		}
-		creation.directories[relative], err = projectRoot.Lstat(relative)
+		componentRoot, err := openStableRoot(projectRoot, relative)
 		if err != nil {
-			return failProject(err)
+			return err
+		}
+		want := []string(nil)
+		if relative == "locks" {
+			want = []string{"sync.lock"}
+		}
+		if err := requireAllowedRootEntries(componentRoot, want); err != nil {
+			_ = componentRoot.Close()
+			return fmt.Errorf("initialization scaffold component %q has unexpected content: %w", relative, err)
+		}
+		if err := componentRoot.Close(); err != nil {
+			return err
+		}
+		if afterComponent != nil {
+			if err := afterComponent(relative); err != nil {
+				return err
+			}
 		}
 	}
-	lockRoot, err := openStableRoot(projectRoot, "locks")
-	if err != nil {
-		return failProject(err)
-	}
-	lockFile, err := openStableInitLockFile(lockRoot, "sync.lock")
-	if err != nil {
-		_ = lockRoot.Close()
-		return failProject(fmt.Errorf("ensure sync lock: %w", err))
-	}
-	creation.lockInfo, err = lockFile.Stat()
-	err = errors.Join(err, lockFile.Close(), lockRoot.Close())
-	if err != nil {
-		return failProject(err)
-	}
-	if err := projectRoot.Close(); err != nil {
-		return fail(err)
-	}
-	return creation, nil
-}
 
-func rollbackNewProjectSyncState(dataRoot *os.Root, creation newProjectStateCreation) error {
-	if creation.projectID == "" || creation.projectInfo == nil {
-		return nil
-	}
-	projectsRoot, err := openStableRoot(dataRoot, "projects")
-	if err != nil {
-		return fmt.Errorf("rollback project state: %w", err)
-	}
-	defer projectsRoot.Close()
-	current, err := projectsRoot.Lstat(creation.projectID)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil || !os.SameFile(current, creation.projectInfo) || !sameEntryMode(current, creation.projectInfo) {
-		return errors.New("rollback project state changed; refusing removal")
-	}
-	projectRoot, err := openStableRoot(projectsRoot, creation.projectID)
-	if err != nil {
-		return fmt.Errorf("rollback project state: %w", err)
-	}
-	expected := []string{"locks", "merge-bases", "queue", "transactions"}
-	if err := requireExactRootEntries(projectRoot, expected); err != nil {
-		_ = projectRoot.Close()
-		return fmt.Errorf("rollback project state has unexpected content: %w", err)
-	}
-	for _, name := range []string{"merge-bases", "queue", "transactions"} {
-		if err := validateOwnedEmptyDirectory(projectRoot, name, creation.directories[name]); err != nil {
-			_ = projectRoot.Close()
-			return fmt.Errorf("rollback project state %s changed or has unexpected content: %w", name, err)
-		}
-	}
-	if err := validateOwnedLockDirectory(projectRoot, creation); err != nil {
-		_ = projectRoot.Close()
-		return err
-	}
-	lockRoot, err := openStableRoot(projectRoot, "locks")
-	if err != nil {
-		_ = projectRoot.Close()
-		return err
-	}
-	if err := validateOwnedLockFile(lockRoot, creation.lockInfo); err != nil {
-		_ = lockRoot.Close()
-		_ = projectRoot.Close()
-		return err
-	}
-	if err := lockRoot.Remove("sync.lock"); err != nil {
-		_ = lockRoot.Close()
-		_ = projectRoot.Close()
-		return fmt.Errorf("remove owned sync lock: %w", err)
-	}
-	cleanupErr := errors.Join(atomicfile.SyncRootDirectory(lockRoot), lockRoot.Close())
-	for _, name := range []string{"locks", "transactions", "queue", "merge-bases"} {
-		info, statErr := projectRoot.Lstat(name)
-		if statErr != nil || !os.SameFile(info, creation.directories[name]) {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("owned state directory %s changed before removal", name))
-			break
-		}
-		if removeErr := projectRoot.Remove(name); removeErr != nil {
-			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove owned state directory %s: %w", name, removeErr))
-			break
-		}
-	}
-	cleanupErr = errors.Join(cleanupErr, atomicfile.SyncRootDirectory(projectRoot), projectRoot.Close())
-	if cleanupErr != nil {
-		return cleanupErr
-	}
-	current, err = projectsRoot.Lstat(creation.projectID)
-	if err != nil || !os.SameFile(current, creation.projectInfo) {
-		return errors.New("owned project state changed before removal")
-	}
-	if err := projectsRoot.Remove(creation.projectID); err != nil {
-		return fmt.Errorf("remove owned project state: %w", err)
-	}
-	return atomicfile.SyncRootDirectory(projectsRoot)
-}
-
-func validateOwnedEmptyDirectory(parent *os.Root, name string, want os.FileInfo) error {
-	current, err := parent.Lstat(name)
-	if err != nil || want == nil || !os.SameFile(current, want) || !sameEntryMode(current, want) {
-		return errors.New("directory identity or mode changed")
-	}
-	root, err := openStableRoot(parent, name)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	return requireExactRootEntries(root, nil)
-}
-
-func validateOwnedLockDirectory(projectRoot *os.Root, creation newProjectStateCreation) error {
-	if err := validateOwnedDirectoryEntries(projectRoot, "locks", creation.directories["locks"], []string{"sync.lock"}); err != nil {
-		return fmt.Errorf("rollback lock directory changed: %w", err)
-	}
 	lockRoot, err := openStableRoot(projectRoot, "locks")
 	if err != nil {
 		return err
 	}
 	defer lockRoot.Close()
-	return validateOwnedLockFile(lockRoot, creation.lockInfo)
-}
-
-func validateOwnedLockFile(lockRoot *os.Root, want os.FileInfo) error {
-	current, err := lockRoot.Lstat("sync.lock")
-	if err != nil || want == nil || !os.SameFile(current, want) || !sameEntryMode(current, want) || !current.Mode().IsRegular() || current.Size() != 0 {
-		return errors.New("rollback sync lock changed; refusing removal")
+	lockInfo, err := lockRoot.Lstat("sync.lock")
+	if errors.Is(err, os.ErrNotExist) {
+		lockFile, createErr := openStableInitLockFile(lockRoot, "sync.lock")
+		if createErr != nil {
+			return fmt.Errorf("ensure sync lock: %w", createErr)
+		}
+		if closeErr := lockFile.Close(); closeErr != nil {
+			return closeErr
+		}
+	} else if err != nil {
+		return err
 	}
-	file, err := lockRoot.Open("sync.lock")
+	lockInfo, err = lockRoot.Lstat("sync.lock")
 	if err != nil {
 		return err
 	}
-	body, readErr := io.ReadAll(io.LimitReader(file, 1))
-	opened, statErr := file.Stat()
-	closeErr := file.Close()
-	after, afterErr := lockRoot.Lstat("sync.lock")
-	if readErr != nil || statErr != nil || closeErr != nil || afterErr != nil || len(body) != 0 || !os.SameFile(opened, after) || !os.SameFile(opened, want) {
-		return errors.New("rollback sync lock changed while reading")
-	}
-	return nil
-}
-
-func validateOwnedDirectoryEntries(parent *os.Root, name string, want os.FileInfo, entries []string) error {
-	current, err := parent.Lstat(name)
-	if err != nil || want == nil || !os.SameFile(current, want) || !sameEntryMode(current, want) {
-		return errors.New("directory identity or mode changed")
-	}
-	root, err := openStableRoot(parent, name)
-	if err != nil {
+	if err := validateExactEmptyLock(lockRoot, lockInfo); err != nil {
 		return err
 	}
-	defer root.Close()
-	return requireExactRootEntries(root, entries)
-}
-
-func requireExactRootEntries(root *os.Root, want []string) error {
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	entries, readErr := directory.ReadDir(-1)
-	closeErr := directory.Close()
-	if readErr != nil || closeErr != nil {
-		return errors.Join(readErr, closeErr)
-	}
-	got := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		got = append(got, entry.Name())
-	}
-	slices.Sort(got)
-	want = append([]string(nil), want...)
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		return fmt.Errorf("entries=%q want=%q", got, want)
-	}
-	return nil
-}
-
-func sameEntryMode(first, second os.FileInfo) bool {
-	return first != nil && second != nil && first.Mode() == second.Mode()
-}
-
-func createNewOverview(root *os.Root, body string) (newOverviewCreation, error) {
-	if err := ensureRootDirectory(root, "docs", 0o755); err != nil {
-		return newOverviewCreation{}, err
-	}
-	parentRelative := filepath.Join("docs", "session-review")
-	if err := ensureRootDirectory(root, parentRelative, 0o755); err != nil {
-		return newOverviewCreation{}, err
-	}
-	parent, err := root.OpenRoot(parentRelative)
-	if err != nil {
-		return newOverviewCreation{}, err
-	}
-	defer parent.Close()
-	const name = "project-overview.md"
-	file, err := parent.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return newOverviewCreation{}, fmt.Errorf("create new project overview: %w", err)
-	}
-	creation := newOverviewCreation{relative: filepath.Join(parentRelative, name), body: []byte(body)}
-	creation.info, err = file.Stat()
-	if err == nil {
-		err = file.Chmod(0o644)
-	}
-	if err == nil {
-		creation.info, err = file.Stat()
-	}
-	if err == nil {
-		var written int
-		written, err = file.Write(creation.body)
-		if err == nil && written != len(creation.body) {
-			err = io.ErrShortWrite
+	if afterComponent != nil {
+		if err := afterComponent("sync.lock"); err != nil {
+			return err
 		}
 	}
-	if err == nil {
-		err = file.Sync()
+	if err := requireExactRootEntriesBounded(projectRoot, initializationStateComponents); err != nil {
+		return fmt.Errorf("initialization scaffold has unexpected content: %w", err)
 	}
-	err = errors.Join(err, file.Close())
-	if err == nil {
-		err = atomicfile.SyncRootPublication(parent, name)
-	}
-	return creation, err
+	return requireExactRootEntriesBounded(lockRoot, []string{"sync.lock"})
 }
 
-func rollbackNewOverview(root *os.Root, creation newOverviewCreation) error {
-	if creation.relative == "" || creation.info == nil {
-		return nil
+func validateStrictPrivateDirectory(parent *os.Root, name string) error {
+	before, err := parent.Lstat(name)
+	if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return errors.New("state component is redirected or not a directory")
 	}
-	current, err := root.Lstat(creation.relative)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
+	if runtime.GOOS != "windows" && before.Mode().Perm() != 0o700 {
+		return fmt.Errorf("private directory mode is %o, want 700", before.Mode().Perm())
 	}
-	if err != nil || !os.SameFile(current, creation.info) || !sameEntryMode(current, creation.info) {
-		return errors.New("overview changed after initialization write; refusing rollback")
-	}
-	body, found, err := readOverviewFile(root, creation.relative)
-	if err != nil || !found || !bytes.Equal(body, creation.body) {
-		return errors.New("overview changed after initialization write; refusing rollback")
-	}
-	after, err := root.Lstat(creation.relative)
-	if err != nil || !os.SameFile(after, creation.info) {
-		return errors.New("overview changed before rollback; refusing removal")
-	}
-	parent, err := root.OpenRoot(filepath.Dir(creation.relative))
+	opened, err := parent.OpenRoot(name)
 	if err != nil {
 		return err
 	}
-	defer parent.Close()
-	current, err = parent.Lstat(filepath.Base(creation.relative))
-	if err != nil || !os.SameFile(current, creation.info) || !sameEntryMode(current, creation.info) || current.Size() != int64(len(creation.body)) {
-		return errors.New("overview changed before rollback removal; refusing removal")
+	defer opened.Close()
+	after, err := opened.Stat(".")
+	if err != nil || !os.SameFile(before, after) || before.Mode() != after.Mode() {
+		return errors.New("state component changed while opening")
 	}
-	if err := parent.Remove(filepath.Base(creation.relative)); err != nil {
-		return fmt.Errorf("remove owned project overview: %w", err)
-	}
-	return atomicfile.SyncRootDirectory(parent)
+	return nil
 }
 
-func configContainsProject(root *os.Root, mapping config.ProjectMapping) bool {
-	cfg, err := config.LoadRoot(root, "config.toml")
-	if err != nil {
-		return false
+func validateExactEmptyLock(root *os.Root, before os.FileInfo) error {
+	if before == nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() != 0 {
+		return errors.New("initialization sync lock is redirected, nonempty, or not regular")
 	}
-	got, found := cfg.ProjectByID(mapping.ID)
-	return found && got.Root == mapping.Root && got.VaultRoot == mapping.VaultRoot && got.VaultReviewPath == mapping.VaultReviewPath && got.VaultCaseMode == mapping.VaultCaseMode
+	if runtime.GOOS != "windows" && before.Mode().Perm() != 0o600 {
+		return fmt.Errorf("initialization sync lock mode is %o, want 600", before.Mode().Perm())
+	}
+	file, err := root.Open("sync.lock")
+	if err != nil {
+		return err
+	}
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	after, afterErr := root.Lstat("sync.lock")
+	if statErr != nil || closeErr != nil || afterErr != nil || !os.SameFile(before, opened) || !os.SameFile(opened, after) || opened.Mode() != after.Mode() || after.Size() != 0 {
+		return errors.New("initialization sync lock changed while validating")
+	}
+	return nil
+}
+
+func requireAllowedRootEntries(root *os.Root, allowed []string) error {
+	entries, err := readBoundedRootEntries(root, len(allowed)+1)
+	if err != nil {
+		return err
+	}
+	allowedNames := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedNames[name] = struct{}{}
+	}
+	for _, entry := range entries {
+		if _, ok := allowedNames[entry.Name()]; !ok {
+			return fmt.Errorf("unexpected entry %q", entry.Name())
+		}
+	}
+	if len(entries) > len(allowed) {
+		return errors.New("too many entries")
+	}
+	return nil
+}
+
+func requireExactRootEntriesBounded(root *os.Root, want []string) error {
+	entries, err := readBoundedRootEntries(root, len(want)+1)
+	if err != nil {
+		return err
+	}
+	if len(entries) != len(want) {
+		return fmt.Errorf("entry count=%d want=%d", len(entries), len(want))
+	}
+	wantNames := make(map[string]struct{}, len(want))
+	for _, name := range want {
+		wantNames[name] = struct{}{}
+	}
+	for _, entry := range entries {
+		if _, ok := wantNames[entry.Name()]; !ok {
+			return fmt.Errorf("unexpected entry %q", entry.Name())
+		}
+	}
+	return nil
+}
+
+func readBoundedRootEntries(root *os.Root, limit int) ([]os.DirEntry, error) {
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := directory.ReadDir(limit)
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	return entries, errors.Join(readErr, directory.Close())
 }
 
 func ensureProjectSyncState(dataRoot *os.Root, projectID string) error {

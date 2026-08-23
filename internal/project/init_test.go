@@ -411,7 +411,7 @@ func TestInitializeNewOverviewContainsReservedSyncIdentity(t *testing.T) {
 	}
 }
 
-func TestInitializeRollsBackNewStateWhenBeforeOverviewFails(t *testing.T) {
+func TestInitializeFailureBeforeOverviewLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	sentinel := errors.New("stop before overview")
 	_, err := Initialize(InitOptions{
@@ -423,23 +423,9 @@ func TestInitializeRollsBackNewStateWhenBeforeOverviewFails(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
-
-	result, err := Initialize(InitOptions{
-		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
-		Random: bytes.NewReader(bytes.Repeat([]byte{0x3b}, 8)),
-	})
-	if err != nil || result.ProjectID != "project-3b3b3b3b3b3b3b3b" {
-		t.Fatalf("result=%+v err=%v", result, err)
-	}
-	if _, err := os.Stat(filepath.Join(data, "projects", "project-2a2a2a2a2a2a2a2a")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("old state survived retry: %v", err)
-	}
-	if info, err := os.Stat(filepath.Join(data, "projects", result.ProjectID)); err != nil || !info.IsDir() {
-		t.Fatalf("new state info=%v err=%v", info, err)
-	}
 }
 
-func TestInitializeRollsBackNewStateAfterRealOverviewWriteFailure(t *testing.T) {
+func TestInitializeRealOverviewWriteFailureLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
@@ -457,8 +443,33 @@ func TestInitializeRollsBackNewStateAfterRealOverviewWriteFailure(t *testing.T) 
 	}
 }
 
-func TestInitializeRollsBackNewOverviewAndStateBeforeConfigWrite(t *testing.T) {
+func TestInitializeFailureAfterOverviewBeforeStateRecoversSameIdentity(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	sentinel := errors.New("stop after overview")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random:             bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		afterOverviewWrite: func() error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	assertOverviewIdentity(t, root, id)
+	assertPathMissing(t, filepath.Join(data, "projects", id))
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	if err != nil || result.ProjectID != id {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertExactInitializationScaffold(t, data, id)
+	assertSingleMapping(t, data, id)
+}
+
+func TestInitializeFailureAfterStateBeforeConfigRecoversSameIdentity(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
 	sentinel := errors.New("stop before config")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
@@ -468,62 +479,66 @@ func TestInitializeRollsBackNewOverviewAndStateBeforeConfigWrite(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
-	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
-}
-
-func TestInitializeRollbackPreservesChangedOverviewAndJoinsCleanupError(t *testing.T) {
-	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
-	sentinel := errors.New("stop after user edit")
-	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
-	_, err := Initialize(InitOptions{
-		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
-		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
-		beforeConfigWrite: func() error {
-			if writeErr := os.WriteFile(overviewPath, []byte("user changed overview\n"), 0o644); writeErr != nil {
-				return writeErr
-			}
-			return sentinel
-		},
-	})
-	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "overview changed") {
-		t.Fatalf("err=%v", err)
-	}
-	body, readErr := os.ReadFile(overviewPath)
-	if readErr != nil || string(body) != "user changed overview\n" {
-		t.Fatalf("changed overview was removed: body=%q err=%v", body, readErr)
-	}
-	if _, statErr := os.Stat(filepath.Join(data, "projects", "project-2a2a2a2a2a2a2a2a")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("owned state survived rollback: %v", statErr)
-	}
-	if _, statErr := os.Stat(filepath.Join(data, "config.toml")); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("config exists: %v", statErr)
-	}
-}
-
-func TestInitializeRollbackPreservesUnexpectedStateContentAndJoinsCleanupError(t *testing.T) {
-	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
-	sentinel := errors.New("stop after state changed")
-	id := "project-2a2a2a2a2a2a2a2a"
-	marker := filepath.Join(data, "projects", id, "queue", "user-state")
-	_, err := Initialize(InitOptions{
-		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
-		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
-		beforeOverviewWrite: func() error {
-			if writeErr := os.WriteFile(marker, []byte("keep"), 0o600); writeErr != nil {
-				return writeErr
-			}
-			return sentinel
-		},
-	})
-	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "unexpected content") {
-		t.Fatalf("err=%v", err)
-	}
-	body, readErr := os.ReadFile(marker)
-	if readErr != nil || string(body) != "keep" {
-		t.Fatalf("unexpected state content was removed: body=%q err=%v", body, readErr)
-	}
-	assertPathMissing(t, filepath.Join(root, "docs", "session-review", "project-overview.md"))
+	assertOverviewIdentity(t, root, id)
+	assertExactInitializationScaffold(t, data, id)
 	assertPathMissing(t, filepath.Join(data, "config.toml"))
+
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	if err != nil || result.ProjectID != id {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertSingleMapping(t, data, id)
+}
+
+func TestInitializeFailureDuringStateRecoversExactScaffold(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	sentinel := errors.New("stop during state")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		afterStateComponent: func(name string) error {
+			if name == "queue" {
+				return sentinel
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	assertOverviewIdentity(t, root, id)
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	if err != nil || result.ProjectID != id {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertExactInitializationScaffold(t, data, id)
+	assertSingleMapping(t, data, id)
+}
+
+func TestInitializeConfigPostPublicationAmbiguityRecovers(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	sentinel := errors.New("config publication result ambiguous")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random:           bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		afterConfigWrite: func() error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	assertOverviewIdentity(t, root, id)
+	assertExactInitializationScaffold(t, data, id)
+	assertSingleMapping(t, data, id)
+
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	if err != nil || result.ProjectID != id {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	assertSingleMapping(t, data, id)
 }
 
 func TestInitializeDoesNotDeletePreexistingGeneratedProjectState(t *testing.T) {
@@ -552,6 +567,90 @@ func TestInitializeDoesNotDeletePreexistingGeneratedProjectState(t *testing.T) {
 	assertPathMissing(t, filepath.Join(data, "config.toml"))
 }
 
+func TestInitializeOverviewRecoveryRejectsNonemptyInitializationScaffold(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	writeTestOverview(t, root, id)
+	stateRoot := filepath.Join(data, "projects", id)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := os.MkdirAll(filepath.Join(stateRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(stateRoot, "queue", "user-state")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	if err == nil || !strings.Contains(err.Error(), "unexpected content") {
+		t.Fatalf("err=%v", err)
+	}
+	body, readErr := os.ReadFile(marker)
+	if readErr != nil || string(body) != "keep" {
+		t.Fatalf("marker changed: body=%q err=%v", body, readErr)
+	}
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+}
+
+func TestInitializeOverviewRecoveryRejectsMalformedInitializationScaffold(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, stateRoot string)
+	}{
+		{
+			name: "extra root entry",
+			mutate: func(t *testing.T, stateRoot string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(stateRoot, "marker"), []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "nonempty sync lock",
+			mutate: func(t *testing.T, stateRoot string) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(stateRoot, "locks", "sync.lock"), []byte("owner"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	if runtime.GOOS != "windows" {
+		tests = append(tests, struct {
+			name   string
+			mutate func(t *testing.T, stateRoot string)
+		}{
+			name: "wrong private mode",
+			mutate: func(t *testing.T, stateRoot string) {
+				t.Helper()
+				if err := os.Chmod(filepath.Join(stateRoot, "queue"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		})
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+			id := "project-2a2a2a2a2a2a2a2a"
+			writeTestOverview(t, root, id)
+			stateRoot := writeExactTestScaffold(t, data, id)
+			test.mutate(t, stateRoot)
+
+			_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+			if err == nil {
+				t.Fatal("expected malformed recovery scaffold rejection")
+			}
+			assertPathMissing(t, filepath.Join(data, "config.toml"))
+		})
+	}
+}
+
 func assertNewInitializationAbsent(t *testing.T, projectRoot, dataRoot, projectID string) {
 	t.Helper()
 	assertPathMissing(t, filepath.Join(dataRoot, "projects", projectID))
@@ -564,6 +663,97 @@ func assertPathMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("path %s exists or is inaccessible: %v", path, err)
+	}
+}
+
+func assertOverviewIdentity(t *testing.T, projectRoot, projectID string) {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"))
+	if err != nil || !strings.Contains(string(body), "project_id: "+projectID+"\n") {
+		t.Fatalf("overview=%q err=%v", body, err)
+	}
+}
+
+func assertExactInitializationScaffold(t *testing.T, dataRoot, projectID string) {
+	t.Helper()
+	stateRoot := filepath.Join(dataRoot, "projects", projectID)
+	stateInfo, err := os.Lstat(stateRoot)
+	if err != nil || !stateInfo.IsDir() || stateInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("state root info=%v err=%v", stateInfo, err)
+	}
+	if runtime.GOOS != "windows" && stateInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("state root mode=%o", stateInfo.Mode().Perm())
+	}
+	entries, err := os.ReadDir(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"locks", "merge-bases", "queue", "transactions"}
+	if got := entryNames(entries); !reflect.DeepEqual(got, want) {
+		t.Fatalf("state entries=%q want=%q", got, want)
+	}
+	for _, name := range []string{"merge-bases", "queue", "transactions"} {
+		path := filepath.Join(stateRoot, name)
+		info, statErr := os.Lstat(path)
+		contents, readErr := os.ReadDir(path)
+		if statErr != nil || readErr != nil || !info.IsDir() || len(contents) != 0 {
+			t.Fatalf("state dir %s info=%v contents=%v statErr=%v readErr=%v", name, info, contents, statErr, readErr)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+			t.Fatalf("state dir %s mode=%o", name, info.Mode().Perm())
+		}
+	}
+	locks := filepath.Join(stateRoot, "locks")
+	locksInfo, err := os.Lstat(locks)
+	if err != nil || !locksInfo.IsDir() || locksInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("locks info=%v err=%v", locksInfo, err)
+	}
+	if runtime.GOOS != "windows" && locksInfo.Mode().Perm() != 0o700 {
+		t.Fatalf("locks mode=%o", locksInfo.Mode().Perm())
+	}
+	lockEntries, err := os.ReadDir(locks)
+	if err != nil || len(lockEntries) != 1 || lockEntries[0].Name() != "sync.lock" {
+		t.Fatalf("lock entries=%v err=%v", lockEntries, err)
+	}
+	lockInfo, err := os.Lstat(filepath.Join(locks, "sync.lock"))
+	if err != nil || !lockInfo.Mode().IsRegular() || lockInfo.Size() != 0 {
+		t.Fatalf("lock info=%v err=%v", lockInfo, err)
+	}
+	if runtime.GOOS != "windows" && lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("lock mode=%o", lockInfo.Mode().Perm())
+	}
+}
+
+func writeExactTestScaffold(t *testing.T, dataRoot, projectID string) string {
+	t.Helper()
+	stateRoot := filepath.Join(dataRoot, "projects", projectID)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := os.MkdirAll(filepath.Join(stateRoot, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateRoot, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return stateRoot
+}
+
+func entryNames(entries []os.DirEntry) []string {
+	names := make([]string, len(entries))
+	for i, entry := range entries {
+		names[i] = entry.Name()
+	}
+	return names
+}
+
+func assertSingleMapping(t *testing.T, dataRoot, projectID string) {
+	t.Helper()
+	cfg, err := config.Load(filepath.Join(dataRoot, "config.toml"))
+	if err != nil || len(cfg.Projects) != 1 || cfg.Projects[0].ID != projectID {
+		t.Fatalf("cfg=%+v err=%v", cfg, err)
 	}
 }
 
