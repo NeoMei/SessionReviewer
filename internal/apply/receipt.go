@@ -19,13 +19,14 @@ import (
 )
 
 const (
-	receiptSchemaVersion = 1
-	receiptPrepared      = "prepared"
-	receiptApplied       = "applied"
-	maxReceiptBytes      = 64 << 20
-	maxReceiptFiles      = 4096
-	maxReceiptScanFiles  = 4096
-	maxReceiptScanBytes  = 4 * maxReceiptBytes
+	receiptSchemaVersion       = 1
+	receiptPrepared            = "prepared"
+	receiptApplied             = "applied"
+	maxReceiptBytes            = 64 << 20
+	maxReceiptFiles            = 4096
+	maxReceiptScanFiles        = 4096
+	maxReceiptScanBytes        = 4 * maxReceiptBytes
+	maxReceiptPreflightEntries = 4096
 )
 
 // ErrPendingReceiptConflict means another proposal digest still owns the
@@ -244,7 +245,7 @@ func saveReceipt(projectData *os.Root, receipt applyReceipt, hookOptions ...appl
 	if err != nil {
 		return err
 	}
-	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
+	if err := rejectEntryCaseCollisionsBounded(directory, maxReceiptPreflightEntries, name, atomicfile.BackupPath(name)); err != nil {
 		return err
 	}
 	writeReceipt := hooks.writeReceipt
@@ -532,7 +533,7 @@ func loadExactReceiptReadOnly(dataRoot *os.Root, ctx inputContext) (applyReceipt
 	if err != nil {
 		return applyReceipt{}, false, err
 	}
-	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
+	if err := rejectEntryCaseCollisionsBounded(directory, maxReceiptPreflightEntries, name, atomicfile.BackupPath(name)); err != nil {
 		return applyReceipt{}, false, err
 	}
 	if _, err := directory.Lstat(name); errors.Is(err, os.ErrNotExist) {
@@ -555,7 +556,7 @@ func openReceiptChildReadOnly(parent *os.Root, name, label string) (*os.Root, bo
 	if parent == nil {
 		return nil, false, errors.New("receipt parent root is required")
 	}
-	if err := rejectDirectoryCaseCollision(parent, name); err != nil {
+	if err := rejectEntryCaseCollisionsBounded(parent, maxReceiptPreflightEntries, name); err != nil {
 		return nil, false, err
 	}
 	info, err := parent.Lstat(name)
@@ -737,6 +738,35 @@ func rejectEntryCaseCollisions(root *os.Root, names ...string) error {
 	entries, err := file.ReadDir(-1)
 	if err != nil {
 		return err
+	}
+	for _, entry := range entries {
+		for _, name := range names {
+			if strings.EqualFold(entry.Name(), name) && entry.Name() != name {
+				return fmt.Errorf("case-colliding apply state entry %q", entry.Name())
+			}
+		}
+	}
+	return nil
+}
+
+func rejectEntryCaseCollisionsBounded(root *os.Root, limit int, names ...string) error {
+	if root == nil || limit <= 0 {
+		return errors.New("bounded apply state root and positive entry limit are required")
+	}
+	file, err := root.Open(".")
+	if err != nil {
+		return err
+	}
+	entries, readErr := file.ReadDir(limit + 1)
+	closeErr := file.Close()
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return err
+	}
+	if len(entries) > limit {
+		return fmt.Errorf("apply state entry count exceeds %d", limit)
 	}
 	for _, entry := range entries {
 		for _, name := range names {

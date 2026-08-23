@@ -680,6 +680,52 @@ func TestOutstandingReceiptOwnershipAllowsOnlyConclusiveAppliedReceipt(t *testin
 	}
 }
 
+func TestExactReceiptReadOnlyPreflightBoundsEveryDirectoryScan(t *testing.T) {
+	for _, level := range []string{"projects", "project-data", "receipts"} {
+		t.Run(level, func(t *testing.T) {
+			dataDir := t.TempDir()
+			projects := filepath.Join(dataDir, "projects")
+			projectData := filepath.Join(projects, testProjectID)
+			receipts := filepath.Join(projectData, "applied-proposals")
+			if err := os.MkdirAll(receipts, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var directory string
+			switch level {
+			case "projects":
+				directory = projects
+			case "project-data":
+				directory = projectData
+			case "receipts":
+				directory = receipts
+			}
+			for index := 0; index < maxReceiptPreflightEntries+1; index++ {
+				name := fmt.Sprintf("extra-%04d", index)
+				if err := os.WriteFile(filepath.Join(directory, name), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root, err := os.OpenRoot(dataDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := snapshotTree(t, dataDir)
+			ctx := inputContext{Packet: evidence.Packet{ProjectID: testProjectID}, ProposalDigest: "sha256:" + testHashA}
+			_, _, err = loadExactReceiptReadOnly(root, ctx)
+			closeErr := root.Close()
+			if err == nil || !strings.Contains(err.Error(), "entry count exceeds") {
+				t.Fatalf("err=%v", err)
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			if after := snapshotTree(t, dataDir); after != before {
+				t.Fatalf("bounded preflight mutated state\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
 func TestRunAfterRenderFailureWritesNoReceiptOrLedger(t *testing.T) {
 	f := newApplyTestFixture(t)
 	before := hashLedger(t, f.projectRoot)
