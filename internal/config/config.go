@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/platform"
@@ -14,14 +15,25 @@ import (
 )
 
 type ProjectMapping struct {
-	ID        string `toml:"id"`
-	Root      string `toml:"root"`
-	VaultRoot string `toml:"vault_root"`
+	ID               string            `toml:"id"`
+	Root             string            `toml:"root"`
+	VaultRoot        string            `toml:"vault_root"`
+	VaultReviewPath  string            `toml:"vault_review_path,omitempty"`
+	VaultCaseMode    platform.CaseMode `toml:"vault_case_mode,omitempty"`
+	RemoteIdentities []string          `toml:"remote_identities,omitempty"`
+	CommonDirs       []string          `toml:"common_dirs,omitempty"`
+	Aliases          []string          `toml:"aliases,omitempty"`
+}
+
+type SessionAssociation struct {
+	SessionID string `toml:"session_id"`
+	ProjectID string `toml:"project_id"`
 }
 
 type Config struct {
-	Version  int              `toml:"version"`
-	Projects []ProjectMapping `toml:"projects"`
+	Version             int                  `toml:"version"`
+	Projects            []ProjectMapping     `toml:"projects"`
+	SessionAssociations []SessionAssociation `toml:"session_associations,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -133,7 +145,40 @@ func validate(cfg Config) error {
 	if cfg.Version != 1 {
 		return errors.New("unsupported config version")
 	}
-	return cfg.ValidateProjectIDs()
+	if err := cfg.ValidateProjectIDs(); err != nil {
+		return err
+	}
+	for _, project := range cfg.Projects {
+		if err := validateVaultMapping(project); err != nil {
+			return fmt.Errorf("project %q: %w", project.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateVaultMapping(project ProjectMapping) error {
+	pathEmpty := project.VaultReviewPath == ""
+	modeEmpty := project.VaultCaseMode == ""
+	if pathEmpty != modeEmpty {
+		return errors.New("vault review path and case mode must be configured together")
+	}
+	if pathEmpty {
+		return nil
+	}
+	if project.VaultCaseMode != platform.CaseSensitive && project.VaultCaseMode != platform.CaseInsensitive {
+		return fmt.Errorf("invalid vault case mode %q", project.VaultCaseMode)
+	}
+	if strings.Contains(project.VaultReviewPath, `\`) {
+		return errors.New("vault review path must use slash separators")
+	}
+	if _, err := platform.PathKey("darwin", platform.CaseSensitive, project.VaultReviewPath); err != nil {
+		return fmt.Errorf("invalid vault review path: %w", err)
+	}
+	components := strings.Split(project.VaultReviewPath, "/")
+	if len(components) < 3 || components[0] != "Projects" || components[len(components)-1] != "Session Review" {
+		return errors.New("vault review path must be below Projects and end in Session Review")
+	}
+	return nil
 }
 
 func (c Config) ValidateProjectIDs() error {

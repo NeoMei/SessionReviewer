@@ -1138,11 +1138,16 @@ func TestRunRejectsBoundedOrChangingInputsBeforeStateWrites(t *testing.T) {
 		if err := os.WriteFile(f.proposalPath, bytes.Repeat([]byte(" "), maxInputBytes+1), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		beforeState := snapshotTree(t, f.projectData)
+		beforeLedger := snapshotTree(t, f.projectRoot)
 		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("err=%v", err)
 		}
-		if _, err := os.Stat(f.projectData); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("project data written: %v", err)
+		if afterState := snapshotTree(t, f.projectData); afterState != beforeState {
+			t.Fatalf("rejected oversized input changed precreated project state bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", beforeState, afterState)
+		}
+		if afterLedger := snapshotTree(t, f.projectRoot); afterLedger != beforeLedger {
+			t.Fatalf("rejected oversized input changed ledger bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", beforeLedger, afterLedger)
 		}
 	})
 
@@ -1160,11 +1165,16 @@ func TestRunRejectsBoundedOrChangingInputsBeforeStateWrites(t *testing.T) {
 			}
 			return nil
 		}
+		beforeState := snapshotTree(t, f.projectData)
+		beforeLedger := snapshotTree(t, f.projectRoot)
 		if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "changed while reading") {
 			t.Fatalf("err=%v", err)
 		}
-		if _, err := os.Stat(f.projectData); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("project data written: %v", err)
+		if afterState := snapshotTree(t, f.projectData); afterState != beforeState {
+			t.Fatalf("rejected changing input changed precreated project state bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", beforeState, afterState)
+		}
+		if afterLedger := snapshotTree(t, f.projectRoot); afterLedger != beforeLedger {
+			t.Fatalf("rejected changing input changed ledger bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", beforeLedger, afterLedger)
 		}
 	})
 }

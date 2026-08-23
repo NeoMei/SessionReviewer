@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
 func TestEnsureRootDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
@@ -131,6 +134,280 @@ func TestInitializeCreatesStableProjectAndMapping(t *testing.T) {
 	}
 	if len(cfg.Projects) != 1 {
 		t.Fatalf("projects=%+v, want one mapping", cfg.Projects)
+	}
+}
+
+func TestDefaultVaultReviewPathIsStableAndCrossPlatformSafe(t *testing.T) {
+	got, err := DefaultVaultReviewPath(`会话:审查. `, "project-2a2a2a2a2a2a2a2a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.ToSlash(filepath.Join("Projects", "会话-审查--2a2a2a2a", "Session Review"))
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+}
+
+func TestDefaultVaultReviewPathSanitizesReservedEmptyUnicodeAndLongNames(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "CON.txt", want: "_CON.txt--2a2a2a2a"},
+		{name: "\x00<>:\\|?*... ", want: "Project--2a2a2a2a"},
+		{name: "Cafe\u0301", want: "Café--2a2a2a2a"},
+		{name: strings.Repeat("界", 70), want: strings.Repeat("界", 64) + "--2a2a2a2a"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := DefaultVaultReviewPath(test.name, "project-2a2a2a2a2a2a2a2a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "Projects/" + test.want + "/Session Review"
+			if got != want {
+				t.Fatalf("got=%q want=%q", got, want)
+			}
+		})
+	}
+	if _, err := DefaultVaultReviewPath("project", "not-a-project-id"); err == nil {
+		t.Fatal("expected invalid project ID error")
+	}
+}
+
+func TestInitializeBackfillsStableVaultMappingOnce(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	if err := config.Save(filepath.Join(data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: id, Root: root, VaultRoot: vault}}}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestOverview(t, root, id)
+	opts := InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}}
+	if _, err := Initialize(opts); err != nil {
+		t.Fatal(err)
+	}
+	first, err := config.Load(filepath.Join(data, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Initialize(opts); err != nil {
+		t.Fatal(err)
+	}
+	second, err := config.Load(filepath.Join(data, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Projects) != 1 || first.Projects[0].VaultReviewPath == "" || first.Projects[0].VaultCaseMode == "" {
+		t.Fatalf("first=%+v", first)
+	}
+	if !reflect.DeepEqual(first.Projects[0], second.Projects[0]) {
+		t.Fatalf("mapping changed: first=%+v second=%+v", first.Projects[0], second.Projects[0])
+	}
+}
+
+func TestInitializePreservesNonemptyVaultMappingInsteadOfRecomputing(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	want := config.ProjectMapping{
+		ID: id, Root: root, VaultRoot: vault,
+		VaultReviewPath: "Projects/Old Name--2a2a2a2a/Session Review",
+		VaultCaseMode:   platform.CaseSensitive,
+	}
+	if err := config.Save(filepath.Join(data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{want}}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestOverview(t, root, id)
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{},
+		caseDetector: func(*os.Root) (platform.CaseMode, error) {
+			t.Fatal("case mode must not be reprobed for a complete mapping")
+			return "", nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := config.Load(filepath.Join(data, "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Projects) != 1 || !reflect.DeepEqual(got.Projects[0], want) {
+		t.Fatalf("got=%+v want=%+v", got.Projects, want)
+	}
+}
+
+func TestDetectCaseModeUsesPinnedVaultAndCleansProbe(t *testing.T) {
+	vault := t.TempDir()
+	root, err := os.OpenRoot(vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before, err := os.ReadDir(vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode, err := detectCaseMode(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != platform.CaseSensitive && mode != platform.CaseInsensitive {
+		t.Fatalf("mode=%q", mode)
+	}
+	after, err := os.ReadDir(vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("case probe left entries: before=%v after=%v", before, after)
+	}
+}
+
+func TestInitializeInconclusiveCaseProbeDoesNotMutateConfig(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	configPath := filepath.Join(data, "config.toml")
+	if err := config.Save(configPath, config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: id, Root: root, VaultRoot: vault}}}); err != nil {
+		t.Fatal(err)
+	}
+	writeTestOverview(t, root, id)
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeErr := errors.New("inconclusive case probe")
+	_, err = Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "darwin", Random: errorReader{},
+		caseDetector: func(*os.Root) (platform.CaseMode, error) { return "", probeErr },
+	})
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("err=%v", err)
+	}
+	after, readErr := os.ReadFile(configPath)
+	if readErr != nil || !bytes.Equal(before, after) {
+		t.Fatalf("config mutated after failed probe: readErr=%v before=%q after=%q", readErr, before, after)
+	}
+	if _, statErr := os.Stat(filepath.Join(data, "projects")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("project state exists after failed probe: %v", statErr)
+	}
+}
+
+func TestInitializeCreatesPrivateIdempotentSyncStateWithoutVaultDirectories(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	opts := InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Now:    func() time.Time { return time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC) },
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 16)),
+	}
+	result, err := Initialize(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateRoot := filepath.Join(data, "projects", result.ProjectID)
+	paths := []string{"merge-bases", "queue", "transactions", "locks"}
+	identities := make(map[string]os.FileInfo, len(paths)+1)
+	for _, relative := range paths {
+		path := filepath.Join(stateRoot, relative)
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("state dir %s info=%v err=%v", relative, info, err)
+		}
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+			t.Fatalf("state dir %s mode=%o", relative, info.Mode().Perm())
+		}
+		identities[relative] = info
+	}
+	lockPath := filepath.Join(stateRoot, "locks", "sync.lock")
+	lockInfo, err := os.Lstat(lockPath)
+	if err != nil || !lockInfo.Mode().IsRegular() || lockInfo.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("sync lock info=%v err=%v", lockInfo, err)
+	}
+	if runtime.GOOS != "windows" && lockInfo.Mode().Perm() != 0o600 {
+		t.Fatalf("sync lock mode=%o", lockInfo.Mode().Perm())
+	}
+	identities["locks/sync.lock"] = lockInfo
+	if _, err := Initialize(opts); err != nil {
+		t.Fatal(err)
+	}
+	for relative, first := range identities {
+		second, err := os.Lstat(filepath.Join(stateRoot, filepath.FromSlash(relative)))
+		if err != nil || !os.SameFile(first, second) {
+			t.Fatalf("state identity changed for %s: err=%v", relative, err)
+		}
+	}
+	if entries, err := os.ReadDir(vault); err != nil || len(entries) != 0 {
+		t.Fatalf("vault was populated during init: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestInitializeRejectsRedirectedSyncStateWithoutMutatingConfig(t *testing.T) {
+	tests := []string{"projects", "project", "merge-bases", "queue", "transactions", "locks", "sync.lock"}
+	for _, redirected := range tests {
+		t.Run(redirected, func(t *testing.T) {
+			root, vault, data, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+			id := "project-2a2a2a2a2a2a2a2a"
+			configPath := filepath.Join(data, "config.toml")
+			if err := config.Save(configPath, config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: id, Root: root, VaultRoot: vault}}}); err != nil {
+				t.Fatal(err)
+			}
+			writeTestOverview(t, root, id)
+			projectState := filepath.Join(data, "projects", id)
+			var target string
+			switch redirected {
+			case "projects":
+				target = filepath.Join(data, "projects")
+			case "project":
+				if err := os.Mkdir(filepath.Join(data, "projects"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target = projectState
+			case "sync.lock":
+				if err := os.MkdirAll(filepath.Join(projectState, "locks"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target = filepath.Join(projectState, "locks", "sync.lock")
+			default:
+				if err := os.MkdirAll(projectState, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				target = filepath.Join(projectState, redirected)
+			}
+			if err := os.Symlink(outside, target); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}})
+			if err == nil || (!strings.Contains(err.Error(), "redirect") && !strings.Contains(err.Error(), "regular") && !strings.Contains(err.Error(), "directory")) {
+				t.Fatalf("err=%v", err)
+			}
+			after, readErr := os.ReadFile(configPath)
+			if readErr != nil || !bytes.Equal(before, after) {
+				t.Fatalf("config mutated: readErr=%v", readErr)
+			}
+		})
+	}
+}
+
+func TestInitializeNewOverviewContainsReservedSyncIdentity(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Now:    func() time.Time { return time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC) },
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 16)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "docs", "session-review", "project-overview.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "---\nid: project-overview\nentity_type: project_overview\nproject_id: project-2a2a2a2a2a2a2a2a\nrevision: 1\nsync_status: synced\ncreated_at: 2026-08-23T00:00:00Z\n---\n"
+	if !strings.HasPrefix(string(body), want) {
+		t.Fatalf("overview=%q want prefix=%q", body, want)
 	}
 }
 
@@ -528,7 +805,7 @@ func TestInitializeRecoversBackupOnlyConfigWithoutLosingMappings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Projects) != 2 || got.Projects[0] != want.Projects[0] {
+	if len(got.Projects) != 2 || !reflect.DeepEqual(got.Projects[0], want.Projects[0]) {
 		t.Fatalf("mappings=%+v", got.Projects)
 	}
 }

@@ -11,11 +11,14 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"golang.org/x/text/unicode/norm"
 )
 
 const initTransactionLockTimeout = 10 * time.Second
@@ -38,6 +41,7 @@ type InitOptions struct {
 	beforeOverviewWrite func() error
 	beforeConfigWrite   func() error
 	afterLock           func() error
+	caseDetector        func(*os.Root) (platform.CaseMode, error)
 }
 
 type InitResult struct {
@@ -119,6 +123,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if opts.Random == nil {
 		opts.Random = rand.Reader
 	}
+	if opts.caseDetector == nil {
+		opts.caseDetector = detectCaseMode
+	}
 
 	dataDir, err := openOrCreateDirectory(paths.dataRoot, 0o700)
 	if err != nil {
@@ -169,23 +176,48 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if overviewExists && overviewID != existing.ID {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project overview ID %q does not match mapped ID %q", overviewID, existing.ID))
 		}
+		updated, changed, err := completeVaultMapping(opts, roots.vault.Root, existing, filepath.Base(paths.projectRoot))
+		if err != nil {
+			return InitResult{}, err
+		}
+		if err := ensureProjectSyncState(dataDir.Root, updated.ID); err != nil {
+			return InitResult{}, err
+		}
 		if !overviewExists {
 			if opts.beforeOverviewWrite != nil {
 				if err := opts.beforeOverviewWrite(); err != nil {
 					return InitResult{}, err
 				}
 			}
-			if err := writeOverview(roots.project.Root, overviewBody(existing.ID, opts.Now(), paths.projectRoot)); err != nil {
+			if err := writeOverview(roots.project.Root, overviewBody(updated.ID, opts.Now(), paths.projectRoot)); err != nil {
 				return InitResult{}, err
 			}
 		}
-		return InitResult{ProjectID: existing.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+		if changed {
+			replaceProjectMapping(&cfg, updated)
+			if opts.beforeConfigWrite != nil {
+				if err := opts.beforeConfigWrite(); err != nil {
+					return InitResult{}, err
+				}
+			}
+			if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
+				return InitResult{}, err
+			}
+		}
+		return InitResult{ProjectID: updated.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project ID %q already belongs to another project root %q", overviewID, owner.Root))
 		}
-		cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: overviewID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot})
+		mapping, _, err := completeVaultMapping(opts, roots.vault.Root, config.ProjectMapping{ID: overviewID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot}, filepath.Base(paths.projectRoot))
+		if err != nil {
+			return InitResult{}, err
+		}
+		if err := ensureProjectSyncState(dataDir.Root, mapping.ID); err != nil {
+			return InitResult{}, err
+		}
+		cfg.Projects = append(cfg.Projects, mapping)
 		if opts.beforeConfigWrite != nil {
 			if err := opts.beforeConfigWrite(); err != nil {
 				return InitResult{}, err
@@ -202,6 +234,13 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, err
 	}
 	id := "project-" + hex.EncodeToString(raw)
+	mapping, _, err := completeVaultMapping(opts, roots.vault.Root, config.ProjectMapping{ID: id, Root: paths.projectRoot, VaultRoot: paths.vaultRoot}, filepath.Base(paths.projectRoot))
+	if err != nil {
+		return InitResult{}, err
+	}
+	if err := ensureProjectSyncState(dataDir.Root, mapping.ID); err != nil {
+		return InitResult{}, err
+	}
 	if opts.beforeOverviewWrite != nil {
 		if err := opts.beforeOverviewWrite(); err != nil {
 			return InitResult{}, err
@@ -210,7 +249,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err := writeOverview(roots.project.Root, overviewBody(id, opts.Now(), paths.projectRoot)); err != nil {
 		return InitResult{}, err
 	}
-	cfg.Projects = append(cfg.Projects, config.ProjectMapping{ID: id, Root: paths.projectRoot, VaultRoot: paths.vaultRoot})
+	cfg.Projects = append(cfg.Projects, mapping)
 	if opts.beforeConfigWrite != nil {
 		if err := opts.beforeConfigWrite(); err != nil {
 			return InitResult{}, err
@@ -300,9 +339,229 @@ func findProject(cfg config.Config, goos, root string, rootInfo os.FileInfo) (co
 	return match, matches == 1, nil
 }
 
+func DefaultVaultReviewPath(projectName, projectID string) (string, error) {
+	if !validProjectID(projectID) {
+		return "", fmt.Errorf("invalid project ID %q", projectID)
+	}
+	name := norm.NFC.String(strings.TrimSpace(projectName))
+	var display strings.Builder
+	replaced := false
+	for _, r := range name {
+		invalid := unicode.IsControl(r) || strings.ContainsRune(`<>:"/\|?*`, r)
+		if invalid {
+			if !replaced {
+				display.WriteByte('-')
+				replaced = true
+			}
+			continue
+		}
+		display.WriteRune(r)
+		replaced = false
+	}
+	name = strings.TrimRight(display.String(), ". ")
+	if name == "" || strings.Trim(name, "-") == "" {
+		name = "Project"
+	}
+	if windowsReservedProjectName(name) {
+		name = "_" + name
+	}
+	if utf8.RuneCountInString(name) > 64 {
+		name = string([]rune(name)[:64])
+		name = strings.TrimRight(name, ". ")
+	}
+	suffix := strings.TrimPrefix(projectID, "project-")[:8]
+	relative := "Projects/" + name + "--" + suffix + "/Session Review"
+	if _, err := platform.PathKey("darwin", platform.CaseSensitive, relative); err != nil {
+		return "", fmt.Errorf("construct vault review path: %w", err)
+	}
+	return relative, nil
+}
+
+func windowsReservedProjectName(name string) bool {
+	base := name
+	if dot := strings.IndexByte(base, '.'); dot >= 0 {
+		base = base[:dot]
+	}
+	base = strings.ToUpper(base)
+	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" {
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+}
+
+func completeVaultMapping(opts InitOptions, vaultRoot *os.Root, mapping config.ProjectMapping, projectName string) (config.ProjectMapping, bool, error) {
+	if mapping.VaultReviewPath != "" && mapping.VaultCaseMode != "" {
+		return mapping, false, nil
+	}
+	reviewPath, err := DefaultVaultReviewPath(projectName, mapping.ID)
+	if err != nil {
+		return config.ProjectMapping{}, false, err
+	}
+	goos := opts.GOOS
+	if goos == "" {
+		goos = runtime.GOOS
+	}
+	caseMode := platform.CaseInsensitive
+	if goos != "windows" {
+		caseMode, err = opts.caseDetector(vaultRoot)
+		if err != nil {
+			return config.ProjectMapping{}, false, err
+		}
+		if caseMode != platform.CaseSensitive && caseMode != platform.CaseInsensitive {
+			return config.ProjectMapping{}, false, fmt.Errorf("case probe returned an invalid result")
+		}
+	}
+	mapping.VaultReviewPath = reviewPath
+	mapping.VaultCaseMode = caseMode
+	return mapping, true, nil
+}
+
+func replaceProjectMapping(cfg *config.Config, mapping config.ProjectMapping) {
+	for index := range cfg.Projects {
+		if cfg.Projects[index].ID == mapping.ID {
+			cfg.Projects[index] = mapping
+			return
+		}
+	}
+}
+
+func detectCaseMode(root *os.Root) (mode platform.CaseMode, retErr error) {
+	if root == nil {
+		return "", errors.New("vault root is required for case detection")
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("generate case probe name: %w", err)
+	}
+	lower := ".session-reviewer-case-" + hex.EncodeToString(random[:])
+	upper := strings.ToUpper(lower)
+	first, err := root.OpenFile(lower, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create case probe: %w", err)
+	}
+	defer func() {
+		retErr = errors.Join(retErr, first.Close())
+		if err := root.Remove(lower); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove lowercase case probe: %w", err))
+		}
+		if err := root.Remove(upper); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, fmt.Errorf("remove uppercase case probe: %w", err))
+		}
+		retErr = errors.Join(retErr, atomicfile.SyncRootDirectory(root))
+	}()
+	firstInfo, err := first.Stat()
+	if err != nil || !firstInfo.Mode().IsRegular() {
+		return "", errors.New("inspect lowercase case probe")
+	}
+	second, err := root.OpenFile(upper, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		secondInfo, statErr := second.Stat()
+		closeErr := second.Close()
+		if statErr != nil || closeErr != nil || !secondInfo.Mode().IsRegular() || os.SameFile(firstInfo, secondInfo) {
+			return "", errors.New("filesystem case probe was inconclusive")
+		}
+		return platform.CaseSensitive, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return "", fmt.Errorf("create uppercase case probe: %w", err)
+	}
+	second, err = root.Open(upper)
+	if err != nil {
+		return "", errors.New("filesystem case probe was inconclusive")
+	}
+	secondInfo, statErr := second.Stat()
+	closeErr := second.Close()
+	if statErr != nil || closeErr != nil || !secondInfo.Mode().IsRegular() || !os.SameFile(firstInfo, secondInfo) {
+		return "", errors.New("filesystem case probe was inconclusive")
+	}
+	return platform.CaseInsensitive, nil
+}
+
+func ensureProjectSyncState(dataRoot *os.Root, projectID string) error {
+	if !validProjectID(projectID) {
+		return fmt.Errorf("invalid project ID %q", projectID)
+	}
+	if err := ensurePrivateRootDirectory(dataRoot, "projects"); err != nil {
+		return fmt.Errorf("ensure projects state root: %w", err)
+	}
+	projectsRoot, err := openStableRoot(dataRoot, "projects")
+	if err != nil {
+		return err
+	}
+	defer projectsRoot.Close()
+	if err := ensurePrivateRootDirectory(projectsRoot, projectID); err != nil {
+		return fmt.Errorf("ensure project state root: %w", err)
+	}
+	projectRoot, err := openStableRoot(projectsRoot, projectID)
+	if err != nil {
+		return err
+	}
+	defer projectRoot.Close()
+	for _, relative := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := ensurePrivateRootDirectory(projectRoot, relative); err != nil {
+			return fmt.Errorf("ensure project state directory %q: %w", relative, err)
+		}
+	}
+	lockRoot, err := openStableRoot(projectRoot, "locks")
+	if err != nil {
+		return err
+	}
+	defer lockRoot.Close()
+	lockFile, err := openStableInitLockFile(lockRoot, "sync.lock")
+	if err != nil {
+		return fmt.Errorf("ensure sync lock: %w", err)
+	}
+	return lockFile.Close()
+}
+
+func openStableRoot(parent *os.Root, name string) (*os.Root, error) {
+	before, err := parent.Lstat(name)
+	if err != nil || !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("state component is redirected or not a directory")
+	}
+	opened, err := parent.OpenRoot(name)
+	if err != nil {
+		return nil, err
+	}
+	after, err := opened.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		_ = opened.Close()
+		return nil, errors.New("state component changed while opening")
+	}
+	return opened, nil
+}
+
+func ensurePrivateRootDirectory(root *os.Root, relative string) error {
+	if err := ensureRootDirectory(root, relative, 0o700); err != nil {
+		return err
+	}
+	before, err := root.Lstat(relative)
+	if err != nil {
+		return err
+	}
+	opened, err := root.OpenRoot(relative)
+	if err != nil {
+		return err
+	}
+	defer opened.Close()
+	after, err := opened.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		return errors.New("private directory changed while opening")
+	}
+	file, err := opened.Open(".")
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if err := file.Chmod(0o700); err != nil {
+		return err
+	}
+	return nil
+}
+
 func overviewBody(projectID string, createdAt time.Time, root string) string {
 	return fmt.Sprintf(
-		"---\nproject_id: %s\ncreated_at: %s\n---\n\n# %s\n",
+		"---\nid: project-overview\nentity_type: project_overview\nproject_id: %s\nrevision: 1\nsync_status: synced\ncreated_at: %s\n---\n\n# %s\n",
 		projectID,
 		createdAt.UTC().Format(time.RFC3339),
 		filepath.Base(root),
