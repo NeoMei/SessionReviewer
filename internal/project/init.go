@@ -1,6 +1,7 @@
 package project
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -165,10 +166,15 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	overviewID, overviewExists := overview.projectID, overview.exists
-	if len(overview.migrated) != 0 {
-		if err := atomicfile.WriteRoot(roots.project.Root, filepath.FromSlash(overviewPath), overview.migrated, 0o644); err != nil {
-			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
+	publishOverviewUpgrade := func() error {
+		if len(overview.publish) == 0 {
+			return nil
 		}
+		if err := atomicfile.WriteRoot(roots.project.Root, filepath.FromSlash(overviewPath), overview.publish, 0o644); err != nil {
+			return initializationError(ErrConflictingInitializationIdentity, err)
+		}
+		overview.publish = nil
+		return nil
 	}
 	existing, mapped, err := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
 	if err != nil {
@@ -190,6 +196,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		}
 		updated, changed, err := completeVaultMapping(opts, roots.vault.Root, existing, filepath.Base(paths.projectRoot))
 		if err != nil {
+			return InitResult{}, err
+		}
+		if err := publishOverviewUpgrade(); err != nil {
 			return InitResult{}, err
 		}
 		if err := ensureProjectSyncState(dataDir.Root, updated.ID); err != nil {
@@ -229,6 +238,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		}
 		mapping, _, err := completeVaultMapping(opts, roots.vault.Root, config.ProjectMapping{ID: overviewID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot}, filepath.Base(paths.projectRoot))
 		if err != nil {
+			return InitResult{}, err
+		}
+		if err := publishOverviewUpgrade(); err != nil {
 			return InitResult{}, err
 		}
 		if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, true, opts.afterStateComponent); err != nil {
@@ -893,19 +905,23 @@ func overviewBody(projectID string, createdAt time.Time, root string) string {
 type overviewRead struct {
 	projectID string
 	exists    bool
-	migrated  []byte
+	publish   []byte
 }
 
 func readOverview(root *os.Root, overview string) (overviewRead, error) {
 	primaryBody, primaryFound, primaryReadErr := readOverviewFile(root, overview)
 	primaryID, primaryMigrated, primaryParseErr := parseOverview(overview, primaryBody, primaryFound)
 	backupBody, backupFound, backupReadErr := readOverviewFile(root, atomicfile.BackupPath(overview))
-	backupID, _, backupParseErr := parseOverview(overview, backupBody, backupFound)
+	backupID, backupMigrated, backupParseErr := parseOverview(overview, backupBody, backupFound)
 	if primaryFound && primaryReadErr == nil && primaryParseErr == nil {
-		return overviewRead{projectID: primaryID, exists: true, migrated: primaryMigrated}, nil
+		return overviewRead{projectID: primaryID, exists: true, publish: primaryMigrated}, nil
 	}
 	if backupFound && backupReadErr == nil && backupParseErr == nil {
-		return overviewRead{projectID: backupID, exists: true}, nil
+		publish := backupMigrated
+		if len(publish) == 0 {
+			publish = bytes.Clone(backupBody)
+		}
+		return overviewRead{projectID: backupID, exists: true, publish: publish}, nil
 	}
 	if !primaryFound && !backupFound {
 		return overviewRead{}, nil

@@ -30,9 +30,38 @@ var (
 	ErrReservedField       = errors.New("machine-reserved field changed")
 	ErrProtectedProvenance = errors.New("proposal provenance changed")
 	ErrUnauthorizedUnit    = errors.New("document unit is not human-editable")
-	MachineReservedFields  = map[string]struct{}{"id": {}, "entity_type": {}, "project_id": {}, "sync_status": {}, "sync_hash": {}, "base_hash": {}, "project_hash": {}, "vault_hash": {}}
-	ProposalOwnedFields    = map[string]struct{}{"revision": {}, "source_sessions": {}, "evidence": {}, "supersedes": {}}
 )
+
+// MachineReservedFields returns a caller-owned snapshot of the reserved field
+// catalog. Authorization uses immutable package-local predicates, so callers
+// cannot weaken validation by mutating the returned map.
+func MachineReservedFields() map[string]struct{} {
+	return map[string]struct{}{"id": {}, "entity_type": {}, "project_id": {}, "sync_status": {}, "sync_hash": {}, "base_hash": {}, "project_hash": {}, "vault_hash": {}}
+}
+
+// ProposalOwnedFields returns a caller-owned snapshot of the provenance field
+// catalog. Mutating it never changes merge validation.
+func ProposalOwnedFields() map[string]struct{} {
+	return map[string]struct{}{"revision": {}, "source_sessions": {}, "evidence": {}, "supersedes": {}}
+}
+
+func isMachineReservedField(name string) bool {
+	switch name {
+	case "id", "entity_type", "project_id", "sync_status", "sync_hash", "base_hash", "project_hash", "vault_hash":
+		return true
+	default:
+		return false
+	}
+}
+
+func isProposalOwnedField(name string) bool {
+	switch name {
+	case "revision", "source_sessions", "evidence", "supersedes":
+		return true
+	default:
+		return false
+	}
+}
 
 type Identity struct {
 	ID, EntityType, ProjectID string
@@ -52,8 +81,9 @@ type UnitKey struct {
 }
 
 type Unit struct {
-	Present bool
-	Value   []byte
+	Present         bool
+	Value           []byte
+	KeyPresentation []byte
 }
 
 type UnitSet map[UnitKey]Unit
@@ -170,7 +200,11 @@ func (d Document) Units() UnitSet {
 	}
 	for i := 0; i+1 < len(d.frontmatter.Content); i += 2 {
 		key := d.frontmatter.Content[i].Value
-		units[UnitKey{Kind: UnitFrontmatter, Name: key}] = Unit{Present: true, Value: encodeNode(d.frontmatter.Content[i+1])}
+		units[UnitKey{Kind: UnitFrontmatter, Name: key}] = Unit{
+			Present:         true,
+			Value:           encodeNode(d.frontmatter.Content[i+1]),
+			KeyPresentation: encodeNode(d.frontmatter.Content[i]),
+		}
 	}
 	return cloneUnitSet(units)
 }
@@ -211,6 +245,17 @@ func (d Document) WithUnits(units UnitSet) (Document, error) {
 			changed = true
 			continue
 		}
+		nextKey := cloneNode(keyNode)
+		var err error
+		if len(unit.KeyPresentation) != 0 {
+			nextKey, err = decodeUnitKey(unit.KeyPresentation, key.Name)
+			if err != nil {
+				return Document{}, err
+			}
+			if !bytes.Equal(encodeNode(keyNode), encodeNode(nextKey)) {
+				changed = true
+			}
+		}
 		next, err := decodeUnitValue(unit.Value)
 		if err != nil {
 			return Document{}, fmt.Errorf("%w: invalid frontmatter unit", ErrInvalidDocument)
@@ -219,7 +264,7 @@ func (d Document) WithUnits(units UnitSet) (Document, error) {
 			preservePresentation(valueNode, next)
 			changed = true
 		}
-		content = append(content, cloneNode(keyNode), next)
+		content = append(content, nextKey, next)
 	}
 	var additions []string
 	for key, unit := range input {
@@ -232,11 +277,19 @@ func (d Document) WithUnits(units UnitSet) (Document, error) {
 	}
 	sort.Strings(additions)
 	for _, name := range additions {
-		node, err := decodeUnitValue(input[UnitKey{Kind: UnitFrontmatter, Name: name}].Value)
+		unit := input[UnitKey{Kind: UnitFrontmatter, Name: name}]
+		node, err := decodeUnitValue(unit.Value)
 		if err != nil {
 			return Document{}, fmt.Errorf("%w: invalid frontmatter unit", ErrInvalidDocument)
 		}
-		content = append(content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: name}, node)
+		keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: name}
+		if len(unit.KeyPresentation) != 0 {
+			keyNode, err = decodeUnitKey(unit.KeyPresentation, name)
+			if err != nil {
+				return Document{}, err
+			}
+		}
+		content = append(content, keyNode, node)
 		changed = true
 	}
 	result.frontmatter.Content = content
@@ -263,10 +316,10 @@ func (d Document) ValidateHumanChanges(base Document) error {
 			continue
 		}
 		if key.Kind == UnitFrontmatter {
-			if _, ok := MachineReservedFields[key.Name]; ok {
+			if isMachineReservedField(key.Name) {
 				return fmt.Errorf("%w: %s", ErrReservedField, key.Name)
 			}
-			if _, ok := ProposalOwnedFields[key.Name]; ok {
+			if isProposalOwnedField(key.Name) {
 				return fmt.Errorf("%w: %s", ErrProtectedProvenance, key.Name)
 			}
 			continue
@@ -288,7 +341,7 @@ func (d Document) FinalizeHumanMerge(base Document, changed bool) (Document, err
 	}
 	baseUnits := base.Units()
 	units := d.Units()
-	for field := range ProposalOwnedFields {
+	for _, field := range [...]string{"revision", "source_sessions", "evidence", "supersedes"} {
 		key := UnitKey{Kind: UnitFrontmatter, Name: field}
 		if value, ok := baseUnits[key]; ok {
 			units[key] = value
@@ -513,6 +566,14 @@ func decodeUnitValue(source []byte) (*yaml.Node, error) {
 	return node, nil
 }
 
+func decodeUnitKey(source []byte, name string) (*yaml.Node, error) {
+	node, err := decodeUnitValue(source)
+	if err != nil || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || node.Value != name {
+		return nil, invalidDocument("frontmatter key presentation does not match unit name")
+	}
+	return node, nil
+}
+
 func requiredString(mapping *yaml.Node, key string) (string, error) {
 	node, ok := mappingValue(mapping, key)
 	if !ok || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || node.Value == "" {
@@ -596,13 +657,13 @@ func cloneNode(node *yaml.Node) *yaml.Node {
 func cloneUnitSet(units UnitSet) UnitSet {
 	copy := make(UnitSet, len(units))
 	for key, unit := range units {
-		copy[key] = Unit{Present: unit.Present, Value: bytes.Clone(unit.Value)}
+		copy[key] = Unit{Present: unit.Present, Value: bytes.Clone(unit.Value), KeyPresentation: bytes.Clone(unit.KeyPresentation)}
 	}
 	return copy
 }
 
 func unitsEqual(first, second Unit) bool {
-	return first.Present == second.Present && bytes.Equal(first.Value, second.Value)
+	return first.Present == second.Present && bytes.Equal(first.Value, second.Value) && bytes.Equal(first.KeyPresentation, second.KeyPresentation)
 }
 
 func unionUnitKeys(first, second UnitSet) []UnitKey {

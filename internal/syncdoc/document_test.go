@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -43,7 +44,7 @@ func TestDocumentNoopRoundTripIsByteExactAndChangedRenderIsCanonical(t *testing.
 		t.Fatalf("no-op changed bytes:\n%q\n%q", input, out)
 	}
 	units := doc.Units()
-	key := requireUnit(t, units, UnitSection, "标题 / Context#1")
+	key := requireUnit(t, units, UnitSection, "标题 / Context@2#1")
 	units[key] = Unit{Present: true, Value: []byte("Changed\r\n")}
 	changed, err := doc.WithUnits(units)
 	if err != nil {
@@ -66,7 +67,7 @@ func TestDocumentNoopRoundTripIsByteExactAndChangedRenderIsCanonical(t *testing.
 func TestBodyTracksDuplicateHeadingOccurrencesAndFences(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## Context\none\n\n```md\n## Context\n```\n\n### Child\nchild\n\n## Context\ntwo\n"))
 	units := doc.Units()
-	for _, name := range []string{"Context#1", "Context / Child#1", "Context#2"} {
+	for _, name := range []string{"Context#1", "Context / Child@3#1", "Context#2"} {
 		requireUnit(t, units, UnitSection, name)
 	}
 	if len(sectionKeys(units)) != 3 {
@@ -78,7 +79,7 @@ func TestBodyUsesCommonMarkHeadingBoundariesAndSetextAncestry(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\nFirst *line*\n------------\nbody\n\n<div>\n## HTML pseudoheading\n</div>\n\n- item\n  ## Nested list heading\n\n### Child\nchild\n"))
 	units := doc.Units()
 	requireUnit(t, units, UnitSection, "First line#1")
-	requireUnit(t, units, UnitSection, "First line / Child#1")
+	requireUnit(t, units, UnitSection, "First line / Child@3#1")
 	if len(sectionKeys(units)) != 2 {
 		t.Fatalf("section keys=%v", sectionKeys(units))
 	}
@@ -173,6 +174,241 @@ func TestReservedFieldEditIsReportedWithoutEchoingValue(t *testing.T) {
 	err := edited.ValidateHumanChanges(base)
 	if !errors.Is(err, ErrReservedField) || strings.Contains(err.Error(), "evil") {
 		t.Fatalf("unsafe error: %v", err)
+	}
+}
+
+func TestReservedFieldCatalogsAreDefensiveCopies(t *testing.T) {
+	machine := MachineReservedFields()
+	proposal := ProposalOwnedFields()
+	delete(machine, "id")
+	delete(proposal, "revision")
+	machine["title"] = struct{}{}
+	proposal["title"] = struct{}{}
+
+	base := mustParse(t, entity("decision-1", "project-1", "Base"))
+	editedID := mustParse(t, entity("decision-2", "project-1", "Base"))
+	if err := editedID.ValidateHumanChanges(base); !errors.Is(err, ErrReservedField) {
+		t.Fatalf("mutated catalog disabled reserved protection: %v", err)
+	}
+	editedRevision := replaceFrontmatterUnit(t, base, "revision", []byte("4\n"))
+	if err := editedRevision.ValidateHumanChanges(base); !errors.Is(err, ErrProtectedProvenance) {
+		t.Fatalf("mutated catalog disabled provenance protection: %v", err)
+	}
+	editedTitle := replaceFrontmatterUnit(t, base, "title", []byte("Human\n"))
+	if err := editedTitle.ValidateHumanChanges(base); err != nil {
+		t.Fatalf("mutated catalog added false protection: %v", err)
+	}
+}
+
+func TestReservedFieldCatalogCopiesCanBeMutatedConcurrently(t *testing.T) {
+	var wait sync.WaitGroup
+	for range 16 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for range 100 {
+				machine := MachineReservedFields()
+				proposal := ProposalOwnedFields()
+				delete(machine, "id")
+				delete(proposal, "revision")
+				machine["caller"] = struct{}{}
+				proposal["caller"] = struct{}{}
+			}
+		}()
+	}
+	wait.Wait()
+	if _, ok := MachineReservedFields()["id"]; !ok {
+		t.Fatal("concurrent caller mutation changed machine policy")
+	}
+	if _, ok := ProposalOwnedFields()["revision"]; !ok {
+		t.Fatal("concurrent caller mutation changed provenance policy")
+	}
+}
+
+func TestNestedSectionAdditionRoundTripsStableUnitKey(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\nParent\n------\nbase\n"))
+	units := doc.Units()
+	key := UnitKey{Kind: UnitSection, Name: "Parent / 新增@3#1"}
+	secondKey := UnitKey{Kind: UnitSection, Name: "Parent / 新增@3#2"}
+	units[key] = Unit{Present: true, Value: []byte("内容\n")}
+	units[secondKey] = Unit{Present: true, Value: []byte("内容 2\n")}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := mustParse(t, rendered)
+	if unit, ok := reparsed.Units()[key]; !ok || !bytes.Equal(unit.Value, []byte("内容\n")) {
+		t.Fatalf("nested key changed across render/parse: key=%+v units=%v\n%s", key, sectionKeys(reparsed.Units()), rendered)
+	}
+	if unit, ok := reparsed.Units()[secondKey]; !ok || !bytes.Equal(unit.Value, []byte("内容 2\n")) {
+		t.Fatalf("duplicate nested key changed across render/parse: key=%+v units=%v\n%s", secondKey, sectionKeys(reparsed.Units()), rendered)
+	}
+}
+
+func TestNewSectionTreeAppendsInStableAncestryOrder(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\npreamble\n"))
+	units := doc.Units()
+	keys := []UnitKey{
+		{Kind: UnitSection, Name: "Parent#1"},
+		{Kind: UnitSection, Name: "Parent / Child@3#1"},
+		{Kind: UnitSection, Name: "Parent / Child / Leaf@5#1"},
+	}
+	for _, key := range keys {
+		units[key] = Unit{Present: true, Value: []byte(key.Name + "\n")}
+	}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := mustParse(t, out)
+	for _, key := range keys {
+		if _, ok := reparsed.Units()[key]; !ok {
+			t.Fatalf("new section tree key changed: missing=%v got=%v\n%s", key, sectionKeys(reparsed.Units()), out)
+		}
+	}
+}
+
+func TestSectionUnitNamesEscapeLiteralAncestryDelimiters(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## A / B\nliteral\n\n## A\nparent\n\n### B\nnested\n\n## C \\ D # @\nsymbols\n\n## A / B\nliteral duplicate\n"))
+	units := doc.Units()
+	for _, name := range []string{"A \\/ B#1", "A \\/ B#2", "A#1", "A / B@3#1", `C \\ D \# \@#1`} {
+		requireUnit(t, units, UnitSection, name)
+	}
+	if len(sectionKeys(units)) != 5 {
+		t.Fatalf("section identity collision: %v", sectionKeys(units))
+	}
+	rendered, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := rendered.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := mustParse(t, out)
+	if len(sectionKeys(reparsed.Units())) != 5 {
+		t.Fatalf("section identities unstable: %v", sectionKeys(reparsed.Units()))
+	}
+}
+
+func TestFrontmatterKeyCommentsParticipateInHumanMerge(t *testing.T) {
+	baseBytes := bytes.Replace(entity("decision-1", "project-1", "Base"), []byte("title: Base"), []byte("# old key comment\ntitle: Base"), 1)
+	editedBytes := bytes.Replace(baseBytes, []byte("# old key comment"), []byte("# human key comment"), 1)
+	base := mustParse(t, baseBytes)
+	edited := mustParse(t, editedBytes)
+	if err := edited.ValidateHumanChanges(base); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := edited.FinalizeHumanMerge(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := merged.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("# human key comment\ntitle: Base")) || bytes.Contains(out, []byte("# old key comment")) || frontmatterInt(t, merged, "revision") != 4 {
+		t.Fatalf("key comment merge was lost:\n%s", out)
+	}
+}
+
+func TestValueOnlyUnitReplacementPreservesFrontmatterKeyPresentation(t *testing.T) {
+	input := bytes.Replace(entity("decision-1", "project-1", "Base"), []byte("title: Base"), []byte("# title key comment\ntitle: Base"), 1)
+	doc := mustParse(t, input)
+	units := doc.Units()
+	key := UnitKey{Kind: UnitFrontmatter, Name: "title"}
+	units[key] = Unit{Present: true, Value: []byte("Changed\n")}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("# title key comment\ntitle: Changed")) {
+		t.Fatalf("value-only replacement lost key presentation:\n%s", out)
+	}
+}
+
+func TestFrontmatterKeyPresentationIsDefensiveAndBoundToName(t *testing.T) {
+	input := bytes.Replace(entity("decision-1", "project-1", "Base"), []byte("title: Base"), []byte("# title key comment\n'title': Base"), 1)
+	doc := mustParse(t, input)
+	key := UnitKey{Kind: UnitFrontmatter, Name: "title"}
+	units := doc.Units()
+	title := units[key]
+	if len(title.KeyPresentation) == 0 {
+		t.Fatal("missing key presentation")
+	}
+	title.KeyPresentation[0] = 'X'
+	units[key] = title
+	if bytes.Equal(doc.Units()[key].KeyPresentation, title.KeyPresentation) {
+		t.Fatal("Units key presentation aliases document storage")
+	}
+
+	bad := doc.Units()
+	badTitle := bad[key]
+	badTitle.KeyPresentation = bytes.Clone(bad[UnitKey{Kind: UnitFrontmatter, Name: "status"}].KeyPresentation)
+	bad[key] = badTitle
+	if _, err := doc.WithUnits(bad); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("mismatched key presentation accepted: %v", err)
+	}
+
+	good := doc.Units()
+	goodTitle := good[key]
+	goodTitle.Value = []byte("Changed\n")
+	good[key] = goodTitle
+	updated, err := doc.WithUnits(good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodTitle.KeyPresentation[0] = 'Y'
+	good[key] = goodTitle
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("# title key comment\n'title': Changed")) {
+		t.Fatalf("key presentation was aliased or lost:\n%s", out)
+	}
+}
+
+func TestSectionUnitCodecCoversLevelsGapsAndRejectsNonCanonicalNames(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n# H1\ntext\n\n### H3\ntext\n\n###### H6\ntext\n\n## H2\ntext\n\n#### H4\ntext\n\n##### H5\ntext\n"))
+	units := doc.Units()
+	for _, name := range []string{"H1@1#1", "H1 / H3@3#1", "H1 / H3 / H6@6#1", "H1 / H2@2#1", "H1 / H2 / H4@4#1", "H1 / H2 / H4 / H5@5#1"} {
+		requireUnit(t, units, UnitSection, name)
+	}
+	units[UnitKey{Kind: UnitFrontmatter, Name: "title"}] = Unit{Present: true, Value: []byte("force render\n")}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	reparsed := mustParse(t, out)
+	for _, key := range sectionKeys(doc.Units()) {
+		if _, ok := reparsed.Units()[key]; !ok {
+			t.Fatalf("level/gap key changed: %v -> %v", key, sectionKeys(reparsed.Units()))
+		}
+	}
+
+	for _, invalid := range []string{"Parent / Child#1", "Parent@2#1", `Parent \x#1`, "Parent@7#1", "Parent@3#0", "Parent / @3#1"} {
+		invalidUnits := doc.Units()
+		invalidUnits[UnitKey{Kind: UnitSection, Name: invalid}] = Unit{Present: true, Value: []byte("bad\n")}
+		if _, err := doc.WithUnits(invalidUnits); !errors.Is(err, ErrInvalidDocument) {
+			t.Fatalf("invalid section key %q accepted: %v", invalid, err)
+		}
 	}
 }
 

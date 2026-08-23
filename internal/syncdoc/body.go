@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -58,14 +59,15 @@ func parseBody(source []byte) (Body, error) {
 				parts = append(parts, ancestry[level])
 			}
 		}
-		path := strings.Join(parts, " / ")
-		occurrences[path]++
+		path := encodeSectionPath(parts)
+		occurrenceIdentity := fmt.Sprintf("%s@%d", path, heading.level)
+		occurrences[occurrenceIdentity]++
 		valueEnd := len(source)
 		if i+1 < len(headings) {
 			valueEnd = headings[i+1].start
 		}
 		sections = append(sections, bodySection{
-			key:     UnitKey{Kind: UnitSection, Name: fmt.Sprintf("%s#%d", path, occurrences[path])},
+			key:     UnitKey{Kind: UnitSection, Name: encodeSectionUnitName(parts, heading.level, occurrences[occurrenceIdentity])},
 			heading: bytes.Clone(source[heading.start:heading.bodyStart]),
 			value:   bytes.Clone(source[heading.bodyStart:valueEnd]),
 			level:   heading.level,
@@ -144,26 +146,58 @@ func (b Body) withUnits(units UnitSet) (Body, bool, error) {
 		result.sections = append(result.sections, copy)
 	}
 	var additions []UnitKey
+	additionIdentities := make(map[UnitKey]sectionUnitIdentity)
 	for key, unit := range units {
 		if key.Kind != UnitSection || !unit.Present {
 			continue
 		}
 		if _, exists := seen[key]; !exists {
+			identity, err := decodeSectionUnitName(key.Name)
+			if err != nil {
+				return Body{}, false, err
+			}
 			additions = append(additions, key)
+			additionIdentities[key] = identity
 		}
 	}
-	sort.Slice(additions, func(i, j int) bool { return additions[i].Name < additions[j].Name })
-	for _, key := range additions {
-		name, level, err := headingFromUnitName(key.Name)
-		if err != nil {
-			return Body{}, false, err
+	sort.Slice(additions, func(i, j int) bool {
+		first, second := additionIdentities[additions[i]], additionIdentities[additions[j]]
+		for index := 0; index < len(first.parts) && index < len(second.parts); index++ {
+			if first.parts[index] != second.parts[index] {
+				return first.parts[index] < second.parts[index]
+			}
 		}
-		heading := []byte(strings.Repeat("#", level) + " " + name + "\n")
-		result.sections = append(result.sections, bodySection{key: key, heading: heading, value: bytes.Clone(units[key].Value), level: level})
+		if len(first.parts) != len(second.parts) {
+			return len(first.parts) < len(second.parts)
+		}
+		if first.level != second.level {
+			return first.level < second.level
+		}
+		return first.occurrence < second.occurrence
+	})
+	for _, key := range additions {
+		identity := additionIdentities[key]
+		heading := []byte(strings.Repeat("#", identity.level) + " " + identity.parts[len(identity.parts)-1] + "\n")
+		result.sections = append(result.sections, bodySection{key: key, heading: heading, value: bytes.Clone(units[key].Value), level: identity.level})
 		changed = true
 	}
 	if len(result.sections) > maxBodySections {
 		return Body{}, false, invalidDocument("too many Markdown sections")
+	}
+	if len(additions) != 0 {
+		reparsed, err := parseBody(result.render())
+		if err != nil {
+			return Body{}, false, err
+		}
+		reparsedKeys := make(map[UnitKey]struct{}, len(reparsed.sections))
+		for _, section := range reparsed.sections {
+			reparsedKeys[section.key] = struct{}{}
+		}
+		for _, key := range additions {
+			if _, ok := reparsedKeys[key]; !ok {
+				return Body{}, false, invalidDocument("new section ancestry is not representable at the append position")
+			}
+		}
 	}
 	return result, changed, nil
 }
@@ -245,22 +279,160 @@ func normalizedHeadingName(name string) (string, error) {
 	return name, nil
 }
 
-func headingFromUnitName(unitName string) (string, int, error) {
-	hash := strings.LastIndexByte(unitName, '#')
+type sectionUnitIdentity struct {
+	parts      []string
+	level      int
+	occurrence int
+}
+
+func decodeSectionUnitName(unitName string) (sectionUnitIdentity, error) {
+	hash := lastUnescapedByte(unitName, '#')
 	if hash <= 0 || hash == len(unitName)-1 {
-		return "", 0, invalidDocument("invalid section unit name")
+		return sectionUnitIdentity{}, invalidDocument("invalid section unit name")
 	}
 	for _, digit := range unitName[hash+1:] {
 		if digit < '0' || digit > '9' {
-			return "", 0, invalidDocument("invalid section occurrence")
+			return sectionUnitIdentity{}, invalidDocument("invalid section occurrence")
 		}
 	}
-	parts := strings.Split(unitName[:hash], " / ")
+	occurrence, err := strconv.Atoi(unitName[hash+1:])
+	if err != nil || occurrence < 1 {
+		return sectionUnitIdentity{}, invalidDocument("invalid section occurrence")
+	}
+	identity := unitName[:hash]
+	level := 2
+	if marker := lastUnescapedByte(identity, '@'); marker >= 0 {
+		parsed, err := strconv.Atoi(identity[marker+1:])
+		if err != nil || parsed < 1 || parsed > 6 {
+			return sectionUnitIdentity{}, invalidDocument("invalid section heading level")
+		}
+		level = parsed
+		identity = identity[:marker]
+	}
+	encodedParts, err := splitSectionPath(identity)
+	if err != nil {
+		return sectionUnitIdentity{}, err
+	}
+	parts := make([]string, len(encodedParts))
+	for i, encoded := range encodedParts {
+		parts[i], err = unescapeSectionComponent(encoded)
+		if err != nil {
+			return sectionUnitIdentity{}, err
+		}
+	}
 	if len(parts) == 0 || len(parts) > 6 {
-		return "", 0, invalidDocument("invalid section ancestry")
+		return sectionUnitIdentity{}, invalidDocument("invalid section ancestry")
 	}
 	name, err := normalizedHeadingName(parts[len(parts)-1])
-	return name, 2, err
+	if err != nil {
+		return sectionUnitIdentity{}, err
+	}
+	parts[len(parts)-1] = name
+	if encodeSectionUnitName(parts, level, occurrence) != unitName {
+		return sectionUnitIdentity{}, invalidDocument("non-canonical section unit name")
+	}
+	return sectionUnitIdentity{parts: parts, level: level, occurrence: occurrence}, nil
+}
+
+func encodeSectionUnitName(parts []string, level, occurrence int) string {
+	identity := encodeSectionPath(parts)
+	if level != 2 || len(parts) > 1 {
+		identity += "@" + strconv.Itoa(level)
+	}
+	return identity + "#" + strconv.Itoa(occurrence)
+}
+
+func encodeSectionPath(parts []string) string {
+	encoded := make([]string, len(parts))
+	for i, part := range parts {
+		encoded[i] = escapeSectionComponent(part)
+	}
+	return strings.Join(encoded, " / ")
+}
+
+func escapeSectionComponent(value string) string {
+	var out strings.Builder
+	out.Grow(len(value))
+	for _, character := range value {
+		switch character {
+		case '\\', '/', '#', '@':
+			out.WriteByte('\\')
+		}
+		out.WriteRune(character)
+	}
+	return out.String()
+}
+
+func unescapeSectionComponent(value string) (string, error) {
+	var out strings.Builder
+	out.Grow(len(value))
+	escaped := false
+	for _, character := range value {
+		if escaped {
+			if character != '\\' && character != '/' && character != '#' && character != '@' {
+				return "", invalidDocument("invalid section unit escape")
+			}
+			out.WriteRune(character)
+			escaped = false
+			continue
+		}
+		if character == '\\' {
+			escaped = true
+			continue
+		}
+		out.WriteRune(character)
+	}
+	if escaped {
+		return "", invalidDocument("trailing section unit escape")
+	}
+	return out.String(), nil
+}
+
+func splitSectionPath(value string) ([]string, error) {
+	parts := make([]string, 0, 6)
+	start := 0
+	escaped := false
+	for index := 0; index < len(value); index++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if value[index] == '\\' {
+			escaped = true
+			continue
+		}
+		if strings.HasPrefix(value[index:], " / ") {
+			if index == start {
+				return nil, invalidDocument("empty section ancestry component")
+			}
+			parts = append(parts, value[start:index])
+			index += len(" / ") - 1
+			start = index + 1
+		}
+	}
+	if escaped || start >= len(value) {
+		return nil, invalidDocument("invalid section ancestry")
+	}
+	return append(parts, value[start:]), nil
+}
+
+func lastUnescapedByte(value string, target byte) int {
+	escaped := false
+	last := -1
+	for index := 0; index < len(value); index++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		if value[index] == '\\' {
+			escaped = true
+			continue
+		}
+		if value[index] == target {
+			last = index
+		}
+	}
+	return last
 }
 
 func normalizeLF(value []byte) []byte {

@@ -514,6 +514,90 @@ func TestInitializePublishedOverviewMigrationSurvivesLaterFailureAndRetry(t *tes
 	}
 }
 
+func TestInitializeOverviewMigrationWaitsForMappingConflictPreflight(t *testing.T) {
+	root, requestedVault, mappedVault, data := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	if err := os.MkdirAll(filepath.Dir(overviewPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	beforeOverview := []byte("---\nproject_id: " + id + "\nunknown: keep\n---\n\n# Project\n")
+	if err := os.WriteFile(overviewPath, beforeOverview, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(data, "config.toml")
+	if err := config.Save(configPath, config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: id, Root: root, VaultRoot: mappedVault}}}); err != nil {
+		t.Fatal(err)
+	}
+	beforeConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Initialize(InitOptions{ProjectRoot: root, VaultRoot: requestedVault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}})
+	if !errors.Is(err, ErrConflictingInitializationIdentity) {
+		t.Fatalf("err=%v", err)
+	}
+	afterOverview, overviewErr := os.ReadFile(overviewPath)
+	afterConfig, configErr := os.ReadFile(configPath)
+	if overviewErr != nil || !bytes.Equal(afterOverview, beforeOverview) {
+		t.Fatalf("overview changed before conflict preflight: err=%v before=%q after=%q", overviewErr, beforeOverview, afterOverview)
+	}
+	if configErr != nil || !bytes.Equal(afterConfig, beforeConfig) {
+		t.Fatalf("config changed before conflict preflight: err=%v before=%q after=%q", configErr, beforeConfig, afterConfig)
+	}
+}
+
+func TestInitializeRestoresCanonicalPrimaryFromOverviewBackup(t *testing.T) {
+	for _, invalidPrimary := range []bool{false, true} {
+		name := "backup-only"
+		if invalidPrimary {
+			name = "invalid-primary"
+		}
+		t.Run(name, func(t *testing.T) {
+			root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+			id := "project-2a2a2a2a2a2a2a2a"
+			overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+			if err := os.MkdirAll(filepath.Dir(overviewPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			backup := []byte("---\nproject_id: " + id + "\nbackup_unknown: keep\n---\n\n# Backup Project\n")
+			if err := os.WriteFile(atomicfile.BackupPath(overviewPath), backup, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if invalidPrimary {
+				if err := os.WriteFile(overviewPath, []byte("not valid frontmatter\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sentinel := errors.New("stop after backup recovery")
+			_, err := Initialize(InitOptions{
+				ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{},
+				beforeConfigWrite: func() error { return sentinel },
+			})
+			if !errors.Is(err, sentinel) {
+				t.Fatalf("recovery failure err=%v", err)
+			}
+			primary, err := os.ReadFile(overviewPath)
+			if err != nil {
+				t.Fatalf("canonical primary missing: %v", err)
+			}
+			for _, want := range []string{"id: project-overview", "entity_type: project_overview", "project_id: " + id, "revision: 1", "sync_status: synced", "backup_unknown: keep", "# Backup Project"} {
+				if !bytes.Contains(primary, []byte(want)) {
+					t.Fatalf("missing %q in restored primary:\n%s", want, primary)
+				}
+			}
+			result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}})
+			if err != nil || result.ProjectID != id {
+				t.Fatalf("retry result=%+v err=%v", result, err)
+			}
+			after, err := os.ReadFile(overviewPath)
+			if err != nil || !bytes.Equal(after, primary) {
+				t.Fatalf("retry changed primary: err=%v before=%q after=%q", err, primary, after)
+			}
+		})
+	}
+}
+
 func TestInitializeFailureBeforeOverviewLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	sentinel := errors.New("stop before overview")
