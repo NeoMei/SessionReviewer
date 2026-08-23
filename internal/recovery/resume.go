@@ -1,0 +1,375 @@
+package recovery
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/neomei/SessionReviewer/internal/ledger"
+)
+
+const (
+	maxRecoveryMarkdownBytes = ledger.MaxDocumentBytes
+	maxRecoveryEntities      = 20_000
+	maxRecoveryValues        = 100_000
+)
+
+var errRecoveryOutputLimit = errors.New("recovery view exceeds safe size limit")
+
+type ResumeCard struct {
+	ProjectID       string
+	Goal            string
+	StopPoint       string
+	LastVerified    string
+	Drift           []string
+	Blockers        []string
+	OpenQuestions   []string
+	NextAction      string
+	FirstInspection string
+	SourceSessions  []string
+}
+
+// ResumeLedgerOnly derives a recovery card exclusively from accepted ledger
+// Markdown. ledger.Load is the sole project-state input boundary.
+func ResumeLedgerOnly(projectRoot string) (ResumeCard, error) {
+	state, err := ledger.Load(projectRoot)
+	if err != nil {
+		return ResumeCard{}, err
+	}
+	if err := validateRecoveryState(state); err != nil {
+		return ResumeCard{}, err
+	}
+
+	card := ResumeCard{
+		ProjectID:       state.ProjectID,
+		Goal:            state.CurrentState.Goal,
+		LastVerified:    state.CurrentState.LastVerified,
+		Drift:           stableUnique(appendCopy(state.CurrentState.UncommittedChanges, state.CurrentState.OpenRisks...)),
+		Blockers:        stableUnique(state.CurrentState.Blockers),
+		NextAction:      state.CurrentState.NextAction,
+		FirstInspection: state.CurrentState.FirstInspection,
+		SourceSessions:  sortedUnique(state.CurrentState.SourceSessions),
+	}
+
+	latest, found, err := latestAcceptedSession(state.Sessions)
+	if err != nil {
+		return ResumeCard{}, err
+	}
+	if found && len(latest.Phases) != 0 {
+		phase := latest.Phases[len(latest.Phases)-1]
+		card.StopPoint = strings.TrimSpace(phase.Summary)
+		if card.StopPoint == "" {
+			card.StopPoint = strings.TrimSpace(phase.Title)
+		}
+	}
+	for _, loop := range state.OpenLoops {
+		if unresolvedLoop(loop.Status) {
+			card.OpenQuestions = append(card.OpenQuestions, loop.Title)
+		}
+	}
+	card.OpenQuestions = sortedUnique(card.OpenQuestions)
+	return card, nil
+}
+
+// Markdown returns compact, deterministic Markdown. Arbitrary callers can
+// construct a card, so the renderer itself also fails closed on output growth.
+func (card ResumeCard) Markdown() string {
+	out := newRecoveryMarkdownBuilder()
+	out.raw("# Resume\n\n")
+	out.field("Project", card.ProjectID)
+	out.field("Goal", card.Goal)
+	out.field("Stop point", card.StopPoint)
+	out.field("Last verified", card.LastVerified)
+	out.section("Drift", card.Drift)
+	out.section("Blockers", card.Blockers)
+	out.section("Open questions", card.OpenQuestions)
+	out.field("Next action", card.NextAction)
+	out.field("First inspection", card.FirstInspection)
+	out.section("Source sessions", card.SourceSessions)
+	return out.finish()
+}
+
+func latestAcceptedSession(sessions map[string]ledger.SessionReport) (ledger.SessionReport, bool, error) {
+	if len(sessions) == 0 {
+		return ledger.SessionReport{}, false, nil
+	}
+	bySessionID := make(map[string]ledger.SessionReport, len(sessions))
+	ids := make([]string, 0, len(sessions))
+	for _, report := range sessions {
+		bySessionID[report.SessionID] = report
+		ids = append(ids, report.SessionID)
+	}
+	sort.Strings(ids)
+	for _, sessionID := range ids {
+		report := bySessionID[sessionID]
+		if report.PreviousSessionID != "" {
+			if _, found := bySessionID[report.PreviousSessionID]; !found {
+				return ledger.SessionReport{}, false, fmt.Errorf("session %q references missing previous session %q", sessionID, report.PreviousSessionID)
+			}
+		}
+		if report.NextSessionID != "" {
+			if _, found := bySessionID[report.NextSessionID]; !found {
+				return ledger.SessionReport{}, false, fmt.Errorf("session %q references missing next session %q", sessionID, report.NextSessionID)
+			}
+		}
+	}
+	for _, sessionID := range ids {
+		report := bySessionID[sessionID]
+		if report.PreviousSessionID != "" {
+			previous := bySessionID[report.PreviousSessionID]
+			if previous.NextSessionID != sessionID {
+				return ledger.SessionReport{}, false, fmt.Errorf("session chain link %q -> %q is not reciprocal", report.PreviousSessionID, sessionID)
+			}
+		}
+		if report.NextSessionID != "" {
+			next := bySessionID[report.NextSessionID]
+			if next.PreviousSessionID != sessionID {
+				return ledger.SessionReport{}, false, fmt.Errorf("session chain link %q -> %q is not reciprocal", sessionID, report.NextSessionID)
+			}
+		}
+	}
+
+	const (
+		unseen uint8 = iota
+		visiting
+		done
+	)
+	marks := make(map[string]uint8, len(sessions))
+	var visit func(string) error
+	visit = func(sessionID string) error {
+		switch marks[sessionID] {
+		case visiting:
+			return fmt.Errorf("accepted session chain contains a cycle at %q", sessionID)
+		case done:
+			return nil
+		}
+		marks[sessionID] = visiting
+		if next := bySessionID[sessionID].NextSessionID; next != "" {
+			if err := visit(next); err != nil {
+				return err
+			}
+		}
+		marks[sessionID] = done
+		return nil
+	}
+	for _, sessionID := range ids {
+		if err := visit(sessionID); err != nil {
+			return ledger.SessionReport{}, false, err
+		}
+	}
+
+	heads := make([]string, 0, 1)
+	terminals := make([]string, 0, 1)
+	for _, sessionID := range ids {
+		report := bySessionID[sessionID]
+		if report.PreviousSessionID == "" {
+			heads = append(heads, sessionID)
+		}
+		if report.NextSessionID == "" {
+			terminals = append(terminals, sessionID)
+		}
+	}
+	if len(heads) != 1 || len(terminals) != 1 {
+		return ledger.SessionReport{}, false, errors.New("accepted session reports form disconnected or ambiguous chains")
+	}
+	visited := 0
+	for sessionID := heads[0]; sessionID != ""; sessionID = bySessionID[sessionID].NextSessionID {
+		visited++
+	}
+	if visited != len(sessions) {
+		return ledger.SessionReport{}, false, errors.New("accepted session reports form disconnected chains")
+	}
+	return bySessionID[terminals[0]], true, nil
+}
+
+func unresolvedLoop(status string) bool {
+	return status == "open" || status == "blocked"
+}
+
+func validateRecoveryState(state ledger.State) error {
+	if state.ProjectID == "" {
+		return errors.New("accepted ledger has empty project ID")
+	}
+	if len(state.Timeline)+len(state.Decisions)+len(state.OpenLoops)+len(state.Sessions) > maxRecoveryEntities {
+		return errRecoveryOutputLimit
+	}
+	values := len(state.CurrentState.UncommittedChanges) + len(state.CurrentState.Blockers) + len(state.CurrentState.OpenRisks) + len(state.CurrentState.SourceSessions)
+	for key, decision := range state.Decisions {
+		if key != decision.ID || decision.ProjectID != state.ProjectID {
+			return fmt.Errorf("decision %q has inconsistent accepted identity", key)
+		}
+		values += len(decision.Tags) + len(decision.Supersedes)
+	}
+	for key, loop := range state.OpenLoops {
+		if key != loop.ID || loop.ProjectID != state.ProjectID {
+			return fmt.Errorf("open loop %q has inconsistent accepted identity", key)
+		}
+		values += len(loop.Tags)
+	}
+	for key, report := range state.Sessions {
+		if key != report.ID || report.ProjectID != state.ProjectID {
+			return fmt.Errorf("session %q has inconsistent accepted identity", key)
+		}
+		values += len(report.Phases)
+	}
+	if values > maxRecoveryValues {
+		return errRecoveryOutputLimit
+	}
+	return validateSupersedes(state.Decisions)
+}
+
+func validateSupersedes(decisions map[string]ledger.Decision) error {
+	const (
+		unseen uint8 = iota
+		visiting
+		done
+	)
+	marks := make(map[string]uint8, len(decisions))
+	var visit func(string) error
+	visit = func(id string) error {
+		switch marks[id] {
+		case visiting:
+			return fmt.Errorf("supersedes cycle at decision %q", id)
+		case done:
+			return nil
+		}
+		marks[id] = visiting
+		predecessors := sortedUnique(decisions[id].Supersedes)
+		for _, predecessor := range predecessors {
+			if _, found := decisions[predecessor]; !found {
+				return fmt.Errorf("decision %q supersedes missing decision %q", id, predecessor)
+			}
+			if err := visit(predecessor); err != nil {
+				return err
+			}
+		}
+		marks[id] = done
+		return nil
+	}
+	ids := make([]string, 0, len(decisions))
+	for id := range decisions {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func appendCopy(first []string, rest ...string) []string {
+	result := make([]string, 0, len(first)+len(rest))
+	result = append(result, first...)
+	return append(result, rest...)
+}
+
+func sortedUnique(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func stableUnique(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+type recoveryMarkdownBuilder struct {
+	text     strings.Builder
+	overflow bool
+}
+
+func newRecoveryMarkdownBuilder() *recoveryMarkdownBuilder {
+	var out recoveryMarkdownBuilder
+	out.text.Grow(1024)
+	return &out
+}
+
+func (out *recoveryMarkdownBuilder) raw(value string) {
+	if out.overflow || len(value) > maxRecoveryMarkdownBytes-out.text.Len() {
+		out.overflow = true
+		return
+	}
+	out.text.WriteString(value)
+}
+
+func (out *recoveryMarkdownBuilder) escaped(value string) {
+	space := false
+	first := true
+	for _, r := range value {
+		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			space = out.text.Len() != 0
+			continue
+		}
+		if space {
+			out.raw(" ")
+			space = false
+		}
+		if strings.ContainsRune("\\`*_{}[]<>()!|#", r) || (first && strings.ContainsRune("+->", r)) {
+			out.raw("\\")
+		}
+		var encoded [utf8.UTFMax]byte
+		size := utf8.EncodeRune(encoded[:], r)
+		out.raw(string(encoded[:size]))
+		first = false
+		if out.overflow {
+			return
+		}
+	}
+}
+
+func (out *recoveryMarkdownBuilder) field(name, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	out.raw("**" + name + ":** ")
+	out.escaped(value)
+	out.raw("\n\n")
+}
+
+func (out *recoveryMarkdownBuilder) section(name string, values []string) {
+	if len(values) == 0 {
+		return
+	}
+	out.raw("## " + name + "\n\n")
+	for _, value := range values {
+		out.raw("- ")
+		out.escaped(value)
+		out.raw("\n")
+	}
+	out.raw("\n")
+}
+
+func (out *recoveryMarkdownBuilder) finish() string {
+	if out.overflow {
+		return "# Recovery output omitted\n\nRecovery output omitted because it exceeds the safe size limit.\n"
+	}
+	return strings.TrimRight(out.text.String(), "\n") + "\n"
+}
