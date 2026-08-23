@@ -438,7 +438,7 @@ git commit -m "feat: add source installation and Skill verification"
 
 **Interfaces:**
 - Consumes: a clean commit/build time, Task 3's source installers and verified Skill, README, and `LICENSE_STATUS.md`; public mode additionally consumes exact tag `v0.1.0` plus owner license authorization.
-- Produces: deterministic `dist/session-reviewer_0.1.0_{darwin_amd64,darwin_arm64}.tar.gz`, `dist/session-reviewer_0.1.0_windows_amd64.zip`, `dist/session-reviewer-skill_0.1.0.zip`, one SPDX SBOM per binary plus Skill, and `dist/SHA256SUMS`.
+- Produces: deterministic `dist/session-reviewer_0.1.0_{darwin_amd64,darwin_arm64}.tar.gz`, `dist/session-reviewer_0.1.0_windows_amd64.zip`, `dist/session-reviewer-skill_0.1.0.zip`, one SPDX SBOM per binary plus Skill, `dist/SHA256SUMS`, and mode-invariant `dist/CORE_PAYLOADS.json` containing exact commit/version, per-target extracted executable hashes, and canonical extracted Skill-tree hash.
 
 - [ ] **Step 1: Write failing archive/SBOM/license-gate tests**
 
@@ -463,6 +463,13 @@ func TestSBOMNamesExactBuildAndEveryModuleWithoutSecrets(t *testing.T) {
 	if !containsPackage(doc.Packages,"modernc.org/sqlite")||!containsPackage(doc.Packages,"github.com/fsnotify/fsnotify"){t.Fatal("dependency missing")}
 	if strings.Contains(marshal(doc),"canary"){t.Fatal("secret leaked")}
 }
+
+func TestCorePayloadManifestIgnoresLicenseWrapperButDetectsPayloadChange(t *testing.T) {
+	private:=packageFixture(t,PackagePrivateCandidate);public:=packageFixture(t,PackagePublicRelease)
+	if bytes.Equal(private.Archive("darwin_arm64"),public.Archive("darwin_arm64")){t.Fatal("license wrappers unexpectedly identical")}
+	if diff:=cmp.Diff(private.CorePayloads(),public.CorePayloads());diff!=""{t.Fatalf("mode-invariant payload mismatch (-private +public):\n%s",diff)}
+	public.mutateExtractedSkillFile("SKILL.md");if cmp.Equal(private.CorePayloads(),public.CorePayloads()){t.Fatal("payload mutation not detected")}
+}
 ```
 
 - [ ] **Step 2: Run packager tests and verify no distribution mechanism exists**
@@ -486,11 +493,20 @@ type Entry struct { Source,Name string; Mode fs.FileMode }
 func BuildArchives(PackageOptions)([]Artifact,error)
 type Artifact struct { Name,Path,SHA256 string; Size int64 }
 func WriteChecksums(path string,artifacts []Artifact)error
+type CorePayloadManifest struct {
+	SchemaVersion int `json:"schema_version"`
+	Version,Commit,SkillTreeSHA256 string
+	Executables map[string]string `json:"executables"` // darwin_amd64, darwin_arm64, windows_amd64
+}
+func ExtractCorePayloads(PackageOptions)(CorePayloadManifest,error)
+func WriteCorePayloads(path string,CorePayloadManifest)error
 ```
 
 Tar/zip entry names use `/`, reject absolute/traversing/link/device entries, set directories `0755`, executables `0755`, documents `0644`, owner/group `0`, and every timestamp to the commit epoch. Gzip uses fixed name/comment and epoch. `SHA256SUMS` sorts filenames bytewise and writes `fmt.Sprintf("%s  %s\n", artifact.SHA256, filepath.Base(artifact.Path))`, where the hash validator requires exactly 64 lowercase hexadecimal characters.
 
-`sbom.go` runs `go list -m -json all` and `go version -m artifact.BinaryPath`, writes SPDX 2.3 JSON with the application package, module packages, module versions/checksums, target OS/arch, build commit, and archive SHA. It rejects replacement paths outside the checkout and never includes environment variables or local absolute paths.
+Wrapper contents are mode-specific by design: private platform/Skill archives carry `LICENSE_STATUS` and no `LICENSE`, while public archives carry the authorized `LICENSE` and no private status notice. Therefore archive bytes, archive hashes, SBOM archive references, and `SHA256SUMS` may differ between modes. Only exact commit/version, each extracted target executable hash, and the canonical extracted Skill-tree hash are cross-mode invariants.
+
+`sbom.go` runs `go list -m -json all` and `go version -m artifact.BinaryPath`, writes SPDX 2.3 JSON with the application package, module packages, module versions/checksums, target OS/arch, build commit, and archive SHA. It rejects replacement paths outside the checkout and never includes environment variables or local absolute paths. `ExtractCorePayloads` hashes the built executable bytes per target and the verified canonical Skill tree before wrapper assembly, then reparses/extracts the completed archives into private temporary roots and requires the extracted hashes to match before writing canonical `CORE_PAYLOADS.json`. The manifest contains no archive/SBOM/checksum/license-wrapper hash.
 
 - [ ] **Step 4: Add exact clean-tree build scripts and hard public gate**
 
@@ -514,7 +530,7 @@ diff -u /tmp/session-reviewer-first-SHA256SUMS dist/SHA256SUMS
 go run ./cmd/check-release-license --public
 ```
 
-Expected: archives/SBOMs/checksums are created; checksum verification succeeds; the two manifests match; the final command exits nonzero with `owner-authorized LICENSE is required for public release` and uploads nothing.
+Expected: archives/SBOMs/checksums/core-payload manifests are created; checksum verification succeeds; repeated private `SHA256SUMS` and `CORE_PAYLOADS.json` match; the final command exits nonzero with `owner-authorized LICENSE is required for public release` and uploads nothing.
 
 - [ ] **Step 6: Commit the reproducible private packager**
 
@@ -648,7 +664,7 @@ Expected: FAIL because `Config`, `Receipt`, validation, and scenario runners do 
 
 ```go
 type Config struct {
-	Binary,Checkout,SessionA,SessionB,ProposalA,ProposalB,OutputDir string
+	Binary,SkillRoot,Checkout,SessionA,SessionB,ProposalA,ProposalB,OutputDir string
 	GOOS,GOARCH string
 	KeepWorkspace bool
 }
@@ -656,7 +672,9 @@ type Assertion struct { Name string `json:"name"`; Passed bool `json:"passed"`; 
 type ScenarioReceipt struct { Name string `json:"name"`; Passed bool `json:"passed"`; DurationMS int64 `json:"duration_ms"`; Assertions []Assertion `json:"assertions"` }
 type Receipt struct {
 	SchemaVersion int `json:"schema_version"`
-	ProductVersion,Commit,GOOS,GOARCH,OSVersion,BinarySHA256,StartedAt,FinishedAt string
+	ProductVersion,Commit,GOOS,GOARCH,OSVersion string
+	BinarySHA256,SkillTreeSHA256 string
+	StartedAt,FinishedAt string
 	SessionInputHashes,ProposalInputHashes []string
 	Scenarios []ScenarioReceipt
 	GitBeforeHash,GitAfterHash string
@@ -665,7 +683,9 @@ type Receipt struct {
 func Run(context.Context,Config)(Receipt,error)
 ```
 
-Validation requires every input be an external absolute regular file, not under checkout/data/project/vault, not tracked by Git, and private to the current user where the OS exposes permissions. Receipts include SHA-256 input identity but no basename/path, raw text, entity narrative, environment, username, hostname, vault name, or notification body. `.gitignore` excludes `/artifacts/private-e2e/`, `/test/e2e/private-inputs/`, and `/dist/`.
+`BinarySHA256` is the hash of the extracted native executable bytes. `SkillTreeSHA256` uses the same canonical Skill-tree algorithm as `install.VerifyFiles`: bytewise-sorted relative slash path, normalized file mode, byte length, and file SHA-256 for every regular Skill payload file, with no zip metadata or archive/license wrapper. These two fields plus exact source commit/version form the mode-invariant native payload contract.
+
+Validation requires every input be an external absolute regular file, not under checkout/data/project/vault, not tracked by Git, and private to the current user where the OS exposes permissions. Receipts include SHA-256 input identity but no basename/path, raw text, entity narrative, environment, username, hostname, vault name, notification body, private archive hash, or `SHA256SUMS` hash. `.gitignore` excludes `/artifacts/private-e2e/`, `/test/e2e/private-inputs/`, and `/dist/`.
 
 - [ ] **Step 4: Implement the exact scenario assertions**
 
@@ -713,18 +733,23 @@ git commit -m "test: add private real session acceptance harness"
 
 **Interfaces:**
 - Consumes: private real E2E inputs on controlled hosts, scenario runner, and the future exact candidate run ID supplied only in the post-task evidence gate.
-- Produces: a committed, dispatchable `release-native.yml`, collectors, and validator for four private receipt bundles keyed by exact commit/archive hash: macOS 13 Intel, macOS 13 Apple Silicon, Windows 10 22H2 x64, Windows 11 x64. This task does not collect final receipts.
+- Produces: a committed, dispatchable `release-native.yml`, collectors, and validator for four private receipt bundles keyed by exact commit/version and mode-invariant core payload hashes (one executable hash per platform plus one common canonical Skill-tree hash): macOS 13 Intel, macOS 13 Apple Silicon, Windows 10 22H2 x64, Windows 11 x64. This task does not collect final receipts or bind private wrapper/archive hashes.
 
 - [ ] **Step 1: Write failing platform receipt validation tests**
 
 ```go
 func TestNativeReceiptGateRequiresEveryMinimumOSAndSameBinarySet(t *testing.T) {
 	receipts:=[]Receipt{darwin13AMD64(),darwin13ARM64(),windows10_22H2(),windows11()}
-	if err:=ValidateNativeSet(receipts,"0.1.0",strings.Repeat("a",40),expectedArchiveHashes());err!=nil{t.Fatal(err)}
+	core:=expectedCorePayloads()
+	if err:=ValidateNativeSet(receipts,"0.1.0",strings.Repeat("a",40),core);err!=nil{t.Fatal(err)}
 	receipts[2].OSVersion="Windows 10 21H2"
-	if err:=ValidateNativeSet(receipts,"0.1.0",strings.Repeat("a",40),expectedArchiveHashes());err==nil{t.Fatal("accepted unsupported Windows")}
+	if err:=ValidateNativeSet(receipts,"0.1.0",strings.Repeat("a",40),core);err==nil{t.Fatal("accepted unsupported Windows")}
+	receipts= []Receipt{darwin13AMD64(),darwin13ARM64(),windows10_22H2(),windows11()};receipts[1].SkillTreeSHA256=strings.Repeat("f",64)
+	if err:=ValidateNativeSet(receipts,"0.1.0",strings.Repeat("a",40),core);err==nil{t.Fatal("accepted mismatched Skill payload")}
 }
 ```
+
+The validator interface is `ValidateNativeSet(receipts []Receipt, version, commit string, core CorePayloadManifest) error`. It requires one receipt for every declared minimum-OS/architecture tuple, matches each receipt's `BinarySHA256` to that platform's core-manifest executable hash, and requires every `SkillTreeSHA256` to equal the manifest's one canonical Skill payload hash. Archive and checksum hashes are intentionally absent from this interface.
 
 - [ ] **Step 2: Run native-set validator test before collector/workflow exist**
 
@@ -738,11 +763,11 @@ Expected: FAIL because native receipt set validation does not exist.
 
 - [ ] **Step 3: Implement exact platform collectors**
 
-macOS collector records `sw_vers -productVersion`, `uname -m`, `sysctl -n kern.osversion`, release binary SHA-256, `version --json`, LaunchAgent lifecycle results, and scenario receipt hash. It rejects product versions below 13 and architecture outside `x86_64|arm64`.
+macOS collector records `sw_vers -productVersion`, `uname -m`, `sysctl -n kern.osversion`, extracted release executable SHA-256, canonical extracted Skill-tree SHA-256, `version --json`, LaunchAgent lifecycle results, and scenario receipt hash. It rejects product versions below 13 and architecture outside `x86_64|arm64`.
 
-Windows collector records `[Environment]::OSVersion.Version`, registry `DisplayVersion` and `CurrentBuild`, `$env:PROCESSOR_ARCHITECTURE`, binary SHA-256, `version --json`, limited Task Scheduler lifecycle, and scenario receipt hash. It accepts Windows 10 only when display version is `22H2` and build is at least `19045`, or Windows 11 build at least `22000`; it requires `AMD64`.
+Windows collector records `[Environment]::OSVersion.Version`, registry `DisplayVersion` and `CurrentBuild`, `$env:PROCESSOR_ARCHITECTURE`, extracted executable SHA-256, canonical extracted Skill-tree SHA-256, `version --json`, limited Task Scheduler lifecycle, and scenario receipt hash. It accepts Windows 10 only when display version is `22H2` and build is at least `19045`, or Windows 11 build at least `22000`; it requires `AMD64`.
 
-Both collectors write redacted JSON and `receipt.sha256`, verify the receipt privacy schema, and never include user/host/path/environment data.
+Both collectors independently extract the platform archive and Skill archive after full private-candidate checksum verification, recompute the exact `CORE_PAYLOADS.json` entries, and fail before installation if they differ. They write redacted JSON and `receipt.sha256`, verify the receipt privacy schema, and never include user/host/path/environment data or private archive/checksum hashes.
 
 - [ ] **Step 4: Add a self-hosted native workflow with exact labels**
 
@@ -763,7 +788,7 @@ jobs:
     runs-on: [self-hosted, session-reviewer-release, '${{ matrix.label }}']
 ```
 
-Each job first checks out the exact `commit` input and verifies `git rev-parse HEAD` equals it, then downloads the candidate by run ID and rejects candidate metadata whose commit/hash set differs. It verifies `SHA256SUMS`, runs installer twice, doctor, scenarios A-E against host-local protected inputs, watcher restart, rollback, uninstall twice, collector, and uploads the redacted receipt bundle as a private GitHub Actions artifact retained 30 days. It never checks out or uploads the private input directory.
+Each job first checks out the exact `commit` input and verifies `git rev-parse HEAD` equals it, then downloads the candidate by run ID and rejects candidate metadata whose commit/version differs. It verifies the private archive `SHA256SUMS` only as a transport-integrity prerequisite, extracts the executable and Skill, requires their hashes to equal `CORE_PAYLOADS.json`, runs installer twice, doctor, scenarios A-E against host-local protected inputs, watcher restart, rollback, uninstall twice, collector, and uploads the redacted receipt bundle plus one aggregate `validated-core-payloads.json` as private GitHub Actions artifacts retained 30 days. The aggregate contains only schema version, source version/commit, target executable hashes, common Skill-tree hash, receipt hashes, and native run ID; it contains no private archive hash. It never checks out or uploads the private input directory.
 
 - [ ] **Step 5: Validate the committed workflow without requiring `release.yml`**
 
@@ -913,6 +938,16 @@ func TestPrivateWorkflowSucceedsWithoutLicenseAndSkipsPublish(t *testing.T) {
 	}
 }
 
+func TestPublicationBindsCorePayloadsNotPrivateArchiveWrappers(t *testing.T) {
+	public:=completeManifest(t);public.Mode="public_release";public.ExactTag="v0.1.0";public.LicenseAuthorized=true
+	public.PrivateArchiveHashes=map[string]string{"darwin_arm64":strings.Repeat("1",64)}
+	public.PublicArchiveHashes=map[string]string{"darwin_arm64":strings.Repeat("2",64)} // LICENSE_STATUS vs LICENSE wrapper
+	public.ValidatedCorePayloads=expectedCorePayloads()
+	if err:=ValidatePublicationManifest(public);err!=nil{t.Fatalf("rejected mode-specific wrapper hashes: %v",err)}
+	public.ExtractedPublicCorePayloads.Executables["darwin_arm64"]=strings.Repeat("f",64)
+	if err:=ValidatePublicationManifest(public);err==nil{t.Fatal("accepted changed executable payload")}
+}
+
 func TestRollbackDrillRestoresPreviousVersionWithoutKnowledgeLoss(t *testing.T) {
 	f:=installedReleaseFixture(t,"0.1.0-rc.1");before:=f.knowledgeHashes();f.upgrade("0.1.0");f.rollback()
 	if got:=f.version();got!="0.1.0-rc.1"{t.Fatalf("version=%s",got)}
@@ -933,9 +968,9 @@ Expected: FAIL because aggregate manifest validation and complete rollback drill
 
 - [ ] **Step 3: Add build/assemble/publish jobs with least privilege**
 
-`release.yml` is committed before final evidence and uses only `workflow_dispatch`, with required `mode` (`private_candidate|public_release`) and `commit`; public mode additionally requires `tag` and `native_run_id`. Private mode checks out the supplied commit, requires clean commit identity and version `0.1.0` but no tag/license/native run, runs Task 4's `--private` build, and must conclude **success** with native-gate/publish skipped. Public mode checks out the exact tag ref supplied as `tag`, requires it equal exactly `v0.1.0`, verifies `git rev-parse HEAD`, peeled tag target, input `commit`, native receipt commit, and candidate manifest commit are identical, rejects a second exact tag, and runs Task 4's `--public` preflight. A tag-push event alone never publishes because it has no channel for `native_run_id`. Build jobs have `contents: read`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates mode/build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS`, and uploads a private `candidate-0.1.0` artifact in either mode.
+`release.yml` is committed before final evidence and uses only `workflow_dispatch`, with required `mode` (`private_candidate|public_release`) and `commit`; public mode additionally requires `tag` and `native_run_id`. Private mode checks out the supplied commit, requires clean commit identity and version `0.1.0` but no tag/license/native run, runs Task 4's `--private` build, and must conclude **success** with native-gate/publish skipped. Public mode checks out the exact tag ref supplied as `tag`, requires it equal exactly `v0.1.0`, verifies `git rev-parse HEAD`, peeled tag target, input `commit`, native receipt commit, and core-payload manifest commit are identical, rejects a second exact tag, and runs Task 4's `--public` preflight. A tag-push event alone never publishes because it has no channel for `native_run_id`. Build jobs have `contents: read`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates mode/build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS` and `CORE_PAYLOADS.json`, and uploads a private `candidate-0.1.0` artifact in either mode.
 
-A native-gate job exists only for public mode. It downloads the four receipt bundles from the explicitly supplied successful `release-native` run ID, verifies that run's workflow file came from the same tagged commit, and validates exact commit plus the complete archive hash set against the newly assembled deterministic candidate. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, and has the exact condition `mode == 'public_release'`; private mode therefore skips both native-gate and publish without evaluating a missing-license command and the workflow remains green. In public mode the job reruns `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
+A native-gate job exists only for public mode. It downloads the four receipt bundles and aggregate `validated-core-payloads.json` from the explicitly supplied successful `release-native` run ID, verifies that run's workflow file came from the same tagged commit, and validates exact commit/version. It extracts every newly built public executable and the public Skill archive, recomputes the mode-invariant core payload hashes, and requires exact equality with the validated native manifest before publish. Private and public archive/SBOM/`SHA256SUMS` hashes are deliberately allowed to differ because `LICENSE_STATUS.md` versus owner-authorized `LICENSE` changes wrapper bytes; native validation never claims those wrappers are identical. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, and has the exact condition `mode == 'public_release'`; private mode therefore skips both native-gate and publish without evaluating a missing-license command and the workflow remains green. In public mode the job reruns `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
 
 ```text
 session-reviewer_0.1.0_darwin_amd64.tar.gz
@@ -947,6 +982,7 @@ session-reviewer_0.1.0_darwin_arm64.spdx.json
 session-reviewer_0.1.0_windows_amd64.spdx.json
 session-reviewer-skill_0.1.0.spdx.json
 SHA256SUMS
+CORE_PAYLOADS.json
 LICENSE
 ```
 
@@ -998,6 +1034,9 @@ Tasks 1-9, including `release-native.yml`, all candidate-affecting code/tests, `
 ```bash
 test -z "$(git status --porcelain)"
 FINAL_COMMIT="$(git rev-parse HEAD)"
+CANDIDATE_REMOTE="origin"
+CANDIDATE_REF="refs/heads/codex/session-reviewer-v0.1.0-candidate"
+CANDIDATE_BRANCH="${CANDIDATE_REF#refs/heads/}"
 go test ./...
 go test -race ./...
 go vet ./...
@@ -1005,18 +1044,30 @@ go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 go test ./test/release -v -count=3
 go run ./cmd/verify-skill ./skill/session-reviewer
 
-gh workflow run release.yml --ref "$(git branch --show-current)" -f mode=private_candidate -f commit="$FINAL_COMMIT"
-CANDIDATE_RUN_ID="$(gh run list --workflow release.yml --event workflow_dispatch --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
+# EXTERNAL AUTHORIZATION GATE: an operator, not an implementation agent or
+# workflow, explicitly authorizes and separately performs:
+# git push "$CANDIDATE_REMOTE" "$FINAL_COMMIT:$CANDIDATE_REF"
+
+REMOTE_COMMIT="$(git ls-remote --refs "$CANDIDATE_REMOTE" "$CANDIDATE_REF" | awk 'NR==1{print $1} END{if(NR!=1)exit 1}')"
+test "$REMOTE_COMMIT" = "$FINAL_COMMIT"
+git fetch --no-tags "$CANDIDATE_REMOTE" "$CANDIDATE_REF"
+test "$(git rev-parse FETCH_HEAD)" = "$FINAL_COMMIT"
+for workflow in .github/workflows/release.yml .github/workflows/release-native.yml; do
+  test "$(git ls-tree -r --name-only FETCH_HEAD -- "$workflow")" = "$workflow"
+done
+
+gh workflow run release.yml --ref "$CANDIDATE_BRANCH" -f mode=private_candidate -f commit="$FINAL_COMMIT"
+CANDIDATE_RUN_ID="$(gh run list --workflow release.yml --event workflow_dispatch --branch "$CANDIDATE_BRANCH" --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
 test -n "$CANDIDATE_RUN_ID"
 gh run watch "$CANDIDATE_RUN_ID" --exit-status
 gh run download "$CANDIDATE_RUN_ID" -p candidate-0.1.0 -D dist/candidate
 
-gh workflow run release-native.yml --ref "$(git branch --show-current)" -f commit="$FINAL_COMMIT" -f candidate_run_id="$CANDIDATE_RUN_ID"
-NATIVE_RUN_ID="$(gh run list --workflow release-native.yml --event workflow_dispatch --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh workflow run release-native.yml --ref "$CANDIDATE_BRANCH" -f commit="$FINAL_COMMIT" -f candidate_run_id="$CANDIDATE_RUN_ID"
+NATIVE_RUN_ID="$(gh run list --workflow release-native.yml --event workflow_dispatch --branch "$CANDIDATE_BRANCH" --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
 test -n "$NATIVE_RUN_ID"
 gh run watch "$NATIVE_RUN_ID" --exit-status
 gh run download "$NATIVE_RUN_ID" -p 'native-receipt-*' -D artifacts/private-e2e/native-receipts
-go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$FINAL_COMMIT" --checksums dist/candidate/SHA256SUMS
+go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$FINAL_COMMIT" --core-payloads dist/candidate/CORE_PAYLOADS.json
 
 ./scripts/install.sh \
   --archive dist/candidate/session-reviewer_0.1.0_darwin_$(go env GOARCH).tar.gz \
@@ -1029,12 +1080,14 @@ test "$(git rev-parse HEAD)" = "$FINAL_COMMIT"
 test -z "$(git status --porcelain --untracked-files=no)"
 ```
 
-The private `release.yml` run succeeds without license authorization because native-gate and publish are skipped; its exact run ID feeds the independently committed native workflow. If any command exposes a defect requiring a tracked code/test/workflow/README/Skill change, the receipts and candidate are invalid: make the fix, commit it, discard all candidate/native run IDs, reset `FINAL_COMMIT`, and repeat the entire gate. No commit, amend, generated source, workflow edit, or packaged-document edit may occur after receipt collection for the accepted hash set.
+The candidate push is a visible external side effect and requires explicit operator authorization; neither plan execution nor release automation creates/updates the remote ref automatically. Stop before `git push` when that authorization or remote/ref choice is absent. Dispatch is permitted only after `git ls-remote`, fetched commit identity, and both workflow-file checks pass. The private `release.yml` run succeeds without license authorization because native-gate and publish are skipped; its exact run ID feeds the independently committed native workflow. If any command exposes a defect requiring a tracked code/test/workflow/README/Skill change, the receipts and candidate are invalid: make the fix, commit it, discard all candidate/native run IDs, reset `FINAL_COMMIT`, obtain authorization to update the named candidate ref, and repeat the entire gate. No commit, amend, generated source, workflow edit, or packaged-document edit may occur after receipt collection for the accepted core payload set.
 
 Public release is a separate explicit dispatch, never a tag-push-only path. The owner-authorized `LICENSE` and `docs/release/license-authorization.json` must already be committed before setting `FINAL_COMMIT`, and therefore require rerunning the private candidate/native gate for that exact commit. After the four receipts pass, create/push exact tag `v0.1.0` pointing to unchanged `FINAL_COMMIT`, then dispatch:
 
 ```bash
 test "$(git rev-list -n1 v0.1.0)" = "$FINAL_COMMIT"
+REMOTE_TAG_COMMIT="$(git ls-remote "$CANDIDATE_REMOTE" 'refs/tags/v0.1.0^{}' 'refs/tags/v0.1.0' | awk '$2~/\^\{\}$/{peeled=$1} $2!~/\^\{\}$/{direct=$1} END{print peeled!=""?peeled:direct}')"
+test "$REMOTE_TAG_COMMIT" = "$FINAL_COMMIT"
 gh workflow run release.yml --ref v0.1.0 \
   -f mode=public_release \
   -f commit="$FINAL_COMMIT" \
@@ -1042,7 +1095,7 @@ gh workflow run release.yml --ref v0.1.0 \
   -f native_run_id="$NATIVE_RUN_ID"
 ```
 
-The public workflow checks out the tag, reconstructs the deterministic archives, validates their complete hash set against the supplied native receipts, runs the license gate, and only then publishes. Pushing `v0.1.0` alone starts no publication workflow and cannot bypass the required native run ID.
+Creating/pushing the tag is also an explicit operator-authorized external action; dispatch stops unless the remote tag peels to `FINAL_COMMIT`. The public workflow checks out the tag, builds new license-bearing archives with their own public `SHA256SUMS`, extracts every executable and the Skill tree, and compares only those mode-invariant core hashes plus commit/version to the supplied validated receipt manifest. It never requires private and public archive hashes to match. It then runs the license gate and only then publishes. Pushing `v0.1.0` alone starts no publication workflow and cannot bypass the required native run ID.
 
 Required evidence:
 
@@ -1051,7 +1104,7 @@ Required evidence:
 - SPDX SBOM and checksum coverage for every binary and Skill artifact;
 - source and archive install, upgrade, rollback, watcher restart, uninstall twice, and purge-preservation tests;
 - non-committed real-session scenarios A-E on macOS and Windows;
-- native macOS 13 Intel/ARM, Windows 10 22H2 x64, and Windows 11 x64 receipts for the exact candidate hashes;
+- native macOS 13 Intel/ARM, Windows 10 22H2 x64, and Windows 11 x64 receipts for the exact candidate commit/version, per-platform executable hashes, and common canonical Skill-tree hash;
 - Windows lock/crash receipts with the accurately scoped recovery guarantee;
 - canary absence across every persistence/artifact surface;
 - 100 MiB session, 10,000-entity index/history, 100,000-event watcher, and 1,000-entity sync budgets;

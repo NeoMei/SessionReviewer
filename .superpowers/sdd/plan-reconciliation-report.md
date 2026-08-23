@@ -12,6 +12,10 @@ Scope: documentation-only reconciliation before executing the sync, history/watc
 
 The history plan consumes the sync engine contracts. Release Task 3 establishes the manifest, source installer, and Skill verifier; Task 4 packages those inputs; Task 5 adds archive install/upgrade/rollback. Release Tasks 6-9 commit the E2E harness, native automation, regression gates, dispatch-only release workflow, README, and packaged inputs. Only after Task 9 is committed may the post-task gate build the exact private candidate and collect native receipts; nothing is committed afterward for that accepted hash set.
 
+Native evidence binds a mode-invariant core payload, not mode-specific wrappers: exact source commit/version, each platform executable hash, and one canonical packaged Skill-tree hash. Private archives may contain `LICENSE_STATUS`, while later authorized public archives contain `LICENSE`; their archive hashes, SBOM wrapper references, and checksum files are expected to differ. Before publication, the public workflow extracts its newly built archives and must match every core hash in the validated native receipt manifest.
+
+Workflow dispatch has an explicit remote prerequisite. An operator must separately authorize and perform the push of the exact candidate commit to a named private candidate ref. Automation may proceed only after `git ls-remote` and a fetched-tree check prove that ref equals local `HEAD` and contains both committed workflow files; every private dispatch uses that verified ref. The plan does not authorize an implementation agent or workflow to create or push the ref.
+
 ## Resolved blockers
 
 | Blocker | Reconciled contract |
