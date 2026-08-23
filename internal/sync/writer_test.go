@@ -247,8 +247,9 @@ func TestRootedWriterPinsImmediateParentThroughPublication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer vault.Close()
-	moved := filepath.Join(vaultPath, "moved")
 	outside := t.TempDir()
+	moved := filepath.Join(outside, "moved")
+	redirect := t.TempDir()
 	writer := RootedWriter{Project: project, Vault: vault, Retry: DefaultRetryPolicy()}
 	writer.beforeWrite = func(side Side, parent *os.Root, leaf string) error {
 		if side != SideVault || leaf != "d1.md" {
@@ -261,18 +262,21 @@ func TestRootedWriterPinsImmediateParentThroughPublication(t *testing.T) {
 		if err := os.Rename(filepath.Join(vaultPath, "decisions"), moved); err != nil {
 			return err
 		}
-		return os.Symlink(outside, filepath.Join(vaultPath, "decisions"))
+		return os.Symlink(redirect, filepath.Join(vaultPath, "decisions"))
 	}
 	err = writer.Write(context.Background(), SideVault, "decisions/d1.md", []byte("accepted\n"), 0o644)
 	if err == nil {
 		t.Fatal("write accepted replaced parent namespace")
 	}
-	if _, err := os.Stat(filepath.Join(outside, "d1.md")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(redirect, "d1.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("write followed replacement redirect: %v", err)
 	}
-	written, err := os.ReadFile(filepath.Join(moved, "d1.md"))
-	if err != nil || string(written) != "accepted\n" {
-		t.Fatalf("pinned write=%q err=%v", written, err)
+	entries, err := os.ReadDir(moved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("write left content or temporary files in moved parent: %v", entries)
 	}
 }
 

@@ -154,14 +154,9 @@ func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Director
 			return err
 		}
 	}
-	current, err := parent.Stat(".")
-	if err != nil || !os.SameFile(parentInfo, current) || !current.IsDir() {
-		return errors.New("rooted write parent changed before publication")
-	}
-	if err := atomicfile.WriteRootFile(parent, leaf, content, mode); err != nil {
-		return err
-	}
-	return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
+	return atomicfile.WriteRootFileChecked(parent, leaf, content, mode, func() error {
+		return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
+	})
 }
 
 func openWriterImmediateParent(directory *pathguard.Directory, relative string) (*os.Root, os.FileInfo, string, string, error) {

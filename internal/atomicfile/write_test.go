@@ -2,6 +2,7 @@ package atomicfile
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,10 +34,130 @@ func TestWriteRootFileRejectsNonLeafPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	for _, leaf := range []string{"", ".", "../state", "nested/state", `nested\state`} {
+	for _, leaf := range []string{"", ".", "..", "../state", "nested/state", `nested\state`} {
 		if err := WriteRootFile(root, leaf, []byte("unsafe"), 0o600); err == nil {
 			t.Fatalf("accepted non-leaf path %q", leaf)
 		}
+	}
+}
+
+func TestWriteRootFileCheckedRejectsInvalidLeafBeforeCheckpointOrTemp(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	for _, leaf := range []string{"", ".", "..", "../state", "nested/state", `nested\state`, `C:state`} {
+		if err := WriteRootFileChecked(root, leaf, []byte("CANARY-CONTENT"), 0o600, func() error {
+			checks++
+			return nil
+		}); err == nil {
+			t.Fatalf("accepted invalid leaf %q", leaf)
+		}
+	}
+	if checks != 0 {
+		t.Fatalf("checkpoint ran before leaf validation: %d", checks)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("invalid leaf created entries=%v err=%v", entries, err)
+	}
+}
+
+func TestWriteRootFileCheckedRemovesArtifactsAtEveryFailedCheckpoint(t *testing.T) {
+	for _, failedCheck := range []int{1, 2, 3} {
+		t.Run(fmt.Sprintf("checkpoint-%d", failedCheck), func(t *testing.T) {
+			directory := t.TempDir()
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			checkpointErr := errors.New("namespace changed")
+			checks := 0
+			err = WriteRootFileChecked(root, "state.json", []byte("CANARY-CONTENT"), 0o600, func() error {
+				checks++
+				if checks == failedCheck {
+					return checkpointErr
+				}
+				return nil
+			})
+			if !errors.Is(err, checkpointErr) || checks != failedCheck {
+				t.Fatalf("error=%v checks=%d", err, checks)
+			}
+			entries, err := os.ReadDir(directory)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("failed checkpoint left entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestWriteRootFileCheckedDoesNotDeleteReplacedPublication(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	checkpointErr := errors.New("namespace changed")
+	err = WriteRootFileChecked(root, "state.json", []byte("ours"), 0o600, func() error {
+		checks++
+		if checks != 3 {
+			return nil
+		}
+		if err := os.Rename(filepath.Join(directory, "state.json"), filepath.Join(directory, "ours-moved")); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(directory, "state.json"), []byte("other"), 0o600); err != nil {
+			return err
+		}
+		return checkpointErr
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(directory, "state.json")); err != nil || string(got) != "other" {
+		t.Fatalf("replacement content=%q err=%v", got, err)
+	}
+}
+
+func TestWriteRootFileCheckedDoesNotDeleteReplacedTemporary(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	checkpointErr := errors.New("namespace changed")
+	var replacement string
+	err = WriteRootFileChecked(root, "state.json", []byte("ours"), 0o600, func() error {
+		checks++
+		if checks != 2 {
+			return nil
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil || len(entries) != 1 {
+			return fmt.Errorf("temporary entries=%v: %w", entries, err)
+		}
+		replacement = filepath.Join(directory, entries[0].Name())
+		if err := os.Rename(replacement, filepath.Join(directory, "ours-moved")); err != nil {
+			return err
+		}
+		if err := os.WriteFile(replacement, []byte("other"), 0o600); err != nil {
+			return err
+		}
+		return checkpointErr
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(replacement); err != nil || string(got) != "other" {
+		t.Fatalf("replacement temporary content=%q err=%v", got, err)
 	}
 }
 

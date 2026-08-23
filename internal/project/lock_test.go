@@ -155,14 +155,14 @@ func TestProjectLockNamespaceReplacementCannotBypassHeldLock(t *testing.T) {
 	original := filepath.Join(directory, "sync.lock")
 	displaced := filepath.Join(directory, "displaced.lock")
 	if err := os.Rename(original, displaced); err != nil {
-		if runtime.GOOS != "windows" || (!errors.Is(err, os.ErrPermission) && !errors.Is(err, syscall.Errno(32))) {
+		if !windowsDeniedNamespaceReplacement(err) {
 			_ = first.Release()
 			t.Fatalf("replace held lock namespace: %v", err)
 		}
 		// A Windows handle that denies FILE_SHARE_DELETE prevents the
 		// replacement itself. It must still serialize competing owners and
 		// become acquirable after release.
-		assertProjectLockHeldThenReleased(t, root, first)
+		assertProjectLockHeldThenReleased(t, root, first, "sync.lock")
 		return
 	}
 	if err := os.WriteFile(original, nil, 0o600); err != nil {
@@ -191,9 +191,9 @@ func TestProjectLockNamespaceReplacementCannotBypassHeldLock(t *testing.T) {
 	}
 }
 
-func assertProjectLockHeldThenReleased(t *testing.T, root *os.Root, first *ProjectLock) {
+func assertProjectLockHeldThenReleased(t *testing.T, root *os.Root, first *ProjectLock, name string) {
 	t.Helper()
-	second, err := AcquireProjectLock(root, "sync.lock", 0)
+	second, err := AcquireProjectLock(root, name, 0)
 	if second != nil {
 		_ = second.Release()
 	}
@@ -204,11 +204,73 @@ func assertProjectLockHeldThenReleased(t *testing.T, root *os.Root, first *Proje
 	if err := first.Release(); err != nil {
 		t.Fatalf("release held lock: %v", err)
 	}
-	third, err := AcquireProjectLock(root, "sync.lock", time.Second)
+	third, err := AcquireProjectLock(root, name, time.Second)
 	if err != nil {
 		t.Fatalf("acquire after release: %v", err)
 	}
 	if err := third.Release(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestProjectLockNestedParentReplacementCannotSplitRootLockDomain(t *testing.T) {
+	for _, replacedParent := range []string{"locks", "locks/deep"} {
+		t.Run(replacedParent, func(t *testing.T) {
+			directory := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(directory, "locks", "deep"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			first, err := AcquireProjectLock(root, "locks/deep/sync.lock", time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			original := filepath.Join(directory, filepath.FromSlash(replacedParent))
+			displaced := original + "-moved"
+			if err := os.Rename(original, displaced); err != nil {
+				if !windowsDeniedNamespaceReplacement(err) {
+					_ = first.Release()
+					t.Fatalf("replace nested parent: %v", err)
+				}
+				assertProjectLockHeldThenReleased(t, root, first, "locks/deep/sync.lock")
+				return
+			}
+			if err := os.MkdirAll(filepath.Join(directory, "locks", "deep"), 0o700); err != nil {
+				_ = first.Release()
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(directory, "locks", "deep", "sync.lock"), nil, 0o600); err != nil {
+				_ = first.Release()
+				t.Fatal(err)
+			}
+
+			second, err := AcquireProjectLock(root, "locks/deep/sync.lock", 0)
+			if second != nil {
+				_ = second.Release()
+			}
+			if !errors.Is(err, ErrProjectLocked) {
+				_ = first.Release()
+				t.Fatalf("nested replacement split root lock domain: lock=%v err=%v", second, err)
+			}
+			if err := first.Release(); err != nil {
+				t.Fatalf("release original nested lock: %v", err)
+			}
+			third, err := AcquireProjectLock(root, "locks/deep/sync.lock", time.Second)
+			if err != nil {
+				t.Fatalf("acquire replacement namespace after release: %v", err)
+			}
+			if err := third.Release(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func windowsDeniedNamespaceReplacement(err error) bool {
+	return runtime.GOOS == "windows" && (errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.Errno(32)))
 }
