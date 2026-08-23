@@ -4,11 +4,20 @@ package project
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"syscall"
 )
 
-func tryInitPlatformLock(file *os.File) (bool, error) {
+func isProjectLockRedirect(info fs.FileInfo) bool {
+	return info.Mode()&os.ModeSymlink != 0
+}
+
+func privateProjectLockMode(info fs.FileInfo) bool {
+	return info.Mode().Perm() == 0o600
+}
+
+func tryProjectPlatformLock(file *os.File) (bool, error) {
 	err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
 	if err == nil {
 		return true, nil
@@ -19,6 +28,6 @@ func tryInitPlatformLock(file *os.File) (bool, error) {
 	return false, err
 }
 
-func unlockInitPlatformLock(file *os.File) error {
+func unlockProjectPlatformLock(file *os.File) error {
 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
 }

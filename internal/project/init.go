@@ -138,12 +138,12 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, initializationError(ErrInvalidInitializationRoot, fmt.Errorf("data root is a symlink or reparse point, or invalid: %w", err))
 	}
 	defer dataDir.Close()
-	lock, err := acquireInitLock(dataDir.Root, "config.toml.lock", initTransactionLockTimeout)
+	lock, err := AcquireProjectLock(dataDir.Root, "config.toml.lock", initTransactionLockTimeout)
 	if err != nil {
 		return InitResult{}, initializationError(ErrInitializationStateChanged, err)
 	}
 	defer func() {
-		retErr = errors.Join(retErr, lock.release())
+		retErr = errors.Join(retErr, lock.Release())
 	}()
 	if opts.afterLock != nil {
 		if err := opts.afterLock(); err != nil {
