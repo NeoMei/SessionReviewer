@@ -876,6 +876,10 @@ func validateLedgerRelativePath(relative string) error {
 }
 
 func ensureSafeParents(directory *pathguard.Directory, relative string, perm fs.FileMode) error {
+	return ensureSafeParentsWith(directory, relative, perm, atomicfile.EnsureRootDir)
+}
+
+func ensureSafeParentsWith(directory *pathguard.Directory, relative string, perm fs.FileMode, ensure func(*os.Root, string, fs.FileMode) error) error {
 	if relative == "." {
 		return nil
 	}
@@ -893,7 +897,7 @@ func ensureSafeParents(directory *pathguard.Directory, relative string, perm fs.
 		}
 		info, err := root.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			if err := root.Mkdir(current, perm); err != nil {
+			if err := ensure(root, current, perm); err != nil {
 				return err
 			}
 			info, err = root.Lstat(current)

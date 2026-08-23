@@ -41,6 +41,8 @@ type Store struct {
 	ExpectedRoot os.FileInfo
 
 	beforeRootValidation func() error
+	writeRoot            func(*os.Root, string, []byte, fs.FileMode) error
+	ensureRootDir        func(*os.Root, string, fs.FileMode) error
 }
 
 type storeRoot struct {
@@ -136,7 +138,11 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("encode cursor state: %w", err)
 	}
-	if err := atomicfile.WriteRoot(root.cursors, root.cursorName, append(b, '\n'), 0o600); err != nil {
+	writeRoot := s.writeRoot
+	if writeRoot == nil {
+		writeRoot = atomicfile.WriteRoot
+	}
+	if err := writeRoot(root.cursors, root.cursorName, append(b, '\n'), 0o600); err != nil {
 		return fmt.Errorf("persist cursor state: %w", err)
 	}
 	if _, found, err := regularEntry(root.cursors, root.cursorName, "cursor file"); err != nil || !found {
@@ -187,7 +193,11 @@ func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 		return root, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := data.Mkdir("cursors", 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		ensureRootDir := s.ensureRootDir
+		if ensureRootDir == nil {
+			ensureRootDir = atomicfile.EnsureRootDir
+		}
+		if err := ensureRootDir(data, "cursors", 0o700); err != nil {
 			_ = root.close()
 			return nil, fmt.Errorf("create cursor directory: %w", err)
 		}
@@ -288,7 +298,7 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 
 	if destinationFound && destinationErr == nil {
 		if backupFound {
-			if err := root.cursors.Remove(root.backupName); err != nil {
+			if err := atomicfile.RemoveRoot(root.cursors, root.backupName); err != nil {
 				return Cursor{}, fmt.Errorf("remove stale cursor backup: %w", err)
 			}
 		}
@@ -296,11 +306,11 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 	}
 	if backupFound && backupErr == nil {
 		if destinationFound {
-			if err := root.cursors.Remove(root.cursorName); err != nil {
+			if err := atomicfile.RemoveRoot(root.cursors, root.cursorName); err != nil {
 				return Cursor{}, fmt.Errorf("remove corrupt replacement cursor: %w", err)
 			}
 		}
-		if err := root.cursors.Rename(root.backupName, root.cursorName); err != nil {
+		if err := atomicfile.RenameRoot(root.cursors, root.backupName, root.cursorName); err != nil {
 			return Cursor{}, fmt.Errorf("restore cursor backup: %w", err)
 		}
 		return backup, nil

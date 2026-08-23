@@ -3,6 +3,7 @@ package project
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +13,36 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 )
+
+func TestEnsureRootDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	durabilityErr := errors.New("injected durable directory failure")
+	err = ensureRootDirectoryWith(root, "docs", 0o755, func(*os.Root, string, fs.FileMode) error {
+		return durabilityErr
+	})
+	if !errors.Is(err, durabilityErr) {
+		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
+
+func TestOpenOrCreateDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "machine", "projects")
+	durabilityErr := errors.New("injected durable machine directory failure")
+	directory, err := openOrCreateDirectoryWith(path, 0o700, func(*os.Root, string, fs.FileMode) error {
+		return durabilityErr
+	})
+	if directory != nil {
+		_ = directory.Close()
+		t.Fatal("returned directory after durability failure")
+	}
+	if !errors.Is(err, durabilityErr) {
+		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
 
 func TestInitializeCreatesStableProjectAndMapping(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "项目")

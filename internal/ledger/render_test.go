@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,7 +13,24 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
+
+func TestEnsureSafeParentsPropagatesDurableCreatorFailure(t *testing.T) {
+	directory, err := pathguard.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	durabilityErr := errors.New("injected ledger parent durability failure")
+	err = ensureSafeParentsWith(directory, filepath.Join("docs", "session-review"), 0o755, func(*os.Root, string, fs.FileMode) error {
+		return durabilityErr
+	})
+	if !errors.Is(err, durabilityErr) {
+		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
 
 const testProjectID = "project-1111111111111111"
 

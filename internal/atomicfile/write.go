@@ -48,6 +48,24 @@ func writeRootWithParentOpener(root *os.Root, path string, data []byte, perm fs.
 }
 
 func writeRootAtParent(parent *os.Root, name string, data []byte, perm fs.FileMode) (retErr error) {
+	return writeRootAtParentWithOps(parent, name, data, perm, defaultDurabilityOps())
+}
+
+type durabilityOps struct {
+	syncTemporary   func(*os.File) error
+	publish         func(*os.Root, string, string) error
+	syncPublication func(*os.Root, string) error
+}
+
+func defaultDurabilityOps() durabilityOps {
+	return durabilityOps{
+		syncTemporary:   (*os.File).Sync,
+		publish:         replaceRootFile,
+		syncPublication: syncRootPublication,
+	}
+}
+
+func writeRootAtParentWithOps(parent *os.Root, name string, data []byte, perm fs.FileMode, ops durabilityOps) (retErr error) {
 	tmp, tmpName, err := createRootTemp(parent)
 	if err != nil {
 		return err
@@ -64,13 +82,19 @@ func writeRootAtParent(parent *os.Root, name string, data []byte, perm fs.FileMo
 	if _, err = tmp.Write(data); err != nil {
 		return err
 	}
-	if err = tmp.Sync(); err != nil {
+	if err = ops.syncTemporary(tmp); err != nil {
 		return err
 	}
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	return replaceRootFile(parent, tmpName, name)
+	if err = ops.publish(parent, tmpName, name); err != nil {
+		return err
+	}
+	if err = ops.syncPublication(parent, name); err != nil {
+		return fmt.Errorf("sync published file metadata: %w", err)
+	}
+	return nil
 }
 
 func createRootTemp(root *os.Root) (*os.File, string, error) {

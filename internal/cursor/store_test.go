@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 )
 
 const validHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -31,6 +34,37 @@ func TestStoreCommitAndReload(t *testing.T) {
 	got, err := store.Load("s1")
 	if err != nil || got != next {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func TestStoreCommitPropagatesAtomicDurabilityFailure(t *testing.T) {
+	durabilityErr := errors.New("injected atomic durability failure")
+	store := Store{
+		Root: t.TempDir(),
+		writeRoot: func(root *os.Root, path string, data []byte, perm fs.FileMode) error {
+			if err := atomicfile.WriteRoot(root, path, data, perm); err != nil {
+				return err
+			}
+			return durabilityErr
+		},
+	}
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := store.Commit("s1", Cursor{}, next); !errors.Is(err, durabilityErr) {
+		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
+
+func TestStoreCommitPropagatesCursorDirectoryDurabilityFailure(t *testing.T) {
+	durabilityErr := errors.New("injected cursor directory durability failure")
+	store := Store{
+		Root: t.TempDir(),
+		ensureRootDir: func(*os.Root, string, fs.FileMode) error {
+			return durabilityErr
+		},
+	}
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := store.Commit("s1", Cursor{}, next); !errors.Is(err, durabilityErr) {
+		t.Fatalf("error=%v want=%v", err, durabilityErr)
 	}
 }
 

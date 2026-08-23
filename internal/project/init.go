@@ -413,9 +413,13 @@ func writeOverview(root *os.Root, body string) error {
 }
 
 func ensureRootDirectory(root *os.Root, name string, perm os.FileMode) error {
+	return ensureRootDirectoryWith(root, name, perm, atomicfile.EnsureRootDir)
+}
+
+func ensureRootDirectoryWith(root *os.Root, name string, perm os.FileMode, ensure func(*os.Root, string, os.FileMode) error) error {
 	info, err := root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := root.Mkdir(name, perm); err != nil {
+		if err := ensure(root, name, perm); err != nil {
 			return err
 		}
 		info, err = root.Lstat(name)
@@ -439,6 +443,10 @@ func ensureRootDirectory(root *os.Root, name string, perm os.FileMode) error {
 }
 
 func openOrCreateDirectory(path string, perm os.FileMode) (*pathguard.Directory, error) {
+	return openOrCreateDirectoryWith(path, perm, atomicfile.EnsureRootDir)
+}
+
+func openOrCreateDirectoryWith(path string, perm os.FileMode, ensure func(*os.Root, string, os.FileMode) error) (*pathguard.Directory, error) {
 	directory, remaining, err := pathguard.OpenDeepest(path)
 	if err != nil {
 		return nil, err
@@ -447,7 +455,7 @@ func openOrCreateDirectory(path string, perm os.FileMode) (*pathguard.Directory,
 		return directory, nil
 	}
 	for _, component := range remaining {
-		if err := directory.Root.Mkdir(component, perm); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := ensure(directory.Root, component, perm); err != nil {
 			_ = directory.Close()
 			return nil, err
 		}
