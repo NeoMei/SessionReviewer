@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -136,6 +137,78 @@ func TestProjectLockRejectsInvalidOrRedirectedFiles(t *testing.T) {
 func TestProjectLockNilReleaseIsIdempotent(t *testing.T) {
 	var lock *ProjectLock
 	if err := lock.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectLockNamespaceReplacementCannotBypassHeldLock(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	first, err := AcquireProjectLock(root, "sync.lock", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := filepath.Join(directory, "sync.lock")
+	displaced := filepath.Join(directory, "displaced.lock")
+	if err := os.Rename(original, displaced); err != nil {
+		if runtime.GOOS != "windows" || (!errors.Is(err, os.ErrPermission) && !errors.Is(err, syscall.Errno(32))) {
+			_ = first.Release()
+			t.Fatalf("replace held lock namespace: %v", err)
+		}
+		// A Windows handle that denies FILE_SHARE_DELETE prevents the
+		// replacement itself. It must still serialize competing owners and
+		// become acquirable after release.
+		assertProjectLockHeldThenReleased(t, root, first)
+		return
+	}
+	if err := os.WriteFile(original, nil, 0o600); err != nil {
+		_ = first.Release()
+		t.Fatal(err)
+	}
+	second, err := AcquireProjectLock(root, "sync.lock", 0)
+	if second != nil {
+		_ = second.Release()
+	}
+	if !errors.Is(err, ErrProjectLocked) {
+		_ = first.Release()
+		t.Fatalf("replacement bypassed held lock: lock=%v err=%v", second, err)
+	}
+	// The namespace replacement is still reported by the original owner, but
+	// releasing it must also release the stable cross-process anchor.
+	if err := first.Release(); err == nil {
+		t.Fatal("owner did not report replaced lock identity")
+	}
+	third, err := AcquireProjectLock(root, "sync.lock", time.Second)
+	if err != nil {
+		t.Fatalf("stable anchor survived owner release: %v", err)
+	}
+	if err := third.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertProjectLockHeldThenReleased(t *testing.T, root *os.Root, first *ProjectLock) {
+	t.Helper()
+	second, err := AcquireProjectLock(root, "sync.lock", 0)
+	if second != nil {
+		_ = second.Release()
+	}
+	if !errors.Is(err, ErrProjectLocked) {
+		_ = first.Release()
+		t.Fatalf("held lock bypassed: lock=%v err=%v", second, err)
+	}
+	if err := first.Release(); err != nil {
+		t.Fatalf("release held lock: %v", err)
+	}
+	third, err := AcquireProjectLock(root, "sync.lock", time.Second)
+	if err != nil {
+		t.Fatalf("acquire after release: %v", err)
+	}
+	if err := third.Release(); err != nil {
 		t.Fatal(err)
 	}
 }

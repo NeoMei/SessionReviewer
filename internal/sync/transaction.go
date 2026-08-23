@@ -63,8 +63,11 @@ func (store TransactionStore) Save(next Transaction) (retErr error) {
 	if err := validateTransaction(next, ""); err != nil {
 		return err
 	}
-	directory, found, err := store.openTransactionDirectory(true)
+	directory, found, err := store.openTransactionDirectory(next.Stage == TxnPlanned)
 	if err != nil || !found {
+		if err == nil {
+			return errors.New("first transaction stage must be planned")
+		}
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, directory.Close()) }()
@@ -87,6 +90,8 @@ func (store TransactionStore) Save(next Transaction) (retErr error) {
 		if reflect.DeepEqual(*current, next) {
 			return verifyTransactionDirectoryIdentity(store.Root, directory)
 		}
+	} else if next.Stage != TxnPlanned {
+		return errors.New("first transaction stage must be planned")
 	}
 	encoded, err := json.MarshalIndent(next, "", "  ")
 	if err != nil {
@@ -504,7 +509,9 @@ func validateTransaction(record Transaction, expectedEntityID string) error {
 	if !stableBaseID.MatchString(record.EntityID) || (expectedEntityID != "" && record.EntityID != expectedEntityID) {
 		return errors.New("invalid transaction entity ID")
 	}
-	if !lowerSHA256.MatchString(record.DesiredHash) || (record.ExpectedBaseHash != "" && !lowerSHA256.MatchString(record.ExpectedBaseHash)) {
+	if !lowerSHA256.MatchString(record.DesiredHash) ||
+		(record.ExpectedBaseHash == "" && record.Kind != TxnEntitySync) ||
+		(record.ExpectedBaseHash != "" && !lowerSHA256.MatchString(record.ExpectedBaseHash)) {
 		return errors.New("invalid transaction hash")
 	}
 	switch record.Stage {

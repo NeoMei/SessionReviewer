@@ -27,6 +27,19 @@ func TestWriteReplacesFileAndLeavesNoTemporaryFile(t *testing.T) {
 	}
 }
 
+func TestWriteRootFileRejectsNonLeafPaths(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	for _, leaf := range []string{"", ".", "../state", "nested/state", `nested\state`} {
+		if err := WriteRootFile(root, leaf, []byte("unsafe"), 0o600); err == nil {
+			t.Fatalf("accepted non-leaf path %q", leaf)
+		}
+	}
+}
+
 func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {
 	base := t.TempDir()
 	live := filepath.Join(base, "live")

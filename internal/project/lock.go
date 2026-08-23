@@ -20,6 +20,7 @@ type ProjectLock struct {
 	mu     sync.Mutex
 	parent *os.Root
 	name   string
+	anchor *projectNamespaceAnchor
 	file   *os.File
 	info   os.FileInfo
 }
@@ -38,15 +39,39 @@ func AcquireProjectLock(root *os.Root, name string, timeout time.Duration) (*Pro
 		return nil, err
 	}
 	deadline := time.Now().Add(timeout)
+	anchor, err := openProjectNamespaceAnchor(parent, leaf)
+	if err != nil {
+		_ = parent.Close()
+		return nil, err
+	}
+	for {
+		locked, err := tryProjectNamespaceAnchor(anchor)
+		if err != nil {
+			_ = closeProjectNamespaceAnchor(anchor)
+			_ = parent.Close()
+			return nil, fmt.Errorf("acquire project namespace anchor: %w", err)
+		}
+		if locked {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			_ = closeProjectNamespaceAnchor(anchor)
+			_ = parent.Close()
+			return nil, ErrProjectLocked
+		}
+		time.Sleep(projectLockPollInterval)
+	}
 	for {
 		file, info, err := openStableProjectLockFile(parent, leaf)
 		if err != nil {
+			_ = releaseProjectNamespaceAnchor(anchor)
 			_ = parent.Close()
 			return nil, err
 		}
 		locked, err := tryProjectPlatformLock(file)
 		if err != nil {
 			_ = file.Close()
+			_ = releaseProjectNamespaceAnchor(anchor)
 			_ = parent.Close()
 			return nil, fmt.Errorf("acquire project advisory lock: %w", err)
 		}
@@ -54,12 +79,13 @@ func AcquireProjectLock(root *os.Root, name string, timeout time.Duration) (*Pro
 			after, inspectErr := parent.Lstat(leaf)
 			opened, statErr := file.Stat()
 			if inspectErr != nil || statErr != nil || !sameProjectLockEntry(info, after) || !sameProjectLockEntry(info, opened) {
-				return nil, errors.Join(errors.New("project lock identity changed after acquisition"), unlockProjectPlatformLock(file), file.Close(), parent.Close())
+				return nil, errors.Join(errors.New("project lock identity changed after acquisition"), unlockProjectPlatformLock(file), file.Close(), releaseProjectNamespaceAnchor(anchor), parent.Close())
 			}
-			return &ProjectLock{parent: parent, name: leaf, file: file, info: info}, nil
+			return &ProjectLock{parent: parent, name: leaf, anchor: anchor, file: file, info: info}, nil
 		}
 		_ = file.Close()
 		if !time.Now().Before(deadline) {
+			_ = releaseProjectNamespaceAnchor(anchor)
 			_ = parent.Close()
 			return nil, ErrProjectLocked
 		}
@@ -83,9 +109,11 @@ func (lock *ProjectLock) Release() error {
 	}
 	file := lock.file
 	parent := lock.parent
+	anchor := lock.anchor
 	lock.file = nil
 	lock.parent = nil
-	return errors.Join(identityErr, unlockProjectPlatformLock(file), file.Close(), parent.Close())
+	lock.anchor = nil
+	return errors.Join(identityErr, unlockProjectPlatformLock(file), file.Close(), releaseProjectNamespaceAnchor(anchor), parent.Close())
 }
 
 func openProjectLockParent(root *os.Root, name string) (*os.Root, string, error) {
@@ -144,6 +172,10 @@ func openStableProjectLockFile(root *os.Root, name string) (*os.File, os.FileInf
 		}
 		if err != nil {
 			return nil, nil, errors.New("cannot open project lock")
+		}
+		file, err = stabilizeProjectLockFile(file)
+		if err != nil {
+			return nil, nil, err
 		}
 		opened, err := file.Stat()
 		if err != nil {

@@ -27,9 +27,10 @@ func TestTransactionJournalRoundTripsEveryKindAndStage(t *testing.T) {
 	kinds := []TransactionKind{TxnEntitySync, TxnConflictNote, TxnResolution}
 	stages := []TransactionStage{TxnPlanned, TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted}
 	for _, kind := range kinds {
-		for _, stage := range stages {
+		for index, stage := range stages {
 			t.Run(string(kind)+"/"+string(stage), func(t *testing.T) {
 				want := validTransaction(kind, stage, "decision-1")
+				want.UpdatedAt = want.UpdatedAt.Add(time.Duration(index) * time.Second)
 				if err := store.Save(want); err != nil {
 					t.Fatal(err)
 				}
@@ -37,13 +38,13 @@ func TestTransactionJournalRoundTripsEveryKindAndStage(t *testing.T) {
 				if err != nil || !found || !reflect.DeepEqual(got, want) {
 					t.Fatalf("got=%+v found=%v err=%v", got, found, err)
 				}
-				if err := store.Remove("decision-1"); err != nil {
-					t.Fatal(err)
-				}
-				if _, found, err := store.Load("decision-1"); err != nil || found {
-					t.Fatalf("found after remove=%v err=%v", found, err)
-				}
 			})
+		}
+		if err := store.Remove("decision-1"); err != nil {
+			t.Fatal(err)
+		}
+		if _, found, err := store.Load("decision-1"); err != nil || found {
+			t.Fatalf("found after remove=%v err=%v", found, err)
 		}
 	}
 	info, err := os.Stat(filepath.Join(rootPath, transactionDirectoryName))
@@ -104,6 +105,82 @@ func TestTransactionStoreAllowsEmptyExpectedBaseForFirstSync(t *testing.T) {
 	got, found, err := store.Load(txn.EntityID)
 	if err != nil || !found || !reflect.DeepEqual(got, txn) {
 		t.Fatalf("got=%+v found=%v err=%v", got, found, err)
+	}
+	txn.Stage = TxnProjectWritten
+	txn.UpdatedAt = txn.UpdatedAt.Add(time.Second)
+	if err := store.Save(txn); err != nil {
+		t.Fatalf("advance first-sync journal with empty base: %v", err)
+	}
+}
+
+func TestTransactionStoreRequiresPlannedAsFirstPersistedStage(t *testing.T) {
+	for _, stage := range []TransactionStage{TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted} {
+		t.Run(string(stage), func(t *testing.T) {
+			rootPath := t.TempDir()
+			root, err := os.OpenRoot(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			txn := validTransaction(TxnEntitySync, stage, "decision-1")
+			if err := (TransactionStore{Root: root}).Save(txn); err == nil {
+				t.Fatal("accepted non-planned first transaction stage")
+			}
+			if _, err := os.Stat(filepath.Join(rootPath, transactionDirectoryName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("transaction directory created: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransactionStoreRestrictsEmptyExpectedBaseToEntityFirstSync(t *testing.T) {
+	for _, kind := range []TransactionKind{TxnConflictNote, TxnResolution} {
+		t.Run(string(kind), func(t *testing.T) {
+			rootPath := t.TempDir()
+			root, err := os.OpenRoot(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			txn := validTransaction(kind, TxnPlanned, "decision-1")
+			txn.ExpectedBaseHash = ""
+			if err := (TransactionStore{Root: root}).Save(txn); err == nil {
+				t.Fatal("accepted empty expected base for non-entity transaction")
+			}
+			if _, err := os.Stat(filepath.Join(rootPath, transactionDirectoryName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("transaction directory created: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransactionStoreRejectsStageSkipAndRegression(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store := TransactionStore{Root: root}
+	txn := validTransaction(TxnEntitySync, TxnPlanned, "decision-1")
+	if err := store.Save(txn); err != nil {
+		t.Fatal(err)
+	}
+	skipped := txn
+	skipped.Stage = TxnVaultWritten
+	skipped.UpdatedAt = skipped.UpdatedAt.Add(time.Second)
+	if err := store.Save(skipped); err == nil {
+		t.Fatal("accepted skipped transaction stage")
+	}
+	txn.Stage = TxnProjectWritten
+	txn.UpdatedAt = txn.UpdatedAt.Add(time.Second)
+	if err := store.Save(txn); err != nil {
+		t.Fatal(err)
+	}
+	regressed := txn
+	regressed.Stage = TxnPlanned
+	regressed.UpdatedAt = regressed.UpdatedAt.Add(time.Second)
+	if err := store.Save(regressed); err == nil {
+		t.Fatal("accepted regressed transaction stage")
 	}
 }
 

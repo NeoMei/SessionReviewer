@@ -36,10 +36,10 @@ func TestRootedWriterRetriesSharingViolationThenSucceeds(t *testing.T) {
 		Vault:   vault,
 		Retry:   RetryPolicy{Initial: 10 * time.Millisecond, Max: 40 * time.Millisecond, InlineAttempts: 4, QueueAttempts: 8},
 		Sleep:   clock.Sleep,
-		write: func(side Side, relative string, content []byte, mode fs.FileMode) error {
+		beforeWrite: func(side Side, _ *os.Root, leaf string) error {
 			attempts++
-			if side != SideVault || relative != "decisions/d1.md" || !bytes.Equal(content, []byte("safe")) || mode != 0o644 {
-				t.Fatalf("write side=%q path=%q content=%q mode=%o", side, relative, content, mode)
+			if side != SideVault || leaf != "d1.md" {
+				t.Fatalf("write side=%q leaf=%q", side, leaf)
 			}
 			if attempts < 4 {
 				return ErrSharingViolation
@@ -63,7 +63,7 @@ func TestRootedWriterReturnsTypedFinalTransientFailureWithoutContent(t *testing.
 		Project: project, Vault: vault,
 		Retry: RetryPolicy{Initial: time.Millisecond, Max: 2 * time.Millisecond, InlineAttempts: 3, QueueAttempts: 4},
 		Sleep: clock.Sleep,
-		write: func(Side, string, []byte, fs.FileMode) error {
+		beforeWrite: func(Side, *os.Root, string) error {
 			attempts++
 			return errors.Join(ErrLockViolation, errors.New("CANARY-CONTENT"))
 		},
@@ -93,7 +93,7 @@ func TestRootedWriterDoesNotRetryPermanentFailures(t *testing.T) {
 			attempts := 0
 			writer := RootedWriter{
 				Project: project, Vault: vault, Retry: DefaultRetryPolicy(), Sleep: clock.Sleep,
-				write: func(Side, string, []byte, fs.FileMode) error { attempts++; return test.err },
+				beforeWrite: func(Side, *os.Root, string) error { attempts++; return test.err },
 			}
 			err := writer.Write(context.Background(), SideProject, "decisions/d1.md", nil, 0o644)
 			if !errors.Is(err, test.err) || errors.Is(err, ErrTransientWrite) {
@@ -112,9 +112,9 @@ func TestRootedWriterHonorsContextCancellationDuringBackoff(t *testing.T) {
 	attempts := 0
 	writer := RootedWriter{
 		Project: project, Vault: vault,
-		Retry: RetryPolicy{Initial: 3 * time.Millisecond, Max: 10 * time.Millisecond, InlineAttempts: 4, QueueAttempts: 8},
-		Sleep: clock.Sleep,
-		write: func(Side, string, []byte, fs.FileMode) error { attempts++; return ErrSharingViolation },
+		Retry:       RetryPolicy{Initial: 3 * time.Millisecond, Max: 10 * time.Millisecond, InlineAttempts: 4, QueueAttempts: 8},
+		Sleep:       clock.Sleep,
+		beforeWrite: func(Side, *os.Root, string) error { attempts++; return ErrSharingViolation },
 	}
 	err := writer.Write(context.Background(), SideVault, "decisions/d1.md", nil, 0o644)
 	if !errors.Is(err, context.Canceled) || attempts != 1 || !reflect.DeepEqual(clock.sleeps, []time.Duration{3 * time.Millisecond}) {
@@ -128,9 +128,9 @@ func TestRootedWriterSanitizesNonContextSleepFailure(t *testing.T) {
 	clock := &fakeRetryClock{err: canaryErr}
 	writer := RootedWriter{
 		Project: project, Vault: vault,
-		Retry: RetryPolicy{Initial: time.Millisecond, Max: time.Millisecond, InlineAttempts: 2, QueueAttempts: 2},
-		Sleep: clock.Sleep,
-		write: func(Side, string, []byte, fs.FileMode) error { return ErrSharingViolation },
+		Retry:       RetryPolicy{Initial: time.Millisecond, Max: time.Millisecond, InlineAttempts: 2, QueueAttempts: 2},
+		Sleep:       clock.Sleep,
+		beforeWrite: func(Side, *os.Root, string) error { return ErrSharingViolation },
 	}
 	err := writer.Write(context.Background(), SideProject, "decisions/d1.md", []byte("CANARY-CONTENT"), 0o644)
 	if !errors.Is(err, canaryErr) || strings.Contains(err.Error(), "CANARY-CONTENT") {
@@ -158,7 +158,7 @@ func TestRootedWriterRejectsInvalidInputsBeforeWriteHook(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			called := 0
-			test.writer.write = func(Side, string, []byte, fs.FileMode) error { called++; return nil }
+			test.writer.beforeWrite = func(Side, *os.Root, string) error { called++; return nil }
 			if err := test.writer.Write(context.Background(), test.side, test.relative, nil, test.mode); err == nil {
 				t.Fatal("accepted invalid input")
 			}
@@ -197,7 +197,7 @@ func TestRootedWriterRevalidatesParentBeforeEveryAttempt(t *testing.T) {
 			}
 			return os.Symlink(t.TempDir(), filepath.Join(vaultPath, "decisions"))
 		},
-		write: func(Side, string, []byte, fs.FileMode) error { attempts++; return ErrSharingViolation },
+		beforeWrite: func(Side, *os.Root, string) error { attempts++; return ErrSharingViolation },
 	}
 	err = writer.Write(context.Background(), SideVault, "decisions/d1.md", nil, 0o644)
 	if err == nil || errors.Is(err, ErrTransientWrite) {
@@ -227,6 +227,52 @@ func TestRootedWriterWritesAtomicallyBelowSelectedPinnedRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(vault.Path, "decisions", "d1.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("vault write err=%v", err)
+	}
+}
+
+func TestRootedWriterPinsImmediateParentThroughPublication(t *testing.T) {
+	projectPath, vaultPath := t.TempDir(), t.TempDir()
+	for _, root := range []string{projectPath, vaultPath} {
+		if err := os.Mkdir(filepath.Join(root, "decisions"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	project, err := pathguard.Open(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer project.Close()
+	vault, err := pathguard.Open(vaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vault.Close()
+	moved := filepath.Join(vaultPath, "moved")
+	outside := t.TempDir()
+	writer := RootedWriter{Project: project, Vault: vault, Retry: DefaultRetryPolicy()}
+	writer.beforeWrite = func(side Side, parent *os.Root, leaf string) error {
+		if side != SideVault || leaf != "d1.md" {
+			t.Fatalf("side=%q leaf=%q", side, leaf)
+		}
+		opened, err := parent.Stat(".")
+		if err != nil || !opened.IsDir() {
+			t.Fatalf("pinned parent info=%v err=%v", opened, err)
+		}
+		if err := os.Rename(filepath.Join(vaultPath, "decisions"), moved); err != nil {
+			return err
+		}
+		return os.Symlink(outside, filepath.Join(vaultPath, "decisions"))
+	}
+	err = writer.Write(context.Background(), SideVault, "decisions/d1.md", []byte("accepted\n"), 0o644)
+	if err == nil {
+		t.Fatal("write accepted replaced parent namespace")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "d1.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("write followed replacement redirect: %v", err)
+	}
+	written, err := os.ReadFile(filepath.Join(moved, "d1.md"))
+	if err != nil || string(written) != "accepted\n" {
+		t.Fatalf("pinned write=%q err=%v", written, err)
 	}
 }
 

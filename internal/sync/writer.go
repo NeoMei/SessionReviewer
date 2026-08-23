@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -45,10 +44,10 @@ type RootedWriter struct {
 	Retry   RetryPolicy
 	Sleep   func(context.Context, time.Duration) error
 
-	// write replaces only the final system write in package tests. Root, side,
-	// relative-path, parent-identity, policy, context, and mode validation always
-	// run before this hook and cannot be bypassed through it.
-	write func(Side, string, []byte, fs.FileMode) error
+	// beforeWrite injects test failures or namespace races after the immediate
+	// parent is pinned. Returning nil cannot replace or bypass the real atomic
+	// write through that pinned handle.
+	beforeWrite func(Side, *os.Root, string) error
 }
 
 func (writer RootedWriter) Write(ctx context.Context, side Side, relative string, content []byte, mode fs.FileMode) error {
@@ -77,15 +76,7 @@ func (writer RootedWriter) Write(ctx context.Context, side Side, relative string
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := validateWriterParent(directory, relative); err != nil {
-			return writerFailure{cause: err}
-		}
-		var writeErr error
-		if writer.write != nil {
-			writeErr = writer.write(side, relative, content, mode)
-		} else {
-			writeErr = atomicfile.WriteRoot(directory.Root, filepath.FromSlash(relative), content, mode)
-		}
+		writeErr := writer.writeAttempt(side, directory, relative, content, mode)
 		if writeErr == nil {
 			return nil
 		}
@@ -152,32 +143,80 @@ func validateWriterMode(mode fs.FileMode) error {
 	return nil
 }
 
-func validateWriterParent(directory *pathguard.Directory, relative string) error {
+func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Directory, relative string, content []byte, mode fs.FileMode) error {
+	parent, parentInfo, parentRelative, leaf, err := openWriterImmediateParent(directory, relative)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	if writer.beforeWrite != nil {
+		if err := writer.beforeWrite(side, parent, leaf); err != nil {
+			return err
+		}
+	}
+	current, err := parent.Stat(".")
+	if err != nil || !os.SameFile(parentInfo, current) || !current.IsDir() {
+		return errors.New("rooted write parent changed before publication")
+	}
+	if err := atomicfile.WriteRootFile(parent, leaf, content, mode); err != nil {
+		return err
+	}
+	return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
+}
+
+func openWriterImmediateParent(directory *pathguard.Directory, relative string) (*os.Root, os.FileInfo, string, string, error) {
+	current, err := directory.Root.Stat(".")
+	if err != nil || !os.SameFile(directory.Info(), current) || !current.IsDir() {
+		return nil, nil, "", "", errors.New("rooted write directory identity changed")
+	}
+	parentRelative := path.Dir(relative)
+	leaf := path.Base(relative)
+	if parentRelative == "." {
+		opened, err := directory.Root.OpenRoot(".")
+		if err != nil {
+			return nil, nil, "", "", errors.New("cannot pin rooted write parent")
+		}
+		info, err := opened.Stat(".")
+		if err != nil || !os.SameFile(current, info) {
+			_ = opened.Close()
+			return nil, nil, "", "", errors.New("rooted write parent changed while opening")
+		}
+		return opened, info, parentRelative, leaf, nil
+	}
+	opened, before, err := directory.OpenDirectory(parentRelative)
+	if err != nil {
+		return nil, nil, "", "", errors.New("rooted write parent is redirected or invalid")
+	}
+	after, err := opened.Stat(".")
+	if err != nil || !os.SameFile(before, after) || !after.IsDir() {
+		_ = opened.Close()
+		return nil, nil, "", "", errors.New("rooted write parent changed while opening")
+	}
+	return opened, before, parentRelative, leaf, nil
+}
+
+func verifyWriterParentNamespace(directory *pathguard.Directory, parent *os.Root, parentInfo os.FileInfo, parentRelative string) error {
+	pinned, err := parent.Stat(".")
+	if err != nil || !os.SameFile(parentInfo, pinned) || !pinned.IsDir() {
+		return errors.New("rooted write parent changed during publication")
+	}
 	current, err := directory.Root.Stat(".")
 	if err != nil || !os.SameFile(directory.Info(), current) || !current.IsDir() {
 		return errors.New("rooted write directory identity changed")
 	}
-	parent := path.Dir(relative)
-	if parent == "." {
-		opened, err := directory.Root.OpenRoot(".")
-		if err != nil {
-			return errors.New("cannot pin rooted write parent")
-		}
-		defer opened.Close()
-		info, err := opened.Stat(".")
-		if err != nil || !os.SameFile(current, info) {
-			return errors.New("rooted write parent changed while opening")
+	if parentRelative == "." {
+		if !os.SameFile(parentInfo, current) {
+			return errors.New("rooted write parent namespace changed")
 		}
 		return nil
 	}
-	opened, before, err := directory.OpenDirectory(parent)
+	reopened, namespaceInfo, err := directory.OpenDirectory(parentRelative)
 	if err != nil {
-		return errors.New("rooted write parent is redirected or invalid")
+		return errors.New("rooted write parent namespace changed")
 	}
-	defer opened.Close()
-	after, err := opened.Stat(".")
-	if err != nil || !os.SameFile(before, after) || !after.IsDir() {
-		return errors.New("rooted write parent changed while opening")
+	defer reopened.Close()
+	if !os.SameFile(parentInfo, namespaceInfo) {
+		return errors.New("rooted write parent namespace changed")
 	}
 	return nil
 }

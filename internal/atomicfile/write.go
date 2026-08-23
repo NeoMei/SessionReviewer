@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const backupSuffix = ".session-reviewer-backup"
@@ -33,6 +34,19 @@ func WriteRoot(root *os.Root, path string, data []byte, perm fs.FileMode) (retEr
 		return fmt.Errorf("atomic file root is required")
 	}
 	return writeRootWithParentOpener(root, path, data, perm, root.OpenRoot)
+}
+
+// WriteRootFile atomically writes one leaf below an already pinned immediate
+// parent. Callers that must hold a directory identity across validation and
+// publication use this instead of re-opening the parent by path.
+func WriteRootFile(parent *os.Root, leaf string, data []byte, perm fs.FileMode) error {
+	if parent == nil {
+		return fmt.Errorf("atomic file root is required")
+	}
+	if leaf == "" || leaf == "." || strings.ContainsAny(leaf, `/\`) || filepath.IsAbs(leaf) || filepath.VolumeName(leaf) != "" || filepath.Base(leaf) != leaf {
+		return fmt.Errorf("atomic file leaf is invalid")
+	}
+	return writeRootAtParent(parent, leaf, data, perm)
 }
 
 func writeRootWithParentOpener(root *os.Root, path string, data []byte, perm fs.FileMode, openParent func(string) (*os.Root, error)) error {
