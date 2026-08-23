@@ -193,32 +193,152 @@ func validateRecoveryState(state ledger.State) error {
 	if state.ProjectID == "" {
 		return errors.New("accepted ledger has empty project ID")
 	}
-	if len(state.Timeline)+len(state.Decisions)+len(state.OpenLoops)+len(state.Sessions) > maxRecoveryEntities {
-		return errRecoveryOutputLimit
+	var budget recoveryBudget
+	if err := budget.countState(state); err != nil {
+		return err
 	}
-	values := len(state.CurrentState.UncommittedChanges) + len(state.CurrentState.Blockers) + len(state.CurrentState.OpenRisks) + len(state.CurrentState.SourceSessions)
 	for key, decision := range state.Decisions {
 		if key != decision.ID || decision.ProjectID != state.ProjectID {
 			return fmt.Errorf("decision %q has inconsistent accepted identity", key)
 		}
-		values += len(decision.Tags) + len(decision.Supersedes)
 	}
 	for key, loop := range state.OpenLoops {
 		if key != loop.ID || loop.ProjectID != state.ProjectID {
 			return fmt.Errorf("open loop %q has inconsistent accepted identity", key)
 		}
-		values += len(loop.Tags)
 	}
 	for key, report := range state.Sessions {
 		if key != report.ID || report.ProjectID != state.ProjectID {
 			return fmt.Errorf("session %q has inconsistent accepted identity", key)
 		}
-		values += len(report.Phases)
-	}
-	if values > maxRecoveryValues {
-		return errRecoveryOutputLimit
 	}
 	return validateSupersedes(state.Decisions)
+}
+
+type recoveryBudget struct {
+	entities int
+	values   int
+}
+
+func (budget *recoveryBudget) addEntities(amount int) error {
+	if amount < 0 || budget.entities > maxRecoveryEntities || amount > maxRecoveryEntities-budget.entities {
+		return errRecoveryOutputLimit
+	}
+	budget.entities += amount
+	return nil
+}
+
+func (budget *recoveryBudget) addValues(amount int) error {
+	if amount < 0 || budget.values > maxRecoveryValues || amount > maxRecoveryValues-budget.values {
+		return errRecoveryOutputLimit
+	}
+	budget.values += amount
+	return nil
+}
+
+func (budget *recoveryBudget) countState(state ledger.State) error {
+	for _, amount := range []int{len(state.Timeline), len(state.Decisions), len(state.OpenLoops), len(state.Sessions)} {
+		if err := budget.addEntities(amount); err != nil {
+			return err
+		}
+	}
+	if err := budget.addValues(1); err != nil { // State.ProjectID.
+		return err
+	}
+	if err := budget.countCurrentState(state.CurrentState); err != nil {
+		return err
+	}
+	for _, event := range state.Timeline {
+		if err := budget.addValues(6); err != nil { // ID, time, revision, class, title, summary.
+			return err
+		}
+		for _, amount := range []int{len(event.DecisionIDs), len(event.OpenLoopIDs)} {
+			if err := budget.addValues(amount); err != nil {
+				return err
+			}
+		}
+		if err := budget.countEvidence(event.Evidence); err != nil {
+			return err
+		}
+	}
+	for _, decision := range state.Decisions {
+		if err := budget.addValues(9); err != nil { // Scalar and revision fields.
+			return err
+		}
+		for _, amount := range []int{len(decision.Tags), len(decision.Supersedes), len(decision.SourceSessions), len(decision.Alternatives), len(decision.RejectedPaths)} {
+			if err := budget.addValues(amount); err != nil {
+				return err
+			}
+		}
+		if err := budget.countEvidence(decision.Evidence); err != nil {
+			return err
+		}
+	}
+	for _, loop := range state.OpenLoops {
+		if err := budget.addValues(9); err != nil { // Scalar and revision fields.
+			return err
+		}
+		for _, amount := range []int{len(loop.Tags), len(loop.SourceSessions), len(loop.Attempts)} {
+			if err := budget.addValues(amount); err != nil {
+				return err
+			}
+		}
+		if err := budget.countEvidence(loop.Evidence); err != nil {
+			return err
+		}
+	}
+	for _, report := range state.Sessions {
+		if err := budget.addValues(7); err != nil { // IDs, revision, goal, and links.
+			return err
+		}
+		for _, amount := range []int{
+			len(report.GoalChanges), len(report.Files), len(report.Commits), len(report.Verification),
+			len(report.DecisionsAdded), len(report.DecisionsRevised), len(report.OpenLoopsCreated), len(report.OpenLoopsClosed),
+		} {
+			if err := budget.addValues(amount); err != nil {
+				return err
+			}
+		}
+		if err := budget.addValues(len(report.Phases)); err != nil { // Phase struct values.
+			return err
+		}
+		for _, phase := range report.Phases {
+			if err := budget.addValues(2); err != nil { // Title and summary.
+				return err
+			}
+			if err := budget.countEvidence(phase.Evidence); err != nil {
+				return err
+			}
+		}
+		if err := budget.countEvidence(report.Evidence); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (budget *recoveryBudget) countCurrentState(state ledger.CurrentState) error {
+	if err := budget.addValues(8); err != nil { // Project, revision, and six text fields.
+		return err
+	}
+	for _, amount := range []int{len(state.UncommittedChanges), len(state.Blockers), len(state.OpenRisks), len(state.SourceSessions)} {
+		if err := budget.addValues(amount); err != nil {
+			return err
+		}
+	}
+	return budget.countEvidence(state.Evidence)
+}
+
+func (budget *recoveryBudget) countEvidence(refs []ledger.EvidenceRef) error {
+	if err := budget.addValues(len(refs)); err != nil { // EvidenceRef struct values.
+		return err
+	}
+	for range refs {
+		if err := budget.addValues(5); err != nil { // Every EvidenceRef scalar field.
+			return err
+		}
+	}
+	return nil
 }
 
 func validateSupersedes(decisions map[string]ledger.Decision) error {
@@ -239,6 +359,9 @@ func validateSupersedes(decisions map[string]ledger.Decision) error {
 		marks[id] = visiting
 		predecessors := sortedUnique(decisions[id].Supersedes)
 		for _, predecessor := range predecessors {
+			if predecessor == id {
+				return fmt.Errorf("decision %q supersedes itself", id)
+			}
 			if _, found := decisions[predecessor]; !found {
 				return fmt.Errorf("decision %q supersedes missing decision %q", id, predecessor)
 			}
@@ -332,7 +455,21 @@ func (out *recoveryMarkdownBuilder) escaped(value string) {
 			out.raw(" ")
 			space = false
 		}
-		if strings.ContainsRune("\\`*_{}[]<>()!|#", r) || (first && strings.ContainsRune("+->", r)) {
+		switch r {
+		case '&':
+			out.raw("&amp;")
+			first = false
+			continue
+		case '<':
+			out.raw("&lt;")
+			first = false
+			continue
+		case '>':
+			out.raw("&gt;")
+			first = false
+			continue
+		}
+		if strings.ContainsRune("\\`*_{}[]()!|#", r) || (first && strings.ContainsRune("+-", r)) {
 			out.raw("\\")
 		}
 		var encoded [utf8.UTFMax]byte

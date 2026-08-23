@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -118,6 +119,43 @@ func TestHistoryRejectsMissingAndCyclicSupersedes(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+
+	t.Run("self reference", func(t *testing.T) {
+		root := recoveryFixture(t)
+		replaceRecoveryFile(t, root, "decisions/decision-old.md", "supersedes: []", "supersedes:\n  - decision-old")
+		if _, err := HistoryLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "itself") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestHistoryOrdersCompleteSupersedesDAGReverseTopologically(t *testing.T) {
+	decisions := map[string]ledger.Decision{
+		"decision-00":     {ID: "decision-00"},
+		"decision-a":      {ID: "decision-a", Supersedes: []string{"decision-shared"}},
+		"decision-b":      {ID: "decision-b", Supersedes: []string{"decision-shared"}},
+		"decision-root":   {ID: "decision-root", Supersedes: []string{"decision-b", "decision-a"}},
+		"decision-shared": {ID: "decision-shared"},
+	}
+	if err := validateSupersedes(decisions); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"decision-00", "decision-root", "decision-a", "decision-b", "decision-shared"}
+	got := decisionIDs(orderedDecisions(decisions))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("order=%v want=%v", got, want)
+	}
+	position := make(map[string]int, len(got))
+	for index, id := range got {
+		position[id] = index
+	}
+	for id, decision := range decisions {
+		for _, predecessor := range decision.Supersedes {
+			if position[id] >= position[predecessor] {
+				t.Fatalf("superseder %q does not precede %q in %v", id, predecessor, got)
+			}
+		}
+	}
 }
 
 func TestRecoveryFailsClosedOnMalformedAcceptedState(t *testing.T) {
@@ -231,6 +269,94 @@ func TestRecoveryMarkdownEscapesControlsAndIsBoundedWithoutMutation(t *testing.T
 	view.Decisions = []ledger.Decision{{ID: "decision", Title: huge}}
 	if got := view.Markdown(); len(got) > maxRecoveryMarkdownBytes || !strings.Contains(got, "output omitted") {
 		t.Fatalf("unbounded history output: len=%d", len(got))
+	}
+}
+
+func TestRecoveryMarkdownPreservesLiteralEntitiesAndHostilePunctuation(t *testing.T) {
+	card := ResumeCard{ProjectID: recoveryProjectID, Goal: "&copy; &lt; <tag> a|b a\\b\x00\u202e"}
+	markdown := card.Markdown()
+	for _, want := range []string{"&amp;copy;", "&amp;lt;", "&lt;tag&gt;", `a\|b`, `a\\b`} {
+		if !strings.Contains(markdown, want) {
+			t.Fatalf("Markdown omitted escaped literal %q:\n%s", want, markdown)
+		}
+	}
+	for _, unsafe := range []string{"\x00", "\u202e", "<tag>", "&copy;"} {
+		if strings.Contains(markdown, unsafe) {
+			t.Fatalf("Markdown retained unsafe construct %q:\n%s", unsafe, markdown)
+		}
+	}
+
+	view := HistoryView{ProjectID: recoveryProjectID, Themes: []Theme{{Name: "&copy;"}, {Name: "©"}, {Name: "<tag>"}}}
+	history := view.Markdown()
+	for _, want := range []string{"- &amp;copy;", "- ©", "- &lt;tag&gt;"} {
+		if !strings.Contains(history, want) {
+			t.Fatalf("theme spelling is not visually distinct for %q:\n%s", want, history)
+		}
+	}
+}
+
+func TestRecoveryBudgetRejectsElevenNestedSlicesOfTenThousand(t *testing.T) {
+	values := make([]string, 10_000)
+	for index := range values {
+		values[index] = "value"
+	}
+	state := ledger.State{
+		ProjectID: recoveryProjectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: recoveryProjectID, UncommittedChanges: values, Blockers: values, OpenRisks: values, SourceSessions: values,
+		},
+		Decisions: map[string]ledger.Decision{
+			"decision-1": {ID: "decision-1", ProjectID: recoveryProjectID, Tags: values, Supersedes: values, SourceSessions: values, Alternatives: values, RejectedPaths: values},
+		},
+		OpenLoops: map[string]ledger.OpenLoop{
+			"loop-1": {ID: "loop-1", ProjectID: recoveryProjectID, Tags: values, SourceSessions: values},
+		},
+		Sessions: map[string]ledger.SessionReport{},
+	}
+	if err := validateRecoveryState(state); !errors.Is(err, errRecoveryOutputLimit) {
+		t.Fatalf("11x10k nested values were not rejected by budget: %v", err)
+	}
+}
+
+func TestRecoveryBudgetCountsNestedEvidenceAndHasOverflowSafeBoundary(t *testing.T) {
+	budget := recoveryBudget{}
+	if err := budget.addValues(maxRecoveryValues); err != nil {
+		t.Fatalf("exact boundary rejected: %v", err)
+	}
+	if err := budget.addValues(1); !errors.Is(err, errRecoveryOutputLimit) {
+		t.Fatalf("boundary+1 accepted: %v", err)
+	}
+
+	budget = recoveryBudget{values: maxRecoveryValues}
+	if err := budget.addValues(int(^uint(0) >> 1)); !errors.Is(err, errRecoveryOutputLimit) {
+		t.Fatalf("overflow-sized addition accepted: %v", err)
+	}
+
+	atBoundary := ledger.State{
+		ProjectID:    recoveryProjectID,
+		CurrentState: ledger.CurrentState{ProjectID: recoveryProjectID, OpenRisks: make([]string, maxRecoveryValues-9)},
+		Decisions:    map[string]ledger.Decision{},
+		OpenLoops:    map[string]ledger.OpenLoop{},
+		Sessions:     map[string]ledger.SessionReport{},
+	}
+	if err := validateRecoveryState(atBoundary); err != nil {
+		t.Fatalf("state at exact value boundary rejected: %v", err)
+	}
+	atBoundary.CurrentState.OpenRisks = append(atBoundary.CurrentState.OpenRisks, "one-over")
+	if err := validateRecoveryState(atBoundary); !errors.Is(err, errRecoveryOutputLimit) {
+		t.Fatalf("state at value boundary+1 accepted: %v", err)
+	}
+
+	refs := make([]ledger.EvidenceRef, maxRecoveryValues/5+1)
+	state := ledger.State{
+		ProjectID:    recoveryProjectID,
+		CurrentState: ledger.CurrentState{ProjectID: recoveryProjectID, Evidence: refs},
+		Decisions:    map[string]ledger.Decision{},
+		OpenLoops:    map[string]ledger.OpenLoop{},
+		Sessions:     map[string]ledger.SessionReport{},
+	}
+	if err := validateRecoveryState(state); !errors.Is(err, errRecoveryOutputLimit) {
+		t.Fatalf("nested evidence scalar values were not rejected: %v", err)
 	}
 }
 

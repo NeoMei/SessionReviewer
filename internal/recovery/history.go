@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"container/heap"
 	"sort"
 	"strings"
 
@@ -125,37 +126,47 @@ func (view HistoryView) Markdown() string {
 }
 
 func orderedDecisions(byID map[string]ledger.Decision) []ledger.Decision {
-	predecessors := make(map[string]struct{}, len(byID))
-	for _, decision := range byID {
-		for _, predecessor := range decision.Supersedes {
-			predecessors[predecessor] = struct{}{}
-		}
-	}
-	terminals := make([]string, 0, len(byID))
+	incoming := make(map[string]int, len(byID))
 	for id := range byID {
-		if _, superseded := predecessors[id]; !superseded {
-			terminals = append(terminals, id)
+		incoming[id] = 0
+	}
+	for _, decision := range byID {
+		for _, predecessor := range sortedUnique(decision.Supersedes) {
+			incoming[predecessor]++
 		}
 	}
-	sort.Strings(terminals)
-
-	ordered := make([]ledger.Decision, 0, len(byID))
-	seen := make(map[string]struct{}, len(byID))
-	var appendChain func(string)
-	appendChain = func(id string) {
-		if _, exists := seen[id]; exists {
-			return
+	ready := &bytewiseIDHeap{}
+	heap.Init(ready)
+	for id, count := range incoming {
+		if count == 0 {
+			heap.Push(ready, id)
 		}
-		seen[id] = struct{}{}
+	}
+	ordered := make([]ledger.Decision, 0, len(byID))
+	for ready.Len() != 0 {
+		id := heap.Pop(ready).(string)
 		ordered = append(ordered, cloneDecision(byID[id]))
 		for _, predecessor := range sortedUnique(byID[id].Supersedes) {
-			appendChain(predecessor)
+			incoming[predecessor]--
+			if incoming[predecessor] == 0 {
+				heap.Push(ready, predecessor)
+			}
 		}
 	}
-	for _, id := range terminals {
-		appendChain(id)
-	}
 	return ordered
+}
+
+type bytewiseIDHeap []string
+
+func (items bytewiseIDHeap) Len() int           { return len(items) }
+func (items bytewiseIDHeap) Less(i, j int) bool { return items[i] < items[j] }
+func (items bytewiseIDHeap) Swap(i, j int)      { items[i], items[j] = items[j], items[i] }
+func (items *bytewiseIDHeap) Push(value any)    { *items = append(*items, value.(string)) }
+func (items *bytewiseIDHeap) Pop() any {
+	old := *items
+	last := old[len(old)-1]
+	*items = old[:len(old)-1]
+	return last
 }
 
 func buildThemes(decisions []ledger.Decision, loops []ledger.OpenLoop) []Theme {
