@@ -786,6 +786,79 @@ Second.
 	}
 }
 
+func TestDocumentUpsertSectionUsesSharedCanonicalSpaceName(t *testing.T) {
+	for name, input := range map[string]string{
+		"ASCII spaces":   "  A   B  ",
+		"Unicode spaces": "\u2003A\u00a0B\u2003",
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n## A B\nOld.\n"))
+			originalHeading := doc.Sections[0].Heading
+			if err := doc.UpsertSection(input, "Replacement."); err != nil {
+				t.Fatal(err)
+			}
+			if len(doc.Sections) != 1 {
+				t.Fatalf("canonical update appended a variant: %#v", doc.Sections)
+			}
+			if doc.Sections[0].Name != "A B" {
+				t.Fatalf("name=%q", doc.Sections[0].Name)
+			}
+			if doc.Sections[0].Heading != originalHeading {
+				t.Fatalf("raw heading changed: %q", doc.Sections[0].Heading)
+			}
+			if !strings.Contains(doc.Sections[0].Body, "Replacement.") {
+				t.Fatalf("body=%q", doc.Sections[0].Body)
+			}
+		})
+	}
+}
+
+func TestDocumentRenderUsesCanonicalSectionNames(t *testing.T) {
+	t.Run("canonical name renders without changing raw heading", func(t *testing.T) {
+		doc := mustParseDocument(t, []byte(validFrontmatter+"---\n## A B\nBody.\n"))
+		rawHeading := doc.Sections[0].Heading
+		doc.Sections[0].Name = "  A   B  "
+		rendered, err := doc.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if doc.Sections[0].Heading != rawHeading || !bytes.Contains(rendered, []byte(rawHeading)) {
+			t.Fatalf("raw heading changed: %q\n%s", doc.Sections[0].Heading, rendered)
+		}
+		reparsed := mustParseDocument(t, rendered)
+		if got := reparsed.Sections[0].Name; got != "A B" {
+			t.Fatalf("reparsed name=%q", got)
+		}
+	})
+
+	t.Run("canonical duplicate is rejected", func(t *testing.T) {
+		doc := mustParseDocument(t, []byte(validFrontmatter+"---\n## First\nOne.\n\n## Second\nTwo.\n"))
+		doc.Sections[0].Name = " A   B "
+		doc.Sections[1].Name = "A B"
+		if _, err := doc.Render(); !errors.Is(err, ErrInvalidDocument) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("control whitespace is rejected", func(t *testing.T) {
+		for _, invalid := range []string{"A\tB", "A\nB", "A\rB"} {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n## A B\nBody.\n"))
+			doc.Sections[0].Name = invalid
+			if _, err := doc.Render(); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("name=%q err=%v", invalid, err)
+			}
+		}
+	})
+}
+
+func TestDocumentRenderRejectsOutputThatCannotReparseAsSameSections(t *testing.T) {
+	doc := mustParseDocument(t, []byte(validFrontmatter+"---\n## First\nOne.\n\n## Second\nTwo.\n"))
+	doc.Sections[1].Heading = doc.Sections[0].Heading
+	if _, err := doc.Render(); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestDocumentRejectsMalformedInput(t *testing.T) {
 	tests := map[string][]byte{
 		"invalid UTF-8":         append([]byte(validFrontmatter), 0xff),

@@ -310,14 +310,20 @@ func (d Document) Render() ([]byte, error) {
 		return nil, invalidDocument("too many sections")
 	}
 	seen := make(map[string]struct{}, len(d.Sections))
+	canonicalNames := make([]string, 0, len(d.Sections))
 	for _, section := range d.Sections {
-		if section.Name == "" || section.Heading == "" {
+		if section.Heading == "" {
 			return nil, invalidDocument("section has no name or heading")
 		}
-		if _, ok := seen[section.Name]; ok {
+		name, err := validatedSectionName(section.Name)
+		if err != nil {
+			return nil, invalidDocument("invalid section heading name")
+		}
+		if _, ok := seen[name]; ok {
 			return nil, invalidDocument("duplicate section heading")
 		}
-		seen[section.Name] = struct{}{}
+		seen[name] = struct{}{}
+		canonicalNames = append(canonicalNames, name)
 	}
 
 	var yamlBody bytes.Buffer
@@ -352,6 +358,15 @@ func (d Document) Render() ([]byte, error) {
 	rendered := strings.TrimRight(out.String(), "\n") + "\n"
 	if len(rendered) > MaxDocumentBytes {
 		return nil, invalidDocument("rendered document exceeds size limit")
+	}
+	reparsed, err := ParseDocument([]byte(rendered))
+	if err != nil || len(reparsed.Sections) != len(canonicalNames) {
+		return nil, invalidDocument("rendered document cannot be reparsed as the same sections")
+	}
+	for i, name := range canonicalNames {
+		if reparsed.Sections[i].Name != name {
+			return nil, invalidDocument("rendered document cannot be reparsed as the same sections")
+		}
 	}
 	return []byte(rendered), nil
 }
@@ -528,8 +543,8 @@ func topLevelH2Headings(source []byte) ([]sourceHeading, error) {
 			continue
 		}
 
-		name := strings.Join(strings.Fields(string(heading.Text(source))), " ")
-		if name == "" {
+		name := strings.ReplaceAll(string(heading.Text(source)), "\n", " ")
+		if strings.TrimSpace(name) == "" {
 			continue
 		}
 		name, err := validatedSectionName(name)
@@ -627,6 +642,7 @@ func validatedSectionName(name string) (string, error) {
 			return "", ErrInvalidSectionName
 		}
 	}
+	name = strings.Join(strings.Fields(name), " ")
 	name = canonicalSectionName(name)
 	if name == "" {
 		return "", ErrInvalidSectionName
