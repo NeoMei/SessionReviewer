@@ -528,9 +528,13 @@ func topLevelH2Headings(source []byte) ([]sourceHeading, error) {
 			continue
 		}
 
-		name := strings.TrimSpace(string(heading.Text(source)))
+		name := strings.Join(strings.Fields(string(heading.Text(source))), " ")
 		if name == "" {
 			continue
+		}
+		name, err := validatedSectionName(name)
+		if err != nil {
+			return nil, invalidDocument("invalid section heading name")
 		}
 		first := heading.Lines().At(0)
 		last := heading.Lines().At(heading.Lines().Len() - 1)

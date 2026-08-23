@@ -729,6 +729,63 @@ Body.
 	}
 }
 
+func TestDocumentCanonicalizesMultilineSetextNameForEditing(t *testing.T) {
+	const rawHeading = "First *decision*\ncontinued \\*literal\\*\n---------------------"
+	doc := mustParseDocument(t, []byte(validFrontmatter+"---\n"+rawHeading+"\nOriginal.\n"))
+	if len(doc.Sections) != 1 {
+		t.Fatalf("sections=%d", len(doc.Sections))
+	}
+	if got := doc.Sections[0].Name; got != "First decision continued \\*literal\\*" {
+		t.Fatalf("name=%q", got)
+	}
+	if got := doc.Sections[0].Heading; got != rawHeading {
+		t.Fatalf("raw heading changed: %q", got)
+	}
+
+	if err := doc.UpsertSection(doc.Sections[0].Name, "Replacement."); err != nil {
+		t.Fatalf("update by parsed section name: %v", err)
+	}
+	if len(doc.Sections) != 1 {
+		t.Fatalf("update appended a section: %#v", doc.Sections)
+	}
+	if got := doc.Sections[0].Heading; got != rawHeading {
+		t.Fatalf("update changed raw heading: %q", got)
+	}
+	rendered, err := doc.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered, []byte(rawHeading+"\n\nReplacement.")) {
+		t.Fatalf("render lost raw heading or update:\n%s", rendered)
+	}
+	reparsed := mustParseDocument(t, rendered)
+	if got := reparsed.Sections[0].Name; got != doc.Sections[0].Name {
+		t.Fatalf("reparsed name=%q want=%q", got, doc.Sections[0].Name)
+	}
+	rerendered, err := reparsed.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rendered, rerendered) {
+		t.Fatalf("render unstable:\nfirst:\n%s\nsecond:\n%s", rendered, rerendered)
+	}
+}
+
+func TestDocumentRejectsDuplicateSectionAfterNameCanonicalization(t *testing.T) {
+	src := []byte(validFrontmatter + `---
+Shared
+*name*
+--------
+First.
+
+## Shared name
+Second.
+`)
+	if _, err := ParseDocument(src); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestDocumentRejectsMalformedInput(t *testing.T) {
 	tests := map[string][]byte{
 		"invalid UTF-8":         append([]byte(validFrontmatter), 0xff),
