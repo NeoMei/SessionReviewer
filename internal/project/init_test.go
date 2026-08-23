@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
 )
 
@@ -29,6 +30,33 @@ func TestEnsureRootDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
 	}
 }
 
+func TestEnsureRootDirectoryRetryResyncsExistingDirectory(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	firstErr := errors.New("injected project directory creation sync failure")
+	err = ensureRootDirectoryWith(root, "docs", 0o755, func(root *os.Root, path string, perm fs.FileMode) error {
+		if err := atomicfile.EnsureRootDir(root, path, perm); err != nil {
+			return err
+		}
+		return firstErr
+	})
+	if !errors.Is(err, firstErr) {
+		t.Fatalf("first error=%v", err)
+	}
+	retryErr := errors.New("injected existing project directory sync failure")
+	calls := 0
+	err = ensureRootDirectoryWith(root, "docs", 0o755, func(*os.Root, string, fs.FileMode) error {
+		calls++
+		return retryErr
+	})
+	if !errors.Is(err, retryErr) || calls != 1 {
+		t.Fatalf("retry error=%v calls=%d", err, calls)
+	}
+}
+
 func TestOpenOrCreateDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "machine", "projects")
 	durabilityErr := errors.New("injected durable machine directory failure")
@@ -41,6 +69,29 @@ func TestOpenOrCreateDirectoryPropagatesDurableCreatorFailure(t *testing.T) {
 	}
 	if !errors.Is(err, durabilityErr) {
 		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
+
+func TestOpenOrCreateDirectoryResyncsExistingFinalDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "machine")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	syncErr := errors.New("injected existing final directory sync failure")
+	calls := 0
+	directory, err := openOrCreateDirectoryWith(path, 0o700, func(_ *os.Root, name string, _ fs.FileMode) error {
+		calls++
+		if name != "machine" {
+			t.Fatalf("ensure name=%q", name)
+		}
+		return syncErr
+	})
+	if directory != nil {
+		_ = directory.Close()
+		t.Fatal("returned directory after existing publication sync failure")
+	}
+	if !errors.Is(err, syncErr) || calls != 1 {
+		t.Fatalf("error=%v calls=%d", err, calls)
 	}
 }
 

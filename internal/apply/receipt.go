@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -56,6 +57,11 @@ type receiptFile struct {
 	TargetMode     uint32 `json:"target_mode"`
 	TargetSHA256   string `json:"target_sha256"`
 	TargetData     []byte `json:"target_data"`
+}
+
+type scannedReceipt struct {
+	name string
+	info os.FileInfo
 }
 
 func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, error) {
@@ -225,7 +231,11 @@ func saveReceipt(projectData *os.Root, receipt applyReceipt, hookOptions ...appl
 	if len(body) > maxReceiptBytes {
 		return fmt.Errorf("apply receipt exceeds %d bytes", maxReceiptBytes)
 	}
-	directory, err := openReceiptDirectory(projectData, true)
+	hooks := applyHooks{}
+	if len(hookOptions) != 0 {
+		hooks = hookOptions[0]
+	}
+	directory, err := openReceiptDirectory(projectData, true, hooks.ensureRootDir)
 	if err != nil {
 		return err
 	}
@@ -236,10 +246,6 @@ func saveReceipt(projectData *os.Root, receipt applyReceipt, hookOptions ...appl
 	}
 	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
 		return err
-	}
-	hooks := applyHooks{}
-	if len(hookOptions) != 0 {
-		hooks = hookOptions[0]
 	}
 	writeReceipt := hooks.writeReceipt
 	if writeReceipt == nil {
@@ -313,7 +319,7 @@ func loadReceiptRoot(directory *os.Root, name, proposalDigest string, remaining 
 }
 
 func scanReceipts(projectData *os.Root, ctx inputContext, hooks applyHooks) (applyReceipt, bool, error) {
-	directory, err := openReceiptDirectory(projectData, false)
+	directory, err := openReceiptDirectory(projectData, false, hooks.ensureRootDir)
 	if errors.Is(err, os.ErrNotExist) {
 		return applyReceipt{}, false, nil
 	}
@@ -341,10 +347,6 @@ func scanReceipts(projectData *os.Root, ctx inputContext, hooks applyHooks) (app
 		return applyReceipt{}, false, fmt.Errorf("apply receipt count exceeds %d", maxReceiptScanFiles)
 	}
 
-	type scannedReceipt struct {
-		name string
-		info os.FileInfo
-	}
 	receipts := make([]scannedReceipt, 0, len(entries))
 	folded := make(map[string]string, len(entries))
 	currentName, err := receiptFileName(ctx.ProposalDigest)
@@ -438,10 +440,46 @@ func scanReceipts(projectData *os.Root, ctx inputContext, hooks applyHooks) (app
 			return applyReceipt{}, false, ErrPendingReceiptConflict
 		}
 	}
+	if err := verifyReceiptDirectorySnapshot(directory, receipts); err != nil {
+		return applyReceipt{}, false, err
+	}
 	if err := validateReceiptDirectoryIdentity(projectData, directory, directoryInfo); err != nil {
 		return applyReceipt{}, false, err
 	}
 	return current, foundCurrent, nil
+}
+
+func verifyReceiptDirectorySnapshot(directory *os.Root, expected []scannedReceipt) error {
+	file, err := directory.Open(".")
+	if err != nil {
+		return fmt.Errorf("re-enumerate apply receipts: %w", err)
+	}
+	entries, readErr := file.ReadDir(maxReceiptScanFiles + 1)
+	closeErr := file.Close()
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return fmt.Errorf("re-enumerate apply receipts: %w", err)
+	}
+	if len(entries) > maxReceiptScanFiles || len(entries) != len(expected) {
+		return errors.New("apply receipt directory entries changed during scan")
+	}
+	want := make(map[string]os.FileInfo, len(expected))
+	for _, receipt := range expected {
+		want[receipt.name] = receipt.info
+	}
+	for _, entry := range entries {
+		before, found := want[entry.Name()]
+		if !found {
+			return errors.New("apply receipt directory entries changed during scan")
+		}
+		after, err := directory.Lstat(entry.Name())
+		if err != nil || !os.SameFile(before, after) {
+			return errors.New("apply receipt directory entries changed during scan")
+		}
+	}
+	return nil
 }
 
 func validateReceiptDirectoryIdentity(projectData, directory *os.Root, expected os.FileInfo) error {
@@ -466,7 +504,7 @@ func exactReceiptTemporaryName(name string) bool {
 	return true
 }
 
-func openReceiptDirectory(projectData *os.Root, create bool) (*os.Root, error) {
+func openReceiptDirectory(projectData *os.Root, create bool, ensure func(*os.Root, string, fs.FileMode) error) (*os.Root, error) {
 	if projectData == nil {
 		return nil, errors.New("project data root is required")
 	}
@@ -477,14 +515,26 @@ func openReceiptDirectory(projectData *os.Root, create bool) (*os.Root, error) {
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return nil, os.ErrNotExist
 	}
-	if errors.Is(err, os.ErrNotExist) {
-		if err := atomicfile.EnsureRootDir(projectData, "applied-proposals", 0o700); err != nil {
-			return nil, err
-		}
-		info, err = projectData.Lstat("applied-proposals")
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return nil, errors.New("apply receipt directory is redirected or not a directory")
 	}
+	if !missing && (info == nil || !info.IsDir() || isApplyRedirect(info)) {
+		return nil, errors.New("apply receipt directory is redirected or not a directory")
+	}
+	before := info
+	if ensure == nil {
+		ensure = atomicfile.EnsureRootDir
+	}
+	if err := ensure(projectData, "applied-proposals", 0o700); err != nil {
+		return nil, err
+	}
+	info, err = projectData.Lstat("applied-proposals")
 	if err != nil || info == nil || !info.IsDir() || isApplyRedirect(info) {
 		return nil, errors.New("apply receipt directory is redirected or not a directory")
+	}
+	if before != nil && !os.SameFile(before, info) {
+		return nil, errors.New("apply receipt directory changed while ensuring durability")
 	}
 	directory, err := projectData.OpenRoot("applied-proposals")
 	if err != nil {

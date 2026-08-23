@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
@@ -29,6 +30,43 @@ func TestEnsureSafeParentsPropagatesDurableCreatorFailure(t *testing.T) {
 	})
 	if !errors.Is(err, durabilityErr) {
 		t.Fatalf("error=%v want=%v", err, durabilityErr)
+	}
+}
+
+func TestEnsureSafeParentsRetryResyncsExistingParents(t *testing.T) {
+	directory, err := pathguard.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	relative := filepath.Join("docs", "session-review")
+	firstErr := errors.New("injected ledger parent creation sync failure")
+	firstCalls := 0
+	err = ensureSafeParentsWith(directory, relative, 0o755, func(root *os.Root, path string, perm fs.FileMode) error {
+		firstCalls++
+		if err := atomicfile.EnsureRootDir(root, path, perm); err != nil {
+			return err
+		}
+		if path == relative {
+			return firstErr
+		}
+		return nil
+	})
+	if !errors.Is(err, firstErr) || firstCalls != 2 {
+		t.Fatalf("first error=%v calls=%d", err, firstCalls)
+	}
+
+	retryErr := errors.New("injected existing ledger parent sync failure")
+	var retryPaths []string
+	err = ensureSafeParentsWith(directory, relative, 0o755, func(_ *os.Root, path string, _ fs.FileMode) error {
+		retryPaths = append(retryPaths, path)
+		if path == relative {
+			return retryErr
+		}
+		return nil
+	})
+	if !errors.Is(err, retryErr) || !reflect.DeepEqual(retryPaths, []string{"docs", relative}) {
+		t.Fatalf("retry error=%v paths=%v", err, retryPaths)
 	}
 }
 

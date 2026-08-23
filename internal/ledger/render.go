@@ -895,15 +895,23 @@ func ensureSafeParentsWith(directory *pathguard.Directory, relative string, perm
 		} else {
 			current = filepath.Join(current, part)
 		}
-		info, err := root.Lstat(current)
-		if errors.Is(err, os.ErrNotExist) {
-			if err := ensure(root, current, perm); err != nil {
-				return err
-			}
-			info, err = root.Lstat(current)
+		before, err := root.Lstat(current)
+		missing := errors.Is(err, os.ErrNotExist)
+		if err != nil && !missing {
+			return errors.New("ledger parent is redirected or not a directory")
 		}
+		if !missing && !before.IsDir() {
+			return errors.New("ledger parent is redirected or not a directory")
+		}
+		if err := ensure(root, current, perm); err != nil {
+			return err
+		}
+		info, err := root.Lstat(current)
 		if err != nil || !info.IsDir() {
 			return errors.New("ledger parent is redirected or not a directory")
+		}
+		if before != nil && !os.SameFile(before, info) {
+			return errors.New("ledger parent changed while ensuring durability")
 		}
 		guarded, guardInfo, guardErr := directory.OpenDirectory(current)
 		if guardErr != nil {

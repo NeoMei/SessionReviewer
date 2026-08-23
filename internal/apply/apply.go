@@ -57,6 +57,7 @@ type applyHooks struct {
 	syncReceiptDirectory    func(*os.Root) error
 	afterReceiptEnumeration func() error
 	receiptScanByteLimit    uint64
+	ensureRootDir           func(*os.Root, string, fs.FileMode) error
 }
 
 type inputContext struct {
@@ -124,11 +125,11 @@ func acquireProjectApplyLockRoot(data *pathguard.Directory, projectID string) (*
 	return &projectApplyLock{platform: platform}, nil
 }
 
-func (lock *projectApplyLock) initializeProjectData(data *pathguard.Directory, projectID string) error {
+func (lock *projectApplyLock) initializeProjectData(data *pathguard.Directory, projectID string, ensureRootDir func(*os.Root, string, fs.FileMode) error) error {
 	if lock == nil || lock.platform == nil || data == nil || data.Root == nil {
 		return errors.New("initialized apply lock and data root are required")
 	}
-	if err := ensureApplySubdirectory(data.Root, "projects"); err != nil {
+	if err := ensureApplySubdirectory(data.Root, "projects", ensureRootDir); err != nil {
 		return err
 	}
 	projectsPath := filepath.Join(data.Path, "projects")
@@ -145,7 +146,7 @@ func (lock *projectApplyLock) initializeProjectData(data *pathguard.Directory, p
 		_ = projects.Close()
 		return errors.New("projects directory identity changed while opening")
 	}
-	if err := ensureApplySubdirectory(projects, projectID); err != nil {
+	if err := ensureApplySubdirectory(projects, projectID, ensureRootDir); err != nil {
 		_ = projects.Close()
 		return err
 	}
@@ -211,19 +212,29 @@ func (lock *projectApplyLock) verifyIdentity(roots *applyRoots, projectPath, dat
 	return nil
 }
 
-func ensureApplySubdirectory(root *os.Root, name string) error {
+func ensureApplySubdirectory(root *os.Root, name string, ensure func(*os.Root, string, fs.FileMode) error) error {
 	if err := rejectDirectoryCaseCollision(root, name); err != nil {
 		return err
 	}
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := atomicfile.EnsureRootDir(root, name, 0o700); err != nil {
-			return err
-		}
-		info, err = root.Lstat(name)
+	before, err := root.Lstat(name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
+	if err == nil && (before == nil || !before.IsDir() || isApplyRedirect(before)) {
+		return fmt.Errorf("apply state directory %q is redirected or not a directory", name)
+	}
+	if ensure == nil {
+		ensure = atomicfile.EnsureRootDir
+	}
+	if err := ensure(root, name, 0o700); err != nil {
+		return err
+	}
+	info, err := root.Lstat(name)
 	if err != nil || info == nil || !info.IsDir() || isApplyRedirect(info) {
 		return fmt.Errorf("apply state directory %q is redirected or not a directory", name)
+	}
+	if before != nil && !os.SameFile(before, info) {
+		return fmt.Errorf("apply state directory %q changed while ensuring durability", name)
 	}
 	return nil
 }
@@ -277,7 +288,7 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-	if err := lock.initializeProjectData(roots.data, ctx.Packet.ProjectID); err != nil {
+	if err := lock.initializeProjectData(roots.data, ctx.Packet.ProjectID, opts.hooks.ensureRootDir); err != nil {
 		return Result{}, err
 	}
 	if err := verifyIdentity(); err != nil {

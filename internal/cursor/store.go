@@ -79,7 +79,7 @@ func (s Store) Load(sessionID string) (result Cursor, retErr error) {
 // LoadReadOnly reads the best valid cursor state without creating, syncing,
 // repairing, replacing, or removing cursor state files.
 func (s Store) LoadReadOnly(sessionID string) (result Cursor, retErr error) {
-	root, err := s.open(sessionID, false)
+	root, err := s.openReadOnly(sessionID)
 	if err != nil {
 		return Cursor{}, err
 	}
@@ -151,6 +151,14 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 }
 
 func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
+	return s.openWithDurability(sessionID, createDir, true)
+}
+
+func (s Store) openReadOnly(sessionID string) (*storeRoot, error) {
+	return s.openWithDurability(sessionID, false, false)
+}
+
+func (s Store) openWithDurability(sessionID string, createDir, syncExisting bool) (*storeRoot, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, err
 	}
@@ -188,7 +196,17 @@ func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 		root.dirMissing = true
 		return root, nil
 	}
-	if errors.Is(err, os.ErrNotExist) {
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		_ = root.close()
+		return nil, fmt.Errorf("inspect cursor directory: %w", err)
+	}
+	if !missing && (isSymlinkOrReparse(cursorInfo) || !cursorInfo.IsDir()) {
+		_ = root.close()
+		return nil, fmt.Errorf("cursor directory is a symlink, reparse point, or non-directory")
+	}
+	before := cursorInfo
+	if missing || syncExisting {
 		ensureRootDir := s.ensureRootDir
 		if ensureRootDir == nil {
 			ensureRootDir = atomicfile.EnsureRootDir
@@ -206,6 +224,10 @@ func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 	if isSymlinkOrReparse(cursorInfo) || !cursorInfo.IsDir() {
 		_ = root.close()
 		return nil, fmt.Errorf("cursor directory is a symlink, reparse point, or non-directory")
+	}
+	if before != nil && !os.SameFile(before, cursorInfo) {
+		_ = root.close()
+		return nil, fmt.Errorf("cursor directory changed while ensuring durability")
 	}
 	cursors, err := data.OpenRoot("cursors")
 	if err != nil {

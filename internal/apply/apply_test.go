@@ -419,6 +419,98 @@ func TestRunPublishedReceiptFailureIsRecoveredOnlyAfterResync(t *testing.T) {
 	assertCursorNotAdvanced(t, f)
 }
 
+func TestRunRetriesExistingApplyDirectoriesBeforeCrossingBoundary(t *testing.T) {
+	for _, target := range []string{"projects", testProjectID, "applied-proposals"} {
+		t.Run(target, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			firstErr := errors.New("injected apply directory creation sync failure")
+			first := f.options()
+			first.hooks.ensureRootDir = func(root *os.Root, name string, perm fs.FileMode) error {
+				if err := atomicfile.EnsureRootDir(root, name, perm); err != nil {
+					return err
+				}
+				if name == target {
+					return firstErr
+				}
+				return nil
+			}
+			if got, err := Run(first); !errors.Is(err, firstErr) || got.CursorAdvanced || got.AlreadyApplied {
+				t.Fatalf("first got=%+v err=%v", got, err)
+			}
+
+			retryErr := errors.New("injected existing apply directory sync failure")
+			var retryNames []string
+			retry := f.options()
+			retry.hooks.ensureRootDir = func(_ *os.Root, name string, _ fs.FileMode) error {
+				retryNames = append(retryNames, name)
+				if name == target {
+					return retryErr
+				}
+				return nil
+			}
+			if got, err := Run(retry); !errors.Is(err, retryErr) || got.CursorAdvanced || got.AlreadyApplied {
+				t.Fatalf("retry got=%+v err=%v names=%v", got, err, retryNames)
+			}
+			if _, err := os.Stat(f.projectData); err == nil {
+				assertCursorNotAdvanced(t, f)
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("inspect project data: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunReceiptScanRejectsEntriesAddedAfterEnumeration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		add  func(*testing.T, *applyTestFixture)
+	}{
+		{name: "invalid extra entry", add: func(t *testing.T, f *applyTestFixture) {
+			path := filepath.Join(f.projectData, "applied-proposals", "not-a-receipt.json")
+			if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "conflicting valid receipt", add: func(t *testing.T, f *applyTestFixture) {
+			ctx := inputContext{
+				Packet: f.packet, ProposalDigest: "sha256:" + strings.Repeat("c", 64),
+				EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashB,
+			}
+			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(f.projectData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if err := saveReceipt(root, receipt); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			if err := os.MkdirAll(filepath.Join(f.projectData, "applied-proposals"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			opts := f.options()
+			opts.hooks.afterReceiptEnumeration = func() error {
+				tc.add(t, f)
+				return nil
+			}
+			if got, err := Run(opts); err == nil || !strings.Contains(err.Error(), "changed during scan") || got.CursorAdvanced || got.AlreadyApplied {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+			if _, err := os.Stat(receiptPathForTest(t, f)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("scan addition allowed a new current digest: %v", err)
+			}
+			assertCursorNotAdvanced(t, f)
+		})
+	}
+}
+
 func TestRunRejectsDifferentProposalWhileSameBoundaryReceiptIsPending(t *testing.T) {
 	f := newApplyTestFixture(t)
 	opts := f.options()

@@ -417,18 +417,26 @@ func ensureRootDirectory(root *os.Root, name string, perm os.FileMode) error {
 }
 
 func ensureRootDirectoryWith(root *os.Root, name string, perm os.FileMode, ensure func(*os.Root, string, os.FileMode) error) error {
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		if err := ensure(root, name, perm); err != nil {
-			return err
-		}
-		info, err = root.Lstat(name)
+	before, err := root.Lstat(name)
+	missing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !missing {
+		return err
 	}
+	if !missing && (!before.IsDir() || before.Mode()&os.ModeSymlink != 0) {
+		return fmt.Errorf("target component is redirected or not a directory")
+	}
+	if err := ensure(root, name, perm); err != nil {
+		return err
+	}
+	info, err := root.Lstat(name)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("target component is redirected or not a directory")
+	}
+	if before != nil && !os.SameFile(before, info) {
+		return fmt.Errorf("target component changed while ensuring durability")
 	}
 	opened, err := root.OpenRoot(name)
 	if err != nil {
@@ -449,6 +457,10 @@ func openOrCreateDirectory(path string, perm os.FileMode) (*pathguard.Directory,
 func openOrCreateDirectoryWith(path string, perm os.FileMode, ensure func(*os.Root, string, os.FileMode) error) (*pathguard.Directory, error) {
 	directory, remaining, err := pathguard.OpenDeepest(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureOpenedDirectoryPublication(directory, perm, ensure); err != nil {
+		_ = directory.Close()
 		return nil, err
 	}
 	if len(remaining) == 0 {
@@ -475,4 +487,28 @@ func openOrCreateDirectoryWith(path string, perm os.FileMode, ensure func(*os.Ro
 		directory.Ancestors = append(directory.Ancestors, info)
 	}
 	return directory, nil
+}
+
+func ensureOpenedDirectoryPublication(directory *pathguard.Directory, perm os.FileMode, ensure func(*os.Root, string, os.FileMode) error) error {
+	if directory == nil {
+		return errors.New("opened directory is required")
+	}
+	clean := filepath.Clean(directory.Path)
+	parentPath := filepath.Dir(clean)
+	if clean == parentPath {
+		return nil
+	}
+	parent, err := pathguard.Open(parentPath)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	if err := ensureRootDirectoryWith(parent.Root, filepath.Base(clean), perm, ensure); err != nil {
+		return err
+	}
+	after, err := parent.Root.Lstat(filepath.Base(clean))
+	if err != nil || !os.SameFile(directory.Info(), after) {
+		return errors.New("opened directory changed while ensuring durability")
+	}
+	return nil
 }

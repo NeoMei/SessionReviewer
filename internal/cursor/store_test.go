@@ -112,6 +112,46 @@ func TestStoreCommitPropagatesCursorDirectoryDurabilityFailure(t *testing.T) {
 	}
 }
 
+func TestStoreCommitRetryResyncsExistingCursorDirectory(t *testing.T) {
+	dir := t.TempDir()
+	firstErr := errors.New("injected cursor directory creation sync failure")
+	first := Store{
+		Root: dir,
+		ensureRootDir: func(root *os.Root, path string, perm fs.FileMode) error {
+			if err := atomicfile.EnsureRootDir(root, path, perm); err != nil {
+				return err
+			}
+			return firstErr
+		},
+	}
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := first.Commit("s1", Cursor{}, next); !errors.Is(err, firstErr) {
+		t.Fatalf("first commit error=%v", err)
+	}
+	if info, err := os.Stat(filepath.Join(dir, "cursors")); err != nil || !info.IsDir() {
+		t.Fatalf("cursor directory info=%v err=%v", info, err)
+	}
+
+	retryErr := errors.New("injected existing cursor directory sync failure")
+	calls := 0
+	retry := Store{
+		Root: dir,
+		ensureRootDir: func(_ *os.Root, path string, _ fs.FileMode) error {
+			calls++
+			if path != "cursors" {
+				t.Fatalf("ensure path=%q", path)
+			}
+			return retryErr
+		},
+	}
+	if err := retry.Commit("s1", Cursor{}, next); !errors.Is(err, retryErr) || calls != 1 {
+		t.Fatalf("retry error=%v calls=%d", err, calls)
+	}
+	if _, err := retry.LoadReadOnly("s1"); err != nil || calls != 1 {
+		t.Fatalf("read-only load error=%v ensure calls=%d", err, calls)
+	}
+}
+
 func TestStoreNormalizesLegacyUppercaseHashes(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	upper := strings.Repeat("AB", 32)
