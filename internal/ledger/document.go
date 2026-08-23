@@ -197,7 +197,7 @@ func validateExistingReservedFields(mapping *yaml.Node) error {
 	if err != nil {
 		return err
 	}
-	if entityType != "decision" && entityType != "open_loop" && entityType != "session" {
+	if entityType != "decision" && entityType != "open_loop" && entityType != "session" && entityType != "current_state" && entityType != "timeline" {
 		return fmt.Errorf("%w: invalid entity_type", ErrReservedFieldChanged)
 	}
 

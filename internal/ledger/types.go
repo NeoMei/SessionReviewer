@@ -115,6 +115,8 @@ type State struct {
 	Decisions    map[string]Decision
 	OpenLoops    map[string]OpenLoop
 	Sessions     map[string]SessionReport
+	documents    stateDocuments
+	projectRoot  string
 }
 
 type ChangeSet struct {
@@ -126,12 +128,30 @@ type ChangeSet struct {
 }
 
 type PlannedFile struct {
-	RelativePath string
-	Data         []byte
-	Perm         fs.FileMode
+	RelativePath   string
+	Data           []byte
+	Perm           fs.FileMode
+	ExpectedData   []byte
+	ExpectedExists bool
+	ExpectedPerm   fs.FileMode
 }
 
 type WritePlan struct {
 	ProjectRoot string
 	Files       []PlannedFile
+}
+
+type loadedDocument struct {
+	Document     Document
+	RelativePath string
+	Original     []byte
+	Perm         fs.FileMode
+}
+
+type stateDocuments struct {
+	current   *loadedDocument
+	timeline  *loadedDocument
+	decisions map[string]loadedDocument
+	openLoops map[string]loadedDocument
+	sessions  map[string]loadedDocument
 }
