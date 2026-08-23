@@ -278,9 +278,16 @@ func decodeCurrentState(doc Document, projectID string) (CurrentState, error) {
 	item.Goal = sectionText(doc, "Current goal")
 	item.LastVerified = sectionText(doc, "Last verified state")
 	item.Branch = sectionText(doc, "Repository")
-	item.UncommittedChanges = sectionList(doc, "Uncommitted changes")
-	item.Blockers = sectionList(doc, "Blockers")
-	item.OpenRisks = sectionList(doc, "Open risks")
+	var listErr error
+	if item.UncommittedChanges, listErr = sectionList(doc, "Uncommitted changes"); listErr != nil {
+		return CurrentState{}, listErr
+	}
+	if item.Blockers, listErr = sectionList(doc, "Blockers"); listErr != nil {
+		return CurrentState{}, listErr
+	}
+	if item.OpenRisks, listErr = sectionList(doc, "Open risks"); listErr != nil {
+		return CurrentState{}, listErr
+	}
 	item.NextAction = sectionText(doc, "Next action")
 	item.FirstInspection = sectionText(doc, "First inspection")
 	item.LastUpdated = sectionText(doc, "Last updated")
@@ -355,9 +362,13 @@ func decodeDecision(doc Document, projectID string) (Decision, error) {
 		}
 	}
 	item.Context = sectionText(doc, "Context")
-	item.Alternatives = sectionList(doc, "Alternatives")
+	if item.Alternatives, err = sectionList(doc, "Alternatives"); err != nil {
+		return Decision{}, err
+	}
 	item.Rationale = sectionText(doc, "Rationale")
-	item.RejectedPaths = sectionList(doc, "Rejected paths")
+	if item.RejectedPaths, err = sectionList(doc, "Rejected paths"); err != nil {
+		return Decision{}, err
+	}
 	item.Consequences = sectionText(doc, "Consequences")
 	item.ReevaluateWhen = sectionText(doc, "Conditions for reevaluation")
 	if strings.TrimSpace(item.Title) == "" || !validDecisionStatus(item.Status) || item.Tags == nil || item.Supersedes == nil || item.SourceSessions == nil || item.Evidence == nil || item.Alternatives == nil || item.RejectedPaths == nil {
@@ -398,7 +409,9 @@ func decodeOpenLoop(doc Document, projectID string) (OpenLoop, error) {
 		}
 	}
 	item.Question = sectionText(doc, "Question")
-	item.Attempts = sectionList(doc, "Attempted paths")
+	if item.Attempts, err = sectionList(doc, "Attempted paths"); err != nil {
+		return OpenLoop{}, err
+	}
 	item.Blocker = sectionText(doc, "Blocking condition")
 	item.NextExperiment = sectionText(doc, "Recommended next experiment")
 	item.CompletionCriterion = sectionText(doc, "Completion criterion")
@@ -514,7 +527,7 @@ func sectionText(doc Document, name string) string {
 	return ""
 }
 
-func sectionList(doc Document, name string) []string {
+func sectionList(doc Document, name string) ([]string, error) {
 	var text string
 	found := false
 	for _, section := range doc.Sections {
@@ -525,26 +538,50 @@ func sectionList(doc Document, name string) []string {
 		}
 	}
 	if !found {
-		return nil
+		return nil, nil
 	}
 	if text == "" {
-		return []string{}
+		return []string{}, nil
+	}
+	lines := strings.Split(text, "\n")
+	markerIndex := -1
+	for index, line := range lines {
+		// A marker-looking HTML comment opts the whole section into the
+		// machine codec. Reject every spelling except the exact supported
+		// marker so future versions and truncated comments cannot fall back
+		// to ordinary Markdown with different semantics.
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), typedListCodecPrefix) {
+			if line != typedListCodecMarker || markerIndex != -1 {
+				return nil, fmt.Errorf("section %q has malformed typed-list codec marker", name)
+			}
+			markerIndex = index
+		}
+	}
+	if markerIndex != -1 {
+		if markerIndex != 0 {
+			return nil, fmt.Errorf("section %q has typed-list codec marker after content", name)
+		}
+		values := make([]string, 0, len(lines)-1)
+		for _, line := range lines[1:] {
+			if !strings.HasPrefix(line, typedListEntryPrefix) {
+				return nil, fmt.Errorf("section %q has malformed typed-list codec entry", name)
+			}
+			value, err := strconv.Unquote(strings.TrimPrefix(line, typedListEntryPrefix))
+			if err != nil {
+				return nil, fmt.Errorf("section %q has malformed typed-list codec entry: %w", name, err)
+			}
+			values = append(values, value)
+		}
+		return values, nil
 	}
 	var values []string
-	for _, line := range strings.Split(text, "\n") {
+	for _, line := range lines {
 		line = strings.TrimLeft(line, " \t")
-		if strings.HasPrefix(line, "- sr-string: ") {
-			encoded := strings.TrimPrefix(line, "- sr-string: ")
-			if value, err := strconv.Unquote(encoded); err == nil {
-				values = append(values, value)
-				continue
-			}
-		}
 		if strings.HasPrefix(line, "- ") {
 			values = append(values, strings.TrimPrefix(line, "- "))
 		}
 	}
-	return values
+	return values, nil
 }
 
 func positiveSafeRevision(value int) bool { return value >= 1 && value <= 1<<53-1 }

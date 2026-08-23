@@ -249,9 +249,79 @@ func TestTypedMarkdownListsRoundTripArbitraryPermittedStrings(t *testing.T) {
 		if name == "session files" {
 			section = "Files"
 		}
-		if got := sectionList(doc, section); !reflect.DeepEqual(got, special) {
+		got, err := sectionList(doc, section)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, special) {
 			t.Fatalf("%s Markdown=%q want=%q", name, got, special)
 		}
+	}
+}
+
+func TestTypedListCodecRequiresExactSectionMarker(t *testing.T) {
+	t.Run("unmarked codec-like bullet remains literal", func(t *testing.T) {
+		doc, err := ParseDocument([]byte("---\nid: decision-1\nentity_type: decision\nproject_id: " + testProjectID + "\nrevision: 1\n---\n\n# Decision\n\n## Alternatives\n\n- sr-string: \"ordinary user text\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := sectionList(doc, "Alternatives")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []string{`sr-string: "ordinary user text"`}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("got=%q want=%q", got, want)
+		}
+	})
+	t.Run("renderer emits exact marker", func(t *testing.T) {
+		root := ledgerFixture(t)
+		state, _ := Load(root)
+		plan, err := Render(state, completeChanges())
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, file := range plan.Files {
+			if file.RelativePath == "docs/session-review/decisions/decision-1.md" && !bytes.Contains(file.Data, []byte(typedListCodecMarker)) {
+				t.Fatalf("decision lacks codec marker:\n%s", file.Data)
+			}
+			if file.RelativePath == "docs/session-review/decisions/decision-1.md" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("decision was not rendered")
+		}
+	})
+}
+
+func TestLoadRejectsMalformedOrAmbiguousTypedListCodec(t *testing.T) {
+	for name, replacement := range map[string]string{
+		"unclosed marker":          "<!-- session-reviewer:list-codec=v1 --",
+		"missing marker version":   "<!-- session-reviewer:list-codec -->",
+		"unknown version":          "<!-- session-reviewer:list-codec=v2 -->",
+		"duplicate marker":         "<!-- session-reviewer:list-codec=v1 -->\n<!-- session-reviewer:list-codec=v1 -->",
+		"marker after data":        "- ordinary\n<!-- session-reviewer:list-codec=v1 -->",
+		"invalid encoded entry":    "<!-- session-reviewer:list-codec=v1 -->\n- sr-string: \"unterminated",
+		"plain entry under marker": "<!-- session-reviewer:list-codec=v1 -->\n- ordinary",
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := ledgerFixture(t)
+			body := decisionDocument("decision-1", testProjectID)
+			body = bytes.Replace(body, []byte("## Alternatives\n"), []byte("## Alternatives\n\n"+replacement+"\n"), 1)
+			writeLedgerFile(t, root, "decisions/decision-1.md", body, 0o644)
+			before, _ := os.ReadFile(filepath.Join(root, "docs/session-review/decisions/decision-1.md"))
+			if _, err := Load(root); err == nil {
+				t.Fatal("malformed codec accepted")
+			} else if !strings.Contains(err.Error(), "typed-list codec") {
+				t.Fatalf("malformed codec failed for unrelated reason: %v", err)
+			}
+			after, _ := os.ReadFile(filepath.Join(root, "docs/session-review/decisions/decision-1.md"))
+			if !bytes.Equal(before, after) {
+				t.Fatal("failed load changed malformed file")
+			}
+		})
 	}
 }
 

@@ -17,6 +17,12 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
+const (
+	typedListCodecMarker = "<!-- session-reviewer:list-codec=v1 -->"
+	typedListCodecPrefix = "<!-- session-reviewer:list-codec"
+	typedListEntryPrefix = "- sr-string: "
+)
+
 // Render validates and applies changes to a private state clone. Every target
 // document is rendered successfully before a non-empty plan is returned.
 func Render(state State, changes ChangeSet) (WritePlan, error) {
@@ -583,16 +589,14 @@ func setKnownFrontmatter(doc *Document, fields map[string]any) error {
 }
 
 func bulletList(values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
 	var out strings.Builder
+	out.WriteString(typedListCodecMarker)
 	for _, value := range values {
-		out.WriteString("- sr-string: ")
-		out.WriteString(strconv.Quote(value))
 		out.WriteByte('\n')
+		out.WriteString(typedListEntryPrefix)
+		out.WriteString(strconv.Quote(value))
 	}
-	return strings.TrimSuffix(out.String(), "\n")
+	return out.String()
 }
 func evidenceMarkdown(values []EvidenceRef) string {
 	if len(values) == 0 {
@@ -719,8 +723,10 @@ func cloneSession(item SessionReport) SessionReport {
 	return item
 }
 
-// Apply preflights the complete plan, refuses stale or redirected targets,
-// writes in bytewise path order, and skips byte-identical files.
+// Apply preflights the complete plan, revalidates each target immediately
+// before its write, writes in bytewise path order, and skips byte-identical
+// files. It does not provide filesystem-wide linearizability: an uncooperative
+// mutation can still race the final check and atomic replacement.
 func Apply(plan WritePlan) ([]string, error) {
 	return applyWithHooks(plan, applyHooks{})
 }
@@ -786,6 +792,10 @@ func applyWithHooks(plan WritePlan, hooks applyHooks) ([]string, error) {
 				return written, err
 			}
 		}
+		// This closes the observable preflight-to-write window for later files.
+		// A filesystem TOCTOU nanorace remains between this recheck and rename.
+		// TODO(task-5): perform Apply under the project lock and prepared/applied
+		// receipt protocol so cooperative writers serialize and crashes recover.
 		skip, err := validatePlannedTarget(directory, item.file)
 		if err != nil {
 			return written, err
