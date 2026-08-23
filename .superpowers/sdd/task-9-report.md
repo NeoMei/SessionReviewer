@@ -59,5 +59,5 @@ Result on 2026-08-23: every applicable command exited 0. `quick_validate.py` pri
 
 - Native execution host: macOS arm64.
 - POSIX wrapper syntax and runtime are exercised on macOS.
-- PowerShell is not installed on this host, so PowerShell parser/runtime tests skip here; they are implemented and run automatically when `pwsh` or Windows PowerShell is available.
+- PowerShell is not installed on this host, so its parser/runtime tests skip here. Parser, argument, exit-code, missing-command, and shadowing cases run when `pwsh` or Windows PowerShell is available; the invalid-executable start-failure probe is POSIX-specific and additionally requires `pwsh`.
 - Windows amd64 cross-build and packaging-test cross-compilation run on macOS. Neither executable is run on a Windows host in this task.
