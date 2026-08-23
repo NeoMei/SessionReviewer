@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -518,7 +519,7 @@ func sectionList(doc Document, name string) []string {
 	found := false
 	for _, section := range doc.Sections {
 		if section.Name == name {
-			text = strings.TrimSpace(section.Body)
+			text = strings.Trim(section.Body, "\n")
 			found = true
 			break
 		}
@@ -531,9 +532,16 @@ func sectionList(doc Document, name string) []string {
 	}
 	var values []string
 	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(line, "- sr-string: ") {
+			encoded := strings.TrimPrefix(line, "- sr-string: ")
+			if value, err := strconv.Unquote(encoded); err == nil {
+				values = append(values, value)
+				continue
+			}
+		}
 		if strings.HasPrefix(line, "- ") {
-			values = append(values, strings.TrimSpace(strings.TrimPrefix(line, "- ")))
+			values = append(values, strings.TrimPrefix(line, "- "))
 		}
 	}
 	return values

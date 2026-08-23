@@ -2,7 +2,9 @@ package ledger
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -194,6 +196,62 @@ func TestLoadRoundTripsAllTypedFieldsAndStableOrder(t *testing.T) {
 	}
 	if got := []string{loaded.Timeline[0].ID, loaded.Timeline[1].ID}; !reflect.DeepEqual(got, []string{"event-0", "event-1"}) {
 		t.Fatalf("timeline order=%v", got)
+	}
+}
+
+func TestTypedMarkdownListsRoundTripArbitraryPermittedStrings(t *testing.T) {
+	root := ledgerFixture(t)
+	state, _ := Load(root)
+	special := []string{"", " ", "  indented", "- leading marker", "line one\nline two", "trailing ", "\ttabbed"}
+	changes := completeChanges()
+	changes.Current.UncommittedChanges = append([]string(nil), special...)
+	changes.Current.Blockers = append([]string(nil), special...)
+	changes.Current.OpenRisks = append([]string(nil), special...)
+	changes.Decisions[0].Alternatives = append([]string(nil), special...)
+	changes.Decisions[0].RejectedPaths = append([]string(nil), special...)
+	changes.OpenLoops[0].Attempts = append([]string(nil), special...)
+	changes.Sessions[0].GoalChanges = append([]string(nil), special...)
+	changes.Sessions[0].Files = append([]string(nil), special...)
+	changes.Sessions[0].Commits = append([]string(nil), special...)
+	changes.Sessions[0].Verification = append([]string(nil), special...)
+	plan, err := Render(state, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, got := range map[string][]string{
+		"current uncommitted":   loaded.CurrentState.UncommittedChanges,
+		"current blockers":      loaded.CurrentState.Blockers,
+		"current risks":         loaded.CurrentState.OpenRisks,
+		"decision alternatives": loaded.Decisions["decision-1"].Alternatives,
+		"decision rejected":     loaded.Decisions["decision-1"].RejectedPaths,
+		"loop attempts":         loaded.OpenLoops["loop-1"].Attempts,
+		"session goals":         loaded.Sessions["session-s1"].GoalChanges,
+		"session files":         loaded.Sessions["session-s1"].Files,
+		"session commits":       loaded.Sessions["session-s1"].Commits,
+		"session verification":  loaded.Sessions["session-s1"].Verification,
+	} {
+		if !reflect.DeepEqual(got, special) {
+			t.Fatalf("%s=%q want=%q", name, got, special)
+		}
+	}
+	for name, doc := range map[string]Document{
+		"session goals": loaded.documents.sessions["session-s1"].Document,
+		"session files": loaded.documents.sessions["session-s1"].Document,
+	} {
+		section := "Goal changes"
+		if name == "session files" {
+			section = "Files"
+		}
+		if got := sectionList(doc, section); !reflect.DeepEqual(got, special) {
+			t.Fatalf("%s Markdown=%q want=%q", name, got, special)
+		}
 	}
 }
 
@@ -389,13 +447,103 @@ func TestRenderFailureReturnsNoPlanAndWritesNothing(t *testing.T) {
 func TestRenderDoesNotMutateInputState(t *testing.T) {
 	root := ledgerFixture(t)
 	state, _ := Load(root)
-	before := cloneStateForTest(state)
+	before, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDocuments := snapshotLoadedDocuments(t, state)
 	if _, err := Render(state, completeChanges()); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(state, before) {
+	after, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) || !reflect.DeepEqual(beforeDocuments, snapshotLoadedDocuments(t, state)) {
 		t.Fatal("Render mutated input state")
 	}
+}
+
+func TestRenderDeepClonesLoadedDocumentsAndIsRepeatable(t *testing.T) {
+	root := ledgerFixture(t)
+	state, _ := Load(root)
+	first, err := Render(state, completeChanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(first); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotLoadedDocuments(t, loaded)
+	beforeState, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := cloneDecision(loaded.Decisions["decision-1"])
+	updated.Revision++
+	updated.Rationale = "Repeated renders must be pure."
+	changes := ChangeSet{Decisions: []Decision{updated}}
+	one, err := Render(loaded, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := Render(loaded, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(one, two) {
+		t.Fatal("repeated Render calls differ")
+	}
+	after := snapshotLoadedDocuments(t, loaded)
+	if !reflect.DeepEqual(before, after) {
+		for key, want := range before {
+			if !bytes.Equal(want, after[key]) {
+				t.Fatalf("Render mutated loaded document %s\nbefore:\n%s\nafter:\n%s", key, want, after[key])
+			}
+		}
+		t.Fatal("Render changed loaded document inventory")
+	}
+	afterState, err := json.Marshal(loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeState, afterState) {
+		t.Fatalf("Render mutated typed state: before=%s after=%s", beforeState, afterState)
+	}
+}
+
+func snapshotLoadedDocuments(t *testing.T, state State) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	add := func(name string, loaded *loadedDocument) {
+		if loaded == nil {
+			return
+		}
+		body, err := loaded.Document.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[name] = body
+	}
+	add("current", state.documents.current)
+	add("timeline", state.documents.timeline)
+	for id, loaded := range state.documents.decisions {
+		item := loaded
+		add("decision/"+id, &item)
+	}
+	for id, loaded := range state.documents.openLoops {
+		item := loaded
+		add("loop/"+id, &item)
+	}
+	for id, loaded := range state.documents.sessions {
+		item := loaded
+		add("session/"+id, &item)
+	}
+	return result
 }
 
 func TestApplyRejectsTraversalRedirectAndConcurrentEdit(t *testing.T) {
@@ -607,6 +755,65 @@ func TestApplyRejectsInvalidBytesBeforeWritingAnyFile(t *testing.T) {
 	}
 }
 
+func TestApplyRevalidatesEachTargetImmediatelyBeforeWrite(t *testing.T) {
+	root := ledgerFixture(t)
+	files := make([]PlannedFile, 31)
+	for i := range files {
+		id := fmt.Sprintf("decision-%02d", i)
+		files[i] = PlannedFile{
+			RelativePath: "docs/session-review/decisions/" + id + ".md",
+			Data:         decisionDocument(id, testProjectID),
+			Perm:         0o644,
+		}
+	}
+	last := filepath.Join(root, filepath.FromSlash(files[30].RelativePath))
+	const userEdit = "user edit after earlier writes\n"
+	written, err := applyWithHooks(WritePlan{ProjectRoot: root, Files: files}, applyHooks{
+		beforeWrite: func(index int, _ PlannedFile) error {
+			if index != 30 {
+				return nil
+			}
+			return os.WriteFile(last, []byte(userEdit), 0o600)
+		},
+	})
+	if err == nil {
+		t.Fatal("late concurrent edit was overwritten")
+	}
+	if len(written) != 30 {
+		t.Fatalf("written=%d want=30 err=%v", len(written), err)
+	}
+	body, readErr := os.ReadFile(last)
+	if readErr != nil || string(body) != userEdit {
+		t.Fatalf("last=%q err=%v", body, readErr)
+	}
+}
+
+func TestApplyChecksExpectationBeforeIdenticalShortCircuit(t *testing.T) {
+	t.Run("unexpected exact creator", func(t *testing.T) {
+		root := ledgerFixture(t)
+		relative := "docs/session-review/decisions/exact.md"
+		data := decisionDocument("exact", testProjectID)
+		writeLedgerFile(t, root, "decisions/exact.md", data, 0o644)
+		plan := WritePlan{ProjectRoot: root, Files: []PlannedFile{{RelativePath: relative, Data: data, Perm: 0o644}}}
+		if _, err := Apply(plan); err == nil {
+			t.Fatal("unexpected exact creator was accepted")
+		}
+	})
+	t.Run("wrong expected mode with identical data", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows does not expose POSIX permission bits")
+		}
+		root := ledgerFixture(t)
+		relative := "docs/session-review/decisions/mode.md"
+		data := decisionDocument("mode", testProjectID)
+		writeLedgerFile(t, root, "decisions/mode.md", data, 0o600)
+		plan := WritePlan{ProjectRoot: root, Files: []PlannedFile{{RelativePath: relative, Data: data, Perm: 0o600, ExpectedExists: true, ExpectedData: data, ExpectedPerm: 0o644}}}
+		if _, err := Apply(plan); err == nil {
+			t.Fatal("wrong expected mode was accepted")
+		}
+	})
+}
+
 func ledgerFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -668,22 +875,4 @@ func ledgerBytes(t *testing.T, root string) map[string][]byte {
 		return nil
 	})
 	return result
-}
-
-func cloneStateForTest(state State) State {
-	clone := state
-	clone.Timeline = append([]TimelineEvent(nil), state.Timeline...)
-	clone.Decisions = make(map[string]Decision, len(state.Decisions))
-	for id, item := range state.Decisions {
-		clone.Decisions[id] = item
-	}
-	clone.OpenLoops = make(map[string]OpenLoop, len(state.OpenLoops))
-	for id, item := range state.OpenLoops {
-		clone.OpenLoops[id] = item
-	}
-	clone.Sessions = make(map[string]SessionReport, len(state.Sessions))
-	for id, item := range state.Sessions {
-		clone.Sessions[id] = item
-	}
-	return clone
 }

@@ -46,6 +46,17 @@ type Document struct {
 	Sections    []Section
 }
 
+// Clone returns a structurally independent document. Rendering and reparsing
+// deliberately duplicates every YAML node and section string while preserving
+// the stable serialized representation.
+func (d Document) Clone() (Document, error) {
+	body, err := d.Render()
+	if err != nil {
+		return Document{}, err
+	}
+	return ParseDocument(body)
+}
+
 func ParseDocument(src []byte) (Document, error) {
 	if len(src) > MaxDocumentBytes {
 		return Document{}, invalidDocument("document exceeds size limit")

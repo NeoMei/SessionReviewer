@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -52,7 +53,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 	}
 
 	if changes.Current != nil {
-		doc, err := renderCurrentDocument(state.CurrentState, next.CurrentState, state.documents.current)
+		doc, err := renderCurrentDocument(state.CurrentState, next.CurrentState, next.documents.current)
 		if err != nil {
 			return fail(err)
 		}
@@ -61,7 +62,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		}
 	}
 	if len(changes.Timeline) != 0 {
-		doc, err := renderTimelineDocument(state.Timeline, next.Timeline, state.documents.timeline, state.ProjectID)
+		doc, err := renderTimelineDocument(state.Timeline, next.Timeline, next.documents.timeline, state.ProjectID)
 		if err != nil {
 			return fail(err)
 		}
@@ -74,7 +75,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 	sort.Slice(decisions, func(i, j int) bool { return decisions[i].ID < decisions[j].ID })
 	for _, incoming := range decisions {
 		old := state.Decisions[incoming.ID]
-		loaded, loadedOK := state.documents.decisions[incoming.ID]
+		loaded, loadedOK := next.documents.decisions[incoming.ID]
 		doc, err := renderDecisionDocument(old, incoming, pointerIf(loaded, loadedOK))
 		if err != nil {
 			return fail(err)
@@ -89,7 +90,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 	sort.Slice(loops, func(i, j int) bool { return loops[i].ID < loops[j].ID })
 	for _, incoming := range loops {
 		old := state.OpenLoops[incoming.ID]
-		loaded, ok := state.documents.openLoops[incoming.ID]
+		loaded, ok := next.documents.openLoops[incoming.ID]
 		doc, err := renderOpenLoopDocument(old, incoming, pointerIf(loaded, ok))
 		if err != nil {
 			return fail(err)
@@ -104,7 +105,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 	for _, incoming := range sessions {
 		old := state.Sessions[incoming.ID]
-		loaded, ok := state.documents.sessions[incoming.ID]
+		loaded, ok := next.documents.sessions[incoming.ID]
 		doc, err := renderSessionDocument(old, incoming, pointerIf(loaded, ok))
 		if err != nil {
 			return fail(err)
@@ -189,11 +190,7 @@ func cloneLoadedMap(source map[string]loadedDocument) (map[string]loadedDocument
 }
 
 func cloneLoaded(source loadedDocument) (loadedDocument, error) {
-	body, err := source.Document.Render()
-	if err != nil {
-		return loadedDocument{}, err
-	}
-	doc, err := ParseDocument(body)
+	doc, err := source.Document.Clone()
 	if err != nil {
 		return loadedDocument{}, err
 	}
@@ -591,8 +588,8 @@ func bulletList(values []string) string {
 	}
 	var out strings.Builder
 	for _, value := range values {
-		out.WriteString("- ")
-		out.WriteString(strings.ReplaceAll(value, "\n", " "))
+		out.WriteString("- sr-string: ")
+		out.WriteString(strconv.Quote(value))
 		out.WriteByte('\n')
 	}
 	return strings.TrimSuffix(out.String(), "\n")
@@ -725,6 +722,14 @@ func cloneSession(item SessionReport) SessionReport {
 // Apply preflights the complete plan, refuses stale or redirected targets,
 // writes in bytewise path order, and skips byte-identical files.
 func Apply(plan WritePlan) ([]string, error) {
+	return applyWithHooks(plan, applyHooks{})
+}
+
+type applyHooks struct {
+	beforeWrite func(index int, file PlannedFile) error
+}
+
+func applyWithHooks(plan WritePlan, hooks applyHooks) ([]string, error) {
 	if plan.ProjectRoot == "" {
 		return nil, errors.New("write plan has no project root")
 	}
@@ -755,23 +760,11 @@ func Apply(plan WritePlan) ([]string, error) {
 		if len(file.Data) > MaxDocumentBytes || !utf8.Valid(file.Data) {
 			return nil, fmt.Errorf("invalid document bytes for %s", file.RelativePath)
 		}
-		current, currentPerm, readErr := readLedgerRegular(directory, file.RelativePath, false)
-		if readErr == nil {
-			if bytes.Equal(current, file.Data) {
-				ready = append(ready, prepared{file: file, skip: true})
-				continue
-			}
-			if !file.ExpectedExists || !bytes.Equal(current, file.ExpectedData) || currentPerm != file.ExpectedPerm {
-				return nil, fmt.Errorf("ledger file %s changed after render", file.RelativePath)
-			}
-		} else if errors.Is(readErr, os.ErrNotExist) || safelyMissingTargetParent(directory, file.RelativePath) {
-			if file.ExpectedExists {
-				return nil, fmt.Errorf("ledger file %s disappeared after render", file.RelativePath)
-			}
-		} else {
-			return nil, readErr
+		skip, err := validatePlannedTarget(directory, file)
+		if err != nil {
+			return nil, err
 		}
-		ready = append(ready, prepared{file: file})
+		ready = append(ready, prepared{file: file, skip: skip})
 	}
 	// Directory creation begins only after every target and expected byte string
 	// has passed preflight.
@@ -784,8 +777,20 @@ func Apply(plan WritePlan) ([]string, error) {
 		}
 	}
 	var written []string
-	for _, item := range ready {
+	for index, item := range ready {
 		if item.skip {
+			continue
+		}
+		if hooks.beforeWrite != nil {
+			if err := hooks.beforeWrite(index, item.file); err != nil {
+				return written, err
+			}
+		}
+		skip, err := validatePlannedTarget(directory, item.file)
+		if err != nil {
+			return written, err
+		}
+		if skip {
 			continue
 		}
 		if err := atomicfile.WriteRoot(directory.Root, filepath.FromSlash(item.file.RelativePath), item.file.Data, item.file.Perm); err != nil {
@@ -794,6 +799,25 @@ func Apply(plan WritePlan) ([]string, error) {
 		written = append(written, item.file.RelativePath)
 	}
 	return written, nil
+}
+
+func validatePlannedTarget(directory *pathguard.Directory, file PlannedFile) (bool, error) {
+	current, currentPerm, readErr := readLedgerRegular(directory, file.RelativePath, false)
+	if readErr == nil {
+		// Expectations describe the exact snapshot Render consumed. Validate
+		// them before treating desired bytes as an idempotent no-op.
+		if !file.ExpectedExists || !bytes.Equal(current, file.ExpectedData) || currentPerm != file.ExpectedPerm {
+			return false, fmt.Errorf("ledger file %s changed after render", file.RelativePath)
+		}
+		return bytes.Equal(current, file.Data), nil
+	}
+	if errors.Is(readErr, os.ErrNotExist) || safelyMissingTargetParent(directory, file.RelativePath) {
+		if file.ExpectedExists {
+			return false, fmt.Errorf("ledger file %s disappeared after render", file.RelativePath)
+		}
+		return false, nil
+	}
+	return false, readErr
 }
 
 func safelyMissingTargetParent(directory *pathguard.Directory, relative string) bool {
