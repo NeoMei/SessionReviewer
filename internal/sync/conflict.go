@@ -289,7 +289,7 @@ func SelectResolution(record ConflictRecord, resolution Resolution, liveProject,
 	case ManualMerge:
 		selected = *manual
 	}
-	selected, err = validateSelectedDocument(record, documents.base, selected)
+	selected, err = validateSelectedDocument(record, documents.base, documents.identity, selected)
 	if err != nil {
 		return syncdoc.Document{}, err
 	}
@@ -306,6 +306,9 @@ func SelectResolution(record ConflictRecord, resolution Resolution, liveProject,
 }
 
 func MarkConflictResolved(record ConflictRecord, action ResolutionAction, resolvedHash string, resolvedAt time.Time) (ConflictRecord, error) {
+	if _, _, sensitive := sensitiveConflictCandidate(record); sensitive {
+		return ConflictRecord{}, ErrSensitiveContent
+	}
 	if err := validateConflictRecord(record); err != nil {
 		return ConflictRecord{}, err
 	}
@@ -328,6 +331,7 @@ func MarkConflictResolved(record ConflictRecord, action ResolutionAction, resolv
 
 type conflictDocuments struct {
 	base, project, vault *syncdoc.Document
+	identity             syncdoc.Identity
 }
 
 func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
@@ -411,7 +415,7 @@ func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
 			}
 		}
 	}
-	return conflictDocuments{base: base, project: project, vault: vault}, nil
+	return conflictDocuments{base: base, project: project, vault: vault, identity: *expected}, nil
 }
 
 func validateLiveConflictCandidate(embedded []byte, embeddedHash, relative string, live Candidate) error {
@@ -434,18 +438,15 @@ func validateLiveConflictCandidate(embedded []byte, embeddedHash, relative strin
 	return nil
 }
 
-func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, selected syncdoc.Document) (syncdoc.Document, error) {
+func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, expectedIdentity syncdoc.Identity, selected syncdoc.Document) (syncdoc.Document, error) {
 	identity, err := selected.Identity()
-	if err != nil || identity.ID != record.EntityID || identity.ProjectID != record.ProjectID {
+	if err != nil || identity != expectedIdentity || identity.ID != record.EntityID || identity.ProjectID != record.ProjectID {
 		return syncdoc.Document{}, syncdoc.ErrReservedField
 	}
 	if base != nil {
 		baseIdentity, baseErr := base.Identity()
 		if baseErr != nil || identity != baseIdentity {
 			return syncdoc.Document{}, syncdoc.ErrReservedField
-		}
-		if err := selected.ValidateHumanChanges(*base); err != nil {
-			return syncdoc.Document{}, err
 		}
 	}
 	rendered, err := selected.Render()
@@ -454,6 +455,12 @@ func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, sel
 	}
 	if result := redact.Default().Text(string(rendered)); len(result.Findings) != 0 {
 		return syncdoc.Document{}, ErrSensitiveContent
+	}
+	if base != nil {
+		selected, err = selected.FinalizeHumanMerge(*base, true)
+		if err != nil {
+			return syncdoc.Document{}, err
+		}
 	}
 	selected, err = selected.WithSyncStatus("synced")
 	if err != nil {

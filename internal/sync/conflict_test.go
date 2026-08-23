@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -235,13 +236,9 @@ func TestSelectResolutionRendersLiveCandidateAndDoesNotTrustClaimedHash(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := selected.Render()
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := projectDocument.Render()
-	if !bytes.Equal(got, want) {
-		t.Fatalf("selected candidate changed:\ngot=%s\nwant=%s", got, want)
+	selectedUnits := selected.Units()
+	if string(selectedUnits[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "title"}].Value) != "Project title\n" || string(selectedUnits[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}].Value) != "4\n" {
+		t.Fatalf("selected units=%+v", selectedUnits)
 	}
 
 	drifted := editFrontmatterUnit(t, projectDocument, "title", "Live drift\n")
@@ -338,6 +335,82 @@ func TestSelectResolutionManualReturnsValidatedDocument(t *testing.T) {
 	}
 }
 
+func TestSelectResolutionFinalizesExistingHumanMergeExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	project := editFrontmatterUnit(t, base, "title", "Project title\n")
+	project = editFrontmatterUnit(t, project, "plugin_key", "project-unknown\n")
+	vault := editFrontmatterUnit(t, base, "tags", "[vault]\n")
+	manual := editFrontmatterUnit(t, base, "title", "Manual title\n")
+	manual = editFrontmatterUnit(t, manual, "plugin_key", "manual-unknown\n")
+	record := conflictRecordForDocuments(t, relative, &base, &project, &vault)
+
+	for _, tc := range []struct {
+		name, title, unknown string
+		resolution           Resolution
+		manual               *syncdoc.Document
+	}{
+		{name: "accept-project", title: "Project title\n", unknown: "project-unknown\n", resolution: Resolution{ConflictID: record.ID, Action: AcceptProject}},
+		{name: "manual", title: "Manual title\n", unknown: "manual-unknown\n", resolution: Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/already/safely/opened/manual.md"}, manual: &manual},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := SelectResolution(record, tc.resolution, candidate(relative, project), candidate(relative, vault), tc.manual)
+			if err != nil {
+				t.Fatal(err)
+			}
+			units := selected.Units()
+			assertUnitValue := func(name, want string) {
+				t.Helper()
+				if got := string(units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: name}].Value); got != want {
+					t.Fatalf("%s=%q want=%q", name, got, want)
+				}
+			}
+			assertUnitValue("revision", "4\n")
+			assertUnitValue("sync_status", "synced\n")
+			assertUnitValue("title", tc.title)
+			assertUnitValue("plugin_key", tc.unknown)
+			baseUnits := base.Units()
+			for _, name := range []string{"source_sessions", "evidence", "supersedes"} {
+				key := syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: name}
+				if !reflect.DeepEqual(units[key], baseUnits[key]) {
+					t.Fatalf("protected %s changed: got=%+v want=%+v", name, units[key], baseUnits[key])
+				}
+			}
+		})
+	}
+}
+
+func TestSelectResolutionExistingNoSemanticChangeDoesNotIncrementRevision(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	vault := editFrontmatterUnit(t, base, "tags", "[vault]\n")
+	record := conflictRecordForDocuments(t, relative, &base, &base, &vault)
+
+	for _, tc := range []struct {
+		name       string
+		resolution Resolution
+		manual     *syncdoc.Document
+	}{
+		{name: "accept-project", resolution: Resolution{ConflictID: record.ID, Action: AcceptProject}},
+		{name: "manual", resolution: Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/already/safely/opened/manual.md"}, manual: &base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := SelectResolution(record, tc.resolution, candidate(relative, base), candidate(relative, vault), tc.manual)
+			if err != nil {
+				t.Fatal(err)
+			}
+			units := selected.Units()
+			if got := string(units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}].Value); got != "3\n" {
+				t.Fatalf("revision=%q want=3", got)
+			}
+		})
+	}
+}
+
 func TestSelectResolutionRejectsMalformedDuplicateAndMissingCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -402,6 +475,68 @@ func TestSelectResolutionSupportsEmptyBaseNewEntity(t *testing.T) {
 	}
 }
 
+func TestSelectResolutionEmptyBaseManualRequiresCompleteEmbeddedIdentity(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	decision := documentAtRevision(t, base, relative, 1)
+	openLoop := parseInlineDocument(t, relative, "---\nid: decision-sync\nentity_type: open_loop\nproject_id: project-1111111111111111\nrevision: 1\nsync_status: synced\ntitle: Loop\nstatus: open\ntags: []\nsource_sessions: []\nevidence: []\n---\n\n# Loop\n\n## Attempted paths\n")
+
+	for _, tc := range []struct {
+		name           string
+		project, vault *syncdoc.Document
+		liveProject    Candidate
+		liveVault      Candidate
+	}{
+		{name: "both-present", project: &decision, vault: &decision, liveProject: candidate(relative, decision), liveVault: candidate(relative, decision)},
+		{name: "project-only", project: &decision, liveProject: candidate(relative, decision)},
+		{name: "vault-only", vault: &decision, liveVault: candidate(relative, decision)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := conflictRecordForDocuments(t, relative, nil, tc.project, tc.vault)
+			_, err := SelectResolution(record, Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/already/safely/opened/manual.md"}, tc.liveProject, tc.liveVault, &openLoop)
+			if !errors.Is(err, syncdoc.ErrReservedField) {
+				t.Fatalf("identity err=%v", err)
+			}
+		})
+	}
+}
+
+func TestSelectResolutionEmptyBaseRejectsMismatchedEmbeddedIdentities(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	decision := documentAtRevision(t, base, relative, 1)
+	openLoop := parseInlineDocument(t, relative, "---\nid: decision-sync\nentity_type: open_loop\nproject_id: project-1111111111111111\nrevision: 1\nsync_status: synced\ntitle: Loop\nstatus: open\ntags: []\nsource_sessions: []\nevidence: []\n---\n\n# Loop\n\n## Attempted paths\n")
+	record := conflictRecordForDocuments(t, relative, nil, &decision, &openLoop)
+	_, err := SelectResolution(record, Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/already/safely/opened/manual.md"}, candidate(relative, decision), candidate(relative, openLoop), &decision)
+	if !errors.Is(err, syncdoc.ErrReservedField) {
+		t.Fatalf("identity err=%v", err)
+	}
+}
+
+func TestSelectResolutionEmptyBaseManualAcceptsMatchingSingleSideIdentity(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	decision := documentAtRevision(t, base, relative, 1)
+	record := conflictRecordForDocuments(t, relative, nil, &decision, nil)
+	selected, err := SelectResolution(record, Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/already/safely/opened/manual.md"}, candidate(relative, decision), Candidate{}, &decision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := selected.Identity()
+	if err != nil || identity != (syncdoc.Identity{ID: "decision-sync", EntityType: "decision", ProjectID: "project-1111111111111111"}) {
+		t.Fatalf("identity=%+v err=%v", identity, err)
+	}
+	if revision := selected.Units()[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]; string(revision.Value) != "1\n" {
+		t.Fatalf("revision=%q want=1", revision.Value)
+	}
+}
+
 func TestMarkConflictResolvedIsPureAndIdempotent(t *testing.T) {
 	t.Parallel()
 
@@ -447,6 +582,46 @@ func TestMarkConflictResolvedIsPureAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestMarkConflictResolvedRedactsEveryCandidateBeforeTrustingHashesOrID(t *testing.T) {
+	t.Parallel()
+
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Base: []byte("safe-base"), Project: []byte("safe-project"), Vault: []byte("safe-vault"), Suggested: []byte("safe-suggested"), CreatedAt: conflictTime,
+	})
+	if err != nil || artifact.Record == nil {
+		t.Fatalf("artifact=%+v err=%v", artifact, err)
+	}
+	for _, field := range []string{"base", "project", "vault", "suggested"} {
+		field := field
+		t.Run(field, func(t *testing.T) {
+			canary := "api_key=sk-abcdefghijklmnopqrstuvwxyz012345-" + field
+			tampered := cloneConflictRecord(*artifact.Record)
+			switch field {
+			case "base":
+				tampered.Base = []byte(canary)
+				tampered.BaseHash = strings.Repeat("f", 64)
+			case "project":
+				tampered.Project = []byte(canary)
+				tampered.ProjectHash = strings.Repeat("f", 64)
+			case "vault":
+				tampered.Vault = []byte(canary)
+				tampered.VaultHash = strings.Repeat("f", 64)
+			case "suggested":
+				tampered.Suggested = []byte(canary)
+			}
+			tampered.ID = "tampered-id"
+			resolved, markErr := MarkConflictResolved(tampered, AcceptProject, strings.Repeat("a", 64), conflictTime.Add(time.Hour))
+			if !errors.Is(markErr, ErrSensitiveContent) || strings.Contains(markErr.Error(), canary) {
+				t.Fatalf("err=%v", markErr)
+			}
+			if strings.Contains(fmt.Sprintf("%+v", resolved), canary) {
+				t.Fatal("failed resolution returned secret-bearing record")
+			}
+		})
+	}
+}
+
 func TestSelectResolutionAlreadyResolvedAllowsOnlySameActionAndHash(t *testing.T) {
 	t.Parallel()
 
@@ -455,7 +630,15 @@ func TestSelectResolutionAlreadyResolvedAllowsOnlySameActionAndHash(t *testing.T
 	project := editFrontmatterUnit(t, base, "title", "Project title\n")
 	vault := editFrontmatterUnit(t, base, "tags", "[vault]\n")
 	record := conflictRecordForDocuments(t, relative, &base, &project, &vault)
-	projectBytes, _ := project.Render()
+	finalProject, err := project.FinalizeHumanMerge(base, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalProject, err = finalProject.WithSyncStatus("synced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectBytes, _ := finalProject.Render()
 	resolved, err := MarkConflictResolved(record, AcceptProject, syncdoc.ContentHash(projectBytes), conflictTime.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
