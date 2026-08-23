@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 
+	applyengine "github.com/neomei/SessionReviewer/internal/apply"
+	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
@@ -18,6 +20,18 @@ type Diagnostic struct {
 func writeDiagnostic(w io.Writer, action string, err error) int {
 	diagnostic := fallbackDiagnostic(action)
 	switch {
+	case errors.Is(err, cursor.ErrStale) && action == "apply":
+		diagnostic = Diagnostic{
+			Code:    "E_APPLY_CURSOR_STALE",
+			Message: "accepted cursor does not match the proposal evidence",
+			Hint:    "prepare a fresh evidence packet and Skill proposal; do not edit cursor files",
+		}
+	case errors.Is(err, applyengine.ErrPendingReceiptConflict) && action == "apply":
+		diagnostic = Diagnostic{
+			Code:    "E_APPLY_RECEIPT_CONFLICT",
+			Message: "another proposal owns an unfinished apply transaction",
+			Hint:    "retry with the same --proposal and --evidence inputs to recover that transaction",
+		}
 	case errors.Is(err, prepare.ErrCursorSourceDrift):
 		diagnostic = Diagnostic{
 			Code:    "E_CURSOR_DRIFT",
@@ -96,6 +110,18 @@ func fallbackDiagnostic(action string) Diagnostic {
 			Code:    "E_PREPARE_FAILED",
 			Message: "prepare failed",
 			Hint:    "run session-reviewer help and retry with explicit paths",
+		}
+	case "apply":
+		return Diagnostic{
+			Code:    "E_APPLY_FAILED",
+			Message: "proposal application failed",
+			Hint:    "inspect the accepted ledger, then retry with the original --proposal and --evidence inputs",
+		}
+	case "resume", "history":
+		return Diagnostic{
+			Code:    "E_RECOVERY_FAILED",
+			Message: "ledger-only recovery failed",
+			Hint:    "inspect and repair the accepted Markdown ledger, then retry --ledger-only",
 		}
 	default:
 		return Diagnostic{

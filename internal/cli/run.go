@@ -15,20 +15,31 @@ Commands:
   init                  Preview or write project and Obsidian initialization
   prepare review        Prepare review evidence, optionally from the start
   prepare checkpoint    Prepare incremental checkpoint evidence
+  apply                 Validate and apply a Skill proposal
+  resume                Render accepted ledger recovery state
+  history               Render accepted cross-session history
   version               Print the version
 
 Options:
   init: --project --vault [--data-dir] [--write]
   prepare: --output [--sessions-root] [--cwd] [--session]
            [--current-session-id] [--data-dir] [--from-start for review]
+  apply: --proposal --evidence [--project] [--data-dir]
+  resume/history: --ledger-only [--project]
+
+Apply validates a Skill proposal against its exact bounded evidence packet.
+Ledger-only resume and history do not process pending sessions.
 
 Examples:
   session-reviewer init --project /path/to/project --vault /path/to/vault
   session-reviewer init --project /path/to/project --vault /path/to/vault --write
   session-reviewer prepare review --output /path/to/project/review.json
   session-reviewer prepare checkpoint --session SESSION_ID --sessions-root /path/to/sessions --output /path/to/project/checkpoint.json
+  session-reviewer apply --proposal proposal.json --evidence evidence.json
+  session-reviewer resume --ledger-only --project /path/to/project
+  session-reviewer history --ledger-only --project /path/to/project
 
-Run session-reviewer init --help or session-reviewer prepare <mode> --help for details.
+Run session-reviewer <command> --help for details.
 `
 
 func Run(args []string, stdout, stderr io.Writer) int {
@@ -47,6 +58,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runInit(args[1:], stdout, stderr)
 	case "prepare":
 		return runPrepare(args[1:], stdout, stderr)
+	case "apply":
+		return runApply(args[1:], stdout, stderr)
+	case "resume":
+		return runRecovery("resume", args[1:], stdout, stderr)
+	case "history":
+		return runRecovery("history", args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
 		return 2

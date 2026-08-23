@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	applyengine "github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
@@ -53,6 +55,21 @@ func TestRunHelpListsEveryFoundationCommand(t *testing.T) {
 		t.Fatalf("code=%d err=%q", code, errOut.String())
 	}
 	for _, text := range []string{"init", "prepare review", "prepare checkpoint", "version", "--sessions-root", "--current-session-id"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("help=%q missing %q", out.String(), text)
+		}
+	}
+}
+
+func TestRunHelpListsLedgerCommandsAndBoundaries(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"help"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, text := range []string{
+		"apply", "resume", "history", "--proposal", "--evidence", "--ledger-only",
+		"validates a Skill proposal", "do not process pending sessions",
+	} {
 		if !strings.Contains(out.String(), text) {
 			t.Fatalf("help=%q missing %q", out.String(), text)
 		}
@@ -105,6 +122,21 @@ func TestRunSubcommandHelpIsCompleteAndUsesStdout(t *testing.T) {
 			args: []string{"prepare", "checkpoint", "-h"},
 			want: []string{"Usage:", "Options:", "Examples:", "prepare checkpoint", "--sessions-root", "--cwd", "--session", "--current-session-id", "--data-dir", "--output"},
 		},
+		{
+			name: "apply",
+			args: []string{"apply", "--help"},
+			want: []string{"Usage:", "Options:", "Examples:", "apply", "--proposal", "--evidence", "--project", "--data-dir", "validates a Skill proposal"},
+		},
+		{
+			name: "resume",
+			args: []string{"resume", "help"},
+			want: []string{"Usage:", "Options:", "Examples:", "resume", "--ledger-only", "--project", "does not process pending sessions"},
+		},
+		{
+			name: "history",
+			args: []string{"history", "-h"},
+			want: []string{"Usage:", "Options:", "Examples:", "history", "--ledger-only", "--project", "does not process pending sessions"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -118,6 +150,216 @@ func TestRunSubcommandHelpIsCompleteAndUsesStdout(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecoveryRequiresLedgerOnly(t *testing.T) {
+	for _, command := range []string{"resume", "history"} {
+		t.Run(command, func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := Run([]string{command, "--project", t.TempDir()}, &out, &errOut)
+			if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), "--ledger-only") || strings.Contains(errOut.String(), "E_") {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+func TestLedgerCommandsRejectUnknownFlagsPositionalsAndPromptsAsSyntax(t *testing.T) {
+	tests := [][]string{
+		{"apply", "--proposal", "proposal.json", "--evidence", "evidence.json", "extra"},
+		{"apply", "--unknown"},
+		{"resume", "--ledger-only", "continue this project"},
+		{"resume", "--ledger-only", "--prompt", "continue"},
+		{"history", "--ledger-only", "extra"},
+		{"history", "--ledger-only=false"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, "_"), func(t *testing.T) {
+			var out, errOut bytes.Buffer
+			code := Run(args, &out, &errOut)
+			if code != 2 || out.Len() != 0 || errOut.Len() == 0 || strings.Contains(errOut.String(), "E_") || strings.Contains(errOut.String(), "recovery:") {
+				t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+			}
+		})
+	}
+}
+
+func TestApplyRequiresProposalAndEvidenceBeforeResolvingDefaults(t *testing.T) {
+	for _, args := range [][]string{{"apply"}, {"apply", "--proposal", "proposal.json"}, {"apply", "--evidence", "evidence.json"}} {
+		var out, errOut bytes.Buffer
+		code := Run(args, &out, &errOut)
+		if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), "requires --proposal and --evidence") || strings.Contains(errOut.String(), "E_") {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+		}
+	}
+}
+
+func TestApplyReportsDeterministicResult(t *testing.T) {
+	fixture := newCLIApplyFixture(t, "")
+	var out, errOut bytes.Buffer
+	code := Run([]string{
+		"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence,
+		"--project", fixture.project, "--data-dir", fixture.data,
+	}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	wantPrefix := "project_id: project-1111111111111111\nsession_id: session-1\ncursor_range: 1-2\nchanged_files:\n"
+	if !strings.HasPrefix(out.String(), wantPrefix) || !strings.HasSuffix(out.String(), "cursor_advanced: true\nalready_applied: false\n") {
+		t.Fatalf("stdout=%q", out.String())
+	}
+	assertApplyOutputContract(t, out.String())
+
+	first := out.String()
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{
+		"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence,
+		"--project", fixture.project, "--data-dir", fixture.data,
+	}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "changed_files: []\n") || !strings.HasSuffix(out.String(), "cursor_advanced: false\nalready_applied: true\n") {
+		t.Fatalf("repeat code=%d stdout=%q stderr=%q first=%q", code, out.String(), errOut.String(), first)
+	}
+	assertApplyOutputContract(t, out.String())
+}
+
+func TestApplyDefaultsProjectAndDataWithoutFollowingWorkingDirectorySymlink(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	defaultData := filepath.Join(home, ".local", "share", "session-reviewer")
+	fixture := newCLIApplyFixture(t, defaultData)
+	link := filepath.Join(root, "project-link")
+	if err := os.Symlink(fixture.project, link); err != nil {
+		t.Fatal(err)
+	}
+	oldWorkingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(link); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+	setCurrentEnv(t, platform.Env{GOOS: "darwin", Home: home})
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "cursor_advanced: true") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRecoveryCommandsPrintAcceptedMarkdownOnlyAndNeverMutateGit(t *testing.T) {
+	fixture := newCLIApplyFixture(t, "")
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence, "--project", fixture.project, "--data-dir", fixture.data}, &out, &errOut); code != 0 {
+		t.Fatalf("apply code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	const canary = "CLI-PENDING-RAW-CONTENT-CANARY"
+	if err := os.WriteFile(filepath.Join(fixture.project, "pending-evidence.json"), []byte(canary), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, fixture.project, "init")
+	gitRun(t, fixture.project, "config", "user.email", "session-reviewer@example.invalid")
+	gitRun(t, fixture.project, "config", "user.name", "SessionReviewer Test")
+	gitRun(t, fixture.project, "add", ".")
+	gitRun(t, fixture.project, "commit", "-m", "fixture")
+	beforeHead := gitRun(t, fixture.project, "rev-parse", "HEAD")
+	beforeTree := gitRun(t, fixture.project, "write-tree")
+	beforeStatus := gitRun(t, fixture.project, "status", "--porcelain=v1", "--untracked-files=all")
+
+	for _, command := range []string{"resume", "history"} {
+		out.Reset()
+		errOut.Reset()
+		code := Run([]string{command, "--ledger-only", "--project", fixture.project}, &out, &errOut)
+		if code != 0 || errOut.Len() != 0 || !strings.HasPrefix(out.String(), "# ") || strings.Contains(out.String(), canary) {
+			t.Fatalf("%s code=%d stdout=%q stderr=%q", command, code, out.String(), errOut.String())
+		}
+	}
+	if got := gitRun(t, fixture.project, "rev-parse", "HEAD"); got != beforeHead {
+		t.Fatalf("HEAD changed: before=%q after=%q", beforeHead, got)
+	}
+	if got := gitRun(t, fixture.project, "write-tree"); got != beforeTree {
+		t.Fatalf("index tree changed: before=%q after=%q", beforeTree, got)
+	}
+	if got := gitRun(t, fixture.project, "status", "--porcelain=v1", "--untracked-files=all"); got != beforeStatus {
+		t.Fatalf("status changed: before=%q after=%q", beforeStatus, got)
+	}
+}
+
+func TestLedgerOperationalDiagnosticsAreStableAndPrivate(t *testing.T) {
+	const canary = "RAW-ERROR-AND-PATH-CANARY"
+	tests := []struct {
+		action string
+		err    error
+		code   string
+		hint   string
+	}{
+		{action: "apply", err: fmt.Errorf("%s: %w", canary, cursor.ErrStale), code: "E_APPLY_CURSOR_STALE", hint: "prepare a fresh"},
+		{action: "apply", err: fmt.Errorf("%s: %w", canary, applyengine.ErrPendingReceiptConflict), code: "E_APPLY_RECEIPT_CONFLICT", hint: "same --proposal and --evidence"},
+		{action: "apply", err: errors.New(canary), code: "E_APPLY_FAILED", hint: "original --proposal and --evidence"},
+		{action: "resume", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
+		{action: "history", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
+	}
+	for _, test := range tests {
+		t.Run(test.action+test.code, func(t *testing.T) {
+			var out bytes.Buffer
+			if code := writeDiagnostic(&out, test.action, test.err); code != 1 {
+				t.Fatalf("exit=%d", code)
+			}
+			if got := out.String(); !strings.Contains(got, test.code) || !strings.Contains(got, test.hint) || strings.Contains(got, canary) {
+				t.Fatalf("diagnostic=%q", got)
+			}
+		})
+	}
+}
+
+func TestLedgerOperationalFailuresDoNotLeakInputsOrPaths(t *testing.T) {
+	root := t.TempDir()
+	proposalPath := filepath.Join(root, "PRIVATE-PROPOSAL-PATH.json")
+	evidencePath := filepath.Join(root, "PRIVATE-EVIDENCE-PATH.json")
+	projectPath := filepath.Join(root, "PRIVATE-PROJECT-PATH")
+	dataPath := filepath.Join(root, "PRIVATE-DATA-PATH")
+	for _, path := range []string{projectPath, dataPath} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for path, body := range map[string]string{proposalPath: `{"canary":"PRIVATE-PROPOSAL-CONTENT"}`, evidencePath: `{"canary":"PRIVATE-EVIDENCE-CONTENT"}`} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{
+		{"apply", "--proposal", proposalPath, "--evidence", evidencePath, "--project", projectPath, "--data-dir", dataPath},
+		{"resume", "--ledger-only", "--project", projectPath},
+		{"history", "--ledger-only", "--project", projectPath},
+	} {
+		var out, errOut bytes.Buffer
+		code := Run(args, &out, &errOut)
+		if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_") {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+		}
+		for _, canary := range []string{proposalPath, evidencePath, projectPath, dataPath, "PRIVATE-PROPOSAL-CONTENT", "PRIVATE-EVIDENCE-CONTENT"} {
+			if strings.Contains(errOut.String(), canary) {
+				t.Fatalf("stderr leaked %q: %q", canary, errOut.String())
+			}
+		}
+	}
+}
+
+func TestApplyResultOutputIsBoundedBeforeWriting(t *testing.T) {
+	result := applyengine.Result{
+		ProjectID: "project-1111111111111111",
+		SessionID: "session-1",
+		ChangedFiles: []string{
+			"docs/session-review/decisions/" + strings.Repeat("x", 2<<20) + ".md",
+		},
+	}
+	body, err := formatApplyResult(result)
+	if err == nil || body != "" {
+		t.Fatalf("body bytes=%d err=%v", len(body), err)
 	}
 }
 
@@ -725,4 +967,127 @@ func TestRunPrepareRejectsInvalidModeAndExtraArguments(t *testing.T) {
 			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
 		}
 	}
+}
+
+type cliApplyFixture struct {
+	project  string
+	data     string
+	proposal string
+	evidence string
+}
+
+func newCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
+	t.Helper()
+	projectRoot := t.TempDir()
+	vaultRoot := t.TempDir()
+	if dataDir == "" {
+		dataDir = t.TempDir()
+	} else if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := project.Initialize(project.InitOptions{
+		ProjectRoot: projectRoot,
+		VaultRoot:   vaultRoot,
+		DataDir:     dataDir,
+		Now:         func() time.Time { return time.Date(2026, 8, 23, 2, 0, 0, 0, time.UTC) },
+		Random:      bytes.NewReader(bytes.Repeat([]byte{0x11}, 16)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	proposalBody, err := os.ReadFile(filepath.Join("..", "..", "testdata", "proposals", "valid-first.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := evidence.Packet{
+		SchemaVersion: 2,
+		ProjectID:     "project-1111111111111111",
+		SessionID:     "session-1",
+		CWD:           "/repo",
+		FromCursor:    1,
+		ToCursor:      2,
+		ExpectedCursor: evidence.CursorBoundary{
+			Line: 0,
+		},
+		NextCursor: evidence.CursorBoundary{
+			Line:       2,
+			SourceHash: strings.Repeat("b", 64),
+		},
+		Events: []evidence.Item{
+			{ID: "ev-message", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: strings.Repeat("a", 64), Kind: "message", Role: "user", Summary: "Choose durable ledger"},
+			{ID: "ev-verify", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: strings.Repeat("b", 64), Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
+		},
+	}
+	packetDigest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalBody = bytes.Replace(
+		proposalBody,
+		[]byte("sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4"),
+		[]byte(packetDigest),
+		1,
+	)
+	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(proposalPath, proposalBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	evidenceBody, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidencePath := filepath.Join(t.TempDir(), "evidence.json")
+	if err := os.WriteFile(evidencePath, append(evidenceBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cliApplyFixture{project: projectRoot, data: dataDir, proposal: proposalPath, evidence: evidencePath}
+}
+
+func assertApplyOutputContract(t *testing.T, output string) {
+	t.Helper()
+	allowed := map[string]bool{
+		"project_id": true, "session_id": true, "cursor_range": true, "changed_files": true,
+		"cursor_advanced": true, "already_applied": true,
+	}
+	var changed []string
+	inChanged := false
+	for _, line := range strings.Split(strings.TrimSuffix(output, "\n"), "\n") {
+		if strings.HasPrefix(line, "  - ") {
+			if !inChanged {
+				t.Fatalf("list item outside changed_files: %q", line)
+			}
+			path := strings.TrimPrefix(line, "  - ")
+			if filepath.IsAbs(path) || strings.Contains(path, "..") {
+				t.Fatalf("unsafe changed path in output: %q", path)
+			}
+			changed = append(changed, path)
+			continue
+		}
+		name, _, found := strings.Cut(line, ":")
+		if !found || !allowed[name] {
+			t.Fatalf("unexpected apply output line %q", line)
+		}
+		inChanged = name == "changed_files" && line == "changed_files:"
+	}
+	for index := 1; index < len(changed); index++ {
+		if changed[index-1] > changed[index] {
+			t.Fatalf("changed paths are not sorted: %v", changed)
+		}
+	}
+	for _, forbidden := range []string{"summarized", "rationale", "evidence_id", "source_hash", "proposal", "PRIVATE"} {
+		if strings.Contains(strings.ToLower(output), strings.ToLower(forbidden)) {
+			t.Fatalf("apply output disclosed %q: %q", forbidden, output)
+		}
+	}
+}
+
+func gitRun(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = directory
+	body, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, body)
+	}
+	return strings.TrimSpace(string(body))
 }
