@@ -36,6 +36,7 @@ var (
 	stableBaseID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 	lowerSHA256  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	baseJSONName = regexp.MustCompile(`^[0-9a-f]{64}\.json$`)
+	baseTempName = regexp.MustCompile(`^\.session-reviewer-[0-9a-f]{32}$`)
 )
 
 type BaseRecord struct {
@@ -240,7 +241,16 @@ func inspectBaseStateNames(root *os.Root) ([]baseStatePair, error) {
 	pairs := make(map[string]baseStatePair)
 	for _, entry := range entries {
 		name := entry.Name()
-		if name == baseLockName || strings.HasPrefix(name, ".session-reviewer-") {
+		if name == baseLockName {
+			if err := validateIgnoredBaseEntry(root, name, "merge-base lock"); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if baseTempName.MatchString(name) {
+			if err := validateIgnoredBaseEntry(root, name, "merge-base temporary"); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		folded := strings.ToLower(name)
@@ -271,6 +281,17 @@ func inspectBaseStateNames(root *os.Root) ([]baseStatePair, error) {
 	}
 	sort.Slice(result, func(first, second int) bool { return result[first].primary < result[second].primary })
 	return result, nil
+}
+
+func validateIgnoredBaseEntry(root *os.Root, name, label string) error {
+	info, err := root.Lstat(name)
+	if err != nil || info == nil || isStateRedirect(info) || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is redirected or not regular", label)
+	}
+	if !privateStateMode(info, 0o600) {
+		return fmt.Errorf("%s permissions are not private", label)
+	}
+	return nil
 }
 
 func loadAllBaseRecords(root *os.Root) ([]BaseRecord, error) {
@@ -382,12 +403,33 @@ func readBaseRecordWithHook(root *os.Root, name, entityID string, before os.File
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(before, opened) || !opened.Mode().IsRegular() || isStateRedirect(opened) {
+	if err != nil || !sameBaseFileMetadata(before, opened) || !opened.Mode().IsRegular() || isStateRedirect(opened) {
 		return BaseRecord{}, errors.New("merge-base state changed while opening")
 	}
-	encoded, err := io.ReadAll(io.LimitReader(file, maxBaseBytes+1))
-	if err != nil || len(encoded) > maxBaseBytes || !utf8.Valid(encoded) {
+	encoded, err := readBoundedBaseSnapshot(file)
+	if err != nil {
 		return BaseRecord{}, errors.New("merge-base state is corrupt")
+	}
+	if afterRead != nil {
+		if err := afterRead(); err != nil {
+			return BaseRecord{}, err
+		}
+	}
+	middle, err := file.Stat()
+	if err != nil || !sameBaseFileMetadata(opened, middle) {
+		return BaseRecord{}, errors.New("merge-base state changed while reading")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return BaseRecord{}, errors.New("merge-base state cannot be reread")
+	}
+	second, err := readBoundedBaseSnapshot(file)
+	if err != nil {
+		return BaseRecord{}, errors.New("merge-base state is corrupt")
+	}
+	afterOpen, err := file.Stat()
+	afterName, nameErr := root.Lstat(name)
+	if err != nil || nameErr != nil || !sameBaseFileMetadata(opened, afterOpen) || !sameBaseFileMetadata(opened, afterName) || isStateRedirect(afterName) || !afterName.Mode().IsRegular() || !bytes.Equal(encoded, second) {
+		return BaseRecord{}, errors.New("merge-base state changed while reading")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
@@ -399,19 +441,26 @@ func readBaseRecordWithHook(root *os.Root, name, entityID string, before os.File
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return BaseRecord{}, errors.New("merge-base state is corrupt")
 	}
-	if afterRead != nil {
-		if err := afterRead(); err != nil {
-			return BaseRecord{}, err
-		}
-	}
-	after, err := root.Lstat(name)
-	if err != nil || !os.SameFile(opened, after) || isStateRedirect(after) || !after.Mode().IsRegular() {
-		return BaseRecord{}, errors.New("merge-base state changed while reading")
-	}
 	if err := validateBaseRecord(record, entityID); err != nil {
 		return BaseRecord{}, err
 	}
 	return record, nil
+}
+
+func readBoundedBaseSnapshot(file *os.File) ([]byte, error) {
+	encoded, err := io.ReadAll(io.LimitReader(file, maxBaseBytes+1))
+	if err != nil || len(encoded) > maxBaseBytes || !utf8.Valid(encoded) {
+		return nil, errors.New("merge-base state is corrupt")
+	}
+	return encoded, nil
+}
+
+func sameBaseFileMetadata(first, second os.FileInfo) bool {
+	return first != nil && second != nil &&
+		os.SameFile(first, second) &&
+		first.Size() == second.Size() &&
+		first.Mode() == second.Mode() &&
+		first.ModTime().Equal(second.ModTime())
 }
 
 func verifyBaseDirectoryIdentity(parent, bases *os.Root) error {

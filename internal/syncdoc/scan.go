@@ -3,12 +3,9 @@ package syncdoc
 import (
 	"bytes"
 	"errors"
-	"path"
 	"regexp"
 	"sort"
-	"strings"
 
-	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 )
@@ -56,9 +53,6 @@ type SourceDocument struct {
 func Scan(root *pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode) Inventory {
 	sources := make([]SourceDocument, 0)
 	err := root.WalkMarkdown(rootRelative, func(relative string, content []byte) error {
-		if skipScanPath(relative) {
-			return nil
-		}
 		sources = append(sources, SourceDocument{RelativePath: relative, Content: bytes.Clone(content)})
 		return nil
 	})
@@ -86,17 +80,27 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 		return ordered[first].RelativePath < ordered[second].RelativePath
 	})
 
-	type candidate struct {
-		entry Entry
+	type analyzedSource struct {
+		source  SourceDocument
+		pathKey string
+		entry   *Entry
 	}
-	candidates := make([]candidate, 0, len(ordered))
+	analyzed := make([]analyzedSource, 0, len(ordered))
 	issues := make([]ScanIssue, 0)
+	byPath := make(map[string][]int, len(ordered))
 	for _, source := range ordered {
 		pathKey, err := platform.PathKey(goos, caseMode, source.RelativePath)
 		if err != nil {
 			issues = append(issues, malformedScanIssue(source.RelativePath))
 			continue
 		}
+		index := len(analyzed)
+		analyzed = append(analyzed, analyzedSource{source: source, pathKey: pathKey})
+		byPath[pathKey] = append(byPath[pathKey], index)
+	}
+
+	for index := range analyzed {
+		source := analyzed[index].source
 		document, err := Parse(source.RelativePath, source.Content)
 		if err != nil {
 			issues = append(issues, malformedScanIssue(source.RelativePath))
@@ -108,39 +112,44 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 			continue
 		}
 		content := bytes.Clone(source.Content)
-		candidates = append(candidates, candidate{entry: Entry{
+		entry := Entry{
 			Identity:     identity,
 			RelativePath: source.RelativePath,
-			PathKey:      pathKey,
+			PathKey:      analyzed[index].pathKey,
 			Document:     document,
 			Content:      content,
 			ContentHash:  ContentHash(content),
-		}})
+		}
+		analyzed[index].entry = &entry
 	}
 
-	byPath := make(map[string][]int, len(candidates))
-	byID := make(map[string][]int, len(candidates))
-	for index, candidate := range candidates {
-		byPath[candidate.entry.PathKey] = append(byPath[candidate.entry.PathKey], index)
-		byID[candidate.entry.Identity.ID] = append(byID[candidate.entry.Identity.ID], index)
+	byID := make(map[string][]int, len(analyzed))
+	for index, source := range analyzed {
+		if source.entry != nil {
+			byID[source.entry.Identity.ID] = append(byID[source.entry.Identity.ID], index)
+		}
 	}
 	excluded := make(map[int]struct{})
-	for index, candidate := range candidates {
-		if len(byPath[candidate.entry.PathKey]) > 1 {
+	for index, source := range analyzed {
+		entityID := ""
+		if source.entry != nil {
+			entityID = source.entry.Identity.ID
+		}
+		if len(byPath[source.pathKey]) > 1 {
 			excluded[index] = struct{}{}
 			issues = append(issues, ScanIssue{
 				Kind:         IssuePathCollision,
-				RelativePath: candidate.entry.RelativePath,
-				EntityID:     candidate.entry.Identity.ID,
+				RelativePath: source.source.RelativePath,
+				EntityID:     entityID,
 				Err:          errors.New("normalized path collision"),
 			})
 		}
-		if len(byID[candidate.entry.Identity.ID]) > 1 {
+		if source.entry != nil && len(byID[source.entry.Identity.ID]) > 1 {
 			excluded[index] = struct{}{}
 			issues = append(issues, ScanIssue{
 				Kind:         IssueDuplicateID,
-				RelativePath: candidate.entry.RelativePath,
-				EntityID:     candidate.entry.Identity.ID,
+				RelativePath: source.entry.RelativePath,
+				EntityID:     source.entry.Identity.ID,
 				Err:          errors.New("duplicate entity identity"),
 			})
 		}
@@ -156,11 +165,13 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 	})
 
 	inventory := Inventory{ByID: make(map[string]Entry), Issues: issues}
-	for index, candidate := range candidates {
+	for index, source := range analyzed {
 		if _, found := excluded[index]; found {
 			continue
 		}
-		inventory.ByID[candidate.entry.Identity.ID] = candidate.entry
+		if source.entry != nil {
+			inventory.ByID[source.entry.Identity.ID] = *source.entry
+		}
 	}
 	return inventory
 }
@@ -171,21 +182,4 @@ func malformedScanIssue(relative string) ScanIssue {
 		RelativePath: relative,
 		Err:          errors.New("Markdown entity is malformed"),
 	}
-}
-
-func skipScanPath(relative string) bool {
-	components := strings.Split(relative, "/")
-	for _, component := range components {
-		if component == ".obsidian" || component == "sync-conflicts" || strings.HasPrefix(component, ".") {
-			return true
-		}
-	}
-	base := path.Base(relative)
-	if !strings.EqualFold(path.Ext(base), ".md") {
-		return true
-	}
-	if strings.HasSuffix(base, strings.TrimPrefix(atomicfile.BackupPath("x"), "x")) || strings.HasPrefix(base, ".session-reviewer-") {
-		return true
-	}
-	return false
 }

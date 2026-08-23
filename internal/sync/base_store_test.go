@@ -462,6 +462,64 @@ func TestBaseStoreReadRejectsStateReplacementAfterContentRead(t *testing.T) {
 	}
 }
 
+func TestBaseStoreReadRejectsSameInodeMutationDuringSnapshot(t *testing.T) {
+	for _, mutation := range []string{"append", "same-size rewrite"} {
+		t.Run(mutation, func(t *testing.T) {
+			data := t.TempDir()
+			root, err := os.OpenRoot(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			store := BaseStore{Root: root}
+			record := validBaseRecord("decision-1", "decisions/decision-1.md", "one")
+			if err := store.Commit("", record); err != nil {
+				t.Fatal(err)
+			}
+			bases, err := root.OpenRoot(baseDirectoryName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bases.Close()
+			name := baseRecordName(record.EntityID)
+			before, err := bases.Lstat(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := readBaseRecordWithHook(bases, name, record.EntityID, before, func() error {
+				switch mutation {
+				case "append":
+					file, err := bases.OpenFile(name, os.O_WRONLY|os.O_APPEND, 0)
+					if err != nil {
+						return err
+					}
+					_, writeErr := file.WriteString(" ")
+					return errors.Join(writeErr, file.Close())
+				case "same-size rewrite":
+					replacement := validBaseRecord(record.EntityID, record.RelativePath, "two")
+					encoded, err := json.MarshalIndent(replacement, "", "  ")
+					if err != nil {
+						return err
+					}
+					encoded = append(encoded, '\n')
+					if int64(len(encoded)) != before.Size() {
+						return errors.New("test replacement is not the same size")
+					}
+					if err := bases.WriteFile(name, encoded, 0o600); err != nil {
+						return err
+					}
+					return bases.Chtimes(name, before.ModTime(), before.ModTime())
+				default:
+					return errors.New("unknown mutation")
+				}
+			})
+			if err == nil || !reflect.DeepEqual(got, BaseRecord{}) {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
 func TestBaseStoreRevalidatesPinnedDirectoryNamespace(t *testing.T) {
 	data := t.TempDir()
 	root, err := os.OpenRoot(data)
@@ -503,6 +561,123 @@ func TestBaseStoreRejectsWhenPrimaryAndBackupAreCorrupt(t *testing.T) {
 	assertBaseLoadFails(t, data, "decision-1")
 }
 
+func TestBaseStoreRejectsNoncanonicalAtomicTemporaryEntriesEverywhere(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry string
+		kind  string
+		mode  os.FileMode
+	}{
+		{name: "lookalike", entry: ".session-reviewer-not-a-real-temp", kind: "file", mode: 0o600},
+		{name: "uppercase digest", entry: ".session-reviewer-" + strings.Repeat("A", 32), kind: "file", mode: 0o600},
+		{name: "temporary directory", entry: ".session-reviewer-" + strings.Repeat("b", 32), kind: "directory", mode: 0o700},
+		{name: "temporary symlink", entry: ".session-reviewer-" + strings.Repeat("c", 32), kind: "symlink", mode: 0o600},
+	}
+	if runtime.GOOS != "windows" {
+		tests = append(tests, struct {
+			name  string
+			entry string
+			kind  string
+			mode  os.FileMode
+		}{name: "public temporary", entry: ".session-reviewer-" + strings.Repeat("d", 32), kind: "file", mode: 0o644})
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, root, store, first := baseStoreWithRecord(t)
+			defer root.Close()
+			full := filepath.Join(data, baseDirectoryName, test.entry)
+			switch test.kind {
+			case "file":
+				if err := os.WriteFile(full, []byte("TEMP-CANARY"), test.mode); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(full, test.mode); err != nil {
+					t.Fatal(err)
+				}
+			case "directory":
+				if err := os.Mkdir(full, test.mode); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("TEMP-CANARY"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, full); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			}
+			assertBaseStoreOperationsFailWithoutCanary(t, store, first, "TEMP-CANARY")
+		})
+	}
+}
+
+func TestBaseStoreAllowsExactPrivateCrashTemporary(t *testing.T) {
+	data, root, store, first := baseStoreWithRecord(t)
+	defer root.Close()
+	tempName := ".session-reviewer-" + strings.Repeat("e", 32)
+	if err := os.WriteFile(filepath.Join(data, baseDirectoryName, tempName), []byte("partial crash bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Load(first.EntityID); err != nil || !found {
+		t.Fatalf("found=%v err=%v", found, err)
+	}
+	if records, err := store.List(); err != nil || len(records) != 1 {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	if err := store.Commit(first.ContentHash, validBaseRecord(first.EntityID, first.RelativePath, "next")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBaseStoreRejectsInvalidPersistentLockEntryEverywhere(t *testing.T) {
+	tests := []struct {
+		name string
+		kind string
+	}{
+		{name: "lock directory", kind: "directory"},
+		{name: "lock symlink", kind: "symlink"},
+	}
+	if runtime.GOOS != "windows" {
+		tests = append(tests, struct {
+			name string
+			kind string
+		}{name: "public lock", kind: "public"})
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			data, root, store, first := baseStoreWithRecord(t)
+			defer root.Close()
+			lockPath := filepath.Join(data, baseDirectoryName, baseLockName)
+			if err := os.Remove(lockPath); err != nil {
+				t.Fatal(err)
+			}
+			switch test.kind {
+			case "directory":
+				if err := os.Mkdir(lockPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				target := filepath.Join(t.TempDir(), "target")
+				if err := os.WriteFile(target, []byte("LOCK-CANARY"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, lockPath); err != nil {
+					t.Skipf("symlink unavailable: %v", err)
+				}
+			case "public":
+				if err := os.WriteFile(lockPath, []byte{}, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(lockPath, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			assertBaseStoreOperationsFailWithoutCanary(t, store, first, "LOCK-CANARY")
+		})
+	}
+}
+
 func TestBaseRecordPathUsesEntityIDDigest(t *testing.T) {
 	want := filepath.ToSlash(filepath.Join("merge-bases", hash("decision-1")+".json"))
 	if got := baseRecordPath("decision-1"); got != want {
@@ -521,6 +696,37 @@ func validBaseRecord(entityID, relativePath, content string) BaseRecord {
 		VaultHash:    digest,
 		Content:      []byte(content),
 		SyncedAt:     fixedTime,
+	}
+}
+
+func baseStoreWithRecord(t *testing.T) (string, *os.Root, BaseStore, BaseRecord) {
+	t.Helper()
+	data := t.TempDir()
+	root, err := os.OpenRoot(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := BaseStore{Root: root}
+	first := validBaseRecord("decision-1", "decisions/decision-1.md", "one")
+	if err := store.Commit("", first); err != nil {
+		root.Close()
+		t.Fatal(err)
+	}
+	return data, root, store, first
+}
+
+func assertBaseStoreOperationsFailWithoutCanary(t *testing.T, store BaseStore, first BaseRecord, canary string) {
+	t.Helper()
+	_, _, loadErr := store.Load(first.EntityID)
+	_, listErr := store.List()
+	commitErr := store.Commit(first.ContentHash, validBaseRecord(first.EntityID, first.RelativePath, "next"))
+	for operation, err := range map[string]error{"Load": loadErr, "List": listErr, "Commit": commitErr} {
+		if err == nil {
+			t.Fatalf("%s accepted invalid state", operation)
+		}
+		if strings.Contains(err.Error(), canary) {
+			t.Fatalf("%s leaked canary in %q", operation, err)
+		}
 	}
 }
 

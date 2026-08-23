@@ -3,6 +3,7 @@ package pathguard
 import (
 	"errors"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -151,6 +152,103 @@ func TestTreeReadRegularBoundsContentAndReturnsMissing(t *testing.T) {
 	got, found, err := directory.ReadRegular("small.md", 5)
 	if err != nil || !found || string(got) != "12345" {
 		t.Fatalf("got=%q found=%v err=%v", got, found, err)
+	}
+}
+
+func TestTreeReadRegularRejectsOverflowingLimitWithoutReturningEmptySuccess(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rootPath, "state.md"), []byte("nonempty"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	got, _, err := directory.ReadRegular("state.md", math.MaxInt64)
+	if err == nil || len(got) != 0 {
+		t.Fatalf("got=%q err=%v", got, err)
+	}
+	if got, found, err := directory.ReadRegular("state.md", int64(len("nonempty"))); err != nil || !found || string(got) != "nonempty" {
+		t.Fatalf("boundary got=%q found=%v err=%v", got, found, err)
+	}
+}
+
+func TestTreeReadRegularRejectsSameInodeMutationDuringSnapshot(t *testing.T) {
+	for _, mutation := range []string{"append", "same-size rewrite"} {
+		t.Run(mutation, func(t *testing.T) {
+			rootPath := t.TempDir()
+			path := filepath.Join(rootPath, "state.md")
+			original := []byte("original")
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory, err := Open(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			got, found, err := directory.readRegularWithHook("state.md", 1024, func() error {
+				switch mutation {
+				case "append":
+					file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+					if err != nil {
+						return err
+					}
+					_, writeErr := file.WriteString("-appended")
+					return errors.Join(writeErr, file.Close())
+				case "same-size rewrite":
+					if err := os.WriteFile(path, []byte("rewritten"), 0o600); err != nil {
+						return err
+					}
+					return os.Chtimes(path, before.ModTime(), before.ModTime())
+				default:
+					return errors.New("unknown mutation")
+				}
+			})
+			if err == nil || !found || len(got) != 0 {
+				t.Fatalf("got=%q found=%v err=%v", got, found, err)
+			}
+		})
+	}
+}
+
+func TestTreeWalkMarkdownRechecksEveryRootRelativeNamespaceComponent(t *testing.T) {
+	for _, replaced := range []string{"docs", "docs/nested"} {
+		t.Run(strings.ReplaceAll(replaced, "/", "_"), func(t *testing.T) {
+			rootPath := t.TempDir()
+			walkRoot := filepath.Join(rootPath, "docs", "nested")
+			if err := os.MkdirAll(walkRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(walkRoot, "one.md"), []byte("one"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			directory, err := Open(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			mutated := false
+			err = directory.WalkMarkdown("docs/nested", func(string, []byte) error {
+				if mutated {
+					return nil
+				}
+				mutated = true
+				live := filepath.Join(rootPath, filepath.FromSlash(replaced))
+				if err := os.Rename(live, live+"-moved"); err != nil {
+					return err
+				}
+				return os.Mkdir(live, 0o700)
+			})
+			if err == nil || !mutated {
+				t.Fatalf("mutated=%v err=%v", mutated, err)
+			}
+		})
 	}
 }
 

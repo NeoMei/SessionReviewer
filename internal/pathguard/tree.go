@@ -14,7 +14,16 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
-const maxWalkMarkdownBytes int64 = 4 << 20
+const (
+	maxWalkMarkdownBytes int64 = 4 << 20
+	maxReadRegularBytes  int64 = 64 << 20
+)
+
+type treeParentIdentity struct {
+	parent *os.Root
+	name   string
+	info   os.FileInfo
+}
 
 // EnsureDirectory creates a relative directory tree below an already pinned
 // root. Every component is opened and identity-checked before it becomes the
@@ -82,8 +91,8 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 	if err != nil {
 		return nil, false, err
 	}
-	if max < 0 {
-		return nil, false, errors.New("read limit must not be negative")
+	if max < 0 || max > maxReadRegularBytes {
+		return nil, false, errors.New("read limit is outside the supported range")
 	}
 	if err := directory.validatePinnedRoot(); err != nil {
 		return nil, false, err
@@ -98,12 +107,7 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 			_ = openedRoots[index].Close()
 		}
 	}()
-	type parentIdentity struct {
-		parent *os.Root
-		name   string
-		info   os.FileInfo
-	}
-	parents := make([]parentIdentity, 0, len(components)-1)
+	parents := make([]treeParentIdentity, 0, len(components)-1)
 	for _, component := range components[:len(components)-1] {
 		before, err := current.Lstat(component)
 		if err != nil || before == nil || !before.IsDir() || isRedirect(before) {
@@ -118,7 +122,7 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 			_ = next.Close()
 			return nil, false, errors.New("file parent changed while opening")
 		}
-		parents = append(parents, parentIdentity{parent: current, name: component, info: before})
+		parents = append(parents, treeParentIdentity{parent: current, name: component, info: before})
 		openedRoots = append(openedRoots, next)
 		current = next
 	}
@@ -145,21 +149,13 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, true, errors.New("file changed while opening")
 	}
-	content, err := io.ReadAll(io.LimitReader(file, max+1))
+	content, err := readStableRegularSnapshot(file, before, opened, max, afterRead)
 	if err != nil {
-		return nil, true, fmt.Errorf("read regular file: %w", err)
-	}
-	if int64(len(content)) > max {
-		return nil, true, errors.New("file exceeds read limit")
-	}
-	if afterRead != nil {
-		if err := afterRead(); err != nil {
-			return nil, true, err
-		}
+		return nil, true, err
 	}
 	afterOpen, err := file.Stat()
 	afterName, nameErr := current.Lstat(name)
-	if err != nil || nameErr != nil || !os.SameFile(opened, afterOpen) || !os.SameFile(opened, afterName) || isRedirect(afterName) || !afterName.Mode().IsRegular() {
+	if err != nil || nameErr != nil || !sameStableFileMetadata(opened, afterOpen) || !sameStableFileMetadata(opened, afterName) || isRedirect(afterName) || !afterName.Mode().IsRegular() {
 		return nil, true, errors.New("file changed while reading")
 	}
 	for _, parent := range parents {
@@ -193,7 +189,13 @@ func (directory *Directory) WalkMarkdown(relative string, visit func(relative st
 	if err != nil {
 		return fmt.Errorf("pin walk root: %w", err)
 	}
-	defer func() { _ = current.Close() }()
+	openedRoots := []*os.Root{current}
+	defer func() {
+		for index := len(openedRoots) - 1; index >= 0; index-- {
+			_ = openedRoots[index].Close()
+		}
+	}()
+	parents := make([]treeParentIdentity, 0, len(components))
 	prefix := ""
 	for _, component := range components {
 		before, err := current.Lstat(component)
@@ -209,12 +211,19 @@ func (directory *Directory) WalkMarkdown(relative string, visit func(relative st
 			_ = next.Close()
 			return errors.New("walk root changed while opening")
 		}
-		_ = current.Close()
+		parents = append(parents, treeParentIdentity{parent: current, name: component, info: before})
+		openedRoots = append(openedRoots, next)
 		current = next
 		prefix = path.Join(prefix, component)
 	}
 	if err := walkMarkdownRoot(current, prefix, visit); err != nil {
 		return err
+	}
+	for _, parent := range parents {
+		after, err := parent.parent.Lstat(parent.name)
+		if err != nil || !sameStableFileMetadata(parent.info, after) || isRedirect(after) || !after.IsDir() {
+			return errors.New("walk root namespace changed while walking")
+		}
 	}
 	return directory.validatePinnedRoot()
 }
@@ -282,7 +291,7 @@ func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) e
 
 func skipMarkdownTreeEntry(name string) bool {
 	return strings.HasPrefix(name, ".") ||
-		name == "sync-conflicts" ||
+		strings.EqualFold(name, "sync-conflicts") ||
 		strings.HasSuffix(name, strings.TrimPrefix(atomicfile.BackupPath("x"), "x"))
 }
 
@@ -299,15 +308,65 @@ func readMarkdownRootFile(root *os.Root, name string, before os.FileInfo) ([]byt
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, errors.New("Markdown file changed while opening")
 	}
-	content, err := io.ReadAll(io.LimitReader(file, maxWalkMarkdownBytes+1))
-	if err != nil || int64(len(content)) > maxWalkMarkdownBytes {
-		return nil, errors.New("Markdown file exceeds read limit")
+	content, err := readStableRegularSnapshot(file, before, opened, maxWalkMarkdownBytes, nil)
+	if err != nil {
+		return nil, err
 	}
 	after, err := root.Lstat(name)
-	if err != nil || !os.SameFile(opened, after) || isRedirect(after) || !after.Mode().IsRegular() {
+	if err != nil || !sameStableFileMetadata(opened, after) || isRedirect(after) || !after.Mode().IsRegular() {
 		return nil, errors.New("Markdown file changed while reading")
 	}
 	return bytes.Clone(content), nil
+}
+
+func readStableRegularSnapshot(file *os.File, before, opened os.FileInfo, max int64, afterFirstRead func() error) ([]byte, error) {
+	if max < 0 || max > maxReadRegularBytes || !sameStableFileMetadata(before, opened) {
+		return nil, errors.New("regular file changed before reading")
+	}
+	first, err := readBoundedRegular(file, max)
+	if err != nil {
+		return nil, err
+	}
+	if afterFirstRead != nil {
+		if err := afterFirstRead(); err != nil {
+			return nil, err
+		}
+	}
+	middle, err := file.Stat()
+	if err != nil || !sameStableFileMetadata(opened, middle) {
+		return nil, errors.New("regular file changed during reading")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.New("cannot rewind regular file snapshot")
+	}
+	second, err := readBoundedRegular(file, max)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil || !sameStableFileMetadata(opened, after) || !bytes.Equal(first, second) {
+		return nil, errors.New("regular file content changed during reading")
+	}
+	return first, nil
+}
+
+func readBoundedRegular(file *os.File, max int64) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(file, max+1))
+	if err != nil {
+		return nil, errors.New("cannot read regular file snapshot")
+	}
+	if int64(len(content)) > max {
+		return nil, errors.New("file exceeds read limit")
+	}
+	return content, nil
+}
+
+func sameStableFileMetadata(first, second os.FileInfo) bool {
+	return first != nil && second != nil &&
+		os.SameFile(first, second) &&
+		first.Size() == second.Size() &&
+		first.Mode() == second.Mode() &&
+		first.ModTime().Equal(second.ModTime())
 }
 
 func (directory *Directory) validatePinnedRoot() error {

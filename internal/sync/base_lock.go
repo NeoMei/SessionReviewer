@@ -54,7 +54,7 @@ func acquireBaseStoreLockWithTimeout(root *os.Root, timeout time.Duration, after
 				}
 			}
 			after, err := root.Lstat(baseLockName)
-			if err != nil || !os.SameFile(info, after) || isStateRedirect(after) || !after.Mode().IsRegular() {
+			if err != nil || !os.SameFile(info, after) || isStateRedirect(after) || !after.Mode().IsRegular() || !privateStateMode(after, 0o600) {
 				return nil, errors.Join(errors.New("merge-base lock identity changed after acquisition"), unlockBasePlatformLock(file), file.Close())
 			}
 			return &baseStoreLock{root: root, file: file, info: info}, nil
@@ -74,7 +74,7 @@ func openStableBaseLockFile(root *os.Root) (*os.File, os.FileInfo, bool, error) 
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, false, errors.New("cannot inspect merge-base lock")
 		}
-		if found && (isStateRedirect(before) || !before.Mode().IsRegular()) {
+		if found && (isStateRedirect(before) || !before.Mode().IsRegular() || !privateStateMode(before, 0o600)) {
 			return nil, nil, false, errors.New("merge-base lock is redirected or not regular")
 		}
 		flags := os.O_RDWR
@@ -101,9 +101,21 @@ func openStableBaseLockFile(root *os.Root) (*os.File, os.FileInfo, bool, error) 
 			}
 			continue
 		}
-		if err := file.Chmod(0o600); err != nil {
-			_ = file.Close()
-			return nil, nil, false, errors.New("cannot protect merge-base lock")
+		if found {
+			if !privateStateMode(opened, 0o600) {
+				_ = file.Close()
+				return nil, nil, false, errors.New("merge-base lock permissions are not private")
+			}
+		} else {
+			if err := file.Chmod(0o600); err != nil {
+				_ = file.Close()
+				return nil, nil, false, errors.New("cannot protect merge-base lock")
+			}
+			opened, err = file.Stat()
+			if err != nil || !privateStateMode(opened, 0o600) {
+				_ = file.Close()
+				return nil, nil, false, errors.New("cannot verify merge-base lock permissions")
+			}
 		}
 		return file, opened, !found, nil
 	}
@@ -115,7 +127,7 @@ func (lock *baseStoreLock) release() error {
 	}
 	after, err := lock.root.Lstat(baseLockName)
 	identityErr := error(nil)
-	if err != nil || !os.SameFile(lock.info, after) || isStateRedirect(after) || !after.Mode().IsRegular() {
+	if err != nil || !os.SameFile(lock.info, after) || isStateRedirect(after) || !after.Mode().IsRegular() || !privateStateMode(after, 0o600) {
 		identityErr = errors.New("merge-base lock identity changed before release")
 	}
 	unlockErr := unlockBasePlatformLock(lock.file)

@@ -29,6 +29,36 @@ func TestScanFindsStableIDsAndIsolatesNormalizedCollisions(t *testing.T) {
 	}
 }
 
+func TestScanPathCollisionIncludesMalformedParticipantsBeforeParsing(t *testing.T) {
+	canary := "MALFORMED-COLLISION-CANARY"
+	malformedPath := "decisions/Café.md"
+	validPath := "decisions/Cafe\u0301.md"
+	got := BuildInventory([]SourceDocument{
+		{RelativePath: malformedPath, Content: []byte(canary)},
+		{RelativePath: validPath, Content: entity("decision-2", "project-1", "valid")},
+	}, "darwin", platform.CaseInsensitive)
+	if len(got.ByID) != 0 || len(got.Issues) != 3 {
+		t.Fatalf("ByID=%+v issues=%+v", got.ByID, got.Issues)
+	}
+	want := map[string]map[IssueKind]int{
+		malformedPath: {IssueMalformed: 1, IssuePathCollision: 1},
+		validPath:     {IssuePathCollision: 1},
+	}
+	for _, issue := range got.Issues {
+		if issue.Err == nil || strings.Contains(issue.Err.Error(), canary) {
+			t.Fatalf("unsafe issue=%+v", issue)
+		}
+		want[issue.RelativePath][issue.Kind]--
+	}
+	for relative, kinds := range want {
+		for kind, remaining := range kinds {
+			if remaining != 0 {
+				t.Fatalf("relative=%q kind=%q remaining=%d issues=%+v", relative, kind, remaining, got.Issues)
+			}
+		}
+	}
+}
+
 func TestScanIsolatesEveryDuplicateIdentityParticipant(t *testing.T) {
 	sources := []SourceDocument{
 		{RelativePath: "decisions/a.md", Content: entity("decision-1", "project-1", "one")},
@@ -159,14 +189,63 @@ func TestScanPrunesExcludedSubtreesBeforeUnsafeEntries(t *testing.T) {
 			t.Skipf("symlink unavailable: %v", err)
 		}
 	}
+	notesPath := filepath.Join(rootPath, "Sync-Conflicts-Notes", "keep.md")
+	if err := os.MkdirAll(filepath.Dir(notesPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notesPath, entity("decision-notes", "project-1", "notes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	directory, err := pathguard.Open(rootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer directory.Close()
 	got := Scan(directory, ".", "darwin", platform.CaseSensitive)
-	if len(got.Issues) != 0 || len(got.ByID) != 1 || got.ByID["decision-keep"].RelativePath != "decisions/keep.md" {
+	if len(got.Issues) != 0 || len(got.ByID) != 2 || got.ByID["decision-keep"].RelativePath != "decisions/keep.md" || got.ByID["decision-notes"].RelativePath != "Sync-Conflicts-Notes/keep.md" {
 		t.Fatalf("inventory=%+v", got)
+	}
+}
+
+func TestScanPrunesCaseFoldedConflictDirectoryWithoutOvermatching(t *testing.T) {
+	for _, excluded := range []string{"SYNC-CONFLICTS", "Sync-Conflicts"} {
+		t.Run(excluded, func(t *testing.T) {
+			rootPath := t.TempDir()
+			keep := filepath.Join(rootPath, "Sync-Conflicts-Notes", "keep.md")
+			if err := os.MkdirAll(filepath.Dir(keep), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(keep, entity("decision-notes", "project-1", "notes"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			excludedRoot := filepath.Join(rootPath, excluded)
+			if err := os.Mkdir(excludedRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oversize, err := os.OpenFile(filepath.Join(excludedRoot, "oversize.md"), os.O_CREATE|os.O_WRONLY, 0o600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := oversize.Truncate(MaxDocumentBytes + 1); err != nil {
+				t.Fatal(err)
+			}
+			oversize.Close()
+			if err := os.WriteFile(filepath.Join(excludedRoot, "malformed.md"), []byte("malformed"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(t.TempDir(), "outside.md"), filepath.Join(excludedRoot, "redirect.md")); err != nil {
+				t.Skipf("symlink unavailable: %v", err)
+			}
+			directory, err := pathguard.Open(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer directory.Close()
+			got := Scan(directory, ".", "windows", platform.CaseInsensitive)
+			if len(got.Issues) != 0 || len(got.ByID) != 1 || got.ByID["decision-notes"].RelativePath != "Sync-Conflicts-Notes/keep.md" {
+				t.Fatalf("inventory=%+v", got)
+			}
+		})
 	}
 }
 
