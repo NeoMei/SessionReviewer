@@ -477,7 +477,7 @@ func TestCorePayloadManifestIgnoresLicenseWrapperButDetectsPayloadChange(t *test
 Run:
 
 ```bash
-go test ./cmd/release-packager ./cmd/check-release-license -run 'TestArchive|TestPublicLicense|TestSBOM' -v
+go test ./cmd/release-packager ./cmd/check-release-license -run 'TestArchive|TestPublicLicense|TestSBOM|TestCorePayloadManifest' -v
 ```
 
 Expected: FAIL because the packager and gate do not exist.
@@ -961,7 +961,7 @@ func TestRollbackDrillRestoresPreviousVersionWithoutKnowledgeLoss(t *testing.T) 
 Run:
 
 ```bash
-go test ./test/release -run 'TestReleaseManifest|TestPrivateWorkflow|TestRollbackDrill' -v
+go test ./test/release -run 'TestReleaseManifest|TestPrivateWorkflow|TestPublicationBinds|TestRollbackDrill' -v
 ```
 
 Expected: FAIL because aggregate manifest validation and complete rollback drill do not exist.
