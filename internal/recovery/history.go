@@ -54,7 +54,9 @@ func HistoryLedgerOnly(projectRoot string) (HistoryView, error) {
 func (view HistoryView) Markdown() string {
 	out := newRecoveryMarkdownBuilder()
 	out.raw("# Project history\n\n")
-	out.field("Project", view.ProjectID)
+	if !out.field("Project", view.ProjectID) {
+		return out.finish()
+	}
 	if len(view.Timeline) != 0 {
 		out.raw("## Timeline\n\n")
 		for _, event := range view.Timeline {
@@ -69,6 +71,9 @@ func (view HistoryView) Markdown() string {
 				out.escaped(event.Summary)
 			}
 			out.raw("\n")
+			if out.overflow {
+				return out.finish()
+			}
 		}
 		out.raw("\n")
 	}
@@ -84,8 +89,11 @@ func (view HistoryView) Markdown() string {
 			out.raw("]\n")
 			if len(decision.Supersedes) != 0 {
 				out.raw("  - Supersedes: ")
-				out.escaped(strings.Join(sortedUnique(decision.Supersedes), ", "))
+				out.escapedList(decision.Supersedes, ", ")
 				out.raw("\n")
+			}
+			if out.overflow {
+				return out.finish()
 			}
 		}
 		out.raw("\n")
@@ -100,6 +108,9 @@ func (view HistoryView) Markdown() string {
 			out.raw("; ")
 			out.escaped(loop.Status)
 			out.raw("]\n")
+			if out.overflow {
+				return out.finish()
+			}
 		}
 		out.raw("\n")
 	}
@@ -111,13 +122,16 @@ func (view HistoryView) Markdown() string {
 			out.raw("\n")
 			if len(theme.DecisionIDs) != 0 {
 				out.raw("  - Decisions: ")
-				out.escaped(strings.Join(theme.DecisionIDs, ", "))
+				out.escapedList(theme.DecisionIDs, ", ")
 				out.raw("\n")
 			}
 			if len(theme.OpenLoopIDs) != 0 {
 				out.raw("  - Open loops: ")
-				out.escaped(strings.Join(theme.OpenLoopIDs, ", "))
+				out.escapedList(theme.OpenLoopIDs, ", ")
 				out.raw("\n")
+			}
+			if out.overflow {
+				return out.finish()
 			}
 		}
 		out.raw("\n")

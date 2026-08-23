@@ -15,6 +15,8 @@ const (
 	maxRecoveryMarkdownBytes = ledger.MaxDocumentBytes
 	maxRecoveryEntities      = 20_000
 	maxRecoveryValues        = 100_000
+	maxEntityLookaheadBytes  = 64
+	recoveryOmissionMarkdown = "# Recovery output omitted\n\nRecovery output omitted because it exceeds the safe size limit.\n"
 )
 
 var errRecoveryOutputLimit = errors.New("recovery view exceeds safe size limit")
@@ -79,16 +81,15 @@ func ResumeLedgerOnly(projectRoot string) (ResumeCard, error) {
 func (card ResumeCard) Markdown() string {
 	out := newRecoveryMarkdownBuilder()
 	out.raw("# Resume\n\n")
-	out.field("Project", card.ProjectID)
-	out.field("Goal", card.Goal)
-	out.field("Stop point", card.StopPoint)
-	out.field("Last verified", card.LastVerified)
-	out.section("Drift", card.Drift)
-	out.section("Blockers", card.Blockers)
-	out.section("Open questions", card.OpenQuestions)
-	out.field("Next action", card.NextAction)
-	out.field("First inspection", card.FirstInspection)
-	out.section("Source sessions", card.SourceSessions)
+	if !out.field("Project", card.ProjectID) || !out.field("Goal", card.Goal) || !out.field("Stop point", card.StopPoint) || !out.field("Last verified", card.LastVerified) {
+		return out.finish()
+	}
+	if !out.section("Drift", card.Drift) || !out.section("Blockers", card.Blockers) || !out.section("Open questions", card.OpenQuestions) {
+		return out.finish()
+	}
+	if !out.field("Next action", card.NextAction) || !out.field("First inspection", card.FirstInspection) || !out.section("Source sessions", card.SourceSessions) {
+		return out.finish()
+	}
 	return out.finish()
 }
 
@@ -444,47 +445,85 @@ func (out *recoveryMarkdownBuilder) raw(value string) {
 }
 
 func (out *recoveryMarkdownBuilder) escaped(value string) {
-	space := false
-	characters := []rune(value)
-	for index := 0; index < len(characters); index++ {
-		r := characters[index]
+	if out.overflow {
+		return
+	}
+	separatorPending := false
+	for index := 0; index < len(value); {
+		start := index
+		r, size := utf8.DecodeRuneInString(value[index:])
+		index += size
 		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			space = out.text.Len() != 0
+			separatorPending = out.text.Len() != 0
 			continue
 		}
-		if space {
+		if separatorPending {
 			out.raw(" ")
-			space = false
+			if out.overflow {
+				return
+			}
+			separatorPending = false
 		}
 		switch r {
 		case '\\':
 			out.raw("\\\\")
+			if out.overflow {
+				return
+			}
 			continue
 		case '&':
 			out.raw("&amp;")
-			if end, entityLike := entityLikeTerminator(characters, index); entityLike {
-				for _, literal := range characters[index+1 : end+1] {
-					out.raw(string(literal))
-				}
+			if out.overflow {
+				return
+			}
+			if end, entityLike := entityLikeTerminator(value, start); entityLike {
+				out.raw(value[index:end])
 				index = end
+			}
+			if out.overflow {
+				return
 			}
 			continue
 		case '<':
 			out.raw("&lt;")
+			if out.overflow {
+				return
+			}
 			continue
 		case '>':
 			out.raw("&gt;")
+			if out.overflow {
+				return
+			}
 			continue
 		}
 		if isASCIIPunctuation(r) {
 			out.raw("\\")
+			if out.overflow {
+				return
+			}
 		}
 		var encoded [utf8.UTFMax]byte
-		size := utf8.EncodeRune(encoded[:], r)
-		out.raw(string(encoded[:size]))
+		encodedSize := utf8.EncodeRune(encoded[:], r)
+		out.raw(string(encoded[:encodedSize]))
 		if out.overflow {
 			return
 		}
+	}
+}
+
+func (out *recoveryMarkdownBuilder) escapedList(values []string, separator string) {
+	for index, value := range values {
+		if out.overflow {
+			return
+		}
+		if index != 0 {
+			out.raw(separator)
+			if out.overflow {
+				return
+			}
+		}
+		out.escaped(value)
 	}
 }
 
@@ -492,65 +531,80 @@ func isASCIIPunctuation(r rune) bool {
 	return r >= '!' && r <= '/' || r >= ':' && r <= '@' || r >= '[' && r <= '`' || r >= '{' && r <= '~'
 }
 
-func entityLikeTerminator(characters []rune, ampersand int) (int, bool) {
+func entityLikeTerminator(value string, ampersand int) (int, bool) {
 	index := ampersand + 1
-	if index >= len(characters) {
+	if index >= len(value) {
 		return 0, false
 	}
-	if characters[index] == '#' {
+	limit := index + maxEntityLookaheadBytes
+	if limit > len(value) {
+		limit = len(value)
+	}
+	if value[index] == '#' {
 		index++
-		if index < len(characters) && (characters[index] == 'x' || characters[index] == 'X') {
+		if index < limit && (value[index] == 'x' || value[index] == 'X') {
 			index++
 			start := index
-			for index < len(characters) && (characters[index] >= '0' && characters[index] <= '9' || characters[index] >= 'a' && characters[index] <= 'f' || characters[index] >= 'A' && characters[index] <= 'F') {
+			for index < limit && (value[index] >= '0' && value[index] <= '9' || value[index] >= 'a' && value[index] <= 'f' || value[index] >= 'A' && value[index] <= 'F') {
 				index++
 			}
-			return index, index > start && index < len(characters) && characters[index] == ';'
+			return index + 1, index > start && index < limit && value[index] == ';'
 		}
 		start := index
-		for index < len(characters) && characters[index] >= '0' && characters[index] <= '9' {
+		for index < limit && value[index] >= '0' && value[index] <= '9' {
 			index++
 		}
-		return index, index > start && index < len(characters) && characters[index] == ';'
+		return index + 1, index > start && index < limit && value[index] == ';'
 	}
-	if !isASCIIAlpha(characters[index]) {
+	if !isASCIIAlpha(rune(value[index])) {
 		return 0, false
 	}
-	for index < len(characters) && (isASCIIAlpha(characters[index]) || characters[index] >= '0' && characters[index] <= '9') {
+	for index < limit && (isASCIIAlpha(rune(value[index])) || value[index] >= '0' && value[index] <= '9') {
 		index++
 	}
-	return index, index < len(characters) && characters[index] == ';'
+	return index + 1, index < limit && value[index] == ';'
 }
 
 func isASCIIAlpha(character rune) bool {
 	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
 }
 
-func (out *recoveryMarkdownBuilder) field(name, value string) {
+func (out *recoveryMarkdownBuilder) field(name, value string) bool {
+	if out.overflow {
+		return false
+	}
 	if strings.TrimSpace(value) == "" {
-		return
+		return true
 	}
 	out.raw("**" + name + ":** ")
 	out.escaped(value)
 	out.raw("\n\n")
+	return !out.overflow
 }
 
-func (out *recoveryMarkdownBuilder) section(name string, values []string) {
+func (out *recoveryMarkdownBuilder) section(name string, values []string) bool {
+	if out.overflow {
+		return false
+	}
 	if len(values) == 0 {
-		return
+		return true
 	}
 	out.raw("## " + name + "\n\n")
 	for _, value := range values {
+		if out.overflow {
+			return false
+		}
 		out.raw("- ")
 		out.escaped(value)
 		out.raw("\n")
 	}
 	out.raw("\n")
+	return !out.overflow
 }
 
 func (out *recoveryMarkdownBuilder) finish() string {
 	if out.overflow {
-		return "# Recovery output omitted\n\nRecovery output omitted because it exceeds the safe size limit.\n"
+		return recoveryOmissionMarkdown
 	}
 	return strings.TrimRight(out.text.String(), "\n") + "\n"
 }

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -355,6 +356,60 @@ func TestRecoveryMarkdownHostileGFMAndObsidianConstructsRemainLiteral(t *testing
 	}
 }
 
+func TestRecoveryMarkdownLargeInputUsesBoundedStreamingAllocation(t *testing.T) {
+	const omitted = "# Recovery output omitted\n\nRecovery output omitted because it exceeds the safe size limit.\n"
+	huge := strings.Repeat("x", 16<<20)
+	later := strings.Repeat("z", maxRecoveryMarkdownBytes+1)
+	resume := ResumeCard{
+		ProjectID: recoveryProjectID, Goal: huge, StopPoint: later,
+		Drift: []string{later, later}, Blockers: []string{later}, OpenQuestions: []string{later},
+		NextAction: later, FirstInspection: later, SourceSessions: []string{later},
+	}
+	history := HistoryView{
+		ProjectID: huge,
+		Timeline:  []ledger.TimelineEvent{{OccurredAt: later, Title: later, Summary: later}},
+		Decisions: []ledger.Decision{{ID: later, Title: later, Status: later, Supersedes: []string{later}}},
+		OpenLoops: []ledger.OpenLoop{{ID: later, Title: later, Status: later}},
+		Themes:    []Theme{{Name: later, DecisionIDs: []string{later}, OpenLoopIDs: []string{later}}},
+	}
+
+	bounded := strings.Repeat("b", maxRecoveryMarkdownBytes+1)
+	baseline := ResumeCard{ProjectID: recoveryProjectID, Goal: bounded}
+	baselineBytes := allocatedBytes(t, func() { recoveryMarkdownAllocationSink = baseline.Markdown() })
+	if recoveryMarkdownAllocationSink != omitted {
+		t.Fatalf("bounded baseline output=%q", recoveryMarkdownAllocationSink)
+	}
+	resumeBytes := allocatedBytes(t, func() { recoveryMarkdownAllocationSink = resume.Markdown() })
+	if recoveryMarkdownAllocationSink != omitted {
+		t.Fatalf("resume output=%q", recoveryMarkdownAllocationSink)
+	}
+	if resumeBytes > baselineBytes+(2<<20) {
+		t.Fatalf("resume allocated %d bytes; baseline=%d", resumeBytes, baselineBytes)
+	}
+
+	historyBytes := allocatedBytes(t, func() { recoveryMarkdownAllocationSink = history.Markdown() })
+	if recoveryMarkdownAllocationSink != omitted {
+		t.Fatalf("history output=%q", recoveryMarkdownAllocationSink)
+	}
+	if historyBytes > baselineBytes+(2<<20) {
+		t.Fatalf("history allocated %d bytes; baseline=%d", historyBytes, baselineBytes)
+	}
+
+	baselineAllocs := testing.AllocsPerRun(3, func() { recoveryMarkdownAllocationSink = baseline.Markdown() })
+	largeAllocs := testing.AllocsPerRun(3, func() { recoveryMarkdownAllocationSink = resume.Markdown() })
+	if largeAllocs > baselineAllocs+8 {
+		t.Fatalf("large input allocations=%0.1f baseline=%0.1f", largeAllocs, baselineAllocs)
+	}
+
+	compressible := strings.Repeat(" ", 16<<20)
+	if got := (ResumeCard{ProjectID: recoveryProjectID, Goal: compressible}).Markdown(); got == omitted {
+		t.Fatal("compressible resume input was rejected by input size instead of bounded output")
+	}
+	if got := (HistoryView{ProjectID: compressible}).Markdown(); got == omitted {
+		t.Fatal("compressible history input was rejected by input size instead of bounded output")
+	}
+}
+
 func TestRecoveryBudgetRejectsElevenNestedSlicesOfTenThousand(t *testing.T) {
 	values := make([]string, 10_000)
 	for index := range values {
@@ -633,6 +688,18 @@ func isTestASCIIPunctuation(character rune) bool {
 }
 
 var renderedHTMLTag = regexp.MustCompile(`(?s)<[^>]*>`)
+
+var recoveryMarkdownAllocationSink string
+
+func allocatedBytes(t *testing.T, run func()) uint64 {
+	t.Helper()
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	run()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
 
 func renderGFMVisibleText(t *testing.T, markdown string) string {
 	t.Helper()
