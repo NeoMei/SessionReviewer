@@ -59,64 +59,173 @@ type inputContext struct {
 	EvidencePacketDigest string
 }
 
+type applyRoots struct {
+	project *pathguard.Directory
+	data    *pathguard.Directory
+}
+
+func (roots *applyRoots) Close() error {
+	if roots == nil {
+		return nil
+	}
+	var err error
+	if roots.project != nil {
+		err = errors.Join(err, roots.project.Close())
+	}
+	if roots.data != nil {
+		err = errors.Join(err, roots.data.Close())
+	}
+	return err
+}
+
 const applyLockTimeout = 2 * time.Second
 
 type projectApplyLock struct {
 	file            *os.File
 	projectDataPath string
+	projects        *os.Root
+	projectData     *os.Root
+	projectsInfo    os.FileInfo
+	projectDataInfo os.FileInfo
+	lockInfo        os.FileInfo
 }
 
 func acquireProjectApplyLock(dataDir, projectID string) (*projectApplyLock, error) {
-	if !safeIdentifier(projectID) {
-		return nil, errors.New("invalid project ID for apply lock")
-	}
 	data, err := pathguard.Open(dataDir)
 	if err != nil {
 		return nil, err
 	}
 	defer data.Close()
+	return acquireProjectApplyLockRoot(data, projectID)
+}
+
+func acquireProjectApplyLockRoot(data *pathguard.Directory, projectID string) (*projectApplyLock, error) {
+	if !safeIdentifier(projectID) {
+		return nil, errors.New("invalid project ID for apply lock")
+	}
+	if data == nil || data.Root == nil {
+		return nil, errors.New("initialized data root is required")
+	}
 	if err := ensureApplySubdirectory(data.Root, "projects"); err != nil {
 		return nil, err
 	}
 	projectsPath := filepath.Join(data.Path, "projects")
-	projects, err := pathguard.Open(projectsPath)
+	projectsInfo, err := data.Root.Lstat("projects")
 	if err != nil {
 		return nil, err
 	}
-	defer projects.Close()
-	if err := ensureApplySubdirectory(projects.Root, projectID); err != nil {
+	projects, err := data.Root.OpenRoot("projects")
+	if err != nil {
+		return nil, err
+	}
+	openedProjects, err := projects.Stat(".")
+	if err != nil || !os.SameFile(projectsInfo, openedProjects) {
+		_ = projects.Close()
+		return nil, errors.New("projects directory identity changed while opening")
+	}
+	if err := ensureApplySubdirectory(projects, projectID); err != nil {
+		_ = projects.Close()
 		return nil, err
 	}
 	projectDataPath := filepath.Join(projectsPath, projectID)
-	projectData, err := pathguard.Open(projectDataPath)
+	projectDataInfo, err := projects.Lstat(projectID)
 	if err != nil {
+		_ = projects.Close()
 		return nil, err
 	}
-	defer projectData.Close()
+	projectData, err := projects.OpenRoot(projectID)
+	if err != nil {
+		_ = projects.Close()
+		return nil, err
+	}
+	openedProjectData, err := projectData.Stat(".")
+	if err != nil || !os.SameFile(projectDataInfo, openedProjectData) {
+		_ = projectData.Close()
+		_ = projects.Close()
+		return nil, errors.New("project data directory identity changed while opening")
+	}
 	const lockName = ".apply.lock"
-	if err := rejectEntryCaseCollisions(projectData.Root, lockName); err != nil {
+	if err := rejectEntryCaseCollisions(projectData, lockName); err != nil {
+		_ = projectData.Close()
+		_ = projects.Close()
 		return nil, err
 	}
 	deadline := time.Now().Add(applyLockTimeout)
 	for {
-		file, err := openStableApplyLockFile(projectData.Root, lockName)
+		file, err := openStableApplyLockFile(projectData, lockName)
 		if err != nil {
+			_ = projectData.Close()
+			_ = projects.Close()
 			return nil, err
 		}
 		locked, err := tryApplyPlatformLock(file)
 		if err != nil {
 			_ = file.Close()
+			_ = projectData.Close()
+			_ = projects.Close()
 			return nil, fmt.Errorf("acquire project apply lock: %w", err)
 		}
 		if locked {
-			return &projectApplyLock{file: file, projectDataPath: projectDataPath}, nil
+			lockInfo, statErr := file.Stat()
+			if statErr != nil {
+				_ = unlockApplyPlatformLock(file)
+				_ = file.Close()
+				_ = projectData.Close()
+				_ = projects.Close()
+				return nil, statErr
+			}
+			return &projectApplyLock{
+				file: file, projectDataPath: projectDataPath, projects: projects, projectData: projectData,
+				projectsInfo: projectsInfo, projectDataInfo: projectDataInfo, lockInfo: lockInfo,
+			}, nil
 		}
 		_ = file.Close()
 		if !time.Now().Before(deadline) {
+			_ = projectData.Close()
+			_ = projects.Close()
 			return nil, errors.New("project apply transaction remains locked by a live owner")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func (lock *projectApplyLock) verifyIdentity(roots *applyRoots, projectPath, dataPath, projectID string) error {
+	if lock == nil || roots == nil || roots.project == nil || roots.data == nil {
+		return errors.New("apply transaction identity is unavailable")
+	}
+	for label, check := range map[string]struct {
+		path string
+		info os.FileInfo
+	}{
+		"project root": {projectPath, roots.project.Info()},
+		"data root":    {dataPath, roots.data.Info()},
+	} {
+		current, err := pathguard.Open(check.path)
+		if err != nil {
+			return fmt.Errorf("%s identity changed: %w", label, err)
+		}
+		same := os.SameFile(check.info, current.Info())
+		closeErr := current.Close()
+		if closeErr != nil {
+			return closeErr
+		}
+		if !same {
+			return fmt.Errorf("%s identity changed", label)
+		}
+	}
+	projectsInfo, err := roots.data.Root.Lstat("projects")
+	if err != nil || !os.SameFile(lock.projectsInfo, projectsInfo) {
+		return errors.New("projects directory identity changed")
+	}
+	projectDataInfo, err := lock.projects.Lstat(projectID)
+	if err != nil || !os.SameFile(lock.projectDataInfo, projectDataInfo) {
+		return errors.New("project data directory identity changed")
+	}
+	lockPathInfo, err := lock.projectData.Lstat(".apply.lock")
+	if err != nil || !os.SameFile(lock.lockInfo, lockPathInfo) {
+		return errors.New("apply lock identity changed")
+	}
+	return nil
 }
 
 func ensureApplySubdirectory(root *os.Root, name string) error {
@@ -179,35 +288,45 @@ func (lock *projectApplyLock) Release() error {
 	if lock == nil || lock.file == nil {
 		return nil
 	}
-	return errors.Join(unlockApplyPlatformLock(lock.file), lock.file.Close())
+	return errors.Join(unlockApplyPlatformLock(lock.file), lock.file.Close(), lock.projectData.Close(), lock.projects.Close())
 }
 
 func Run(opts Options) (result Result, retErr error) {
-	ctx, err := openInputs(opts)
+	ctx, roots, err := openInputs(opts)
 	if err != nil {
 		return Result{}, err
 	}
+	defer func() { retErr = errors.Join(retErr, roots.Close()) }()
 	result = baseResult(ctx)
-	lock, err := acquireProjectApplyLock(opts.DataDir, ctx.Packet.ProjectID)
+	lock, err := acquireProjectApplyLockRoot(roots.data, ctx.Packet.ProjectID)
 	if err != nil {
 		return Result{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
+	verifyIdentity := func() error {
+		return lock.verifyIdentity(roots, opts.ProjectRoot, opts.DataDir, ctx.Packet.ProjectID)
+	}
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
 
 	store := cursor.Store{Root: lock.projectDataPath}
 	current, err := store.Load(ctx.Packet.SessionID)
 	if err != nil {
 		return Result{}, err
 	}
-	receipt, found, err := loadReceipt(lock.projectDataPath, ctx.ProposalDigest)
+	receipt, found, err := loadReceipt(lock.projectData, ctx.ProposalDigest)
 	if err != nil {
 		return Result{}, err
 	}
 	if found {
-		return recoverReceipt(store, current, receipt, ctx, opts, lock.projectDataPath)
+		return recoverReceipt(store, current, receipt, ctx, opts, lock, verifyIdentity)
 	}
 	if !cursorAtBoundary(current, ctx.Packet.ExpectedCursor) {
 		return Result{}, cursor.ErrStale
+	}
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
 	}
 	state, err := ledger.Load(opts.ProjectRoot)
 	if err != nil {
@@ -229,11 +348,17 @@ func Run(opts Options) (result Result, retErr error) {
 			return Result{}, err
 		}
 	}
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
 	receipt, err = newPreparedReceipt(ctx, plan)
 	if err != nil {
 		return Result{}, err
 	}
-	if err := saveReceipt(lock.projectDataPath, receipt); err != nil {
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
+	if err := saveReceipt(lock.projectData, receipt); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.afterPreparedReceipt != nil {
@@ -241,13 +366,19 @@ func Run(opts Options) (result Result, retErr error) {
 			return Result{}, err
 		}
 	}
-	written, err := applyReceiptFiles(opts.ProjectRoot, receipt, opts.hooks)
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
+	written, err := applyReceiptFiles(opts.ProjectRoot, receipt, opts.hooks, verifyIdentity)
 	if err != nil {
 		return Result{}, err
 	}
 	receipt.State = receiptApplied
 	receipt.ChangedFiles = receiptPlannedChanges(receipt)
-	if err := saveReceipt(lock.projectDataPath, receipt); err != nil {
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
+	if err := saveReceipt(lock.projectData, receipt); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.afterAppliedReceipt != nil {
@@ -255,10 +386,10 @@ func Run(opts Options) (result Result, retErr error) {
 			return Result{}, err
 		}
 	}
-	return finishReceipt(store, current, receipt, opts, written)
+	return finishReceipt(store, current, receipt, opts, written, verifyIdentity)
 }
 
-func openInputs(opts Options) (inputContext, error) {
+func openInputs(opts Options) (_ inputContext, roots *applyRoots, retErr error) {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -267,89 +398,100 @@ func openInputs(opts Options) (inputContext, error) {
 		"project root": opts.ProjectRoot, "data directory": opts.DataDir,
 	} {
 		if strings.TrimSpace(value) == "" {
-			return inputContext{}, fmt.Errorf("%s is required", label)
+			return inputContext{}, nil, fmt.Errorf("%s is required", label)
 		}
 	}
 	projectRoot, err := pathguard.Open(opts.ProjectRoot)
 	if err != nil {
-		return inputContext{}, fmt.Errorf("invalid project root: %w", err)
+		return inputContext{}, nil, fmt.Errorf("invalid project root: %w", err)
 	}
-	defer projectRoot.Close()
 	dataRoot, err := pathguard.Open(opts.DataDir)
 	if err != nil {
-		return inputContext{}, fmt.Errorf("invalid data directory: %w", err)
+		_ = projectRoot.Close()
+		return inputContext{}, nil, fmt.Errorf("invalid data directory: %w", err)
 	}
-	defer dataRoot.Close()
+	roots = &applyRoots{project: projectRoot, data: dataRoot}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, roots.Close())
+			roots = nil
+		}
+	}()
 
 	proposalBody, proposalDigest, err := readBoundedRegular(opts.ProposalPath, maxInputBytes, "proposal", opts.hooks.duringInputRead)
 	if err != nil {
-		return inputContext{}, err
+		return inputContext{}, nil, err
 	}
 	if opts.hooks.afterInputRead != nil {
 		if err := opts.hooks.afterInputRead("proposal"); err != nil {
-			return inputContext{}, err
+			return inputContext{}, nil, err
 		}
 	}
 	p, err := proposal.Decode(bytes.NewReader(proposalBody))
 	if err != nil {
-		return inputContext{}, err
+		return inputContext{}, nil, err
 	}
 	evidenceBody, evidenceFileDigest, err := readBoundedRegular(opts.EvidencePath, maxInputBytes, "evidence", opts.hooks.duringInputRead)
 	if err != nil {
-		return inputContext{}, err
+		return inputContext{}, nil, err
 	}
 	if opts.hooks.afterInputRead != nil {
 		if err := opts.hooks.afterInputRead("evidence"); err != nil {
-			return inputContext{}, err
+			return inputContext{}, nil, err
 		}
 	}
 	if err := inspectJSONObject(evidenceBody); err != nil {
-		return inputContext{}, fmt.Errorf("invalid evidence JSON: %w", err)
+		return inputContext{}, nil, fmt.Errorf("invalid evidence JSON: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(evidenceBody))
 	dec.DisallowUnknownFields()
 	var packet evidence.Packet
 	if err := dec.Decode(&packet); err != nil {
-		return inputContext{}, fmt.Errorf("decode evidence packet: %w", err)
+		return inputContext{}, nil, fmt.Errorf("decode evidence packet: %w", err)
 	}
 	if err := requireJSONEOF(dec); err != nil {
-		return inputContext{}, err
+		return inputContext{}, nil, err
 	}
 	packetDigest, err := evidence.Digest(packet)
 	if err != nil {
-		return inputContext{}, err
+		return inputContext{}, nil, err
 	}
 	if p.EvidencePacketSHA256 != packetDigest {
-		return inputContext{}, fmt.Errorf("proposal evidence digest does not match input packet")
+		return inputContext{}, nil, fmt.Errorf("proposal evidence digest does not match input packet")
 	}
 	if !safeIdentifier(packet.ProjectID) || !safeIdentifier(packet.SessionID) {
-		return inputContext{}, fmt.Errorf("invalid packet identity")
+		return inputContext{}, nil, fmt.Errorf("invalid packet identity")
 	}
 	if packet.ProjectID != p.ProjectID || packet.SessionID != p.SessionID {
-		return inputContext{}, fmt.Errorf("proposal and evidence identities differ")
+		return inputContext{}, nil, fmt.Errorf("proposal and evidence identities differ")
 	}
 	cfg, err := config.LoadRoot(dataRoot.Root, "config.toml")
 	if err != nil {
-		return inputContext{}, fmt.Errorf("load initialized project mapping: %w", err)
+		return inputContext{}, nil, fmt.Errorf("load initialized project mapping: %w", err)
 	}
 	matches := 0
 	for _, mapping := range cfg.Projects {
 		if mapping.ID != packet.ProjectID {
 			continue
 		}
-		mapped, mapErr := pathguard.SameDirectory(projectRoot.Path, mapping.Root)
-		if mapErr != nil || !mapped {
-			return inputContext{}, fmt.Errorf("initialized project mapping does not match requested root")
+		mappedRoot, mapErr := pathguard.Open(mapping.Root)
+		if mapErr != nil {
+			return inputContext{}, nil, fmt.Errorf("initialized project mapping does not match requested root")
+		}
+		mapped := os.SameFile(projectRoot.Info(), mappedRoot.Info())
+		closeErr := mappedRoot.Close()
+		if closeErr != nil || !mapped {
+			return inputContext{}, nil, fmt.Errorf("initialized project mapping does not match requested root")
 		}
 		matches++
 	}
 	if matches != 1 {
-		return inputContext{}, fmt.Errorf("project is not uniquely initialized")
+		return inputContext{}, nil, fmt.Errorf("project is not uniquely initialized")
 	}
 	return inputContext{
 		Packet: packet, Proposal: p, ProposalDigest: proposalDigest,
 		EvidenceFileDigest: evidenceFileDigest, EvidencePacketDigest: packetDigest,
-	}, nil
+	}, roots, nil
 }
 
 func readBoundedRegular(path string, limit int64, label string, duringRead func(string) error) ([]byte, string, error) {
@@ -393,7 +535,7 @@ func readBoundedRegular(path string, limit int64, label string, duringRead func(
 	return body, digestBytes(body), nil
 }
 
-func applyReceiptFiles(projectRoot string, receipt applyReceipt, hooks applyHooks) ([]string, error) {
+func applyReceiptFiles(projectRoot string, receipt applyReceipt, hooks applyHooks, verifyIdentity func() error) ([]string, error) {
 	// ledger.Apply performs the final rooted preimage check immediately before
 	// atomic replacement. As documented there, an uncooperative external writer
 	// can still win the residual check-to-rename nanorace.
@@ -401,14 +543,19 @@ func applyReceiptFiles(projectRoot string, receipt applyReceipt, hooks applyHook
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	var written []string
 	for index, file := range files {
+		if verifyIdentity != nil {
+			if err := verifyIdentity(); err != nil {
+				return written, err
+			}
+		}
 		current, exists, mode, err := readProjectTarget(projectRoot, file.RelativePath)
 		if err != nil {
 			return written, err
 		}
-		if exists && digestBytes(current) == file.TargetSHA256 && uint32(mode.Perm()) == file.TargetMode {
+		if exists && digestBytes(current) == file.TargetSHA256 && applyModeEqual(mode, file.TargetMode) {
 			continue
 		}
-		if exists != file.PreimageExists || (exists && (digestBytes(current) != file.PreimageSHA256 || uint32(mode.Perm()) != file.PreimageMode)) {
+		if exists != file.PreimageExists || (exists && (digestBytes(current) != file.PreimageSHA256 || !applyModeEqual(mode, file.PreimageMode))) {
 			return written, fmt.Errorf("ledger file %s has an intervening user edit", file.RelativePath)
 		}
 		planned := ledger.PlannedFile{
@@ -467,11 +614,14 @@ func targetParentMissing(root, relative string) bool {
 	return err == nil && len(remaining) != 0
 }
 
-func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyReceipt, ctx inputContext, opts Options, projectDataPath string) (Result, error) {
+func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyReceipt, ctx inputContext, opts Options, lock *projectApplyLock, verifyIdentity func() error) (Result, error) {
 	if err := receipt.matches(ctx); err != nil {
 		return Result{}, err
 	}
 	if cursorAtOrBeyond(current, receipt.NextCursor) {
+		if err := verifyIdentity(); err != nil {
+			return Result{}, err
+		}
 		if err := verifyReceiptTargets(opts.ProjectRoot, receipt); err != nil {
 			return Result{}, err
 		}
@@ -482,14 +632,17 @@ func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyRece
 	if !cursorAtBoundary(current, receipt.ExpectedCursor) {
 		return Result{}, cursor.ErrStale
 	}
-	written, err := applyReceiptFiles(opts.ProjectRoot, receipt, opts.hooks)
+	written, err := applyReceiptFiles(opts.ProjectRoot, receipt, opts.hooks, verifyIdentity)
 	if err != nil {
 		return Result{}, err
 	}
 	if receipt.State == receiptPrepared {
 		receipt.State = receiptApplied
 		receipt.ChangedFiles = receiptPlannedChanges(receipt)
-		if err := saveReceipt(projectDataPath, receipt); err != nil {
+		if err := verifyIdentity(); err != nil {
+			return Result{}, err
+		}
+		if err := saveReceipt(lock.projectData, receipt); err != nil {
 			return Result{}, err
 		}
 		if opts.hooks.afterAppliedReceipt != nil {
@@ -498,18 +651,20 @@ func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyRece
 			}
 		}
 	}
-	return finishReceipt(store, current, receipt, opts, written)
+	return finishReceipt(store, current, receipt, opts, written, verifyIdentity)
 }
 
-func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyReceipt, opts Options, written []string) (Result, error) {
+func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyReceipt, opts Options, written []string, verifyIdentity func() error) (Result, error) {
+	if verifyIdentity != nil {
+		if err := verifyIdentity(); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := verifyReceiptTargets(opts.ProjectRoot, receipt); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.beforeCAS != nil {
 		if err := opts.hooks.beforeCAS(); err != nil {
-			return Result{}, err
-		}
-		if err := verifyReceiptTargets(opts.ProjectRoot, receipt); err != nil {
 			return Result{}, err
 		}
 	}
@@ -520,10 +675,23 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 	if !current.UpdatedAt.IsZero() && now.Before(current.UpdatedAt) {
 		now = current.UpdatedAt
 	}
+	if verifyIdentity != nil {
+		if err := verifyIdentity(); err != nil {
+			return Result{}, err
+		}
+	}
+	if err := verifyReceiptTargets(opts.ProjectRoot, receipt); err != nil {
+		return Result{}, err
+	}
 	next := cursor.Cursor{SessionID: receipt.SessionID, LastLine: receipt.NextCursor.Line, LastHash: receipt.NextCursor.SourceHash, UpdatedAt: now}
 	if err := store.Commit(receipt.SessionID, current, next); err != nil {
 		if !errors.Is(err, cursor.ErrStale) {
 			return Result{}, err
+		}
+		if verifyIdentity != nil {
+			if err := verifyIdentity(); err != nil {
+				return Result{}, err
+			}
 		}
 		latest, loadErr := store.Load(receipt.SessionID)
 		if loadErr != nil || !cursorAtOrBeyond(latest, receipt.NextCursor) {
@@ -548,7 +716,7 @@ func verifyReceiptTargets(projectRoot string, receipt applyReceipt) error {
 		if err != nil {
 			return err
 		}
-		if !exists || digestBytes(body) != file.TargetSHA256 || uint32(mode.Perm()) != file.TargetMode {
+		if !exists || digestBytes(body) != file.TargetSHA256 || !applyModeEqual(mode, file.TargetMode) {
 			return fmt.Errorf("ledger file %s does not match applied receipt", file.RelativePath)
 		}
 	}

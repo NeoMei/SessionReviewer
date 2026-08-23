@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
 
@@ -353,6 +355,169 @@ func TestRunRechecksTargetsAfterBeforeCASHook(t *testing.T) {
 	}
 }
 
+func TestRunRechecksTargetsAfterCallerNow(t *testing.T) {
+	f := newApplyTestFixture(t)
+	opts := f.options()
+	opts.Now = func() time.Time {
+		if err := os.WriteFile(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md"), []byte("user edit from Now\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return f.now
+	}
+	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "does not match applied receipt") {
+		t.Fatalf("err=%v", err)
+	}
+	assertCursorNotAdvanced(t, f)
+}
+
+func TestRunFailsClosedWhenPinnedRootsAreReplaced(t *testing.T) {
+	t.Run("project root after render", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		original := f.projectRoot + "-original"
+		opts := f.options()
+		opts.hooks.afterRender = func() error {
+			return replaceDirectoryForTest(f.projectRoot, original)
+		}
+		if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "identity") {
+			t.Fatalf("err=%v", err)
+		}
+		assertCursorNotAdvanced(t, f)
+		if _, err := os.Stat(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement project tree was written: %v", err)
+		}
+	})
+
+	t.Run("data root after render", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		original := f.dataDir + "-original"
+		opts := f.options()
+		opts.hooks.afterRender = func() error {
+			if err := os.Rename(f.dataDir, original); err != nil {
+				return err
+			}
+			return os.Mkdir(f.dataDir, 0o700)
+		}
+		if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "identity") {
+			t.Fatalf("err=%v", err)
+		}
+		entries, err := os.ReadDir(f.dataDir)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("replacement data tree entries=%v err=%v", entries, err)
+		}
+		if _, err := os.Stat(filepath.Join(original, "projects", testProjectID, "cursors", testSessionID+".json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("cursor advanced in pinned data tree: %v", err)
+		}
+	})
+
+	t.Run("project data after prepared receipt", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		before := hashLedger(t, f.projectRoot)
+		original := f.projectData + "-original"
+		opts := f.options()
+		opts.hooks.afterPreparedReceipt = func() error {
+			return replaceDirectoryForTest(f.projectData, original)
+		}
+		if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "identity") {
+			t.Fatalf("err=%v", err)
+		}
+		if after := hashLedger(t, f.projectRoot); after != before {
+			t.Fatal("ledger changed after project-data replacement")
+		}
+		entries, err := os.ReadDir(f.projectData)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("replacement project-data entries=%v err=%v", entries, err)
+		}
+		if _, err := os.Stat(filepath.Join(original, "cursors", testSessionID+".json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("cursor advanced in pinned project-data tree: %v", err)
+		}
+	})
+}
+
+func TestRunFailsClosedWhenLockedPathIsReplaced(t *testing.T) {
+	f := newApplyTestFixture(t)
+	before := hashLedger(t, f.projectRoot)
+	opts := f.options()
+	opts.hooks.afterPreparedReceipt = func() error {
+		lockPath := filepath.Join(f.projectData, ".apply.lock")
+		if err := os.Rename(lockPath, lockPath+".moved"); err != nil {
+			return err
+		}
+		return os.WriteFile(lockPath, []byte("replacement"), 0o600)
+	}
+	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "lock identity") {
+		t.Fatalf("err=%v", err)
+	}
+	if after := hashLedger(t, f.projectRoot); after != before {
+		t.Fatal("ledger changed after lock replacement")
+	}
+	assertCursorNotAdvanced(t, f)
+}
+
+func TestRunRepairsReceiptPrivacyModesUnderLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes only a writable/read-only approximation, not POSIX privacy bits")
+	}
+	for _, tc := range []struct {
+		name  string
+		drift func(receiptPath string) error
+	}{
+		{name: "directory", drift: func(receiptPath string) error { return os.Chmod(filepath.Dir(receiptPath), 0o755) }},
+		{name: "file", drift: func(receiptPath string) error { return os.Chmod(receiptPath, 0o644) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			opts := f.options()
+			opts.hooks.afterPreparedReceipt = func() error { return errors.New("stop after prepared") }
+			if _, err := Run(opts); err == nil {
+				t.Fatal("expected injected interruption")
+			}
+			path := receiptPathForTest(t, f)
+			if err := tc.drift(path); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(f.options()); err != nil {
+				t.Fatal(err)
+			}
+			dirInfo, err := os.Stat(filepath.Dir(path))
+			if err != nil || dirInfo.Mode().Perm() != 0o700 {
+				t.Fatalf("receipt dir mode=%#o err=%v", dirInfo.Mode().Perm(), err)
+			}
+			fileInfo, err := os.Stat(path)
+			if err != nil || fileInfo.Mode().Perm() != 0o600 {
+				t.Fatalf("receipt file mode=%#o err=%v", fileInfo.Mode().Perm(), err)
+			}
+		})
+	}
+}
+
+func TestNewPreparedReceiptRejectsAggregateEncodedSizeAndFileCount(t *testing.T) {
+	ctx := inputContext{Packet: evidence.Packet{
+		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
+		ExpectedCursor: evidence.CursorBoundary{Line: 0}, NextCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
+	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
+
+	t.Run("aggregate encoded target data", func(t *testing.T) {
+		data := bytes.Repeat([]byte("x"), 4<<20)
+		files := make([]ledger.PlannedFile, 13)
+		for i := range files {
+			files[i] = ledger.PlannedFile{RelativePath: fmt.Sprintf("docs/session-review/decisions/decision-%02d.md", i), Data: data, Perm: 0o644}
+		}
+		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}); err == nil || !strings.Contains(err.Error(), "encoded size") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("file count", func(t *testing.T) {
+		files := make([]ledger.PlannedFile, 4097)
+		for i := range files {
+			files[i] = ledger.PlannedFile{RelativePath: fmt.Sprintf("docs/session-review/decisions/decision-%04d.md", i), Data: []byte("x"), Perm: 0o644}
+		}
+		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}); err == nil || !strings.Contains(err.Error(), "file count") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
 func TestRunAcceptsLaterCursorOnlyWhileReceiptTargetsMatch(t *testing.T) {
 	f := newApplyTestFixture(t)
 	if _, err := Run(f.options()); err != nil {
@@ -390,7 +555,7 @@ func TestFinishReceiptClampsClockRegression(t *testing.T) {
 	receipt := applyReceipt{ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 2, ToCursor: 2,
 		ExpectedCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
 		NextCursor:     evidence.CursorBoundary{Line: 2, SourceHash: testHashB}, Files: []receiptFile{}, ChangedFiles: []string{}}
-	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: t.TempDir(), Now: func() time.Time { return future.Add(-time.Hour) }}, nil)
+	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: t.TempDir(), Now: func() time.Time { return future.Add(-time.Hour) }}, nil, nil)
 	if err != nil || !got.CursorAdvanced {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
@@ -479,6 +644,21 @@ func receiptPathForTest(t *testing.T, f *applyTestFixture) string {
 	}
 	digest := sha256.Sum256(body)
 	return filepath.Join(f.projectData, "applied-proposals", hex.EncodeToString(digest[:])+".json")
+}
+
+func replaceDirectoryForTest(live, moved string) error {
+	if err := os.Rename(live, moved); err != nil {
+		return err
+	}
+	return os.Mkdir(live, 0o700)
+}
+
+func assertCursorNotAdvanced(t *testing.T, f *applyTestFixture) {
+	t.Helper()
+	c, err := (cursor.Store{Root: f.projectData}).Load(testSessionID)
+	if err != nil || c != (cursor.Cursor{}) {
+		t.Fatalf("cursor=%+v err=%v", c, err)
+	}
 }
 
 func hashLedger(t *testing.T, root string) string {

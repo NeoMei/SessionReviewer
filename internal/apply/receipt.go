@@ -2,11 +2,11 @@ package apply
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,7 +15,6 @@ import (
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
-	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 const (
@@ -23,6 +22,7 @@ const (
 	receiptPrepared      = "prepared"
 	receiptApplied       = "applied"
 	maxReceiptBytes      = 64 << 20
+	maxReceiptFiles      = 4096
 )
 
 type applyReceipt struct {
@@ -53,6 +53,9 @@ type receiptFile struct {
 }
 
 func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, error) {
+	if err := validatePreparedReceiptBudget(plan); err != nil {
+		return applyReceipt{}, err
+	}
 	receipt := applyReceipt{
 		SchemaVersion: receiptSchemaVersion, State: receiptPrepared,
 		ProjectID: ctx.Packet.ProjectID, SessionID: ctx.Packet.SessionID,
@@ -65,7 +68,7 @@ func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, 
 	for _, file := range plan.Files {
 		entry := receiptFile{
 			RelativePath: file.RelativePath, PreimageExists: file.ExpectedExists,
-			PreimageMode: uint32(file.ExpectedPerm.Perm()), TargetMode: uint32(file.Perm.Perm()),
+			PreimageMode: normalizeApplyMode(file.ExpectedPerm), TargetMode: normalizeApplyMode(file.Perm),
 			TargetSHA256: digestBytes(file.Data), TargetData: append([]byte(nil), file.Data...),
 		}
 		if file.ExpectedExists {
@@ -78,6 +81,29 @@ func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, 
 		return applyReceipt{}, err
 	}
 	return receipt, nil
+}
+
+func validatePreparedReceiptBudget(plan ledger.WritePlan) error {
+	if len(plan.Files) > maxReceiptFiles {
+		return fmt.Errorf("apply receipt file count exceeds %d", maxReceiptFiles)
+	}
+	// Conservatively budget the indented JSON, two escaped path occurrences
+	// (files and changed_files), hashes, modes, field names, commas/newlines,
+	// and base64 expansion before copying any target bytes.
+	budget := uint64(4096)
+	limit := uint64(maxReceiptBytes)
+	for _, file := range plan.Files {
+		if len(file.Data) > ledger.MaxDocumentBytes {
+			return fmt.Errorf("invalid target metadata for %s", file.RelativePath)
+		}
+		encoded := uint64(base64.StdEncoding.EncodedLen(len(file.Data)))
+		pathBudget := uint64(len(file.RelativePath))*12 + 4
+		if encoded > limit || pathBudget > limit || budget > limit-encoded || budget+encoded > limit-pathBudget || budget+encoded+pathBudget > limit-1024 {
+			return fmt.Errorf("apply receipt encoded size exceeds %d bytes", maxReceiptBytes)
+		}
+		budget += encoded + pathBudget + 1024
+	}
+	return nil
 }
 
 func (receipt applyReceipt) matches(ctx inputContext) error {
@@ -104,6 +130,9 @@ func (receipt applyReceipt) validate() error {
 	if receipt.FromCursor < 1 || receipt.ToCursor < receipt.FromCursor || receipt.ExpectedCursor.Line != receipt.FromCursor-1 || receipt.NextCursor.Line != receipt.ToCursor {
 		return errors.New("invalid apply receipt boundaries")
 	}
+	if len(receipt.Files) > maxReceiptFiles {
+		return fmt.Errorf("apply receipt file count exceeds %d", maxReceiptFiles)
+	}
 	seen := make(map[string]struct{}, len(receipt.Files))
 	caseSeen := make(map[string]string, len(receipt.Files))
 	for _, file := range receipt.Files {
@@ -119,11 +148,11 @@ func (receipt applyReceipt) validate() error {
 			return fmt.Errorf("case-colliding receipt paths %q and %q", prior, file.RelativePath)
 		}
 		caseSeen[folded] = file.RelativePath
-		if file.TargetMode == 0 || fs.FileMode(file.TargetMode).Perm() != fs.FileMode(file.TargetMode) || file.TargetSHA256 != digestBytes(file.TargetData) || len(file.TargetData) > ledger.MaxDocumentBytes {
+		if !validApplyMode(file.TargetMode) || file.TargetSHA256 != digestBytes(file.TargetData) || len(file.TargetData) > ledger.MaxDocumentBytes {
 			return fmt.Errorf("invalid target metadata for %s", file.RelativePath)
 		}
 		if file.PreimageExists {
-			if file.PreimageMode == 0 || fs.FileMode(file.PreimageMode).Perm() != fs.FileMode(file.PreimageMode) || file.PreimageSHA256 == "" {
+			if !validApplyMode(file.PreimageMode) || file.PreimageSHA256 == "" {
 				return fmt.Errorf("invalid preimage metadata for %s", file.RelativePath)
 			}
 		} else if file.PreimageMode != 0 || file.PreimageSHA256 != "" {
@@ -143,7 +172,7 @@ func (receipt applyReceipt) validate() error {
 	return nil
 }
 
-func saveReceipt(projectDataPath string, receipt applyReceipt) error {
+func saveReceipt(projectData *os.Root, receipt applyReceipt) error {
 	if err := receipt.validate(); err != nil {
 		return err
 	}
@@ -161,7 +190,7 @@ func saveReceipt(projectDataPath string, receipt applyReceipt) error {
 	if len(body) > maxReceiptBytes {
 		return fmt.Errorf("apply receipt exceeds %d bytes", maxReceiptBytes)
 	}
-	directory, err := openReceiptDirectory(projectDataPath, true)
+	directory, err := openReceiptDirectory(projectData, true)
 	if err != nil {
 		return err
 	}
@@ -170,17 +199,20 @@ func saveReceipt(projectDataPath string, receipt applyReceipt) error {
 	if err != nil {
 		return err
 	}
-	if err := rejectReceiptCaseCollisions(directory.Root, name); err != nil {
+	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
 		return err
 	}
-	if err := atomicfile.WriteRoot(directory.Root, name, body, 0o600); err != nil {
+	if err := atomicfile.WriteRoot(directory, name, body, 0o600); err != nil {
 		return fmt.Errorf("persist apply receipt: %w", err)
+	}
+	if _, err := protectReceiptFile(directory, name); err != nil {
+		return err
 	}
 	return nil
 }
 
-func loadReceipt(projectDataPath, proposalDigest string) (applyReceipt, bool, error) {
-	directory, err := openReceiptDirectory(projectDataPath, false)
+func loadReceipt(projectData *os.Root, proposalDigest string) (applyReceipt, bool, error) {
+	directory, err := openReceiptDirectory(projectData, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return applyReceipt{}, false, nil
 	}
@@ -192,10 +224,10 @@ func loadReceipt(projectDataPath, proposalDigest string) (applyReceipt, bool, er
 	if err != nil {
 		return applyReceipt{}, false, err
 	}
-	if err := rejectReceiptCaseCollisions(directory.Root, name); err != nil {
+	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
 		return applyReceipt{}, false, err
 	}
-	file, info, err := directory.OpenRegular(name)
+	file, info, err := openReceiptRegular(directory, name)
 	if errors.Is(err, os.ErrNotExist) {
 		return applyReceipt{}, false, nil
 	}
@@ -210,7 +242,7 @@ func loadReceipt(projectDataPath, proposalDigest string) (applyReceipt, bool, er
 	if err != nil || len(body) > maxReceiptBytes {
 		return applyReceipt{}, true, errors.New("read bounded apply receipt")
 	}
-	after, err := directory.Root.Lstat(name)
+	after, err := directory.Lstat(name)
 	if err != nil || !os.SameFile(info, after) || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
 		return applyReceipt{}, true, errors.New("apply receipt changed while reading")
 	}
@@ -242,29 +274,91 @@ func loadReceipt(projectDataPath, proposalDigest string) (applyReceipt, bool, er
 	return receipt, true, nil
 }
 
-func openReceiptDirectory(projectDataPath string, create bool) (*pathguard.Directory, error) {
-	project, err := pathguard.Open(projectDataPath)
-	if err != nil {
+func openReceiptDirectory(projectData *os.Root, create bool) (*os.Root, error) {
+	if projectData == nil {
+		return nil, errors.New("project data root is required")
+	}
+	if err := rejectDirectoryCaseCollision(projectData, "applied-proposals"); err != nil {
 		return nil, err
 	}
-	defer project.Close()
-	if err := rejectDirectoryCaseCollision(project.Root, "applied-proposals"); err != nil {
-		return nil, err
-	}
-	info, err := project.Root.Lstat("applied-proposals")
+	info, err := projectData.Lstat("applied-proposals")
 	if errors.Is(err, os.ErrNotExist) && !create {
 		return nil, os.ErrNotExist
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := project.Root.Mkdir("applied-proposals", 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := projectData.Mkdir("applied-proposals", 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 			return nil, err
 		}
-		info, err = project.Root.Lstat("applied-proposals")
+		info, err = projectData.Lstat("applied-proposals")
 	}
 	if err != nil || info == nil || !info.IsDir() || isApplyRedirect(info) {
 		return nil, errors.New("apply receipt directory is redirected or not a directory")
 	}
-	return pathguard.Open(filepath.Join(projectDataPath, "applied-proposals"))
+	directory, err := projectData.OpenRoot("applied-proposals")
+	if err != nil {
+		return nil, err
+	}
+	opened, err := directory.Stat(".")
+	if err != nil || !os.SameFile(info, opened) {
+		_ = directory.Close()
+		return nil, errors.New("apply receipt directory identity changed while opening")
+	}
+	directoryFile, err := directory.Open(".")
+	if err != nil {
+		_ = directory.Close()
+		return nil, err
+	}
+	chmodErr := directoryFile.Chmod(0o700)
+	protected, statErr := directoryFile.Stat()
+	closeErr := directoryFile.Close()
+	after, pathErr := projectData.Lstat("applied-proposals")
+	if err := errors.Join(chmodErr, statErr, closeErr, pathErr); err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("protect apply receipt directory: %w", err)
+	}
+	if !os.SameFile(info, protected) || !os.SameFile(protected, after) || !receiptPrivacyModeEqual(protected.Mode(), 0o700) {
+		_ = directory.Close()
+		return nil, errors.New("apply receipt directory identity or privacy mode changed")
+	}
+	return directory, nil
+}
+
+func openReceiptRegular(root *os.Root, name string) (*os.File, os.FileInfo, error) {
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !before.Mode().IsRegular() || isApplyRedirect(before) {
+		return nil, nil, errors.New("apply receipt is redirected or not regular")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, nil, errors.New("apply receipt identity changed while opening")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("protect apply receipt: %w", err)
+	}
+	protected, err := file.Stat()
+	after, pathErr := root.Lstat(name)
+	if err != nil || pathErr != nil || !os.SameFile(opened, protected) || !os.SameFile(protected, after) || !receiptPrivacyModeEqual(protected.Mode(), 0o600) {
+		_ = file.Close()
+		return nil, nil, errors.New("apply receipt identity or privacy mode changed")
+	}
+	return file, protected, nil
+}
+
+func protectReceiptFile(root *os.Root, name string) (os.FileInfo, error) {
+	file, info, err := openReceiptRegular(root, name)
+	if file != nil {
+		err = errors.Join(err, file.Close())
+	}
+	return info, err
 }
 
 func receiptFileName(digest string) (string, error) {
