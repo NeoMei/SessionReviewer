@@ -363,9 +363,21 @@ func TestIndexIsDisposableAndRebuildsFromAcceptedSnapshot(t *testing.T) {
 }
 
 func TestIndexNeverStoresNarrativeOrEvidenceSummary(t *testing.T) {
-	// Public row types expose IDs, classifications, tags, cursors, and hashes only.
+	// Hash fields are structural metadata; narrative/content-bearing fields are forbidden.
 	for _, typ := range []reflect.Type{reflect.TypeOf(EntityRow{}), reflect.TypeOf(SessionRow{})} {
-		for i:=0;i<typ.NumField();i++ { if strings.Contains(strings.ToLower(typ.Field(i).Name), "summary") || strings.Contains(strings.ToLower(typ.Field(i).Name), "content") { t.Fatalf("unsafe field %s",typ.Field(i).Name) } }
+		for i:=0;i<typ.NumField();i++ {
+			name:=strings.ToLower(typ.Field(i).Name)
+			if name=="contenthash"||name=="sourcehash"||strings.HasSuffix(name,"sha256"){continue}
+			for _,forbidden:=range []string{"title","body","narrative","summary","raw","text","content","evidence"}{
+				if strings.Contains(name,forbidden){t.Fatalf("unsafe narrative field %s",typ.Field(i).Name)}
+			}
+		}
+	}
+	for _,column:=range schemaColumns(t,schema){
+		if column=="content_hash"||column=="source_hash"||strings.HasSuffix(column,"_sha256"){continue}
+		for _,forbidden:=range []string{"title","body","narrative","summary","raw_text","content","evidence"}{
+			if strings.Contains(column,forbidden){t.Fatalf("unsafe narrative column %s",column)}
+		}
 	}
 	narrative := []byte("NARRATIVE-CANARY-do-not-store")
 	evidenceSummary := []byte("EVIDENCE-SUMMARY-CANARY-do-not-store")
@@ -389,6 +401,8 @@ func TestIndexLockSerializesProcessesAndRebuildRejectsRootSwap(t *testing.T) {
 	if err:=store.Rebuild(context.Background(),f.snapshot());!errors.Is(err,ErrIndexIdentityChanged){t.Fatalf("err=%v",err)}
 }
 ```
+
+`schemaColumns` parses the declared `CREATE TABLE` statements in the test (or queries `PRAGMA table_info` from a temporary database) and returns normalized column names. The allowlist is deliberately narrow: `ContentHash`/`content_hash`, `SourceHash`/`source_hash`, and explicit `*SHA256`/`*_sha256` identity fields may contain hashes; a generic `Content`, `ContentBytes`, `Evidence`, `EvidenceSummary`, title, body, narrative, raw text, or similarly content-bearing field/column fails. The subsequent byte scan remains authoritative for proving that hash inputs are stored only as digests, never as the narrative bytes they identify.
 
 - [ ] **Step 2: Run the test and verify it fails before adding SQLite**
 

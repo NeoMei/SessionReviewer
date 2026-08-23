@@ -80,7 +80,7 @@ test/release/archive_test.go                  Installed/archive/Skill smoke test
 .gitignore                                    Private E2E inputs/receipts and `dist/`
 .github/workflows/ci.yml                      Always-on release regressions
 .github/workflows/release-native.yml          Native minimum-OS private acceptance dispatch
-.github/workflows/release.yml                 Tag build, artifact/SBOM/checksum assembly, gated publish
+.github/workflows/release.yml                 Dispatch-only candidate assembly and tag-bound gated publish
 docs/release/native-hosts.md                  Exact native host labels and evidence commands
 docs/release/checklist.md                     `v0.1.0` gates and receipt manifest
 docs/release/rollback.md                      Watcher stop, previous binary restore, dry-run, index rebuild
@@ -702,7 +702,7 @@ git commit -m "test: add private real session acceptance harness"
 
 ---
 
-### Task 7: Collect Native Minimum-OS macOS and Windows Evidence
+### Task 7: Commit Native Minimum-OS Evidence Automation
 
 **Files:**
 - Create: `scripts/collect-platform-receipt.sh`
@@ -712,8 +712,8 @@ git commit -m "test: add private real session acceptance harness"
 - Create: `docs/release/checklist.md`
 
 **Interfaces:**
-- Consumes: exact `v0.1.0` candidate archive/checksum, private real E2E inputs on controlled hosts, and scenario runner.
-- Produces: four private native receipt bundles keyed by exact commit/binary hash and one aggregate gate: macOS 13 Intel, macOS 13 Apple Silicon, Windows 10 22H2 x64, Windows 11 x64.
+- Consumes: private real E2E inputs on controlled hosts, scenario runner, and the future exact candidate run ID supplied only in the post-task evidence gate.
+- Produces: a committed, dispatchable `release-native.yml`, collectors, and validator for four private receipt bundles keyed by exact commit/archive hash: macOS 13 Intel, macOS 13 Apple Silicon, Windows 10 22H2 x64, Windows 11 x64. This task does not collect final receipts.
 
 - [ ] **Step 1: Write failing platform receipt validation tests**
 
@@ -763,29 +763,29 @@ jobs:
     runs-on: [self-hosted, session-reviewer-release, '${{ matrix.label }}']
 ```
 
-Each job downloads the candidate by run ID, verifies `SHA256SUMS`, runs installer twice, doctor, scenarios A-E against host-local protected inputs, watcher restart, rollback, uninstall twice, collector, and uploads the redacted receipt bundle as a private GitHub Actions artifact retained 30 days. It never checks out or uploads the private input directory.
+Each job first checks out the exact `commit` input and verifies `git rev-parse HEAD` equals it, then downloads the candidate by run ID and rejects candidate metadata whose commit/hash set differs. It verifies `SHA256SUMS`, runs installer twice, doctor, scenarios A-E against host-local protected inputs, watcher restart, rollback, uninstall twice, collector, and uploads the redacted receipt bundle as a private GitHub Actions artifact retained 30 days. It never checks out or uploads the private input directory.
 
-- [ ] **Step 5: Execute and validate all four native runs**
+- [ ] **Step 5: Validate the committed workflow without requiring `release.yml`**
 
-Run after candidate artifacts exist:
+Run before commit:
 
 ```bash
-CANDIDATE_RUN_ID="$(gh run list --workflow release.yml --branch "$(git branch --show-current)" --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh workflow run release-native.yml -f commit="$(git rev-parse HEAD)" -f candidate_run_id="$CANDIDATE_RUN_ID"
-NATIVE_RUN_ID="$(gh run list --workflow release-native.yml --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh run watch "$NATIVE_RUN_ID" --exit-status
-gh run download "$NATIVE_RUN_ID" -p 'native-receipt-*' -D artifacts/private-e2e/native-receipts
-go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$(git rev-parse HEAD)" --checksums dist/SHA256SUMS
+go test ./test/e2e/real -run TestNativeReceiptGate -v
+actionlint .github/workflows/release-native.yml
+rg -n 'workflow_dispatch|candidate_run_id|commit:' .github/workflows/release-native.yml
+! rg -n 'workflow_run|release\.yml' .github/workflows/release-native.yml
 ```
 
-Expected: both computed run IDs are non-empty decimal values; workflow and validator exit 0; all receipts name supported minimum OS/arch, exact commit, matching binary hashes, and scenarios A-E pass.
+Expected: validator and workflow syntax pass; the workflow is independently dispatchable from any committed HEAD with explicit commit/candidate inputs and has no dependency on an as-yet-uncommitted `release.yml`.
 
-- [ ] **Step 6: Commit native evidence automation and release checklist**
+- [ ] **Step 6: Commit native evidence automation before any final receipt collection**
 
 ```bash
 git add scripts/collect-platform-receipt.sh scripts/collect-platform-receipt.ps1 .github/workflows/release-native.yml docs/release/native-hosts.md docs/release/checklist.md test/e2e/real
 git commit -m "test: gate release on native platform receipts"
 ```
+
+Do not dispatch the final native run in this task. Tasks 8 and 9 still change tests, workflows, README, and other packaged/candidate inputs. The post-task evidence gate runs only after those commits exist and the worktree is clean.
 
 ---
 
@@ -897,19 +897,19 @@ git commit -m "test: add release security and recovery gates"
 
 ```go
 func TestReleaseManifestSeparatesPrivateCandidateAndPublicExactTag(t *testing.T) {
-	private:=completeManifest(t);private.Mode="private_candidate";private.ExactTag="";private.LicenseAuthorized=false
-	if err:=ValidateReleaseManifest(private);err!=nil{t.Fatalf("private candidate failed: %v",err)}
-	private.NativeReceipts=private.NativeReceipts[:3];if err:=ValidateReleaseManifest(private);err==nil{t.Fatal("accepted missing native receipt")}
+	private:=completeCandidateManifest(t);private.Mode="private_candidate";private.ExactTag="";private.LicenseAuthorized=false;private.NativeReceipts=nil
+	if err:=ValidateCandidateManifest(private);err!=nil{t.Fatalf("private candidate failed before native evidence: %v",err)}
 	public:=completeManifest(t);public.Mode="public_release";public.ExactTag="v0.1.0";public.LicenseAuthorized=false
-	if err:=ValidateReleaseManifest(public);err==nil{t.Fatal("accepted unlicensed public release")}
-	public.LicenseAuthorized=true;public.ExactTag="v0.1.0-rc.1";if err:=ValidateReleaseManifest(public);err==nil{t.Fatal("accepted wrong public tag")}
+	if err:=ValidatePublicationManifest(public);err==nil{t.Fatal("accepted unlicensed public release")}
+	public.LicenseAuthorized=true;public.NativeReceipts=public.NativeReceipts[:3];if err:=ValidatePublicationManifest(public);err==nil{t.Fatal("accepted missing native receipt")}
+	public=completeManifest(t);public.Mode="public_release";public.LicenseAuthorized=true;public.ExactTag="v0.1.0-rc.1";if err:=ValidatePublicationManifest(public);err==nil{t.Fatal("accepted wrong public tag")}
 }
 
 func TestPrivateWorkflowSucceedsWithoutLicenseAndSkipsPublish(t *testing.T) {
-	d:=DecideWorkflow(WorkflowInput{Event:"workflow_dispatch",Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:false})
-	if d.Mode!="private_candidate"||!d.Build||!d.Assemble||!d.NativeGate||d.Publish||d.Conclusion!="success"{t.Fatalf("%#v",d)}
+	d:=DecideWorkflow(WorkflowInput{Event:"workflow_dispatch",Mode:"private_candidate",Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:false})
+	if d.Mode!="private_candidate"||!d.Build||!d.Assemble||d.NativeGate||d.Publish||d.Conclusion!="success"{t.Fatalf("%#v",d)}
 	for _,tag:=range []string{"", "v0.1", "v0.1.0-rc.1", "v0.1.0^{}"} {
-		if got:=DecideWorkflow(WorkflowInput{Event:"push_tag",Tag:tag,Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:true});got.Publish{t.Fatalf("tag %q published",tag)}
+		if got:=DecideWorkflow(WorkflowInput{Event:"workflow_dispatch",Mode:"public_release",Tag:tag,NativeRunID:"123",Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:true});got.Publish{t.Fatalf("tag %q published",tag)}
 	}
 }
 
@@ -926,16 +926,16 @@ func TestRollbackDrillRestoresPreviousVersionWithoutKnowledgeLoss(t *testing.T) 
 Run:
 
 ```bash
-go test ./test/release -run 'TestReleaseManifest|TestRollbackDrill' -v
+go test ./test/release -run 'TestReleaseManifest|TestPrivateWorkflow|TestRollbackDrill' -v
 ```
 
 Expected: FAIL because aggregate manifest validation and complete rollback drill do not exist.
 
 - [ ] **Step 3: Add build/assemble/publish jobs with least privilege**
 
-`release.yml` has two mutually exclusive modes. Manual `workflow_dispatch` is `private_candidate`: it checks out the supplied commit, requires clean commit identity and version `0.1.0` but no tag/license, runs Task 4's `--private` build, and must conclude **success** with the publish job skipped. A `push` of tag `v0.1.0` is `public_release`: it requires the ref name exactly `v0.1.0`, tag target exactly `HEAD`, no other exact tag, and Task 4's `--public` preflight. Build jobs have `contents: read`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates mode/build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS`, and uploads a private `candidate-0.1.0` artifact in either mode.
+`release.yml` is committed before final evidence and uses only `workflow_dispatch`, with required `mode` (`private_candidate|public_release`) and `commit`; public mode additionally requires `tag` and `native_run_id`. Private mode checks out the supplied commit, requires clean commit identity and version `0.1.0` but no tag/license/native run, runs Task 4's `--private` build, and must conclude **success** with native-gate/publish skipped. Public mode checks out the exact tag ref supplied as `tag`, requires it equal exactly `v0.1.0`, verifies `git rev-parse HEAD`, peeled tag target, input `commit`, native receipt commit, and candidate manifest commit are identical, rejects a second exact tag, and runs Task 4's `--public` preflight. A tag-push event alone never publishes because it has no channel for `native_run_id`. Build jobs have `contents: read`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates mode/build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS`, and uploads a private `candidate-0.1.0` artifact in either mode.
 
-A native-gate job downloads the four receipt bundles by explicitly supplied successful `release-native` run ID and validates commit plus artifact hashes. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, and has the exact condition `mode == 'public_release'`; private mode therefore skips the job without evaluating a missing-license command and the workflow remains green. In public mode the job reruns `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
+A native-gate job exists only for public mode. It downloads the four receipt bundles from the explicitly supplied successful `release-native` run ID, verifies that run's workflow file came from the same tagged commit, and validates exact commit plus the complete archive hash set against the newly assembled deterministic candidate. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, and has the exact condition `mode == 'public_release'`; private mode therefore skips both native-gate and publish without evaluating a missing-license command and the workflow remains green. In public mode the job reruns `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
 
 ```text
 session-reviewer_0.1.0_darwin_amd64.tar.gz
@@ -970,30 +970,19 @@ session-reviewer watch install
 
 and Windows equivalents with `uninstall.ps1`/`install.ps1 -Rollback`. If binary startup fails, copy the manifest-verified previous binary from the manifest path, verify its SHA, invoke it with absolute path, leave watcher disabled, run sync dry-run, and preserve all local state for diagnosis. Rollback never reverses Markdown automatically.
 
-- [ ] **Step 5: Perform the private final release rehearsal**
+- [ ] **Step 5: Validate release modes and documentation before commit**
 
-Run from a clean exact candidate commit before creating a public tag:
+Run before committing Task 9:
 
 ```bash
-go test ./...
-go test -race ./...
-go vet ./...
-go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
-./scripts/build-release.sh --version 0.1.0 --private
-shasum -a 256 -c dist/SHA256SUMS
-go test ./test/release -v -count=3
-go run ./cmd/verify-skill ./skill/session-reviewer
-go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$(git rev-parse HEAD)" --checksums dist/SHA256SUMS
-./scripts/install.sh --archive dist/session-reviewer_0.1.0_darwin_$(go env GOARCH).tar.gz --checksums dist/SHA256SUMS
-session-reviewer doctor --json
-./scripts/install.sh --rollback
-./scripts/uninstall.sh
-go run ./cmd/check-release-license --public
+go test ./test/release -run 'TestReleaseManifest|TestPrivateWorkflow|TestRollbackDrill' -v
+actionlint .github/workflows/release.yml
+rg -n 'workflow_dispatch|private_candidate|public_release|native_run_id|tag:' .github/workflows/release.yml
+! rg -n '^\s*push:' .github/workflows/release.yml
 git diff --check
-git status --short
 ```
 
-Expected: every technical gate before the license check passes; the license check intentionally exits nonzero and performs no external write; diff check is silent; status is clean because `dist/`, private inputs, and receipts are ignored.
+Expected: tests and workflow syntax pass; only dispatch carries a native run ID; private mode skips native/publish; public mode requires exact tag plus native run ID; diff check is silent. Final candidate build/native receipts occur only after the following commit.
 
 - [ ] **Step 6: Commit release automation and documentation**
 
@@ -1004,20 +993,56 @@ git commit -m "build: gate SessionReviewer release publication"
 
 ## `v0.1.0` Completion and Publication Gate
 
-Technical hardening is complete only when a fresh private rehearsal proves:
+Tasks 1-9, including `release-native.yml`, all candidate-affecting code/tests, `release.yml`, installer scripts, Skill, README, and packaged documents, must be committed before this gate starts. Set `FINAL_COMMIT` once from that clean committed state. The gate may create ignored artifacts/receipts but must not commit or amend anything afterward:
 
 ```bash
+test -z "$(git status --porcelain)"
+FINAL_COMMIT="$(git rev-parse HEAD)"
 go test ./...
 go test -race ./...
 go vet ./...
 go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
-./scripts/build-release.sh --version 0.1.0 --private
-shasum -a 256 -c dist/SHA256SUMS
 go test ./test/release -v -count=3
 go run ./cmd/verify-skill ./skill/session-reviewer
-go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$(git rev-parse HEAD)" --checksums dist/SHA256SUMS
-git status --short
+
+gh workflow run release.yml --ref "$(git branch --show-current)" -f mode=private_candidate -f commit="$FINAL_COMMIT"
+CANDIDATE_RUN_ID="$(gh run list --workflow release.yml --event workflow_dispatch --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
+test -n "$CANDIDATE_RUN_ID"
+gh run watch "$CANDIDATE_RUN_ID" --exit-status
+gh run download "$CANDIDATE_RUN_ID" -p candidate-0.1.0 -D dist/candidate
+
+gh workflow run release-native.yml --ref "$(git branch --show-current)" -f commit="$FINAL_COMMIT" -f candidate_run_id="$CANDIDATE_RUN_ID"
+NATIVE_RUN_ID="$(gh run list --workflow release-native.yml --event workflow_dispatch --commit "$FINAL_COMMIT" --limit 1 --json databaseId --jq '.[0].databaseId')"
+test -n "$NATIVE_RUN_ID"
+gh run watch "$NATIVE_RUN_ID" --exit-status
+gh run download "$NATIVE_RUN_ID" -p 'native-receipt-*' -D artifacts/private-e2e/native-receipts
+go run ./cmd/release-packager validate-native --receipts artifacts/private-e2e/native-receipts --version 0.1.0 --commit "$FINAL_COMMIT" --checksums dist/candidate/SHA256SUMS
+
+./scripts/install.sh \
+  --archive dist/candidate/session-reviewer_0.1.0_darwin_$(go env GOARCH).tar.gz \
+  --skill-archive dist/candidate/session-reviewer-skill_0.1.0.zip \
+  --checksums dist/candidate/SHA256SUMS
+session-reviewer doctor --json
+./scripts/install.sh --rollback
+./scripts/uninstall.sh
+test "$(git rev-parse HEAD)" = "$FINAL_COMMIT"
+test -z "$(git status --porcelain --untracked-files=no)"
 ```
+
+The private `release.yml` run succeeds without license authorization because native-gate and publish are skipped; its exact run ID feeds the independently committed native workflow. If any command exposes a defect requiring a tracked code/test/workflow/README/Skill change, the receipts and candidate are invalid: make the fix, commit it, discard all candidate/native run IDs, reset `FINAL_COMMIT`, and repeat the entire gate. No commit, amend, generated source, workflow edit, or packaged-document edit may occur after receipt collection for the accepted hash set.
+
+Public release is a separate explicit dispatch, never a tag-push-only path. The owner-authorized `LICENSE` and `docs/release/license-authorization.json` must already be committed before setting `FINAL_COMMIT`, and therefore require rerunning the private candidate/native gate for that exact commit. After the four receipts pass, create/push exact tag `v0.1.0` pointing to unchanged `FINAL_COMMIT`, then dispatch:
+
+```bash
+test "$(git rev-list -n1 v0.1.0)" = "$FINAL_COMMIT"
+gh workflow run release.yml --ref v0.1.0 \
+  -f mode=public_release \
+  -f commit="$FINAL_COMMIT" \
+  -f tag=v0.1.0 \
+  -f native_run_id="$NATIVE_RUN_ID"
+```
+
+The public workflow checks out the tag, reconstructs the deterministic archives, validates their complete hash set against the supplied native receipts, runs the license gate, and only then publishes. Pushing `v0.1.0` alone starts no publication workflow and cannot bypass the required native run ID.
 
 Required evidence:
 
