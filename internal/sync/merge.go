@@ -86,6 +86,9 @@ func mergeFromBase(input MergeInput) MergeResult {
 		if validationErr := candidate.Document.ValidateHumanChanges(*input.Base); validationErr != nil {
 			return conflictResult(reasonForHumanValidation(validationErr), nil)
 		}
+		if !validDocumentShape(candidate.Document) {
+			return conflictResult("invalid_document", nil)
+		}
 	}
 	targetPath, pathFailure := mergePathFromBase(input)
 	if pathFailure != nil {
@@ -135,6 +138,9 @@ func mergeFromBase(input MergeInput) MergeResult {
 	}
 	accepted, err = accepted.WithSyncStatus("synced")
 	if err != nil {
+		return conflictResult("invalid_document", nil)
+	}
+	if !validDocumentShape(accepted) {
 		return conflictResult("invalid_document", nil)
 	}
 	return acceptedResult(input, targetPath, accepted)
@@ -226,9 +232,6 @@ func candidateChangesOtherUnit(candidate Candidate, base syncdoc.Document) bool 
 	}
 	baseUnits, candidateUnits := base.Units(), candidate.Document.Units()
 	for _, key := range sortedUnitKeys(baseUnits, candidateUnits) {
-		if key.Kind == syncdoc.UnitFrontmatter && key.Name == "status" {
-			continue
-		}
 		if !unitsEqual(baseUnits[key], candidateUnits[key]) {
 			return true
 		}
@@ -269,7 +272,17 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	if input.Vault.Present {
 		vaultPath = pathUnit(input.Vault.RelativePath)
 	}
-	mergedPath, pathConflict := mergeUnit(syncdoc.Unit{}, projectPath, vaultPath)
+	projectEffective, vaultEffective := projectPath, vaultPath
+	if input.Project.Present && input.Vault.Present {
+		projectKey, _ := platform.PathKey(input.GOOS, input.CaseMode, input.Project.RelativePath)
+		vaultKey, _ := platform.PathKey(input.GOOS, input.CaseMode, input.Vault.RelativePath)
+		if projectKey == vaultKey {
+			// With no Base spelling to preserve, Project is the deterministic
+			// authority and Vault converges to that display spelling.
+			vaultEffective = projectPath
+		}
+	}
+	mergedPath, pathConflict := mergeUnit(syncdoc.Unit{}, projectEffective, vaultEffective)
 	if pathConflict {
 		return conflictResult("path_conflict", []UnitConflict{{Key: relativePathUnitKey, Project: cloneUnit(projectPath), Vault: cloneUnit(vaultPath)}})
 	}
@@ -356,7 +369,7 @@ func validateMergePath(relative string) error {
 		return syncdoc.ErrInvalidPath
 	}
 	for _, component := range strings.Split(relative, "/") {
-		if component == "sync-conflicts" {
+		if strings.EqualFold(component, "sync-conflicts") {
 			return syncdoc.ErrInvalidPath
 		}
 	}
@@ -380,19 +393,30 @@ func validNewCandidate(document syncdoc.Document, entityID, projectID string) bo
 	if identity.EntityType == "project_overview" {
 		return identity.ID == "project-overview" && validOverviewCandidate(units)
 	}
+	return validDocumentShape(document)
+}
+
+func validDocumentShape(document syncdoc.Document) bool {
+	identity, err := document.Identity()
+	if err != nil || !stableBaseID.MatchString(identity.ID) {
+		return false
+	}
+	units := document.Units()
+	var revision int
+	revisionUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
+	status, statusOK := decodeStringUnit(units, "sync_status")
+	if !revisionUnit.Present || yaml.Unmarshal(revisionUnit.Value, &revision) != nil || revision < 1 || revision > 1<<53-1 || !statusOK || status != "synced" || hasReservedHashUnit(units) {
+		return false
+	}
+	if identity.EntityType == "project_overview" {
+		return identity.ID == "project-overview" && validOverviewCandidate(units)
+	}
 	rendered, err := document.Render()
 	if err != nil {
 		return false
 	}
 	ledgerDocument, err := ledger.ParseDocument(rendered)
 	if err != nil {
-		return false
-	}
-	reserved := map[string]any{"id": identity.ID, "entity_type": identity.EntityType, "project_id": identity.ProjectID, "revision": 2}
-	if sessions, ok := decodeStringSequenceUnit(units, "source_sessions"); ok {
-		reserved["source_sessions"] = sessions
-	}
-	if err := ledgerDocument.SetReserved(reserved); err != nil {
 		return false
 	}
 	if _, err := ledgerDocument.Render(); err != nil {

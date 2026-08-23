@@ -183,6 +183,108 @@ func TestMergeRejectsReservedAndProtectedHumanChanges(t *testing.T) {
 	}
 }
 
+func TestMergeRejectsExistingDecisionWithInvalidDomainShape(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	tests := []struct {
+		name    string
+		project syncdoc.Document
+	}{
+		{"invalid-status", editFrontmatterUnit(t, base, "status", "not-a-status\n")},
+		{"missing-alternatives", removeSectionUnit(t, base, " / Alternatives#1")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := Merge(MergeInput{EntityID: "decision-sync", ProjectID: "project-1111111111111111", BasePath: relative, Base: &base, Project: candidate(relative, tc.project), Vault: candidate(relative, base)})
+			if got.Kind != MergeConflict || got.Reason != "invalid_document" || got.Accepted != nil {
+				t.Fatalf("got=%+v", got)
+			}
+		})
+	}
+}
+
+func TestMergeValidatesExistingAndFinalShapesWithoutRequiringRevisionOne(t *testing.T) {
+	t.Parallel()
+
+	documents := existingShapeDocuments(t)
+	for name, item := range documents {
+		t.Run(name, func(t *testing.T) {
+			base := item.document
+			got := Merge(MergeInput{EntityID: item.id, ProjectID: "project-1111111111111111", BasePath: item.path, Base: &base, Project: candidate(item.path, base), Vault: candidate(item.path, base)})
+			if got.Kind != MergeNoop || got.Reason != "" || got.Accepted == nil {
+				t.Fatalf("got=%+v", got)
+			}
+			revision := got.Accepted.Units()[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
+			if string(revision.Value) != "7\n" {
+				t.Fatalf("revision=%q", revision.Value)
+			}
+		})
+	}
+}
+
+func TestMergeRejectsInvalidExistingShapeForEveryLedgerClass(t *testing.T) {
+	t.Parallel()
+
+	documents := existingShapeDocuments(t)
+	tests := []struct {
+		name string
+		item existingShapeDocument
+		edit func(*testing.T, syncdoc.Document) syncdoc.Document
+	}{
+		{"decision", documents["decision"], func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+			return editFrontmatterUnit(t, document, "status", "invalid\n")
+		}},
+		{"open-loop", documents["open-loop"], func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+			return removeSectionUnit(t, document, " / Attempted paths#1")
+		}},
+		{"session", documents["session"], func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+			return removeFrontmatterUnit(t, document, "goal_changes")
+		}},
+		{"current-state", documents["current-state"], func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+			return removeSectionUnit(t, document, " / Blockers#1")
+		}},
+		{"timeline", documents["timeline"], func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+			return editFrontmatterUnit(t, document, "events", "- id: event-1\n  occurred_at: invalid-time\n  revision: 1\n  class: verified\n  title: Event\n  summary: Summary\n  evidence: []\n  decision_ids: []\n  open_loop_ids: []\n")
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := tc.item.document
+			edited := tc.edit(t, base)
+			got := Merge(MergeInput{EntityID: tc.item.id, ProjectID: "project-1111111111111111", BasePath: tc.item.path, Base: &base, Project: candidate(tc.item.path, edited), Vault: candidate(tc.item.path, base)})
+			if got.Kind != MergeConflict || got.Reason != "invalid_document" || got.Accepted != nil {
+				t.Fatalf("got=%+v", got)
+			}
+		})
+	}
+}
+
+func TestMergeRejectsMalformedExistingReservedEnvelope(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	original := fixtureDocument(t, "base-decision.md", relative)
+	tests := []struct {
+		name string
+		base syncdoc.Document
+	}{
+		{"missing-revision", removeFrontmatterUnit(t, original, "revision")},
+		{"missing-sync-status", removeFrontmatterUnit(t, original, "sync_status")},
+		{"entity-hash-field", editFrontmatterUnit(t, original, "sync_hash", strings.Repeat("a", 64)+"\n")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := tc.base
+			got := Merge(MergeInput{EntityID: "decision-sync", ProjectID: "project-1111111111111111", BasePath: relative, Base: &base, Project: candidate(relative, base), Vault: candidate(relative, base)})
+			if got.Kind != MergeConflict || got.Reason != "invalid_document" || got.Accepted != nil {
+				t.Fatalf("got=%+v", got)
+			}
+		})
+	}
+}
+
 func TestMergeReportsEveryExactConflictDeterministically(t *testing.T) {
 	t.Parallel()
 
@@ -282,6 +384,7 @@ func TestMergeArchivePolicyMatrix(t *testing.T) {
 	const relative = "decisions/decision-sync.md"
 	base := fixtureDocument(t, "base-decision.md", relative)
 	archive := editFrontmatterUnit(t, base, "status", "archived\n")
+	superseded := editFrontmatterUnit(t, base, "status", "superseded\n")
 	projectArchiveAndTitle := editFrontmatterUnit(t, archive, "title", "Project archived title\n")
 	vaultArchiveAndTags := editFrontmatterUnit(t, archive, "tags", "[sync, vault]\n")
 	modified := editFrontmatterUnit(t, base, "title", "Other live edit\n")
@@ -297,6 +400,7 @@ func TestMergeArchivePolicyMatrix(t *testing.T) {
 		{"project-unchanged-vault-archive", candidate(relative, base), candidate(relative, archive), MergeWriteBoth, "", true, "", ""},
 		{"project-archive-vault-modify", candidate(relative, archive), candidate(relative, modified), MergeConflict, "archive_vs_modify", false, "", ""},
 		{"project-modify-vault-archive", candidate(relative, modified), candidate(relative, archive), MergeConflict, "archive_vs_modify", false, "", ""},
+		{"project-archive-vault-other-status", candidate(relative, archive), candidate(relative, superseded), MergeConflict, "archive_vs_modify", false, "", ""},
 		{"both-archive-merge-other-units", candidate(relative, projectArchiveAndTitle), candidate(relative, vaultArchiveAndTags), MergeWriteBoth, "", true, "Project archived title", "sync, vault"},
 	}
 	for _, tc := range tests {
@@ -422,6 +526,7 @@ func TestMergeRejectsInvalidOrCollidingRenameTargetsAndMissingContext(t *testing
 		{"dirty", "decisions/../renamed.md", "invalid_path", true, map[string]string{}},
 		{"not-markdown", "decisions/renamed.txt", "invalid_path", true, map[string]string{}},
 		{"conflict-area", "sync-conflicts/decision-sync.md", "invalid_path", true, map[string]string{}},
+		{"case-folded-conflict-area", "Sync-Conflicts/decision-sync.md", "invalid_path", true, map[string]string{}},
 		{"nested-conflict-area", "decisions/sync-conflicts/decision-sync.md", "invalid_path", true, map[string]string{}},
 		{"windows-device", "decisions/CON.md", "invalid_path", true, map[string]string{}},
 		{"normalized-collision", "decisions/renamed.md", "path_collision", true, occupiedPath(t, "darwin", platform.CaseInsensitive, "Decisions/RENAMED.md", "other-entity")},
@@ -622,6 +727,37 @@ func TestMergeFirstSyncConflictsEveryCommonDifferentUnit(t *testing.T) {
 	}
 }
 
+func TestMergeFirstSyncConvergesEquivalentPathKeysToProjectSpelling(t *testing.T) {
+	t.Parallel()
+
+	const basePath = "decisions/decision-sync.md"
+	base := documentAtRevision(t, fixtureDocument(t, "base-decision.md", basePath), basePath, 1)
+	tests := []struct {
+		name, projectPath, vaultPath string
+	}{
+		{"case-fold", "Decisions/DECISION-SYNC.md", basePath},
+		{"nfc-nfd", "decisions/Café.md", "decisions/Cafe\u0301.md"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			project := candidateAtPath(t, tc.projectPath, base)
+			vault := candidateAtPath(t, tc.vaultPath, base)
+			got := Merge(MergeInput{EntityID: "decision-sync", ProjectID: "project-1111111111111111", Project: project, Vault: vault, GOOS: "darwin", CaseMode: platform.CaseInsensitive, OccupiedPathKeys: map[string]string{}})
+			if got.Kind != MergeWriteVault || got.Reason != "" || got.Accepted == nil || len(got.Conflicts) != 0 {
+				t.Fatalf("got=%+v", got)
+			}
+			accepted, err := got.Accepted.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			projectBytes, _ := project.Document.Render()
+			if !bytes.Equal(accepted, projectBytes) {
+				t.Fatal("equivalent first-sync paths changed document bytes")
+			}
+		})
+	}
+}
+
 func TestMergeRecomputesAndRejectsUntrustedCandidateHashes(t *testing.T) {
 	t.Parallel()
 
@@ -676,6 +812,29 @@ func parseInlineDocument(t *testing.T, relative, content string) syncdoc.Documen
 		t.Fatal(err)
 	}
 	return document
+}
+
+type existingShapeDocument struct {
+	id, path string
+	document syncdoc.Document
+}
+
+func existingShapeDocuments(t *testing.T) map[string]existingShapeDocument {
+	t.Helper()
+	const projectID = "project-1111111111111111"
+	sources := map[string]struct{ id, path, content string }{
+		"decision":      {"decision-existing", "decisions/decision-existing.md", "---\nid: decision-existing\nentity_type: decision\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\ntitle: Decision\nstatus: accepted\ntags: []\nsupersedes: []\nsource_sessions: []\nevidence: []\n---\n\n# Decision\n\n## Alternatives\n\n## Rejected paths\n"},
+		"open-loop":     {"loop-existing", "open-loops/loop-existing.md", "---\nid: loop-existing\nentity_type: open_loop\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\ntitle: Loop\nstatus: open\ntags: []\nsource_sessions: []\nevidence: []\n---\n\n# Loop\n\n## Attempted paths\n"},
+		"session":       {"session-existing", "sessions/session-existing.md", "---\nid: session-existing\nentity_type: session\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\nsession_id: source-session\nsource_sessions: [source-session]\ninitial_goal: Goal\ngoal_changes: []\nphases: []\nfiles: []\ncommits: []\nverification: []\ndecisions_added: []\ndecisions_revised: []\nopen_loops_created: []\nopen_loops_closed: []\nprevious_session_id: ''\nnext_session_id: ''\nevidence: []\n---\n\n# Session\n"},
+		"current-state": {"current-state", "current-state.md", "---\nid: current-state\nentity_type: current_state\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\nsource_sessions: []\nevidence: []\n---\n\n# Current state\n\n## Uncommitted changes\n\n## Blockers\n\n## Open risks\n"},
+		"timeline":      {"evolution-timeline", "evolution-timeline.md", "---\nid: evolution-timeline\nentity_type: timeline\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\nevents:\n  - id: event-1\n    occurred_at: '2026-08-23T00:00:00Z'\n    revision: 1\n    class: verified\n    title: Event\n    summary: Summary\n    evidence: []\n    decision_ids: []\n    open_loop_ids: []\n---\n\n# Timeline\n"},
+		"overview":      {"project-overview", "project-overview.md", "---\nid: project-overview\nentity_type: project_overview\nproject_id: " + projectID + "\nrevision: 7\nsync_status: synced\n---\n\n# Project\n"},
+	}
+	result := make(map[string]existingShapeDocument, len(sources))
+	for name, source := range sources {
+		result[name] = existingShapeDocument{id: source.id, path: source.path, document: parseInlineDocument(t, source.path, source.content)}
+	}
+	return result
 }
 
 func candidate(relative string, document syncdoc.Document) Candidate {
