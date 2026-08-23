@@ -411,6 +411,109 @@ func TestInitializeNewOverviewContainsReservedSyncIdentity(t *testing.T) {
 	}
 }
 
+func TestInitializeMigratesOldOverviewWithoutClobberingUnknownContent(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	if err := os.MkdirAll(filepath.Dir(overviewPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte("---\n# identity comment\nproject_id: " + id + "\nplugin_key:\n  nested: true\n---\n\nPreamble.\n\n## Plugin Section\n```query\n# not a heading\n```\n")
+	if err := os.WriteFile(overviewPath, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ProjectID != id {
+		t.Fatalf("project id=%q", result.ProjectID)
+	}
+	got, err := os.ReadFile(overviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"id: project-overview", "entity_type: project_overview", "revision: 1", "sync_status: synced", "# identity comment", "plugin_key:", "nested: true", "Preamble.", "## Plugin Section", "# not a heading"} {
+		if !bytes.Contains(got, []byte(want)) {
+			t.Fatalf("missing %q in migrated overview:\n%s", want, got)
+		}
+	}
+	if cfg, err := config.Load(result.ConfigPath); err != nil || len(cfg.Projects) != 1 || cfg.Projects[0].ID != id {
+		t.Fatalf("config=%+v err=%v", cfg, err)
+	}
+}
+
+func TestInitializeOverviewMigrationConflictLeavesOverviewAndConfigUnchanged(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra string
+	}{
+		{"conflicting id", "id: another-overview\n"},
+		{"conflicting type", "entity_type: decision\n"},
+		{"conflicting revision", "revision: 9\n"},
+		{"conflicting status", "sync_status: conflicted\n"},
+		{"duplicate key", "project_id: project-3333333333333333\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+			overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+			if err := os.MkdirAll(filepath.Dir(overviewPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			before := []byte("---\nproject_id: project-2a2a2a2a2a2a2a2a\n" + tc.extra + "---\n\n# Project\n")
+			if err := os.WriteFile(overviewPath, before, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS}); !errors.Is(err, ErrConflictingInitializationIdentity) {
+				t.Fatalf("err=%v", err)
+			}
+			after, err := os.ReadFile(overviewPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("overview changed: err=%v before=%q after=%q", err, before, after)
+			}
+			if _, err := os.Stat(filepath.Join(data, "config.toml")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("config changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestInitializePublishedOverviewMigrationSurvivesLaterFailureAndRetry(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	if err := os.MkdirAll(filepath.Dir(overviewPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := []byte("---\nproject_id: " + id + "\nunknown: keep\n---\n\n# Project\n")
+	if err := os.WriteFile(overviewPath, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("stop before config")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{},
+		beforeConfigWrite: func() error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	migrated, err := os.ReadFile(overviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(migrated, old) || !bytes.Contains(migrated, []byte("id: project-overview")) || !bytes.Contains(migrated, []byte("unknown: keep")) {
+		t.Fatalf("published migration was lost: %s", migrated)
+	}
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: runtime.GOOS, Random: errorReader{}})
+	if err != nil || result.ProjectID != id {
+		t.Fatalf("retry result=%+v err=%v", result, err)
+	}
+	after, err := os.ReadFile(overviewPath)
+	if err != nil || !bytes.Equal(after, migrated) {
+		t.Fatalf("retry changed migration: err=%v before=%q after=%q", err, migrated, after)
+	}
+}
+
 func TestInitializeFailureBeforeOverviewLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	sentinel := errors.New("stop before overview")

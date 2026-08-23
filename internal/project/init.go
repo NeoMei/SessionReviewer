@@ -18,7 +18,9 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"golang.org/x/text/unicode/norm"
+	"gopkg.in/yaml.v3"
 )
 
 const initTransactionLockTimeout = 10 * time.Second
@@ -157,9 +159,16 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
-	overviewID, overviewExists, err := readOverviewID(roots.project.Root, filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md")))
+	overviewPath := filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md"))
+	overview, err := readOverview(roots.project.Root, overviewPath)
 	if err != nil {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
+	}
+	overviewID, overviewExists := overview.projectID, overview.exists
+	if len(overview.migrated) != 0 {
+		if err := atomicfile.WriteRoot(roots.project.Root, filepath.FromSlash(overviewPath), overview.migrated, 0o644); err != nil {
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
+		}
 	}
 	existing, mapped, err := findProject(cfg, opts.GOOS, paths.projectRoot, roots.project.Info())
 	if err != nil {
@@ -881,39 +890,94 @@ func overviewBody(projectID string, createdAt time.Time, root string) string {
 	)
 }
 
-func readOverviewID(root *os.Root, overview string) (string, bool, error) {
-	primary, primaryFound, primaryErr := readOverviewIDFile(root, overview)
-	backup, backupFound, backupErr := readOverviewIDFile(root, atomicfile.BackupPath(overview))
-	if primaryFound && primaryErr == nil {
-		return primary, true, nil
-	} else if backupFound && backupErr == nil {
-		return backup, true, nil
-	} else if !primaryFound && !backupFound {
-		return "", false, nil
-	} else {
-		return "", false, fmt.Errorf("project overview or its parent is redirected or invalid")
-	}
+type overviewRead struct {
+	projectID string
+	exists    bool
+	migrated  []byte
 }
 
-func readOverviewIDFile(root *os.Root, name string) (string, bool, error) {
-	body, found, err := readOverviewFile(root, name)
-	if err != nil || !found {
-		return "", found, err
+func readOverview(root *os.Root, overview string) (overviewRead, error) {
+	primaryBody, primaryFound, primaryReadErr := readOverviewFile(root, overview)
+	primaryID, primaryMigrated, primaryParseErr := parseOverview(overview, primaryBody, primaryFound)
+	backupBody, backupFound, backupReadErr := readOverviewFile(root, atomicfile.BackupPath(overview))
+	backupID, _, backupParseErr := parseOverview(overview, backupBody, backupFound)
+	if primaryFound && primaryReadErr == nil && primaryParseErr == nil {
+		return overviewRead{projectID: primaryID, exists: true, migrated: primaryMigrated}, nil
 	}
-	var projectID string
-	for _, line := range strings.Split(string(body), "\n") {
-		if !strings.HasPrefix(line, "project_id:") {
+	if backupFound && backupReadErr == nil && backupParseErr == nil {
+		return overviewRead{projectID: backupID, exists: true}, nil
+	}
+	if !primaryFound && !backupFound {
+		return overviewRead{}, nil
+	}
+	return overviewRead{}, fmt.Errorf("project overview or its parent is redirected or invalid")
+}
+
+func parseOverview(relativePath string, body []byte, found bool) (string, []byte, error) {
+	if !found {
+		return "", nil, nil
+	}
+	doc, err := syncdoc.Parse(relativePath, body)
+	if err != nil {
+		return "", nil, err
+	}
+	units := doc.Units()
+	reserved := []struct {
+		name string
+		want any
+	}{
+		{"id", "project-overview"},
+		{"entity_type", "project_overview"},
+		{"revision", 1},
+		{"sync_status", "synced"},
+	}
+	changed := false
+	for _, field := range reserved {
+		key := syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: field.name}
+		unit, ok := units[key]
+		if ok && unit.Present {
+			var value any
+			if err := yaml.Unmarshal(unit.Value, &value); err != nil || !reflectScalarEqual(value, field.want) {
+				return "", nil, fmt.Errorf("project overview contains conflicting reserved identity")
+			}
 			continue
 		}
-		if projectID != "" {
-			return "", false, fmt.Errorf("project overview contains multiple project IDs")
+		value, err := yaml.Marshal(field.want)
+		if err != nil {
+			return "", nil, err
 		}
-		projectID = strings.TrimSpace(strings.TrimPrefix(line, "project_id:"))
+		units[key] = syncdoc.Unit{Present: true, Value: value}
+		changed = true
 	}
-	if !validProjectID(projectID) {
-		return "", true, fmt.Errorf("project overview contains invalid project ID")
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		return "", nil, err
 	}
-	return projectID, true, nil
+	identity, err := updated.Identity()
+	if err != nil || !validProjectID(identity.ProjectID) {
+		return "", nil, fmt.Errorf("project overview contains invalid project ID")
+	}
+	if !changed {
+		return identity.ProjectID, nil, nil
+	}
+	migrated, err := updated.Render()
+	if err != nil {
+		return "", nil, err
+	}
+	return identity.ProjectID, migrated, nil
+}
+
+func reflectScalarEqual(got, want any) bool {
+	switch expected := want.(type) {
+	case string:
+		actual, ok := got.(string)
+		return ok && actual == expected
+	case int:
+		actual, ok := got.(int)
+		return ok && actual == expected
+	default:
+		return false
+	}
 }
 
 func readOverviewFile(root *os.Root, name string) ([]byte, bool, error) {
