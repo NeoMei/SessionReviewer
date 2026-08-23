@@ -192,6 +192,18 @@ func TestRenderDoesNotMutateState(t *testing.T) {
 	}
 }
 
+func TestRenderRejectsDiagramOverFourMiB(t *testing.T) {
+	state := emptyState()
+	state.Timeline = []ledger.TimelineEvent{{
+		ID:         "event-oversized",
+		OccurredAt: "2026-08-23T01:02:03Z",
+		Title:      strings.Repeat("x", ledger.MaxDocumentBytes),
+	}}
+	if got, err := diagram.Render(state); err == nil || len(got) != 0 {
+		t.Fatalf("oversized render returned %d bytes, err=%v", len(got), err)
+	}
+}
+
 func emptyState() ledger.State {
 	return ledger.State{
 		ProjectID: "project-1111111111111111",

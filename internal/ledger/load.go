@@ -80,11 +80,12 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 	}
 
 	state := State{
-		ProjectID:   projectID,
-		projectRoot: directory.Path,
-		Decisions:   make(map[string]Decision),
-		OpenLoops:   make(map[string]OpenLoop),
-		Sessions:    make(map[string]SessionReport),
+		ProjectID:       projectID,
+		projectRoot:     directory.Path,
+		projectRootInfo: directory.Info(),
+		Decisions:       make(map[string]Decision),
+		OpenLoops:       make(map[string]OpenLoop),
+		Sessions:        make(map[string]SessionReport),
 		documents: stateDocuments{
 			decisions: make(map[string]loadedDocument),
 			openLoops: make(map[string]loadedDocument),

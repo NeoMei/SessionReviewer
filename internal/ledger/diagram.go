@@ -11,6 +11,40 @@ import (
 	"unicode"
 )
 
+const (
+	maxDiagramNodes       = 20_000
+	maxDiagramEdges       = 50_000
+	maxDiagramLabelValues = 100_000
+	maxDiagramIdentityLen = 128
+)
+
+type diagramRenderOptions struct {
+	nodeDigest     func([]byte) [32]byte
+	maxNodes       int
+	maxEdges       int
+	maxOutputBytes int
+	maxLabelValues int
+}
+
+func (options diagramRenderOptions) normalized() diagramRenderOptions {
+	if options.nodeDigest == nil {
+		options.nodeDigest = sha256.Sum256
+	}
+	if options.maxNodes <= 0 {
+		options.maxNodes = maxDiagramNodes
+	}
+	if options.maxEdges <= 0 {
+		options.maxEdges = maxDiagramEdges
+	}
+	if options.maxOutputBytes <= 0 {
+		options.maxOutputBytes = MaxDocumentBytes
+	}
+	if options.maxLabelValues <= 0 {
+		options.maxLabelValues = maxDiagramLabelValues
+	}
+	return options
+}
+
 type diagramNode struct {
 	kind  string
 	id    string
@@ -29,8 +63,19 @@ func RenderDiagram(state State) ([]byte, error) {
 }
 
 func renderDiagram(state State) ([]byte, error) {
+	return renderDiagramWithOptions(state, diagramRenderOptions{})
+}
+
+func renderDiagramWithOptions(state State, options diagramRenderOptions) ([]byte, error) {
+	options = options.normalized()
+	if err := preflightDiagramBudget(state, options); err != nil {
+		return nil, err
+	}
 	if err := validateDiagramState(state); err != nil {
 		return nil, err
+	}
+	makeNodeID := func(kind, id string) string {
+		return nodeIDWithDigest(kind, id, options.nodeDigest)
 	}
 
 	timeline := append([]TimelineEvent(nil), state.Timeline...)
@@ -61,15 +106,15 @@ func renderDiagram(state State) ([]byte, error) {
 
 	var causalEdges []diagramEdge
 	for i := 1; i < len(timeline); i++ {
-		causalEdges = append(causalEdges, diagramEdge{from: nodeID("event", timeline[i-1].ID), to: nodeID("event", timeline[i].ID)})
+		causalEdges = append(causalEdges, diagramEdge{from: makeNodeID("event", timeline[i-1].ID), to: makeNodeID("event", timeline[i].ID)})
 	}
 	for _, event := range timeline {
-		from := nodeID("event", event.ID)
+		from := makeNodeID("event", event.ID)
 		for _, id := range sortedUniqueStrings(event.DecisionIDs) {
-			causalEdges = append(causalEdges, diagramEdge{from: from, to: nodeID("decision", id)})
+			causalEdges = append(causalEdges, diagramEdge{from: from, to: makeNodeID("decision", id)})
 		}
 		for _, id := range sortedUniqueStrings(event.OpenLoopIDs) {
-			causalEdges = append(causalEdges, diagramEdge{from: from, to: nodeID("loop", id)})
+			causalEdges = append(causalEdges, diagramEdge{from: from, to: makeNodeID("loop", id)})
 		}
 	}
 
@@ -101,53 +146,328 @@ func renderDiagram(state State) ([]byte, error) {
 	}
 
 	var relationshipEdges []diagramEdge
-	projectNode := nodeID("project", state.ProjectID)
+	if err := validateGeneratedDiagramNodeIDs(causalNodes, relationshipNodes, options.nodeDigest); err != nil {
+		return nil, err
+	}
+
+	projectNode := makeNodeID("project", state.ProjectID)
 	if state.ProjectID != "" {
 		for _, session := range sessions {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: nodeID("session", session.ID)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: makeNodeID("session", session.ID)})
 		}
 		for _, decision := range decisions {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: nodeID("decision", decision.ID)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: makeNodeID("decision", decision.ID)})
 		}
 		for _, loop := range loops {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: nodeID("loop", loop.ID)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: makeNodeID("loop", loop.ID)})
 		}
 		for _, blocker := range sortedUniqueStrings(state.CurrentState.Blockers) {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: nodeID("blocker", "current-state\x00"+blocker)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: projectNode, to: makeNodeID("blocker", "current-state\x00"+blocker)})
 		}
 	}
 	for _, session := range sessions {
-		from := nodeID("session", session.ID)
+		from := makeNodeID("session", session.ID)
 		for _, id := range sortedUniqueStrings(append(append([]string(nil), session.DecisionsAdded...), session.DecisionsRevised...)) {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: nodeID("decision", id)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: makeNodeID("decision", id)})
 		}
 		for _, id := range sortedUniqueStrings(append(append([]string(nil), session.OpenLoopsCreated...), session.OpenLoopsClosed...)) {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: nodeID("loop", id)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: makeNodeID("loop", id)})
 		}
 	}
 	for _, decision := range decisions {
-		from := nodeID("decision", decision.ID)
+		from := makeNodeID("decision", decision.ID)
 		for _, id := range sortedUniqueStrings(decision.Supersedes) {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: nodeID("decision", id)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: makeNodeID("decision", id)})
 		}
 	}
 	for _, loop := range loops {
-		from := nodeID("loop", loop.ID)
+		from := makeNodeID("loop", loop.ID)
 		if loop.Blocker != "" {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: nodeID("blocker", loop.ID+"\x00"+loop.Blocker)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: makeNodeID("blocker", loop.ID+"\x00"+loop.Blocker)})
 		}
 		if loop.NextExperiment != "" {
-			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: nodeID("experiment", loop.ID+"\x00"+loop.NextExperiment)})
+			relationshipEdges = append(relationshipEdges, diagramEdge{from: from, to: makeNodeID("experiment", loop.ID+"\x00"+loop.NextExperiment)})
 		}
 	}
 
-	var output bytes.Buffer
+	output := newCappedDiagramBuffer(options.maxOutputBytes)
 	output.WriteString("# Project evolution\n\n")
 	output.WriteString("This file is derived from the accepted project ledger. Manual edits are overwritten on the next accepted render.\n\n")
-	writeMermaidGraph(&output, "Causal evolution", "flowchart LR", causalNodes, causalEdges)
-	output.WriteByte('\n')
-	writeMermaidGraph(&output, "Project relationships", "graph TD", relationshipNodes, relationshipEdges)
+	writeMermaidGraph(output, "Causal evolution", "flowchart LR", causalNodes, causalEdges, options.nodeDigest)
+	output.appendByte('\n')
+	writeMermaidGraph(output, "Project relationships", "graph TD", relationshipNodes, relationshipEdges, options.nodeDigest)
+	if output.err != nil {
+		return nil, output.err
+	}
 	return output.Bytes(), nil
+}
+
+type diagramBudget struct {
+	options     diagramRenderOptions
+	nodes       int
+	edges       int
+	labelValues int
+	labelBytes  int
+}
+
+func preflightDiagramBudget(state State, options diagramRenderOptions) error {
+	budget := diagramBudget{options: options}
+	if err := budget.addNodes(len(state.Timeline)); err != nil {
+		return err
+	}
+	if state.ProjectID != "" {
+		if err := budget.addNodes(1); err != nil {
+			return err
+		}
+	}
+	for _, count := range []int{len(state.Decisions), len(state.Decisions), len(state.OpenLoops), len(state.OpenLoops), len(state.Sessions), len(state.CurrentState.Blockers)} {
+		if err := budget.addNodes(count); err != nil {
+			return err
+		}
+	}
+	for _, loop := range state.OpenLoops {
+		if loop.Blocker != "" {
+			if err := budget.addNodes(1); err != nil {
+				return err
+			}
+		}
+		if loop.NextExperiment != "" {
+			if err := budget.addNodes(1); err != nil {
+				return err
+			}
+		}
+	}
+	if err := preflightDiagramIdentities(state); err != nil {
+		return err
+	}
+
+	if len(state.Timeline) > 1 {
+		if err := budget.addEdges(len(state.Timeline) - 1); err != nil {
+			return err
+		}
+	}
+	for _, event := range state.Timeline {
+		if err := budget.addEdges(len(event.DecisionIDs)); err != nil {
+			return err
+		}
+		if err := budget.addEdges(len(event.OpenLoopIDs)); err != nil {
+			return err
+		}
+	}
+	if state.ProjectID != "" {
+		for _, count := range []int{len(state.Sessions), len(state.Decisions), len(state.OpenLoops), len(state.CurrentState.Blockers)} {
+			if err := budget.addEdges(count); err != nil {
+				return err
+			}
+		}
+	}
+	for _, session := range state.Sessions {
+		for _, count := range []int{len(session.DecisionsAdded), len(session.DecisionsRevised), len(session.OpenLoopsCreated), len(session.OpenLoopsClosed)} {
+			if err := budget.addEdges(count); err != nil {
+				return err
+			}
+		}
+	}
+	for _, decision := range state.Decisions {
+		if err := budget.addEdges(len(decision.Supersedes)); err != nil {
+			return err
+		}
+	}
+	for _, loop := range state.OpenLoops {
+		if loop.Blocker != "" {
+			if err := budget.addEdges(1); err != nil {
+				return err
+			}
+		}
+		if loop.NextExperiment != "" {
+			if err := budget.addEdges(1); err != nil {
+				return err
+			}
+		}
+	}
+
+	if state.ProjectID != "" {
+		if err := budget.addLabel(state.ProjectID, 1); err != nil {
+			return err
+		}
+		if err := budget.addLabel(state.CurrentState.Goal, 1); err != nil {
+			return err
+		}
+	}
+	for _, event := range state.Timeline {
+		if err := budget.addLabel(event.OccurredAt, 1); err != nil {
+			return err
+		}
+		if err := budget.addLabel(event.Title, 1); err != nil {
+			return err
+		}
+	}
+	for _, decision := range state.Decisions {
+		for _, value := range []string{decision.Title, decision.Status} {
+			if err := budget.addLabel(value, 2); err != nil {
+				return err
+			}
+		}
+		for _, tag := range decision.Tags {
+			if err := budget.addLabel(tag, 2); err != nil {
+				return err
+			}
+		}
+	}
+	for _, loop := range state.OpenLoops {
+		for _, value := range []string{loop.Title, loop.Status} {
+			if err := budget.addLabel(value, 2); err != nil {
+				return err
+			}
+		}
+		for _, tag := range loop.Tags {
+			if err := budget.addLabel(tag, 2); err != nil {
+				return err
+			}
+		}
+		for _, value := range []string{loop.Blocker, loop.NextExperiment} {
+			if err := budget.addLabel(value, 1); err != nil {
+				return err
+			}
+		}
+	}
+	for _, session := range state.Sessions {
+		if err := budget.addLabel(session.SessionID, 1); err != nil {
+			return err
+		}
+	}
+	for _, blocker := range state.CurrentState.Blockers {
+		if err := budget.addLabel(blocker, 1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preflightDiagramIdentities(state State) error {
+	check := func(value, owner string) error {
+		if len(value) > maxDiagramIdentityLen {
+			return fmt.Errorf("diagram %s identity exceeds size limit", owner)
+		}
+		return nil
+	}
+	checkAll := func(values []string, owner string) error {
+		for _, value := range values {
+			if err := check(value, owner); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, value := range []struct {
+		identity string
+		owner    string
+	}{
+		{identity: state.ProjectID, owner: "project"},
+		{identity: state.CurrentState.ProjectID, owner: "current-state project"},
+	} {
+		if err := check(value.identity, value.owner); err != nil {
+			return err
+		}
+	}
+	for _, event := range state.Timeline {
+		if err := check(event.ID, "timeline event"); err != nil {
+			return err
+		}
+		if err := checkAll(event.DecisionIDs, "timeline decision reference"); err != nil {
+			return err
+		}
+		if err := checkAll(event.OpenLoopIDs, "timeline open-loop reference"); err != nil {
+			return err
+		}
+	}
+	for key, decision := range state.Decisions {
+		for _, value := range []struct {
+			identity string
+			owner    string
+		}{
+			{identity: key, owner: "decision map key"},
+			{identity: decision.ID, owner: "decision"},
+			{identity: decision.ProjectID, owner: "decision project"},
+		} {
+			if err := check(value.identity, value.owner); err != nil {
+				return err
+			}
+		}
+		if err := checkAll(decision.Supersedes, "superseded decision reference"); err != nil {
+			return err
+		}
+	}
+	for key, loop := range state.OpenLoops {
+		for _, value := range []struct {
+			identity string
+			owner    string
+		}{
+			{identity: key, owner: "open-loop map key"},
+			{identity: loop.ID, owner: "open loop"},
+			{identity: loop.ProjectID, owner: "open-loop project"},
+		} {
+			if err := check(value.identity, value.owner); err != nil {
+				return err
+			}
+		}
+	}
+	for key, session := range state.Sessions {
+		for _, value := range []struct {
+			identity string
+			owner    string
+		}{
+			{identity: key, owner: "session map key"},
+			{identity: session.ID, owner: "session"},
+			{identity: session.ProjectID, owner: "session project"},
+		} {
+			if err := check(value.identity, value.owner); err != nil {
+				return err
+			}
+		}
+		for _, references := range []struct {
+			values []string
+			owner  string
+		}{
+			{values: session.DecisionsAdded, owner: "session added-decision reference"},
+			{values: session.DecisionsRevised, owner: "session revised-decision reference"},
+			{values: session.OpenLoopsCreated, owner: "session created-loop reference"},
+			{values: session.OpenLoopsClosed, owner: "session closed-loop reference"},
+		} {
+			if err := checkAll(references.values, references.owner); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (budget *diagramBudget) addNodes(count int) error {
+	if count < 0 || count > budget.options.maxNodes-budget.nodes {
+		return errors.New("diagram node limit exceeded")
+	}
+	budget.nodes += count
+	return nil
+}
+
+func (budget *diagramBudget) addEdges(count int) error {
+	if count < 0 || count > budget.options.maxEdges-budget.edges {
+		return errors.New("diagram edge limit exceeded")
+	}
+	budget.edges += count
+	return nil
+}
+
+func (budget *diagramBudget) addLabel(value string, copies int) error {
+	if copies < 0 || copies > budget.options.maxLabelValues-budget.labelValues {
+		return errors.New("diagram label-value limit exceeded")
+	}
+	budget.labelValues += copies
+	if len(value) != 0 && copies > (budget.options.maxOutputBytes-budget.labelBytes)/len(value) {
+		return errors.New("diagram size limit exceeded")
+	}
+	budget.labelBytes += len(value) * copies
+	return nil
 }
 
 func validateDiagramState(state State) error {
@@ -292,17 +612,71 @@ func entityDiagramLabel(kind, title, status string, tags []string) string {
 	return label
 }
 
-func writeMermaidGraph(output *bytes.Buffer, title, declaration string, nodes []diagramNode, edges []diagramEdge) {
+func validateGeneratedDiagramNodeIDs(causal, relationships []diagramNode, digest func([]byte) [32]byte) error {
+	generated := make(map[string]string, len(causal)+len(relationships))
+	for _, nodes := range [][]diagramNode{causal, relationships} {
+		for _, node := range nodes {
+			original := node.kind + "\x00" + node.id
+			generatedID := nodeIDWithDigest(node.kind, node.id, digest)
+			if previous, exists := generated[generatedID]; exists && previous != original {
+				return fmt.Errorf("generated diagram node ID collision %q between %q and %q", generatedID, previous, original)
+			}
+			generated[generatedID] = original
+		}
+	}
+	return nil
+}
+
+type cappedDiagramBuffer struct {
+	buffer bytes.Buffer
+	limit  int
+	err    error
+}
+
+func newCappedDiagramBuffer(limit int) *cappedDiagramBuffer {
+	return &cappedDiagramBuffer{limit: limit}
+}
+
+func (output *cappedDiagramBuffer) WriteString(value string) {
+	if output.err != nil {
+		return
+	}
+	if len(value) > output.limit-output.buffer.Len() {
+		output.err = errors.New("diagram size limit exceeded")
+		return
+	}
+	_, _ = output.buffer.WriteString(value)
+}
+
+func (output *cappedDiagramBuffer) appendByte(value byte) {
+	if output.err != nil {
+		return
+	}
+	if output.buffer.Len() >= output.limit {
+		output.err = errors.New("diagram size limit exceeded")
+		return
+	}
+	_ = output.buffer.WriteByte(value)
+}
+
+func (output *cappedDiagramBuffer) Bytes() []byte {
+	if output.err != nil {
+		return nil
+	}
+	return output.buffer.Bytes()
+}
+
+func writeMermaidGraph(output *cappedDiagramBuffer, title, declaration string, nodes []diagramNode, edges []diagramEdge, digest func([]byte) [32]byte) {
 	output.WriteString("## ")
 	output.WriteString(title)
 	output.WriteString("\n\n```mermaid\n")
 	output.WriteString(declaration)
-	output.WriteByte('\n')
+	output.appendByte('\n')
 	for _, node := range nodes {
 		output.WriteString("  ")
-		output.WriteString(nodeID(node.kind, node.id))
+		output.WriteString(nodeIDWithDigest(node.kind, node.id, digest))
 		output.WriteString("[\"")
-		output.WriteString(escapeDiagramLabel(node.label))
+		writeEscapedDiagramLabel(output, node.label)
 		output.WriteString("\"]\n")
 	}
 	for _, edge := range sortedUniqueEdges(edges) {
@@ -310,7 +684,7 @@ func writeMermaidGraph(output *bytes.Buffer, title, declaration string, nodes []
 		output.WriteString(edge.from)
 		output.WriteString(" --> ")
 		output.WriteString(edge.to)
-		output.WriteByte('\n')
+		output.appendByte('\n')
 	}
 	output.WriteString("```\n")
 }
@@ -349,37 +723,42 @@ func sortedUniqueStrings(values []string) []string {
 }
 
 func nodeID(kind, id string) string {
-	sum := sha256.Sum256([]byte(kind + "\x00" + id))
+	return nodeIDWithDigest(kind, id, sha256.Sum256)
+}
+
+func nodeIDWithDigest(kind, id string, digest func([]byte) [32]byte) string {
+	sum := digest([]byte(kind + "\x00" + id))
 	return kind + "_" + hex.EncodeToString(sum[:6])
 }
 
-func escapeDiagramLabel(value string) string {
-	var escaped strings.Builder
+func writeEscapedDiagramLabel(output *cappedDiagramBuffer, value string) {
 	for _, character := range value {
 		switch character {
 		case '&':
-			escaped.WriteString("&amp;")
+			output.WriteString("&amp;")
 		case '"':
-			escaped.WriteString("&quot;")
+			output.WriteString("&quot;")
 		case '[':
-			escaped.WriteString("&#91;")
+			output.WriteString("&#91;")
 		case ']':
-			escaped.WriteString("&#93;")
+			output.WriteString("&#93;")
 		case '<':
-			escaped.WriteString("&lt;")
+			output.WriteString("&lt;")
 		case '>':
-			escaped.WriteString("&gt;")
+			output.WriteString("&gt;")
 		case '`':
-			escaped.WriteString("&#96;")
+			output.WriteString("&#96;")
 		case '\\':
-			escaped.WriteString("&#92;")
+			output.WriteString("&#92;")
 		default:
 			if unicode.IsControl(character) || unicode.Is(unicode.Cf, character) || unicode.Is(unicode.Zl, character) || unicode.Is(unicode.Zp, character) {
-				escaped.WriteByte(' ')
+				output.appendByte(' ')
 			} else {
-				escaped.WriteRune(character)
+				output.WriteString(string(character))
 			}
 		}
+		if output.err != nil {
+			return
+		}
 	}
-	return escaped.String()
 }

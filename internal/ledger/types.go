@@ -109,14 +109,15 @@ type SessionReport struct {
 }
 
 type State struct {
-	ProjectID    string
-	CurrentState CurrentState
-	Timeline     []TimelineEvent
-	Decisions    map[string]Decision
-	OpenLoops    map[string]OpenLoop
-	Sessions     map[string]SessionReport
-	documents    stateDocuments
-	projectRoot  string
+	ProjectID       string
+	CurrentState    CurrentState
+	Timeline        []TimelineEvent
+	Decisions       map[string]Decision
+	OpenLoops       map[string]OpenLoop
+	Sessions        map[string]SessionReport
+	documents       stateDocuments
+	projectRoot     string
+	projectRootInfo fs.FileInfo
 }
 
 type ChangeSet struct {

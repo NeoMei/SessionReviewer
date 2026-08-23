@@ -162,6 +162,72 @@ func TestRenderOverwritesUserEditsToDerivedDiagram(t *testing.T) {
 	}
 }
 
+func TestRenderDerivedDiagramUsesLoadedProjectRootIdentity(t *testing.T) {
+	root := ledgerFixture(t)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := completeChanges()
+	initial, err := Render(state, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const relative = "docs/session-review/diagrams/project-evolution.md"
+	var target []byte
+	for _, file := range initial.Files {
+		if file.RelativePath == relative {
+			target = append([]byte(nil), file.Data...)
+		}
+	}
+	if len(target) == 0 {
+		t.Fatal("initial render omitted derived diagram")
+	}
+
+	held := root + "-held"
+	replacement := root + "-replacement"
+	if err := os.Rename(root, held); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	t.Cleanup(func() {
+		if !restored {
+			_ = os.Rename(held, root)
+		}
+		_ = os.RemoveAll(replacement)
+	})
+	path := filepath.Join(root, filepath.FromSlash(relative))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, target, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if plan, err := Render(state, changes); err == nil {
+		t.Fatalf("replacement root was accepted, files=%+v", plan.Files)
+	}
+	if err := os.Rename(root, replacement); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(held, root); err != nil {
+		t.Fatal(err)
+	}
+	restored = true
+
+	plan, err := Render(state, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, file := range plan.Files {
+		found = found || file.RelativePath == relative
+	}
+	if !found {
+		t.Fatalf("restored root omitted derived diagram: %+v", plan.Files)
+	}
+}
+
 func TestRenderCompleteLayoutPreservesUserContent(t *testing.T) {
 	root := ledgerFixture(t)
 	state, err := Load(root)

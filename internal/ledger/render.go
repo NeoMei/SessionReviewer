@@ -129,7 +129,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		return fail(errors.New("render diagram: document exceeds size limit"))
 	}
 	const diagramRelative = ledgerRootRelative + "/diagrams/project-evolution.md"
-	directory, err := openLedgerProjectRoot(state.projectRoot, rootOpenOptions{})
+	directory, err := openLedgerProjectRoot(state.projectRoot, rootOpenOptions{expectedRoot: state.projectRootInfo})
 	if err != nil {
 		return fail(fmt.Errorf("read derived diagram: %w", err))
 	}
