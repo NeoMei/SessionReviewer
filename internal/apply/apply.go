@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
@@ -81,13 +82,12 @@ func (roots *applyRoots) Close() error {
 const applyLockTimeout = 2 * time.Second
 
 type projectApplyLock struct {
-	file            *os.File
+	platform        *applyPlatformLock
 	projectDataPath string
 	projects        *os.Root
 	projectData     *os.Root
 	projectsInfo    os.FileInfo
 	projectDataInfo os.FileInfo
-	lockInfo        os.FileInfo
 }
 
 func acquireProjectApplyLock(dataDir, projectID string) (*projectApplyLock, error) {
@@ -106,87 +106,65 @@ func acquireProjectApplyLockRoot(data *pathguard.Directory, projectID string) (*
 	if data == nil || data.Root == nil {
 		return nil, errors.New("initialized data root is required")
 	}
-	if err := ensureApplySubdirectory(data.Root, "projects"); err != nil {
+	// DataDir is an initialized, trusted application boundary. The retained
+	// root identity and later pathname rechecks fail closed on namespace
+	// replacement, but this cooperative lock is not filesystem-wide exclusion
+	// against a hostile writer replacing arbitrary entries below DataDir.
+	platform, err := acquireApplyPlatformLock(data.Root, data.Path, projectID, applyLockTimeout)
+	if err != nil {
 		return nil, err
+	}
+	return &projectApplyLock{platform: platform}, nil
+}
+
+func (lock *projectApplyLock) initializeProjectData(data *pathguard.Directory, projectID string) error {
+	if lock == nil || lock.platform == nil || data == nil || data.Root == nil {
+		return errors.New("initialized apply lock and data root are required")
+	}
+	if err := ensureApplySubdirectory(data.Root, "projects"); err != nil {
+		return err
 	}
 	projectsPath := filepath.Join(data.Path, "projects")
 	projectsInfo, err := data.Root.Lstat("projects")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	projects, err := data.Root.OpenRoot("projects")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	openedProjects, err := projects.Stat(".")
 	if err != nil || !os.SameFile(projectsInfo, openedProjects) {
 		_ = projects.Close()
-		return nil, errors.New("projects directory identity changed while opening")
+		return errors.New("projects directory identity changed while opening")
 	}
 	if err := ensureApplySubdirectory(projects, projectID); err != nil {
 		_ = projects.Close()
-		return nil, err
+		return err
 	}
 	projectDataPath := filepath.Join(projectsPath, projectID)
 	projectDataInfo, err := projects.Lstat(projectID)
 	if err != nil {
 		_ = projects.Close()
-		return nil, err
+		return err
 	}
 	projectData, err := projects.OpenRoot(projectID)
 	if err != nil {
 		_ = projects.Close()
-		return nil, err
+		return err
 	}
 	openedProjectData, err := projectData.Stat(".")
 	if err != nil || !os.SameFile(projectDataInfo, openedProjectData) {
 		_ = projectData.Close()
 		_ = projects.Close()
-		return nil, errors.New("project data directory identity changed while opening")
+		return errors.New("project data directory identity changed while opening")
 	}
-	const lockName = ".apply.lock"
-	if err := rejectEntryCaseCollisions(projectData, lockName); err != nil {
-		_ = projectData.Close()
-		_ = projects.Close()
-		return nil, err
-	}
-	deadline := time.Now().Add(applyLockTimeout)
-	for {
-		file, err := openStableApplyLockFile(projectData, lockName)
-		if err != nil {
-			_ = projectData.Close()
-			_ = projects.Close()
-			return nil, err
-		}
-		locked, err := tryApplyPlatformLock(file)
-		if err != nil {
-			_ = file.Close()
-			_ = projectData.Close()
-			_ = projects.Close()
-			return nil, fmt.Errorf("acquire project apply lock: %w", err)
-		}
-		if locked {
-			lockInfo, statErr := file.Stat()
-			if statErr != nil {
-				_ = unlockApplyPlatformLock(file)
-				_ = file.Close()
-				_ = projectData.Close()
-				_ = projects.Close()
-				return nil, statErr
-			}
-			return &projectApplyLock{
-				file: file, projectDataPath: projectDataPath, projects: projects, projectData: projectData,
-				projectsInfo: projectsInfo, projectDataInfo: projectDataInfo, lockInfo: lockInfo,
-			}, nil
-		}
-		_ = file.Close()
-		if !time.Now().Before(deadline) {
-			_ = projectData.Close()
-			_ = projects.Close()
-			return nil, errors.New("project apply transaction remains locked by a live owner")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	lock.projectDataPath = projectDataPath
+	lock.projects = projects
+	lock.projectData = projectData
+	lock.projectsInfo = projectsInfo
+	lock.projectDataInfo = projectDataInfo
+	return nil
 }
 
 func (lock *projectApplyLock) verifyIdentity(roots *applyRoots, projectPath, dataPath, projectID string) error {
@@ -213,17 +191,15 @@ func (lock *projectApplyLock) verifyIdentity(roots *applyRoots, projectPath, dat
 			return fmt.Errorf("%s identity changed", label)
 		}
 	}
-	projectsInfo, err := roots.data.Root.Lstat("projects")
-	if err != nil || !os.SameFile(lock.projectsInfo, projectsInfo) {
-		return errors.New("projects directory identity changed")
-	}
-	projectDataInfo, err := lock.projects.Lstat(projectID)
-	if err != nil || !os.SameFile(lock.projectDataInfo, projectDataInfo) {
-		return errors.New("project data directory identity changed")
-	}
-	lockPathInfo, err := lock.projectData.Lstat(".apply.lock")
-	if err != nil || !os.SameFile(lock.lockInfo, lockPathInfo) {
-		return errors.New("apply lock identity changed")
+	if lock.projects != nil || lock.projectData != nil {
+		projectsInfo, err := roots.data.Root.Lstat("projects")
+		if err != nil || !os.SameFile(lock.projectsInfo, projectsInfo) {
+			return errors.New("projects directory identity changed")
+		}
+		projectDataInfo, err := lock.projects.Lstat(projectID)
+		if err != nil || !os.SameFile(lock.projectDataInfo, projectDataInfo) {
+			return errors.New("project data directory identity changed")
+		}
 	}
 	return nil
 }
@@ -234,7 +210,7 @@ func ensureApplySubdirectory(root *os.Root, name string) error {
 	}
 	info, err := root.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := root.Mkdir(name, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		if err := atomicfile.EnsureRootDir(root, name, 0o700); err != nil {
 			return err
 		}
 		info, err = root.Lstat(name)
@@ -245,50 +221,18 @@ func ensureApplySubdirectory(root *os.Root, name string) error {
 	return nil
 }
 
-func openStableApplyLockFile(root *os.Root, name string) (*os.File, error) {
-	for {
-		before, err := root.Lstat(name)
-		found := err == nil
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-		if found && (!before.Mode().IsRegular() || isApplyRedirect(before)) {
-			return nil, errors.New("apply lock is redirected or not regular")
-		}
-		flags := os.O_RDWR
-		if !found {
-			flags |= os.O_CREATE | os.O_EXCL
-		}
-		file, err := root.OpenFile(name, flags, 0o600)
-		if errors.Is(err, os.ErrExist) || errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		opened, err := file.Stat()
-		if err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		after, err := root.Lstat(name)
-		if err != nil || !os.SameFile(opened, after) || (found && !os.SameFile(before, opened)) {
-			_ = file.Close()
-			continue
-		}
-		if err := file.Chmod(0o600); err != nil {
-			_ = file.Close()
-			return nil, err
-		}
-		return file, nil
-	}
-}
-
 func (lock *projectApplyLock) Release() error {
-	if lock == nil || lock.file == nil {
+	if lock == nil {
 		return nil
 	}
-	return errors.Join(unlockApplyPlatformLock(lock.file), lock.file.Close(), lock.projectData.Close(), lock.projects.Close())
+	var projectDataErr, projectsErr error
+	if lock.projectData != nil {
+		projectDataErr = lock.projectData.Close()
+	}
+	if lock.projects != nil {
+		projectsErr = lock.projects.Close()
+	}
+	return errors.Join(projectDataErr, projectsErr, releaseApplyPlatformLock(lock.platform))
 }
 
 func Run(opts Options) (result Result, retErr error) {
@@ -298,6 +242,13 @@ func Run(opts Options) (result Result, retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, roots.Close()) }()
 	result = baseResult(ctx)
+	current, err := cursor.LoadReadOnlyRoot(roots.data.Root, ctx.Packet.ProjectID, ctx.Packet.SessionID)
+	if err != nil {
+		return Result{}, err
+	}
+	if !cursorCompatibleWithInput(current, ctx.Packet) {
+		return Result{}, cursor.ErrStale
+	}
 	lock, err := acquireProjectApplyLockRoot(roots.data, ctx.Packet.ProjectID)
 	if err != nil {
 		return Result{}, err
@@ -309,13 +260,31 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-
-	store := cursor.Store{Root: lock.projectDataPath, ExpectedRoot: lock.projectDataInfo}
-	current, err := store.Load(ctx.Packet.SessionID)
+	current, err = cursor.LoadReadOnlyRoot(roots.data.Root, ctx.Packet.ProjectID, ctx.Packet.SessionID)
 	if err != nil {
 		return Result{}, err
 	}
-	receipt, found, err := loadReceipt(lock.projectData, ctx.ProposalDigest)
+	if !cursorCompatibleWithInput(current, ctx.Packet) {
+		return Result{}, cursor.ErrStale
+	}
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
+	if err := lock.initializeProjectData(roots.data, ctx.Packet.ProjectID); err != nil {
+		return Result{}, err
+	}
+	if err := verifyIdentity(); err != nil {
+		return Result{}, err
+	}
+	store := cursor.Store{Root: lock.projectDataPath, ExpectedRoot: lock.projectDataInfo}
+	current, err = store.Load(ctx.Packet.SessionID)
+	if err != nil {
+		return Result{}, err
+	}
+	if !cursorCompatibleWithInput(current, ctx.Packet) {
+		return Result{}, cursor.ErrStale
+	}
+	receipt, found, err := scanReceipts(lock.projectData, ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -739,6 +708,10 @@ func cursorAtBoundary(value cursor.Cursor, boundary evidence.CursorBoundary) boo
 		return value == (cursor.Cursor{})
 	}
 	return value.SessionID != "" && value.LastLine == boundary.Line && strings.EqualFold(value.LastHash, boundary.SourceHash)
+}
+
+func cursorCompatibleWithInput(value cursor.Cursor, packet evidence.Packet) bool {
+	return cursorAtBoundary(value, packet.ExpectedCursor) || cursorAtOrBeyond(value, packet.NextCursor)
 }
 
 func cursorAtOrBeyond(value cursor.Cursor, boundary evidence.CursorBoundary) bool {

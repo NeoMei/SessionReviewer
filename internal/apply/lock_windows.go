@@ -4,10 +4,14 @@ package apply
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -19,32 +23,86 @@ func isApplyRedirect(info fs.FileInfo) bool {
 	return ok && data.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
-const applyLockfileFailImmediately = 0x1
-const applyLockfileExclusiveLock = 0x2
+const (
+	applyWaitObject0   = 0
+	applyWaitAbandoned = 0x80
+	applyWaitTimeout   = 0x102
+)
 
 var applyKernel32 = syscall.NewLazyDLL("kernel32.dll")
-var applyProcLockFileEx = applyKernel32.NewProc("LockFileEx")
-var applyProcUnlockFileEx = applyKernel32.NewProc("UnlockFileEx")
+var applyProcCreateMutexW = applyKernel32.NewProc("CreateMutexW")
+var applyProcWaitForSingleObject = applyKernel32.NewProc("WaitForSingleObject")
+var applyProcReleaseMutex = applyKernel32.NewProc("ReleaseMutex")
+var applyProcCloseHandle = applyKernel32.NewProc("CloseHandle")
+var applyProcGetFinalPathNameByHandleW = applyKernel32.NewProc("GetFinalPathNameByHandleW")
 
-func tryApplyPlatformLock(file *os.File) (bool, error) {
-	var overlapped syscall.Overlapped
-	result, _, callErr := applyProcLockFileEx.Call(file.Fd(), applyLockfileExclusiveLock|applyLockfileFailImmediately, 0, 1, 0, uintptr(unsafe.Pointer(&overlapped)))
-	runtime.KeepAlive(file)
-	if result != 0 {
-		return true, nil
-	}
-	if errors.Is(callErr, syscall.Errno(33)) {
-		return false, nil
-	}
-	return false, callErr
+type applyPlatformLock struct {
+	handle syscall.Handle
 }
 
-func unlockApplyPlatformLock(file *os.File) error {
-	var overlapped syscall.Overlapped
-	result, _, callErr := applyProcUnlockFileEx.Call(file.Fd(), 0, 1, 0, uintptr(unsafe.Pointer(&overlapped)))
-	runtime.KeepAlive(file)
-	if result == 0 {
-		return callErr
+func acquireApplyPlatformLock(root *os.Root, fallbackPath, projectID string, timeout time.Duration) (*applyPlatformLock, error) {
+	identity, err := canonicalApplyDataIdentity(root, fallbackPath)
+	if err != nil {
+		return nil, err
+	}
+	name := windowsApplyMutexName(identity, projectID)
+	encoded, err := syscall.UTF16PtrFromString(name)
+	if err != nil {
+		return nil, fmt.Errorf("encode apply mutex name: %w", err)
+	}
+	handle, _, callErr := applyProcCreateMutexW.Call(0, 0, uintptr(unsafe.Pointer(encoded)))
+	if handle == 0 {
+		return nil, fmt.Errorf("create apply mutex: %w", callErr)
+	}
+	waitMillis := uintptr(timeout / time.Millisecond)
+	result, _, waitErr := applyProcWaitForSingleObject.Call(handle, waitMillis)
+	if result == applyWaitObject0 || result == applyWaitAbandoned {
+		return &applyPlatformLock{handle: syscall.Handle(handle)}, nil
+	}
+	_, _, _ = applyProcCloseHandle.Call(handle)
+	if result == applyWaitTimeout {
+		return nil, errors.New("project apply transaction remains locked by a live owner")
+	}
+	return nil, fmt.Errorf("wait for apply mutex: %w", waitErr)
+}
+
+func canonicalApplyDataIdentity(root *os.Root, fallbackPath string) (string, error) {
+	file, err := root.Open(".")
+	if err != nil {
+		return "", fmt.Errorf("open pinned data root for apply mutex identity: %w", err)
+	}
+	defer file.Close()
+	buffer := make([]uint16, 512)
+	for {
+		length, _, callErr := applyProcGetFinalPathNameByHandleW.Call(file.Fd(), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)), 0)
+		runtime.KeepAlive(file)
+		if length == 0 {
+			return "", fmt.Errorf("resolve apply mutex data identity: %w", callErr)
+		}
+		if length < uintptr(len(buffer)) {
+			resolved := syscall.UTF16ToString(buffer[:length])
+			if strings.HasPrefix(resolved, `\\?\UNC\`) {
+				resolved = `\\` + strings.TrimPrefix(resolved, `\\?\UNC\`)
+			} else {
+				resolved = strings.TrimPrefix(resolved, `\\?\`)
+			}
+			return strings.ToLower(filepath.Clean(resolved)), nil
+		}
+		buffer = make([]uint16, int(length)+1)
+		if len(buffer) > 32768 {
+			return "", fmt.Errorf("resolved apply mutex data identity is too long: %q", filepath.Base(fallbackPath))
+		}
+	}
+}
+
+func releaseApplyPlatformLock(lock *applyPlatformLock) error {
+	if lock == nil || lock.handle == 0 {
+		return nil
+	}
+	released, _, releaseErr := applyProcReleaseMutex.Call(uintptr(lock.handle))
+	closed, _, closeErr := applyProcCloseHandle.Call(uintptr(lock.handle))
+	if released == 0 || closed == 0 {
+		return errors.Join(releaseErr, closeErr)
 	}
 	return nil
 }

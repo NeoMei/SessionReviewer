@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/proposal"
 )
 
 const (
@@ -186,6 +188,52 @@ func TestRunRecoversPreparedAndPartialTransactions(t *testing.T) {
 	}
 }
 
+func TestRunRejectsDifferentProposalWhileSameBoundaryReceiptIsPending(t *testing.T) {
+	f := newApplyTestFixture(t)
+	opts := f.options()
+	opts.hooks.afterFile = func(index int, _ string) error {
+		if index == 0 {
+			return errors.New("stop after first file")
+		}
+		return nil
+	}
+	if _, err := Run(opts); err == nil {
+		t.Fatal("interruption was not injected")
+	}
+	aReceipt := receiptPathForTest(t, f)
+	beforeLedger := snapshotTree(t, f.projectRoot)
+	beforeState := snapshotTree(t, f.projectData)
+
+	body, err := os.ReadFile(f.proposalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(body, []byte("Long sessions need durable continuity."), []byte("Long sessions need auditable continuity."), 1)
+	if bytes.Equal(body, changed) {
+		t.Fatal("proposal B did not differ from proposal A")
+	}
+	if err := os.WriteFile(f.proposalPath, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bReceipt := receiptPathForTest(t, f)
+	if aReceipt == bReceipt {
+		t.Fatal("proposal digests unexpectedly match")
+	}
+
+	if _, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) || err.Error() != "pending apply receipt conflicts with current proposal" {
+		t.Fatalf("err=%v", err)
+	}
+	if got := snapshotTree(t, f.projectRoot); got != beforeLedger {
+		t.Fatalf("pending conflict changed ledger\nbefore:\n%s\nafter:\n%s", beforeLedger, got)
+	}
+	if got := snapshotTree(t, f.projectData); got != beforeState {
+		t.Fatalf("pending conflict changed transaction state\nbefore:\n%s\nafter:\n%s", beforeState, got)
+	}
+	if _, err := os.Stat(bReceipt); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("proposal B receipt exists: %v", err)
+	}
+}
+
 func TestRunAfterRenderFailureWritesNoReceiptOrLedger(t *testing.T) {
 	f := newApplyTestFixture(t)
 	before := hashLedger(t, f.projectRoot)
@@ -301,6 +349,166 @@ func TestRunRejectsCorruptAndRedirectedReceipts(t *testing.T) {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+func TestRunScansEveryReceiptBeforeCurrentProposal(t *testing.T) {
+	badBodies := map[string][]byte{
+		"malformed":     []byte("{"),
+		"unknown field": []byte(`{"unknown":true}`),
+		"duplicate key": []byte(`{"schema_version":1,"schema_version":1}`),
+	}
+	for name, badBody := range badBodies {
+		t.Run(name, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			directory := filepath.Join(f.projectData, "applied-proposals")
+			if err := os.MkdirAll(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			badName := strings.Repeat("c", 64) + ".json"
+			if err := os.WriteFile(filepath.Join(directory, badName), badBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			before := hashLedger(t, f.projectRoot)
+			if _, err := Run(f.options()); err == nil {
+				t.Fatal("accepted invalid non-current receipt")
+			}
+			if after := hashLedger(t, f.projectRoot); after != before {
+				t.Fatal("invalid receipt scan changed ledger")
+			}
+			assertCursorNotAdvanced(t, f)
+		})
+	}
+
+	t.Run("nonregular", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		bad := filepath.Join(f.projectData, "applied-proposals", strings.Repeat("c", 64)+".json")
+		if err := os.MkdirAll(bad, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "not regular") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("invalid digest name", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		directory := filepath.Join(f.projectData, "applied-proposals")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "not-a-digest.json"), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "receipt name") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("case collision", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		opts := f.options()
+		opts.hooks.afterPreparedReceipt = func() error { return errors.New("stop") }
+		if _, err := Run(opts); err == nil {
+			t.Fatal("expected interruption")
+		}
+		lower := receiptPathForTest(t, f)
+		upper := filepath.Join(filepath.Dir(lower), strings.ToUpper(filepath.Base(lower)))
+		if err := os.WriteFile(upper, []byte("{}"), 0o600); err != nil {
+			t.Skipf("case-colliding filename unavailable: %v", err)
+		}
+		entries, err := os.ReadDir(filepath.Dir(lower))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) < 2 {
+			t.Skip("filesystem is case-insensitive")
+		}
+		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "case-colliding") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestRunBoundsReceiptDirectoryScan(t *testing.T) {
+	t.Run("count", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		directory := filepath.Join(f.projectData, "applied-proposals")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < 4097; index++ {
+			name := fmt.Sprintf("%064x.json", index+1)
+			if err := os.WriteFile(filepath.Join(directory, name), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "receipt count") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("aggregate size", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		directory := filepath.Join(f.projectData, "applied-proposals")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < 5; index++ {
+			name := fmt.Sprintf("%064x.json", index+1)
+			path := filepath.Join(directory, name)
+			if err := os.WriteFile(path, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Truncate(path, maxReceiptBytes); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "aggregate size") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestRunIgnoresValidReceiptForDifferentSessionOrBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*inputContext)
+	}{
+		{name: "different session", mutate: func(ctx *inputContext) { ctx.Packet.SessionID = "session-other" }},
+		{name: "different boundary", mutate: func(ctx *inputContext) {
+			ctx.Packet.FromCursor = 2
+			ctx.Packet.ToCursor = 3
+			ctx.Packet.ExpectedCursor = evidence.CursorBoundary{Line: 1, SourceHash: testHashA}
+			ctx.Packet.NextCursor = evidence.CursorBoundary{Line: 3, SourceHash: testHashA}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			ctx := inputContext{Packet: f.packet, ProposalDigest: "sha256:" + strings.Repeat("c", 64), EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashB}
+			tc.mutate(&ctx)
+			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(f.projectData, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(f.projectData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := saveReceipt(root, receipt); err != nil {
+				_ = root.Close()
+				t.Fatal(err)
+			}
+			if err := root.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := Run(f.options()); err != nil || !got.CursorAdvanced {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
+	}
 }
 
 func TestRunRejectsBoundedOrChangingInputsBeforeStateWrites(t *testing.T) {
@@ -433,24 +641,35 @@ func TestRunFailsClosedWhenPinnedRootsAreReplaced(t *testing.T) {
 	})
 }
 
-func TestRunFailsClosedWhenLockedPathIsReplaced(t *testing.T) {
+func TestRunDoesNotDependOnLegacyApplyLockEntry(t *testing.T) {
 	f := newApplyTestFixture(t)
-	before := hashLedger(t, f.projectRoot)
+	if err := os.MkdirAll(f.projectData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(f.projectData, ".apply.lock")
+	if err := os.WriteFile(legacy, []byte("legacy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	opts := f.options()
 	opts.hooks.afterPreparedReceipt = func() error {
-		lockPath := filepath.Join(f.projectData, ".apply.lock")
-		if err := os.Rename(lockPath, lockPath+".moved"); err != nil {
-			return err
-		}
-		return os.WriteFile(lockPath, []byte("replacement"), 0o600)
+		return os.Rename(legacy, legacy+".moved")
 	}
-	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "lock identity") {
-		t.Fatalf("err=%v", err)
+	if got, err := Run(opts); err != nil || !got.CursorAdvanced {
+		t.Fatalf("got=%+v err=%v", got, err)
 	}
-	if after := hashLedger(t, f.projectRoot); after != before {
-		t.Fatal("ledger changed after lock replacement")
+	if _, err := os.Stat(legacy); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("apply recreated legacy lock: %v", err)
 	}
-	assertCursorNotAdvanced(t, f)
+}
+
+func TestRunCreatesNoFilesystemApplyLock(t *testing.T) {
+	f := newApplyTestFixture(t)
+	if _, err := Run(f.options()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(f.projectData, ".apply.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("filesystem apply lock exists: %v", err)
+	}
 }
 
 func TestRunRepairsReceiptPrivacyModesUnderLock(t *testing.T) {
@@ -516,6 +735,135 @@ func TestNewPreparedReceiptRejectsAggregateEncodedSizeAndFileCount(t *testing.T)
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+func TestReceiptValidateRejectsTraversalPathsDirectly(t *testing.T) {
+	ctx := inputContext{Packet: evidence.Packet{
+		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
+		ExpectedCursor: evidence.CursorBoundary{}, NextCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
+	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
+	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{{RelativePath: "docs/session-review/current-state.md", Data: []byte("x"), Perm: 0o644}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"..", "../escape", "./../escape", "docs/../../escape", "docs/session-review/../../../escape"} {
+		t.Run(strings.ReplaceAll(path, "/", "_"), func(t *testing.T) {
+			receipt := base
+			receipt.Files = append([]receiptFile(nil), base.Files...)
+			receipt.Files[0].RelativePath = path
+			if err := receipt.validate(); err == nil || !strings.Contains(err.Error(), "invalid receipt file path") {
+				t.Fatalf("path=%q err=%v", path, err)
+			}
+		})
+	}
+}
+
+func TestReceiptValidateRejectsMalformedInputDigests(t *testing.T) {
+	ctx := inputContext{Packet: evidence.Packet{
+		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
+		ExpectedCursor: evidence.CursorBoundary{}, NextCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
+	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
+	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"proposal", "evidence file", "evidence packet"} {
+		t.Run(field, func(t *testing.T) {
+			receipt := base
+			switch field {
+			case "proposal":
+				receipt.ProposalSHA256 = "sha256:short"
+			case "evidence file":
+				receipt.EvidenceFileSHA256 = "not-a-digest"
+			case "evidence packet":
+				receipt.EvidencePacketSHA256 = "sha256:" + strings.ToUpper(testHashA)
+			}
+			if err := receipt.validate(); err == nil || !strings.Contains(err.Error(), "invalid apply receipt identity") {
+				t.Fatalf("err=%v", err)
+			}
+		})
+	}
+}
+
+func TestReceiptValidateRejectsMalformedRecoveryMetadata(t *testing.T) {
+	ctx := inputContext{Packet: evidence.Packet{
+		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 2, ToCursor: 2,
+		ExpectedCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA}, NextCursor: evidence.CursorBoundary{Line: 2, SourceHash: testHashB},
+	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
+	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{{
+		RelativePath: "docs/session-review/current-state.md", Data: []byte("new"), Perm: 0o644,
+		ExpectedExists: true, ExpectedData: []byte("old"), ExpectedPerm: 0o644,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*applyReceipt)
+	}{
+		{name: "expected cursor hash", mutate: func(receipt *applyReceipt) { receipt.ExpectedCursor.SourceHash = strings.ToUpper(testHashA) }},
+		{name: "next cursor hash", mutate: func(receipt *applyReceipt) { receipt.NextCursor.SourceHash = "" }},
+		{name: "preimage hash", mutate: func(receipt *applyReceipt) { receipt.Files[0].PreimageSHA256 = "sha256:short" }},
+		{name: "prepared changed files", mutate: func(receipt *applyReceipt) { receipt.ChangedFiles = []string{receipt.Files[0].RelativePath} }},
+		{name: "applied missing changed files", mutate: func(receipt *applyReceipt) { receipt.State = receiptApplied }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			receipt := base
+			receipt.Files = append([]receiptFile(nil), base.Files...)
+			receipt.ChangedFiles = append([]string(nil), base.ChangedFiles...)
+			tc.mutate(&receipt)
+			if err := receipt.validate(); err == nil {
+				t.Fatal("accepted malformed recovery metadata")
+			}
+		})
+	}
+}
+
+func TestApplyMutexNamePolicyIsDeterministicAndNamespaced(t *testing.T) {
+	first := windowsApplyMutexName("/trusted/data", testProjectID)
+	if first != windowsApplyMutexName("/trusted/data", testProjectID) {
+		t.Fatal("mutex name is not deterministic")
+	}
+	if !strings.HasPrefix(first, `Local\SessionReviewer.Apply.`) {
+		t.Fatalf("mutex namespace=%q", first)
+	}
+	if first == windowsApplyMutexName("/trusted/data-other", testProjectID) || first == windowsApplyMutexName("/trusted/data", "project-other") {
+		t.Fatal("mutex name does not bind data identity and project ID")
+	}
+}
+
+func TestRunStaleCursorLeavesDataTreeByteAndMetadataExact(t *testing.T) {
+	for _, existingUnsafe := range []bool{false, true} {
+		name := "projects missing"
+		if existingUnsafe {
+			name = "existing unsafe modes"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newApplyTestFixture(t)
+			if err := os.RemoveAll(filepath.Join(f.dataDir, "projects")); err != nil {
+				t.Fatal(err)
+			}
+			if existingUnsafe {
+				cursorDir := filepath.Join(f.projectData, "cursors")
+				if err := os.MkdirAll(cursorDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				for _, path := range []string{filepath.Join(f.dataDir, "projects"), f.projectData, cursorDir} {
+					if err := os.Chmod(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			makeExpectedCursorStale(t, f)
+			before := snapshotTree(t, f.dataDir)
+			if _, err := Run(f.options()); !errors.Is(err, cursor.ErrStale) {
+				t.Fatalf("err=%v", err)
+			}
+			if after := snapshotTree(t, f.dataDir); after != before {
+				t.Fatalf("stale apply changed data tree\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
 }
 
 func TestRunAcceptsLaterCursorOnlyWhileReceiptTargetsMatch(t *testing.T) {
@@ -651,6 +999,78 @@ func replaceDirectoryForTest(live, moved string) error {
 		return err
 	}
 	return os.Mkdir(live, 0o700)
+}
+
+func makeExpectedCursorStale(t *testing.T, f *applyTestFixture) {
+	t.Helper()
+	f.packet.FromCursor = 2
+	f.packet.ToCursor = 2
+	f.packet.ExpectedCursor = evidence.CursorBoundary{Line: 1, SourceHash: testHashA}
+	f.packet.NextCursor = evidence.CursorBoundary{Line: 2, SourceHash: testHashB}
+	f.packet.Events = f.packet.Events[1:]
+	evidenceBody, err := json.Marshal(f.packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.evidencePath, append(evidenceBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := evidence.Digest(f.packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(f.proposalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := proposal.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.FromCursor = f.packet.FromCursor
+	p.ToCursor = f.packet.ToCursor
+	p.EvidencePacketSHA256 = digest
+	body, err = json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.proposalPath, append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotTree(t *testing.T, root string) string {
+	t.Helper()
+	var lines []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		line := filepath.ToSlash(relative) + "|" + info.Mode().String() + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
+		if info.Mode().IsRegular() {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			digest := sha256.Sum256(body)
+			line += "|" + hex.EncodeToString(digest[:])
+		}
+		lines = append(lines, line)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(lines)
+	return strings.Join(lines, "\n")
 }
 
 func assertCursorNotAdvanced(t *testing.T, f *applyTestFixture) {
