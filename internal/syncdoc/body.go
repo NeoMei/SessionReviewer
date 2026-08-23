@@ -2,7 +2,6 @@ package syncdoc
 
 import (
 	"bytes"
-	"fmt"
 	"sort"
 	"strconv"
 	"strings"
@@ -45,29 +44,32 @@ func parseBody(source []byte) (Body, error) {
 		return Body{}, invalidDocument("too many Markdown sections")
 	}
 
-	ancestry := make([]string, 6)
-	occurrences := make(map[string]int, len(headings))
+	ancestry := make([]sectionComponent, 6)
+	active := make([]bool, 6)
+	occurrences := make(map[sectionOccurrenceIdentity]int, len(headings))
 	sections := make([]bodySection, 0, len(headings))
 	for i, heading := range headings {
-		ancestry[heading.level-1] = heading.name
 		for level := heading.level; level < len(ancestry); level++ {
-			ancestry[level] = ""
+			active[level] = false
 		}
-		parts := make([]string, 0, heading.level)
-		for level := 0; level < heading.level; level++ {
-			if ancestry[level] != "" {
-				parts = append(parts, ancestry[level])
+		components := make([]sectionComponent, 0, heading.level)
+		for level := 0; level < heading.level-1; level++ {
+			if active[level] {
+				components = append(components, ancestry[level])
 			}
 		}
-		path := encodeSectionPath(parts)
-		occurrenceIdentity := fmt.Sprintf("%s@%d", path, heading.level)
+		occurrenceIdentity := sectionOccurrenceIdentity{parent: encodeSectionComponents(components), name: heading.name, level: heading.level}
 		occurrences[occurrenceIdentity]++
+		component := sectionComponent{name: heading.name, level: heading.level, occurrence: occurrences[occurrenceIdentity]}
+		ancestry[heading.level-1] = component
+		active[heading.level-1] = true
+		components = append(components, component)
 		valueEnd := len(source)
 		if i+1 < len(headings) {
 			valueEnd = headings[i+1].start
 		}
 		sections = append(sections, bodySection{
-			key:     UnitKey{Kind: UnitSection, Name: encodeSectionUnitName(parts, heading.level, occurrences[occurrenceIdentity])},
+			key:     UnitKey{Kind: UnitSection, Name: encodeSectionUnitName(components)},
 			heading: bytes.Clone(source[heading.start:heading.bodyStart]),
 			value:   bytes.Clone(source[heading.bodyStart:valueEnd]),
 			level:   heading.level,
@@ -116,7 +118,7 @@ func (b Body) units() UnitSet {
 	units := make(UnitSet, len(b.sections)+1)
 	units[UnitKey{Kind: UnitPreamble}] = Unit{Present: true, Value: bytes.Clone(b.preamble)}
 	for _, section := range b.sections {
-		units[section.key] = Unit{Present: true, Value: bytes.Clone(section.value)}
+		units[section.key] = Unit{Present: true, Value: bytes.Clone(section.value), HeadingPresentation: bytes.Clone(section.heading)}
 	}
 	return units
 }
@@ -129,77 +131,171 @@ func (b Body) withUnits(units UnitSet) (Body, bool, error) {
 		result.preamble = bytes.Clone(preamble.Value)
 	}
 	changed := !ok || !preamble.Present || !bytes.Equal(result.preamble, b.preamble)
-	seen := make(map[UnitKey]struct{}, len(b.sections))
-	for _, section := range b.sections {
-		seen[section.key] = struct{}{}
+	entries := make(map[UnitKey]sectionEntry, len(b.sections))
+	existingKeys := make(map[UnitKey]struct{}, len(b.sections))
+	for order, section := range b.sections {
+		existingKeys[section.key] = struct{}{}
 		unit, exists := units[section.key]
 		if !exists || !unit.Present {
 			changed = true
 			continue
 		}
+		identity, err := decodeSectionUnitName(section.key.Name)
+		if err != nil {
+			return Body{}, false, err
+		}
 		copy := section
 		copy.heading = bytes.Clone(section.heading)
 		copy.value = bytes.Clone(unit.Value)
-		if !bytes.Equal(copy.value, section.value) {
+		if len(unit.HeadingPresentation) != 0 {
+			copy.heading, err = validatedHeadingPresentation(unit.HeadingPresentation, identity.leaf())
+			if err != nil {
+				return Body{}, false, err
+			}
+		}
+		if !bytes.Equal(copy.heading, section.heading) || !bytes.Equal(copy.value, section.value) {
 			changed = true
 		}
-		result.sections = append(result.sections, copy)
+		entries[section.key] = sectionEntry{section: copy, identity: identity, existing: true, order: order}
 	}
-	var additions []UnitKey
-	additionIdentities := make(map[UnitKey]sectionUnitIdentity)
+	additionKeys := make(map[UnitKey]struct{})
 	for key, unit := range units {
 		if key.Kind != UnitSection || !unit.Present {
 			continue
 		}
-		if _, exists := seen[key]; !exists {
-			identity, err := decodeSectionUnitName(key.Name)
+		if _, exists := existingKeys[key]; exists {
+			continue
+		}
+		identity, err := decodeSectionUnitName(key.Name)
+		if err != nil {
+			return Body{}, false, err
+		}
+		leaf := identity.leaf()
+		heading := []byte(strings.Repeat("#", leaf.level) + " " + leaf.name + "\n")
+		if len(unit.HeadingPresentation) != 0 {
+			heading, err = validatedHeadingPresentation(unit.HeadingPresentation, leaf)
 			if err != nil {
 				return Body{}, false, err
 			}
-			additions = append(additions, key)
-			additionIdentities[key] = identity
 		}
-	}
-	sort.Slice(additions, func(i, j int) bool {
-		first, second := additionIdentities[additions[i]], additionIdentities[additions[j]]
-		for index := 0; index < len(first.parts) && index < len(second.parts); index++ {
-			if first.parts[index] != second.parts[index] {
-				return first.parts[index] < second.parts[index]
-			}
+		entries[key] = sectionEntry{
+			section:  bodySection{key: key, heading: heading, value: bytes.Clone(unit.Value), level: leaf.level},
+			identity: identity,
 		}
-		if len(first.parts) != len(second.parts) {
-			return len(first.parts) < len(second.parts)
-		}
-		if first.level != second.level {
-			return first.level < second.level
-		}
-		return first.occurrence < second.occurrence
-	})
-	for _, key := range additions {
-		identity := additionIdentities[key]
-		heading := []byte(strings.Repeat("#", identity.level) + " " + identity.parts[len(identity.parts)-1] + "\n")
-		result.sections = append(result.sections, bodySection{key: key, heading: heading, value: bytes.Clone(units[key].Value), level: identity.level})
+		additionKeys[key] = struct{}{}
 		changed = true
 	}
-	if len(result.sections) > maxBodySections {
+	if len(entries) > maxBodySections {
 		return Body{}, false, invalidDocument("too many Markdown sections")
 	}
-	if len(additions) != 0 {
+	ordered, err := orderSectionEntries(entries)
+	if err != nil {
+		return Body{}, false, err
+	}
+	result.sections = make([]bodySection, len(ordered))
+	for index, entry := range ordered {
+		result.sections[index] = entry.section
+	}
+	if changed {
 		reparsed, err := parseBody(result.render())
 		if err != nil {
 			return Body{}, false, err
 		}
-		reparsedKeys := make(map[UnitKey]struct{}, len(reparsed.sections))
-		for _, section := range reparsed.sections {
-			reparsedKeys[section.key] = struct{}{}
+		if len(reparsed.sections) != len(result.sections) {
+			return Body{}, false, invalidDocument("new section render introduced unexpected structure")
 		}
-		for _, key := range additions {
-			if _, ok := reparsedKeys[key]; !ok {
-				return Body{}, false, invalidDocument("new section ancestry is not representable at the append position")
+		for index, section := range reparsed.sections {
+			if _, added := additionKeys[result.sections[index].key]; added && section.key != result.sections[index].key {
+				return Body{}, false, invalidDocument("new section ancestry is not representable at the requested position")
 			}
 		}
+		result = reparsed
 	}
 	return result, changed, nil
+}
+
+type sectionEntry struct {
+	section  bodySection
+	identity sectionUnitIdentity
+	existing bool
+	order    int
+}
+
+func orderSectionEntries(entries map[UnitKey]sectionEntry) ([]sectionEntry, error) {
+	children := make(map[UnitKey][]sectionEntry)
+	roots := make([]sectionEntry, 0)
+	for _, entry := range entries {
+		parent, hasParent := entry.identity.parentKey()
+		if !hasParent {
+			roots = append(roots, entry)
+			continue
+		}
+		if _, ok := entries[parent]; !ok {
+			return nil, invalidDocument("section parent is missing")
+		}
+		children[parent] = append(children[parent], entry)
+	}
+	sortSectionSiblings(roots)
+	for parent := range children {
+		sortSectionSiblings(children[parent])
+	}
+	ordered := make([]sectionEntry, 0, len(entries))
+	var appendTree func(sectionEntry)
+	appendTree = func(entry sectionEntry) {
+		ordered = append(ordered, entry)
+		for _, child := range children[entry.section.key] {
+			appendTree(child)
+		}
+	}
+	for _, root := range roots {
+		appendTree(root)
+	}
+	if len(ordered) != len(entries) {
+		return nil, invalidDocument("section ancestry is cyclic or unreachable")
+	}
+	return ordered, nil
+}
+
+func sortSectionSiblings(entries []sectionEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		first, second := entries[i], entries[j]
+		firstLeaf, secondLeaf := first.identity.leaf(), second.identity.leaf()
+		if firstLeaf.name == secondLeaf.name && firstLeaf.level == secondLeaf.level && firstLeaf.occurrence != secondLeaf.occurrence {
+			return firstLeaf.occurrence < secondLeaf.occurrence
+		}
+		if first.existing != second.existing {
+			return first.existing
+		}
+		if first.existing {
+			return first.order < second.order
+		}
+		if firstLeaf.name != secondLeaf.name {
+			return firstLeaf.name < secondLeaf.name
+		}
+		if firstLeaf.level != secondLeaf.level {
+			return firstLeaf.level < secondLeaf.level
+		}
+		if firstLeaf.occurrence != secondLeaf.occurrence {
+			return firstLeaf.occurrence < secondLeaf.occurrence
+		}
+		return first.section.key.Name < second.section.key.Name
+	})
+}
+
+func validatedHeadingPresentation(source []byte, expected sectionComponent) ([]byte, error) {
+	parsed, err := parseBody(source)
+	if err != nil || len(parsed.preamble) != 0 || len(parsed.sections) != 1 || len(parsed.sections[0].value) != 0 {
+		return nil, invalidDocument("invalid section heading presentation")
+	}
+	identity, err := decodeSectionUnitName(parsed.sections[0].key.Name)
+	if err != nil {
+		return nil, err
+	}
+	actual := identity.leaf()
+	if actual.name != expected.name || actual.level != expected.level {
+		return nil, invalidDocument("section heading presentation does not match unit identity")
+	}
+	return bytes.Clone(source), nil
 }
 
 func (b Body) render() []byte {
@@ -279,75 +375,115 @@ func normalizedHeadingName(name string) (string, error) {
 	return name, nil
 }
 
-type sectionUnitIdentity struct {
-	parts      []string
+type sectionComponent struct {
+	name       string
 	level      int
 	occurrence int
 }
 
-func decodeSectionUnitName(unitName string) (sectionUnitIdentity, error) {
-	hash := lastUnescapedByte(unitName, '#')
-	if hash <= 0 || hash == len(unitName)-1 {
-		return sectionUnitIdentity{}, invalidDocument("invalid section unit name")
+type sectionOccurrenceIdentity struct {
+	parent string
+	name   string
+	level  int
+}
+
+type sectionUnitIdentity struct {
+	components []sectionComponent
+}
+
+func (identity sectionUnitIdentity) leaf() sectionComponent {
+	return identity.components[len(identity.components)-1]
+}
+
+func (identity sectionUnitIdentity) parentKey() (UnitKey, bool) {
+	if len(identity.components) < 2 {
+		return UnitKey{}, false
 	}
-	for _, digit := range unitName[hash+1:] {
+	return UnitKey{Kind: UnitSection, Name: encodeSectionUnitName(identity.components[:len(identity.components)-1])}, true
+}
+
+func decodeSectionUnitName(unitName string) (sectionUnitIdentity, error) {
+	encodedComponents, err := splitSectionPath(unitName)
+	if err != nil || len(encodedComponents) == 0 || len(encodedComponents) > 6 {
+		return sectionUnitIdentity{}, invalidDocument("invalid section ancestry")
+	}
+	components := make([]sectionComponent, len(encodedComponents))
+	previousLevel := 0
+	for index, encoded := range encodedComponents {
+		component, err := decodeSectionComponent(encoded)
+		if err != nil {
+			return sectionUnitIdentity{}, err
+		}
+		if component.level <= previousLevel {
+			return sectionUnitIdentity{}, invalidDocument("section ancestry levels must increase")
+		}
+		components[index] = component
+		previousLevel = component.level
+	}
+	identity := sectionUnitIdentity{components: components}
+	if encodeSectionUnitName(components) != unitName {
+		return sectionUnitIdentity{}, invalidDocument("non-canonical section unit name")
+	}
+	return identity, nil
+}
+
+func decodeSectionComponent(encoded string) (sectionComponent, error) {
+	hash := lastUnescapedByte(encoded, '#')
+	if hash <= 0 || hash == len(encoded)-1 {
+		return sectionComponent{}, invalidDocument("invalid section unit name")
+	}
+	for _, digit := range encoded[hash+1:] {
 		if digit < '0' || digit > '9' {
-			return sectionUnitIdentity{}, invalidDocument("invalid section occurrence")
+			return sectionComponent{}, invalidDocument("invalid section occurrence")
 		}
 	}
-	occurrence, err := strconv.Atoi(unitName[hash+1:])
+	occurrence, err := strconv.Atoi(encoded[hash+1:])
 	if err != nil || occurrence < 1 {
-		return sectionUnitIdentity{}, invalidDocument("invalid section occurrence")
+		return sectionComponent{}, invalidDocument("invalid section occurrence")
 	}
-	identity := unitName[:hash]
+	identity := encoded[:hash]
 	level := 2
 	if marker := lastUnescapedByte(identity, '@'); marker >= 0 {
 		parsed, err := strconv.Atoi(identity[marker+1:])
 		if err != nil || parsed < 1 || parsed > 6 {
-			return sectionUnitIdentity{}, invalidDocument("invalid section heading level")
+			return sectionComponent{}, invalidDocument("invalid section heading level")
 		}
 		level = parsed
 		identity = identity[:marker]
 	}
-	encodedParts, err := splitSectionPath(identity)
+	name, err := unescapeSectionComponent(identity)
 	if err != nil {
-		return sectionUnitIdentity{}, err
+		return sectionComponent{}, err
 	}
-	parts := make([]string, len(encodedParts))
-	for i, encoded := range encodedParts {
-		parts[i], err = unescapeSectionComponent(encoded)
-		if err != nil {
-			return sectionUnitIdentity{}, err
-		}
-	}
-	if len(parts) == 0 || len(parts) > 6 {
-		return sectionUnitIdentity{}, invalidDocument("invalid section ancestry")
-	}
-	name, err := normalizedHeadingName(parts[len(parts)-1])
+	name, err = normalizedHeadingName(name)
 	if err != nil {
-		return sectionUnitIdentity{}, err
+		return sectionComponent{}, err
 	}
-	parts[len(parts)-1] = name
-	if encodeSectionUnitName(parts, level, occurrence) != unitName {
-		return sectionUnitIdentity{}, invalidDocument("non-canonical section unit name")
+	component := sectionComponent{name: name, level: level, occurrence: occurrence}
+	if encodeSectionComponent(component) != encoded {
+		return sectionComponent{}, invalidDocument("non-canonical section component")
 	}
-	return sectionUnitIdentity{parts: parts, level: level, occurrence: occurrence}, nil
+	return component, nil
 }
 
-func encodeSectionUnitName(parts []string, level, occurrence int) string {
-	identity := encodeSectionPath(parts)
-	if level != 2 || len(parts) > 1 {
-		identity += "@" + strconv.Itoa(level)
-	}
-	return identity + "#" + strconv.Itoa(occurrence)
+func encodeSectionUnitName(components []sectionComponent) string {
+	return encodeSectionComponents(components)
 }
 
-func encodeSectionPath(parts []string) string {
-	encoded := make([]string, len(parts))
-	for i, part := range parts {
-		encoded[i] = escapeSectionComponent(part)
+func encodeSectionComponents(components []sectionComponent) string {
+	encoded := make([]string, len(components))
+	for index, component := range components {
+		encoded[index] = encodeSectionComponent(component)
 	}
 	return strings.Join(encoded, " / ")
+}
+
+func encodeSectionComponent(component sectionComponent) string {
+	identity := escapeSectionComponent(component.name)
+	if component.level != 2 {
+		identity += "@" + strconv.Itoa(component.level)
+	}
+	return identity + "#" + strconv.Itoa(component.occurrence)
 }
 
 func escapeSectionComponent(value string) string {

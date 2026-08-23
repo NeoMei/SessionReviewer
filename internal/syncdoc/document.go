@@ -81,9 +81,14 @@ type UnitKey struct {
 }
 
 type Unit struct {
-	Present         bool
-	Value           []byte
+	Present bool
+	Value   []byte
+	// KeyPresentation is only valid for frontmatter units. It retains the
+	// complete YAML key node, including comments and scalar style.
 	KeyPresentation []byte
+	// HeadingPresentation is only valid for section units. It retains the
+	// complete ATX or Setext heading source, including line endings.
+	HeadingPresentation []byte
 }
 
 type UnitSet map[UnitKey]Unit
@@ -220,13 +225,22 @@ func (d Document) WithUnits(units UnitSet) (Document, error) {
 			if key.Name == "" {
 				return Document{}, invalidDocument("empty frontmatter unit name")
 			}
+			if len(input[key].HeadingPresentation) != 0 {
+				return Document{}, invalidDocument("frontmatter unit has section heading presentation")
+			}
 		case UnitPreamble:
 			if key.Name != "" {
 				return Document{}, invalidDocument("invalid preamble unit name")
 			}
+			if len(input[key].KeyPresentation) != 0 || len(input[key].HeadingPresentation) != 0 {
+				return Document{}, invalidDocument("preamble unit has inapplicable presentation metadata")
+			}
 		case UnitSection:
 			if key.Name == "" {
 				return Document{}, invalidDocument("empty section unit name")
+			}
+			if len(input[key].KeyPresentation) != 0 {
+				return Document{}, invalidDocument("section unit has frontmatter key presentation")
 			}
 		default:
 			return Document{}, invalidDocument("unknown unit kind")
@@ -657,13 +671,18 @@ func cloneNode(node *yaml.Node) *yaml.Node {
 func cloneUnitSet(units UnitSet) UnitSet {
 	copy := make(UnitSet, len(units))
 	for key, unit := range units {
-		copy[key] = Unit{Present: unit.Present, Value: bytes.Clone(unit.Value), KeyPresentation: bytes.Clone(unit.KeyPresentation)}
+		copy[key] = Unit{
+			Present:             unit.Present,
+			Value:               bytes.Clone(unit.Value),
+			KeyPresentation:     bytes.Clone(unit.KeyPresentation),
+			HeadingPresentation: bytes.Clone(unit.HeadingPresentation),
+		}
 	}
 	return copy
 }
 
 func unitsEqual(first, second Unit) bool {
-	return first.Present == second.Present && bytes.Equal(first.Value, second.Value) && bytes.Equal(first.KeyPresentation, second.KeyPresentation)
+	return first.Present == second.Present && bytes.Equal(first.Value, second.Value) && bytes.Equal(first.KeyPresentation, second.KeyPresentation) && bytes.Equal(first.HeadingPresentation, second.HeadingPresentation)
 }
 
 func unionUnitKeys(first, second UnitSet) []UnitKey {

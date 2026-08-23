@@ -44,7 +44,7 @@ func TestDocumentNoopRoundTripIsByteExactAndChangedRenderIsCanonical(t *testing.
 		t.Fatalf("no-op changed bytes:\n%q\n%q", input, out)
 	}
 	units := doc.Units()
-	key := requireUnit(t, units, UnitSection, "标题 / Context@2#1")
+	key := requireUnit(t, units, UnitSection, "标题@1#1 / Context#1")
 	units[key] = Unit{Present: true, Value: []byte("Changed\r\n")}
 	changed, err := doc.WithUnits(units)
 	if err != nil {
@@ -67,7 +67,7 @@ func TestDocumentNoopRoundTripIsByteExactAndChangedRenderIsCanonical(t *testing.
 func TestBodyTracksDuplicateHeadingOccurrencesAndFences(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## Context\none\n\n```md\n## Context\n```\n\n### Child\nchild\n\n## Context\ntwo\n"))
 	units := doc.Units()
-	for _, name := range []string{"Context#1", "Context / Child@3#1", "Context#2"} {
+	for _, name := range []string{"Context#1", "Context#1 / Child@3#1", "Context#2"} {
 		requireUnit(t, units, UnitSection, name)
 	}
 	if len(sectionKeys(units)) != 3 {
@@ -79,7 +79,7 @@ func TestBodyUsesCommonMarkHeadingBoundariesAndSetextAncestry(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\nFirst *line*\n------------\nbody\n\n<div>\n## HTML pseudoheading\n</div>\n\n- item\n  ## Nested list heading\n\n### Child\nchild\n"))
 	units := doc.Units()
 	requireUnit(t, units, UnitSection, "First line#1")
-	requireUnit(t, units, UnitSection, "First line / Child@3#1")
+	requireUnit(t, units, UnitSection, "First line#1 / Child@3#1")
 	if len(sectionKeys(units)) != 2 {
 		t.Fatalf("section keys=%v", sectionKeys(units))
 	}
@@ -136,7 +136,11 @@ func TestBodyDeletionReadditionAndDuplicateOccurrencesAreIndependent(t *testing.
 	}
 
 	readdedUnits := deleted.Units()
-	readdedUnits[first] = Unit{Present: true, Value: []byte("one\n")}
+	canonicalSurvivor := requireUnit(t, readdedUnits, UnitSection, "Context#1")
+	if !bytes.Equal(readdedUnits[canonicalSurvivor].Value, []byte("second changed\n")) {
+		t.Fatalf("surviving duplicate was not canonically reindexed: %v", sectionKeys(readdedUnits))
+	}
+	readdedUnits[UnitKey{Kind: UnitSection, Name: "Context#2"}] = Unit{Present: true, Value: []byte("one\n")}
 	readded, err := deleted.WithUnits(readdedUnits)
 	if err != nil {
 		t.Fatal(err)
@@ -228,8 +232,8 @@ func TestReservedFieldCatalogCopiesCanBeMutatedConcurrently(t *testing.T) {
 func TestNestedSectionAdditionRoundTripsStableUnitKey(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\nParent\n------\nbase\n"))
 	units := doc.Units()
-	key := UnitKey{Kind: UnitSection, Name: "Parent / 新增@3#1"}
-	secondKey := UnitKey{Kind: UnitSection, Name: "Parent / 新增@3#2"}
+	key := UnitKey{Kind: UnitSection, Name: "Parent#1 / 新增@3#1"}
+	secondKey := UnitKey{Kind: UnitSection, Name: "Parent#1 / 新增@3#2"}
 	units[key] = Unit{Present: true, Value: []byte("内容\n")}
 	units[secondKey] = Unit{Present: true, Value: []byte("内容 2\n")}
 	updated, err := doc.WithUnits(units)
@@ -254,8 +258,8 @@ func TestNewSectionTreeAppendsInStableAncestryOrder(t *testing.T) {
 	units := doc.Units()
 	keys := []UnitKey{
 		{Kind: UnitSection, Name: "Parent#1"},
-		{Kind: UnitSection, Name: "Parent / Child@3#1"},
-		{Kind: UnitSection, Name: "Parent / Child / Leaf@5#1"},
+		{Kind: UnitSection, Name: "Parent#1 / Child@3#1"},
+		{Kind: UnitSection, Name: "Parent#1 / Child@3#1 / Leaf@5#1"},
 	}
 	for _, key := range keys {
 		units[key] = Unit{Present: true, Value: []byte(key.Name + "\n")}
@@ -279,7 +283,7 @@ func TestNewSectionTreeAppendsInStableAncestryOrder(t *testing.T) {
 func TestSectionUnitNamesEscapeLiteralAncestryDelimiters(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## A / B\nliteral\n\n## A\nparent\n\n### B\nnested\n\n## C \\ D # @\nsymbols\n\n## A / B\nliteral duplicate\n"))
 	units := doc.Units()
-	for _, name := range []string{"A \\/ B#1", "A \\/ B#2", "A#1", "A / B@3#1", `C \\ D \# \@#1`} {
+	for _, name := range []string{"A \\/ B#1", "A \\/ B#2", "A#1", "A#1 / B@3#1", `C \\ D \# \@#1`} {
 		requireUnit(t, units, UnitSection, name)
 	}
 	if len(sectionKeys(units)) != 5 {
@@ -384,7 +388,7 @@ func TestFrontmatterKeyPresentationIsDefensiveAndBoundToName(t *testing.T) {
 func TestSectionUnitCodecCoversLevelsGapsAndRejectsNonCanonicalNames(t *testing.T) {
 	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n# H1\ntext\n\n### H3\ntext\n\n###### H6\ntext\n\n## H2\ntext\n\n#### H4\ntext\n\n##### H5\ntext\n"))
 	units := doc.Units()
-	for _, name := range []string{"H1@1#1", "H1 / H3@3#1", "H1 / H3 / H6@6#1", "H1 / H2@2#1", "H1 / H2 / H4@4#1", "H1 / H2 / H4 / H5@5#1"} {
+	for _, name := range []string{"H1@1#1", "H1@1#1 / H3@3#1", "H1@1#1 / H3@3#1 / H6@6#1", "H1@1#1 / H2#1", "H1@1#1 / H2#1 / H4@4#1", "H1@1#1 / H2#1 / H4@4#1 / H5@5#1"} {
 		requireUnit(t, units, UnitSection, name)
 	}
 	units[UnitKey{Kind: UnitFrontmatter, Name: "title"}] = Unit{Present: true, Value: []byte("force render\n")}
@@ -403,12 +407,171 @@ func TestSectionUnitCodecCoversLevelsGapsAndRejectsNonCanonicalNames(t *testing.
 		}
 	}
 
-	for _, invalid := range []string{"Parent / Child#1", "Parent@2#1", `Parent \x#1`, "Parent@7#1", "Parent@3#0", "Parent / @3#1"} {
+	for _, invalid := range []string{"Parent / Child#1", "Parent@2#1", `Parent \x#1`, "Parent@7#1", "Parent@3#0", "Parent#1 / @3#1", "Parent#1 / Child#1", "Parent#1 / Child@2#1"} {
 		invalidUnits := doc.Units()
 		invalidUnits[UnitKey{Kind: UnitSection, Name: invalid}] = Unit{Present: true, Value: []byte("bad\n")}
 		if _, err := doc.WithUnits(invalidUnits); !errors.Is(err, ErrInvalidDocument) {
 			t.Fatalf("invalid section key %q accepted: %v", invalid, err)
 		}
+	}
+}
+
+func TestSectionHeadingPresentationTransfersSetextAndNormalizesCRLF(t *testing.T) {
+	base := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\nbase preamble\n"))
+	side := mustParse(t, []byte("---\r\nid: decision-1\r\nentity_type: decision\r\nproject_id: project-1\r\nrevision: 3\r\n---\r\n\r\nContext\r\n-------\r\nside body\r\n\r\n### Detail ###\r\ndetail body\r\n"))
+	updated, err := base.WithUnits(side.Units())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("Context\n-------\nside body\n")) || !bytes.Contains(out, []byte("### Detail ###\ndetail body\n")) || bytes.Contains(out, []byte("## Context")) || bytes.Contains(out, []byte("\r")) {
+		t.Fatalf("ATX/Setext/CRLF heading presentation was not transferred:\n%s", out)
+	}
+}
+
+func TestUnitMetadataApplicabilityAndHeadingBinding(t *testing.T) {
+	doc := mustParse(t, entity("decision-1", "project-1", "Base"))
+	tests := []struct {
+		name   string
+		key    UnitKey
+		mutate func(Unit) Unit
+	}{
+		{"frontmatter heading", UnitKey{Kind: UnitFrontmatter, Name: "title"}, func(unit Unit) Unit { unit.HeadingPresentation = []byte("## Title\n"); return unit }},
+		{"section key", UnitKey{Kind: UnitSection, Name: "Context#1"}, func(unit Unit) Unit { unit.KeyPresentation = []byte("Context\n"); return unit }},
+		{"preamble key", UnitKey{Kind: UnitPreamble}, func(unit Unit) Unit { unit.KeyPresentation = []byte("preamble\n"); return unit }},
+		{"preamble heading", UnitKey{Kind: UnitPreamble}, func(unit Unit) Unit { unit.HeadingPresentation = []byte("## Preamble\n"); return unit }},
+		{"mismatched heading", UnitKey{Kind: UnitSection, Name: "Context#1"}, func(unit Unit) Unit { unit.HeadingPresentation = []byte("## Other\n"); return unit }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			units := doc.Units()
+			units[test.key] = test.mutate(units[test.key])
+			if _, err := doc.WithUnits(units); !errors.Is(err, ErrInvalidDocument) {
+				t.Fatalf("invalid metadata accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestSectionHeadingPresentationIsDefensivelyCloned(t *testing.T) {
+	doc := mustParse(t, entity("decision-1", "project-1", "Base"))
+	key := UnitKey{Kind: UnitSection, Name: "Context#1"}
+	units := doc.Units()
+	section := units[key]
+	if len(section.HeadingPresentation) == 0 {
+		t.Fatal("missing heading presentation")
+	}
+	section.HeadingPresentation[0] = 'X'
+	if bytes.Equal(section.HeadingPresentation, doc.Units()[key].HeadingPresentation) {
+		t.Fatal("Units heading presentation aliases document storage")
+	}
+
+	input := doc.Units()
+	updated, err := doc.WithUnits(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := input[key]
+	incoming.HeadingPresentation[0] = 'Y'
+	input[key] = incoming
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("## Context\n")) {
+		t.Fatalf("WithUnits retained aliased heading metadata:\n%s", out)
+	}
+}
+
+func TestRepeatedParentAncestryPreservesChildOwnershipAndOrder(t *testing.T) {
+	base := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n"))
+	side := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## Parent\nparent one\n\n### Child\nchild one\n\n## Parent\nparent two\n\n### Child\nchild two\n"))
+	updated, err := base.WithUnits(side.Units())
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wants := []string{"## Parent\nparent one", "### Child\nchild one", "## Parent\nparent two", "### Child\nchild two"}
+	last := -1
+	for _, want := range wants {
+		index := bytes.Index(out, []byte(want))
+		if index <= last {
+			t.Fatalf("parent-child ownership/order lost for %q:\n%s", want, out)
+		}
+		last = index
+	}
+	reparsed := mustParse(t, out)
+	for key, want := range map[UnitKey][]byte{
+		{Kind: UnitSection, Name: "Parent#1 / Child@3#1"}: []byte("child one\n\n"),
+		{Kind: UnitSection, Name: "Parent#2 / Child@3#1"}: []byte("child two\n"),
+	} {
+		unit, ok := reparsed.Units()[key]
+		if !ok || !bytes.Equal(unit.Value, want) {
+			t.Fatalf("child ownership key=%v unit=%q ok=%v keys=%v", key, unit.Value, ok, sectionKeys(reparsed.Units()))
+		}
+	}
+}
+
+func TestNewChildIsInsertedInsideExistingParentBeforeLaterSibling(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## Parent\nparent body\n\n## Later\nlater body\n"))
+	units := doc.Units()
+	childKey := UnitKey{Kind: UnitSection, Name: "Parent#1 / Child@3#1"}
+	alphaKey := UnitKey{Kind: UnitSection, Name: "Parent#1 / Alpha@3#1"}
+	units[childKey] = Unit{Present: true, Value: []byte("child body\n"), HeadingPresentation: []byte("### Child\n")}
+	units[alphaKey] = Unit{Present: true, Value: []byte("alpha body\n"), HeadingPresentation: []byte("### Alpha\n")}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := bytes.Index(out, []byte("## Parent"))
+	alpha := bytes.Index(out, []byte("### Alpha"))
+	child := bytes.Index(out, []byte("### Child"))
+	later := bytes.Index(out, []byte("## Later"))
+	if !(parent >= 0 && parent < alpha && alpha < child && child < later) {
+		t.Fatalf("children were not inserted deterministically in parent subtree: parent=%d alpha=%d child=%d later=%d\n%s", parent, alpha, child, later, out)
+	}
+	reparsed := mustParse(t, out).Units()
+	for _, key := range []UnitKey{alphaKey, childKey} {
+		if _, ok := reparsed[key]; !ok {
+			t.Fatalf("inserted child key %v was unstable:\n%s", key, out)
+		}
+	}
+}
+
+func TestSectionAdditionsFailClosedWhenAncestryCannotBeRepresented(t *testing.T) {
+	doc := mustParse(t, entity("decision-1", "project-1", "Base"))
+	for _, name := range []string{
+		"Missing#1 / Child@3#1",
+		"Context / Child@3#1",
+		"Context#1 / Child@3#2",
+	} {
+		units := doc.Units()
+		units[UnitKey{Kind: UnitSection, Name: name}] = Unit{Present: true, Value: []byte("child\n")}
+		if _, err := doc.WithUnits(units); !errors.Is(err, ErrInvalidDocument) {
+			t.Fatalf("unrepresentable section ancestry %q accepted: %v", name, err)
+		}
+	}
+}
+
+func TestSectionUnitLimitAppliesToAdditions(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n"))
+	units := doc.Units()
+	for index := 0; index <= maxBodySections; index++ {
+		name := fmt.Sprintf("Section %05d#1", index)
+		units[UnitKey{Kind: UnitSection, Name: name}] = Unit{Present: true}
+	}
+	if _, err := doc.WithUnits(units); !errors.Is(err, ErrInvalidDocument) {
+		t.Fatalf("section addition limit was not enforced: %v", err)
 	}
 }
 
