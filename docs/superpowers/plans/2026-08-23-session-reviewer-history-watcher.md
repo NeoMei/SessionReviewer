@@ -22,6 +22,7 @@
 - The watcher must never call a model, apply semantic proposals, close open loops, or run any Git command.
 - The watcher never commits, stages, resets, checks out, pushes, pulls, rebases, or otherwise mutates Git.
 - Raw session files stay local and are opened read-only; secrets must not enter SQLite, watcher state, queues, notifications, or logs.
+- SQLite may store lowercase SHA-256 identities and accepted structural metadata, but never frontmatter/body narrative bytes, titles, evidence summaries, raw event text, or source-file content. Privacy tests distinguish an allowed hash from the forbidden bytes it hashes.
 - Manual `sync`, `resume`, and `history` workflows remain complete when the watcher is disabled.
 
 ## Plan Set and Dependency Boundary
@@ -49,8 +50,11 @@ internal/project/resolve_test.go            Collision, alias, stored-ID, and con
 internal/session/context.go                 CWD segment extraction from visible session context records
 internal/session/context_test.go            Project segmentation and read-only cross-project evidence cases
 internal/index/schema.go                    SQLite schema and version
-internal/index/store.go                     Open, quick-check, quarantine, rebuild transaction, and queries
-internal/index/store_test.go                Rebuild, corruption, no-CGO, and source-of-truth tests
+internal/index/lock.go                      Rooted per-index cross-process advisory lock
+internal/index/lock_unix.go                 POSIX lock adapter
+internal/index/lock_windows.go              Windows LockFileEx adapter
+internal/index/store.go                     Rooted open, quick-check, quarantine, rebuild/swap, and queries
+internal/index/store_test.go                Lock, privacy, identity-safe rebuild, corruption, and no-CGO tests
 internal/cli/index.go                       Explicit cache status/rebuild commands
 internal/history/build.go                   Supersession chains, accepted tag themes, and current entities
 internal/history/build_test.go              Multi-session evolution, cycles, repeated entities, unresolved themes
@@ -166,19 +170,22 @@ Expected: FAIL because `RemoteIdentities`, `CommonDirs`, `Resolve`, `NormalizeRe
 - [ ] **Step 3: Add the exact stored and runtime types**
 
 ```go
-// additions to internal/config/config.go
+// The complete union already introduced by the sync plan. This task adds
+// identity behavior/validation without dropping or redeclaring sync fields.
 type SessionAssociation struct {
 	SessionID string `toml:"session_id"`
 	ProjectID string `toml:"project_id"`
 }
 
 type ProjectMapping struct {
-	ID               string   `toml:"id"`
-	Root             string   `toml:"root"`
-	VaultRoot        string   `toml:"vault_root"`
-	RemoteIdentities []string `toml:"remote_identities,omitempty"`
-	CommonDirs       []string `toml:"common_dirs,omitempty"`
-	Aliases          []string `toml:"aliases,omitempty"`
+	ID               string            `toml:"id"`
+	Root             string            `toml:"root"`
+	VaultRoot        string            `toml:"vault_root"`
+	VaultReviewPath  string            `toml:"vault_review_path,omitempty"`
+	VaultCaseMode    platform.CaseMode `toml:"vault_case_mode,omitempty"`
+	RemoteIdentities []string          `toml:"remote_identities,omitempty"`
+	CommonDirs       []string          `toml:"common_dirs,omitempty"`
+	Aliases          []string          `toml:"aliases,omitempty"`
 }
 
 type Config struct {
@@ -187,6 +194,8 @@ type Config struct {
 	SessionAssociations []SessionAssociation `toml:"session_associations,omitempty"`
 }
 ```
+
+Do not replace the sync plan's `ProjectMapping`/`Config` declarations. Add validation for remote identities, common directories, aliases, and associations to the existing union. A round-trip fixture populates `VaultReviewPath`, `VaultCaseMode`, every identity slice, and `SessionAssociations`, performs `project alias add` and `project associate-session`, reloads TOML, and asserts every unrelated field is byte-for-byte equivalent after canonical re-encoding.
 
 ```go
 // internal/project/resolve.go
@@ -240,7 +249,7 @@ func matchMappings(projects []config.ProjectMapping,values func(config.ProjectMa
 }
 ```
 
-`git_identity.go` must define this injectable, read-only command boundary and reject all verbs except the three listed invocations:
+`git_identity.go` must define this injectable, read-only command boundary and reject every argv except the three exact slices listed below:
 
 ```go
 type CommandRunner interface { Run(ctx context.Context, dir, name string, args ...string) ([]byte, error) }
@@ -248,7 +257,17 @@ type GitInspector struct { Runner CommandRunner }
 func (g GitInspector) Inspect(ctx context.Context, cwd string) (GitIdentity, error)
 ```
 
-`Inspect` runs exactly `git rev-parse --show-toplevel`, `git rev-parse --git-common-dir`, and `git config --get-regexp ^remote\..*\.url$`; it converts a relative common dir against the repository root, resolves physical directory identity on the current OS, sorts/deduplicates normalized remotes, and never prints raw remote URLs.
+The package-level allowlist is equality over argument count and each string, not joined text, prefix, substring, or shell parsing:
+
+```go
+var inspectGitArgv = [][]string{
+	{"rev-parse", "--show-toplevel"},
+	{"rev-parse", "--git-common-dir"},
+	{"config", "--get-regexp", `^remote\..*\.url$`},
+}
+```
+
+`Inspect` runs exactly those invocations; extra options, alternate regexes, positionals, and combined tokens fail before `Runner.Run`. It converts a relative common dir against the repository root, resolves physical directory identity on the current OS, sorts/deduplicates normalized remotes, and never prints raw remote URLs. Tests enumerate the exact three accepted vectors plus near misses such as `rev-parse --show-toplevel --exec-path`, `config --get-regexp .*`, and `status`.
 
 - [ ] **Step 4: Implement context segmentation and explicit confirmation commands**
 
@@ -312,6 +331,9 @@ git commit -m "feat: resolve projects across sessions and worktrees"
 - Modify: `go.mod`
 - Modify: `go.sum`
 - Create: `internal/index/schema.go`
+- Create: `internal/index/lock.go`
+- Create: `internal/index/lock_unix.go`
+- Create: `internal/index/lock_windows.go`
 - Create: `internal/index/store.go`
 - Create: `internal/index/store_test.go`
 - Create: `internal/cli/index.go`
@@ -319,7 +341,7 @@ git commit -m "feat: resolve projects across sessions and worktrees"
 - Modify: `internal/cli/run_test.go`
 
 **Interfaces:**
-- Consumes: `ledger.State`, discovered session metadata/segments, and accepted content hashes; never raw event text.
+- Consumes: pinned per-user data root, `ledger.State`, discovered session metadata/segments, and accepted content hashes; never raw event text or narrative/content bytes.
 - Produces: `index.Open(index.Options) (*index.Store, error)`, `(*Store).Rebuild(context.Context, index.Snapshot) error`, `(*Store).ReplaceProject(context.Context, index.ProjectSnapshot) error`, `(*Store).Refresh(context.Context,string) error`, `(*Store).PendingSessions(context.Context, string) ([]index.SessionRow, error)`, `(*Store).QuarantinedPath() string`, `(*Store).Close() error`, and `session-reviewer index status|rebuild`.
 
 - [ ] **Step 1: Write failing rebuild and corruption tests**
@@ -327,23 +349,44 @@ git commit -m "feat: resolve projects across sessions and worktrees"
 ```go
 // internal/index/store_test.go
 func TestIndexIsDisposableAndRebuildsFromAcceptedSnapshot(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "index.sqlite")
-	store, err := Open(Options{Path:path, Now:func() time.Time{return fixedTime}}); if err != nil { t.Fatal(err) }
+	data := t.TempDir()
+	path := filepath.Join(data, "index", "index.sqlite")
+	store, err := Open(Options{DataRoot:data, Now:func() time.Time{return fixedTime}}); if err != nil { t.Fatal(err) }
 	snapshot := Snapshot{Projects:[]ProjectSnapshot{{ProjectID:"project-0123456789abcdef", Entities:[]EntityRow{{ID:"decision-1",Kind:"decision",Status:"accepted",ContentHash:strings.Repeat("a",64),Tags:[]string{"watcher"}}}}}}
 	if err := store.Rebuild(context.Background(), snapshot); err != nil { t.Fatal(err) }
 	if err := store.Close(); err != nil { t.Fatal(err) }
 	if err := os.WriteFile(path, []byte("not sqlite"), 0o600); err != nil { t.Fatal(err) }
-	rebuilt, err := Open(Options{Path:path, Rebuild:snapshot, Now:func() time.Time{return fixedTime}}); if err != nil { t.Fatal(err) }
+	rebuilt, err := Open(Options{DataRoot:data, Rebuild:snapshot, Now:func() time.Time{return fixedTime}}); if err != nil { t.Fatal(err) }
 	defer rebuilt.Close()
 	if rebuilt.QuarantinedPath() != path+".corrupt-20260823T010203Z" { t.Fatalf("quarantine = %q", rebuilt.QuarantinedPath()) }
 	rows, err := rebuilt.Entities(context.Background(), "project-0123456789abcdef"); if err != nil || len(rows) != 1 { t.Fatalf("rows=%#v err=%v",rows,err) }
 }
 
 func TestIndexNeverStoresNarrativeOrEvidenceSummary(t *testing.T) {
-	// The public row types deliberately expose IDs, classifications, tags, cursors, and hashes only.
+	// Public row types expose IDs, classifications, tags, cursors, and hashes only.
 	for _, typ := range []reflect.Type{reflect.TypeOf(EntityRow{}), reflect.TypeOf(SessionRow{})} {
 		for i:=0;i<typ.NumField();i++ { if strings.Contains(strings.ToLower(typ.Field(i).Name), "summary") || strings.Contains(strings.ToLower(typ.Field(i).Name), "content") { t.Fatalf("unsafe field %s",typ.Field(i).Name) } }
 	}
+	narrative := []byte("NARRATIVE-CANARY-do-not-store")
+	evidenceSummary := []byte("EVIDENCE-SUMMARY-CANARY-do-not-store")
+	allowedHash := sha256Hex(narrative)
+	f := newIndexPrivacyFixture(t)
+	f.rebuildAcceptedLedger(EntitySource{ID:"decision-1",Title:string(narrative),Body:string(narrative),EvidenceSummary:string(evidenceSummary),ContentHash:allowedHash})
+	for _, path := range f.sqliteFamilyAndQuarantineFiles() {
+		body := mustRead(t,path)
+		if bytes.Contains(body,narrative) || bytes.Contains(body,evidenceSummary) { t.Fatalf("narrative bytes persisted in %s",filepath.Base(path)) }
+	}
+	rows, err := f.store.Entities(context.Background(), f.projectID); if err != nil { t.Fatal(err) }
+	if len(rows)!=1 || rows[0].ContentHash!=allowedHash { t.Fatalf("hash metadata missing: %#v",rows) }
+}
+
+func TestIndexLockSerializesProcessesAndRebuildRejectsRootSwap(t *testing.T) {
+	f:=newIndexFixture(t); owner:=startIndexLockHelper(t,f.dataRoot); defer owner.Kill()
+	if _,err:=Open(Options{DataRoot:f.dataRoot,LockTimeout:100*time.Millisecond});!errors.Is(err,ErrIndexLocked){t.Fatalf("err=%v",err)}
+	owner.KillAndWait()
+	store,err:=Open(Options{DataRoot:f.dataRoot});if err!=nil{t.Fatal(err)};defer store.Close()
+	f.swapIndexDirectoryForDecoy()
+	if err:=store.Rebuild(context.Background(),f.snapshot());!errors.Is(err,ErrIndexIdentityChanged){t.Fatalf("err=%v",err)}
 }
 ```
 
@@ -352,7 +395,7 @@ func TestIndexNeverStoresNarrativeOrEvidenceSummary(t *testing.T) {
 Run:
 
 ```bash
-CGO_ENABLED=0 go test ./internal/index -run 'TestIndexIsDisposable|TestIndexNeverStores' -v
+CGO_ENABLED=0 go test ./internal/index -run 'TestIndexIsDisposable|TestIndexNeverStores|TestIndexLock' -v
 ```
 
 Expected: FAIL because `internal/index` and its types do not exist.
@@ -376,10 +419,12 @@ type SessionRow struct { SessionID string; FromLine, ToLine, AcceptedLine int; S
 type ProjectSnapshot struct { ProjectID, RootHash string; IndexedAt time.Time; Entities []EntityRow; Sessions []SessionRow }
 type Snapshot struct { Projects []ProjectSnapshot }
 type SnapshotSource interface { Project(context.Context,string)(ProjectSnapshot,error) }
-type Options struct { Path string; Rebuild Snapshot; Source SnapshotSource; Now func() time.Time }
+type Options struct { DataRoot string; ExpectedRoot fs.FileInfo; Rebuild Snapshot; Source SnapshotSource; Now func() time.Time; LockTimeout time.Duration }
 ```
 
-`store.go` imports `_ "modernc.org/sqlite"`, opens with `sql.Open("sqlite", path)`, sets `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=FULL`, `PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=5000`, and runs `PRAGMA quick_check`. Any open/schema/check failure closes the handle, renames the file and its `-wal`/`-shm` companions with `fmt.Sprintf("%s.corrupt-%s", path, now.UTC().Format("20060102T150405Z"))`, creates a clean database, and rebuilds it in one transaction from the supplied snapshot. An empty snapshot creates an empty cache; it never infers accepted facts.
+`Open` validates and opens `DataRoot` as `os.Root`, confirms `ExpectedRoot` when supplied, ensures/opens an `index` directory with mode `0700`, and acquires one stable regular `index/index.lock` (`0600`) with a rooted cross-process advisory lock before inspecting SQLite. POSIX uses `flock`; Windows uses `LockFileEx`; the lock file is never deleted, a live owner times out with `ErrIndexLocked`, and process death releases it. The held lock covers quick-check, quarantine, rebuild, swap, and every write transaction; read queries use the live store whose owner still holds the lock. Helper-subprocess tests prove exclusion and crash release on both OS implementations.
+
+`store.go` imports `_ "modernc.org/sqlite"`, opens root-relative `index/index.sqlite`, sets `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=FULL`, `PRAGMA foreign_keys=ON`, `PRAGMA busy_timeout=5000`, and runs `PRAGMA quick_check`. It records the opened data/index directory identities and rechecks both before every quarantine or swap. Any open/schema/check failure closes the handle, lstat/open/stat-verifies the database and its `-wal`/`-shm` companions as regular entries beneath the pinned index root, and renames each verified entry to a collision-free root-relative basename `index.sqlite.corrupt-<UTC>[.<n>]`; a redirect, identity change, or case-collision fails closed without moving anything. It then creates a clean sibling database from the supplied snapshot. An empty snapshot creates an empty cache; it never infers accepted facts.
 
 - [ ] **Step 4: Implement transactional replacement and deterministic queries**
 
@@ -405,7 +450,7 @@ func (s *Store) Refresh(ctx context.Context,projectID string)error{
 }
 ```
 
-Every query orders by stable keys. `Rebuild` creates a sibling temporary database, closes/checkpoints it, then installs it using `atomicfile.Write`-equivalent replacement so a crash leaves either the previous usable cache or a fully built new cache. SQLite bytes are never a source for rendering ledger documents.
+Every query orders by stable keys. Under the same per-index lock, `Rebuild` creates a unique sibling database through the pinned `os.Root`, populates it transactionally, checkpoints/closes it, reopens it by rooted name, verifies regular-file identity and `quick_check`, writes a content-free swap marker, and installs it with the current rooted `atomicfile` publication primitive. It then reopens/quick-checks the installed identity before clearing the marker. Startup uses the marker only to select and verify complete old/new candidates; it never follows or trusts an absolute path. A crash leaves either the previous usable cache or a fully built new cache. SQLite bytes are never a source for rendering ledger documents.
 
 `internal/cli/index.go` implements `session-reviewer index status [--data-dir DIR] [--json]` and `session-reviewer index rebuild [--data-dir DIR] [--project ROOT|--all]`. Rebuild loads accepted Markdown and session metadata through `SnapshotSource`, writes a sibling database, quick-checks it, swaps it, and prints project/entity/session counts; it never reads narrative into SQLite, advances a cursor, or requires the watcher.
 
@@ -449,7 +494,7 @@ git commit -m "feat: add rebuildable pure Go project index"
 - Modify: `internal/cli/run_test.go`
 
 **Interfaces:**
-- Consumes: `session.Discover`, `session.SegmentContexts`, `cursor.Store.LoadReadOnly`, `ledger.State`, accepted `Decision.Tags`/`OpenLoop.Tags`, and `index.Store` as an optional cache.
+- Consumes: `session.Discover`, `session.SegmentContexts`, one existing per-project `cursor.Store.LoadReadOnly(sessionID)`, `ledger.State`, accepted `Decision.Tags`/`OpenLoop.Tags`, and `index.Store` as an optional cache.
 - Produces: `pending.Scanner.Scan(context.Context, pending.Options) (pending.Report, error)`, `history.Build(ledger.State) (recovery.HistoryView, error)`, and `recovery.History(context.Context, recovery.HistoryOptions) (recovery.HistoryView, error)`.
 
 - [ ] **Step 1: Write failing pending and evolution tests**
@@ -497,13 +542,14 @@ type PendingSession struct { SessionID, ProjectID string; FromLine, ToLine int; 
 type Report struct { ProjectID string; ReviewPending bool; Sessions []PendingSession; Ambiguous []string }
 type Options struct { ProjectID string; IdleAfter time.Duration; Now time.Time }
 type SessionSource interface { Candidates(context.Context) ([]session.Candidate,error); Segments(context.Context,session.Candidate)([]session.ProjectSegment,error); LastRecord(context.Context,session.Candidate)(session.Record,error) }
-type CursorSource interface { LoadReadOnly(projectID,sessionID string)(cursor.Cursor,error) }
+type CursorStore interface { LoadReadOnly(sessionID string)(cursor.Cursor,error) }
+type CursorStores interface { ForProject(projectID string)(CursorStore,error) }
 type Resolver interface { ResolveSegment(context.Context,session.ProjectSegment)(project.Resolution,error) }
-type Scanner struct { Sessions SessionSource; Cursors CursorSource; Projects Resolver }
+type Scanner struct { Sessions SessionSource; Cursors CursorStores; Projects Resolver }
 func (s Scanner) Scan(ctx context.Context, opts Options) (Report,error)
 ```
 
-The scanner compares the last visible record line/hash to the accepted cursor without writing it. A missing source becomes `SourceMissing` only for previously indexed sessions; a shorter source or cursor hash mismatch becomes `SourceDrift`; an ambiguous identity goes in `Ambiguous` and is never assigned. `Idle` is true only when `Now-LastWrite >= IdleAfter`.
+At scan start, `Scanner` calls `Cursors.ForProject(opts.ProjectID)` exactly once. The concrete factory resolves and identity-pins `<data>/projects/<project-id>` and returns the existing `cursor.Store{Root: projectDataPath, ExpectedRoot: projectDataInfo}`; it never treats the machine data root as a cursor store and never passes project ID as a session ID. The scanner calls that store's `LoadReadOnly(sessionID)` for resolved segments and never writes/repairs cursor state. It compares the last visible record line/hash to the accepted cursor. A missing source becomes `SourceMissing` only for previously indexed sessions; a shorter source or cursor hash mismatch becomes `SourceDrift`; an ambiguous identity goes in `Ambiguous` and is never assigned. `Idle` is true only when `Now-LastWrite >= IdleAfter`. Tests place same-named session cursors beneath two project stores and prove a scan reads only the requested project's value.
 
 Extend the existing accepted view without replacing its earlier fields:
 
@@ -615,13 +661,16 @@ func (i Inspector) Inspect(ctx context.Context, root string) (Snapshot,error) {
 	return Snapshot{Branch:strings.TrimSpace(string(branch)),Head:strings.TrimSpace(string(head)),Changes:parsePorcelainZ(status)},nil
 }
 func (i Inspector) run(ctx context.Context,root string,args ...string)([]byte,error){
-	allowed:=strings.Join(args," ")
-	if !(strings.HasPrefix(allowed,"symbolic-ref ")||allowed=="rev-parse HEAD"||strings.HasPrefix(allowed,"status ")) { return nil,fmt.Errorf("Git command is not read-only allowlisted") }
+	if !exactArgv(args,
+		[]string{"symbolic-ref","--quiet","--short","HEAD"},
+		[]string{"rev-parse","HEAD"},
+		[]string{"status","--porcelain=v1","-z","--untracked-files=all"},
+	) { return nil,fmt.Errorf("Git command is not read-only allowlisted") }
 	return i.Runner.Run(ctx,root,"git",args...)
 }
 ```
 
-No other Git subcommand is representable through this package. Status paths pass through redaction before they enter a card.
+`exactArgv` requires equal length and equal string at every position; it performs no join, prefix, substring, shell, or regexp comparison. In particular, `symbolic-ref --quiet --short HEAD --delete`, `symbolic-ref refs/heads/main`, `status --porcelain=v2`, and every extra argument are rejected before the runner records a call. No other Git subcommand is representable through this package. Status paths pass through redaction before they enter a card. The test enumerates the three accepted vectors and a table of near-miss/mutating vectors rather than checking command verbs alone.
 
 - [ ] **Step 4: Add the versioned recovery card and stable renderer**
 

@@ -4,7 +4,7 @@
 
 **Goal:** Turn the completed SessionReviewer engine and Skill into traceable `v0.1.0` source and binary distributions with truthful platform durability, idempotent no-admin installation, actionable CLI help, real private macOS/Windows acceptance receipts, security/performance/recovery gates, checksums, SBOMs, release CI, documentation, and a tested rollback path.
 
-**Architecture:** Build metadata is injected into one binary from an exact tag/commit, while a Go release packager creates deterministic per-platform archives, a separate Skill archive, SPDX SBOMs, and one checksum manifest without relying on host archive quirks. Installation remains user-scoped and manifest-driven; private real-session E2E runs consume external ignored inputs and emit redacted receipts, while public release publication remains mechanically blocked until the repository owner explicitly authorizes and adds a license grant.
+**Architecture:** Build metadata is injected from an exact commit for private candidates and from an exact `v0.1.0` tag/commit pair for public mode, while a Go release packager creates deterministic per-platform archives, a separate Skill archive, SPDX SBOMs, and one checksum manifest without relying on host archive quirks. Installation remains user-scoped and manifest-driven; private real-session E2E runs consume external ignored inputs and emit redacted receipts, while public release publication remains mechanically blocked until the repository owner explicitly authorizes and adds a license grant.
 
 **Tech Stack:** Go 1.26; Go standard library archive/tar, archive/zip, gzip, SHA-256, JSON, and `debug/buildinfo`; existing macOS/Windows engine and Skill; POSIX shell; PowerShell 5.1+; GitHub Actions; `govulncheck` from `golang.org/x/vuln v1.7.0`; SPDX 2.3 JSON; native macOS 13 Intel/Apple Silicon and Windows 10 22H2/Windows 11 x86-64 acceptance hosts.
 
@@ -20,7 +20,7 @@
 - Until that authorization exists, packages contain `LICENSE_STATUS.md` stating that no license grant is included and are restricted to private acceptance; CI must refuse the public-release job.
 - The watcher never calls a model or Git and is not required for manual checkpoint/review/sync/resume/history workflows.
 - No release is accepted from cross-compilation alone; native minimum-OS receipts are required for macOS and Windows.
-- Windows replacement is described according to its tested guarantees; the multi-rename backup protocol must never be called atomic or power-loss equivalent to POSIX rename.
+- Windows replacement is described according to the current Go 1.26 rooted implementation: an existing destination uses one `os.Root.Rename` replacement operation, while an absent destination is published with a rooted hard link followed by temporary-name removal. Neither path is claimed to provide untested power-loss equivalence to POSIX directory `fsync`.
 - Secrets must not appear in evidence, Markdown, SQLite, merge bases, durable queues, conflict notes, watcher state, logs, receipts, SBOMs, archives, or checksums filenames.
 - Install, upgrade, rollback, and uninstall preserve project/vault Markdown and raw sessions; local machine state is removed only through an explicit purge flag.
 - Release automation never tags, publishes, or uploads from a dirty tree.
@@ -42,11 +42,20 @@ internal/cli/doctor_test.go                 Safe actionable diagnostic output
 cmd/session-reviewer/main.go                Build metadata remains linked through buildinfo package
 LICENSE_STATUS.md                           Explicit no-license-grant status for private artifacts
 docs/release/licensing.md                   Owner authorization gate and public-release refusal
-internal/atomicfile/durability.go            Named/testable platform guarantees
-internal/atomicfile/durability_test.go       Crash-point and recovery matrix
-internal/atomicfile/replace_windows.go       Retried recoverable backup protocol, accurately scoped
-internal/atomicfile/replace_windows_logic.go Recovery decisions and failure classes
+internal/atomicfile/guarantee.go             Named/testable platform guarantees
+internal/atomicfile/guarantee_test.go        Current publication-operation matrix
+internal/atomicfile/replace_windows.go       Current rooted replacement entry point; behavior retained
+internal/atomicfile/replace_windows_logic.go Current replace-or-link decision; behavior retained
 docs/platform/windows-durability.md          Exact Windows guarantees and limitations
+internal/install/manifest.go                  Installed files, rollback pair, hashes, version
+internal/install/manifest_test.go             Source/archive/rollback/preservation invariants
+scripts/install.sh                            Source first, then archive macOS install and upgrade
+scripts/uninstall.sh                          Manifest-driven macOS uninstall/purge
+scripts/install.ps1                           Source first, then archive Windows install and upgrade
+scripts/uninstall.ps1                         Manifest-driven Windows uninstall/purge
+cmd/verify-skill/main.go                      Skill frontmatter/script/package contract
+skill/session-reviewer/SKILL.md               Packaged Codex workflow instructions
+skill/session-reviewer/scripts/*              Relative-path POSIX/PowerShell workflow wrappers
 cmd/release-packager/main.go                 Deterministic archive/checksum/SBOM command
 cmd/release-packager/archive.go              Stable tar.gz/zip creation
 cmd/release-packager/archive_test.go         Archive contents, modes, timestamps, traversal tests
@@ -55,15 +64,6 @@ cmd/release-packager/sbom_test.go            SPDX validation and no-secret tests
 scripts/build-release.sh                     Clean-tree multi-target release build
 scripts/build-release.ps1                    Native Windows release build/verification
 cmd/check-release-license/main.go            Hard public-release license gate
-scripts/install.sh                            Source/archive macOS install and upgrade
-scripts/uninstall.sh                          Manifest-driven macOS uninstall/purge
-scripts/install.ps1                           Source/archive Windows install and upgrade
-scripts/uninstall.ps1                         Manifest-driven Windows uninstall/purge
-internal/install/manifest.go                  Installed files, previous binary, hashes, version
-internal/install/manifest_test.go             Upgrade/rollback/preservation invariants
-cmd/verify-skill/main.go                      Skill frontmatter/script/package contract
-skill/session-reviewer/SKILL.md               Packaged Codex workflow instructions
-skill/session-reviewer/scripts/*              Relative-path POSIX/PowerShell workflow wrappers
 test/e2e/real/config.go                       External real-session/proposal input contract
 test/e2e/real/runner.go                       Scenarios A-E orchestration
 test/e2e/real/runner_test.go                  Synthetic harness unit tests
@@ -184,7 +184,7 @@ Create `LICENSE_STATUS.md` with this exact project status (not a license grant):
 This repository does not currently include a license grant. Private build and acceptance artifacts created from it are not authorized for public redistribution by this notice. A public release must remain blocked until the repository owner explicitly selects and adds an authorized LICENSE file.
 ```
 
-`docs/release/licensing.md` states that implementation agents must not select a license/holder, `cmd/check-release-license` is the mechanical gate added in Task 3, and public release resumes only after explicit owner authorization in a separate change.
+`docs/release/licensing.md` states that implementation agents must not select a license/holder, `cmd/check-release-license` is the mechanical gate added in Task 4, and public release resumes only after explicit owner authorization in a separate change.
 
 - [ ] **Step 5: Run CLI and metadata regressions**
 
@@ -212,35 +212,32 @@ git commit -m "feat: add release identity and actionable diagnostics"
 ### Task 2: Define and Prove Windows Replacement Durability Without Overclaiming
 
 **Files:**
-- Create: `internal/atomicfile/durability.go`
-- Create: `internal/atomicfile/durability_test.go`
-- Modify: `internal/atomicfile/replace_windows.go`
-- Modify: `internal/atomicfile/replace_windows_logic.go`
+- Create: `internal/atomicfile/guarantee.go`
+- Create: `internal/atomicfile/guarantee_test.go`
 - Modify: `internal/atomicfile/replace_windows_test.go`
-- Modify: `internal/atomicfile/write.go`
 - Modify: `internal/atomicfile/write_test.go`
 - Create: `docs/platform/windows-durability.md`
+- Do not modify: `internal/atomicfile/replace_windows.go`
+- Do not modify: `internal/atomicfile/replace_windows_logic.go`
 
 **Interfaces:**
-- Consumes: existing `atomicfile.Write`, `WriteRoot`, `BackupPath`, and every config/cursor/base/queue/state loader.
-- Produces: `atomicfile.GuaranteeFor(goos string) atomicfile.Guarantee`, `atomicfile.RecoverRoot(*os.Root,string) error`, classified Windows lock/recovery errors, and tested documentation of exactly what survives process crash versus power loss.
+- Consumes: existing `atomicfile.Write`, `WriteRoot`, `replaceWindowsFile`, rooted `Rename`/`Link`/`Remove`, temporary-file sync, and publication sync contracts.
+- Produces: `atomicfile.GuaranteeFor(goos string) atomicfile.Guarantee`, classified Windows publication errors, and tested documentation of exactly what is guaranteed for existing versus absent destinations and what remains unproven for power loss.
 
 - [ ] **Step 1: Write failing durability and crash-state matrix tests**
 
 ```go
-func TestWindowsGuaranteeIsCrashRecoverableButNotClaimedAtomic(t *testing.T) {
+func TestWindowsGuaranteeMatchesCurrentRootedPublication(t *testing.T) {
 	g:=GuaranteeFor("windows")
-	if !g.TempDataFlushed || !g.ProcessCrashRecoverable || !g.BackupPreservesPrevious {t.Fatalf("%#v",g)}
-	if g.AtomicReplacement || g.DirectoryEntryPowerLossGuaranteed {t.Fatalf("overclaim: %#v",g)}
+	if !g.TempDataFlushed || !g.ExistingDestinationSingleReplace || !g.AbsentDestinationRaceSafeLink || !g.PublishedFileFlushed {t.Fatalf("%#v",g)}
+	if g.UsesBackupProtocol || g.DirectoryEntryPowerLossGuaranteed {t.Fatalf("overclaim: %#v",g)}
 }
 
-func TestRecoverRootCoversEveryInterruptedWindowsState(t *testing.T) {
-	for _,tc:=range []struct{name string;destination,backup,temp bool;want string}{
-		{"old only",true,false,false,"old"},
-		{"backup only",false,true,false,"old"},
-		{"new and backup",true,true,false,"new"},
-		{"old and temp",true,false,true,"old"},
-	}{t.Run(tc.name,func(t *testing.T){root:=buildCrashState(t,tc);if err:=RecoverRoot(root,"state.json");err!=nil{t.Fatal(err)};if got:=readState(t,root);got!=tc.want{t.Fatalf("got %q",got)}})}
+func TestWindowsPublicationUsesCurrentExactOperations(t *testing.T) {
+	present:=captureWindowsOps(t,true); if err:=replaceWindowsFile("tmp","state",present.ops);err!=nil{t.Fatal(err)}
+	if diff:=cmp.Diff([]string{"exists:state","rename:tmp:state"},present.calls);diff!=""{t.Fatal(diff)}
+	absent:=captureWindowsOps(t,false); if err:=replaceWindowsFile("tmp","state",absent.ops);err!=nil{t.Fatal(err)}
+	if diff:=cmp.Diff([]string{"exists:state","link:tmp:state","remove:tmp"},absent.calls);diff!=""{t.Fatal(diff)}
 }
 ```
 
@@ -249,40 +246,44 @@ func TestRecoverRootCoversEveryInterruptedWindowsState(t *testing.T) {
 Run:
 
 ```bash
-go test ./internal/atomicfile -run 'TestWindowsGuarantee|TestRecoverRoot' -v
+go test ./internal/atomicfile -run 'TestWindowsGuarantee|TestWindowsPublication' -v
 ```
 
-Expected: FAIL because the named guarantee and general recovery entry point do not exist.
+Expected: FAIL because the named guarantee does not exist; the exact-operation test passes against the current implementation and prevents a stale backup protocol from being introduced by this task.
 
-- [ ] **Step 3: Add the exact guarantee and reusable recovery API**
+- [ ] **Step 3: Add the exact current-publication guarantee API**
 
 ```go
 type Guarantee struct {
 	TempDataFlushed bool
-	AtomicReplacement bool
-	ProcessCrashRecoverable bool
-	BackupPreservesPrevious bool
+	ExistingDestinationSingleReplace bool
+	AbsentDestinationRaceSafeLink bool
+	PublishedFileFlushed bool
+	DirectoryFlushAttempted bool
+	UsesBackupProtocol bool
 	DirectoryEntryPowerLossGuaranteed bool
 }
 func GuaranteeFor(goos string) Guarantee {
-	if goos=="windows" { return Guarantee{TempDataFlushed:true,ProcessCrashRecoverable:true,BackupPreservesPrevious:true} }
-	return Guarantee{TempDataFlushed:true,AtomicReplacement:true,ProcessCrashRecoverable:true,BackupPreservesPrevious:true}
+	if goos=="windows" { return Guarantee{TempDataFlushed:true,ExistingDestinationSingleReplace:true,AbsentDestinationRaceSafeLink:true,PublishedFileFlushed:true,DirectoryFlushAttempted:true} }
+	return Guarantee{TempDataFlushed:true,ExistingDestinationSingleReplace:true,PublishedFileFlushed:true,DirectoryFlushAttempted:true,DirectoryEntryPowerLossGuaranteed:true}
 }
-func RecoverRoot(root *os.Root,name string) error { return recoverReplacement(root,name,BackupPath(name)) }
 ```
 
-The Windows implementation retains the pinned `os.Root` multi-rename protocol because converting root-relative paths back to names for `ReplaceFileW` would weaken the path-swap boundary. It retries sharing/lock violations with delays `50ms, 100ms, 200ms, 400ms, 800ms`; after that, callers persist the existing sync queue item. It does not label the sequence atomic. A valid destination wins when destination and backup both exist; backup-only restores the prior version; a temp is never promoted after caller identity is lost.
+Do not replace the current implementation. For an existing destination, `os.Root.Rename` uses Go 1.26's handle-relative Windows rename with replace-if-exists semantics; one namespace operation publishes the fully synced temporary. For an absent destination, `Link(temporary,destination)` fails rather than overwriting a racing creator, and successful publication removes only the temporary name. The writer then flushes the published file and attempts to flush the pinned directory. A sharing/lock failure leaves the previous destination intact and returns the wrapped error; sync callers may retry/queue at their existing higher-level boundary. No `.session-reviewer-backup` file or loader recovery protocol participates in these Windows writes.
 
-- [ ] **Step 4: Apply recovery consistently to every durable loader**
+- [ ] **Step 4: Characterize exact visibility, failure, and durability boundaries**
 
-Before reading config, cursor, merge base, queue item, watcher state, install manifest, apply receipt, or index swap marker, loaders call `RecoverRoot` under their existing process lock. Read-only commands may consult a valid backup but must not mutate recovery state. Add injected crash hooks after temp sync, after destination-to-backup, after temp-to-destination, and before backup removal; helper subprocess tests terminate at each hook and assert the next writer recovers deterministically.
+Add injected-operation tests before temporary sync, after temporary sync/before publication, on existing-destination rename failure, on absent-destination link failure, after link/before temporary-name removal, and on publication-sync failure. They assert: a pre-publication failure leaves the old destination or absence unchanged; a successful existing-destination call leaves only the new complete file; an absent-destination link creates the complete destination and a failed cleanup may leave only an extra same-inode temporary name; publication-sync failure reports uncertainty after complete new content is visible. Native concurrent-reader tests repeatedly replace differing checksummed payloads and accept only complete old/new payloads, never missing or torn bytes.
 
 `docs/platform/windows-durability.md` must explicitly say:
 
 - the temporary file's data is flushed before installation;
-- a process crash leaves a recoverable old or new complete file under tested states;
-- open-file sharing violations retry and then queue without discarding either side;
-- the sequence is not a single atomic replace and does not claim power-loss directory-entry durability;
+- an existing destination is published with one rooted replace-if-exists rename after temporary sync;
+- an absent destination is published by a race-safe rooted hard link followed by temporary-name removal;
+- process interruption at tested hooks leaves an old/new complete destination; link cleanup may leave an extra temporary hard-link name that a later failed-write cleanup removes;
+- open-file sharing violations leave the old destination intact and return to the caller's retry/queue boundary;
+- no backup multi-rename/recovery state exists in the current implementation;
+- power-loss directory-entry durability is not claimed where Windows directory-handle flush is unsupported or fails;
 - native Windows 10/11 crash/power-interruption receipts are the release evidence;
 - POSIX uses same-directory rename and directory sync where supported.
 
@@ -300,10 +301,10 @@ GOOS=windows GOARCH=amd64 go test -c -o /tmp/atomicfile-windows.test.exe ./inter
 Run on native Windows 10 22H2 and Windows 11:
 
 ```powershell
-go test .\internal\atomicfile -run 'TestRecoverRoot|TestWindowsNativeLockedDestination|TestCrashHelper' -count 20 -v
+go test .\internal\atomicfile -run 'TestWindowsNativeHandleRenameNeverMakesDestinationMissing|TestWindowsNativeLockedDestination|TestWindowsPublication' -count 20 -v
 ```
 
-Expected: all tests pass; lock failures preserve old and queued new content; documentation never uses “atomic replacement” for the Windows multi-rename path.
+Expected: all tests pass; existing-destination replacement is one rooted atomic namespace operation for observed process-level visibility, absent-destination publication is race-safe, lock failures preserve old content, and documentation makes no untested power-loss claim.
 
 - [ ] **Step 6: Commit accurately scoped durability**
 
@@ -314,7 +315,115 @@ git commit -m "fix: harden and document Windows file recovery"
 
 ---
 
-### Task 3: Build Deterministic Archives, SBOMs, Checksums, and the License Gate
+### Task 3: Define the Install Manifest, Source Install, and Skill Verifier
+
+**Files:**
+- Create: `internal/install/manifest.go`
+- Create: `internal/install/manifest_test.go`
+- Create: `scripts/install.sh`
+- Create: `scripts/uninstall.sh`
+- Create: `scripts/install.ps1`
+- Create: `scripts/uninstall.ps1`
+- Create: `cmd/verify-skill/main.go`
+- Modify: `skill/session-reviewer/SKILL.md`
+- Modify: `skill/session-reviewer/scripts/prepare-workflow.sh`
+- Modify: `skill/session-reviewer/scripts/prepare-workflow.ps1`
+- Modify: `skill/session-reviewer/scripts/apply-proposal.sh`
+- Modify: `skill/session-reviewer/scripts/apply-proposal.ps1`
+- Create: `test/release/source_install_test.go`
+
+**Interfaces:**
+- Consumes: a clean source checkout, Go 1.26.x, existing watcher lifecycle commands, and the current packaged Skill workflows.
+- Produces: `install.LoadRoot(*os.Root)`, `install.SaveRoot(*os.Root,Manifest)`, `install.VerifyFiles(Manifest)`, user-scoped source install/uninstall on POSIX and Windows, and `cmd/verify-skill`; it does not consume or create release archives.
+
+- [ ] **Step 1: Write failing manifest, source-install, and Skill verification tests**
+
+```go
+func TestSourceInstallWritesVerifiedManifestAndPreservesKnowledgeOnUninstall(t *testing.T) {
+	f:=newSourceInstallFixture(t); f.install()
+	m:=f.manifest()
+	if m.SchemaVersion!=1 || m.InstallMode!="source" || m.BinarySHA256=="" || m.SkillTreeSHA256=="" {t.Fatalf("%#v",m)}
+	f.uninstall(false)
+	for _,path:=range []string{f.projectLedger,f.vaultReview,f.rawSessions}{if _,err:=os.Stat(path);err!=nil{t.Fatalf("preserved %s: %v",path,err)}}
+}
+
+func TestVerifySkillRejectsMissingWrapperAndCheckoutPath(t *testing.T) {
+	f:=copySkillFixture(t); f.remove("scripts/apply-proposal.ps1")
+	if err:=VerifySkill(f.root);err==nil{t.Fatal("accepted incomplete Skill")}
+	f=copySkillFixture(t);f.append("SKILL.md",`/Users/neomei/private`)
+	if err:=VerifySkill(f.root);err==nil{t.Fatal("accepted checkout path")}
+}
+```
+
+- [ ] **Step 2: Run source-install tests before the contracts exist**
+
+Run:
+
+```bash
+go test ./internal/install ./test/release -run 'TestSourceInstall|TestVerifySkill' -v
+go test ./skill/session-reviewer/tests -count=1
+```
+
+Expected: FAIL because the manifest, source installers, and verifier do not exist; existing Skill package tests remain an independent compatibility gate.
+
+- [ ] **Step 3: Define the rooted manifest and exact user locations**
+
+```go
+type Manifest struct {
+	SchemaVersion int `json:"schema_version"`
+	InstallMode string `json:"install_mode"` // source or archive
+	ProductVersion,Commit,InstalledAt string
+	BinaryPath,BinarySHA256,SkillPath,SkillTreeSHA256 string
+	PreviousBinaryPath,PreviousBinarySHA256,PreviousSkillPath,PreviousSkillTreeSHA256 string
+	StartupInstalled bool
+}
+func LoadRoot(root *os.Root)(Manifest,error)
+func SaveRoot(root *os.Root,Manifest)error
+func VerifyFiles(Manifest)error
+```
+
+Load/save are strict, size-bounded, rooted, identity-checked, content-hash verified, mode `0600`, and reject trailing JSON, redirects, absolute manifest entries outside the selected user roots, or inconsistent previous/current pairs. macOS defaults are binary `$HOME/.local/bin/session-reviewer`, Skill `${CODEX_HOME:-$HOME/.codex}/skills/session-reviewer`, manifest `$HOME/.local/share/session-reviewer/install-manifest.json`. Windows defaults are binary `%LOCALAPPDATA%\SessionReviewer\bin\session-reviewer.exe`, Skill `%CODEX_HOME%\skills\session-reviewer` or `%USERPROFILE%\.codex\skills\session-reviewer`, manifest `%LOCALAPPDATA%\SessionReviewer\install-manifest.json`. Installers refuse system locations and never modify machine-level PATH.
+
+- [ ] **Step 4: Implement source-only install, safe uninstall, and the Skill verifier**
+
+Exact source commands are:
+
+```bash
+./scripts/install.sh --source . --version 0.1.0 --install-watcher
+./scripts/uninstall.sh
+```
+
+```powershell
+.\scripts\install.ps1 -Source . -Version 0.1.0 -InstallWatcher
+.\scripts\uninstall.ps1
+```
+
+Source install verifies a clean checkout and Go `1.26.x`, runs `cmd/verify-skill`, builds the native binary with explicit version/commit/time metadata, verifies `version --json`, copies binary and Skill through rooted temporary files, installs the watcher only when requested, and writes the manifest last. Failure removes only newly created hash-matching files and restores the prior watcher state. Source uninstall stops the watcher, removes only manifest-listed files whose current hashes match, reports modified Skill files, preserves machine data/project/vault/raw sessions, and is idempotent. Archive/checksum/rollback flags are usage errors until Task 5.
+
+`cmd/verify-skill` checks frontmatter identity, required references/wrappers, POSIX syntax, PowerShell parseability when available, schema byte identity, relative resource paths, no checkout/user paths, no forbidden model/Git/network capability, and the existing Skill package test contract.
+
+- [ ] **Step 5: Verify in isolated user homes and commit**
+
+Run:
+
+```bash
+go run ./cmd/verify-skill ./skill/session-reviewer
+env HOME="$(mktemp -d)" CODEX_HOME="$(mktemp -d)" ./scripts/install.sh --source . --version 0.1.0
+go test ./internal/install ./test/release ./skill/session-reviewer/tests -v
+pwsh -NoProfile -File ./scripts/install.ps1 -Source . -Version 0.1.0 -WhatIf
+git diff --check
+```
+
+Expected: verifier/tests and isolated POSIX source install/uninstall pass; PowerShell reports only user paths; no archive is needed or produced.
+
+```bash
+git add internal/install scripts/install.sh scripts/uninstall.sh scripts/install.ps1 scripts/uninstall.ps1 cmd/verify-skill skill/session-reviewer test/release/source_install_test.go
+git commit -m "feat: add source installation and Skill verification"
+```
+
+---
+
+### Task 4: Build Deterministic Archives, SBOMs, Checksums, and the License Gate
 
 **Files:**
 - Create: `cmd/release-packager/main.go`
@@ -328,7 +437,7 @@ git commit -m "fix: harden and document Windows file recovery"
 - Modify: `.gitignore`
 
 **Interfaces:**
-- Consumes: exact clean tag/commit/build time, built binaries, README, `LICENSE_STATUS.md`, install/uninstall scripts, and packaged Skill.
+- Consumes: a clean commit/build time, Task 3's source installers and verified Skill, README, and `LICENSE_STATUS.md`; public mode additionally consumes exact tag `v0.1.0` plus owner license authorization.
 - Produces: deterministic `dist/session-reviewer_0.1.0_{darwin_amd64,darwin_arm64}.tar.gz`, `dist/session-reviewer_0.1.0_windows_amd64.zip`, `dist/session-reviewer-skill_0.1.0.zip`, one SPDX SBOM per binary plus Skill, and `dist/SHA256SUMS`.
 
 - [ ] **Step 1: Write failing archive/SBOM/license-gate tests**
@@ -370,7 +479,9 @@ Expected: FAIL because the packager and gate do not exist.
 
 ```go
 type Target struct { GOOS,GOARCH,BinaryPath,ArchivePath string }
-type PackageOptions struct { Version,Commit string; Epoch time.Time; Root,Dist string; Targets []Target }
+type PackageMode string
+const (PackagePrivateCandidate PackageMode="private_candidate"; PackagePublicRelease PackageMode="public_release")
+type PackageOptions struct { Mode PackageMode; Version,Commit string; Epoch time.Time; Root,Dist string; Targets []Target }
 type Entry struct { Source,Name string; Mode fs.FileMode }
 func BuildArchives(PackageOptions)([]Artifact,error)
 type Artifact struct { Name,Path,SHA256 string; Size int64 }
@@ -383,9 +494,9 @@ Tar/zip entry names use `/`, reject absolute/traversing/link/device entries, set
 
 - [ ] **Step 4: Add exact clean-tree build scripts and hard public gate**
 
-`scripts/build-release.sh` verifies `git diff --quiet`, `git diff --cached --quiet`, no untracked files except ignored `dist/`, exact tag `v0.1.0`, tag target equals `HEAD`, and Go `1.26.x`; it derives `COMMIT=$(git rev-parse HEAD)` and `BUILD_TIME=$(git show -s --format=%cI HEAD)`, builds all three targets with `CGO_ENABLED=0 -trimpath -buildvcs=true`, validates injected metadata by running native binaries where possible and `go version -m` otherwise, then invokes the packager.
+Both scripts require exactly one mode. `--private --version 0.1.0` requires a clean tracked/index tree, no untracked files except ignored `dist/`, Go `1.26.x`, and a full lowercase `HEAD`; it explicitly does **not** require or create a tag and records package mode `private_candidate`. `--public --version 0.1.0` requires all private checks plus `git describe --tags --exact-match HEAD` equal to exactly `v0.1.0`, `git rev-list -n1 v0.1.0` equal to `HEAD`, no second exact tag, and a successful public license gate before packaging; it records `public_release`. Unknown/multiple modes are usage errors. Both derive `COMMIT=$(git rev-parse HEAD)` and `BUILD_TIME=$(git show -s --format=%cI HEAD)`, build all three targets with `CGO_ENABLED=0 -trimpath -buildvcs=true`, validate injected metadata by running native binaries where possible and `go version -m` otherwise, then invoke the packager. Tests prove private mode succeeds at an untagged clean commit and public mode rejects an untagged, wrong-tagged, or unauthorized commit.
 
-`go run ./cmd/check-release-license --public` requires a root `LICENSE` regular file, rejects symlink/empty/status-notice content, and requires a separately committed `docs/release/license-authorization.json` with integer version `1`, exact string `authorized_by: repository-owner`, an RFC3339 `authorized_at`, and a 64-character lowercase `license_file_sha256` equal to the file hash. This plan does not create either file. `release.yml` calls this before any public upload; therefore current publication fails safely and private archives remain available for acceptance only.
+`go run ./cmd/check-release-license --public` requires a root `LICENSE` regular file, rejects symlink/empty/status-notice content, and requires a separately committed `docs/release/license-authorization.json` with integer version `1`, exact string `authorized_by: repository-owner`, an RFC3339 `authorized_at`, and a 64-character lowercase `license_file_sha256` equal to the file hash. This plan does not create either file. Private mode never calls this command and is successful without authorization; public mode calls it before producing public-mode artifacts or performing any upload.
 
 - [ ] **Step 5: Build the immediate private `v0.1.0` package set twice**
 
@@ -393,12 +504,12 @@ Before the final tag exists, test with an isolated signed input tuple while keep
 
 ```bash
 rm -rf dist
-go run ./cmd/release-packager --version 0.1.0 --commit "$(git rev-parse HEAD)" --epoch "$(git show -s --format=%cI HEAD)" --input ./build --dist ./dist --private
+./scripts/build-release.sh --version 0.1.0 --private
 find dist -maxdepth 1 -type f -print | LC_ALL=C sort
 shasum -a 256 -c dist/SHA256SUMS
 cp dist/SHA256SUMS /tmp/session-reviewer-first-SHA256SUMS
 rm -rf dist
-go run ./cmd/release-packager --version 0.1.0 --commit "$(git rev-parse HEAD)" --epoch "$(git show -s --format=%cI HEAD)" --input ./build --dist ./dist --private
+./scripts/build-release.sh --version 0.1.0 --private
 diff -u /tmp/session-reviewer-first-SHA256SUMS dist/SHA256SUMS
 go run ./cmd/check-release-license --public
 ```
@@ -414,113 +525,82 @@ git commit -m "build: package release archives and SBOMs"
 
 ---
 
-### Task 4: Package the Skill and Add Source/Archive Install, Upgrade, Rollback, and Uninstall
+### Task 5: Add Verified Archive Install, Upgrade, Rollback, and Purging Uninstall
 
 **Files:**
-- Create: `internal/install/manifest.go`
-- Create: `internal/install/manifest_test.go`
-- Create: `scripts/install.sh`
-- Create: `scripts/uninstall.sh`
-- Create: `scripts/install.ps1`
-- Create: `scripts/uninstall.ps1`
-- Create: `cmd/verify-skill/main.go`
-- Modify: `skill/session-reviewer/SKILL.md`
-- Modify: `skill/session-reviewer/scripts/prepare-workflow.sh`
-- Modify: `skill/session-reviewer/scripts/prepare-workflow.ps1`
-- Modify: `skill/session-reviewer/scripts/apply-proposal.sh`
-- Modify: `skill/session-reviewer/scripts/apply-proposal.ps1`
+- Modify: `internal/install/manifest.go`
+- Modify: `internal/install/manifest_test.go`
+- Modify: `scripts/install.sh`
+- Modify: `scripts/uninstall.sh`
+- Modify: `scripts/install.ps1`
+- Modify: `scripts/uninstall.ps1`
 - Create: `test/release/archive_test.go`
 
 **Interfaces:**
-- Consumes: source checkout or one verified release archive, `SHA256SUMS`, CLI watcher lifecycle, and existing Skill workflows.
-- Produces: user-level binary/Skill install manifest, idempotent upgrade, recoverable previous binary, source-build install, archive install, uninstall with optional local-state purge, and a self-contained Skill archive.
+- Consumes: Task 3's rooted manifest/source installer/verified Skill, Task 4's deterministic platform and Skill archives, `SHA256SUMS`, and CLI watcher lifecycle.
+- Produces: verified archive installation, idempotent same-version reinstall, versioned upgrade with binary/Skill rollback pair, purge-aware uninstall, and native archive-install smoke; source installation remains compatible.
 
-- [ ] **Step 1: Write failing install and Skill package tests**
+- [ ] **Step 1: Write failing archive upgrade/rollback tests**
 
 ```go
 func TestUpgradeKeepsPreviousBinaryAndUninstallPreservesKnowledge(t *testing.T) {
 	f:=newInstallFixture(t);f.install("0.1.0-dev.1");f.install("0.1.0")
-	m:=f.manifest();if m.Version!="0.1.0"||m.PreviousBinarySHA256==""{t.Fatalf("%#v",m)}
+	m:=f.manifest();if m.ProductVersion!="0.1.0"||m.InstallMode!="archive"||m.PreviousBinarySHA256==""||m.PreviousSkillTreeSHA256==""{t.Fatalf("%#v",m)}
 	f.uninstall(false)
 	for _,path:=range []string{f.projectLedger,f.vaultReview,f.rawSessions}{if _,err:=os.Stat(path);err!=nil{t.Fatalf("preserved path %s: %v",path,err)}}
 }
 
-func TestSkillArchiveHasValidIdentityAndNoCheckoutPaths(t *testing.T) {
-	archive:=buildSkillArchive(t);entries:=readZip(t,archive)
-	body:=entries["session-reviewer/SKILL.md"]
-	if !bytes.Contains(body,[]byte("name: session-reviewer")){t.Fatal("skill identity missing")}
-	if bytes.Contains(body,[]byte("/Users/neomei/"))||bytes.Contains(body,[]byte(`C:\Users\`)){t.Fatal("checkout path leaked")}
-	for _,script:=range []string{"prepare-workflow.sh","prepare-workflow.ps1","apply-proposal.sh","apply-proposal.ps1"}{if !hasEntrySuffix(entries,script){t.Fatalf("missing %s",script)}}
+func TestArchiveInstallRejectsChecksumOrMetadataMismatchBeforeStoppingWatcher(t *testing.T) {
+	f:=newInstallFixture(t);f.tamperArchive()
+	if err:=f.installArchive();err==nil{t.Fatal("accepted tampered archive")}
+	if f.watcherStops()!=0||f.manifestExists(){t.Fatal("mutated install before verification")}
 }
 ```
 
-- [ ] **Step 2: Run install/archive tests before scripts exist**
+- [ ] **Step 2: Run archive tests before archive flags exist**
 
 Run:
 
 ```bash
-go test ./internal/install ./test/release -run 'TestUpgrade|TestSkillArchive' -v
+go test ./internal/install ./test/release -run 'TestUpgrade|TestArchiveInstall' -v
 ```
 
-Expected: FAIL because the manifest, scripts, and verified archive contract do not exist.
+Expected: FAIL because Task 3's source installer rejects archive/rollback flags and the archive transaction is not implemented.
 
-- [ ] **Step 3: Define the manifest and exact install locations**
+- [ ] **Step 3: Extend the manifest transaction without changing its schema**
 
-```go
-type Manifest struct {
-	Version int `json:"version"`
-	ProductVersion,Commit,InstalledAt string
-	BinaryPath,BinarySHA256,SkillPath,SkillSHA256 string
-	PreviousBinaryPath,PreviousBinarySHA256 string
-	StartupInstalled bool
-}
-func Load(root string)(Manifest,error)
-func Save(root string,Manifest)error
-func VerifyFiles(Manifest)error
-```
+Use Task 3's `PreviousBinaryPath`/`PreviousBinarySHA256` and `PreviousSkillPath`/`PreviousSkillTreeSHA256` as one inseparable rollback pair. An upgrade refuses a half-pair, verifies current hashes before backup, stores backups beneath rooted `previous/<current-manifest-hash>/`, and writes one new manifest last. Same version/commit/archive hashes are a no-op after verification. A different commit with the same version is rejected.
 
-macOS defaults: binary `$HOME/.local/bin/session-reviewer`, Skill `${CODEX_HOME:-$HOME/.codex}/skills/session-reviewer`, manifest `$HOME/.local/share/session-reviewer/install-manifest.json`. Windows defaults: binary `%LOCALAPPDATA%\SessionReviewer\bin\session-reviewer.exe`, Skill `%CODEX_HOME%\skills\session-reviewer` or `%USERPROFILE%\.codex\skills\session-reviewer`, manifest `%LOCALAPPDATA%\SessionReviewer\install-manifest.json`. Installers refuse system paths and never modify machine-level PATH.
+- [ ] **Step 4: Implement exact archive/rollback/purge flows**
 
-- [ ] **Step 4: Implement exact source/archive/rollback/uninstall flows**
-
-Source install commands:
-
-```bash
-./scripts/install.sh --source . --version 0.1.0 --install-watcher
-```
-
-```powershell
-.\scripts\install.ps1 -Source . -Version 0.1.0 -InstallWatcher
-```
-
-Archive install verifies its filename entry in `SHA256SUMS`, extracts to a private temporary directory, runs `version --json`, verifies version/commit against archive metadata, stops the watcher if installed, and moves the existing verified binary to `filepath.Join(dataRoot,"previous","session-reviewer-"+currentBinarySHA256)`. It then atomically installs binary and Skill, writes the manifest last, and reinstalls/restarts the watcher. A failure restores the previous manifest/binary/Skill and watcher state.
+Archive install requires both the platform archive and `session-reviewer-skill_0.1.0.zip`, verifies each exact filename entry in `SHA256SUMS` before extraction, extracts to a private directory with traversal/link/device rejection, runs `version --json`, verifies version/commit against packager metadata, and runs the Skill verifier. Only then may it stop an installed watcher, back up the verified binary/Skill pair, atomically install the new pair, write the manifest last, and reinstall/restart the prior watcher spec. A failure restores the previous manifest/binary/Skill and watcher state.
 
 `uninstall` first calls `watch uninstall`, removes only manifest-listed files whose current hashes match, reports locally modified Skill files rather than deleting them, and preserves data. `--purge-state`/`-PurgeState` additionally removes index, watcher state, queues, merge bases, cursors, and config after printing the exact roots; it still preserves project/vault Markdown and raw sessions. `--rollback` reinstalls the manifest's previous verified binary and corresponding Skill backup, then runs `doctor` and `sync --dry-run`.
 
-- [ ] **Step 5: Verify Skill and both installer families in isolated homes**
+- [ ] **Step 5: Verify source compatibility and both archive installer families**
 
 Run:
 
 ```bash
-go run ./cmd/verify-skill ./skill/session-reviewer
-env HOME="$(mktemp -d)" CODEX_HOME="$(mktemp -d)" ./scripts/install.sh --source . --version 0.1.0
+./scripts/build-release.sh --version 0.1.0 --private
+env HOME="$(mktemp -d)" CODEX_HOME="$(mktemp -d)" ./scripts/install.sh --archive dist/session-reviewer_0.1.0_darwin_$(go env GOARCH).tar.gz --skill-archive dist/session-reviewer-skill_0.1.0.zip --checksums dist/SHA256SUMS
 go test ./internal/install ./test/release -v
-pwsh -NoProfile -File ./scripts/install.ps1 -Source . -Version 0.1.0 -WhatIf
+pwsh -NoProfile -File ./scripts/install.ps1 -Archive dist/session-reviewer_0.1.0_windows_amd64.zip -SkillArchive dist/session-reviewer-skill_0.1.0.zip -Checksums dist/SHA256SUMS -WhatIf
 git diff --check
 ```
 
-Expected: Skill verification and isolated POSIX install pass; PowerShell shows only user-level paths; archive smoke covers Windows installation natively in Task 6.
+Expected: private archives build without a tag, isolated POSIX archive install/rollback/uninstall pass, Task 3 source-install tests remain green, and PowerShell shows only user-level paths; native Windows archive smoke is Task 7.
 
-- [ ] **Step 6: Commit self-contained installation and Skill packaging**
+- [ ] **Step 6: Commit verified archive installation**
 
 ```bash
-git add internal/install scripts/install.sh scripts/uninstall.sh scripts/install.ps1 scripts/uninstall.ps1 cmd/verify-skill skill/session-reviewer test/release/archive_test.go
-git commit -m "feat: package and install SessionReviewer and Skill"
+git add internal/install scripts/install.sh scripts/uninstall.sh scripts/install.ps1 scripts/uninstall.ps1 test/release/archive_test.go
+git commit -m "feat: install and roll back verified release archives"
 ```
 
 ---
 
-### Task 5: Build Non-Committed Real-Session E2E Scenarios A-E and Redacted Receipts
+### Task 6: Build Non-Committed Real-Session E2E Scenarios A-E and Redacted Receipts
 
 **Files:**
 - Create: `test/e2e/real/config.go`
@@ -622,7 +702,7 @@ git commit -m "test: add private real session acceptance harness"
 
 ---
 
-### Task 6: Collect Native Minimum-OS macOS and Windows Evidence
+### Task 7: Collect Native Minimum-OS macOS and Windows Evidence
 
 **Files:**
 - Create: `scripts/collect-platform-receipt.sh`
@@ -709,7 +789,7 @@ git commit -m "test: gate release on native platform receipts"
 
 ---
 
-### Task 7: Add Release Security, Canary, Memory, Performance, and Recovery Regressions
+### Task 8: Add Release Security, Canary, Memory, Performance, and Recovery Regressions
 
 **Files:**
 - Create: `test/release/security_test.go`
@@ -732,7 +812,7 @@ func TestReleaseCanaryAbsentFromEveryPersistenceAndArtifact(t *testing.T) {
 
 func TestReleaseMemoryAndLatencyBudgets(t *testing.T) {
 	metrics:=runSyntheticReleaseScale(t,Scale{SessionBytes:100<<20,Entities:10_000,FileEvents:100_000,SyncEntities:1_000})
-	if metrics.PeakHeapBytes>128<<20{t.Fatalf("peak heap %d",metrics.PeakHeapBytes)}
+	if metrics.PeakLiveHeapBytes>128<<20{t.Fatalf("peak live heap %d",metrics.PeakLiveHeapBytes)}
 	if metrics.Parse>30*time.Second||metrics.IndexRebuild>10*time.Second||metrics.History>5*time.Second||metrics.WatcherStorm>30*time.Second||metrics.Sync>15*time.Second{t.Fatalf("budgets %#v",metrics)}
 }
 ```
@@ -753,7 +833,7 @@ Run:
 go test ./test/release -run 'TestReleaseCanary|TestReleaseMemory|TestReleaseRecovers' -v
 ```
 
-Expected: FAIL until Tasks 1–6 expose every listed store to `exerciseEveryWorkflow`, keep streaming allocation below the stated bound, and wire every listed crash hook to recovery; after those exact contracts exist, PASS.
+Expected: FAIL until Tasks 1–7 expose every listed store to `exerciseEveryWorkflow`, keep streaming live heap below the stated bound, and wire every listed crash hook to recovery; after those exact contracts exist, PASS.
 
 - [ ] **Step 3: Add fuzz/race/vulnerability gates with exact budgets**
 
@@ -769,7 +849,7 @@ Add CI steps:
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 ```
 
-Keep generated large files in test temp directories. Metrics use `runtime.MemStats.TotalAlloc` deltas and wall time around isolated phases; native receipts record actual values. A CI timing breach fails and prints metrics, never event/entity content.
+Keep generated large files in test temp directories. `PeakLiveHeapBytes` is **not** derived from cumulative `runtime.MemStats.TotalAlloc`. A sampler records `/memory/classes/heap/objects:bytes` through `runtime/metrics` before the phase and every 10 ms until the worker exits, and reports the maximum baseline-adjusted live-object bytes; the worker must run long enough to produce at least two samples or the measurement fails. Separately record `TotalAllocatedBytes` as the before/after `runtime.MemStats.TotalAlloc` delta for allocation-churn diagnosis, with no peak label and no substitution for the 128 MiB live-heap gate. Wall time surrounds the same isolated phase; native receipts record both named values. A CI timing/memory breach fails and prints metrics, never event/entity content.
 
 - [ ] **Step 4: Prove manual parity and watcher security invariants**
 
@@ -800,26 +880,37 @@ git commit -m "test: add release security and recovery gates"
 
 ---
 
-### Task 8: Add Gated Release CI, Final Documentation, and Rollback Drill
+### Task 9: Add Gated Release CI, Final Documentation, and Rollback Drill
 
 **Files:**
 - Create: `.github/workflows/release.yml`
+- Create: `test/release/release_manifest_test.go`
 - Create: `docs/release/rollback.md`
 - Modify: `docs/release/checklist.md`
 - Modify: `README.md`
 
 **Interfaces:**
-- Consumes: clean `v0.1.0` tag, candidate/native workflow receipts, deterministic artifacts/SBOMs/checksums, license authorization gate, and installer rollback.
+- Consumes: either a clean untagged/manual private-candidate commit or a clean exact `v0.1.0` public tag, candidate/native workflow receipts, deterministic artifacts/SBOMs/checksums, license authorization gate, and installer rollback.
 - Produces: private candidate artifacts today and, only after separate explicit license authorization, an immutable GitHub Release with the exact verified asset set.
 
 - [ ] **Step 1: Write failing release-manifest and rollback-drill tests**
 
 ```go
-func TestReleaseManifestRequiresArtifactsSBOMChecksumsNativeReceiptsAndLicenseAuthorization(t *testing.T) {
-	m:=completeManifest(t)
-	if err:=ValidateReleaseManifest(m);err!=nil{t.Fatal(err)}
-	m.NativeReceipts=m.NativeReceipts[:3];if err:=ValidateReleaseManifest(m);err==nil{t.Fatal("accepted missing native receipt")}
-	m=completeManifest(t);m.LicenseAuthorized=false;if err:=ValidateReleaseManifest(m);err==nil{t.Fatal("accepted unlicensed public release")}
+func TestReleaseManifestSeparatesPrivateCandidateAndPublicExactTag(t *testing.T) {
+	private:=completeManifest(t);private.Mode="private_candidate";private.ExactTag="";private.LicenseAuthorized=false
+	if err:=ValidateReleaseManifest(private);err!=nil{t.Fatalf("private candidate failed: %v",err)}
+	private.NativeReceipts=private.NativeReceipts[:3];if err:=ValidateReleaseManifest(private);err==nil{t.Fatal("accepted missing native receipt")}
+	public:=completeManifest(t);public.Mode="public_release";public.ExactTag="v0.1.0";public.LicenseAuthorized=false
+	if err:=ValidateReleaseManifest(public);err==nil{t.Fatal("accepted unlicensed public release")}
+	public.LicenseAuthorized=true;public.ExactTag="v0.1.0-rc.1";if err:=ValidateReleaseManifest(public);err==nil{t.Fatal("accepted wrong public tag")}
+}
+
+func TestPrivateWorkflowSucceedsWithoutLicenseAndSkipsPublish(t *testing.T) {
+	d:=DecideWorkflow(WorkflowInput{Event:"workflow_dispatch",Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:false})
+	if d.Mode!="private_candidate"||!d.Build||!d.Assemble||!d.NativeGate||d.Publish||d.Conclusion!="success"{t.Fatalf("%#v",d)}
+	for _,tag:=range []string{"", "v0.1", "v0.1.0-rc.1", "v0.1.0^{}"} {
+		if got:=DecideWorkflow(WorkflowInput{Event:"push_tag",Tag:tag,Version:"0.1.0",Commit:strings.Repeat("a",40),LicenseAuthorized:true});got.Publish{t.Fatalf("tag %q published",tag)}
+	}
 }
 
 func TestRollbackDrillRestoresPreviousVersionWithoutKnowledgeLoss(t *testing.T) {
@@ -842,9 +933,9 @@ Expected: FAIL because aggregate manifest validation and complete rollback drill
 
 - [ ] **Step 3: Add build/assemble/publish jobs with least privilege**
 
-`release.yml` triggers on `v*` tags and manual candidate dispatch. Build jobs have `contents: read`, verify clean exact `v0.1.0`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS`, and uploads a private `candidate-0.1.0` artifact.
+`release.yml` has two mutually exclusive modes. Manual `workflow_dispatch` is `private_candidate`: it checks out the supplied commit, requires clean commit identity and version `0.1.0` but no tag/license, runs Task 4's `--private` build, and must conclude **success** with the publish job skipped. A `push` of tag `v0.1.0` is `public_release`: it requires the ref name exactly `v0.1.0`, tag target exactly `HEAD`, no other exact tag, and Task 4's `--public` preflight. Build jobs have `contents: read`, run the full test/vet/race/vulnerability suite, build one target each, and upload binary/SBOM fragments. An assemble job downloads only same-run artifacts, validates mode/build metadata and archive contents, creates deterministic archives/Skill/SBOMs/`SHA256SUMS`, and uploads a private `candidate-0.1.0` artifact in either mode.
 
-A native-gate job downloads the four receipt bundles by explicitly supplied successful `release-native` run ID and validates commit plus artifact hashes. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, runs `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
+A native-gate job downloads the four receipt bundles by explicitly supplied successful `release-native` run ID and validates commit plus artifact hashes. The final `publish` job has `contents: write`, depends on build/assemble/native-gate, and has the exact condition `mode == 'public_release'`; private mode therefore skips the job without evaluating a missing-license command and the workflow remains green. In public mode the job reruns `go run ./cmd/check-release-license --public`, rejects any pre-existing mismatched tag/release/asset, creates a non-draft non-prerelease GitHub Release, and uploads exactly:
 
 ```text
 session-reviewer_0.1.0_darwin_amd64.tar.gz
@@ -859,7 +950,7 @@ SHA256SUMS
 LICENSE
 ```
 
-Because this plan does not add `LICENSE`/authorization, `publish` currently stops before any GitHub write. Candidate build and private native acceptance remain usable.
+Because this plan does not add `LICENSE`/authorization, a public-tag run fails safely before any GitHub write. A manual private-candidate run builds, gates, uploads its private workflow artifact, skips `publish`, and succeeds.
 
 - [ ] **Step 4: Document install, support, recovery, uninstall, and rollback exactly**
 
@@ -907,7 +998,7 @@ Expected: every technical gate before the license check passes; the license chec
 - [ ] **Step 6: Commit release automation and documentation**
 
 ```bash
-git add .github/workflows/release.yml docs/release/checklist.md docs/release/rollback.md README.md
+git add .github/workflows/release.yml test/release/release_manifest_test.go docs/release/checklist.md docs/release/rollback.md README.md
 git commit -m "build: gate SessionReviewer release publication"
 ```
 
@@ -941,6 +1032,6 @@ Required evidence:
 - 100 MiB session, 10,000-entity index/history, 100,000-event watcher, and 1,000-entity sync budgets;
 - corrupt SQLite quarantine/rebuild, interrupted apply/sync, durable queue restart, and previous-version rollback;
 - complete Skill archive and actionable help/doctor/docs;
-- clean working tree and exact tag/commit identity.
+- clean working tree and exact commit identity for a private candidate; public mode additionally requires exact `v0.1.0` tag/commit identity.
 
 Public publication additionally requires an explicit repository-owner licensing decision in a separate authorized change that adds `LICENSE` and `docs/release/license-authorization.json`. Until then, do not create/push `v0.1.0`, do not create a public GitHub Release, and report: private release candidate technically verified; public distribution blocked by missing owner-authorized license grant.

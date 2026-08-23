@@ -4,9 +4,9 @@
 
 **Goal:** Build deterministic, recoverable Base/Project/Vault synchronization that preserves human Markdown edits, exposes conflicts and explicit resolutions, and never invokes a semantic model or mutates Git.
 
-**Architecture:** Each Markdown entity is parsed into a lossless frontmatter/body document whose editable units are merged against a durable per-entity base. A per-project locked sync engine scans stable entity identities, plans every entity independently, applies root-confined atomic writes through a crash journal and retry queue, and advances a base only after Project and Vault both verify the same accepted document. Conflict notes mirror both candidates to both sides while unrelated entities continue.
+**Architecture:** A new compatibility layer in `internal/syncdoc` parses each Markdown entity into a lossless frontmatter/body document whose authorized human-edit units are merged against a durable per-entity base; the existing accepted-ledger parser and mutation API in `internal/ledger/document.go` remains intact and is used as the semantic-validation boundary. A per-project locked sync engine scans stable entity identities, plans every entity independently, applies root-confined atomic writes through a crash journal and retry queue, and advances a base only after Project and Vault both verify the same accepted document. Conflict notes mirror both candidates to both sides while unrelated entities continue.
 
-**Tech Stack:** Go 1.26; Go standard library including `os.Root`; `github.com/pelletier/go-toml/v2 v2.4.3`; `gopkg.in/yaml.v3 v3.0.1`; `golang.org/x/text v0.41.0`; existing `internal/atomicfile`, `internal/pathguard`, `internal/project`, `internal/config`, and `internal/redact` packages; GitHub Actions macOS and Windows runners.
+**Tech Stack:** Go 1.26; Go standard library including `os.Root`; `github.com/pelletier/go-toml/v2 v2.4.3`; `gopkg.in/yaml.v3 v3.0.1`; `golang.org/x/text v0.41.0`; existing `internal/ledger`, `internal/atomicfile`, `internal/pathguard`, `internal/project`, `internal/config`, and `internal/redact` packages; new compatibility-preserving `internal/syncdoc`; GitHub Actions macOS and Windows runners.
 
 ## Global Constraints
 
@@ -16,7 +16,8 @@
 - No automatic Git commit, push, reset, checkout, clean, restore, add, branch, tag, or rollback is permitted.
 - `status`, `title`, `tags`, every recognized narrative section, every unknown frontmatter key, and every unknown body section are editable units.
 - `id`, `entity_type`, `project_id`, `sync_status`, `sync_hash`, `base_hash`, `project_hash`, and `vault_hash` are machine-reserved; the domain field `status` remains editable.
-- A missing file is not a deletion request. `status: archived` is the only automatic logical-deletion signal; physical deletion is never automatic.
+- `revision`, `source_sessions`, `evidence` (including every nested `source_hash`), and `supersedes` are proposal-owned provenance/CAS fields, not authorized human-edit units. A human changes narrative/title/status/tags while retaining the Base values for these fields; any side edit to a proposal-owned field is isolated as `protected_provenance`. After a successful non-noop human merge, sync validates the merged semantic document through `internal/ledger` and increments `revision` exactly once from the Base, regardless of how many units or sides changed; no-op/format-only sync keeps the revision. New entities require revision `1`. `project_overview` follows the same rule and is created/migrated at revision `1`.
+- A missing file is not a deletion request. `status: archived` is the only automatic logical-deletion signal. The only automatic physical removal is verified old-path cleanup after a successful rename: the replacement on both sides and the new Base must verify first, and the old entry must still be the same pinned regular file with the pre-rename content hash and entity identity.
 - A merge base advances only after Project and Vault both contain and verify the accepted content.
 - A malformed entity, invalid reserved-field edit, normalized-path collision, or suspected secret is preserved at its source and isolated from automatic writes.
 - Raw candidate content never appears in CLI errors, queue metadata, transaction journals, or logs. Suspected secrets never enter merge bases or conflict notes.
@@ -53,7 +54,7 @@ This plan implements explicit synchronization, sync status, conflict resolution,
 ```text
 go.mod                                  Add YAML AST and Unicode normalization dependencies
 go.sum                                  Record dependency checksums
-internal/config/config.go               Persist stable vault review path and case policy
+internal/config/config.go               Persist the union mapping used by sync and later history/project identity
 internal/config/config_test.go          Mapping migration and validation tests
 internal/platform/pathkey.go            Unicode/case-aware relative-path identity
 internal/platform/pathkey_test.go       NFC, macOS case modes, and Windows comparisons
@@ -65,11 +66,12 @@ internal/project/lock_windows.go         Windows LockFileEx adapter renamed for 
 internal/project/lock_test.go            live-owner, crash-release, and cross-process tests
 internal/pathguard/tree.go               Root-confined directory creation, reads, and Markdown walk
 internal/pathguard/tree_test.go          traversal, symlink, junction/reparse, and race tests
-internal/ledger/document.go              YAML-node frontmatter parser, identity, editable/reserved units
-internal/ledger/body.go                  Fence-aware Markdown section AST
-internal/ledger/document_test.go         Round-trip and unknown-key/section preservation tests
-internal/ledger/scan.go                  Stable ID/path inventory and normalized collision detection
-internal/ledger/scan_test.go             duplicate ID, case, Unicode, malformed, and archive tests
+internal/syncdoc/document.go             Lossless sync-only YAML/frontmatter compatibility document
+internal/syncdoc/body.go                 Lossless fence-aware Markdown unit slices for synchronization
+internal/syncdoc/document_test.go        Round-trip, authorization, and ledger-compatibility tests
+internal/syncdoc/scan.go                 Stable ID/path inventory and normalized collision detection
+internal/syncdoc/scan_test.go            duplicate ID, case, Unicode, malformed, and archive tests
+internal/ledger/document.go              Existing accepted-ledger document API; explicitly unchanged
 internal/sync/types.go                   Public sync contracts, reports, operations, and enums
 internal/sync/base_store.go              Atomic durable base records and last-written hashes
 internal/sync/base_store_test.go         corruption, recovery, CAS, and private-state tests
@@ -172,16 +174,30 @@ const (
 )
 
 // internal/config/config.go
+type SessionAssociation struct {
+	SessionID string `toml:"session_id"`
+	ProjectID string `toml:"project_id"`
+}
+
 type ProjectMapping struct {
-	ID              string   `toml:"id"`
-	Root            string   `toml:"root"`
-	VaultRoot       string   `toml:"vault_root"`
-	VaultReviewPath string   `toml:"vault_review_path,omitempty"`
-	VaultCaseMode   platform.CaseMode `toml:"vault_case_mode,omitempty"`
+	ID               string            `toml:"id"`
+	Root             string            `toml:"root"`
+	VaultRoot        string            `toml:"vault_root"`
+	VaultReviewPath  string            `toml:"vault_review_path,omitempty"`
+	VaultCaseMode    platform.CaseMode `toml:"vault_case_mode,omitempty"`
+	RemoteIdentities []string          `toml:"remote_identities,omitempty"`
+	CommonDirs       []string          `toml:"common_dirs,omitempty"`
+	Aliases          []string          `toml:"aliases,omitempty"`
+}
+
+type Config struct {
+	Version             int                  `toml:"version"`
+	Projects            []ProjectMapping     `toml:"projects"`
+	SessionAssociations []SessionAssociation `toml:"session_associations,omitempty"`
 }
 ```
 
-Keep configuration version `1` so existing files load. `validate` accepts both fields empty for migration, but requires both together; a non-empty review path must be slash-separated, relative, clean, below `Projects/`, end in `/Session Review`, contain no `.`/`..` component, NUL, Windows-reserved component, trailing dot/space, or absolute/UNC/device prefix. `VaultCaseMode` accepts only the two constants.
+This is the one configuration union consumed by this plan and `2026-08-23-session-reviewer-history-watcher.md`; later tasks extend validation and behavior but must not redeclare or drop any field. Keep configuration version `1` so existing files load. `validate` accepts both vault fields empty for migration, but requires both together; a non-empty review path must be slash-separated, relative, clean, below `Projects/`, end in `/Session Review`, contain no `.`/`..` component, NUL, Windows-reserved component, trailing dot/space, or absolute/UNC/device prefix. `VaultCaseMode` accepts only the two constants. Empty history identity slices/associations remain valid and omitted, and sync round-trip tests seed every union field and prove none is discarded.
 
 `PathKey` must validate the relative path first, convert separators to `/`, apply NFC with `norm.NFC.String`, and apply `cases.Fold().String` only for Windows or `CaseInsensitive`. It must not call `strings.ToLower`, because Unicode case folding is required.
 
@@ -200,6 +216,7 @@ Render a newly created overview with exact reserved identity fields:
 id: project-overview
 entity_type: project_overview
 project_id: project-2a2a2a2a2a2a2a2a
+revision: 1
 sync_status: synced
 created_at: 2026-08-23T00:00:00Z
 ---
@@ -225,15 +242,16 @@ git commit -m "feat: persist stable Obsidian mapping"
 **Files:**
 - Modify: `go.mod`
 - Modify: `go.sum`
-- Create: `internal/ledger/document.go`
-- Create: `internal/ledger/body.go`
-- Create: `internal/ledger/document_test.go`
+- Create: `internal/syncdoc/document.go`
+- Create: `internal/syncdoc/body.go`
+- Create: `internal/syncdoc/document_test.go`
 - Modify: `internal/project/init.go`
 - Modify: `internal/project/init_test.go`
+- Do not modify: `internal/ledger/document.go`
 
 **Interfaces:**
-- Consumes: UTF-8 Markdown bytes with YAML frontmatter and a repository-relative slash path.
-- Produces: `ledger.Parse(relativePath string, content []byte) (Document,error)`, `Document.Render() ([]byte,error)`, `Document.Identity() (Identity,error)`, `Document.Units() UnitSet`, `Document.WithUnits(UnitSet) (Document,error)`, `Document.WithSyncStatus(string) (Document,error)`, and `ledger.ContentHash([]byte) string`.
+- Consumes: UTF-8 Markdown bytes with YAML frontmatter and a repository-relative slash path; for accepted ledger entities it also consumes the existing `ledger.ParseDocument`/`SetReserved` semantic contract without changing that package.
+- Produces: `syncdoc.Parse(relativePath string, content []byte) (Document,error)`, `Document.Render() ([]byte,error)`, `Document.Identity() (Identity,error)`, `Document.Units() UnitSet`, `Document.WithUnits(UnitSet) (Document,error)`, `Document.ValidateHumanChanges(base Document) error`, `Document.FinalizeHumanMerge(base Document, changed bool) (Document,error)`, `Document.WithSyncStatus(string) (Document,error)`, and `syncdoc.ContentHash([]byte) string`.
 
 - [ ] **Step 1: Write failing AST preservation and validation tests**
 
@@ -256,10 +274,32 @@ func TestDocumentPreservesUnknownFrontmatterAndBodySections(t *testing.T) {
 func TestReservedFieldEditIsReportedWithoutEchoingValue(t *testing.T) {
 	base := mustParse(t, entity("decision-1", "project-1", "Base"))
 	edited := mustParse(t, entity("decision-evil-secret-value", "project-1", "Edit"))
-	err := edited.ValidateReserved(base.Identity())
+	err := edited.ValidateHumanChanges(base)
 	if !errors.Is(err, ErrReservedField) || strings.Contains(err.Error(), "evil") {
 		t.Fatalf("unsafe error: %v", err)
 	}
+}
+
+func TestProtectedProvenanceCannotBeHumanEdited(t *testing.T) {
+	base := mustParse(t, entity("decision-1", "project-1", "Base"))
+	for _, field := range []string{"revision", "source_sessions", "evidence", "supersedes"} {
+		edited := replaceFrontmatterUnit(t, base, field, protectedDifferentValue(field))
+		if err := edited.ValidateHumanChanges(base); !errors.Is(err, ErrProtectedProvenance) {
+			t.Fatalf("field=%s err=%v", field, err)
+		}
+	}
+	editedHash := replaceNestedEvidenceHash(t, base, strings.Repeat("b", 64))
+	if err := editedHash.ValidateHumanChanges(base); !errors.Is(err, ErrProtectedProvenance) { t.Fatalf("hash err=%v", err) }
+}
+
+func TestRevisionIncrementsOnceForMergedHumanChangeAndNotForNoop(t *testing.T) {
+	base := mustParse(t, entity("decision-1", "project-1", "Base"))
+	edited := replaceSection(t, base, "Context#1", []byte("Human edit.\n"))
+	if err := edited.ValidateHumanChanges(base); err != nil { t.Fatal(err) }
+	merged, err := edited.FinalizeHumanMerge(base, true); if err != nil { t.Fatal(err) }
+	if got := frontmatterInt(t, merged, "revision"); got != 4 { t.Fatalf("revision=%d", got) }
+	noop, err := base.FinalizeHumanMerge(base, false); if err != nil { t.Fatal(err) }
+	if got := frontmatterInt(t, noop, "revision"); got != 3 { t.Fatalf("noop revision=%d", got) }
 }
 
 func mustParse(t *testing.T, content []byte) Document {
@@ -270,15 +310,17 @@ func mustParse(t *testing.T, content []byte) Document {
 }
 
 func entity(id, projectID, body string) []byte {
-	return []byte(fmt.Sprintf("---\nid: %s\nentity_type: decision\nproject_id: %s\nstatus: accepted\nsync_status: synced\n---\n\n## Context\n%s\n", id, projectID, body))
+	return []byte(fmt.Sprintf("---\nid: %s\nentity_type: decision\nproject_id: %s\nrevision: 3\nstatus: accepted\nsource_sessions: [session-1]\nevidence:\n  - evidence_id: ev-1\n    session_id: session-1\n    jsonl_line: 7\n    source_hash: %s\n    summary: safe\nsupersedes: []\nsync_status: synced\n---\n\n## Context\n%s\n", id, projectID, strings.Repeat("a", 64), body))
 }
 ```
 
+The fixture helpers above must operate through `Units`/`WithUnits`, preserve all unrelated bytes, and use valid alternative YAML values for each protected field; they are test helpers, not new production interfaces.
+
 - [ ] **Step 2: Run the focused tests to verify failure**
 
-Run: `go test ./internal/ledger -run 'Test(DocumentPreserves|ReservedField)' -v`
+Run: `go test ./internal/syncdoc -run 'Test(DocumentPreserves|ReservedField|ProtectedProvenance|Revision)' -v`
 
-Expected: FAIL because `internal/ledger` does not exist.
+Expected: FAIL because `internal/syncdoc` and its contracts do not exist.
 
 - [ ] **Step 3: Define the exact document and unit types**
 
@@ -304,9 +346,13 @@ type Document struct {
 	dirty        bool
 }
 
-var ReservedFields = map[string]struct{}{
+var MachineReservedFields = map[string]struct{}{
 	"id": {}, "entity_type": {}, "project_id": {}, "sync_status": {},
 	"sync_hash": {}, "base_hash": {}, "project_hash": {}, "vault_hash": {},
+}
+
+var ProposalOwnedFields = map[string]struct{}{
+	"revision": {}, "source_sessions": {}, "evidence": {}, "supersedes": {},
 }
 ```
 
@@ -316,26 +362,29 @@ var ReservedFields = map[string]struct{}{
 
 Frontmatter unit values are canonical YAML node encodings including style and comments; body units are exact bytes. `Render` returns the original bytes when `dirty == false`; changed documents use LF, preserve all unknown nodes/sections, preserve scalar quoting style where valid, and end with one newline. `ContentHash` is lowercase SHA-256 hex of rendered bytes.
 
+`ValidateHumanChanges` authorizes changes only to `title`, domain `status`, `tags`, recognized narrative sections, unknown frontmatter keys, unknown body sections, and relative path. It requires `id`, `entity_type`, `project_id`, all sync fields, `revision`, `source_sessions`, `evidence`, every nested evidence `source_hash`, and `supersedes` to equal Base exactly; a mismatch returns `ErrReservedField` or `ErrProtectedProvenance` without echoing values. `FinalizeHumanMerge` first renders/reparses through `ledger.ParseDocument` for every accepted ledger entity. If `changed` is true it calls the existing ledger mutation boundary to set revision to `base.revision+1` exactly once while retaining Base provenance, then returns a reparsed lossless document; if false it retains Base revision and bytes. New accepted entities must enter with revision `1` and valid proposal-owned provenance, so sync cannot manufacture evidence relationships. `project_overview` is validated locally because the accepted-ledger parser intentionally does not own that entity type; it requires revision `>=1` and uses the same one-increment rule.
+
 - [ ] **Step 4: Migrate older overview identity through the parser**
 
-Replace the string-line overview mutation in `project.Initialize` with `ledger.Parse`, adding these values only when the existing file has `project_id` but lacks the other keys:
+Replace the string-line overview mutation in `project.Initialize` with `syncdoc.Parse`, adding these values only when the existing file has `project_id` but lacks the other keys:
 
 ```go
-units[ledger.UnitKey{Kind: ledger.UnitFrontmatter, Name: "id"}] = ledger.Unit{Present: true, Value: []byte("project-overview\n")}
-units[ledger.UnitKey{Kind: ledger.UnitFrontmatter, Name: "entity_type"}] = ledger.Unit{Present: true, Value: []byte("project_overview\n")}
-units[ledger.UnitKey{Kind: ledger.UnitFrontmatter, Name: "sync_status"}] = ledger.Unit{Present: true, Value: []byte("synced\n")}
+units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "id"}] = syncdoc.Unit{Present: true, Value: []byte("project-overview\n")}
+units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "entity_type"}] = syncdoc.Unit{Present: true, Value: []byte("project_overview\n")}
+units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}] = syncdoc.Unit{Present: true, Value: []byte("1\n")}
+units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}] = syncdoc.Unit{Present: true, Value: []byte("synced\n")}
 ```
 
 An existing conflicting identity fails closed; its bytes and config remain unchanged.
 
 - [ ] **Step 5: Run tests and commit**
 
-Run: `go mod tidy && gofmt -w internal/ledger internal/project && go test ./internal/ledger ./internal/project -v`
+Run: `go mod tidy && gofmt -w internal/syncdoc internal/project && go test ./internal/syncdoc ./internal/ledger ./internal/project -v`
 
-Expected: PASS, including byte-identical no-op round trip, CRLF input, multilingual headings, fenced pseudo-headings, duplicate keys rejection, reserved edit rejection, and older overview migration.
+Expected: PASS, including byte-identical no-op round trip, CRLF input, multilingual headings, fenced pseudo-headings, duplicate keys rejection, reserved/provenance edit rejection, one revision increment for a merged human edit, no increment for no-op sync, revision-1 overview creation/migration, and all pre-existing `internal/ledger` tests unchanged.
 
 ```bash
-git add go.mod go.sum internal/ledger internal/project/init.go internal/project/init_test.go
+git add go.mod go.sum internal/syncdoc internal/project/init.go internal/project/init_test.go
 git commit -m "feat: add lossless Markdown entity AST"
 ```
 
@@ -346,15 +395,15 @@ git commit -m "feat: add lossless Markdown entity AST"
 **Files:**
 - Create: `internal/pathguard/tree.go`
 - Create: `internal/pathguard/tree_test.go`
-- Create: `internal/ledger/scan.go`
-- Create: `internal/ledger/scan_test.go`
+- Create: `internal/syncdoc/scan.go`
+- Create: `internal/syncdoc/scan_test.go`
 - Create: `internal/sync/types.go`
 - Create: `internal/sync/base_store.go`
 - Create: `internal/sync/base_store_test.go`
 
 **Interfaces:**
 - Consumes: pinned project/vault roots, configured case mode, `docs/session-review` or vault review relative root, and per-project data root.
-- Produces: `ledger.Scan(*pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode) Inventory`, `sync.BaseStore.Load/List/Commit`, and shared sync enums/types.
+- Produces: `syncdoc.Scan(*pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode) Inventory`, `sync.BaseStore.Load/List/Commit`, and shared sync enums/types.
 
 - [ ] **Step 1: Write failing scanner and base-store tests**
 
@@ -391,7 +440,7 @@ func hash(value string) string { sum := sha256.Sum256([]byte(value)); return hex
 
 - [ ] **Step 2: Run focused tests to verify failure**
 
-Run: `go test ./internal/pathguard ./internal/ledger ./internal/sync -run 'Test(Scan|BaseStore)' -v`
+Run: `go test ./internal/pathguard ./internal/syncdoc ./internal/sync -run 'Test(Scan|BaseStore)' -v`
 
 Expected: FAIL with undefined tree, scanner, and base-store APIs.
 
@@ -447,16 +496,16 @@ The base filename is `merge-bases/<sha256(entity-id)>.json`; the record carries 
 
 `pathguard` must expose `EnsureDirectory(relative string, perm fs.FileMode) error`, `ReadRegular(relative string, max int64) ([]byte,bool,error)`, and `WalkMarkdown(relative string, visit func(relative string, content []byte) error) error`. Each method is relative, rejects `..`, absolute, UNC, and device paths, pins every opened parent identity, rejects all redirects including Windows reparse points, never follows a Markdown symlink, and rechecks file identity after reading.
 
-`ledger.Scan` skips `sync-conflicts/`, `.obsidian/`, non-Markdown files, atomic temporary/backup names, and hidden files. It sorts slash paths before parsing. Duplicate identity or normalized path key isolates every participant rather than selecting one.
+`syncdoc.Scan` skips `sync-conflicts/`, `.obsidian/`, non-Markdown files, atomic temporary/backup names, and hidden files. It sorts slash paths before parsing. Duplicate identity or normalized path key isolates every participant rather than selecting one.
 
 - [ ] **Step 4: Run scanner/base security tests and commit**
 
-Run: `gofmt -w internal/pathguard internal/ledger internal/sync && go test ./internal/pathguard ./internal/ledger ./internal/sync -run 'Test(Scan|BaseStore|Tree)' -v`
+Run: `gofmt -w internal/pathguard internal/syncdoc internal/sync && go test ./internal/pathguard ./internal/syncdoc ./internal/sync -run 'Test(Scan|BaseStore|Tree)' -v`
 
 Expected: PASS, including symlink escape on macOS, reparse classification in Windows logic tests, concurrent stale CAS, corrupt primary/backup, Unicode collision, duplicate ID, and deterministic list order.
 
 ```bash
-git add internal/pathguard/tree.go internal/pathguard/tree_test.go internal/ledger/scan.go internal/ledger/scan_test.go internal/sync/types.go internal/sync/base_store.go internal/sync/base_store_test.go
+git add internal/pathguard/tree.go internal/pathguard/tree_test.go internal/syncdoc/scan.go internal/syncdoc/scan_test.go internal/sync/types.go internal/sync/base_store.go internal/sync/base_store_test.go
 git commit -m "feat: inventory entities and persist merge bases"
 ```
 
@@ -473,14 +522,14 @@ git commit -m "feat: inventory entities and persist merge bases"
 - Create: `testdata/sync/conflicting-decision.md`
 
 **Interfaces:**
-- Consumes: `MergeInput{Base *ledger.Document, Project Candidate, Vault Candidate}`.
+- Consumes: `MergeInput{Base *syncdoc.Document, Project Candidate, Vault Candidate}`.
 - Produces: `Merge(MergeInput) MergeResult` with an accepted document or exact conflicting units, without filesystem writes.
 
 - [ ] **Step 1: Encode the merge table as failing table-driven tests**
 
 ```go
-type Candidate struct { Present bool; RelativePath string; Document ledger.Document; Hash string }
-type MergeInput struct { EntityID string; Base *ledger.Document; Project, Vault Candidate }
+type Candidate struct { Present bool; RelativePath string; Document syncdoc.Document; Hash string }
+type MergeInput struct { EntityID string; Base *syncdoc.Document; Project, Vault Candidate }
 type MergeKind string
 const (
 	MergeNoop         MergeKind = "noop"
@@ -489,19 +538,19 @@ const (
 	MergeWriteBoth    MergeKind = "write_both"
 	MergeConflict     MergeKind = "conflict"
 )
-type UnitConflict struct { Key ledger.UnitKey; Base, Project, Vault ledger.Unit }
-type MergeResult struct { Kind MergeKind; Accepted *ledger.Document; Conflicts []UnitConflict; Reason string }
+type UnitConflict struct { Key syncdoc.UnitKey; Base, Project, Vault syncdoc.Unit }
+type MergeResult struct { Kind MergeKind; Accepted *syncdoc.Document; Conflicts []UnitConflict; Reason string }
 
 func TestMergeUnitMatrix(t *testing.T) {
-	cases := []struct{ name string; base, project, vault ledger.Unit; conflict bool; want ledger.Unit }{
+	cases := []struct{ name string; base, project, vault syncdoc.Unit; conflict bool; want syncdoc.Unit }{
 		{"unchanged", present("b"), present("b"), present("b"), false, present("b")},
 		{"project-only", present("b"), present("p"), present("b"), false, present("p")},
 		{"vault-only", present("b"), present("b"), present("v"), false, present("v")},
 		{"same-change", present("b"), present("x"), present("x"), false, present("x")},
-		{"different-change", present("b"), present("p"), present("v"), true, ledger.Unit{}},
+		{"different-change", present("b"), present("p"), present("v"), true, syncdoc.Unit{}},
 		{"project-delete", present("b"), absent(), present("b"), false, absent()},
 		{"vault-delete", present("b"), present("b"), absent(), false, absent()},
-		{"delete-vs-edit", present("b"), absent(), present("v"), true, ledger.Unit{}},
+		{"delete-vs-edit", present("b"), absent(), present("v"), true, syncdoc.Unit{}},
 		{"both-delete", present("b"), absent(), absent(), false, absent()},
 	}
 	for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
@@ -510,8 +559,8 @@ func TestMergeUnitMatrix(t *testing.T) {
 	}) }
 }
 
-func present(value string) ledger.Unit { return ledger.Unit{Present:true, Value:[]byte(value)} }
-func absent() ledger.Unit { return ledger.Unit{} }
+func present(value string) syncdoc.Unit { return syncdoc.Unit{Present:true, Value:[]byte(value)} }
+func absent() syncdoc.Unit { return syncdoc.Unit{} }
 ```
 
 Add document-level tests for missing file recovery, first sync, disjoint unknown-key/unknown-section edits, same-section conflicts, title changes, file renames, domain status transitions, and archive-versus-edit.
@@ -539,15 +588,15 @@ Expected: FAIL because `Merge` is undefined.
 | present | unchanged | changed | apply Vault to Project |
 | present | changed | changed | merge by the unit matrix |
 
-Before unit merge, both present candidates must validate the base `Identity`. A changed reserved field yields `MergeConflict` with reason `reserved_field`; it is never treated as a new entity. A newly discovered entity requires valid reserved identity and exact project ID.
+Before unit merge, both present candidates must validate the base `Identity` and `ValidateHumanChanges(base)`. A changed machine-reserved field yields `MergeConflict` with reason `reserved_field`; a changed `revision`, `source_sessions`, `evidence`/nested `source_hash`, or `supersedes` yields reason `protected_provenance`; neither is treated as a new entity. A newly discovered entity requires valid reserved identity, exact project ID, revision `1`, and ledger-valid proposal-owned provenance.
 
 Archive policy is exact: if one candidate changes domain `status` from a non-archived base to `archived` while the other candidate changes any other editable unit, return reason `archive_vs_modify`; if the other side is unchanged, propagate the archive; if both set archived, merge their remaining units normally. Missing files never set archived and archived files remain present on both sides.
 
-Treat `RelativePath` as a separate merge unit. A one-sided rename propagates; a rename on one side plus content edits on the other merges; identical two-sided renames converge; different two-sided renames conflict. A case/NFC-only spelling change on a mapping whose `platform.PathKey` is unchanged keeps the Base spelling and is a no-op, preventing Obsidian normalization loops. On a case-sensitive mapping, a case change is a real rename. Rename targets must remain within the same ledger root, end in `.md`, avoid `sync-conflicts/`, and have no normalized collision. A rename is the only operation permitted to remove an old physical path: both new files and the new Base must verify first, then the writer removes an old file only when its pinned identity and pre-rename hash still match.
+Treat `RelativePath` as a separate merge unit. A one-sided rename propagates; a rename on one side plus content edits on the other merges; identical two-sided renames converge; different two-sided renames conflict. A case/NFC-only spelling change on a mapping whose `platform.PathKey` is unchanged keeps the Base spelling and is a no-op, preventing Obsidian normalization loops. On a case-sensitive mapping, a case change is a real rename. Rename targets must remain within the same ledger root, end in `.md`, avoid `sync-conflicts/`, and have no normalized collision. Rename cleanup is the sole physical-deletion exception: after both target files render to the accepted hash and the CAS-committed Base records the target path/hash, reopen each old parent through its pinned root, require the old entry to be the same regular-file identity observed during planning, reparse it to the same entity ID, require its bytes to equal that side's recorded pre-rename hash, and only then remove that old path plus durably sync its parent. Any failed check leaves the old file in place, records `rename_cleanup_blocked`, and does not roll back the verified target/Base.
 
-The accepted document is created from Base when present, applies merged units in deterministic key order, sets `sync_status: synced`, and renders once. Reserved hashes stay out of entity frontmatter; they live in `BaseRecord`.
+The accepted document is created from Base when present, applies merged authorized units in deterministic key order, runs `FinalizeHumanMerge` so one semantic change produces exactly one revision increment, sets `sync_status: synced`, and renders once. Reserved hashes stay out of entity frontmatter; they live in `BaseRecord`.
 
-The package-private primitive exercised by the table has the exact signature `func mergeUnit(base, project, vault ledger.Unit) (ledger.Unit, bool)`, where the Boolean is `true` only for a conflict.
+The package-private primitive exercised by the table has the exact signature `func mergeUnit(base, project, vault syncdoc.Unit) (syncdoc.Unit, bool)`, where the Boolean is `true` only for a conflict.
 
 - [ ] **Step 4: Run exhaustive merge tests and commit**
 
@@ -597,9 +646,9 @@ func TestResolveRejectsStaleConflictAndInvalidManualIdentity(t *testing.T) {
 	project := Candidate{Present:true, Hash:hash("PROJECT-CHANGED")}
 	vault := Candidate{Present:true, Hash:record.VaultHash}
 	if _, err := SelectResolution(record, Resolution{ConflictID:record.ID,Action:AcceptProject}, project, vault, nil); !errors.Is(err,ErrStaleConflict) { t.Fatalf("stale err=%v",err) }
-	manual, err := ledger.Parse("decisions/decision-1.md", entityBytes("decision-1","project-other","MANUAL")); if err != nil { t.Fatal(err) }
+	manual, err := syncdoc.Parse("decisions/decision-1.md", entityBytes("decision-1","project-other","MANUAL")); if err != nil { t.Fatal(err) }
 	project.Hash = record.ProjectHash
-	if _, err := SelectResolution(record, Resolution{ConflictID:record.ID,Action:ManualMerge,ManualFile:"manual.md"}, project, vault, &manual); !errors.Is(err,ledger.ErrReservedField) { t.Fatalf("identity err=%v",err) }
+	if _, err := SelectResolution(record, Resolution{ConflictID:record.ID,Action:ManualMerge,ManualFile:"manual.md"}, project, vault, &manual); !errors.Is(err,syncdoc.ErrReservedField) { t.Fatalf("identity err=%v",err) }
 }
 
 func entityBytes(id, projectID, body string) []byte {
@@ -633,7 +682,7 @@ type ConflictRecord struct {
 	Base, Project, Vault, Suggested []byte
 	CreatedAt                       time.Time
 }
-func SelectResolution(ConflictRecord, Resolution, liveProject, liveVault Candidate, manual *ledger.Document) (ledger.Document,error)
+func SelectResolution(ConflictRecord, Resolution, liveProject, liveVault Candidate, manual *syncdoc.Document) (syncdoc.Document,error)
 ```
 
 Conflict ID is `conflict-<UTC YYYYMMDDTHHMMSSZ>-<safe-entity-id>-<first12 sha256(base|project|vault)>`. Both sides receive the identical note at `sync-conflicts/<id>.md`. Its frontmatter contains only IDs, kind, source hashes, `resolution_status: open`, creation time, and exact copy-paste commands. Its body has Base, Project, Obsidian, and Suggested Merge sections inside a dynamically sized backtick fence longer than every candidate fence. No candidate is interpreted as Markdown.
@@ -927,7 +976,7 @@ const (
 )
 type Operation struct { EntityID string; Kind OperationKind; Target Side; RelativePath, BeforeHash, AfterHash string }
 type EntityError struct { EntityID, Code string }
-type Report struct { ProjectID string; DryRun bool; Operations []Operation; Conflicts []string; Issues []ledger.ScanIssue; Errors []EntityError; QueueDepth int }
+type Report struct { ProjectID string; DryRun bool; Operations []Operation; Conflicts []string; Issues []syncdoc.ScanIssue; Errors []EntityError; QueueDepth int }
 type Status struct { ProjectID string; InSync, Conflicted, Malformed, Queued, Blocked int; OpenConflicts []string; Pending []Operation }
 type QueueReport struct { Attempted, Completed, Rescheduled, Blocked int }
 type Engine struct { /* pinned roots, stores, lock root, writer, gate */ }
@@ -1209,7 +1258,7 @@ git commit -m "docs: explain deterministic sync recovery"
 - [ ] Unknown frontmatter keys, comments, scalar styles, preamble, fenced content, and unknown sections survive a merge.
 - [ ] Every editable field/section combination follows the documented unit matrix.
 - [ ] Reserved identity/hash edits are isolated and reported without echoing unsafe values.
-- [ ] Missing files are restored; only `status: archived` represents logical deletion; no physical deletion is inferred.
+- [ ] Missing files are restored; only `status: archived` represents logical deletion; no physical deletion is inferred except identity/hash-verified old-path cleanup after a completed rename.
 - [ ] Conflict notes exist on both sides, retain Base/Project/Obsidian candidates, offer all three actions, and remain as resolved history.
 - [ ] One conflict, malformed entity, queue failure, or Vault outage does not block unrelated safe entities.
 - [ ] Dry-run changes no file, directory, base, queue, journal, config, conflict, hash, or mtime.
