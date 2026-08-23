@@ -432,6 +432,133 @@ func TestSectionHeadingPresentationTransfersSetextAndNormalizesCRLF(t *testing.T
 	}
 }
 
+func TestChangedPrecedingContentKeepsFollowingSetextSectionBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		changedKey UnitKey
+		value      []byte
+		headings   []string
+		keys       []string
+	}{
+		{
+			name:       "preamble to Setext",
+			body:       "preamble\n\nSecond\n------\nsecond body\n",
+			changedKey: UnitKey{Kind: UnitPreamble},
+			value:      []byte("changed preamble\r\n"),
+			headings:   []string{"Second\n------"},
+			keys:       []string{"Second#1"},
+		},
+		{
+			name:       "ATX to Setext",
+			body:       "## First\nfirst body\n\nSecond\n------\nsecond body\n",
+			changedKey: UnitKey{Kind: UnitSection, Name: "First#1"},
+			value:      []byte("changed first\r\n"),
+			headings:   []string{"## First", "Second\n------"},
+			keys:       []string{"First#1", "Second#1"},
+		},
+		{
+			name:       "Setext to Setext",
+			body:       "First\n-----\nfirst body\n\nSecond\n------\nsecond body\n",
+			changedKey: UnitKey{Kind: UnitSection, Name: "First#1"},
+			value:      []byte("changed first\r\n"),
+			headings:   []string{"First\n-----", "Second\n------"},
+			keys:       []string{"First#1", "Second#1"},
+		},
+		{
+			name:       "empty Setext value before Setext",
+			body:       "First\n-----\nfirst body\n\nSecond\n------\nsecond body\n",
+			changedKey: UnitKey{Kind: UnitSection, Name: "First#1"},
+			value:      nil,
+			headings:   []string{"First\n-----", "Second\n------"},
+			keys:       []string{"First#1", "Second#1"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n" + test.body)
+			doc := mustParse(t, input)
+			units := doc.Units()
+			units[test.changedKey] = Unit{Present: true, Value: test.value}
+			updated, err := doc.WithUnits(units)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := updated.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(out, []byte("\r")) || !bytes.HasSuffix(out, []byte("\n")) || bytes.HasSuffix(out, []byte("\n\n")) {
+				t.Fatalf("changed output is not canonical: %q", out)
+			}
+			last := -1
+			for _, heading := range test.headings {
+				index := bytes.Index(out, []byte(heading))
+				if index <= last {
+					t.Fatalf("heading order/style changed for %q: index=%d last=%d\n%s", heading, index, last, out)
+				}
+				last = index
+			}
+			reparsed := mustParse(t, out)
+			for _, key := range test.keys {
+				requireUnit(t, reparsed.Units(), UnitSection, key)
+			}
+			if len(sectionKeys(reparsed.Units())) != len(test.keys) {
+				t.Fatalf("Setext section structure changed: want=%v got=%v\n%s", test.keys, sectionKeys(reparsed.Units()), out)
+			}
+		})
+	}
+}
+
+func TestSideOnlySetextSectionAfterBodyRoundTripsExactStructure(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\n\n## Existing\nexisting body\n"))
+	units := doc.Units()
+	setextKey := UnitKey{Kind: UnitSection, Name: "Unknown#1"}
+	units[setextKey] = Unit{
+		Present:             true,
+		Value:               []byte("unknown body\r\n"),
+		HeadingPresentation: []byte("Unknown\r\n-------\r\n"),
+	}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := bytes.Index(out, []byte("## Existing\nexisting body"))
+	unknown := bytes.Index(out, []byte("Unknown\n-------\nunknown body"))
+	if existing < 0 || unknown <= existing || bytes.Contains(out, []byte("\r")) {
+		t.Fatalf("side-only Setext structure/order/style changed: existing=%d unknown=%d\n%s", existing, unknown, out)
+	}
+	reparsed := mustParse(t, out)
+	if len(sectionKeys(reparsed.Units())) != 2 {
+		t.Fatalf("side-only Setext changed section count: %v\n%s", sectionKeys(reparsed.Units()), out)
+	}
+	unit, ok := reparsed.Units()[setextKey]
+	if !ok || !bytes.Equal(unit.Value, []byte("unknown body\n")) || !bytes.Equal(unit.HeadingPresentation, []byte("Unknown\n-------\n")) {
+		t.Fatalf("side-only Setext did not round-trip exact unit: unit=%+v ok=%v keys=%v\n%s", unit, ok, sectionKeys(reparsed.Units()), out)
+	}
+}
+
+func TestChangedRenderDoesNotAddBlankBeforeATXHeading(t *testing.T) {
+	doc := mustParse(t, []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\n---\npreamble\n## Existing\nbody\n"))
+	units := doc.Units()
+	units[UnitKey{Kind: UnitPreamble}] = Unit{Present: true, Value: []byte("changed preamble\r\n")}
+	updated, err := doc.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte("changed preamble\n## Existing\nbody\n")) || bytes.Contains(out, []byte("changed preamble\n\n## Existing")) || bytes.Contains(out, []byte("\r")) {
+		t.Fatalf("ATX spacing changed while normalizing output:\n%s", out)
+	}
+}
+
 func TestUnitMetadataApplicabilityAndHeadingBinding(t *testing.T) {
 	doc := mustParse(t, entity("decision-1", "project-1", "Base"))
 	tests := []struct {

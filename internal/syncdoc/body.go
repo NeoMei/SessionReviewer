@@ -301,8 +301,12 @@ func validatedHeadingPresentation(source []byte, expected sectionComponent) ([]b
 func (b Body) render() []byte {
 	var out bytes.Buffer
 	out.Write(normalizeLF(b.preamble))
+	precedingNarrative := b.preamble
 	for _, section := range b.sections {
 		if out.Len() != 0 && out.Bytes()[out.Len()-1] != '\n' {
+			out.WriteByte('\n')
+		}
+		if isSetextHeadingSource(section.heading, section.level) && narrativeNeedsSetextBoundary(precedingNarrative) {
 			out.WriteByte('\n')
 		}
 		out.Write(normalizeLF(section.heading))
@@ -310,8 +314,28 @@ func (b Body) render() []byte {
 			out.WriteByte('\n')
 		}
 		out.Write(normalizeLF(section.value))
+		precedingNarrative = section.value
 	}
 	return out.Bytes()
+}
+
+func isSetextHeadingSource(source []byte, level int) bool {
+	firstLineEnd, _ := physicalLineEnd(source, 0)
+	return !isSourceATXHeading(source[:firstLineEnd], level)
+}
+
+func narrativeNeedsSetextBoundary(source []byte) bool {
+	source = normalizeLF(source)
+	if len(source) == 0 {
+		return false
+	}
+	if source[len(source)-1] == '\n' {
+		source = source[:len(source)-1]
+	}
+	if lineStart := bytes.LastIndexByte(source, '\n'); lineStart >= 0 {
+		source = source[lineStart+1:]
+	}
+	return len(bytes.TrimSpace(source)) != 0
 }
 
 func physicalLineStart(source []byte, position int) int {
