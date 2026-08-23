@@ -121,6 +121,44 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 			return fail(err)
 		}
 	}
+	diagramBody, err := renderDiagram(next)
+	if err != nil {
+		return fail(err)
+	}
+	if len(diagramBody) > MaxDocumentBytes {
+		return fail(errors.New("render diagram: document exceeds size limit"))
+	}
+	const diagramRelative = ledgerRootRelative + "/diagrams/project-evolution.md"
+	directory, err := openLedgerProjectRoot(state.projectRoot, rootOpenOptions{})
+	if err != nil {
+		return fail(fmt.Errorf("read derived diagram: %w", err))
+	}
+	existing, mode, readErr := readLedgerRegular(directory, diagramRelative, false)
+	safelyMissing := errors.Is(readErr, os.ErrNotExist) || safelyMissingTargetParent(directory, diagramRelative)
+	closeErr := directory.Close()
+	if readErr == nil {
+		if closeErr != nil {
+			return fail(closeErr)
+		}
+		if !bytes.Equal(existing, diagramBody) {
+			files = append(files, PlannedFile{
+				RelativePath:   diagramRelative,
+				Data:           diagramBody,
+				Perm:           mode,
+				ExpectedData:   append([]byte(nil), existing...),
+				ExpectedExists: true,
+				ExpectedPerm:   mode,
+			})
+		}
+	} else {
+		if closeErr != nil {
+			return fail(closeErr)
+		}
+		if !safelyMissing {
+			return fail(fmt.Errorf("read derived diagram: %w", readErr))
+		}
+		files = append(files, PlannedFile{RelativePath: diagramRelative, Data: diagramBody, Perm: 0o644})
+	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	return WritePlan{ProjectRoot: state.projectRoot, Files: files}, nil
 }
@@ -861,6 +899,9 @@ func validateLedgerRelativePath(relative string) error {
 		return errors.New("invalid ledger relative path")
 	}
 	if relative == ledgerRootRelative+"/current-state.md" || relative == ledgerRootRelative+"/evolution-timeline.md" {
+		return nil
+	}
+	if relative == ledgerRootRelative+"/diagrams/project-evolution.md" {
 		return nil
 	}
 	for _, dir := range []string{"decisions", "open-loops", "sessions"} {

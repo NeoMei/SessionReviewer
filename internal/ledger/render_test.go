@@ -72,6 +72,96 @@ func TestEnsureSafeParentsRetryResyncsExistingParents(t *testing.T) {
 
 const testProjectID = "project-1111111111111111"
 
+func TestRenderPlansDerivedDiagramFromNextAcceptedState(t *testing.T) {
+	root := ledgerFixture(t)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Render(state, completeChanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const relative = "docs/session-review/diagrams/project-evolution.md"
+	var derived *PlannedFile
+	for i := range plan.Files {
+		if plan.Files[i].RelativePath == relative {
+			derived = &plan.Files[i]
+			break
+		}
+	}
+	if derived == nil || !bytes.Contains(derived.Data, []byte("Use durable Markdown")) || !bytes.Contains(derived.Data, []byte("flowchart LR")) {
+		t.Fatalf("derived=%+v files=%+v", derived, plan.Files)
+	}
+	if _, err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	next, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeat, err := Render(next, ChangeSet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repeat.Files) != 0 {
+		t.Fatalf("unchanged repeat planned files=%+v", repeat.Files)
+	}
+}
+
+func TestRenderOverwritesUserEditsToDerivedDiagram(t *testing.T) {
+	root := ledgerFixture(t)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := Render(state, completeChanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(first); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "docs/session-review/diagrams/project-evolution.md")
+	manual := []byte("# user-authored diagram\n")
+	if err := os.WriteFile(path, manual, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Render(next, ChangeSet{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Files) != 1 || plan.Files[0].RelativePath != "docs/session-review/diagrams/project-evolution.md" || !plan.Files[0].ExpectedExists || !bytes.Equal(plan.Files[0].ExpectedData, manual) {
+		t.Fatalf("overwrite plan=%+v", plan.Files)
+	}
+	if bytes.Contains(plan.Files[0].Data, []byte("user-authored")) || !bytes.Contains(plan.Files[0].Data, []byte("Manual edits are overwritten")) {
+		t.Fatalf("derived policy/data=%s", plan.Files[0].Data)
+	}
+	if runtime.GOOS != "windows" && plan.Files[0].Perm != 0o600 {
+		t.Fatalf("mode=%#o", plan.Files[0].Perm)
+	}
+	if _, err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, plan.Files[0].Data) {
+		t.Fatalf("diagram bytes=%q want=%q", got, plan.Files[0].Data)
+	}
+}
+
 func TestRenderCompleteLayoutPreservesUserContent(t *testing.T) {
 	root := ledgerFixture(t)
 	state, err := Load(root)
@@ -89,6 +179,7 @@ func TestRenderCompleteLayoutPreservesUserContent(t *testing.T) {
 	want := []string{
 		"docs/session-review/current-state.md",
 		"docs/session-review/decisions/decision-1.md",
+		"docs/session-review/diagrams/project-evolution.md",
 		"docs/session-review/evolution-timeline.md",
 		"docs/session-review/open-loops/loop-1.md",
 		"docs/session-review/sessions/session-s1.md",
