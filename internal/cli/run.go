@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 var Version = "dev"
@@ -72,4 +77,32 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 func isHelpToken(arg string) bool {
 	return arg == "help" || arg == "-h" || arg == "--help"
+}
+
+func resolveImplicitProjectRoot() (_ string, retErr error) {
+	workingDirectoryInfo, err := os.Stat(".")
+	if err != nil {
+		return "", fmt.Errorf("inspect current directory: %w", err)
+	}
+	logicalPath, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("read current directory: %w", err)
+	}
+	absolutePath, err := filepath.Abs(logicalPath)
+	if err != nil {
+		return "", fmt.Errorf("make current directory absolute: %w", err)
+	}
+	physicalPath, err := filepath.EvalSymlinks(absolutePath)
+	if err != nil {
+		return "", fmt.Errorf("resolve current directory: %w", err)
+	}
+	directory, err := pathguard.Open(physicalPath)
+	if err != nil {
+		return "", fmt.Errorf("open resolved current directory: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, directory.Close()) }()
+	if !os.SameFile(workingDirectoryInfo, directory.Info()) {
+		return "", errors.New("resolved current directory identity changed")
+	}
+	return directory.Path, nil
 }

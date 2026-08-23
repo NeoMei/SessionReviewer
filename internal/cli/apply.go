@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -57,7 +56,7 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if *projectRoot == "" {
-		resolved, err := os.Getwd()
+		resolved, err := resolveImplicitProjectRoot()
 		if err != nil {
 			return writeDiagnostic(stderr, "apply", err)
 		}

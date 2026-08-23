@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -224,7 +225,10 @@ func TestApplyReportsDeterministicResult(t *testing.T) {
 	assertApplyOutputContract(t, out.String())
 }
 
-func TestApplyDefaultsProjectAndDataWithoutFollowingWorkingDirectorySymlink(t *testing.T) {
+func TestLedgerCommandsResolveOnlyImplicitLogicalSymlinkWorkingDirectory(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("logical PWD subprocess coverage is a macOS acceptance test")
+	}
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
 	defaultData := filepath.Join(home, ".local", "share", "session-reviewer")
@@ -233,20 +237,51 @@ func TestApplyDefaultsProjectAndDataWithoutFollowingWorkingDirectorySymlink(t *t
 	if err := os.Symlink(fixture.project, link); err != nil {
 		t.Fatal(err)
 	}
-	oldWorkingDirectory, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(link); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
-	setCurrentEnv(t, platform.Env{GOOS: "darwin", Home: home})
+	binary := buildCLIForSubprocess(t)
+	environment := append(os.Environ(), "HOME="+home)
 
+	stdout, stderr, code := runCLIThroughLogicalSymlink(t, link, binary, environment,
+		"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence)
+	if code != 0 || stderr != "" || !strings.Contains(stdout, "cursor_advanced: true") {
+		t.Fatalf("apply code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	for _, command := range []string{"resume", "history"} {
+		stdout, stderr, code = runCLIThroughLogicalSymlink(t, link, binary, environment, command, "--ledger-only")
+		if code != 0 || stderr != "" || !strings.HasPrefix(stdout, "# ") {
+			t.Fatalf("%s code=%d stdout=%q stderr=%q", command, code, stdout, stderr)
+		}
+	}
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "explicit project symlink", args: []string{"resume", "--ledger-only", "--project", link}},
+		{name: "explicit apply project symlink", args: []string{"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence, "--project", link, "--data-dir", fixture.data}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(binary, test.args...)
+			command.Env = environment
+			var out, errOut bytes.Buffer
+			command.Stdout, command.Stderr = &out, &errOut
+			err := command.Run()
+			if exitCode(err) != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_") {
+				t.Fatalf("args=%v code=%d stdout=%q stderr=%q", test.args, exitCode(err), out.String(), errOut.String())
+			}
+		})
+	}
+
+	dataLink := filepath.Join(root, "data-link")
+	if err := os.Symlink(fixture.data, dataLink); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary, "apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence, "--project", fixture.project, "--data-dir", dataLink)
+	command.Env = environment
 	var out, errOut bytes.Buffer
-	code := Run([]string{"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence}, &out, &errOut)
-	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "cursor_advanced: true") {
-		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	command.Stdout, command.Stderr = &out, &errOut
+	err := command.Run()
+	if exitCode(err) != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_APPLY_FAILED") {
+		t.Fatalf("explicit data symlink code=%d stdout=%q stderr=%q", exitCode(err), out.String(), errOut.String())
 	}
 }
 
@@ -1090,4 +1125,38 @@ func gitRun(t *testing.T, directory string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, body)
 	}
 	return strings.TrimSpace(string(body))
+}
+
+func buildCLIForSubprocess(t *testing.T) string {
+	t.Helper()
+	binary := filepath.Join(t.TempDir(), "session-reviewer")
+	command := exec.Command("go", "build", "-o", binary, "./cmd/session-reviewer")
+	command.Dir = filepath.Clean(filepath.Join("..", ".."))
+	if body, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build CLI subprocess fixture: %v\n%s", err, body)
+	}
+	return binary
+}
+
+func runCLIThroughLogicalSymlink(t *testing.T, link, binary string, environment []string, args ...string) (string, string, int) {
+	t.Helper()
+	shellArgs := []string{"-c", `cd "$1" || exit 99; export PWD="$1"; shift; exec "$@"`, "session-reviewer-subprocess", link, binary}
+	shellArgs = append(shellArgs, args...)
+	command := exec.Command("/bin/sh", shellArgs...)
+	command.Env = environment
+	var stdout, stderr bytes.Buffer
+	command.Stdout, command.Stderr = &stdout, &stderr
+	err := command.Run()
+	return stdout.String(), stderr.String(), exitCode(err)
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
