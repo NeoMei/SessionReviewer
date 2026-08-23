@@ -28,12 +28,47 @@ var (
 // Load reads the accepted Markdown ledger without following any redirect. It
 // returns no partial state when any durable document is unsafe or malformed.
 func Load(projectRoot string) (State, error) {
-	directory, err := pathguard.Open(projectRoot)
+	return loadWithRootOptions(projectRoot, rootOpenOptions{})
+}
+
+// LoadExpected reads through a project root only when the handle opened by
+// this operation still has the caller's pinned identity.
+func LoadExpected(projectRoot string, expectedRoot os.FileInfo) (State, error) {
+	return loadWithRootOptions(projectRoot, rootOpenOptions{expectedRoot: expectedRoot})
+}
+
+type rootOpenOptions struct {
+	expectedRoot os.FileInfo
+	beforeOpen   func() error
+}
+
+func loadWithRootOptions(projectRoot string, options rootOpenOptions) (State, error) {
+	directory, err := openLedgerProjectRoot(projectRoot, options)
 	if err != nil {
-		return State{}, fmt.Errorf("open project root: %w", err)
+		return State{}, err
 	}
 	defer directory.Close()
+	return loadFromDirectory(directory)
+}
 
+func openLedgerProjectRoot(projectRoot string, options rootOpenOptions) (*pathguard.Directory, error) {
+	if options.beforeOpen != nil {
+		if err := options.beforeOpen(); err != nil {
+			return nil, err
+		}
+	}
+	directory, err := pathguard.Open(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open project root: %w", err)
+	}
+	if options.expectedRoot != nil && !os.SameFile(options.expectedRoot, directory.Info()) {
+		_ = directory.Close()
+		return nil, errors.New("opened project root does not match expected project root identity")
+	}
+	return directory, nil
+}
+
+func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 	overviewPath := ledgerRootRelative + "/project-overview.md"
 	overview, _, err := readLedgerRegular(directory, overviewPath, true)
 	if err != nil {
@@ -230,7 +265,7 @@ func loadDocument(directory *pathguard.Directory, relative string) (loadedDocume
 }
 
 func readLedgerDirectory(directory *pathguard.Directory, relative string) ([]os.DirEntry, error) {
-	subdirectory, err := pathguard.Open(filepath.Join(directory.Path, filepath.FromSlash(relative)))
+	subdirectory, subdirectoryInfo, err := directory.OpenDirectory(relative)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -238,20 +273,20 @@ func readLedgerDirectory(directory *pathguard.Directory, relative string) ([]os.
 		return nil, errors.New("ledger directory is redirected or not a directory")
 	}
 	defer subdirectory.Close()
-	file, err := subdirectory.Root.Open(".")
+	file, err := subdirectory.Open(".")
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	opened, err := file.Stat()
-	if err != nil || !os.SameFile(subdirectory.Info(), opened) {
+	if err != nil || !os.SameFile(subdirectoryInfo, opened) {
 		return nil, errors.New("ledger directory changed while opening")
 	}
 	entries, err := file.ReadDir(-1)
 	if err != nil {
 		return nil, err
 	}
-	after, err := subdirectory.Root.Stat(".")
+	after, err := subdirectory.Stat(".")
 	if err != nil || !os.SameFile(opened, after) {
 		return nil, errors.New("ledger directory changed while reading")
 	}

@@ -449,6 +449,37 @@ func TestProtectCursorDirectoryCannotBeRedirectedByRootReplacement(t *testing.T)
 	}
 }
 
+func TestStoreExpectedRootRejectsReplacementBeforeActualOpen(t *testing.T) {
+	base := t.TempDir()
+	live := filepath.Join(base, "live")
+	moved := filepath.Join(base, "moved")
+	if err := os.Mkdir(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expected, err := os.Stat(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := Store{
+		Root:         live,
+		ExpectedRoot: expected,
+		beforeRootValidation: func() error {
+			if err := os.Rename(live, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(live, 0o700)
+		},
+	}
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: strings.Repeat("a", 64), UpdatedAt: time.Now().UTC()}
+	if err := store.Commit("s1", Cursor{}, next); err == nil || !strings.Contains(err.Error(), "expected root identity") {
+		t.Fatalf("err=%v", err)
+	}
+	entries, err := os.ReadDir(live)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("replacement root entries=%v err=%v", entries, err)
+	}
+}
+
 func TestStoreRejectsCaseCollidingSessionID(t *testing.T) {
 	store := Store{Root: t.TempDir()}
 	if err := store.Commit("Session", Cursor{}, Cursor{SessionID: "Session"}); err != nil {

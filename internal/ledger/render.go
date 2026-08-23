@@ -728,7 +728,13 @@ func cloneSession(item SessionReport) SessionReport {
 // files. It does not provide filesystem-wide linearizability: an uncooperative
 // mutation can still race the final check and atomic replacement.
 func Apply(plan WritePlan) ([]string, error) {
-	return applyWithHooks(plan, applyHooks{})
+	return applyWithRootOptions(plan, rootOpenOptions{})
+}
+
+// ApplyExpected writes through a project root only when the handle opened by
+// this operation still has the caller's pinned identity.
+func ApplyExpected(plan WritePlan, expectedRoot os.FileInfo) ([]string, error) {
+	return applyWithRootOptions(plan, rootOpenOptions{expectedRoot: expectedRoot})
 }
 
 type applyHooks struct {
@@ -736,10 +742,18 @@ type applyHooks struct {
 }
 
 func applyWithHooks(plan WritePlan, hooks applyHooks) ([]string, error) {
+	return applyWithRootOptionsAndHooks(plan, rootOpenOptions{}, hooks)
+}
+
+func applyWithRootOptions(plan WritePlan, options rootOpenOptions) ([]string, error) {
+	return applyWithRootOptionsAndHooks(plan, options, applyHooks{})
+}
+
+func applyWithRootOptionsAndHooks(plan WritePlan, options rootOpenOptions, hooks applyHooks) ([]string, error) {
 	if plan.ProjectRoot == "" {
 		return nil, errors.New("write plan has no project root")
 	}
-	directory, err := pathguard.Open(plan.ProjectRoot)
+	directory, err := openLedgerProjectRoot(plan.ProjectRoot, options)
 	if err != nil {
 		return nil, err
 	}
@@ -778,7 +792,7 @@ func applyWithHooks(plan WritePlan, hooks applyHooks) ([]string, error) {
 		if item.skip {
 			continue
 		}
-		if err := ensureSafeParents(directory.Root, filepath.Dir(filepath.FromSlash(item.file.RelativePath)), 0o755); err != nil {
+		if err := ensureSafeParents(directory, filepath.Dir(filepath.FromSlash(item.file.RelativePath)), 0o755); err != nil {
 			return nil, err
 		}
 	}
@@ -835,11 +849,11 @@ func safelyMissingTargetParent(directory *pathguard.Directory, relative string) 
 		return false
 	}
 	parent := filepath.Dir(filepath.FromSlash(relative))
-	guarded, remaining, err := pathguard.OpenDeepest(filepath.Join(directory.Path, parent))
+	guarded, _, err := directory.OpenDirectory(parent)
 	if guarded != nil {
 		_ = guarded.Close()
 	}
-	return err == nil && len(remaining) != 0
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func validateLedgerRelativePath(relative string) error {
@@ -861,10 +875,11 @@ func validateLedgerRelativePath(relative string) error {
 	return errors.New("path is outside durable ledger documents")
 }
 
-func ensureSafeParents(root *os.Root, relative string, perm fs.FileMode) error {
+func ensureSafeParents(directory *pathguard.Directory, relative string, perm fs.FileMode) error {
 	if relative == "." {
 		return nil
 	}
+	root := directory.Root
 	parts := strings.Split(filepath.Clean(relative), string(filepath.Separator))
 	current := ""
 	for _, part := range parts {
@@ -878,19 +893,6 @@ func ensureSafeParents(root *os.Root, relative string, perm fs.FileMode) error {
 		}
 		info, err := root.Lstat(current)
 		if errors.Is(err, os.ErrNotExist) {
-			parentPath := filepath.Dir(current)
-			if parentPath == "." {
-				parentPath = ""
-			}
-			if parentPath != "" {
-				// The parent was validated in the preceding iteration. Reopen it
-				// through pathguard so Windows reparse points are rejected too.
-				guarded, guardErr := pathguard.Open(filepath.Join(rootName(root), parentPath))
-				if guardErr != nil {
-					return guardErr
-				}
-				_ = guarded.Close()
-			}
 			if err := root.Mkdir(current, perm); err != nil {
 				return err
 			}
@@ -899,29 +901,14 @@ func ensureSafeParents(root *os.Root, relative string, perm fs.FileMode) error {
 		if err != nil || !info.IsDir() {
 			return errors.New("ledger parent is redirected or not a directory")
 		}
-		guarded, guardErr := pathguard.Open(filepath.Join(rootName(root), current))
+		guarded, guardInfo, guardErr := directory.OpenDirectory(current)
 		if guardErr != nil {
 			return errors.New("ledger parent is redirected or not a directory")
 		}
-		guardInfo := guarded.Info()
 		_ = guarded.Close()
 		if !os.SameFile(info, guardInfo) {
 			return errors.New("ledger parent changed while validating")
 		}
-		opened, err := root.OpenRoot(current)
-		if err != nil {
-			return err
-		}
-		openedInfo, statErr := opened.Stat(".")
-		_ = opened.Close()
-		if statErr != nil || !os.SameFile(info, openedInfo) {
-			return errors.New("ledger parent changed while opening")
-		}
 	}
 	return nil
-}
-
-func rootName(root *os.Root) string {
-	// os.Root.Name returns the absolute path used to open the root.
-	return root.Name()
 }

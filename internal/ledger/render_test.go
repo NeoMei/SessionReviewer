@@ -616,6 +616,58 @@ func snapshotLoadedDocuments(t *testing.T, state State) map[string][]byte {
 	return result
 }
 
+func TestExpectedProjectRootRejectsReplacementInsideLedgerOpen(t *testing.T) {
+	t.Run("load", func(t *testing.T) {
+		root := ledgerFixture(t)
+		moved := root + "-moved"
+		expected, err := os.Stat(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = loadWithRootOptions(root, rootOpenOptions{
+			expectedRoot: expected,
+			beforeOpen: func() error {
+				if err := os.Rename(root, moved); err != nil {
+					return err
+				}
+				if err := os.MkdirAll(filepath.Join(root, "docs", "session-review"), 0o755); err != nil {
+					return err
+				}
+				return os.WriteFile(filepath.Join(root, "docs", "session-review", "project-overview.md"), []byte("---\nproject_id: "+testProjectID+"\n---\n\n# Replacement\n"), 0o644)
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "expected project root identity") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("apply", func(t *testing.T) {
+		root := ledgerFixture(t)
+		moved := root + "-moved"
+		expected, err := os.Stat(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		relative := "docs/session-review/decisions/replacement.md"
+		plan := WritePlan{ProjectRoot: root, Files: []PlannedFile{{RelativePath: relative, Data: decisionDocument("replacement", testProjectID), Perm: 0o644}}}
+		_, err = applyWithRootOptions(plan, rootOpenOptions{
+			expectedRoot: expected,
+			beforeOpen: func() error {
+				if err := os.Rename(root, moved); err != nil {
+					return err
+				}
+				return os.Mkdir(root, 0o700)
+			},
+		})
+		if err == nil || !strings.Contains(err.Error(), "expected project root identity") {
+			t.Fatalf("err=%v", err)
+		}
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("replacement tree target=%v", err)
+		}
+	})
+}
+
 func TestApplyRejectsTraversalRedirectAndConcurrentEdit(t *testing.T) {
 	t.Run("traversal", func(t *testing.T) {
 		root := ledgerFixture(t)

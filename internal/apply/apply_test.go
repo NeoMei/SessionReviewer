@@ -555,7 +555,7 @@ func TestFinishReceiptClampsClockRegression(t *testing.T) {
 	receipt := applyReceipt{ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 2, ToCursor: 2,
 		ExpectedCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
 		NextCursor:     evidence.CursorBoundary{Line: 2, SourceHash: testHashB}, Files: []receiptFile{}, ChangedFiles: []string{}}
-	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: t.TempDir(), Now: func() time.Time { return future.Add(-time.Hour) }}, nil, nil)
+	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: t.TempDir(), Now: func() time.Time { return future.Add(-time.Hour) }}, nil, nil, nil)
 	if err != nil || !got.CursorAdvanced {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}

@@ -197,6 +197,59 @@ func (directory *Directory) OpenRegular(path string) (*os.File, os.FileInfo, err
 	return file, opened, nil
 }
 
+// OpenDirectory opens an existing descendant directory relative to an already
+// pinned root. Every component is rejected if redirected and checked against
+// the handle that was actually opened.
+func (directory *Directory) OpenDirectory(path string) (*os.Root, os.FileInfo, error) {
+	if directory == nil || directory.Root == nil {
+		return nil, nil, fmt.Errorf("directory root is required")
+	}
+	path = filepath.Clean(filepath.FromSlash(path))
+	if path == "." || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, ".."+string(filepath.Separator)) {
+		return nil, nil, fmt.Errorf("invalid relative directory path")
+	}
+	components := strings.Split(path, string(filepath.Separator))
+	current := directory.Root
+	owned := false
+	var openedInfo os.FileInfo
+	for _, component := range components {
+		before, err := current.Lstat(component)
+		if err != nil {
+			if owned {
+				_ = current.Close()
+			}
+			return nil, nil, err
+		}
+		if isRedirect(before) || !before.IsDir() {
+			if owned {
+				_ = current.Close()
+			}
+			return nil, nil, fmt.Errorf("directory is redirected or not a directory")
+		}
+		next, err := current.OpenRoot(component)
+		if err != nil {
+			if owned {
+				_ = current.Close()
+			}
+			return nil, nil, fmt.Errorf("open directory: %w", err)
+		}
+		openedInfo, err = next.Stat(".")
+		if err != nil || !os.SameFile(before, openedInfo) {
+			_ = next.Close()
+			if owned {
+				_ = current.Close()
+			}
+			return nil, nil, fmt.Errorf("directory changed while opening")
+		}
+		if owned {
+			_ = current.Close()
+		}
+		current = next
+		owned = true
+	}
+	return current, openedInfo, nil
+}
+
 func SameDirectory(first, second string) (bool, error) {
 	firstDirectory, err := Open(first)
 	if err != nil {

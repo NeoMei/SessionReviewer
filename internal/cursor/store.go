@@ -37,7 +37,10 @@ type Cursor struct {
 }
 
 type Store struct {
-	Root string
+	Root         string
+	ExpectedRoot os.FileInfo
+
+	beforeRootValidation func() error
 }
 
 type storeRoot struct {
@@ -149,6 +152,11 @@ func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return nil, err
 	}
+	if s.beforeRootValidation != nil {
+		if err := s.beforeRootValidation(); err != nil {
+			return nil, err
+		}
+	}
 	rootInfo, err := validateRootPath(s.Root)
 	if err != nil {
 		return nil, err
@@ -161,6 +169,10 @@ func (s Store) open(sessionID string, createDir bool) (*storeRoot, error) {
 	if err != nil || !os.SameFile(rootInfo, openedRootInfo) {
 		_ = data.Close()
 		return nil, fmt.Errorf("data root changed while opening")
+	}
+	if s.ExpectedRoot != nil && !os.SameFile(s.ExpectedRoot, openedRootInfo) {
+		_ = data.Close()
+		return nil, fmt.Errorf("data root does not match expected root identity")
 	}
 
 	root := &storeRoot{
