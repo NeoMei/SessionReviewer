@@ -3,7 +3,6 @@ package proposal
 import (
 	"bytes"
 	"encoding/json"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +18,7 @@ const (
 	sessionID = "session-1"
 	hashA     = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	hashB     = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	jsMaxInt  = 9007199254740991
 )
 
 func fixedPacket() evidence.Packet {
@@ -108,6 +108,7 @@ func TestDecodeStrictEnvelope(t *testing.T) {
 		"optional explicit null":  bytes.Replace(valid, []byte(`"goal": "Ship the durable ledger"`), []byte(`"goal": null`), 1),
 		"non-JSON NaN":            bytes.Replace(valid, []byte(`"schema_version": 1`), []byte(`"schema_version": NaN`), 1),
 		"integer overflow":        bytes.Replace(valid, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 999999999999999999999999999999999`), 1),
+		"non JS-safe integer":     bytes.Replace(valid, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 9007199254740992`), 1),
 	}
 	for name, body := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -176,6 +177,43 @@ func TestValidateRejectsPacketMismatchAndRedactionFindings(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSecretsInPersistedStringsAcrossNestedEntities(t *testing.T) {
+	base, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	secret := "Authorization: Bearer abcdefghijklmnop"
+	tests := map[string]func(*Proposal){
+		"decision source session": func(p *Proposal) { p.NewDecisions[0].SourceSessions = append(p.NewDecisions[0].SourceSessions, secret) },
+		"current source session":  func(p *Proposal) { *p.CurrentStatePatch.SourceSessions = append(*p.CurrentStatePatch.SourceSessions, secret) },
+		"session report files":    func(p *Proposal) { p.SessionReport.Files = []string{secret} },
+		"session report commits":  func(p *Proposal) { p.SessionReport.Commits = []string{secret} },
+		"previous session id":     func(p *Proposal) { p.SessionReport.PreviousSessionID = secret },
+		"next session id":         func(p *Proposal) { p.SessionReport.NextSessionID = secret },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			mutate(&p)
+			changes, err := Validate(p, packet, state)
+			if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("secret canary persisted: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsCrossSessionReportOverwrite(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	existing := p.SessionReport
+	existing.SessionID = "other-session"
+	existing.Revision = 1
+	state.Sessions[existing.ID] = existing
+	p.SessionReport.Revision = 2
+
+	changes, err := Validate(p, packet, state)
+	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+		t.Fatalf("cross-session report overwrite accepted: changes=%+v err=%v", changes, err)
+	}
+}
+
 func TestValidateRejectsEvidenceTupleMismatchAndDuplicates(t *testing.T) {
 	base, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	tests := map[string]func(*Proposal, *evidence.Packet){
@@ -208,6 +246,89 @@ func TestValidateRejectsEvidenceTupleMismatchAndDuplicates(t *testing.T) {
 				t.Fatal("accepted invalid evidence binding")
 			}
 		})
+	}
+}
+
+func TestValidateBindsTailEventHashToNextCursor(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	packet.Events[1].SourceHash = hashA
+	for i := range p.TimelineEvents[0].Evidence {
+		p.TimelineEvents[0].Evidence[i].SourceHash = hashA
+	}
+	for i := range *p.CurrentStatePatch.Evidence {
+		(*p.CurrentStatePatch.Evidence)[i].SourceHash = hashA
+	}
+	for i := range p.SessionReport.Evidence {
+		p.SessionReport.Evidence[i].SourceHash = hashA
+	}
+	for phaseIndex := range p.SessionReport.Phases {
+		for evidenceIndex := range p.SessionReport.Phases[phaseIndex].Evidence {
+			p.SessionReport.Phases[phaseIndex].Evidence[evidenceIndex].SourceHash = hashA
+		}
+	}
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	changes, err := Validate(p, packet, state)
+	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+		t.Fatalf("tail event hash was not bound to next cursor: changes=%+v err=%v", changes, err)
+	}
+}
+
+func TestValidateRequiresEqualBoundariesForEmptyConsumedRange(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	packet.FromCursor = 3
+	packet.ToCursor = 2
+	packet.ExpectedCursor = evidence.CursorBoundary{Line: 2, SourceHash: hashB}
+	packet.NextCursor = evidence.CursorBoundary{Line: 2, SourceHash: hashA}
+	packet.Events = []evidence.Item{}
+	p.FromCursor = 3
+	p.ToCursor = 2
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	_, err = Validate(p, packet, state)
+	if err == nil || !strings.Contains(err.Error(), "empty packet cursor boundaries") {
+		t.Fatalf("empty consumed range boundary mismatch not detected first: %v", err)
+	}
+}
+
+func TestValidateRejectsNonJSSafePacketNumbers(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	unsafeLine := jsMaxInt + 1
+	packet.ToCursor = unsafeLine
+	packet.NextCursor.Line = unsafeLine
+	packet.Events[1].JSONLLine = unsafeLine
+	p.ToCursor = unsafeLine
+	for i := range p.TimelineEvents[0].Evidence {
+		p.TimelineEvents[0].Evidence[i].JSONLLine = unsafeLine
+	}
+	for i := range *p.CurrentStatePatch.Evidence {
+		(*p.CurrentStatePatch.Evidence)[i].JSONLLine = unsafeLine
+	}
+	for i := range p.SessionReport.Evidence {
+		p.SessionReport.Evidence[i].JSONLLine = unsafeLine
+	}
+	for phaseIndex := range p.SessionReport.Phases {
+		for evidenceIndex := range p.SessionReport.Phases[phaseIndex].Evidence {
+			p.SessionReport.Phases[phaseIndex].Evidence[evidenceIndex].JSONLLine = unsafeLine
+		}
+	}
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	changes, err := Validate(p, packet, state)
+	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+		t.Fatalf("non-JS-safe packet integer accepted: changes=%+v err=%v", changes, err)
 	}
 }
 
@@ -244,10 +365,11 @@ func TestValidateDecisionExistenceRevisionAndTransitions(t *testing.T) {
 		},
 		"update missing": func(_ *Proposal, state *ledger.State) { delete(state.Decisions, old.ID) },
 		"wrong revision": func(p *Proposal, _ *ledger.State) { p.UpdatedDecisions[0].ExpectedRevision = 2 },
-		"revision overflow": func(_ *Proposal, state *ledger.State) {
+		"revision overflow": func(p *Proposal, state *ledger.State) {
 			item := state.Decisions[old.ID]
-			item.Revision = math.MaxInt
+			item.Revision = jsMaxInt
 			state.Decisions[old.ID] = item
+			p.UpdatedDecisions[0].ExpectedRevision = jsMaxInt
 		},
 		"invalid transition": func(p *Proposal, state *ledger.State) {
 			item := state.Decisions[old.ID]
@@ -305,6 +427,142 @@ func TestValidateOpenLoopTransitionsAndOperationShape(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestValidateSessionReportEffectsAreExactAndSorted(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+	ref := base.NewDecisions[0].Evidence[0]
+
+	tests := map[string]func(*Proposal, *ledger.State){
+		"omitted decision addition": func(p *Proposal, _ *ledger.State) {
+			p.SessionReport.DecisionsAdded = []string{}
+		},
+		"unchanged decision called revised": func(p *Proposal, state *ledger.State) {
+			item := base.NewDecisions[0]
+			item.ID = "decision-existing"
+			state.Decisions[item.ID] = item
+			p.SessionReport.DecisionsRevised = []string{item.ID}
+		},
+		"unchanged loop called created": func(p *Proposal, state *ledger.State) {
+			item := ledger.OpenLoop{ID: "loop-existing", ProjectID: projectID, Title: "Existing", Status: "open", Revision: 1}
+			state.OpenLoops[item.ID] = item
+			p.SessionReport.OpenLoopsCreated = []string{item.ID}
+		},
+		"unchanged loop called closed": func(p *Proposal, state *ledger.State) {
+			item := ledger.OpenLoop{ID: "loop-existing", ProjectID: projectID, Title: "Existing", Status: "open", Revision: 1}
+			state.OpenLoops[item.ID] = item
+			p.SessionReport.OpenLoopsClosed = []string{item.ID}
+		},
+		"unsorted additions": func(p *Proposal, _ *ledger.State) {
+			second := p.NewDecisions[0]
+			second.ID = "decision-0"
+			p.NewDecisions = append(p.NewDecisions, second)
+			p.EvidenceLinks = append(p.EvidenceLinks, EvidenceLink{EntityID: second.ID, EvidenceID: ref.EvidenceID, Relation: "supports"})
+			p.SessionReport.DecisionsAdded = []string{"decision-1", "decision-0"}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			state := fixedState()
+			mutate(&p, &state)
+			changes, err := Validate(p, packet, state)
+			if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("false session effects accepted: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsRevisionOnlyDecisionAndLoopChanges(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+	ref := base.NewDecisions[0].Evidence[0]
+
+	t.Run("decision", func(t *testing.T) {
+		state := fixedState()
+		existing := base.NewDecisions[0]
+		state.Decisions[existing.ID] = existing
+		p := cloneProposal(t, base)
+		p.NewDecisions = []ledger.Decision{}
+		p.UpdatedDecisions = []DecisionPatch{{ID: existing.ID, ExpectedRevision: 1, Evidence: evidenceptr([]ledger.EvidenceRef{ref})}}
+		p.SessionReport.DecisionsAdded = []string{}
+		p.SessionReport.DecisionsRevised = []string{existing.ID}
+
+		changes, err := Validate(p, packet, state)
+		if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("revision-only decision accepted: changes=%+v err=%v", changes, err)
+		}
+	})
+
+	t.Run("open loop", func(t *testing.T) {
+		state := fixedState()
+		existing := ledger.OpenLoop{
+			ID: "loop-1", ProjectID: projectID, Title: "Existing", Status: "open", Revision: 1,
+			Tags: []string{}, SourceSessions: []string{sessionID}, Evidence: []ledger.EvidenceRef{ref}, Attempts: []string{},
+		}
+		state.OpenLoops[existing.ID] = existing
+		p := cloneProposal(t, base)
+		p.OpenLoops = []OpenLoopChange{{Operation: "update", Patch: &OpenLoopPatch{
+			ID: existing.ID, ExpectedRevision: 1, Evidence: evidenceptr([]ledger.EvidenceRef{ref}),
+		}}}
+		p.EvidenceLinks = append(p.EvidenceLinks, EvidenceLink{EntityID: existing.ID, EvidenceID: ref.EvidenceID, Relation: "supports"})
+
+		changes, err := Validate(p, packet, state)
+		if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("revision-only open loop accepted: changes=%+v err=%v", changes, err)
+		}
+	})
+}
+
+func TestValidateOpenLoopCloseEffectsUseOnlyActiveToTerminalTransitions(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+	ref := base.NewDecisions[0].Evidence[0]
+
+	makeUpdate := func(oldStatus, nextStatus string, closed []string) (Proposal, ledger.State) {
+		state := fixedState()
+		loop := ledger.OpenLoop{
+			ID: "loop-1", ProjectID: projectID, Title: "Resolve renderer", Status: oldStatus, Revision: 1,
+			Tags: []string{}, SourceSessions: []string{sessionID}, Evidence: []ledger.EvidenceRef{ref}, Question: "How?", Attempts: []string{},
+		}
+		state.OpenLoops[loop.ID] = loop
+		p := cloneProposal(t, base)
+		p.OpenLoops = []OpenLoopChange{{Operation: "update", Patch: &OpenLoopPatch{
+			ID: loop.ID, ExpectedRevision: 1, Status: strptr(nextStatus), Evidence: evidenceptr([]ledger.EvidenceRef{ref}),
+		}}}
+		p.EvidenceLinks = append(p.EvidenceLinks, EvidenceLink{EntityID: loop.ID, EvidenceID: ref.EvidenceID, Relation: "supports"})
+		p.SessionReport.OpenLoopsClosed = closed
+		return p, state
+	}
+
+	for _, transition := range []struct {
+		name, oldStatus, nextStatus string
+		closed                      []string
+	}{
+		{name: "open resolved", oldStatus: "open", nextStatus: "resolved", closed: []string{"loop-1"}},
+		{name: "blocked abandoned", oldStatus: "blocked", nextStatus: "abandoned", closed: []string{"loop-1"}},
+		{name: "open blocked", oldStatus: "open", nextStatus: "blocked", closed: []string{}},
+		{name: "resolved archived", oldStatus: "resolved", nextStatus: "archived", closed: []string{}},
+	} {
+		t.Run(transition.name, func(t *testing.T) {
+			p, state := makeUpdate(transition.oldStatus, transition.nextStatus, transition.closed)
+			if _, err := Validate(p, packet, state); err != nil {
+				t.Fatalf("valid close accounting rejected: %v", err)
+			}
+		})
+	}
+
+	t.Run("omitted close", func(t *testing.T) {
+		p, state := makeUpdate("open", "resolved", []string{})
+		if changes, err := Validate(p, packet, state); err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("omitted close accepted: changes=%+v err=%v", changes, err)
+		}
+	})
+	t.Run("archival called close", func(t *testing.T) {
+		p, state := makeUpdate("resolved", "archived", []string{"loop-1"})
+		if changes, err := Validate(p, packet, state); err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("archival misreported as close: changes=%+v err=%v", changes, err)
+		}
+	})
 }
 
 func TestValidateSupersedesTargetsCyclesAndScopedIDs(t *testing.T) {
@@ -393,7 +651,7 @@ func TestValidateSortsOnlyAfterFullValidation(t *testing.T) {
 	second.ID = "decision-0"
 	second.Title = "Earlier by ID"
 	p.NewDecisions = append(p.NewDecisions, second)
-	p.SessionReport.DecisionsAdded = []string{"decision-1", "decision-0"}
+	p.SessionReport.DecisionsAdded = []string{"decision-0", "decision-1"}
 	p.EvidenceLinks = append(p.EvidenceLinks, EvidenceLink{EntityID: second.ID, EvidenceID: second.Evidence[0].EvidenceID, Relation: "supports"})
 	changes, err := Validate(p, packet, state)
 	if err != nil {
@@ -430,6 +688,16 @@ func TestSchemaDeclaresClosedProtocolAndRequiredFields(t *testing.T) {
 	for _, token := range []string{`"enum"`, `"additionalProperties": false`, `"oneOf"`} {
 		if !strings.Contains(string(b), token) {
 			t.Fatalf("schema missing %s", token)
+		}
+	}
+	defs, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		t.Fatal("schema definitions missing")
+	}
+	for _, name := range []string{"nonnegative_integer", "positive_integer"} {
+		definition, ok := defs[name].(map[string]any)
+		if !ok || definition["maximum"] != float64(jsMaxInt) {
+			t.Fatalf("%s maximum is not JS-safe: %+v", name, definition)
 		}
 	}
 }

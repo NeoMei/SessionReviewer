@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"reflect"
 	"regexp"
 	"sort"
@@ -21,6 +20,7 @@ import (
 const (
 	proposalSchemaVersion = 1
 	maxProposalBytes      = 4 * 1024 * 1024
+	maxSafeInteger        = 1<<53 - 1
 	currentStateEntityID  = "current-state"
 )
 
@@ -375,20 +375,20 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 		if !ok {
 			return fail(fmt.Errorf("decision %q does not exist", patch.ID))
 		}
-		if old.Revision == math.MaxInt || patch.ExpectedRevision != old.Revision {
+		if old.Revision >= maxSafeInteger || patch.ExpectedRevision != old.Revision {
 			return fail(fmt.Errorf("decision %q revision mismatch or overflow", patch.ID))
 		}
 		if patch.Evidence == nil {
 			return fail(fmt.Errorf("decision patch %q lacks current-packet evidence", patch.ID))
 		}
 		updated := applyDecisionPatch(old, patch)
-		updated.Revision = old.Revision + 1
 		if err := validateDecisionTransition(old.Status, updated.Status); err != nil {
 			return fail(fmt.Errorf("decision %q: %w", patch.ID, err))
 		}
 		if reflect.DeepEqual(old, updated) {
 			return fail(fmt.Errorf("decision patch %q is a no-op", patch.ID))
 		}
+		updated.Revision = old.Revision + 1
 		if err := requireCurrentSession(updated.SourceSessions, p.SessionID, "decision "+patch.ID); err != nil {
 			return fail(err)
 		}
@@ -431,20 +431,20 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 			if !ok {
 				return fail(fmt.Errorf("open loop %q does not exist", patch.ID))
 			}
-			if old.Revision == math.MaxInt || patch.ExpectedRevision != old.Revision {
+			if old.Revision >= maxSafeInteger || patch.ExpectedRevision != old.Revision {
 				return fail(fmt.Errorf("open loop %q revision mismatch or overflow", patch.ID))
 			}
 			if patch.Evidence == nil {
 				return fail(fmt.Errorf("open-loop patch %q lacks current-packet evidence", patch.ID))
 			}
 			updated = applyOpenLoopPatch(old, patch)
-			updated.Revision = old.Revision + 1
 			if err := validateLoopTransition(old.Status, updated.Status); err != nil {
 				return fail(fmt.Errorf("open loop %q: %w", patch.ID, err))
 			}
 			if reflect.DeepEqual(old, updated) {
 				return fail(fmt.Errorf("open-loop patch %q is a no-op", patch.ID))
 			}
+			updated.Revision = old.Revision + 1
 		default:
 			return fail(fmt.Errorf("unknown open-loop operation %q", change.Operation))
 		}
@@ -466,7 +466,7 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 		seenTimeline[item.ID] = struct{}{}
 		old, exists := timelineByID[item.ID]
 		if exists {
-			if old.Revision == math.MaxInt || item.Revision != old.Revision+1 {
+			if old.Revision >= maxSafeInteger || item.Revision != old.Revision+1 {
 				return fail(fmt.Errorf("timeline %q revision mismatch or overflow", item.ID))
 			}
 		} else {
@@ -498,7 +498,10 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 		return fail(errors.New("session report identity does not match proposal"))
 	}
 	if old, exists := state.Sessions[report.ID]; exists {
-		if old.Revision == math.MaxInt || report.Revision != old.Revision+1 {
+		if old.ProjectID != report.ProjectID || old.SessionID != report.SessionID {
+			return fail(fmt.Errorf("session report %q identity cannot change", report.ID))
+		}
+		if old.Revision >= maxSafeInteger || report.Revision != old.Revision+1 {
 			return fail(fmt.Errorf("session report %q revision mismatch or overflow", report.ID))
 		}
 	} else {
@@ -534,6 +537,9 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 			return fail(fmt.Errorf("timeline %q inference upgrade lacks verification evidence", item.ID))
 		}
 	}
+	if err := validateSessionReportEffects(report, state, result); err != nil {
+		return fail(err)
+	}
 
 	sort.Slice(result.Decisions, func(i, j int) bool { return result.Decisions[i].ID < result.Decisions[j].ID })
 	sort.Slice(result.OpenLoops, func(i, j int) bool { return result.OpenLoops[i].ID < result.OpenLoops[j].ID })
@@ -542,11 +548,73 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	return result, nil
 }
 
+func validateSessionReportEffects(report ledger.SessionReport, state ledger.State, changes ledger.ChangeSet) error {
+	added := make([]string, 0, len(changes.Decisions))
+	revised := make([]string, 0, len(changes.Decisions))
+	for _, item := range changes.Decisions {
+		if _, existed := state.Decisions[item.ID]; existed {
+			revised = append(revised, item.ID)
+		} else {
+			added = append(added, item.ID)
+		}
+	}
+	created := make([]string, 0, len(changes.OpenLoops))
+	closed := make([]string, 0, len(changes.OpenLoops))
+	for _, item := range changes.OpenLoops {
+		old, existed := state.OpenLoops[item.ID]
+		if !existed {
+			created = append(created, item.ID)
+		} else if isActiveLoopStatus(old.Status) && isClosedLoopStatus(item.Status) {
+			closed = append(closed, item.ID)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(revised)
+	sort.Strings(created)
+	sort.Strings(closed)
+	checks := []struct {
+		name     string
+		declared []string
+		actual   []string
+	}{
+		{name: "decisions_added", declared: report.DecisionsAdded, actual: added},
+		{name: "decisions_revised", declared: report.DecisionsRevised, actual: revised},
+		{name: "open_loops_created", declared: report.OpenLoopsCreated, actual: created},
+		{name: "open_loops_closed", declared: report.OpenLoopsClosed, actual: closed},
+	}
+	for _, check := range checks {
+		if !equalStrings(check.declared, check.actual) {
+			return fmt.Errorf("session report %s does not exactly match packet effects: declared=%v actual=%v", check.name, check.declared, check.actual)
+		}
+	}
+	return nil
+}
+
+func isActiveLoopStatus(status string) bool {
+	return status == "open" || status == "blocked"
+}
+
+func isClosedLoopStatus(status string) bool {
+	return status == "resolved" || status == "abandoned"
+}
+
+func equalStrings(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func validateProtocolShape(p Proposal) error {
 	if p.SchemaVersion != proposalSchemaVersion {
 		return fmt.Errorf("unsupported proposal schema version %d", p.SchemaVersion)
 	}
-	if strings.TrimSpace(p.ProjectID) == "" || strings.TrimSpace(p.SessionID) == "" || p.FromCursor < 1 || p.ToCursor < p.FromCursor-1 {
+	if strings.TrimSpace(p.ProjectID) == "" || strings.TrimSpace(p.SessionID) == "" || !positiveSafeInteger(p.FromCursor) || !nonnegativeSafeInteger(p.ToCursor) || p.ToCursor < p.FromCursor-1 {
 		return errors.New("invalid proposal identity or cursor range")
 	}
 	if !prefixedSHA256.MatchString(p.EvidencePacketSHA256) {
@@ -561,7 +629,7 @@ func validateProtocolShape(p Proposal) error {
 		}
 	}
 	for _, patch := range p.UpdatedDecisions {
-		if strings.TrimSpace(patch.ID) == "" || patch.ExpectedRevision < 1 || !decisionPatchHasChange(patch) {
+		if strings.TrimSpace(patch.ID) == "" || !positiveSafeInteger(patch.ExpectedRevision) || !decisionPatchHasChange(patch) {
 			return fmt.Errorf("invalid decision patch %q", patch.ID)
 		}
 		if patch.Status != nil && !validDecisionStatus(*patch.Status) {
@@ -602,7 +670,7 @@ func validateProtocolShape(p Proposal) error {
 				return errors.New("open-loop update requires patch and forbids entity")
 			}
 			patch := *change.Patch
-			if strings.TrimSpace(patch.ID) == "" || patch.ExpectedRevision < 1 || !openLoopPatchHasChange(patch) {
+			if strings.TrimSpace(patch.ID) == "" || !positiveSafeInteger(patch.ExpectedRevision) || !openLoopPatchHasChange(patch) {
 				return fmt.Errorf("invalid open-loop patch %q", patch.ID)
 			}
 			if patch.Status != nil && !validLoopStatus(*patch.Status) {
@@ -627,7 +695,7 @@ func validateProtocolShape(p Proposal) error {
 			return err
 		}
 	}
-	if p.CurrentStatePatch.ExpectedRevision < 0 || !currentPatchHasChange(p.CurrentStatePatch) {
+	if !nonnegativeSafeInteger(p.CurrentStatePatch.ExpectedRevision) || !currentPatchHasChange(p.CurrentStatePatch) {
 		return errors.New("invalid or empty current-state patch")
 	}
 	if err := validateOptionalStringSlice(p.CurrentStatePatch.UncommittedChanges, "uncommitted changes"); err != nil {
@@ -662,7 +730,7 @@ func validateProtocolShape(p Proposal) error {
 }
 
 func validateDecision(item ledger.Decision) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || item.Revision < 1 || !validDecisionStatus(item.Status) {
+	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validDecisionStatus(item.Status) {
 		return fmt.Errorf("invalid decision %q", item.ID)
 	}
 	if item.Tags == nil || item.Supersedes == nil || item.SourceSessions == nil || item.Evidence == nil || item.Alternatives == nil || item.RejectedPaths == nil {
@@ -677,7 +745,7 @@ func validateDecision(item ledger.Decision) error {
 }
 
 func validateOpenLoop(item ledger.OpenLoop) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || item.Revision < 1 || !validLoopStatus(item.Status) {
+	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validLoopStatus(item.Status) {
 		return fmt.Errorf("invalid open loop %q", item.ID)
 	}
 	if item.Tags == nil || item.SourceSessions == nil || item.Evidence == nil || item.Attempts == nil {
@@ -693,7 +761,7 @@ func validateOpenLoop(item ledger.OpenLoop) error {
 }
 
 func validateTimeline(item ledger.TimelineEvent) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Title) == "" || item.Revision < 1 || !validFactClass(item.Class) || !validTime(item.OccurredAt) {
+	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validFactClass(item.Class) || !validTime(item.OccurredAt) {
 		return fmt.Errorf("invalid timeline event %q", item.ID)
 	}
 	if item.Evidence == nil || item.DecisionIDs == nil || item.OpenLoopIDs == nil {
@@ -709,7 +777,7 @@ func validateTimeline(item ledger.TimelineEvent) error {
 }
 
 func validateSessionReport(report ledger.SessionReport) error {
-	if strings.TrimSpace(report.ID) == "" || strings.TrimSpace(report.ProjectID) == "" || strings.TrimSpace(report.SessionID) == "" || report.Revision < 1 {
+	if strings.TrimSpace(report.ID) == "" || strings.TrimSpace(report.ProjectID) == "" || strings.TrimSpace(report.SessionID) == "" || !positiveSafeInteger(report.Revision) {
 		return fmt.Errorf("invalid session report %q", report.ID)
 	}
 	arrays := map[string][]string{
@@ -746,7 +814,7 @@ func validateSessionReport(report ledger.SessionReport) error {
 func validateEvidenceRefs(refs []ledger.EvidenceRef) error {
 	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if strings.TrimSpace(ref.EvidenceID) == "" || strings.TrimSpace(ref.SessionID) == "" || ref.JSONLLine < 1 || !lowercaseSHA256.MatchString(ref.SourceHash) {
+		if strings.TrimSpace(ref.EvidenceID) == "" || strings.TrimSpace(ref.SessionID) == "" || !positiveSafeInteger(ref.JSONLLine) || !lowercaseSHA256.MatchString(ref.SourceHash) {
 			return fmt.Errorf("invalid evidence reference %q", ref.EvidenceID)
 		}
 		if _, duplicate := seen[ref.EvidenceID]; duplicate {
@@ -842,6 +910,14 @@ func validTime(value string) bool {
 	return err == nil && parsed.Format(time.RFC3339Nano) == value
 }
 
+func nonnegativeSafeInteger(value int) bool {
+	return value >= 0 && value <= maxSafeInteger
+}
+
+func positiveSafeInteger(value int) bool {
+	return value >= 1 && value <= maxSafeInteger
+}
+
 func decisionPatchHasChange(p DecisionPatch) bool {
 	return p.Title != nil || p.Status != nil || p.Tags != nil || p.Supersedes != nil || p.SourceSessions != nil || p.Evidence != nil ||
 		p.Context != nil || p.Rationale != nil || p.Consequences != nil || p.ReevaluateWhen != nil || p.Alternatives != nil || p.RejectedPaths != nil
@@ -861,7 +937,7 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 	if packet.SchemaVersion != 2 || packet.ProjectID != p.ProjectID || packet.SessionID != p.SessionID || packet.FromCursor != p.FromCursor || packet.ToCursor != p.ToCursor {
 		return nil, errors.New("proposal does not identify the exact evidence packet")
 	}
-	if strings.TrimSpace(packet.CWD) == "" || packet.FromCursor < 1 || packet.ToCursor < packet.FromCursor-1 {
+	if strings.TrimSpace(packet.CWD) == "" || !positiveSafeInteger(packet.FromCursor) || !nonnegativeSafeInteger(packet.ToCursor) || packet.ToCursor < packet.FromCursor-1 {
 		return nil, errors.New("invalid evidence packet envelope")
 	}
 	if packet.ExpectedCursor.Line != packet.FromCursor-1 || packet.NextCursor.Line != packet.ToCursor {
@@ -873,6 +949,9 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 	if err := validateBoundary(packet.NextCursor); err != nil {
 		return nil, err
 	}
+	if packet.ToCursor == packet.FromCursor-1 && packet.ExpectedCursor != packet.NextCursor {
+		return nil, errors.New("empty packet cursor boundaries must be equal")
+	}
 	digest, err := evidence.Digest(packet)
 	if err != nil {
 		return nil, fmt.Errorf("digest evidence packet: %w", err)
@@ -883,12 +962,15 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 	items := make(map[string]evidence.Item, len(packet.Events))
 	lastLine := 0
 	for _, item := range packet.Events {
-		if strings.TrimSpace(item.ID) == "" || item.JSONLLine < packet.FromCursor || item.JSONLLine > packet.ToCursor || item.JSONLLine <= lastLine || !lowercaseSHA256.MatchString(item.SourceHash) || !validTime(item.Timestamp) {
+		if strings.TrimSpace(item.ID) == "" || !positiveSafeInteger(item.JSONLLine) || item.JSONLLine < packet.FromCursor || item.JSONLLine > packet.ToCursor || item.JSONLLine <= lastLine || !lowercaseSHA256.MatchString(item.SourceHash) || !validTime(item.Timestamp) {
 			return nil, fmt.Errorf("invalid evidence event %q", item.ID)
 		}
 		lastLine = item.JSONLLine
 		if _, duplicate := items[item.ID]; duplicate {
 			return nil, fmt.Errorf("duplicate evidence event id %q", item.ID)
+		}
+		if item.JSONLLine == packet.NextCursor.Line && item.SourceHash != packet.NextCursor.SourceHash {
+			return nil, fmt.Errorf("tail evidence event %q source hash does not match next cursor", item.ID)
 		}
 		switch item.Kind {
 		case "message":
@@ -910,7 +992,7 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 }
 
 func validateBoundary(boundary evidence.CursorBoundary) error {
-	if boundary.Line < 0 {
+	if !nonnegativeSafeInteger(boundary.Line) {
 		return errors.New("negative cursor boundary")
 	}
 	if boundary.Line == 0 {
@@ -926,53 +1008,9 @@ func validateBoundary(boundary evidence.CursorBoundary) error {
 }
 
 func validateSafeText(p Proposal, packet evidence.Packet) error {
-	values := []string{packet.CWD}
-	for _, item := range packet.Events {
-		values = append(values, item.ItemID, item.ToolName, item.Summary)
-	}
-	for _, item := range p.NewDecisions {
-		values = append(values, decisionText(item)...)
-		values = append(values, evidenceText(item.Evidence)...)
-	}
-	for _, patch := range p.UpdatedDecisions {
-		values = appendOptionalStrings(values, patch.Title, patch.Context, patch.Rationale, patch.Consequences, patch.ReevaluateWhen)
-		values = appendOptionalStringSlice(values, patch.Tags, patch.Alternatives, patch.RejectedPaths)
-		if patch.Evidence != nil {
-			values = append(values, evidenceText(*patch.Evidence)...)
-		}
-	}
-	for _, change := range p.OpenLoops {
-		if change.Entity != nil {
-			values = append(values, openLoopText(*change.Entity)...)
-			values = append(values, evidenceText(change.Entity.Evidence)...)
-		}
-		if change.Patch != nil {
-			values = appendOptionalStrings(values, change.Patch.Title, change.Patch.Question, change.Patch.Blocker, change.Patch.NextExperiment, change.Patch.CompletionCriterion)
-			values = appendOptionalStringSlice(values, change.Patch.Tags, change.Patch.Attempts)
-			if change.Patch.Evidence != nil {
-				values = append(values, evidenceText(*change.Patch.Evidence)...)
-			}
-		}
-	}
-	for _, item := range p.TimelineEvents {
-		values = append(values, item.Title, item.Summary)
-		values = append(values, evidenceText(item.Evidence)...)
-	}
-	patch := p.CurrentStatePatch
-	values = appendOptionalStrings(values, patch.Goal, patch.Branch, patch.NextAction, patch.FirstInspection)
-	values = appendOptionalStringSlice(values, patch.UncommittedChanges, patch.Blockers, patch.OpenRisks)
-	if patch.Evidence != nil {
-		values = append(values, evidenceText(*patch.Evidence)...)
-	}
-	report := p.SessionReport
-	values = append(values, report.InitialGoal)
-	values = append(values, report.GoalChanges...)
-	values = append(values, report.Verification...)
-	values = append(values, evidenceText(report.Evidence)...)
-	for _, phase := range report.Phases {
-		values = append(values, phase.Title, phase.Summary)
-		values = append(values, evidenceText(phase.Evidence)...)
-	}
+	values := make([]string, 0)
+	collectStrings(reflect.ValueOf(p), &values)
+	collectStrings(reflect.ValueOf(packet), &values)
 	redactor := redact.Default()
 	for _, value := range values {
 		if result := redactor.Text(value); len(result.Findings) != 0 {
@@ -982,43 +1020,32 @@ func validateSafeText(p Proposal, packet evidence.Packet) error {
 	return nil
 }
 
-func decisionText(item ledger.Decision) []string {
-	values := []string{item.Title, item.Context, item.Rationale, item.Consequences, item.ReevaluateWhen}
-	values = append(values, item.Tags...)
-	values = append(values, item.Alternatives...)
-	return append(values, item.RejectedPaths...)
-}
-
-func openLoopText(item ledger.OpenLoop) []string {
-	values := []string{item.Title, item.Question, item.Blocker, item.NextExperiment, item.CompletionCriterion}
-	values = append(values, item.Tags...)
-	return append(values, item.Attempts...)
-}
-
-func evidenceText(refs []ledger.EvidenceRef) []string {
-	values := make([]string, 0, len(refs))
-	for _, ref := range refs {
-		values = append(values, ref.Summary)
+func collectStrings(value reflect.Value, result *[]string) {
+	if !value.IsValid() {
+		return
 	}
-	return values
-}
-
-func appendOptionalStrings(values []string, pointers ...*string) []string {
-	for _, pointer := range pointers {
-		if pointer != nil {
-			values = append(values, *pointer)
+	switch value.Kind() {
+	case reflect.Interface, reflect.Pointer:
+		if !value.IsNil() {
+			collectStrings(value.Elem(), result)
+		}
+	case reflect.String:
+		*result = append(*result, value.String())
+	case reflect.Struct:
+		for i := 0; i < value.NumField(); i++ {
+			collectStrings(value.Field(i), result)
+		}
+	case reflect.Array, reflect.Slice:
+		for i := 0; i < value.Len(); i++ {
+			collectStrings(value.Index(i), result)
+		}
+	case reflect.Map:
+		iterator := value.MapRange()
+		for iterator.Next() {
+			collectStrings(iterator.Key(), result)
+			collectStrings(iterator.Value(), result)
 		}
 	}
-	return values
-}
-
-func appendOptionalStringSlice(values []string, pointers ...*[]string) []string {
-	for _, pointer := range pointers {
-		if pointer != nil {
-			values = append(values, (*pointer)...)
-		}
-	}
-	return values
 }
 
 func validateState(state ledger.State, projectID string) (map[string]string, error) {
@@ -1028,7 +1055,7 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 	if state.CurrentState.ProjectID != "" && state.CurrentState.ProjectID != projectID {
 		return nil, errors.New("current state belongs to another project")
 	}
-	if state.CurrentState.Revision < 0 {
+	if !nonnegativeSafeInteger(state.CurrentState.Revision) {
 		return nil, errors.New("negative current-state revision")
 	}
 	ids := make(map[string]string)
@@ -1044,7 +1071,7 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		return nil
 	}
 	for key, item := range state.Decisions {
-		if key != item.ID || item.ProjectID != projectID || item.Revision < 1 || !validDecisionStatus(item.Status) {
+		if key != item.ID || item.ProjectID != projectID || !positiveSafeInteger(item.Revision) || !validDecisionStatus(item.Status) {
 			return nil, fmt.Errorf("invalid existing decision %q", key)
 		}
 		if err := reserve(item.ID, "decision"); err != nil {
@@ -1052,7 +1079,7 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		}
 	}
 	for key, item := range state.OpenLoops {
-		if key != item.ID || item.ProjectID != projectID || item.Revision < 1 || !validLoopStatus(item.Status) {
+		if key != item.ID || item.ProjectID != projectID || !positiveSafeInteger(item.Revision) || !validLoopStatus(item.Status) {
 			return nil, fmt.Errorf("invalid existing open loop %q", key)
 		}
 		if err := reserve(item.ID, "open_loop"); err != nil {
@@ -1060,7 +1087,7 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		}
 	}
 	for _, item := range state.Timeline {
-		if item.Revision < 1 || !validFactClass(item.Class) {
+		if !positiveSafeInteger(item.Revision) || !validFactClass(item.Class) {
 			return nil, fmt.Errorf("invalid existing timeline %q", item.ID)
 		}
 		if err := reserve(item.ID, "timeline"); err != nil {
@@ -1068,7 +1095,7 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		}
 	}
 	for key, item := range state.Sessions {
-		if key != item.ID || item.ProjectID != projectID || item.Revision < 1 {
+		if key != item.ID || item.ProjectID != projectID || !positiveSafeInteger(item.Revision) {
 			return nil, fmt.Errorf("invalid existing session report %q", key)
 		}
 		if err := reserve(item.ID, "session"); err != nil {
@@ -1251,7 +1278,7 @@ func validateLoopTransition(old, next string) error {
 }
 
 func applyCurrentPatch(old ledger.CurrentState, patch CurrentStatePatch, projectID, sessionID string, packet map[string]evidence.Item, changes map[string]map[string]struct{}) (ledger.CurrentState, error) {
-	if old.Revision == math.MaxInt || patch.ExpectedRevision != old.Revision {
+	if old.Revision >= maxSafeInteger || patch.ExpectedRevision != old.Revision {
 		return ledger.CurrentState{}, errors.New("current-state revision mismatch or overflow")
 	}
 	if patch.Evidence == nil || patch.SourceSessions == nil {
