@@ -81,6 +81,67 @@ func TestEnsureRootDirSyncFailureReturnsAfterCreation(t *testing.T) {
 	}
 }
 
+func TestEnsureRootDirRetryResyncsExistingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	firstSyncErr := errors.New("injected first directory sync failure")
+	err = ensureRootDirWithOps(root, "projects", 0o700, directoryDurabilityOps{
+		syncParent: func(*os.Root, string) error { return firstSyncErr },
+	})
+	if !errors.Is(err, firstSyncErr) {
+		t.Fatalf("first error=%v want=%v", err, firstSyncErr)
+	}
+
+	secondSyncErr := errors.New("injected retry directory sync failure")
+	calls := 0
+	err = ensureRootDirWithOps(root, "projects", 0o700, directoryDurabilityOps{
+		syncParent: func(_ *os.Root, name string) error {
+			calls++
+			if name != "projects" {
+				t.Fatalf("sync name=%q", name)
+			}
+			return secondSyncErr
+		},
+	})
+	if !errors.Is(err, secondSyncErr) || calls != 1 {
+		t.Fatalf("retry error=%v calls=%d", err, calls)
+	}
+}
+
+func TestSyncRootPublicationRetriesExistingPublishedFile(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	publicationErr := errors.New("injected publication sync failure")
+	ops := defaultDurabilityOps()
+	ops.syncPublication = func(*os.Root, string) error { return publicationErr }
+	if err := writeRootAtParentWithOps(root, "state.json", []byte("new"), 0o600, ops); !errors.Is(err, publicationErr) {
+		t.Fatalf("write error=%v want=%v", err, publicationErr)
+	}
+
+	var calls []string
+	retryErr := errors.New("injected retry sync failure")
+	err = syncRootPublicationWithSync(root, "state.json", func(_ *os.Root, name string) error {
+		calls = append(calls, name)
+		return retryErr
+	})
+	if !errors.Is(err, retryErr) || !reflect.DeepEqual(calls, []string{"state.json"}) {
+		t.Fatalf("retry error=%v calls=%v", err, calls)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "state.json")); err != nil || string(got) != "new" {
+		t.Fatalf("published content=%q err=%v", got, err)
+	}
+}
+
 func TestEnsureRootDirRejectsRedirectedParentAndTraversal(t *testing.T) {
 	dir := t.TempDir()
 	outside := t.TempDir()

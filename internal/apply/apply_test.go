@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
@@ -186,6 +188,235 @@ func TestRunRecoversPreparedAndPartialTransactions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunRetryResyncsUncertainLedgerBeforeCAS(t *testing.T) {
+	f := newApplyTestFixture(t)
+	firstSyncErr := errors.New("injected target publication sync failure")
+	first := f.options()
+	first.hooks.applyPlan = func(plan ledger.WritePlan, expectedRoot os.FileInfo) ([]string, error) {
+		changed, err := ledger.ApplyExpected(plan, expectedRoot)
+		if err != nil {
+			return changed, err
+		}
+		return changed, firstSyncErr
+	}
+	if got, err := Run(first); !errors.Is(err, firstSyncErr) || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("first run got=%+v err=%v", got, err)
+	}
+
+	secondSyncErr := errors.New("injected target retry sync failure")
+	var syncOrder []string
+	second := f.options()
+	second.hooks.syncPublication = func(root *os.Root, path string) error {
+		syncOrder = append(syncOrder, filepath.ToSlash(path))
+		if strings.HasPrefix(filepath.ToSlash(path), "docs/session-review/") {
+			return secondSyncErr
+		}
+		return atomicfile.SyncRootPublication(root, path)
+	}
+	if got, err := Run(second); !errors.Is(err, secondSyncErr) || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("second run got=%+v err=%v syncOrder=%v", got, err, syncOrder)
+	}
+	if len(syncOrder) < 2 || !strings.HasSuffix(syncOrder[0], ".json") || !strings.HasPrefix(syncOrder[1], "docs/session-review/") {
+		t.Fatalf("sync order=%v", syncOrder)
+	}
+	assertCursorNotAdvanced(t, f)
+
+	third := f.options()
+	var receiptSynced, targetSynced bool
+	third.hooks.syncPublication = func(root *os.Root, path string) error {
+		if strings.HasSuffix(path, ".json") {
+			receiptSynced = true
+		}
+		if strings.HasPrefix(filepath.ToSlash(path), "docs/session-review/") {
+			targetSynced = true
+		}
+		return atomicfile.SyncRootPublication(root, path)
+	}
+	third.hooks.beforeCAS = func() error {
+		if !receiptSynced || !targetSynced {
+			return fmt.Errorf("CAS reached before publication resync: receipt=%v target=%v", receiptSynced, targetSynced)
+		}
+		return nil
+	}
+	if got, err := Run(third); err != nil || !got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("third run got=%+v err=%v", got, err)
+	}
+}
+
+func TestRunAlreadyAppliedRequiresReceiptAndLedgerResync(t *testing.T) {
+	f := newApplyTestFixture(t)
+	if _, err := Run(f.options()); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		fail func(string) bool
+	}{
+		{name: "receipt", fail: func(path string) bool { return strings.HasSuffix(path, ".json") }},
+		{name: "ledger", fail: func(path string) bool { return strings.HasPrefix(filepath.ToSlash(path), "docs/session-review/") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			syncErr := errors.New("injected existing publication sync failure")
+			opts := f.options()
+			opts.hooks.syncPublication = func(root *os.Root, path string) error {
+				if tc.fail(path) {
+					return syncErr
+				}
+				return atomicfile.SyncRootPublication(root, path)
+			}
+			if got, err := Run(opts); !errors.Is(err, syncErr) || got.AlreadyApplied || got.CursorAdvanced {
+				t.Fatalf("got=%+v err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestRunReceiptScanBudgetsActualReadsAfterGrowth(t *testing.T) {
+	f := newApplyTestFixture(t)
+	stop := f.options()
+	stop.hooks.afterPreparedReceipt = func() error { return errors.New("stop after prepared receipt") }
+	if _, err := Run(stop); err == nil {
+		t.Fatal("expected interruption")
+	}
+	receiptPath := receiptPathForTest(t, f)
+	info, err := os.Stat(receiptPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := f.options()
+	opts.hooks.receiptScanByteLimit = uint64(info.Size()) + 8
+	opts.hooks.afterReceiptEnumeration = func() error {
+		file, err := os.OpenFile(receiptPath, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return err
+		}
+		_, writeErr := file.Write(bytes.Repeat([]byte("x"), 16))
+		return errors.Join(writeErr, file.Close())
+	}
+	if got, err := Run(opts); err == nil || !strings.Contains(err.Error(), "aggregate size") || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	assertCursorNotAdvanced(t, f)
+}
+
+func TestRunReceiptScanRejectsDirectoryReplacementAfterEnumeration(t *testing.T) {
+	f := newApplyTestFixture(t)
+	stop := f.options()
+	stop.hooks.afterPreparedReceipt = func() error { return errors.New("stop after prepared receipt") }
+	if _, err := Run(stop); err == nil {
+		t.Fatal("expected interruption")
+	}
+	receiptDir := filepath.Join(f.projectData, "applied-proposals")
+	moved := receiptDir + "-moved"
+
+	opts := f.options()
+	opts.hooks.afterReceiptEnumeration = func() error {
+		if err := os.Rename(receiptDir, moved); err != nil {
+			return err
+		}
+		return os.Mkdir(receiptDir, 0o700)
+	}
+	if got, err := Run(opts); err == nil || !strings.Contains(err.Error(), "directory identity") || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if _, err := os.Stat(receiptPathForTest(t, f)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("replacement receipt directory gained current digest: %v", err)
+	}
+	assertCursorNotAdvanced(t, f)
+}
+
+func TestRunCleansOnlyExactReceiptTemporaryNamesDurably(t *testing.T) {
+	t.Run("exact uncertain removal is resynced", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		directory := filepath.Join(f.projectData, "applied-proposals")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		name := ".session-reviewer-" + strings.Repeat("a", 32)
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte("orphan"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		removeErr := errors.New("injected orphan removal sync failure")
+		first := f.options()
+		first.hooks.removeReceipt = func(root *os.Root, candidate string) error {
+			if candidate != name {
+				t.Fatalf("remove candidate=%q", candidate)
+			}
+			if err := atomicfile.RemoveRoot(root, candidate); err != nil {
+				return err
+			}
+			return removeErr
+		}
+		if got, err := Run(first); !errors.Is(err, removeErr) || got.CursorAdvanced || got.AlreadyApplied {
+			t.Fatalf("first got=%+v err=%v", got, err)
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("orphan still exists: %v", err)
+		}
+
+		syncErr := errors.New("injected receipt directory retry sync failure")
+		second := f.options()
+		second.hooks.syncReceiptDirectory = func(*os.Root) error { return syncErr }
+		if got, err := Run(second); !errors.Is(err, syncErr) || got.CursorAdvanced || got.AlreadyApplied {
+			t.Fatalf("second got=%+v err=%v", got, err)
+		}
+		assertCursorNotAdvanced(t, f)
+
+		if got, err := Run(f.options()); err != nil || !got.CursorAdvanced {
+			t.Fatalf("final got=%+v err=%v", got, err)
+		}
+	})
+
+	t.Run("near match is not removed", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		directory := filepath.Join(f.projectData, "applied-proposals")
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		name := ".session-reviewer-" + strings.Repeat("a", 31)
+		path := filepath.Join(directory, name)
+		if err := os.WriteFile(path, []byte("not an exact temp name"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "receipt name") || got.CursorAdvanced {
+			t.Fatalf("got=%+v err=%v", got, err)
+		}
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("near-match was removed: %v", err)
+		}
+	})
+}
+
+func TestRunPublishedReceiptFailureIsRecoveredOnlyAfterResync(t *testing.T) {
+	f := newApplyTestFixture(t)
+	publicationErr := errors.New("injected receipt publication failure")
+	first := f.options()
+	writes := 0
+	first.hooks.writeReceipt = func(root *os.Root, path string, data []byte, perm fs.FileMode) error {
+		writes++
+		if err := atomicfile.WriteRoot(root, path, data, perm); err != nil {
+			return err
+		}
+		return publicationErr
+	}
+	if got, err := Run(first); !errors.Is(err, publicationErr) || writes != 1 || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("first got=%+v err=%v writes=%d", got, err, writes)
+	}
+	if _, err := os.Stat(receiptPathForTest(t, f)); err != nil {
+		t.Fatalf("receipt was not actually published: %v", err)
+	}
+
+	retryErr := errors.New("injected receipt retry sync failure")
+	retry := f.options()
+	retry.hooks.syncPublication = func(*os.Root, string) error { return retryErr }
+	if got, err := Run(retry); !errors.Is(err, retryErr) || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("retry got=%+v err=%v", got, err)
+	}
+	assertCursorNotAdvanced(t, f)
 }
 
 func TestRunRejectsDifferentProposalWhileSameBoundaryReceiptIsPending(t *testing.T) {

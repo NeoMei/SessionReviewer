@@ -207,7 +207,7 @@ func equalReceiptPaths(left, right []string) bool {
 	return true
 }
 
-func saveReceipt(projectData *os.Root, receipt applyReceipt) error {
+func saveReceipt(projectData *os.Root, receipt applyReceipt, hookOptions ...applyHooks) error {
 	if err := receipt.validate(); err != nil {
 		return err
 	}
@@ -237,16 +237,82 @@ func saveReceipt(projectData *os.Root, receipt applyReceipt) error {
 	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
 		return err
 	}
-	if err := atomicfile.WriteRoot(directory, name, body, 0o600); err != nil {
+	hooks := applyHooks{}
+	if len(hookOptions) != 0 {
+		hooks = hookOptions[0]
+	}
+	writeReceipt := hooks.writeReceipt
+	if writeReceipt == nil {
+		writeReceipt = atomicfile.WriteRoot
+	}
+	if err := writeReceipt(directory, name, body, 0o600); err != nil {
 		return fmt.Errorf("persist apply receipt: %w", err)
 	}
 	if _, err := protectReceiptFile(directory, name); err != nil {
 		return err
 	}
+	if err := hooks.publicationSync()(directory, name); err != nil {
+		return fmt.Errorf("sync apply receipt publication: %w", err)
+	}
 	return nil
 }
 
-func loadReceipt(projectData *os.Root, proposalDigest string) (applyReceipt, bool, error) {
+func loadReceiptRoot(directory *os.Root, name, proposalDigest string, remaining *uint64, syncPublication func(*os.Root, string) error) (applyReceipt, error) {
+	file, info, err := openReceiptRegular(directory, name)
+	if err != nil {
+		return applyReceipt{}, fmt.Errorf("open apply receipt: %w", err)
+	}
+	defer file.Close()
+	if info.Size() > maxReceiptBytes {
+		return applyReceipt{}, errors.New("apply receipt exceeds size limit")
+	}
+	if info.Size() < 0 || uint64(info.Size()) > *remaining {
+		return applyReceipt{}, fmt.Errorf("apply receipt aggregate size exceeds %d bytes", maxReceiptScanBytes)
+	}
+	if err := syncPublication(directory, name); err != nil {
+		return applyReceipt{}, fmt.Errorf("sync apply receipt publication: %w", err)
+	}
+	body, err := io.ReadAll(io.LimitReader(file, int64(*remaining)))
+	if err != nil || uint64(len(body)) > *remaining {
+		return applyReceipt{}, errors.New("read bounded apply receipt")
+	}
+	*remaining -= uint64(len(body))
+	after, err := directory.Lstat(name)
+	openedAfter, openedErr := file.Stat()
+	if err != nil || openedErr != nil || !os.SameFile(info, after) || !os.SameFile(info, openedAfter) ||
+		after.Size() != info.Size() || openedAfter.Size() != info.Size() || int64(len(body)) != info.Size() ||
+		!after.ModTime().Equal(info.ModTime()) || !openedAfter.ModTime().Equal(info.ModTime()) {
+		return applyReceipt{}, errors.New("apply receipt changed while reading")
+	}
+	if err := inspectJSONObject(body); err != nil {
+		return applyReceipt{}, fmt.Errorf("invalid apply receipt JSON: %w", err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.DisallowUnknownFields()
+	var receipt applyReceipt
+	if err := dec.Decode(&receipt); err != nil {
+		return applyReceipt{}, fmt.Errorf("decode apply receipt: %w", err)
+	}
+	if err := requireJSONEOF(dec); err != nil {
+		return applyReceipt{}, err
+	}
+	wantDigest := receipt.ReceiptSHA256
+	receipt.ReceiptSHA256 = ""
+	unsigned, err := json.Marshal(receipt)
+	if err != nil || wantDigest != digestBytes(unsigned) {
+		return applyReceipt{}, errors.New("apply receipt integrity check failed")
+	}
+	receipt.ReceiptSHA256 = wantDigest
+	if err := receipt.validate(); err != nil {
+		return applyReceipt{}, err
+	}
+	if receipt.ProposalSHA256 != proposalDigest {
+		return applyReceipt{}, errors.New("apply receipt filename digest mismatch")
+	}
+	return receipt, nil
+}
+
+func scanReceipts(projectData *os.Root, ctx inputContext, hooks applyHooks) (applyReceipt, bool, error) {
 	directory, err := openReceiptDirectory(projectData, false)
 	if errors.Is(err, os.ErrNotExist) {
 		return applyReceipt{}, false, nil
@@ -255,75 +321,16 @@ func loadReceipt(projectData *os.Root, proposalDigest string) (applyReceipt, boo
 		return applyReceipt{}, false, err
 	}
 	defer directory.Close()
-	name, err := receiptFileName(proposalDigest)
+	directoryInfo, err := directory.Stat(".")
 	if err != nil {
-		return applyReceipt{}, false, err
-	}
-	if err := rejectReceiptCaseCollisions(directory, name); err != nil {
-		return applyReceipt{}, false, err
-	}
-	file, info, err := openReceiptRegular(directory, name)
-	if errors.Is(err, os.ErrNotExist) {
-		return applyReceipt{}, false, nil
-	}
-	if err != nil {
-		return applyReceipt{}, false, fmt.Errorf("open apply receipt: %w", err)
-	}
-	defer file.Close()
-	if info.Size() > maxReceiptBytes {
-		return applyReceipt{}, true, errors.New("apply receipt exceeds size limit")
-	}
-	body, err := io.ReadAll(io.LimitReader(file, maxReceiptBytes+1))
-	if err != nil || len(body) > maxReceiptBytes {
-		return applyReceipt{}, true, errors.New("read bounded apply receipt")
-	}
-	after, err := directory.Lstat(name)
-	if err != nil || !os.SameFile(info, after) || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
-		return applyReceipt{}, true, errors.New("apply receipt changed while reading")
-	}
-	if err := inspectJSONObject(body); err != nil {
-		return applyReceipt{}, true, fmt.Errorf("invalid apply receipt JSON: %w", err)
-	}
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
-	var receipt applyReceipt
-	if err := dec.Decode(&receipt); err != nil {
-		return applyReceipt{}, true, fmt.Errorf("decode apply receipt: %w", err)
-	}
-	if err := requireJSONEOF(dec); err != nil {
-		return applyReceipt{}, true, err
-	}
-	wantDigest := receipt.ReceiptSHA256
-	receipt.ReceiptSHA256 = ""
-	unsigned, err := json.Marshal(receipt)
-	if err != nil || wantDigest != digestBytes(unsigned) {
-		return applyReceipt{}, true, errors.New("apply receipt integrity check failed")
-	}
-	receipt.ReceiptSHA256 = wantDigest
-	if err := receipt.validate(); err != nil {
-		return applyReceipt{}, true, err
-	}
-	if receipt.ProposalSHA256 != proposalDigest {
-		return applyReceipt{}, true, errors.New("apply receipt filename digest mismatch")
-	}
-	return receipt, true, nil
-}
-
-func scanReceipts(projectData *os.Root, ctx inputContext) (applyReceipt, bool, error) {
-	directory, err := openReceiptDirectory(projectData, false)
-	if errors.Is(err, os.ErrNotExist) {
-		return applyReceipt{}, false, nil
-	}
-	if err != nil {
-		return applyReceipt{}, false, err
+		return applyReceipt{}, false, fmt.Errorf("inspect apply receipt directory: %w", err)
 	}
 	file, err := directory.Open(".")
 	if err != nil {
-		_ = directory.Close()
 		return applyReceipt{}, false, err
 	}
 	entries, readErr := file.ReadDir(maxReceiptScanFiles + 1)
-	closeErr := errors.Join(file.Close(), directory.Close())
+	closeErr := file.Close()
 	if errors.Is(readErr, io.EOF) {
 		readErr = nil
 	}
@@ -334,15 +341,33 @@ func scanReceipts(projectData *os.Root, ctx inputContext) (applyReceipt, bool, e
 		return applyReceipt{}, false, fmt.Errorf("apply receipt count exceeds %d", maxReceiptScanFiles)
 	}
 
-	names := make([]string, 0, len(entries))
+	type scannedReceipt struct {
+		name string
+		info os.FileInfo
+	}
+	receipts := make([]scannedReceipt, 0, len(entries))
 	folded := make(map[string]string, len(entries))
 	currentName, err := receiptFileName(ctx.ProposalDigest)
 	if err != nil {
 		return applyReceipt{}, false, err
 	}
+	limit := hooks.receiptScanByteLimit
+	if limit == 0 {
+		limit = maxReceiptScanBytes
+	}
 	var aggregate uint64
+	removeReceipt := hooks.removeReceipt
+	if removeReceipt == nil {
+		removeReceipt = atomicfile.RemoveRoot
+	}
 	for _, entry := range entries {
 		name := entry.Name()
+		if exactReceiptTemporaryName(name) {
+			if err := removeReceipt(directory, name); err != nil {
+				return applyReceipt{}, false, fmt.Errorf("remove orphan apply receipt temporary file: %w", err)
+			}
+			continue
+		}
 		if strings.EqualFold(name, currentName) && name != currentName {
 			return applyReceipt{}, false, fmt.Errorf("case-colliding apply receipt name %q", name)
 		}
@@ -354,7 +379,7 @@ func scanReceipts(projectData *os.Root, ctx inputContext) (applyReceipt, bool, e
 		if _, err := receiptDigestFromName(name); err != nil {
 			return applyReceipt{}, false, err
 		}
-		info, err := entry.Info()
+		info, err := directory.Lstat(name)
 		if err != nil {
 			return applyReceipt{}, false, fmt.Errorf("inspect apply receipt: %w", err)
 		}
@@ -369,22 +394,36 @@ func scanReceipts(projectData *os.Root, ctx inputContext) (applyReceipt, bool, e
 			return applyReceipt{}, false, errors.New("apply receipt aggregate size overflow")
 		}
 		aggregate += size
-		names = append(names, name)
+		receipts = append(receipts, scannedReceipt{name: name, info: info})
 	}
-	if aggregate > maxReceiptScanBytes {
-		return applyReceipt{}, false, fmt.Errorf("apply receipt aggregate size exceeds %d bytes", maxReceiptScanBytes)
+	if aggregate > limit {
+		return applyReceipt{}, false, fmt.Errorf("apply receipt aggregate size exceeds %d bytes", limit)
+	}
+	syncDirectory := hooks.syncReceiptDirectory
+	if syncDirectory == nil {
+		syncDirectory = atomicfile.SyncRootDirectory
+	}
+	if err := syncDirectory(directory); err != nil {
+		return applyReceipt{}, false, fmt.Errorf("sync apply receipt directory: %w", err)
+	}
+	if hooks.afterReceiptEnumeration != nil {
+		if err := hooks.afterReceiptEnumeration(); err != nil {
+			return applyReceipt{}, false, err
+		}
 	}
 
-	sort.Strings(names)
+	sort.Slice(receipts, func(i, j int) bool { return receipts[i].name < receipts[j].name })
 	var current applyReceipt
 	var foundCurrent bool
-	for _, name := range names {
+	remaining := limit
+	for _, scanned := range receipts {
+		name := scanned.name
 		digest, _ := receiptDigestFromName(name)
-		receipt, found, err := loadReceipt(projectData, digest)
+		receipt, err := loadReceiptRoot(directory, name, digest, &remaining, hooks.publicationSync())
 		if err != nil {
 			return applyReceipt{}, false, fmt.Errorf("scan apply receipt %q: %w", name, err)
 		}
-		if !found {
+		if currentInfo, err := directory.Lstat(name); err != nil || !os.SameFile(scanned.info, currentInfo) {
 			return applyReceipt{}, false, fmt.Errorf("apply receipt %q changed during scan", name)
 		}
 		if receipt.ProjectID != ctx.Packet.ProjectID {
@@ -399,7 +438,32 @@ func scanReceipts(projectData *os.Root, ctx inputContext) (applyReceipt, bool, e
 			return applyReceipt{}, false, ErrPendingReceiptConflict
 		}
 	}
+	if err := validateReceiptDirectoryIdentity(projectData, directory, directoryInfo); err != nil {
+		return applyReceipt{}, false, err
+	}
 	return current, foundCurrent, nil
+}
+
+func validateReceiptDirectoryIdentity(projectData, directory *os.Root, expected os.FileInfo) error {
+	pinned, pinnedErr := directory.Stat(".")
+	named, namedErr := projectData.Lstat("applied-proposals")
+	if pinnedErr != nil || namedErr != nil || !os.SameFile(expected, pinned) || !os.SameFile(expected, named) {
+		return errors.New("apply receipt directory identity changed during scan")
+	}
+	return nil
+}
+
+func exactReceiptTemporaryName(name string) bool {
+	const prefix = ".session-reviewer-"
+	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+32 {
+		return false
+	}
+	for _, r := range name[len(prefix):] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func openReceiptDirectory(projectData *os.Root, create bool) (*os.Root, error) {

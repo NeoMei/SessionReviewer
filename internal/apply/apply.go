@@ -43,13 +43,20 @@ type Result struct {
 }
 
 type applyHooks struct {
-	afterRender          func() error
-	afterPreparedReceipt func() error
-	afterFile            func(index int, relativePath string) error
-	afterAppliedReceipt  func() error
-	beforeCAS            func() error
-	afterInputRead       func(kind string) error
-	duringInputRead      func(kind string) error
+	afterRender             func() error
+	afterPreparedReceipt    func() error
+	afterFile               func(index int, relativePath string) error
+	afterAppliedReceipt     func() error
+	beforeCAS               func() error
+	afterInputRead          func(kind string) error
+	duringInputRead         func(kind string) error
+	applyPlan               func(ledger.WritePlan, os.FileInfo) ([]string, error)
+	writeReceipt            func(*os.Root, string, []byte, fs.FileMode) error
+	syncPublication         func(*os.Root, string) error
+	removeReceipt           func(*os.Root, string) error
+	syncReceiptDirectory    func(*os.Root) error
+	afterReceiptEnumeration func() error
+	receiptScanByteLimit    uint64
 }
 
 type inputContext struct {
@@ -284,7 +291,7 @@ func Run(opts Options) (result Result, retErr error) {
 	if !cursorCompatibleWithInput(current, ctx.Packet) {
 		return Result{}, cursor.ErrStale
 	}
-	receipt, found, err := scanReceipts(lock.projectData, ctx)
+	receipt, found, err := scanReceipts(lock.projectData, ctx, opts.hooks)
 	if err != nil {
 		return Result{}, err
 	}
@@ -327,7 +334,7 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-	if err := saveReceipt(lock.projectData, receipt); err != nil {
+	if err := saveReceipt(lock.projectData, receipt, opts.hooks); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.afterPreparedReceipt != nil {
@@ -347,7 +354,7 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-	if err := saveReceipt(lock.projectData, receipt); err != nil {
+	if err := saveReceipt(lock.projectData, receipt, opts.hooks); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.afterAppliedReceipt != nil {
@@ -522,6 +529,9 @@ func applyReceiptFiles(projectRoot string, expectedRoot os.FileInfo, receipt app
 			return written, err
 		}
 		if exists && digestBytes(current) == file.TargetSHA256 && applyModeEqual(mode, file.TargetMode) {
+			if err := syncProjectTargetPublication(projectRoot, expectedRoot, file.RelativePath, hooks.publicationSync()); err != nil {
+				return written, fmt.Errorf("sync ledger file %s publication: %w", file.RelativePath, err)
+			}
 			continue
 		}
 		if exists != file.PreimageExists || (exists && (digestBytes(current) != file.PreimageSHA256 || !applyModeEqual(mode, file.PreimageMode))) {
@@ -531,7 +541,11 @@ func applyReceiptFiles(projectRoot string, expectedRoot os.FileInfo, receipt app
 			RelativePath: file.RelativePath, Data: append([]byte(nil), file.TargetData...), Perm: fs.FileMode(file.TargetMode),
 			ExpectedData: append([]byte(nil), current...), ExpectedExists: exists, ExpectedPerm: mode.Perm(),
 		}
-		changed, err := ledger.ApplyExpected(ledger.WritePlan{ProjectRoot: projectRoot, Files: []ledger.PlannedFile{planned}}, expectedRoot)
+		applyPlan := hooks.applyPlan
+		if applyPlan == nil {
+			applyPlan = ledger.ApplyExpected
+		}
+		changed, err := applyPlan(ledger.WritePlan{ProjectRoot: projectRoot, Files: []ledger.PlannedFile{planned}}, expectedRoot)
 		if err != nil {
 			return written, err
 		}
@@ -594,7 +608,7 @@ func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyRece
 		if err := verifyIdentity(); err != nil {
 			return Result{}, err
 		}
-		if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+		if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 			return Result{}, err
 		}
 		result := baseResult(ctx)
@@ -614,7 +628,7 @@ func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyRece
 		if err := verifyIdentity(); err != nil {
 			return Result{}, err
 		}
-		if err := saveReceipt(lock.projectData, receipt); err != nil {
+		if err := saveReceipt(lock.projectData, receipt, opts.hooks); err != nil {
 			return Result{}, err
 		}
 		if opts.hooks.afterAppliedReceipt != nil {
@@ -632,7 +646,7 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 			return Result{}, err
 		}
 	}
-	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 		return Result{}, err
 	}
 	if opts.hooks.beforeCAS != nil {
@@ -652,7 +666,7 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 			return Result{}, err
 		}
 	}
-	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 		return Result{}, err
 	}
 	next := cursor.Cursor{SessionID: receipt.SessionID, LastLine: receipt.NextCursor.Line, LastHash: receipt.NextCursor.SourceHash, UpdatedAt: now}
@@ -669,7 +683,7 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 		if loadErr != nil || !cursorAtOrBeyond(latest, receipt.NextCursor) {
 			return Result{}, cursor.ErrStale
 		}
-		if verifyErr := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt); verifyErr != nil {
+		if verifyErr := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); verifyErr != nil {
 			return Result{}, verifyErr
 		}
 		result := resultFromReceipt(receipt)
@@ -682,7 +696,7 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 	return result, nil
 }
 
-func verifyReceiptTargets(projectRoot string, expectedRoot os.FileInfo, receipt applyReceipt) error {
+func verifyReceiptTargets(projectRoot string, expectedRoot os.FileInfo, receipt applyReceipt, syncPublication func(*os.Root, string) error) error {
 	for _, file := range receipt.Files {
 		body, exists, mode, err := readProjectTarget(projectRoot, expectedRoot, file.RelativePath)
 		if err != nil {
@@ -691,8 +705,30 @@ func verifyReceiptTargets(projectRoot string, expectedRoot os.FileInfo, receipt 
 		if !exists || digestBytes(body) != file.TargetSHA256 || !applyModeEqual(mode, file.TargetMode) {
 			return fmt.Errorf("ledger file %s does not match applied receipt", file.RelativePath)
 		}
+		if err := syncProjectTargetPublication(projectRoot, expectedRoot, file.RelativePath, syncPublication); err != nil {
+			return fmt.Errorf("sync ledger file %s publication: %w", file.RelativePath, err)
+		}
 	}
 	return nil
+}
+
+func syncProjectTargetPublication(projectRoot string, expectedRoot os.FileInfo, relative string, syncPublication func(*os.Root, string) error) error {
+	directory, err := pathguard.Open(projectRoot)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	if expectedRoot != nil && !os.SameFile(expectedRoot, directory.Info()) {
+		return errors.New("opened project root does not match expected project root identity")
+	}
+	return syncPublication(directory.Root, filepath.FromSlash(relative))
+}
+
+func (hooks applyHooks) publicationSync() func(*os.Root, string) error {
+	if hooks.syncPublication != nil {
+		return hooks.syncPublication
+	}
+	return atomicfile.SyncRootPublication
 }
 
 func baseResult(ctx inputContext) Result {

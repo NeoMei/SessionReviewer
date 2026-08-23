@@ -54,6 +54,50 @@ func TestStoreCommitPropagatesAtomicDurabilityFailure(t *testing.T) {
 	}
 }
 
+func TestStoreLoadResyncsUncertainCursorBeforeReturning(t *testing.T) {
+	dir := t.TempDir()
+	publicationErr := errors.New("injected cursor publication failure")
+	writer := Store{
+		Root: dir,
+		writeRoot: func(root *os.Root, path string, data []byte, perm fs.FileMode) error {
+			if err := atomicfile.WriteRoot(root, path, data, perm); err != nil {
+				return err
+			}
+			return publicationErr
+		},
+	}
+	want := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := writer.Commit("s1", Cursor{}, want); !errors.Is(err, publicationErr) {
+		t.Fatalf("commit error=%v want=%v", err, publicationErr)
+	}
+
+	retryErr := errors.New("injected cursor resync failure")
+	syncCalls := 0
+	retry := Store{
+		Root: dir,
+		syncRootPublication: func(_ *os.Root, name string) error {
+			syncCalls++
+			if name != "s1.json" {
+				t.Fatalf("sync name=%q", name)
+			}
+			return retryErr
+		},
+	}
+	if got, err := retry.Load("s1"); !errors.Is(err, retryErr) || got != (Cursor{}) {
+		t.Fatalf("mutating load got=%+v err=%v", got, err)
+	}
+	if got, err := retry.LoadReadOnly("s1"); err != nil || got != want || syncCalls != 1 {
+		t.Fatalf("read-only got=%+v err=%v syncCalls=%d", got, err, syncCalls)
+	}
+	retry.syncRootPublication = func(*os.Root, string) error {
+		syncCalls++
+		return nil
+	}
+	if got, err := retry.Load("s1"); err != nil || got != want || syncCalls != 2 {
+		t.Fatalf("successful retry got=%+v err=%v syncCalls=%d", got, err, syncCalls)
+	}
+}
+
 func TestStoreCommitPropagatesCursorDirectoryDurabilityFailure(t *testing.T) {
 	durabilityErr := errors.New("injected cursor directory durability failure")
 	store := Store{
@@ -170,6 +214,37 @@ func TestStoreLoadReadOnlyUsesBackupWithoutRepairingFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(backup); err != nil {
 		t.Fatalf("backup was removed: %v", err)
+	}
+}
+
+func TestStoreLoadReadOnlyCreatesNoLockOrState(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	cursors := filepath.Join(store.Root, "cursors")
+	if err := os.Mkdir(cursors, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	body, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cursors, "s1.json"), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadDir(cursors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.LoadReadOnly("s1")
+	if err != nil || got != want {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	after, err := os.ReadDir(cursors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(after) != fmt.Sprint(before) {
+		t.Fatalf("read-only load changed entries: before=%v after=%v", before, after)
 	}
 }
 

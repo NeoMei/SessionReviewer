@@ -11,8 +11,8 @@ import (
 
 // EnsureRootDir creates exactly one directory below an existing, pinned
 // parent and does not return success until the parent's directory entry has
-// passed the platform durability operation. Existing directories are checked
-// but do not require another parent sync.
+// passed the platform durability operation. Existing directories are resynced
+// so a retry can resolve an earlier create-then-sync failure.
 func EnsureRootDir(root *os.Root, path string, perm fs.FileMode) error {
 	return ensureRootDirWithOps(root, path, perm, directoryDurabilityOps{
 		syncParent: syncRootDirectoryEntry,
@@ -35,7 +35,13 @@ func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops dire
 
 	info, err := parent.Lstat(name)
 	if err == nil {
-		return validateRootDirectory(parent, name, info)
+		if err := validateRootDirectory(parent, name, info); err != nil {
+			return err
+		}
+		if err := ops.syncParent(parent, name); err != nil {
+			return fmt.Errorf("sync existing directory entry: %w", err)
+		}
+		return validateRootDirectoryIdentity(parent, name, info)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect directory: %w", err)
@@ -48,7 +54,13 @@ func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops dire
 		if err != nil {
 			return fmt.Errorf("inspect concurrently created directory: %w", err)
 		}
-		return validateRootDirectory(parent, name, info)
+		if err := validateRootDirectory(parent, name, info); err != nil {
+			return err
+		}
+		if err := ops.syncParent(parent, name); err != nil {
+			return fmt.Errorf("sync concurrently created directory entry: %w", err)
+		}
+		return validateRootDirectoryIdentity(parent, name, info)
 	}
 	if err := ops.syncParent(parent, name); err != nil {
 		return fmt.Errorf("sync created directory entry: %w", err)
@@ -58,6 +70,65 @@ func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops dire
 		return fmt.Errorf("inspect created directory: %w", err)
 	}
 	return validateRootDirectory(parent, name, info)
+}
+
+func validateRootDirectoryIdentity(parent *os.Root, name string, before os.FileInfo) error {
+	after, err := parent.Lstat(name)
+	if err != nil || !os.SameFile(before, after) {
+		return fmt.Errorf("directory changed while syncing")
+	}
+	return validateRootDirectory(parent, name, after)
+}
+
+// SyncRootPublication re-establishes the platform publication durability of
+// one existing regular file through a pinned immediate parent.
+func SyncRootPublication(root *os.Root, path string) error {
+	return syncRootPublicationWithSync(root, path, syncRootPublication)
+}
+
+func syncRootPublicationWithSync(root *os.Root, path string, sync func(*os.Root, string) error) error {
+	if root == nil {
+		return fmt.Errorf("atomic file root is required")
+	}
+	parent, name, err := openPinnedParent(root, path)
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	before, err := parent.Lstat(name)
+	if err != nil {
+		return fmt.Errorf("inspect published file: %w", err)
+	}
+	if !before.Mode().IsRegular() || isAtomicRedirect(before) {
+		return fmt.Errorf("published file is redirected or not regular")
+	}
+	if err := sync(parent, name); err != nil {
+		return fmt.Errorf("sync existing published file metadata: %w", err)
+	}
+	after, err := parent.Lstat(name)
+	if err != nil || !os.SameFile(before, after) || !after.Mode().IsRegular() || isAtomicRedirect(after) {
+		return fmt.Errorf("published file changed while syncing")
+	}
+	return nil
+}
+
+// SyncRootDirectory flushes the contents of an already pinned directory.
+func SyncRootDirectory(root *os.Root) error {
+	if root == nil {
+		return fmt.Errorf("atomic file root is required")
+	}
+	before, err := root.Stat(".")
+	if err != nil || before == nil || !before.IsDir() || isAtomicRedirect(before) {
+		return fmt.Errorf("inspect pinned directory")
+	}
+	if err := syncPinnedDirectory(root); err != nil {
+		return fmt.Errorf("sync pinned directory: %w", err)
+	}
+	after, err := root.Stat(".")
+	if err != nil || !os.SameFile(before, after) {
+		return fmt.Errorf("pinned directory changed while syncing")
+	}
+	return nil
 }
 
 func validateRootDirectory(parent *os.Root, name string, before os.FileInfo) error {

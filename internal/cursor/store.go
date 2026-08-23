@@ -43,6 +43,7 @@ type Store struct {
 	beforeRootValidation func() error
 	writeRoot            func(*os.Root, string, []byte, fs.FileMode) error
 	ensureRootDir        func(*os.Root, string, fs.FileMode) error
+	syncRootPublication  func(*os.Root, string) error
 }
 
 type storeRoot struct {
@@ -72,11 +73,11 @@ func (s Store) Load(sessionID string) (result Cursor, retErr error) {
 		return Cursor{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
-	return root.loadLocked(sessionID)
+	return root.loadLocked(sessionID, s.publicationSync())
 }
 
-// LoadReadOnly reads the best valid cursor state under the normal transaction
-// lock but never repairs, replaces, or removes cursor state files.
+// LoadReadOnly reads the best valid cursor state without creating, syncing,
+// repairing, replacing, or removing cursor state files.
 func (s Store) LoadReadOnly(sessionID string) (result Cursor, retErr error) {
 	root, err := s.open(sessionID, false)
 	if err != nil {
@@ -86,11 +87,6 @@ func (s Store) LoadReadOnly(sessionID string) (result Cursor, retErr error) {
 	if root.dirMissing {
 		return Cursor{}, nil
 	}
-	lock, err := acquireCursorLock(root.cursors, root.lockName)
-	if err != nil {
-		return Cursor{}, err
-	}
-	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 	return root.loadReadOnlyLocked(sessionID)
 }
 
@@ -113,7 +109,7 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if err := rejectCaseCollision(root.cursors, root.cursorName, root.backupName, root.lockName); err != nil {
 		return err
 	}
-	current, err := root.loadLocked(sessionID)
+	current, err := root.loadLocked(sessionID, s.publicationSync())
 	if err != nil {
 		return err
 	}
@@ -272,7 +268,14 @@ func (root *storeRoot) close() error {
 	return err
 }
 
-func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
+func (s Store) publicationSync() func(*os.Root, string) error {
+	if s.syncRootPublication != nil {
+		return s.syncRootPublication
+	}
+	return atomicfile.SyncRootPublication
+}
+
+func (root *storeRoot) loadLocked(sessionID string, syncPublication func(*os.Root, string) error) (Cursor, error) {
 	destinationInfo, destinationFound, err := regularEntry(root.cursors, root.cursorName, "cursor file")
 	if err != nil {
 		return Cursor{}, err
@@ -297,6 +300,9 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 	}
 
 	if destinationFound && destinationErr == nil {
+		if err := syncPublication(root.cursors, root.cursorName); err != nil {
+			return Cursor{}, fmt.Errorf("sync cursor publication: %w", err)
+		}
 		if backupFound {
 			if err := atomicfile.RemoveRoot(root.cursors, root.backupName); err != nil {
 				return Cursor{}, fmt.Errorf("remove stale cursor backup: %w", err)
@@ -305,6 +311,9 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 		return destination, nil
 	}
 	if backupFound && backupErr == nil {
+		if err := syncPublication(root.cursors, root.backupName); err != nil {
+			return Cursor{}, fmt.Errorf("sync cursor backup publication: %w", err)
+		}
 		if destinationFound {
 			if err := atomicfile.RemoveRoot(root.cursors, root.cursorName); err != nil {
 				return Cursor{}, fmt.Errorf("remove corrupt replacement cursor: %w", err)
@@ -312,6 +321,9 @@ func (root *storeRoot) loadLocked(sessionID string) (Cursor, error) {
 		}
 		if err := atomicfile.RenameRoot(root.cursors, root.backupName, root.cursorName); err != nil {
 			return Cursor{}, fmt.Errorf("restore cursor backup: %w", err)
+		}
+		if err := syncPublication(root.cursors, root.cursorName); err != nil {
+			return Cursor{}, fmt.Errorf("sync restored cursor publication: %w", err)
 		}
 		return backup, nil
 	}
