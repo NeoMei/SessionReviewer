@@ -180,21 +180,162 @@ func TestValidateRejectsPacketMismatchAndRedactionFindings(t *testing.T) {
 func TestValidateRejectsSecretsInPersistedStringsAcrossNestedEntities(t *testing.T) {
 	base, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	secret := "Authorization: Bearer abcdefghijklmnop"
-	tests := map[string]func(*Proposal){
-		"decision source session": func(p *Proposal) { p.NewDecisions[0].SourceSessions = append(p.NewDecisions[0].SourceSessions, secret) },
-		"current source session":  func(p *Proposal) { *p.CurrentStatePatch.SourceSessions = append(*p.CurrentStatePatch.SourceSessions, secret) },
-		"session report files":    func(p *Proposal) { p.SessionReport.Files = []string{secret} },
-		"session report commits":  func(p *Proposal) { p.SessionReport.Commits = []string{secret} },
-		"previous session id":     func(p *Proposal) { p.SessionReport.PreviousSessionID = secret },
-		"next session id":         func(p *Proposal) { p.SessionReport.NextSessionID = secret },
+	addLoop := func(p *Proposal) *ledger.OpenLoop {
+		loop := &ledger.OpenLoop{
+			ID:                  "loop-canary",
+			ProjectID:           projectID,
+			Title:               "Investigate",
+			Status:              "open",
+			Revision:            1,
+			Tags:                []string{},
+			SourceSessions:      []string{sessionID},
+			Evidence:            []ledger.EvidenceRef{p.NewDecisions[0].Evidence[0]},
+			Question:            "What remains?",
+			Attempts:            []string{},
+			Blocker:             "",
+			NextExperiment:      "Inspect",
+			CompletionCriterion: "Verified",
+		}
+		p.OpenLoops = []OpenLoopChange{{Operation: "create", Entity: loop}}
+		return loop
+	}
+	tests := map[string]func(*Proposal, *evidence.Packet){
+		"packet cwd":           func(_ *Proposal, packet *evidence.Packet) { packet.CWD = secret },
+		"packet tool name":     func(_ *Proposal, packet *evidence.Packet) { packet.Events[1].ToolName = secret },
+		"packet event summary": func(_ *Proposal, packet *evidence.Packet) { packet.Events[0].Summary = secret },
+		"decision title":       func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Title = secret },
+		"decision tag":         func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Tags = []string{secret} },
+		"decision source session": func(p *Proposal, _ *evidence.Packet) {
+			p.NewDecisions[0].SourceSessions = append(p.NewDecisions[0].SourceSessions, secret)
+		},
+		"decision evidence summary":  func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Evidence[0].Summary = secret },
+		"decision context":           func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Context = secret },
+		"decision rationale":         func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Rationale = secret },
+		"decision consequences":      func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Consequences = secret },
+		"decision reevaluate when":   func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].ReevaluateWhen = secret },
+		"decision alternative":       func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].Alternatives = []string{secret} },
+		"decision rejected path":     func(p *Proposal, _ *evidence.Packet) { p.NewDecisions[0].RejectedPaths = []string{secret} },
+		"open-loop title":            func(p *Proposal, _ *evidence.Packet) { addLoop(p).Title = secret },
+		"open-loop tag":              func(p *Proposal, _ *evidence.Packet) { addLoop(p).Tags = []string{secret} },
+		"open-loop source session":   func(p *Proposal, _ *evidence.Packet) { addLoop(p).SourceSessions = []string{secret} },
+		"open-loop evidence summary": func(p *Proposal, _ *evidence.Packet) { addLoop(p).Evidence[0].Summary = secret },
+		"open-loop question":         func(p *Proposal, _ *evidence.Packet) { addLoop(p).Question = secret },
+		"open-loop attempt":          func(p *Proposal, _ *evidence.Packet) { addLoop(p).Attempts = []string{secret} },
+		"open-loop blocker":          func(p *Proposal, _ *evidence.Packet) { addLoop(p).Blocker = secret },
+		"open-loop next experiment":  func(p *Proposal, _ *evidence.Packet) { addLoop(p).NextExperiment = secret },
+		"open-loop completion":       func(p *Proposal, _ *evidence.Packet) { addLoop(p).CompletionCriterion = secret },
+		"timeline title":             func(p *Proposal, _ *evidence.Packet) { p.TimelineEvents[0].Title = secret },
+		"timeline summary":           func(p *Proposal, _ *evidence.Packet) { p.TimelineEvents[0].Summary = secret },
+		"timeline evidence summary":  func(p *Proposal, _ *evidence.Packet) { p.TimelineEvents[0].Evidence[0].Summary = secret },
+		"current goal":               func(p *Proposal, _ *evidence.Packet) { p.CurrentStatePatch.Goal = strptr(secret) },
+		"current branch":             func(p *Proposal, _ *evidence.Packet) { p.CurrentStatePatch.Branch = strptr(secret) },
+		"current next action":        func(p *Proposal, _ *evidence.Packet) { p.CurrentStatePatch.NextAction = strptr(secret) },
+		"current first inspection":   func(p *Proposal, _ *evidence.Packet) { p.CurrentStatePatch.FirstInspection = strptr(secret) },
+		"current uncommitted change": func(p *Proposal, _ *evidence.Packet) {
+			values := []string{secret}
+			p.CurrentStatePatch.UncommittedChanges = &values
+		},
+		"current blocker": func(p *Proposal, _ *evidence.Packet) {
+			values := []string{secret}
+			p.CurrentStatePatch.Blockers = &values
+		},
+		"current risk": func(p *Proposal, _ *evidence.Packet) {
+			values := []string{secret}
+			p.CurrentStatePatch.OpenRisks = &values
+		},
+		"current source session": func(p *Proposal, _ *evidence.Packet) {
+			values := []string{secret}
+			p.CurrentStatePatch.SourceSessions = &values
+		},
+		"current evidence summary": func(p *Proposal, _ *evidence.Packet) { (*p.CurrentStatePatch.Evidence)[0].Summary = secret },
+		"session initial goal":     func(p *Proposal, _ *evidence.Packet) { p.SessionReport.InitialGoal = secret },
+		"session goal change":      func(p *Proposal, _ *evidence.Packet) { p.SessionReport.GoalChanges = []string{secret} },
+		"session phase title":      func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Phases[0].Title = secret },
+		"session phase summary":    func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Phases[0].Summary = secret },
+		"session phase evidence":   func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Phases[0].Evidence[0].Summary = secret },
+		"session report files":     func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Files = []string{secret} },
+		"session report commits":   func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Commits = []string{secret} },
+		"session verification":     func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Verification = []string{secret} },
+		"previous session id":      func(p *Proposal, _ *evidence.Packet) { p.SessionReport.PreviousSessionID = secret },
+		"next session id":          func(p *Proposal, _ *evidence.Packet) { p.SessionReport.NextSessionID = secret },
+		"session report evidence":  func(p *Proposal, _ *evidence.Packet) { p.SessionReport.Evidence[0].Summary = secret },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			p := cloneProposal(t, base)
-			mutate(&p)
-			changes, err := Validate(p, packet, state)
-			if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			gotPacket := packet
+			gotPacket.Events = append([]evidence.Item(nil), packet.Events...)
+			mutate(&p, &gotPacket)
+			digest, err := evidence.Digest(gotPacket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.EvidencePacketSHA256 = digest
+			changes, err := Validate(p, gotPacket, state)
+			if err == nil || !strings.Contains(err.Error(), "redaction findings") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
 				t.Fatalf("secret canary persisted: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
+func TestValidateSafeTextCoversNarrativePatchFields(t *testing.T) {
+	secret := "Authorization: Bearer abcdefghijklmnop"
+	tests := map[string]func(*Proposal){
+		"decision title": func(p *Proposal) { p.UpdatedDecisions = []DecisionPatch{{Title: strptr(secret)}} },
+		"decision tags":  func(p *Proposal) { values := []string{secret}; p.UpdatedDecisions = []DecisionPatch{{Tags: &values}} },
+		"decision source sessions": func(p *Proposal) {
+			values := []string{secret}
+			p.UpdatedDecisions = []DecisionPatch{{SourceSessions: &values}}
+		},
+		"decision evidence summary": func(p *Proposal) {
+			values := []ledger.EvidenceRef{{Summary: secret}}
+			p.UpdatedDecisions = []DecisionPatch{{Evidence: &values}}
+		},
+		"decision context":         func(p *Proposal) { p.UpdatedDecisions = []DecisionPatch{{Context: strptr(secret)}} },
+		"decision rationale":       func(p *Proposal) { p.UpdatedDecisions = []DecisionPatch{{Rationale: strptr(secret)}} },
+		"decision consequences":    func(p *Proposal) { p.UpdatedDecisions = []DecisionPatch{{Consequences: strptr(secret)}} },
+		"decision reevaluate when": func(p *Proposal) { p.UpdatedDecisions = []DecisionPatch{{ReevaluateWhen: strptr(secret)}} },
+		"decision alternatives": func(p *Proposal) {
+			values := []string{secret}
+			p.UpdatedDecisions = []DecisionPatch{{Alternatives: &values}}
+		},
+		"decision rejected paths": func(p *Proposal) {
+			values := []string{secret}
+			p.UpdatedDecisions = []DecisionPatch{{RejectedPaths: &values}}
+		},
+		"open-loop title": func(p *Proposal) { p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Title: strptr(secret)}}} },
+		"open-loop tags": func(p *Proposal) {
+			values := []string{secret}
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Tags: &values}}}
+		},
+		"open-loop source sessions": func(p *Proposal) {
+			values := []string{secret}
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{SourceSessions: &values}}}
+		},
+		"open-loop evidence summary": func(p *Proposal) {
+			values := []ledger.EvidenceRef{{Summary: secret}}
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Evidence: &values}}}
+		},
+		"open-loop question": func(p *Proposal) { p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Question: strptr(secret)}}} },
+		"open-loop attempts": func(p *Proposal) {
+			values := []string{secret}
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Attempts: &values}}}
+		},
+		"open-loop blocker": func(p *Proposal) { p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{Blocker: strptr(secret)}}} },
+		"open-loop next experiment": func(p *Proposal) {
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{NextExperiment: strptr(secret)}}}
+		},
+		"open-loop completion": func(p *Proposal) {
+			p.OpenLoops = []OpenLoopChange{{Patch: &OpenLoopPatch{CompletionCriterion: strptr(secret)}}}
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			var p Proposal
+			mutate(&p)
+			if err := validateSafeText(p, evidence.Packet{}); err == nil || !strings.Contains(err.Error(), "redaction findings") {
+				t.Fatalf("secret canary in patch accepted: %v", err)
 			}
 		})
 	}
@@ -212,6 +353,52 @@ func TestValidateRejectsCrossSessionReportOverwrite(t *testing.T) {
 	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
 		t.Fatalf("cross-session report overwrite accepted: changes=%+v err=%v", changes, err)
 	}
+}
+
+func TestValidateEnforcesOneSessionReportPerSessionID(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+
+	t.Run("same report id updates same session", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		state := fixedState()
+		existing := p.SessionReport
+		existing.Revision = 1
+		state.Sessions[existing.ID] = existing
+		p.SessionReport.Revision = 2
+		if _, err := Validate(p, packet, state); err != nil {
+			t.Fatalf("same-session report update rejected: %v", err)
+		}
+	})
+
+	t.Run("different report id cannot claim represented session", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		state := fixedState()
+		existing := p.SessionReport
+		existing.ID = "session-report-existing"
+		state.Sessions[existing.ID] = existing
+
+		changes, err := Validate(p, packet, state)
+		if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("second report id accepted for one session: changes=%+v err=%v", changes, err)
+		}
+	})
+
+	t.Run("malformed state with duplicate session ids fails closed", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		state := fixedState()
+		first := p.SessionReport
+		first.Revision = 1
+		second := first
+		second.ID = "session-report-duplicate"
+		state.Sessions[first.ID] = first
+		state.Sessions[second.ID] = second
+		p.SessionReport.Revision = 2
+
+		changes, err := Validate(p, packet, state)
+		if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("duplicate existing session reports accepted: changes=%+v err=%v", changes, err)
+		}
+	})
 }
 
 func TestValidateRejectsEvidenceTupleMismatchAndDuplicates(t *testing.T) {
@@ -275,6 +462,36 @@ func TestValidateBindsTailEventHashToNextCursor(t *testing.T) {
 	changes, err := Validate(p, packet, state)
 	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
 		t.Fatalf("tail event hash was not bound to next cursor: changes=%+v err=%v", changes, err)
+	}
+}
+
+func TestValidateAllowsShapeValidatedBalancedSHA256(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	balancedHash := strings.Repeat("0123456789abcdef", 4)
+	packet.NextCursor.SourceHash = balancedHash
+	packet.Events[1].SourceHash = balancedHash
+	for i := range p.TimelineEvents[0].Evidence {
+		p.TimelineEvents[0].Evidence[i].SourceHash = balancedHash
+	}
+	for i := range *p.CurrentStatePatch.Evidence {
+		(*p.CurrentStatePatch.Evidence)[i].SourceHash = balancedHash
+	}
+	for i := range p.SessionReport.Evidence {
+		p.SessionReport.Evidence[i].SourceHash = balancedHash
+	}
+	for phaseIndex := range p.SessionReport.Phases {
+		for evidenceIndex := range p.SessionReport.Phases[phaseIndex].Evidence {
+			p.SessionReport.Phases[phaseIndex].Evidence[evidenceIndex].SourceHash = balancedHash
+		}
+	}
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	if _, err := Validate(p, packet, state); err != nil {
+		t.Fatalf("shape-validated balanced SHA-256 rejected as text: %v", err)
 	}
 }
 

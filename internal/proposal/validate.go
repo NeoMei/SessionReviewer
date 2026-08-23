@@ -338,6 +338,10 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	if err != nil {
 		return fail(err)
 	}
+	sessionReportBySession, err := indexSessionReports(state.Sessions)
+	if err != nil {
+		return fail(err)
+	}
 
 	result := ledger.ChangeSet{}
 	changeEvidence := make(map[string]map[string]struct{})
@@ -496,6 +500,9 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	report := p.SessionReport
 	if report.ProjectID != p.ProjectID || report.SessionID != p.SessionID {
 		return fail(errors.New("session report identity does not match proposal"))
+	}
+	if existingID, represented := sessionReportBySession[report.SessionID]; represented && existingID != report.ID {
+		return fail(fmt.Errorf("session %q is already represented by report %q", report.SessionID, existingID))
 	}
 	if old, exists := state.Sessions[report.ID]; exists {
 		if old.ProjectID != report.ProjectID || old.SessionID != report.SessionID {
@@ -1008,9 +1015,35 @@ func validateBoundary(boundary evidence.CursorBoundary) error {
 }
 
 func validateSafeText(p Proposal, packet evidence.Packet) error {
-	values := make([]string, 0)
-	collectStrings(reflect.ValueOf(p), &values)
-	collectStrings(reflect.ValueOf(packet), &values)
+	// Scan only text that can be persisted or rendered. Protocol-owned values
+	// (IDs, hashes, timestamps, and enums) are validated by their dedicated
+	// shape and semantic checks; treating them as prose creates false positives
+	// for valid high-entropy hashes.
+	values := []string{packet.CWD}
+	for _, item := range packet.Events {
+		values = append(values, item.ToolName, item.Summary)
+	}
+	for _, decision := range p.NewDecisions {
+		values = appendDecisionText(values, decision)
+	}
+	for _, patch := range p.UpdatedDecisions {
+		values = appendDecisionPatchText(values, patch)
+	}
+	for _, change := range p.OpenLoops {
+		if change.Entity != nil {
+			values = appendOpenLoopText(values, *change.Entity)
+		}
+		if change.Patch != nil {
+			values = appendOpenLoopPatchText(values, *change.Patch)
+		}
+	}
+	for _, event := range p.TimelineEvents {
+		values = append(values, event.Title, event.Summary)
+		values = appendEvidenceText(values, event.Evidence)
+	}
+	values = appendCurrentStatePatchText(values, p.CurrentStatePatch)
+	values = appendSessionReportText(values, p.SessionReport)
+
 	redactor := redact.Default()
 	for _, value := range values {
 		if result := redactor.Text(value); len(result.Findings) != 0 {
@@ -1020,32 +1053,99 @@ func validateSafeText(p Proposal, packet evidence.Packet) error {
 	return nil
 }
 
-func collectStrings(value reflect.Value, result *[]string) {
-	if !value.IsValid() {
-		return
+func appendDecisionText(values []string, decision ledger.Decision) []string {
+	values = append(values, decision.Title, decision.Context, decision.Rationale, decision.Consequences, decision.ReevaluateWhen)
+	values = append(values, decision.Tags...)
+	values = append(values, decision.SourceSessions...)
+	values = append(values, decision.Alternatives...)
+	values = append(values, decision.RejectedPaths...)
+	return appendEvidenceText(values, decision.Evidence)
+}
+
+func appendDecisionPatchText(values []string, patch DecisionPatch) []string {
+	values = appendOptionalText(values, patch.Title)
+	values = appendOptionalTexts(values, patch.Tags)
+	values = appendOptionalTexts(values, patch.SourceSessions)
+	values = appendOptionalEvidenceText(values, patch.Evidence)
+	values = appendOptionalText(values, patch.Context)
+	values = appendOptionalText(values, patch.Rationale)
+	values = appendOptionalText(values, patch.Consequences)
+	values = appendOptionalText(values, patch.ReevaluateWhen)
+	values = appendOptionalTexts(values, patch.Alternatives)
+	return appendOptionalTexts(values, patch.RejectedPaths)
+}
+
+func appendOpenLoopText(values []string, loop ledger.OpenLoop) []string {
+	values = append(values, loop.Title, loop.Question, loop.Blocker, loop.NextExperiment, loop.CompletionCriterion)
+	values = append(values, loop.Tags...)
+	values = append(values, loop.SourceSessions...)
+	values = append(values, loop.Attempts...)
+	return appendEvidenceText(values, loop.Evidence)
+}
+
+func appendOpenLoopPatchText(values []string, patch OpenLoopPatch) []string {
+	values = appendOptionalText(values, patch.Title)
+	values = appendOptionalTexts(values, patch.Tags)
+	values = appendOptionalTexts(values, patch.SourceSessions)
+	values = appendOptionalEvidenceText(values, patch.Evidence)
+	values = appendOptionalText(values, patch.Question)
+	values = appendOptionalText(values, patch.Blocker)
+	values = appendOptionalText(values, patch.NextExperiment)
+	values = appendOptionalText(values, patch.CompletionCriterion)
+	return appendOptionalTexts(values, patch.Attempts)
+}
+
+func appendCurrentStatePatchText(values []string, patch CurrentStatePatch) []string {
+	values = appendOptionalText(values, patch.Goal)
+	values = appendOptionalText(values, patch.Branch)
+	values = appendOptionalText(values, patch.NextAction)
+	values = appendOptionalText(values, patch.FirstInspection)
+	values = appendOptionalTexts(values, patch.UncommittedChanges)
+	values = appendOptionalTexts(values, patch.Blockers)
+	values = appendOptionalTexts(values, patch.OpenRisks)
+	values = appendOptionalTexts(values, patch.SourceSessions)
+	return appendOptionalEvidenceText(values, patch.Evidence)
+}
+
+func appendSessionReportText(values []string, report ledger.SessionReport) []string {
+	values = append(values, report.InitialGoal, report.PreviousSessionID, report.NextSessionID)
+	values = append(values, report.GoalChanges...)
+	values = append(values, report.Files...)
+	values = append(values, report.Commits...)
+	values = append(values, report.Verification...)
+	for _, phase := range report.Phases {
+		values = append(values, phase.Title, phase.Summary)
+		values = appendEvidenceText(values, phase.Evidence)
 	}
-	switch value.Kind() {
-	case reflect.Interface, reflect.Pointer:
-		if !value.IsNil() {
-			collectStrings(value.Elem(), result)
-		}
-	case reflect.String:
-		*result = append(*result, value.String())
-	case reflect.Struct:
-		for i := 0; i < value.NumField(); i++ {
-			collectStrings(value.Field(i), result)
-		}
-	case reflect.Array, reflect.Slice:
-		for i := 0; i < value.Len(); i++ {
-			collectStrings(value.Index(i), result)
-		}
-	case reflect.Map:
-		iterator := value.MapRange()
-		for iterator.Next() {
-			collectStrings(iterator.Key(), result)
-			collectStrings(iterator.Value(), result)
-		}
+	return appendEvidenceText(values, report.Evidence)
+}
+
+func appendEvidenceText(values []string, refs []ledger.EvidenceRef) []string {
+	for _, ref := range refs {
+		values = append(values, ref.Summary)
 	}
+	return values
+}
+
+func appendOptionalText(values []string, value *string) []string {
+	if value != nil {
+		values = append(values, *value)
+	}
+	return values
+}
+
+func appendOptionalTexts(values []string, value *[]string) []string {
+	if value != nil {
+		values = append(values, (*value)...)
+	}
+	return values
+}
+
+func appendOptionalEvidenceText(values []string, value *[]ledger.EvidenceRef) []string {
+	if value != nil {
+		values = appendEvidenceText(values, *value)
+	}
+	return values
 }
 
 func validateState(state ledger.State, projectID string) (map[string]string, error) {
@@ -1103,6 +1203,20 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		}
 	}
 	return ids, nil
+}
+
+func indexSessionReports(reports map[string]ledger.SessionReport) (map[string]string, error) {
+	bySession := make(map[string]string, len(reports))
+	for id, report := range reports {
+		if strings.TrimSpace(report.SessionID) == "" {
+			return nil, fmt.Errorf("existing session report %q has no session id", id)
+		}
+		if previousID, duplicate := bySession[report.SessionID]; duplicate {
+			return nil, fmt.Errorf("session id %q is represented by both %q and %q", report.SessionID, previousID, id)
+		}
+		bySession[report.SessionID] = id
+	}
+	return bySession, nil
 }
 
 func reserveNewID(ids map[string]string, id, kind string) error {
