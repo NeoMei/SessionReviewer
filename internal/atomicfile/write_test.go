@@ -159,6 +159,346 @@ func TestWriteRootFileCheckedDoesNotDeleteReplacedTemporary(t *testing.T) {
 	if got, err := os.ReadFile(replacement); err != nil || string(got) != "other" {
 		t.Fatalf("replacement temporary content=%q err=%v", got, err)
 	}
+	if info, err := os.Stat(filepath.Join(directory, "ours-moved")); err != nil || info.Size() != 0 {
+		t.Fatalf("original temporary was not sanitized: info=%v err=%v", info, err)
+	}
+}
+
+func TestWriteRootFileCheckedSanitizesRenamedTemporaryWhenCheckpointFailsInReadOnlyParent(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+	checkpointErr := errors.New("namespace changed")
+	checks := 0
+	err = WriteRootFileChecked(root, "state.json", []byte("SECRET"), 0o600, func() error {
+		checks++
+		if checks != 2 {
+			return nil
+		}
+		entries, err := os.ReadDir(directory)
+		if err != nil || len(entries) != 1 {
+			return fmt.Errorf("temporary entries=%v: %w", entries, err)
+		}
+		if err := os.Rename(filepath.Join(directory, entries[0].Name()), filepath.Join(directory, "unknown-temp")); err != nil {
+			return err
+		}
+		if err := os.Chmod(directory, 0o500); err != nil {
+			return err
+		}
+		return checkpointErr
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(directory, "unknown-temp")); err != nil || info.Size() != 0 {
+		t.Fatalf("unknown temporary was not sanitized: info=%v err=%v", info, err)
+	}
+}
+
+func TestWriteRootFileCheckedSanitizesRenamedTemporaryWhenPublishFails(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+	publishErr := errors.New("injected publish failure")
+	ops := defaultDurabilityOps()
+	ops.publish = func(parent *os.Root, temporary, _ string) error {
+		if err := parent.Rename(temporary, "unknown-temp"); err != nil {
+			return err
+		}
+		if err := os.Chmod(directory, 0o500); err != nil {
+			return err
+		}
+		return publishErr
+	}
+	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET"), 0o600, func() error { return nil }, ops)
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(directory, "unknown-temp")); err != nil || info.Size() != 0 {
+		t.Fatalf("unknown temporary was not sanitized: info=%v err=%v", info, err)
+	}
+}
+
+func TestWriteRootFileCheckedRollsBackPartiallyPublishedDestinationBeforeSanitizing(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	publishErr := errors.New("remove linked temporary failed")
+	ops := defaultDurabilityOps()
+	ops.publish = func(parent *os.Root, temporary, destination string) error {
+		if err := parent.Link(temporary, destination); err != nil {
+			return err
+		}
+		return publishErr
+	}
+	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET"), 0o600, func() error { return nil }, ops)
+	if !errors.Is(err, publishErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, "state.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("partially published destination remains: %v", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("partial publish left entries=%v err=%v", entries, err)
+	}
+}
+
+func TestWriteRootFileCheckedReportsSanitizeFailure(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checkpointErr := errors.New("namespace changed")
+	sanitizeErr := errors.New("truncate and sync failed")
+	ops := defaultDurabilityOps()
+	ops.sanitizeTemporary = func(*os.File) error { return sanitizeErr }
+	checks := 0
+	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET"), 0o600, func() error {
+		checks++
+		if checks == 2 {
+			return checkpointErr
+		}
+		return nil
+	}, ops)
+	if !errors.Is(err, checkpointErr) || !errors.Is(err, sanitizeErr) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestWriteRootFileCheckedRestoresExistingDestinationAfterFinalCheckpointFailure(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	checkpointErr := errors.New("namespace changed")
+	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error {
+		checks++
+		if checks == 3 {
+			return checkpointErr
+		}
+		return nil
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "old" {
+		t.Fatalf("restored content=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, BackupPath("state.json"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback backup remains: %v", err)
+	}
+}
+
+func TestWriteRootFileCheckedFinalFailureLeavesAbsentDestinationAbsent(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	checkpointErr := errors.New("namespace changed")
+	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error {
+		checks++
+		if checks == 3 {
+			return checkpointErr
+		}
+		return nil
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("failed empty-target write left entries=%v err=%v", entries, err)
+	}
+}
+
+func TestWriteRootFileCheckedRejectsRollbackBackupCollisionBeforePublish(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	backup := filepath.Join(directory, BackupPath("state.json"))
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("collision"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error { return nil })
+	if err == nil {
+		t.Fatal("write accepted rollback backup collision")
+	}
+	for path, want := range map[string]string{destination: "old", backup: "collision"} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != want {
+			t.Fatalf("%s content=%q err=%v", path, got, err)
+		}
+	}
+}
+
+func TestWriteRootFileCheckedRejectsTamperedRollbackBeforePublish(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	backup := filepath.Join(directory, BackupPath("state.json"))
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error {
+		checks++
+		if checks != 2 {
+			return nil
+		}
+		if err := os.Rename(backup, filepath.Join(directory, "old-moved")); err != nil {
+			return fmt.Errorf("rollback backup was not established before publish checkpoint: %w", err)
+		}
+		return os.WriteFile(backup, []byte("attacker"), 0o600)
+	})
+	if err == nil {
+		t.Fatal("write accepted tampered rollback backup")
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "old" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(backup); err != nil || string(got) != "attacker" {
+		t.Fatalf("third-party backup content=%q err=%v", got, err)
+	}
+}
+
+func TestWriteRootFileCheckedSuccessRemovesRollbackBackup(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "new" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, BackupPath("state.json"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback backup remains: %v", err)
+	}
+}
+
+func TestWriteRootFileCheckedFailsBeforePublishWhenRollbackHardlinkIsUnsupported(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	unsupported := errors.New("hardlinks unsupported")
+	ops := defaultDurabilityOps()
+	ops.linkRollback = func(*os.Root, string, string) error { return unsupported }
+	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("new"), 0o600, func() error { return nil }, ops)
+	if !errors.Is(err, unsupported) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "old" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 1 {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+}
+
+func TestWriteRootFileCheckedCheckpointTwoFailureRemovesRollbackAndPreservesDestination(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	checkpointErr := errors.New("namespace changed")
+	err = WriteRootFileChecked(root, "state.json", []byte("SECRET"), 0o600, func() error {
+		checks++
+		if checks == 2 {
+			return checkpointErr
+		}
+		return nil
+	})
+	if !errors.Is(err, checkpointErr) {
+		t.Fatalf("error=%v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "old" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 1 {
+		t.Fatalf("checkpoint failure left entries=%v err=%v", entries, err)
+	}
+}
+
+func TestWriteRootWithoutCheckpointDoesNotRequireRollbackHardlinks(t *testing.T) {
+	directory := t.TempDir()
+	destination := filepath.Join(directory, "state.json")
+	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ops := defaultDurabilityOps()
+	ops.linkRollback = func(*os.Root, string, string) error { return errors.New("unexpected rollback hardlink") }
+	if err := writeRootAtParentWithOps(root, "state.json", []byte("new"), 0o600, ops); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "new" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
 }
 
 func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {

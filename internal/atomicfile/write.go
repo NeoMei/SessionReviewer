@@ -83,16 +83,20 @@ func writeRootAtParent(parent *os.Root, name string, data []byte, perm fs.FileMo
 }
 
 type durabilityOps struct {
-	syncTemporary   func(*os.File) error
-	publish         func(*os.Root, string, string) error
-	syncPublication func(*os.Root, string) error
+	syncTemporary     func(*os.File) error
+	sanitizeTemporary func(*os.File) error
+	publish           func(*os.Root, string, string) error
+	syncPublication   func(*os.Root, string) error
+	linkRollback      func(*os.Root, string, string) error
 }
 
 func defaultDurabilityOps() durabilityOps {
 	return durabilityOps{
-		syncTemporary:   (*os.File).Sync,
-		publish:         replaceRootFile,
-		syncPublication: syncRootPublication,
+		syncTemporary:     (*os.File).Sync,
+		sanitizeTemporary: sanitizeRootTemporary,
+		publish:           replaceRootFile,
+		syncPublication:   syncRootPublication,
+		linkRollback:      (*os.Root).Link,
 	}
 }
 
@@ -115,12 +119,13 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 		_ = tmp.Close()
 		return errors.New("cannot verify created atomic temporary file")
 	}
-	published := false
+	prepublication := true
+	sanitizeOnReturn := true
 	defer func() {
-		_ = tmp.Close()
-		if retErr != nil && !published {
-			retErr = errors.Join(retErr, removeRootEntryIfOwned(parent, tmpName, createdInfo))
+		if retErr != nil && sanitizeOnReturn {
+			retErr = errors.Join(retErr, sanitizeAndRemoveRootTemporary(parent, tmp, tmpName, createdInfo, ops.sanitizeTemporary))
 		}
+		retErr = errors.Join(retErr, tmp.Close())
 	}()
 	if err = tmp.Chmod(perm); err != nil {
 		return err
@@ -139,20 +144,46 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 	if err != nil || !os.SameFile(temporaryInfo, temporaryNameInfo) || !temporaryNameInfo.Mode().IsRegular() || isAtomicRedirect(temporaryNameInfo) {
 		return errors.New("atomic temporary file changed before publication")
 	}
+	rollback := rootRollback{}
+	if checkpoint != nil {
+		rollback, err = prepareRootRollback(parent, name, ops.linkRollback)
+		if err != nil {
+			return err
+		}
+	}
+	rollbackFinalized := !rollback.active
+	defer func() {
+		if retErr != nil && prepublication && !rollbackFinalized {
+			retErr = errors.Join(retErr, removeRootRollback(parent, rollback))
+		}
+	}()
 	if checkpoint != nil {
 		if err = checkpoint(); err != nil {
 			return err
 		}
 	}
-	if err = tmp.Close(); err != nil {
-		return err
+	if rollback.active {
+		if err := validateRootRollback(parent, name, rollback, true); err != nil {
+			return err
+		}
 	}
 	if err = ops.publish(parent, tmpName, name); err != nil {
-		return err
+		partial, inspectErr := parent.Lstat(name)
+		var partialRollbackErr error
+		if inspectErr == nil && os.SameFile(temporaryInfo, partial) && partial.Mode().IsRegular() && !isAtomicRedirect(partial) {
+			prepublication = false
+			partialRollbackErr = rollbackRootPublication(parent, name, partial, data, rollback)
+			rollbackFinalized = partialRollbackErr == nil
+		} else if inspectErr != nil && !errors.Is(inspectErr, os.ErrNotExist) {
+			partialRollbackErr = errors.New("cannot inspect destination after failed atomic publication")
+		}
+		return errors.Join(err, partialRollbackErr)
 	}
-	published = true
+	prepublication = false
+	sanitizeOnReturn = false
 	publishedInfo, err := parent.Lstat(name)
 	if err != nil || !os.SameFile(temporaryInfo, publishedInfo) || !publishedInfo.Mode().IsRegular() || isAtomicRedirect(publishedInfo) {
+		sanitizeOnReturn = true
 		return errors.New("atomic publication identity changed")
 	}
 	if err = ops.syncPublication(parent, name); err != nil {
@@ -160,11 +191,142 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 	}
 	if checkpoint != nil {
 		if err = checkpoint(); err != nil {
-			cleanupErr := removePublishedRootFileIfOwned(parent, name, publishedInfo, data)
-			return errors.Join(err, cleanupErr)
+			rollbackErr := rollbackRootPublication(parent, name, publishedInfo, data, rollback)
+			rollbackFinalized = rollbackErr == nil
+			sanitizeOnReturn = rollbackErr != nil
+			return errors.Join(err, rollbackErr)
+		}
+	}
+	if rollback.active {
+		if err := removeRootRollback(parent, rollback); err != nil {
+			return err
+		}
+		rollbackFinalized = true
+	}
+	return nil
+}
+
+type rootRollback struct {
+	active   bool
+	name     string
+	original os.FileInfo
+}
+
+func prepareRootRollback(parent *os.Root, destination string, link func(*os.Root, string, string) error) (rootRollback, error) {
+	backup := BackupPath(destination)
+	if _, err := parent.Lstat(backup); err == nil {
+		return rootRollback{}, errors.New("atomic rollback backup already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return rootRollback{}, errors.New("cannot inspect atomic rollback backup")
+	}
+	original, err := parent.Lstat(destination)
+	if errors.Is(err, os.ErrNotExist) {
+		return rootRollback{}, nil
+	}
+	if err != nil || !original.Mode().IsRegular() || isAtomicRedirect(original) {
+		return rootRollback{}, errors.New("atomic destination is redirected or not regular")
+	}
+	file, err := parent.Open(destination)
+	if err != nil {
+		return rootRollback{}, errors.New("cannot open atomic destination for rollback")
+	}
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil || closeErr != nil || !os.SameFile(original, opened) || !opened.Mode().IsRegular() || isAtomicRedirect(opened) {
+		return rootRollback{}, errors.New("atomic destination changed before rollback")
+	}
+	if link == nil {
+		link = (*os.Root).Link
+	}
+	if err := link(parent, destination, backup); err != nil {
+		return rootRollback{}, fmt.Errorf("cannot establish atomic rollback hardlink: %w", err)
+	}
+	rollback := rootRollback{active: true, name: backup, original: original}
+	if err := validateRootRollback(parent, destination, rollback, true); err != nil {
+		return rootRollback{}, errors.Join(err, removeRootRollback(parent, rollback))
+	}
+	if err := syncRootDirectoryEntry(parent, backup); err != nil {
+		return rootRollback{}, errors.Join(errors.New("cannot sync atomic rollback hardlink"), removeRootRollback(parent, rollback))
+	}
+	if err := validateRootRollback(parent, destination, rollback, true); err != nil {
+		return rootRollback{}, errors.Join(err, removeRootRollback(parent, rollback))
+	}
+	return rollback, nil
+}
+
+func validateRootRollback(parent *os.Root, destination string, rollback rootRollback, requireDestination bool) error {
+	if !rollback.active {
+		return nil
+	}
+	backup, err := parent.Lstat(rollback.name)
+	if err != nil || !os.SameFile(rollback.original, backup) || !backup.Mode().IsRegular() || isAtomicRedirect(backup) {
+		return errors.New("atomic rollback backup identity changed")
+	}
+	if requireDestination {
+		current, err := parent.Lstat(destination)
+		if err != nil || !os.SameFile(rollback.original, current) || !current.Mode().IsRegular() || isAtomicRedirect(current) {
+			return errors.New("atomic destination changed after rollback backup")
 		}
 	}
 	return nil
+}
+
+func removeRootRollback(parent *os.Root, rollback rootRollback) error {
+	if !rollback.active {
+		return nil
+	}
+	if err := validateRootRollback(parent, "", rollback, false); err != nil {
+		return err
+	}
+	if err := parent.Remove(rollback.name); err != nil {
+		return errors.New("cannot remove atomic rollback backup")
+	}
+	if err := syncRootDirectoryEntry(parent, rollback.name); err != nil {
+		return errors.New("cannot sync atomic rollback backup removal")
+	}
+	return nil
+}
+
+func rollbackRootPublication(parent *os.Root, destination string, publishedInfo os.FileInfo, desired []byte, rollback rootRollback) error {
+	if rollback.active {
+		if err := validateRootRollback(parent, destination, rollback, false); err != nil {
+			return err
+		}
+	}
+	if err := removePublishedRootFileIfOwned(parent, destination, publishedInfo, desired); err != nil {
+		return err
+	}
+	if !rollback.active {
+		return nil
+	}
+	if err := parent.Link(rollback.name, destination); err != nil {
+		return errors.New("cannot restore atomic rollback destination")
+	}
+	restored, err := parent.Lstat(destination)
+	if err != nil || !os.SameFile(rollback.original, restored) || !restored.Mode().IsRegular() || isAtomicRedirect(restored) {
+		return errors.New("restored atomic rollback identity changed")
+	}
+	if err := syncRootDirectoryEntry(parent, destination); err != nil {
+		return errors.New("cannot sync restored atomic rollback destination")
+	}
+	return removeRootRollback(parent, rollback)
+}
+
+func sanitizeRootTemporary(file *os.File) error {
+	truncateErr := file.Truncate(0)
+	syncErr := file.Sync()
+	return errors.Join(truncateErr, syncErr)
+}
+
+func sanitizeAndRemoveRootTemporary(parent *os.Root, file *os.File, name string, createdInfo os.FileInfo, sanitize func(*os.File) error) error {
+	if sanitize == nil {
+		sanitize = sanitizeRootTemporary
+	}
+	var sanitizeErr error
+	if err := sanitize(file); err != nil {
+		sanitizeErr = fmt.Errorf("cannot sanitize failed atomic temporary: %w", err)
+	}
+	return errors.Join(sanitizeErr, removeRootEntryIfOwned(parent, name, createdInfo))
 }
 
 func removeRootEntryIfOwned(parent *os.Root, name string, ownedInfo os.FileInfo) error {
