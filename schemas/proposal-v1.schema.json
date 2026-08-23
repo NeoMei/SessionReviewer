@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/proposal-v1.schema.json",
+  "title": "SessionReviewer semantic proposal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_id",
+    "session_id",
+    "from_cursor",
+    "to_cursor",
+    "evidence_packet_sha256",
+    "new_decisions",
+    "updated_decisions",
+    "open_loops",
+    "timeline_events",
+    "current_state_patch",
+    "session_report",
+    "evidence_links"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "project_id": { "$ref": "#/$defs/nonempty_string" },
+    "session_id": { "$ref": "#/$defs/nonempty_string" },
+    "from_cursor": { "$ref": "#/$defs/positive_integer" },
+    "to_cursor": { "$ref": "#/$defs/nonnegative_integer" },
+    "evidence_packet_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "new_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/decision" }
+    },
+    "updated_decisions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/decision_patch" }
+    },
+    "open_loops": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/open_loop_change" }
+    },
+    "timeline_events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/timeline_event" }
+    },
+    "current_state_patch": { "$ref": "#/$defs/current_state_patch" },
+    "session_report": { "$ref": "#/$defs/session_report" },
+    "evidence_links": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence_link" }
+    }
+  },
+  "$defs": {
+    "nonempty_string": { "type": "string", "minLength": 1 },
+    "string_array": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "nonempty_string_array": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nonempty_string" },
+      "uniqueItems": true
+    },
+    "nonnegative_integer": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "positive_integer": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9223372036854775807
+    },
+    "evidence_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidence_id", "session_id", "jsonl_line", "source_hash", "summary"],
+      "properties": {
+        "evidence_id": { "$ref": "#/$defs/nonempty_string" },
+        "session_id": { "$ref": "#/$defs/nonempty_string" },
+        "jsonl_line": { "$ref": "#/$defs/positive_integer" },
+        "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "summary": { "type": "string" }
+      }
+    },
+    "evidence_array": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence_ref" },
+      "uniqueItems": true
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "project_id", "title", "status", "revision", "tags", "supersedes",
+        "source_sessions", "evidence", "context", "rationale", "consequences",
+        "reevaluate_when", "alternatives", "rejected_paths"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "project_id": { "$ref": "#/$defs/nonempty_string" },
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "tags": { "$ref": "#/$defs/nonempty_string_array" },
+        "supersedes": { "$ref": "#/$defs/nonempty_string_array" },
+        "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "context": { "type": "string" },
+        "rationale": { "type": "string" },
+        "consequences": { "type": "string" },
+        "reevaluate_when": { "type": "string" },
+        "alternatives": { "$ref": "#/$defs/string_array" },
+        "rejected_paths": { "$ref": "#/$defs/string_array" }
+      }
+    },
+    "decision_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "expected_revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "expected_revision": { "$ref": "#/$defs/positive_integer" },
+        "title": { "type": "string" },
+        "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
+        "tags": { "$ref": "#/$defs/nonempty_string_array" },
+        "supersedes": { "$ref": "#/$defs/nonempty_string_array" },
+        "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "context": { "type": "string" },
+        "rationale": { "type": "string" },
+        "consequences": { "type": "string" },
+        "reevaluate_when": { "type": "string" },
+        "alternatives": { "$ref": "#/$defs/string_array" },
+        "rejected_paths": { "$ref": "#/$defs/string_array" }
+      },
+      "anyOf": [
+        { "required": ["title"] },
+        { "required": ["status"] },
+        { "required": ["tags"] },
+        { "required": ["supersedes"] },
+        { "required": ["source_sessions"] },
+        { "required": ["evidence"] },
+        { "required": ["context"] },
+        { "required": ["rationale"] },
+        { "required": ["consequences"] },
+        { "required": ["reevaluate_when"] },
+        { "required": ["alternatives"] },
+        { "required": ["rejected_paths"] }
+      ]
+    },
+    "open_loop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "project_id", "title", "status", "revision", "tags", "source_sessions",
+        "evidence", "question", "attempts", "blocker", "next_experiment", "completion_criterion"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "project_id": { "$ref": "#/$defs/nonempty_string" },
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "status": { "enum": ["open", "blocked", "resolved", "abandoned", "archived"] },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "tags": { "$ref": "#/$defs/nonempty_string_array" },
+        "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "question": { "type": "string" },
+        "attempts": { "$ref": "#/$defs/string_array" },
+        "blocker": { "type": "string" },
+        "next_experiment": { "type": "string" },
+        "completion_criterion": { "type": "string" }
+      }
+    },
+    "open_loop_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "expected_revision"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "expected_revision": { "$ref": "#/$defs/positive_integer" },
+        "title": { "type": "string" },
+        "status": { "enum": ["open", "blocked", "resolved", "abandoned", "archived"] },
+        "tags": { "$ref": "#/$defs/nonempty_string_array" },
+        "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "question": { "type": "string" },
+        "blocker": { "type": "string" },
+        "next_experiment": { "type": "string" },
+        "completion_criterion": { "type": "string" },
+        "attempts": { "$ref": "#/$defs/string_array" }
+      },
+      "anyOf": [
+        { "required": ["title"] },
+        { "required": ["status"] },
+        { "required": ["tags"] },
+        { "required": ["source_sessions"] },
+        { "required": ["evidence"] },
+        { "required": ["question"] },
+        { "required": ["blocker"] },
+        { "required": ["next_experiment"] },
+        { "required": ["completion_criterion"] },
+        { "required": ["attempts"] }
+      ]
+    },
+    "open_loop_change": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation"],
+      "properties": {
+        "operation": { "enum": ["create", "update"] },
+        "entity": { "$ref": "#/$defs/open_loop" },
+        "patch": { "$ref": "#/$defs/open_loop_patch" }
+      },
+      "oneOf": [
+        {
+          "properties": { "operation": { "const": "create" } },
+          "required": ["entity"],
+          "not": { "required": ["patch"] }
+        },
+        {
+          "properties": { "operation": { "const": "update" } },
+          "required": ["patch"],
+          "not": { "required": ["entity"] }
+        }
+      ]
+    },
+    "timeline_event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "occurred_at", "revision", "class", "title", "summary", "evidence", "decision_ids", "open_loop_ids"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "class": { "enum": ["verified", "decision", "inference", "superseded", "pending_confirmation"] },
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "summary": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "decision_ids": { "$ref": "#/$defs/nonempty_string_array" },
+        "open_loop_ids": { "$ref": "#/$defs/nonempty_string_array" }
+      }
+    },
+    "current_state_patch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_revision"],
+      "properties": {
+        "expected_revision": { "$ref": "#/$defs/nonnegative_integer" },
+        "goal": { "type": "string" },
+        "last_verified": { "type": "string", "format": "date-time" },
+        "branch": { "type": "string" },
+        "next_action": { "type": "string" },
+        "first_inspection": { "type": "string" },
+        "last_updated": { "type": "string", "format": "date-time" },
+        "uncommitted_changes": { "$ref": "#/$defs/string_array" },
+        "blockers": { "$ref": "#/$defs/string_array" },
+        "open_risks": { "$ref": "#/$defs/string_array" },
+        "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
+        "evidence": { "$ref": "#/$defs/evidence_array" }
+      },
+      "anyOf": [
+        { "required": ["goal"] },
+        { "required": ["last_verified"] },
+        { "required": ["branch"] },
+        { "required": ["next_action"] },
+        { "required": ["first_inspection"] },
+        { "required": ["last_updated"] },
+        { "required": ["uncommitted_changes"] },
+        { "required": ["blockers"] },
+        { "required": ["open_risks"] },
+        { "required": ["source_sessions"] },
+        { "required": ["evidence"] }
+      ]
+    },
+    "session_phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "summary", "evidence"],
+      "properties": {
+        "title": { "$ref": "#/$defs/nonempty_string" },
+        "summary": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence_array" }
+      }
+    },
+    "session_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "project_id", "session_id", "revision", "initial_goal", "goal_changes", "phases",
+        "files", "commits", "verification", "decisions_added", "decisions_revised",
+        "open_loops_created", "open_loops_closed", "previous_session_id", "next_session_id", "evidence"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "project_id": { "$ref": "#/$defs/nonempty_string" },
+        "session_id": { "$ref": "#/$defs/nonempty_string" },
+        "revision": { "$ref": "#/$defs/positive_integer" },
+        "initial_goal": { "type": "string" },
+        "goal_changes": { "$ref": "#/$defs/string_array" },
+        "phases": { "type": "array", "items": { "$ref": "#/$defs/session_phase" } },
+        "files": { "$ref": "#/$defs/string_array" },
+        "commits": { "$ref": "#/$defs/string_array" },
+        "verification": { "$ref": "#/$defs/string_array" },
+        "decisions_added": { "$ref": "#/$defs/nonempty_string_array" },
+        "decisions_revised": { "$ref": "#/$defs/nonempty_string_array" },
+        "open_loops_created": { "$ref": "#/$defs/nonempty_string_array" },
+        "open_loops_closed": { "$ref": "#/$defs/nonempty_string_array" },
+        "previous_session_id": { "type": "string" },
+        "next_session_id": { "type": "string" },
+        "evidence": { "$ref": "#/$defs/evidence_array" }
+      }
+    },
+    "evidence_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entity_id", "evidence_id", "relation"],
+      "properties": {
+        "entity_id": { "$ref": "#/$defs/nonempty_string" },
+        "evidence_id": { "$ref": "#/$defs/nonempty_string" },
+        "relation": { "enum": ["supports", "verifies", "contradicts"] }
+      }
+    }
+  }
+}

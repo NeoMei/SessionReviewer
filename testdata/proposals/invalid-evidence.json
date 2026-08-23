@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "project_id": "project-1111111111111111",
+  "session_id": "session-1",
+  "from_cursor": 1,
+  "to_cursor": 2,
+  "evidence_packet_sha256": "sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4",
+  "new_decisions": [
+    {
+      "id": "decision-1",
+      "project_id": "project-1111111111111111",
+      "title": "Use a durable ledger",
+      "status": "accepted",
+      "revision": 1,
+      "tags": [],
+      "supersedes": [],
+      "source_sessions": ["session-1"],
+      "evidence": [
+        {
+          "evidence_id": "ev-missing",
+          "session_id": "session-1",
+          "jsonl_line": 1,
+          "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "summary": "Choose durable ledger"
+        }
+      ],
+      "context": "Long sessions need durable continuity.",
+      "rationale": "Markdown remains editable.",
+      "consequences": "Accepted facts can be reviewed.",
+      "reevaluate_when": "The storage boundary changes.",
+      "alternatives": [],
+      "rejected_paths": []
+    }
+  ],
+  "updated_decisions": [],
+  "open_loops": [],
+  "timeline_events": [],
+  "current_state_patch": {
+    "expected_revision": 0,
+    "goal": "Ship the durable ledger",
+    "source_sessions": ["session-1"],
+    "evidence": [
+      {
+        "evidence_id": "ev-verify",
+        "session_id": "session-1",
+        "jsonl_line": 2,
+        "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "summary": "go test passed"
+      }
+    ]
+  },
+  "session_report": {
+    "id": "session-report-1",
+    "project_id": "project-1111111111111111",
+    "session_id": "session-1",
+    "revision": 1,
+    "initial_goal": "Build a durable review ledger",
+    "goal_changes": [],
+    "phases": [],
+    "files": [],
+    "commits": [],
+    "verification": [],
+    "decisions_added": ["decision-1"],
+    "decisions_revised": [],
+    "open_loops_created": [],
+    "open_loops_closed": [],
+    "previous_session_id": "",
+    "next_session_id": "",
+    "evidence": [
+      {
+        "evidence_id": "ev-verify",
+        "session_id": "session-1",
+        "jsonl_line": 2,
+        "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "summary": "go test passed"
+      }
+    ]
+  },
+  "evidence_links": [
+    {"entity_id": "decision-1", "evidence_id": "ev-missing", "relation": "supports"},
+    {"entity_id": "current-state", "evidence_id": "ev-verify", "relation": "verifies"},
+    {"entity_id": "session-report-1", "evidence_id": "ev-verify", "relation": "verifies"}
+  ]
+}

@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "project_id": "project-1111111111111111",
+  "session_id": "session-1",
+  "from_cursor": 1,
+  "to_cursor": 2,
+  "evidence_packet_sha256": "sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4",
+  "new_decisions": [
+    {
+      "id": "decision-1",
+      "project_id": "project-1111111111111111",
+      "title": "Use a durable ledger",
+      "status": "accepted",
+      "revision": 1,
+      "tags": ["durability"],
+      "supersedes": [],
+      "source_sessions": ["session-1"],
+      "evidence": [
+        {
+          "evidence_id": "ev-message",
+          "session_id": "session-1",
+          "jsonl_line": 1,
+          "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "summary": "Choose durable ledger"
+        }
+      ],
+      "context": "Long sessions need durable continuity.",
+      "rationale": "Markdown remains editable.",
+      "consequences": "Accepted facts can be reviewed.",
+      "reevaluate_when": "The storage boundary changes.",
+      "alternatives": ["Conversation-only memory"],
+      "rejected_paths": ["Opaque state"]
+    }
+  ],
+  "updated_decisions": [],
+  "open_loops": [],
+  "timeline_events": [
+    {
+      "id": "timeline-1",
+      "occurred_at": "2026-08-23T01:03:03Z",
+      "revision": 1,
+      "class": "verified",
+      "title": "Proposal validation passed",
+      "summary": "Focused validation completed.",
+      "evidence": [
+        {
+          "evidence_id": "ev-verify",
+          "session_id": "session-1",
+          "jsonl_line": 2,
+          "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "summary": "go test passed"
+        }
+      ],
+      "decision_ids": ["decision-1"],
+      "open_loop_ids": []
+    }
+  ],
+  "current_state_patch": {
+    "expected_revision": 0,
+    "goal": "Ship the durable ledger",
+    "last_verified": "2026-08-23T01:03:03Z",
+    "branch": "main",
+    "next_action": "Render accepted entities",
+    "first_inspection": "Read the accepted ledger",
+    "last_updated": "2026-08-23T01:03:03Z",
+    "uncommitted_changes": [],
+    "blockers": [],
+    "open_risks": [],
+    "source_sessions": ["session-1"],
+    "evidence": [
+      {
+        "evidence_id": "ev-verify",
+        "session_id": "session-1",
+        "jsonl_line": 2,
+        "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "summary": "go test passed"
+      }
+    ]
+  },
+  "session_report": {
+    "id": "session-report-1",
+    "project_id": "project-1111111111111111",
+    "session_id": "session-1",
+    "revision": 1,
+    "initial_goal": "Build a durable review ledger",
+    "goal_changes": [],
+    "phases": [
+      {
+        "title": "Validation",
+        "summary": "Validated a bounded proposal.",
+        "evidence": [
+          {
+            "evidence_id": "ev-verify",
+            "session_id": "session-1",
+            "jsonl_line": 2,
+            "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "summary": "go test passed"
+          }
+        ]
+      }
+    ],
+    "files": ["internal/proposal/validate.go"],
+    "commits": [],
+    "verification": ["go test ./internal/proposal"],
+    "decisions_added": ["decision-1"],
+    "decisions_revised": [],
+    "open_loops_created": [],
+    "open_loops_closed": [],
+    "previous_session_id": "",
+    "next_session_id": "",
+    "evidence": [
+      {
+        "evidence_id": "ev-verify",
+        "session_id": "session-1",
+        "jsonl_line": 2,
+        "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "summary": "go test passed"
+      }
+    ]
+  },
+  "evidence_links": [
+    {"entity_id": "decision-1", "evidence_id": "ev-message", "relation": "supports"},
+    {"entity_id": "timeline-1", "evidence_id": "ev-verify", "relation": "verifies"},
+    {"entity_id": "current-state", "evidence_id": "ev-verify", "relation": "verifies"},
+    {"entity_id": "session-report-1", "evidence_id": "ev-verify", "relation": "verifies"}
+  ]
+}
