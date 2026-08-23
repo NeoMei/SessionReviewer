@@ -600,6 +600,135 @@ func TestDocumentSectionScannerValidatesFenceInfoStrings(t *testing.T) {
 	}
 }
 
+func TestDocumentSectionDiscoveryFollowsCommonMarkAST(t *testing.T) {
+	tests := map[string]struct {
+		body string
+		want []string
+	}{
+		"thematic breaks and indented code end paragraph context": {
+			body: `***
+<x-compact>
+## Hidden after compact break
+</x-compact>
+
+* * *
+<x-spaced>
+## Hidden after spaced break
+</x-spaced>
+
+    indented code
+<x-after-code>
+## Hidden after indented code
+</x-after-code>
+
+## Real after blocks
+`,
+			want: []string{"Real after blocks"},
+		},
+		"nested list and blockquote headings are not ledger sections": {
+			body: `- list item
+
+  ## Nested list H2
+
+> ## Nested blockquote H2
+
+## Top-level H2
+`,
+			want: []string{"Top-level H2"},
+		},
+		"all HTML block types hide internal headings": {
+			body: `<script>
+## Type 1 script
+</script>
+<pre>
+## Type 1 pre
+</pre>
+<style>
+## Type 1 style
+</style>
+<textarea>
+## Type 1 textarea
+</textarea>
+<!--
+## Type 2 comment
+-->
+<?processing
+## Type 3 instruction
+?>
+<!DOCTYPE
+## Type 4 declaration
+>
+<![CDATA[
+## Type 5 CDATA
+]]>
+<div>
+## Type 6 block tag
+</div>
+
+<x-widget disabled data-label="a > b">
+## Type 7 custom tag
+</x-widget>
+
+## Real after HTML
+`,
+			want: []string{"Real after HTML"},
+		},
+		"valid fences hide headings and invalid backtick info does not": {
+			body: "``` go\n## Hidden backtick\n```\n~~~ go`allowed\n## Hidden tilde\n~~~\n``` go`invalid\n## Visible after invalid opener\n```\n",
+			want: []string{"Visible after invalid opener"},
+		},
+		"top-level setext H2 is a section but nested setext is not": {
+			body: `- Nested setext
+  -------------
+
+> Nested quote setext
+> -------------------
+
+Top-level setext
+----------------
+Body.
+`,
+			want: []string{"Top-level setext"},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			doc := mustParseDocument(t, []byte(validFrontmatter+"---\n"+test.body))
+			got := make([]string, 0, len(doc.Sections))
+			for _, section := range doc.Sections {
+				got = append(got, section.Name)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("sections=%v want=%v", got, test.want)
+			}
+			if name == "top-level setext H2 is a section but nested setext is not" {
+				if heading := doc.Sections[0].Heading; heading != "Top-level setext\n----------------" {
+					t.Fatalf("Setext heading source was not preserved exactly: %q", heading)
+				}
+			}
+			first, err := doc.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			parsed := mustParseDocument(t, first)
+			reparsedNames := make([]string, 0, len(parsed.Sections))
+			for _, section := range parsed.Sections {
+				reparsedNames = append(reparsedNames, section.Name)
+			}
+			if !reflect.DeepEqual(reparsedNames, test.want) {
+				t.Fatalf("reparsed sections=%v want=%v", reparsedNames, test.want)
+			}
+			second, err := parsed.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(first, second) {
+				t.Fatalf("render unstable:\nfirst:\n%s\nsecond:\n%s", first, second)
+			}
+		})
+	}
+}
+
 func TestDocumentRejectsMalformedInput(t *testing.T) {
 	tests := map[string][]byte{
 		"invalid UTF-8":         append([]byte(validFrontmatter), 0xff),

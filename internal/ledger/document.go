@@ -11,6 +11,9 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/text"
 	"gopkg.in/yaml.v3"
 )
 
@@ -477,73 +480,10 @@ func requiredRevision(mapping *yaml.Node) (int, error) {
 }
 
 func parseSections(body string) (string, []Section, error) {
-	type heading struct {
-		start int
-		end   int
-		name  string
-		text  string
-	}
-	var headings []heading
-	var fence byte
-	var fenceLength int
-	var html htmlBlock
-	var paragraphOpen bool
-
-	for start := 0; start < len(body); {
-		end := strings.IndexByte(body[start:], '\n')
-		if end < 0 {
-			end = len(body)
-		} else {
-			end += start
-		}
-		line := body[start:end]
-		trimmed := strings.TrimLeft(line, " ")
-		indent := len(line) - len(trimmed)
-		if html.kind != htmlNone {
-			if html.endsOnBlank {
-				if strings.TrimSpace(line) == "" {
-					html = htmlBlock{}
-				}
-			} else if strings.Contains(strings.ToLower(line), html.endMarker) {
-				html = htmlBlock{}
-			}
-		} else if indent <= 3 {
-			if fence != 0 {
-				if marker, count := fenceMarker(trimmed); marker == fence && count >= fenceLength && strings.Trim(strings.TrimLeft(trimmed, string(marker)), " \t") == "" {
-					fence, fenceLength = 0, 0
-				}
-			} else if marker, count := fenceMarker(trimmed); count >= 3 && validFenceOpener(trimmed, marker, count) {
-				fence, fenceLength = marker, count
-				paragraphOpen = false
-			} else if candidate, ok := startHTMLBlock(trimmed); ok {
-				html = candidate
-				paragraphOpen = false
-				if !html.endsOnBlank && strings.Contains(strings.ToLower(trimmed), html.endMarker) {
-					html = htmlBlock{}
-				}
-			} else if !paragraphOpen && isCompleteType7HTMLTagLine(trimmed) {
-				html = htmlBlock{kind: htmlUntilBlank, endsOnBlank: true}
-			} else {
-				if name, ok := sectionName(trimmed); ok {
-					headings = append(headings, heading{start: start, end: end, name: name, text: line})
-					paragraphOpen = false
-				} else if strings.TrimSpace(line) == "" {
-					paragraphOpen = false
-				} else if isATXBlockHeading(trimmed) || isSetextHeadingUnderline(trimmed) {
-					paragraphOpen = false
-				} else {
-					paragraphOpen = true
-				}
-			}
-		} else if strings.TrimSpace(line) == "" {
-			paragraphOpen = false
-		} else {
-			paragraphOpen = true
-		}
-		if end == len(body) {
-			break
-		}
-		start = end + 1
+	source := []byte(body)
+	headings, err := topLevelH2Headings(source)
+	if err != nil {
+		return "", nil, err
 	}
 	if len(headings) > maxSections {
 		return "", nil, invalidDocument("too many sections")
@@ -556,15 +496,15 @@ func parseSections(body string) (string, []Section, error) {
 			return "", nil, invalidDocument("duplicate section heading")
 		}
 		seen[item.name] = struct{}{}
-		bodyStart := item.end
-		if bodyStart < len(body) {
-			bodyStart++
-		}
 		bodyEnd := len(body)
 		if i+1 < len(headings) {
 			bodyEnd = headings[i+1].start
 		}
-		sections = append(sections, Section{Name: item.name, Heading: item.text, Body: body[bodyStart:bodyEnd]})
+		sections = append(sections, Section{
+			Name:    item.name,
+			Heading: body[item.start:item.headingEnd],
+			Body:    body[item.bodyStart:bodyEnd],
+		})
 	}
 	if len(headings) == 0 {
 		return body, sections, nil
@@ -572,239 +512,88 @@ func parseSections(body string) (string, []Section, error) {
 	return body[:headings[0].start], sections, nil
 }
 
-func isATXBlockHeading(line string) bool {
-	count := 0
-	for count < len(line) && line[count] == '#' {
-		count++
-	}
-	return count >= 1 && count <= 6 && (count == len(line) || line[count] == ' ' || line[count] == '\t')
+type sourceHeading struct {
+	start      int
+	headingEnd int
+	bodyStart  int
+	name       string
 }
 
-func isSetextHeadingUnderline(line string) bool {
-	line = strings.TrimSpace(line)
-	if line == "" || (line[0] != '=' && line[0] != '-') {
-		return false
-	}
-	for index := 1; index < len(line); index++ {
-		if line[index] != line[0] {
-			return false
-		}
-	}
-	return true
-}
-
-func isCompleteType7HTMLTagLine(line string) bool {
-	if len(line) < 3 || line[0] != '<' {
-		return false
-	}
-	if line[1] == '/' {
-		index, ok := consumeHTMLTagName(line, 2)
-		if !ok {
-			return false
-		}
-		index = skipHTMLSpace(line, index)
-		return index < len(line) && line[index] == '>' && onlyHTMLSpace(line, index+1)
-	}
-
-	index, ok := consumeHTMLTagName(line, 1)
-	if !ok {
-		return false
-	}
-	for {
-		if index >= len(line) {
-			return false
-		}
-		if line[index] == '>' {
-			return onlyHTMLSpace(line, index+1)
-		}
-		if line[index] == '/' && index+1 < len(line) && line[index+1] == '>' {
-			return onlyHTMLSpace(line, index+2)
-		}
-		if line[index] != ' ' && line[index] != '\t' {
-			return false
-		}
-		index = skipHTMLSpace(line, index)
-		if index >= len(line) {
-			return false
-		}
-		if line[index] == '>' {
-			return onlyHTMLSpace(line, index+1)
-		}
-		if line[index] == '/' && index+1 < len(line) && line[index+1] == '>' {
-			return onlyHTMLSpace(line, index+2)
+func topLevelH2Headings(source []byte) ([]sourceHeading, error) {
+	root := goldmark.DefaultParser().Parse(text.NewReader(source))
+	headings := make([]sourceHeading, 0)
+	for node := root.FirstChild(); node != nil; node = node.NextSibling() {
+		heading, ok := node.(*ast.Heading)
+		if !ok || heading.Level != 2 || heading.Lines().Len() == 0 {
+			continue
 		}
 
-		var attributeOK bool
-		index, attributeOK = consumeHTMLAttributeName(line, index)
-		if !attributeOK {
-			return false
+		name := strings.TrimSpace(string(heading.Text(source)))
+		if name == "" {
+			continue
 		}
-		afterName := index
-		afterSpace := skipHTMLSpace(line, index)
-		if afterSpace < len(line) && line[afterSpace] == '=' {
-			index = skipHTMLSpace(line, afterSpace+1)
-			var valueOK bool
-			index, valueOK = consumeHTMLAttributeValue(line, index)
-			if !valueOK {
-				return false
+		first := heading.Lines().At(0)
+		last := heading.Lines().At(heading.Lines().Len() - 1)
+		start := physicalLineStart(source, first.Start)
+		contentEnd, afterContent := physicalLineEnd(source, last.Stop)
+		headingEnd, bodyStart := contentEnd, afterContent
+		if !isSourceATXH2(source[start:contentEnd]) {
+			underlineStart := afterContent
+			if last.Stop > 0 && last.Stop <= len(source) && source[last.Stop-1] == '\n' {
+				underlineStart = last.Stop
 			}
-		} else {
-			index = afterName
+			headingEnd, bodyStart = physicalLineEnd(source, underlineStart)
 		}
+		if headingEnd < start || bodyStart < headingEnd || bodyStart > len(source) {
+			return nil, invalidDocument("invalid Markdown heading source position")
+		}
+		headings = append(headings, sourceHeading{
+			start:      start,
+			headingEnd: headingEnd,
+			bodyStart:  bodyStart,
+			name:       name,
+		})
 	}
+	return headings, nil
 }
 
-func consumeHTMLTagName(line string, index int) (int, bool) {
-	if index >= len(line) || !isASCIILetter(line[index]) {
-		return index, false
+func physicalLineStart(source []byte, position int) int {
+	if position < 0 {
+		return 0
 	}
-	index++
-	for index < len(line) && (isASCIILetter(line[index]) || isASCIIDigit(line[index]) || line[index] == '-') {
+	if position > len(source) {
+		position = len(source)
+	}
+	if index := bytes.LastIndexByte(source[:position], '\n'); index >= 0 {
+		return index + 1
+	}
+	return 0
+}
+
+func physicalLineEnd(source []byte, position int) (int, int) {
+	if position < 0 {
+		position = 0
+	}
+	if position > len(source) {
+		position = len(source)
+	}
+	if index := bytes.IndexByte(source[position:], '\n'); index >= 0 {
+		end := position + index
+		return end, end + 1
+	}
+	return len(source), len(source)
+}
+
+func isSourceATXH2(line []byte) bool {
+	index := 0
+	for index < len(line) && index < 3 && line[index] == ' ' {
 		index++
 	}
-	return index, true
-}
-
-func consumeHTMLAttributeName(line string, index int) (int, bool) {
-	if index >= len(line) || !(isASCIILetter(line[index]) || line[index] == '_' || line[index] == ':') {
-		return index, false
-	}
-	index++
-	for index < len(line) {
-		value := line[index]
-		if !(isASCIILetter(value) || isASCIIDigit(value) || value == '_' || value == '.' || value == ':' || value == '-') {
-			break
-		}
-		index++
-	}
-	return index, true
-}
-
-func consumeHTMLAttributeValue(line string, index int) (int, bool) {
-	if index >= len(line) {
-		return index, false
-	}
-	if line[index] == '\'' || line[index] == '"' {
-		quote := line[index]
-		index++
-		for index < len(line) && line[index] != quote {
-			index++
-		}
-		if index == len(line) {
-			return index, false
-		}
-		return index + 1, true
-	}
-	start := index
-	for index < len(line) && !strings.ContainsRune(" \t\n\"'=<>`", rune(line[index])) {
-		index++
-	}
-	return index, index > start
-}
-
-func skipHTMLSpace(line string, index int) int {
-	for index < len(line) && (line[index] == ' ' || line[index] == '\t') {
-		index++
-	}
-	return index
-}
-
-func onlyHTMLSpace(line string, index int) bool {
-	return skipHTMLSpace(line, index) == len(line)
-}
-
-func isASCIILetter(value byte) bool {
-	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
-}
-
-func isASCIIDigit(value byte) bool {
-	return value >= '0' && value <= '9'
-}
-
-type htmlBlockKind uint8
-
-const (
-	htmlNone htmlBlockKind = iota
-	htmlUntilMarker
-	htmlUntilBlank
-)
-
-type htmlBlock struct {
-	kind        htmlBlockKind
-	endMarker   string
-	endsOnBlank bool
-}
-
-func startHTMLBlock(line string) (htmlBlock, bool) {
-	lower := strings.ToLower(line)
-	for _, tag := range []string{"script", "pre", "style", "textarea"} {
-		prefix := "<" + tag
-		if strings.HasPrefix(lower, prefix) && htmlTagBoundary(lower, len(prefix)) {
-			return htmlBlock{kind: htmlUntilMarker, endMarker: "</" + tag + ">"}, true
-		}
-	}
-	for _, marker := range []struct {
-		start string
-		end   string
-	}{
-		{"<!--", "-->"},
-		{"<?", "?>"},
-		{"<![cdata[", "]]>"},
-	} {
-		if strings.HasPrefix(lower, marker.start) {
-			return htmlBlock{kind: htmlUntilMarker, endMarker: marker.end}, true
-		}
-	}
-	if strings.HasPrefix(line, "<!") && len(line) > 2 && line[2] >= 'A' && line[2] <= 'Z' {
-		return htmlBlock{kind: htmlUntilMarker, endMarker: ">"}, true
-	}
-	if tag, ok := leadingHTMLTag(lower); ok {
-		if _, exists := commonMarkBlockTags[tag]; exists {
-			return htmlBlock{kind: htmlUntilBlank, endsOnBlank: true}, true
-		}
-	}
-	return htmlBlock{}, false
-}
-
-func leadingHTMLTag(line string) (string, bool) {
-	if len(line) < 2 || line[0] != '<' {
-		return "", false
-	}
-	index := 1
-	if index < len(line) && line[index] == '/' {
-		index++
-	}
-	start := index
-	for index < len(line) && ((line[index] >= 'a' && line[index] <= 'z') || (line[index] >= '0' && line[index] <= '9')) {
-		index++
-	}
-	if index == start || !htmlTagBoundary(line, index) {
-		return "", false
-	}
-	return line[start:index], true
-}
-
-func htmlTagBoundary(line string, index int) bool {
-	if index == len(line) {
-		return true
-	}
-	switch line[index] {
-	case ' ', '\t', '>', '/':
-		return true
-	default:
+	if index+2 > len(line) || line[index] != '#' || line[index+1] != '#' {
 		return false
 	}
-}
-
-var commonMarkBlockTags = map[string]struct{}{
-	"address": {}, "article": {}, "aside": {}, "base": {}, "basefont": {}, "blockquote": {}, "body": {},
-	"caption": {}, "center": {}, "col": {}, "colgroup": {}, "dd": {}, "details": {}, "dialog": {}, "dir": {},
-	"div": {}, "dl": {}, "dt": {}, "fieldset": {}, "figcaption": {}, "figure": {}, "footer": {}, "form": {},
-	"frame": {}, "frameset": {}, "h1": {}, "h2": {}, "h3": {}, "h4": {}, "h5": {}, "h6": {}, "head": {},
-	"header": {}, "hr": {}, "html": {}, "iframe": {}, "legend": {}, "li": {}, "link": {}, "main": {}, "menu": {},
-	"menuitem": {}, "nav": {}, "noframes": {}, "ol": {}, "optgroup": {}, "option": {}, "p": {}, "param": {},
-	"search": {}, "section": {}, "summary": {}, "table": {}, "tbody": {}, "td": {}, "tfoot": {}, "th": {},
-	"thead": {}, "title": {}, "tr": {}, "track": {}, "ul": {},
+	index += 2
+	return index == len(line) || line[index] == ' ' || line[index] == '\t'
 }
 
 func sectionName(line string) (string, bool) {
@@ -839,22 +628,6 @@ func validatedSectionName(name string) (string, error) {
 		return "", ErrInvalidSectionName
 	}
 	return name, nil
-}
-
-func fenceMarker(line string) (byte, int) {
-	if line == "" || (line[0] != '`' && line[0] != '~') {
-		return 0, 0
-	}
-	marker := line[0]
-	count := 0
-	for count < len(line) && line[count] == marker {
-		count++
-	}
-	return marker, count
-}
-
-func validFenceOpener(line string, marker byte, count int) bool {
-	return marker != '`' || !strings.ContainsRune(line[count:], '`')
 }
 
 func normalizeSectionBody(body string) string {
