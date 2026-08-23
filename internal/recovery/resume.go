@@ -445,8 +445,9 @@ func (out *recoveryMarkdownBuilder) raw(value string) {
 
 func (out *recoveryMarkdownBuilder) escaped(value string) {
 	space := false
-	first := true
-	for _, r := range value {
+	characters := []rune(value)
+	for index := 0; index < len(characters); index++ {
+		r := characters[index]
 		if unicode.IsSpace(r) || unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
 			space = out.text.Len() != 0
 			continue
@@ -456,30 +457,73 @@ func (out *recoveryMarkdownBuilder) escaped(value string) {
 			space = false
 		}
 		switch r {
+		case '\\':
+			out.raw("\\\\")
+			continue
 		case '&':
 			out.raw("&amp;")
-			first = false
+			if end, entityLike := entityLikeTerminator(characters, index); entityLike {
+				for _, literal := range characters[index+1 : end+1] {
+					out.raw(string(literal))
+				}
+				index = end
+			}
 			continue
 		case '<':
 			out.raw("&lt;")
-			first = false
 			continue
 		case '>':
 			out.raw("&gt;")
-			first = false
 			continue
 		}
-		if strings.ContainsRune("\\`*_{}[]()!|#", r) || (first && strings.ContainsRune("+-", r)) {
+		if isASCIIPunctuation(r) {
 			out.raw("\\")
 		}
 		var encoded [utf8.UTFMax]byte
 		size := utf8.EncodeRune(encoded[:], r)
 		out.raw(string(encoded[:size]))
-		first = false
 		if out.overflow {
 			return
 		}
 	}
+}
+
+func isASCIIPunctuation(r rune) bool {
+	return r >= '!' && r <= '/' || r >= ':' && r <= '@' || r >= '[' && r <= '`' || r >= '{' && r <= '~'
+}
+
+func entityLikeTerminator(characters []rune, ampersand int) (int, bool) {
+	index := ampersand + 1
+	if index >= len(characters) {
+		return 0, false
+	}
+	if characters[index] == '#' {
+		index++
+		if index < len(characters) && (characters[index] == 'x' || characters[index] == 'X') {
+			index++
+			start := index
+			for index < len(characters) && (characters[index] >= '0' && characters[index] <= '9' || characters[index] >= 'a' && characters[index] <= 'f' || characters[index] >= 'A' && characters[index] <= 'F') {
+				index++
+			}
+			return index, index > start && index < len(characters) && characters[index] == ';'
+		}
+		start := index
+		for index < len(characters) && characters[index] >= '0' && characters[index] <= '9' {
+			index++
+		}
+		return index, index > start && index < len(characters) && characters[index] == ';'
+	}
+	if !isASCIIAlpha(characters[index]) {
+		return 0, false
+	}
+	for index < len(characters) && (isASCIIAlpha(characters[index]) || characters[index] >= '0' && characters[index] <= '9') {
+		index++
+	}
+	return index, index < len(characters) && characters[index] == ';'
+}
+
+func isASCIIAlpha(character rune) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z'
 }
 
 func (out *recoveryMarkdownBuilder) field(name, value string) {

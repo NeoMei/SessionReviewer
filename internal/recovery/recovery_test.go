@@ -3,14 +3,18 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"html"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
 
 const recoveryProjectID = "project-0123456789abcdef"
@@ -85,8 +89,9 @@ func TestHistoryFollowsSupersedesAndGroupsOnlyUnresolvedEditableTags(t *testing.
 		t.Fatalf("themes=%+v want=%+v", view.Themes, wantThemes)
 	}
 	markdown := view.Markdown()
-	for _, required := range []string{"# Project history", "decision-new", "decision-old", "Supersedes", "loop-resolved", "ALPHA", "durability"} {
-		if !strings.Contains(markdown, required) {
+	visible := renderGFMVisibleText(t, markdown)
+	for _, required := range []string{"Project history", "decision-new", "decision-old", "Supersedes", "loop-resolved", "ALPHA", "durability"} {
+		if !strings.Contains(visible, required) {
 			t.Fatalf("history omitted %q:\n%s", required, markdown)
 		}
 	}
@@ -185,7 +190,7 @@ func TestRecoveryHandlesEmptyAcceptedState(t *testing.T) {
 	if view.ProjectID != recoveryProjectID || len(view.Timeline) != 0 || len(view.Decisions) != 0 || len(view.OpenLoops) != 0 || len(view.Themes) != 0 {
 		t.Fatalf("view=%+v", view)
 	}
-	if !strings.Contains(card.Markdown(), recoveryProjectID) || !strings.Contains(view.Markdown(), recoveryProjectID) {
+	if !strings.Contains(renderGFMVisibleText(t, card.Markdown()), recoveryProjectID) || !strings.Contains(renderGFMVisibleText(t, view.Markdown()), recoveryProjectID) {
 		t.Fatal("empty views omitted project identity")
 	}
 }
@@ -292,6 +297,61 @@ func TestRecoveryMarkdownPreservesLiteralEntitiesAndHostilePunctuation(t *testin
 		if !strings.Contains(history, want) {
 			t.Fatalf("theme spelling is not visually distinct for %q:\n%s", want, history)
 		}
+	}
+}
+
+func TestRecoveryMarkdownEveryASCIIPunctuationRendersLiterallyUnderGFM(t *testing.T) {
+	const punctuation = `!"#$%&'()*+,-./:;<=>?@[\]^_` + "`" + `{|}~`
+	for _, character := range punctuation {
+		t.Run(string(character), func(t *testing.T) {
+			markdown := (ResumeCard{ProjectID: recoveryProjectID, Goal: string(character)}).Markdown()
+			wantSource := "**Goal:** " + expectedLiteralMarkdown(string(character))
+			if !strings.Contains(markdown, wantSource) {
+				t.Fatalf("source does not conservatively escape %q: want %q in\n%s", character, wantSource, markdown)
+			}
+			visible := renderGFMVisibleText(t, markdown)
+			if !strings.Contains(visible, "Goal: "+string(character)) {
+				t.Fatalf("visible text changed %q: %q", character, visible)
+			}
+		})
+	}
+}
+
+func TestRecoveryMarkdownHostileGFMAndObsidianConstructsRemainLiteral(t *testing.T) {
+	values := []string{
+		"~~strike~~",
+		"==highlight==",
+		"$math$ and $$block$$",
+		"[[target|label]] and ![[embed]]",
+		"> [!NOTE] callout",
+		"#tag _emphasis_ *strong*",
+		"`code` and ```fence```",
+		"{key:value} [label](target)",
+		`"quoted": /path?x=1&y=2`,
+		"a\\b | table | cell",
+		"Unicode 中文 🚀 © remains unchanged",
+	}
+	for _, value := range values {
+		t.Run(value, func(t *testing.T) {
+			view := HistoryView{ProjectID: recoveryProjectID, Themes: []Theme{{Name: value}}}
+			markdown := view.Markdown()
+			wantSource := "- " + expectedLiteralMarkdown(value)
+			if !strings.Contains(markdown, wantSource) {
+				t.Fatalf("source omitted conservative literal encoding %q:\n%s", wantSource, markdown)
+			}
+			visible := renderGFMVisibleText(t, markdown)
+			if !strings.Contains(visible, value) {
+				t.Fatalf("GFM visible text changed %q:\n%s\nvisible=%q", value, markdown, visible)
+			}
+		})
+	}
+
+	controlled := (ResumeCard{ProjectID: recoveryProjectID, Goal: "left\x00right\u202eend"}).Markdown()
+	if strings.ContainsAny(controlled, "\x00\u202e") {
+		t.Fatalf("control or format character survived source:\n%s", controlled)
+	}
+	if visible := renderGFMVisibleText(t, controlled); !strings.Contains(visible, "Goal: left right end") {
+		t.Fatalf("control removal merged visible tokens: %q", visible)
 	}
 }
 
@@ -546,4 +606,41 @@ func TestHistoryRepeatedCallsAreByteStable(t *testing.T) {
 	if !sort.StringsAreSorted(outputs) || outputs[0] != outputs[len(outputs)-1] {
 		t.Fatal("history output varied across calls")
 	}
+}
+
+func expectedLiteralMarkdown(value string) string {
+	var out strings.Builder
+	for _, character := range value {
+		switch character {
+		case '&':
+			out.WriteString("&amp;")
+		case '<':
+			out.WriteString("&lt;")
+		case '>':
+			out.WriteString("&gt;")
+		default:
+			if isTestASCIIPunctuation(character) {
+				out.WriteByte('\\')
+			}
+			out.WriteRune(character)
+		}
+	}
+	return out.String()
+}
+
+func isTestASCIIPunctuation(character rune) bool {
+	return character >= '!' && character <= '/' || character >= ':' && character <= '@' || character >= '[' && character <= '`' || character >= '{' && character <= '~'
+}
+
+var renderedHTMLTag = regexp.MustCompile(`(?s)<[^>]*>`)
+
+func renderGFMVisibleText(t *testing.T, markdown string) string {
+	t.Helper()
+	var rendered bytes.Buffer
+	parser := goldmark.New(goldmark.WithExtensions(extension.GFM))
+	if err := parser.Convert([]byte(markdown), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	withoutTags := renderedHTMLTag.ReplaceAllString(rendered.String(), " ")
+	return strings.Join(strings.Fields(html.UnescapeString(withoutTags)), " ")
 }
