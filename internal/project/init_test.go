@@ -518,6 +518,57 @@ func TestInitializeFailureDuringStateRecoversExactScaffold(t *testing.T) {
 	assertSingleMapping(t, data, id)
 }
 
+func TestInitializeOverviewRecoveryRevalidatesEarlierStateComponents(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	writeTestOverview(t, root, id)
+	marker := filepath.Join(data, "projects", id, "merge-bases", "late-marker")
+
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{},
+		afterStateComponent: func(name string) error {
+			if name != "queue" {
+				return nil
+			}
+			return os.WriteFile(marker, []byte("preserve"), 0o600)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unexpected content") {
+		t.Fatalf("err=%v", err)
+	}
+	assertOverviewIdentity(t, root, id)
+	body, readErr := os.ReadFile(marker)
+	if readErr != nil || string(body) != "preserve" {
+		t.Fatalf("marker=%q readErr=%v", body, readErr)
+	}
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+}
+
+func TestInitializeOverviewRecoveryRevalidatesEarlierStateModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission-bit mutation is not portable to Windows")
+	}
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	writeTestOverview(t, root, id)
+	queue := filepath.Join(data, "projects", id, "queue")
+
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{},
+		afterStateComponent: func(name string) error {
+			if name != "sync.lock" {
+				return nil
+			}
+			return os.Chmod(queue, 0o755)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "mode") {
+		t.Fatalf("err=%v", err)
+	}
+	assertOverviewIdentity(t, root, id)
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+}
+
 func TestInitializeConfigPostPublicationAmbiguityRecovers(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	id := "project-2a2a2a2a2a2a2a2a"

@@ -545,6 +545,10 @@ func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allo
 	} else if err := validateStrictPrivateDirectory(projectsRoot, projectID); err != nil {
 		return fmt.Errorf("invalid initialization scaffold root: %w", err)
 	}
+	projectInfo, err := projectsRoot.Lstat(projectID)
+	if err != nil {
+		return err
+	}
 	projectRoot, err := openStableRoot(projectsRoot, projectID)
 	if err != nil {
 		return err
@@ -554,6 +558,7 @@ func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allo
 		return fmt.Errorf("initialization scaffold has unexpected content: %w", err)
 	}
 
+	componentInfos := make(map[string]os.FileInfo, len(initializationStateComponents))
 	for _, relative := range initializationStateComponents {
 		info, statErr := projectRoot.Lstat(relative)
 		if errors.Is(statErr, os.ErrNotExist) {
@@ -567,6 +572,11 @@ func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allo
 		} else if err := validateStrictPrivateDirectory(projectRoot, relative); err != nil {
 			return fmt.Errorf("invalid initialization scaffold component %q: %w", relative, err)
 		}
+		info, err = projectRoot.Lstat(relative)
+		if err != nil {
+			return err
+		}
+		componentInfos[relative] = info
 		componentRoot, err := openStableRoot(projectRoot, relative)
 		if err != nil {
 			return err
@@ -618,10 +628,74 @@ func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allo
 			return err
 		}
 	}
-	if err := requireExactRootEntriesBounded(projectRoot, initializationStateComponents); err != nil {
-		return fmt.Errorf("initialization scaffold has unexpected content: %w", err)
+	return revalidateExactInitializationScaffold(projectsRoot, projectID, projectInfo, componentInfos, lockInfo)
+}
+
+func revalidateExactInitializationScaffold(projectsRoot *os.Root, projectID string, projectInfo os.FileInfo, componentInfos map[string]os.FileInfo, lockInfo os.FileInfo) error {
+	currentProject, err := projectsRoot.Lstat(projectID)
+	if err != nil || !sameStableEntry(currentProject, projectInfo) {
+		return errors.New("initialization scaffold root changed before final validation")
 	}
-	return requireExactRootEntriesBounded(lockRoot, []string{"sync.lock"})
+	if err := validateStrictPrivateDirectory(projectsRoot, projectID); err != nil {
+		return fmt.Errorf("invalid initialization scaffold root during final validation: %w", err)
+	}
+	projectRoot, err := openStableRoot(projectsRoot, projectID)
+	if err != nil {
+		return err
+	}
+	defer projectRoot.Close()
+	if err := requireExactRootEntriesBounded(projectRoot, initializationStateComponents); err != nil {
+		return fmt.Errorf("initialization scaffold has unexpected content during final validation: %w", err)
+	}
+
+	for _, relative := range initializationStateComponents {
+		current, err := projectRoot.Lstat(relative)
+		if err != nil || !sameStableEntry(current, componentInfos[relative]) {
+			return fmt.Errorf("initialization scaffold component %q identity or mode changed before final validation", relative)
+		}
+		if err := validateStrictPrivateDirectory(projectRoot, relative); err != nil {
+			return fmt.Errorf("invalid initialization scaffold component %q during final validation: %w", relative, err)
+		}
+		componentRoot, err := openStableRoot(projectRoot, relative)
+		if err != nil {
+			return err
+		}
+		want := []string(nil)
+		if relative == "locks" {
+			want = []string{"sync.lock"}
+		}
+		if err := requireExactRootEntriesBounded(componentRoot, want); err != nil {
+			_ = componentRoot.Close()
+			return fmt.Errorf("initialization scaffold component %q has unexpected content during final validation: %w", relative, err)
+		}
+		if relative == "locks" {
+			currentLock, err := componentRoot.Lstat("sync.lock")
+			if err != nil || !sameStableEntry(currentLock, lockInfo) {
+				_ = componentRoot.Close()
+				return errors.New("initialization sync lock changed before final validation")
+			}
+			if err := validateExactEmptyLock(componentRoot, currentLock); err != nil {
+				_ = componentRoot.Close()
+				return err
+			}
+		}
+		if err := componentRoot.Close(); err != nil {
+			return err
+		}
+		after, err := projectRoot.Lstat(relative)
+		if err != nil || !sameStableEntry(after, componentInfos[relative]) {
+			return fmt.Errorf("initialization scaffold component %q identity or mode changed during final validation", relative)
+		}
+	}
+	afterProject, err := projectsRoot.Lstat(projectID)
+	if err != nil || !sameStableEntry(afterProject, projectInfo) {
+		return errors.New("initialization scaffold root changed during final validation")
+	}
+	return nil
+}
+
+func sameStableEntry(current, expected os.FileInfo) bool {
+	return current != nil && expected != nil && os.SameFile(current, expected) && current.Mode() == expected.Mode()
 }
 
 func validateStrictPrivateDirectory(parent *os.Root, name string) error {
