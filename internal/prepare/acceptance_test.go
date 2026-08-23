@@ -372,9 +372,14 @@ func TestFoundationPacketFullResumesAtFirstRejectedEvent(t *testing.T) {
 	store := cursor.Store{Root: projectData}
 	expectedCursor := cursor.Cursor{}
 	for index, wantSummary := range []string{"first", "second", "third"} {
-		opts := fixture.options("checkpoint")
+		mode := "checkpoint"
+		if index == 0 {
+			mode = "review"
+		}
+		opts := fixture.options(mode)
 		opts.Limits = evidence.DefaultLimits()
 		opts.Limits.MaxEvents = 1
+		opts.FromStart = index == 0
 		var cursorBytes []byte
 		cursorPath := filepath.Join(projectData, "cursors", foundationSessionID+".json")
 		if index > 0 {
@@ -401,6 +406,10 @@ func TestFoundationPacketFullResumesAtFirstRejectedEvent(t *testing.T) {
 		}
 		if packet.FromCursor != wantFrom || packet.ToCursor != wantLine || len(packet.Events) != 1 || packet.Events[0].Summary != wantSummary {
 			t.Fatalf("segment %d packet=%+v", index+1, packet)
+		}
+		wantBoundary := evidence.CursorBoundary{Line: expectedCursor.LastLine, SourceHash: expectedCursor.LastHash}
+		if packet.ExpectedCursor != wantBoundary {
+			t.Fatalf("segment %d expected_cursor=%+v want=%+v", index+1, packet.ExpectedCursor, wantBoundary)
 		}
 		if packet.HasMore != (index < 2) {
 			t.Fatalf("segment %d has_more=%v", index+1, packet.HasMore)

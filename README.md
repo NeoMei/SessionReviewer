@@ -1,6 +1,6 @@
 # SessionReviewer
 
-SessionReviewer 的当前基础版本把本机 Codex session JSONL 流式转换为有界、脱敏的 evidence packet，供后续 Codex Skill 做项目历史整理。CLI 只负责确定性提取和文件安全，不会自行生成决策、结论或项目语义。
+SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go CLI 把本机 Codex session JSONL 流式转换为有界、脱敏的 evidence packet，SessionReviewer Skill 基于该 packet 生成语义 proposal，CLI 验证并 apply 到可编辑 Markdown ledger。CLI 只负责确定性提取、验证、安全写入和 accepted-ledger 恢复，不会自行生成决策、结论或项目语义。
 
 ## 要求与支持范围
 
@@ -108,7 +108,33 @@ session-reviewer.exe prepare review `
 
 Codex sessions root 按以下顺序解析：`--sessions-root`，`SESSION_REVIEWER_SESSIONS_ROOT`，`$CODEX_HOME/sessions`，最后是用户目录下的 `.codex/sessions`。当未传 `--session` 时，当前 session ID 依次取 `--current-session-id`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；全部缺失时才使用 cwd 和时间窗口保守推断。完整的 ID 优先级是 `--session` 最高，然后才是上述当前-session 来源。
 
-重要语义：`prepare` 永远不会创建、推进、修复或提交 accepted cursor。packet 满时会返回 `has_more: true`，`next_cursor` 和兼容字段 `to_cursor` 都停在最后一个已完整消费的记录，不会跨过因 packet 已满而被拒绝的记录。未来的 apply 阶段只有在语义变更成功持久化后才会以 `expected_cursor` 做 CAS 并提交 `next_cursor`。
+重要语义：`prepare` 永远不会创建、推进、修复或提交 accepted cursor。packet 满时会返回 `has_more: true`，`next_cursor` 和兼容字段 `to_cursor` 都停在最后一个已完整消费的记录，不会跨过因 packet 已满而被拒绝的记录。`apply` 会先验证 proposal 与该 packet 的 digest、evidence 和 revision，再渲染全部目标字节并持久化 ledger/receipt，最后才以 `expected_cursor` 做 CAS 提交 `next_cursor`。
+
+## 手动 prepare → Skill proposal → apply
+
+当前工作流不需要 sync 或后台 watcher。在 SessionReviewer Skill 中选择 `review` 或 `checkpoint`；Skill 会调用随包脚本准备一个 packet，读取必要的 accepted ledger 实体与 proposal schema/invariants，然后在本机临时目录中生成 proposal。也可将已生成的文件显式 apply：
+
+```bash
+session-reviewer apply \
+  --proposal /private/tmp/session-reviewer/proposal.json \
+  --evidence /private/tmp/session-reviewer/evidence.json \
+  --project /path/to/project
+```
+
+`apply` 成功时输出 `changed_files`、`cursor_advanced` 和 `already_applied`。如果 packet 为 `has_more: true`，必须等该次 apply 成功且 `cursor_advanced: true` 后才能 prepare 下一包；下一包的 `expected_cursor` 必须与上一包的 `next_cursor` 完全相等。只有显式要求从 session 开头复查时，第一包才可使用 `review --from-start`；后续包和 `already_applied: true` 后的重试都必须省略 `--from-start`。
+
+重复 apply 同一个已接受 proposal 会返回 `already_applied: true`，不重写 ledger 或派生图，也不改变字节、哈希或修改时间。如果在写入后、cursor CAS 前中断，receipt 会用于校验并恢复该次接受；任何中间用户编辑或边界不匹配都会失败关闭。
+
+ledger 是可编辑 Markdown。未知 frontmatter 字段和 CLI 不拥有的自定义章节会在后续 apply 中保留；已接受的 title、status、tags 和 narrative 是后续 proposal 的当前基线，只能通过 revision/evidence 验证的显式变更更新。`docs/session-review/diagrams/project-evolution.md` 中的两张 Mermaid graph 由 accepted ledger 派生，不是独立的语义来源，不应手工编辑。
+
+## accepted-ledger-only 恢复
+
+```bash
+session-reviewer resume --ledger-only --project /path/to/project
+session-reviewer history --ledger-only --project /path/to/project
+```
+
+`resume` 只渲染 accepted current state 与恢复信息，`history` 只渲染已接受的跨 session 历史。它们都不会读取、解释或接受 pending session evidence；如果恢复后还要纳入新证据，再进入上述 review/checkpoint 流程。
 
 ## 输出与隐私边界
 
@@ -119,7 +145,7 @@ Codex sessions root 按以下顺序解析：`--sessions-root`，`SESSION_REVIEWE
 - 脱敏覆盖常见 token、命名 secret、连接 URL、私钥和高熵候选，但它不是对任意敏感信息的形式化证明。evidence 仍应作为本地敏感项目资料保管，并在分享前检查。
 - 输出使用同目录原子替换；失败时保留原输出。输出不得位于 raw sessions 或本机 data 目录内，也不能经过符号链接、junction/reparse point 或非普通文件。
 - Windows 上，已存在的目标通过打开目录句柄上的 `os.Root.Rename` 替换；目标不存在时通过同一 root 的 `Link` 发布并用 `Remove` 清理临时名，因此不会覆盖同时创建的目标。不支持硬链接的文件系统会安全失败，不回退到可覆盖的新文件 rename。这是可见性与 no-clobber 合同，不是对所有文件系统的目录元数据 crash durability 承诺。
-- 该 Go CLI 不发起模型或 OpenAI API 调用，也不执行 Git commit、push、reset、checkout、switch、restore，不修改 Git 索引、分支、refs 或工作树。
+- 该 Go CLI 不发起模型或 OpenAI API 调用，也不执行 Git commit、add、push、reset、checkout、switch、restore，不修改 Git 索引、分支或 refs。`apply` 会按请求更改 ledger 工作树文件，这些是普通的未提交文件变更，不是 Git 操作。
 
 ## 常见错误与恢复
 
@@ -129,19 +155,19 @@ Codex sessions root 按以下顺序解析：`--sessions-root`，`SESSION_REVIEWE
 - cursor 损坏、已接受行被截断/改写，或需要完整复查：使用 `prepare review --from-start`。常规增量准备会校验 cursor 行的源哈希并在漂移时失败关闭；`--from-start` 绕过 cursor 读取与校验，且不修复它，便于后续显式恢复。
 - `output path is inside a protected data root`：把 `--output` 改到项目工作目录等独立位置。
 - root redirected/invalid：使用实际存在的物理目录，移除路径中的符号链接、junction 或 reparse point。
-- packet 的 `has_more` 为 `true`：不要手工假定整段已接受；保留 packet，交给未来的验证/apply 流程成功提交 cursor 后再准备下一段。
+- packet 的 `has_more` 为 `true`：不要手工假定整段已接受；保留 packet，交给当前验证/apply 流程成功提交 cursor 后再准备下一段。
 
 准备失败不会推进 cursor，也不会用半成品覆盖既有 evidence 文件。进入诊断映射的 `init`/`prepare` 运行失败使用稳定错误码和 `recovery` 操作，不把原始 session 内容、内部原因或敏感路径复制到 stdout/stderr。命令语法和用法错误仍输出普通用法文本并以状态码 2 退出，不使用该稳定诊断格式。
 
 ## 当前限制与后续模型
 
-当前仓库只完成 deterministic foundation。它尚不提供：
+当前仓库已完成 deterministic prepare/apply/ledger-only recovery 和语义 session-review Skill。它尚不提供：
 
-- semantic conclusions 或自动总结；
-- proposal `apply` 与完整 Markdown ledger；
-- Mermaid diagram、`resume`、`history` 或语义 session-review Skill；
-- deterministic `session-reviewer sync`、three-way conflict engine、后台 watcher 或发布安装包。
+- 脱离 Skill proposal 的 CLI semantic conclusions 或自动总结；
+- deterministic `session-reviewer sync` 和 three-way conflict engine；
+- 后台 watcher；
+- 已发布、可直接安装的用户发行包。
 
-计划中的 Obsidian 混合模型以 repository 内的 ledger 为 canonical source。普通编辑同步由确定性本地引擎处理：用户可显式运行 `session-reviewer sync`，无模型的后台 watcher 也可同步非冲突编辑。引擎对每个稳定实体比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）；单边变更可直接应用到另一边，不同字段变更可自动合并，同一字段冲突则保留两边并生成显式 conflict note。
+计划中的 Obsidian 混合模型以 repository 内的 ledger 为 canonical source。普通编辑同步将由未来的确定性本地引擎处理：预期用户可显式运行 `session-reviewer sync`，无模型的后台 watcher 也可同步非冲突编辑。这些都是未来工作，当前命令集中不存在 `sync` 或 watcher。计划中的引擎对每个稳定实体比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）；单边变更可直接应用到另一边，不同字段变更可自动合并，同一字段冲突则保留两边并生成显式 conflict note。
 
 Skill/模型用于语义 session review，并生成交给引擎验证的 proposal/apply；普通的确定性 Obsidian 同步不需要模型。该模型不是无状态、逐文件互相覆盖的镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。

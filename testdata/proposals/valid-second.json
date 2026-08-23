@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "project_id": "project-1111111111111111",
+  "session_id": "session-1",
+  "from_cursor": 4,
+  "to_cursor": 5,
+  "evidence_packet_sha256": "sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4",
+  "new_decisions": [],
+  "updated_decisions": [],
+  "open_loops": [
+    {
+      "operation": "update",
+      "patch": {
+        "id": "loop-1",
+        "expected_revision": 1,
+        "status": "resolved",
+        "evidence": [
+          {
+            "evidence_id": "ev-native",
+            "session_id": "session-1",
+            "jsonl_line": 5,
+            "source_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "summary": "native build passed"
+          }
+        ],
+        "attempts": ["Native build passed"],
+        "blocker": ""
+      }
+    }
+  ],
+  "timeline_events": [
+    {
+      "id": "timeline-2",
+      "occurred_at": "2026-08-23T01:05:03Z",
+      "revision": 1,
+      "class": "verified",
+      "title": "Native build verified",
+      "summary": "The second bounded packet completed native verification.",
+      "evidence": [
+        {
+          "evidence_id": "ev-native",
+          "session_id": "session-1",
+          "jsonl_line": 5,
+          "source_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+          "summary": "native build passed"
+        }
+      ],
+      "decision_ids": ["decision-1"],
+      "open_loop_ids": ["loop-1"]
+    }
+  ],
+  "current_state_patch": {
+    "expected_revision": 1,
+    "last_verified": "2026-08-23T01:05:03Z",
+    "next_action": "Publish the verified ledger",
+    "last_updated": "2026-08-23T01:05:03Z",
+    "blockers": [],
+    "open_risks": [],
+    "source_sessions": ["session-1"],
+    "evidence": [
+      {
+        "evidence_id": "ev-native",
+        "session_id": "session-1",
+        "jsonl_line": 5,
+        "source_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "summary": "native build passed"
+      }
+    ]
+  },
+  "session_report": {
+    "id": "session-report-1",
+    "project_id": "project-1111111111111111",
+    "session_id": "session-1",
+    "revision": 2,
+    "initial_goal": "Build a durable review ledger",
+    "goal_changes": ["Verify the native build"],
+    "phases": [
+      {
+        "title": "Validation",
+        "summary": "Accepted the first bounded packet.",
+        "evidence": []
+      },
+      {
+        "title": "Native verification",
+        "summary": "Accepted the second bounded packet and closed the verification loop.",
+        "evidence": [
+          {
+            "evidence_id": "ev-native",
+            "session_id": "session-1",
+            "jsonl_line": 5,
+            "source_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "summary": "native build passed"
+          }
+        ]
+      }
+    ],
+    "files": ["internal/proposal/validate.go", "internal/apply/apply.go"],
+    "commits": [],
+    "verification": ["go test ./internal/proposal", "go test ./internal/apply"],
+    "decisions_added": [],
+    "decisions_revised": [],
+    "open_loops_created": [],
+    "open_loops_closed": ["loop-1"],
+    "previous_session_id": "",
+    "next_session_id": "",
+    "evidence": [
+      {
+        "evidence_id": "ev-native",
+        "session_id": "session-1",
+        "jsonl_line": 5,
+        "source_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "summary": "native build passed"
+      }
+    ]
+  },
+  "evidence_links": [
+    {"entity_id": "loop-1", "evidence_id": "ev-native", "relation": "verifies"},
+    {"entity_id": "timeline-2", "evidence_id": "ev-native", "relation": "verifies"},
+    {"entity_id": "current-state", "evidence_id": "ev-native", "relation": "verifies"},
+    {"entity_id": "session-report-1", "evidence_id": "ev-native", "relation": "verifies"}
+  ]
+}

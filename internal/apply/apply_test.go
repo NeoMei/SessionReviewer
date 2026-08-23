@@ -22,6 +22,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	preparepkg "github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/proposal"
 )
@@ -129,6 +130,88 @@ func TestRunRepeatIsIdempotent(t *testing.T) {
 	got, err := Run(f.options())
 	if err != nil || !got.AlreadyApplied || len(got.ChangedFiles) != 0 || before != hashLedger(t, f.projectRoot) {
 		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func TestTwoPacketWorkflowIsIncrementalAndIdempotent(t *testing.T) {
+	f := newMultiPacketFixture(t)
+	p1 := f.prepare(t, true)
+	r1, err := Run(f.applyOptions(t, p1, "valid-first.json"))
+	if err != nil || !r1.CursorAdvanced || !p1.HasMore {
+		t.Fatalf("r1=%+v err=%v p1=%+v", r1, err, p1)
+	}
+
+	reportPath := filepath.Join(f.projectRoot, "docs", "session-review", "sessions", "session-report-1.md")
+	reportBody, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportBody = bytes.Replace(reportBody, []byte("---\n"), []byte("---\nuser_extension: keep-me\n"), 1)
+	reportBody = append(reportBody, []byte("\n## User Notes\n\nKeep this exact editable note.\n")...)
+	if err := os.WriteFile(reportPath, reportBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.initializeGitBaseline(t)
+	gitBefore := snapshotTree(t, filepath.Join(f.projectRoot, ".git"))
+
+	p2 := f.prepare(t, false)
+	if p2.ExpectedCursor != p1.NextCursor || p2.FromCursor != p1.ToCursor+1 || p2.FromCursor != 4 {
+		t.Fatalf("p1=%+v p2=%+v", p1, p2)
+	}
+	opts := f.applyOptions(t, p2, "valid-second.json")
+	r2, err := Run(opts)
+	if err != nil || !r2.CursorAdvanced || p2.HasMore {
+		t.Fatalf("r2=%+v err=%v p2=%+v", r2, err, p2)
+	}
+
+	state, err := ledger.Load(f.projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loop := state.OpenLoops["loop-1"]
+	report := state.Sessions["session-report-1"]
+	if len(state.Sessions) != 1 || report.Revision != 2 || len(state.Timeline) != 2 ||
+		state.CurrentState.Revision != 2 || state.CurrentState.NextAction != "Publish the verified ledger" ||
+		len(state.Decisions) != 1 || state.Decisions["decision-1"].Revision != 1 ||
+		len(state.OpenLoops) != 1 || loop.Revision != 2 || loop.Status != "resolved" {
+		t.Fatalf("state=%+v report=%+v loop=%+v", state, report, loop)
+	}
+	reportBody, err = os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, preserved := range []string{"user_extension: keep-me", "## User Notes", "Keep this exact editable note."} {
+		if !bytes.Contains(reportBody, []byte(preserved)) {
+			t.Fatalf("updated report lost editable unknown content %q", preserved)
+		}
+	}
+	diagramPath := filepath.Join(f.projectRoot, "docs", "session-review", "diagrams", "project-evolution.md")
+	diagramBody, err := os.ReadFile(diagramPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(diagramBody, []byte("```mermaid")) != 2 {
+		t.Fatalf("derived diagram does not contain both graphs: %q", diagramBody)
+	}
+
+	before := snapshotTree(t, f.projectRoot)
+	dataBefore := snapshotTree(t, f.dataDir)
+	again, err := Run(opts)
+	if err != nil || !again.AlreadyApplied || len(again.ChangedFiles) != 0 {
+		t.Fatalf("again=%+v err=%v", again, err)
+	}
+	if after := snapshotTree(t, f.projectRoot); after != before {
+		t.Fatalf("reapply changed bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if dataAfter := snapshotTree(t, f.dataDir); dataAfter != dataBefore {
+		t.Fatalf("reapply changed receipt or cursor bytes, hashes, modes, or mtimes\nbefore:\n%s\nafter:\n%s", dataBefore, dataAfter)
+	}
+	if got := snapshotTree(t, filepath.Join(f.projectRoot, ".git")); got != gitBefore {
+		t.Fatalf("apply mutated Git metadata\nbefore:\n%s\nafter:\n%s", gitBefore, got)
+	}
+	stableDiagram, err := os.ReadFile(diagramPath)
+	if err != nil || !bytes.Equal(stableDiagram, diagramBody) {
+		t.Fatalf("derived diagram changed on reapply: err=%v", err)
 	}
 }
 
@@ -1701,6 +1784,222 @@ func rewriteFixtureInputs(t *testing.T, f *applyTestFixture) {
 	}
 	if err := os.WriteFile(f.proposalPath, append(body, '\n'), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+type multiPacketFixture struct {
+	projectRoot string
+	dataDir     string
+	sessions    string
+	evidence    string
+	proposal    string
+	now         time.Time
+}
+
+func newMultiPacketFixture(t *testing.T) *multiPacketFixture {
+	t.Helper()
+	root := t.TempDir()
+	f := &multiPacketFixture{
+		projectRoot: filepath.Join(root, "project"),
+		dataDir:     filepath.Join(root, "data"),
+		sessions:    filepath.Join(root, "sessions"),
+		evidence:    filepath.Join(root, "work", "evidence.json"),
+		proposal:    filepath.Join(root, "work", "proposal.json"),
+		now:         time.Date(2026, 8, 23, 5, 0, 0, 0, time.UTC),
+	}
+	vaultRoot := filepath.Join(root, "vault")
+	for _, directory := range []string{f.projectRoot, vaultRoot, f.sessions, filepath.Dir(f.evidence)} {
+		if err := os.MkdirAll(directory, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := project.Initialize(project.InitOptions{
+		ProjectRoot: f.projectRoot,
+		VaultRoot:   vaultRoot,
+		DataDir:     f.dataDir,
+		Now:         func() time.Time { return f.now },
+		Random:      bytes.NewReader(bytes.Repeat([]byte{0x11}, 16)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessionPath := filepath.Join(f.sessions, "rollout.jsonl")
+	records := []any{
+		map[string]any{"timestamp": "2026-08-23T01:00:00Z", "type": "session_meta", "payload": map[string]any{"id": testSessionID, "cwd": f.projectRoot, "source": "test"}},
+		multiPacketMessage("first-message", "user", "Choose durable ledger", "2026-08-23T01:02:03Z"),
+		multiPacketToolResult("first-verify", "go test passed", "2026-08-23T01:03:03Z"),
+		multiPacketMessage("second-message", "user", "Verify native build", "2026-08-23T01:04:03Z"),
+		multiPacketToolResult("second-verify", "native build passed", "2026-08-23T01:05:03Z"),
+	}
+	var sessionBody bytes.Buffer
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sessionBody.Write(line)
+		sessionBody.WriteByte('\n')
+	}
+	if err := os.WriteFile(sessionPath, sessionBody.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+func multiPacketMessage(id, role, body, timestamp string) map[string]any {
+	return map[string]any{
+		"timestamp": timestamp,
+		"type":      "response_item",
+		"payload": map[string]any{
+			"type": "message", "id": id, "role": role,
+			"content": []map[string]any{{"type": "input_text", "text": body}},
+		},
+	}
+}
+
+func multiPacketToolResult(id, output, timestamp string) map[string]any {
+	return map[string]any{
+		"timestamp": timestamp,
+		"type":      "response_item",
+		"payload":   map[string]any{"type": "custom_tool_call_output", "id": id, "output": output},
+	}
+}
+
+func (f *multiPacketFixture) prepare(t *testing.T, fromStart bool) evidence.Packet {
+	t.Helper()
+	limits := evidence.DefaultLimits()
+	limits.MaxEvents = 2
+	mode := "checkpoint"
+	if fromStart {
+		mode = "review"
+	}
+	packet, err := preparepkg.Run(preparepkg.Options{
+		Mode: mode, SessionsRoot: f.sessions, SessionID: testSessionID,
+		CWD: f.projectRoot, DataDir: f.dataDir, Output: f.evidence,
+		GOOS: runtime.GOOS, Now: f.now, AmbiguityWindow: time.Second, Limits: limits,
+		FromStart: fromStart,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return packet
+}
+
+func (f *multiPacketFixture) applyOptions(t *testing.T, packet evidence.Packet, fixtureName string) Options {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "proposals", fixtureName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := proposal.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ProjectID, p.SessionID = packet.ProjectID, packet.SessionID
+	p.FromCursor, p.ToCursor = packet.FromCursor, packet.ToCursor
+	p.EvidencePacketSHA256, err = evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Events) != 2 {
+		t.Fatalf("packet events=%d want=2", len(packet.Events))
+	}
+	events := map[string]evidence.Item{
+		"ev-message": packet.Events[0], "ev-verify": packet.Events[1],
+		"ev-progress": packet.Events[0], "ev-native": packet.Events[1],
+	}
+	bindProposalEvidence(t, &p, events)
+	if fixtureName == "valid-first.json" {
+		loopEvidence := []ledger.EvidenceRef{evidenceRef(packet.Events[0], packet.SessionID)}
+		p.OpenLoops = []proposal.OpenLoopChange{{Operation: "create", Entity: &ledger.OpenLoop{
+			ID: "loop-1", ProjectID: packet.ProjectID, Title: "Verify native build", Status: "open", Revision: 1,
+			Tags: []string{"verification"}, SourceSessions: []string{packet.SessionID}, Evidence: loopEvidence,
+			Question: "Does the native build pass?", Attempts: []string{}, Blocker: "Native evidence pending",
+			NextExperiment: "Run the native build", CompletionCriterion: "The native build passes",
+		}}}
+		p.TimelineEvents[0].OpenLoopIDs = []string{"loop-1"}
+		p.SessionReport.OpenLoopsCreated = []string{"loop-1"}
+		p.EvidenceLinks = append(p.EvidenceLinks, proposal.EvidenceLink{EntityID: "loop-1", EvidenceID: packet.Events[0].ID, Relation: "supports"})
+	}
+	body, err = json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.proposal, append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return Options{
+		ProposalPath: f.proposal, EvidencePath: f.evidence,
+		ProjectRoot: f.projectRoot, DataDir: f.dataDir,
+		Now: func() time.Time { return f.now },
+	}
+}
+
+func bindProposalEvidence(t *testing.T, p *proposal.Proposal, events map[string]evidence.Item) {
+	t.Helper()
+	bind := func(refs []ledger.EvidenceRef) {
+		for index := range refs {
+			event, ok := events[refs[index].EvidenceID]
+			if !ok {
+				t.Fatalf("fixture references unknown evidence %q", refs[index].EvidenceID)
+			}
+			refs[index] = evidenceRef(event, p.SessionID)
+		}
+	}
+	for index := range p.NewDecisions {
+		bind(p.NewDecisions[index].Evidence)
+	}
+	for index := range p.UpdatedDecisions {
+		if p.UpdatedDecisions[index].Evidence != nil {
+			bind(*p.UpdatedDecisions[index].Evidence)
+		}
+	}
+	for index := range p.OpenLoops {
+		if p.OpenLoops[index].Entity != nil {
+			bind(p.OpenLoops[index].Entity.Evidence)
+		}
+		if p.OpenLoops[index].Patch != nil && p.OpenLoops[index].Patch.Evidence != nil {
+			bind(*p.OpenLoops[index].Patch.Evidence)
+		}
+	}
+	for index := range p.TimelineEvents {
+		bind(p.TimelineEvents[index].Evidence)
+	}
+	if p.CurrentStatePatch.Evidence != nil {
+		bind(*p.CurrentStatePatch.Evidence)
+	}
+	for index := range p.SessionReport.Phases {
+		bind(p.SessionReport.Phases[index].Evidence)
+	}
+	bind(p.SessionReport.Evidence)
+	for index := range p.EvidenceLinks {
+		event, ok := events[p.EvidenceLinks[index].EvidenceID]
+		if !ok {
+			t.Fatalf("fixture link references unknown evidence %q", p.EvidenceLinks[index].EvidenceID)
+		}
+		p.EvidenceLinks[index].EvidenceID = event.ID
+	}
+}
+
+func evidenceRef(event evidence.Item, sessionID string) ledger.EvidenceRef {
+	return ledger.EvidenceRef{
+		EvidenceID: event.ID, SessionID: sessionID, JSONLLine: event.JSONLLine,
+		SourceHash: event.SourceHash, Summary: event.Summary,
+	}
+}
+
+func (f *multiPacketFixture) initializeGitBaseline(t *testing.T) {
+	t.Helper()
+	commands := [][]string{
+		{"init", "-q"},
+		{"add", "."},
+		{"-c", "user.name=SessionReviewer Test", "-c", "user.email=test@example.invalid", "commit", "-q", "-m", "baseline"},
+	}
+	for _, args := range commands {
+		command := exec.Command("git", args...)
+		command.Dir = f.projectRoot
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, output)
+		}
 	}
 }
 
