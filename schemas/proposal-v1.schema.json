@@ -51,6 +51,16 @@
   },
   "$defs": {
     "nonempty_string": { "type": "string", "minLength": 1 },
+    "stable_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+      "maxLength": 128
+    },
+    "stable_id_array": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/stable_id" },
+      "uniqueItems": true
+    },
     "string_array": {
       "type": "array",
       "items": { "type": "string" },
@@ -76,7 +86,7 @@
       "additionalProperties": false,
       "required": ["evidence_id", "session_id", "jsonl_line", "source_hash", "summary"],
       "properties": {
-        "evidence_id": { "$ref": "#/$defs/nonempty_string" },
+        "evidence_id": { "$ref": "#/$defs/stable_id" },
         "session_id": { "$ref": "#/$defs/nonempty_string" },
         "jsonl_line": { "$ref": "#/$defs/positive_integer" },
         "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -97,13 +107,13 @@
         "reevaluate_when", "alternatives", "rejected_paths"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "project_id": { "$ref": "#/$defs/nonempty_string" },
         "title": { "$ref": "#/$defs/nonempty_string" },
         "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
         "revision": { "$ref": "#/$defs/positive_integer" },
         "tags": { "$ref": "#/$defs/nonempty_string_array" },
-        "supersedes": { "$ref": "#/$defs/nonempty_string_array" },
+        "supersedes": { "$ref": "#/$defs/stable_id_array" },
         "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
         "evidence": { "$ref": "#/$defs/evidence_array" },
         "context": { "type": "string" },
@@ -119,12 +129,12 @@
       "additionalProperties": false,
       "required": ["id", "expected_revision"],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "expected_revision": { "$ref": "#/$defs/positive_integer" },
         "title": { "type": "string" },
         "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
         "tags": { "$ref": "#/$defs/nonempty_string_array" },
-        "supersedes": { "$ref": "#/$defs/nonempty_string_array" },
+        "supersedes": { "$ref": "#/$defs/stable_id_array" },
         "source_sessions": { "$ref": "#/$defs/nonempty_string_array" },
         "evidence": { "$ref": "#/$defs/evidence_array" },
         "context": { "type": "string" },
@@ -157,7 +167,7 @@
         "evidence", "question", "attempts", "blocker", "next_experiment", "completion_criterion"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "project_id": { "$ref": "#/$defs/nonempty_string" },
         "title": { "$ref": "#/$defs/nonempty_string" },
         "status": { "enum": ["open", "blocked", "resolved", "abandoned", "archived"] },
@@ -177,7 +187,7 @@
       "additionalProperties": false,
       "required": ["id", "expected_revision"],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "expected_revision": { "$ref": "#/$defs/positive_integer" },
         "title": { "type": "string" },
         "status": { "enum": ["open", "blocked", "resolved", "abandoned", "archived"] },
@@ -230,15 +240,15 @@
       "additionalProperties": false,
       "required": ["id", "occurred_at", "revision", "class", "title", "summary", "evidence", "decision_ids", "open_loop_ids"],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "occurred_at": { "type": "string", "format": "date-time" },
         "revision": { "$ref": "#/$defs/positive_integer" },
         "class": { "enum": ["verified", "decision", "inference", "superseded", "pending_confirmation"] },
         "title": { "$ref": "#/$defs/nonempty_string" },
         "summary": { "type": "string" },
         "evidence": { "$ref": "#/$defs/evidence_array" },
-        "decision_ids": { "$ref": "#/$defs/nonempty_string_array" },
-        "open_loop_ids": { "$ref": "#/$defs/nonempty_string_array" }
+        "decision_ids": { "$ref": "#/$defs/stable_id_array" },
+        "open_loop_ids": { "$ref": "#/$defs/stable_id_array" }
       }
     },
     "current_state_patch": {
@@ -292,7 +302,7 @@
         "open_loops_created", "open_loops_closed", "previous_session_id", "next_session_id", "evidence"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/nonempty_string" },
+        "id": { "$ref": "#/$defs/stable_id" },
         "project_id": { "$ref": "#/$defs/nonempty_string" },
         "session_id": { "$ref": "#/$defs/nonempty_string" },
         "revision": { "$ref": "#/$defs/positive_integer" },
@@ -302,10 +312,10 @@
         "files": { "$ref": "#/$defs/string_array" },
         "commits": { "$ref": "#/$defs/string_array" },
         "verification": { "$ref": "#/$defs/string_array" },
-        "decisions_added": { "$ref": "#/$defs/nonempty_string_array" },
-        "decisions_revised": { "$ref": "#/$defs/nonempty_string_array" },
-        "open_loops_created": { "$ref": "#/$defs/nonempty_string_array" },
-        "open_loops_closed": { "$ref": "#/$defs/nonempty_string_array" },
+        "decisions_added": { "$ref": "#/$defs/stable_id_array" },
+        "decisions_revised": { "$ref": "#/$defs/stable_id_array" },
+        "open_loops_created": { "$ref": "#/$defs/stable_id_array" },
+        "open_loops_closed": { "$ref": "#/$defs/stable_id_array" },
         "previous_session_id": { "type": "string" },
         "next_session_id": { "type": "string" },
         "evidence": { "$ref": "#/$defs/evidence_array" }
@@ -316,8 +326,8 @@
       "additionalProperties": false,
       "required": ["entity_id", "evidence_id", "relation"],
       "properties": {
-        "entity_id": { "$ref": "#/$defs/nonempty_string" },
-        "evidence_id": { "$ref": "#/$defs/nonempty_string" },
+        "entity_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_id": { "$ref": "#/$defs/stable_id" },
         "relation": { "enum": ["supports", "verifies", "contradicts"] }
       }
     }

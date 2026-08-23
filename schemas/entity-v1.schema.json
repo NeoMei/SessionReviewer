@@ -6,7 +6,11 @@
   "additionalProperties": true,
   "required": ["id", "entity_type", "project_id", "revision"],
   "properties": {
-    "id": { "type": "string", "minLength": 1 },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+      "maxLength": 128
+    },
     "entity_type": { "type": "string", "enum": ["decision", "open_loop", "session"] },
     "project_id": { "type": "string", "minLength": 1 },
     "revision": { "type": "integer", "minimum": 1 },
@@ -40,7 +44,11 @@
           "status": { "enum": ["proposed", "accepted", "superseded", "archived"] },
           "supersedes": {
             "type": "array",
-            "items": { "type": "string", "minLength": 1 }
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+              "maxLength": 128
+            }
           }
         }
       }

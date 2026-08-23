@@ -495,6 +495,204 @@ func TestValidateAllowsShapeValidatedBalancedSHA256(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsUnsafeStableIDsAtomically(t *testing.T) {
+	base, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	bearerID := "Authorization: Bearer abcdefghijklmnop"
+	unsafeByShape := map[string]string{
+		"bearer secret":  bearerID,
+		"uppercase":      "Decision-1",
+		"path traversal": "decision/../one",
+		"too long":       "a" + strings.Repeat("b", 128),
+		"unicode":        "décision-1",
+		"control":        "decision-\n1",
+		"colon":          "decision:1",
+		"leading dash":   "-decision-1",
+	}
+	for name, unsafeID := range unsafeByShape {
+		t.Run("decision id "+name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			p.NewDecisions[0].ID = unsafeID
+			changes, err := Validate(p, packet, state)
+			if err == nil || !strings.Contains(err.Error(), "invalid stable id") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("unsafe decision id accepted atomically: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+
+	tests := map[string]func(*Proposal){
+		"decision patch id": func(p *Proposal) {
+			p.UpdatedDecisions = []DecisionPatch{{ID: bearerID, ExpectedRevision: 1, Title: strptr("changed")}}
+		},
+		"decision supersedes id": func(p *Proposal) { p.NewDecisions[0].Supersedes = []string{bearerID} },
+		"open-loop entity id": func(p *Proposal) {
+			p.OpenLoops = []OpenLoopChange{{Operation: "create", Entity: &ledger.OpenLoop{
+				ID: bearerID, ProjectID: projectID, Title: "Loop", Status: "open", Revision: 1,
+				Tags: []string{}, SourceSessions: []string{sessionID}, Evidence: []ledger.EvidenceRef{}, Attempts: []string{},
+			}}}
+		},
+		"open-loop patch id": func(p *Proposal) {
+			p.OpenLoops = []OpenLoopChange{{Operation: "update", Patch: &OpenLoopPatch{ID: bearerID, ExpectedRevision: 1, Title: strptr("changed")}}}
+		},
+		"timeline id":               func(p *Proposal) { p.TimelineEvents[0].ID = bearerID },
+		"timeline decision ref":     func(p *Proposal) { p.TimelineEvents[0].DecisionIDs = []string{bearerID} },
+		"timeline open-loop ref":    func(p *Proposal) { p.TimelineEvents[0].OpenLoopIDs = []string{bearerID} },
+		"session report id":         func(p *Proposal) { p.SessionReport.ID = bearerID },
+		"decisions-added effect":    func(p *Proposal) { p.SessionReport.DecisionsAdded = []string{bearerID} },
+		"decisions-revised effect":  func(p *Proposal) { p.SessionReport.DecisionsRevised = []string{bearerID} },
+		"open-loops-created effect": func(p *Proposal) { p.SessionReport.OpenLoopsCreated = []string{bearerID} },
+		"open-loops-closed effect":  func(p *Proposal) { p.SessionReport.OpenLoopsClosed = []string{bearerID} },
+		"evidence reference id":     func(p *Proposal) { p.NewDecisions[0].Evidence[0].EvidenceID = bearerID },
+		"evidence-link entity id":   func(p *Proposal) { p.EvidenceLinks[0].EntityID = bearerID },
+		"evidence-link evidence id": func(p *Proposal) { p.EvidenceLinks[0].EvidenceID = bearerID },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			mutate(&p)
+			changes, err := Validate(p, packet, state)
+			if err == nil || !strings.Contains(err.Error(), "invalid stable id") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("unsafe stable id accepted atomically: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
+func TestValidateStableIDLengthBoundaryAndExactReferences(t *testing.T) {
+	base, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	rewriteDecisionID := func(p *Proposal, id string) {
+		oldID := p.NewDecisions[0].ID
+		p.NewDecisions[0].ID = id
+		p.TimelineEvents[0].DecisionIDs = []string{id}
+		p.SessionReport.DecisionsAdded = []string{id}
+		for i := range p.EvidenceLinks {
+			if p.EvidenceLinks[i].EntityID == oldID {
+				p.EvidenceLinks[i].EntityID = id
+			}
+		}
+	}
+
+	t.Run("128 bytes accepted", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		rewriteDecisionID(&p, "a"+strings.Repeat("b", 127))
+		if _, err := Validate(p, packet, state); err != nil {
+			t.Fatalf("maximum-length stable id rejected: %v", err)
+		}
+	})
+
+	t.Run("129 bytes rejected", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		rewriteDecisionID(&p, "a"+strings.Repeat("b", 128))
+		if changes, err := Validate(p, packet, state); err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("overlength stable id accepted: changes=%+v err=%v", changes, err)
+		}
+	})
+
+	t.Run("cross-reference mismatch rejected without normalization", func(t *testing.T) {
+		p := cloneProposal(t, base)
+		p.NewDecisions[0].ID = "decision-two"
+		if changes, err := Validate(p, packet, state); err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			t.Fatalf("cross-reference mismatch accepted: changes=%+v err=%v", changes, err)
+		}
+	})
+}
+
+func TestValidateKeepsExternalProjectAndSessionIDContractsSeparate(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	externalProjectID := "Project:External/One"
+	externalSessionID := "Session:External/One"
+	p.ProjectID = externalProjectID
+	p.SessionID = externalSessionID
+	p.NewDecisions[0].ProjectID = externalProjectID
+	p.NewDecisions[0].SourceSessions = []string{externalSessionID}
+	p.SessionReport.ProjectID = externalProjectID
+	p.SessionReport.SessionID = externalSessionID
+	*p.CurrentStatePatch.SourceSessions = []string{externalSessionID}
+	for _, refs := range [][]ledger.EvidenceRef{
+		p.NewDecisions[0].Evidence,
+		p.TimelineEvents[0].Evidence,
+		*p.CurrentStatePatch.Evidence,
+		p.SessionReport.Phases[0].Evidence,
+		p.SessionReport.Evidence,
+	} {
+		for i := range refs {
+			refs[i].SessionID = externalSessionID
+		}
+	}
+	packet.ProjectID = externalProjectID
+	packet.SessionID = externalSessionID
+	state.ProjectID = externalProjectID
+	state.CurrentState.ProjectID = externalProjectID
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	if _, err := Validate(p, packet, state); err != nil {
+		t.Fatalf("external project/session id contract was forced into stable-id grammar: %v", err)
+	}
+}
+
+func TestValidateRejectsUnsafeIDsInExistingState(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+	unsafeID := "Authorization: Bearer abcdefghijklmnop"
+	tests := map[string]func(*ledger.State, Proposal){
+		"decision": func(state *ledger.State, p Proposal) {
+			item := p.NewDecisions[0]
+			item.ID = unsafeID
+			state.Decisions[unsafeID] = item
+		},
+		"open loop": func(state *ledger.State, _ Proposal) {
+			state.OpenLoops[unsafeID] = ledger.OpenLoop{ID: unsafeID, ProjectID: projectID, Status: "open", Revision: 1}
+		},
+		"timeline": func(state *ledger.State, _ Proposal) {
+			state.Timeline = []ledger.TimelineEvent{{ID: unsafeID, Revision: 1, Class: ledger.Verified}}
+		},
+		"session report": func(state *ledger.State, p Proposal) {
+			item := p.SessionReport
+			item.ID = unsafeID
+			state.Sessions[unsafeID] = item
+		},
+		"decision supersedes reference": func(state *ledger.State, p Proposal) {
+			item := p.NewDecisions[0]
+			item.ID = "decision-existing"
+			item.Supersedes = []string{unsafeID}
+			state.Decisions[item.ID] = item
+		},
+		"timeline decision reference": func(state *ledger.State, _ Proposal) {
+			state.Timeline = []ledger.TimelineEvent{{
+				ID: "timeline-existing", Revision: 1, Class: ledger.Verified,
+				DecisionIDs: []string{unsafeID}, OpenLoopIDs: []string{},
+			}}
+		},
+		"session effect reference": func(state *ledger.State, p Proposal) {
+			item := p.SessionReport
+			item.ID = "session-report-existing"
+			item.SessionID = "historic-session"
+			item.DecisionsAdded = []string{unsafeID}
+			state.Sessions[item.ID] = item
+		},
+		"evidence reference": func(state *ledger.State, p Proposal) {
+			item := p.NewDecisions[0]
+			item.ID = "decision-existing"
+			item.Evidence[0].EvidenceID = unsafeID
+			state.Decisions[item.ID] = item
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			stateSource := cloneProposal(t, base)
+			state := fixedState()
+			mutate(&state, stateSource)
+			changes, err := Validate(p, packet, state)
+			if err == nil || !strings.Contains(err.Error(), "invalid stable id") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("unsafe existing %s id accepted: changes=%+v err=%v", name, changes, err)
+			}
+		})
+	}
+}
+
 func TestValidateRequiresEqualBoundariesForEmptyConsumedRange(t *testing.T) {
 	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	packet.FromCursor = 3
@@ -917,6 +1115,75 @@ func TestSchemaDeclaresClosedProtocolAndRequiredFields(t *testing.T) {
 			t.Fatalf("%s maximum is not JS-safe: %+v", name, definition)
 		}
 	}
+	stableID, ok := defs["stable_id"].(map[string]any)
+	if !ok || stableID["pattern"] != stableIDPattern || stableID["maxLength"] != float64(128) {
+		t.Fatalf("schema stable-id grammar differs from validator contract: %+v", stableID)
+	}
+	stableIDArray, ok := defs["stable_id_array"].(map[string]any)
+	if !ok || schemaRef(t, stableIDArray, "items") != "#/$defs/stable_id" {
+		t.Fatalf("schema stable-id array does not share the stable-id grammar: %+v", stableIDArray)
+	}
+	for path, want := range map[string]string{
+		"decision.id":                       "#/$defs/stable_id",
+		"decision.supersedes":               "#/$defs/stable_id_array",
+		"decision_patch.id":                 "#/$defs/stable_id",
+		"decision_patch.supersedes":         "#/$defs/stable_id_array",
+		"open_loop.id":                      "#/$defs/stable_id",
+		"open_loop_patch.id":                "#/$defs/stable_id",
+		"timeline_event.id":                 "#/$defs/stable_id",
+		"timeline_event.decision_ids":       "#/$defs/stable_id_array",
+		"timeline_event.open_loop_ids":      "#/$defs/stable_id_array",
+		"session_report.id":                 "#/$defs/stable_id",
+		"session_report.decisions_added":    "#/$defs/stable_id_array",
+		"session_report.decisions_revised":  "#/$defs/stable_id_array",
+		"session_report.open_loops_created": "#/$defs/stable_id_array",
+		"session_report.open_loops_closed":  "#/$defs/stable_id_array",
+		"evidence_ref.evidence_id":          "#/$defs/stable_id",
+		"evidence_link.entity_id":           "#/$defs/stable_id",
+		"evidence_link.evidence_id":         "#/$defs/stable_id",
+	} {
+		parts := strings.Split(path, ".")
+		definition, ok := defs[parts[0]].(map[string]any)
+		if !ok {
+			t.Fatalf("schema definition %s missing", parts[0])
+		}
+		properties, ok := definition["properties"].(map[string]any)
+		if !ok || schemaRef(t, properties, parts[1]) != want {
+			t.Fatalf("schema field %s does not use %s", path, want)
+		}
+	}
+	if schemaRef(t, schema["properties"].(map[string]any), "project_id") != "#/$defs/nonempty_string" || schemaRef(t, schema["properties"].(map[string]any), "session_id") != "#/$defs/nonempty_string" {
+		t.Fatal("proposal project/session protocol ids were incorrectly forced into the model stable-id grammar")
+	}
+}
+
+func TestEntitySchemaSharesStableIDGrammar(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "schemas", "entity-v1.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(b, &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	id := properties["id"].(map[string]any)
+	if id["pattern"] != stableIDPattern || id["maxLength"] != float64(128) {
+		t.Fatalf("entity schema id grammar differs from proposal validator: %+v", id)
+	}
+	if _, constrained := properties["project_id"].(map[string]any)["pattern"]; constrained {
+		t.Fatal("external project id was incorrectly forced into the model stable-id grammar")
+	}
+}
+
+func schemaRef(t *testing.T, object map[string]any, field string) string {
+	t.Helper()
+	value, ok := object[field].(map[string]any)
+	if !ok {
+		return ""
+	}
+	ref, _ := value["$ref"].(string)
+	return ref
 }
 
 func containsJSONText(values []any, want string) bool {

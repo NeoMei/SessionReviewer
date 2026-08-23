@@ -22,11 +22,13 @@ const (
 	maxProposalBytes      = 4 * 1024 * 1024
 	maxSafeInteger        = 1<<53 - 1
 	currentStateEntityID  = "current-state"
+	stableIDPattern       = `^[a-z0-9][a-z0-9._-]{0,127}$`
 )
 
 var (
 	lowercaseSHA256  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	prefixedSHA256   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	stableID         = regexp.MustCompile(stableIDPattern)
 	redactionWarning = regexp.MustCompile(`^redacted:[a-z0-9_]+:[1-9][0-9]*$`)
 )
 
@@ -636,7 +638,10 @@ func validateProtocolShape(p Proposal) error {
 		}
 	}
 	for _, patch := range p.UpdatedDecisions {
-		if strings.TrimSpace(patch.ID) == "" || !positiveSafeInteger(patch.ExpectedRevision) || !decisionPatchHasChange(patch) {
+		if !validStableID(patch.ID) {
+			return fmt.Errorf("invalid stable id for decision patch %q", patch.ID)
+		}
+		if !positiveSafeInteger(patch.ExpectedRevision) || !decisionPatchHasChange(patch) {
 			return fmt.Errorf("invalid decision patch %q", patch.ID)
 		}
 		if patch.Status != nil && !validDecisionStatus(*patch.Status) {
@@ -645,7 +650,7 @@ func validateProtocolShape(p Proposal) error {
 		if err := validateOptionalNonemptyStringSlice(patch.Tags, "decision tags"); err != nil {
 			return err
 		}
-		if err := validateOptionalNonemptyStringSlice(patch.Supersedes, "decision supersedes"); err != nil {
+		if err := validateOptionalStableIDSlice(patch.Supersedes, "decision supersedes"); err != nil {
 			return err
 		}
 		if err := validateOptionalNonemptyStringSlice(patch.SourceSessions, "decision source sessions"); err != nil {
@@ -677,7 +682,10 @@ func validateProtocolShape(p Proposal) error {
 				return errors.New("open-loop update requires patch and forbids entity")
 			}
 			patch := *change.Patch
-			if strings.TrimSpace(patch.ID) == "" || !positiveSafeInteger(patch.ExpectedRevision) || !openLoopPatchHasChange(patch) {
+			if !validStableID(patch.ID) {
+				return fmt.Errorf("invalid stable id for open-loop patch %q", patch.ID)
+			}
+			if !positiveSafeInteger(patch.ExpectedRevision) || !openLoopPatchHasChange(patch) {
 				return fmt.Errorf("invalid open-loop patch %q", patch.ID)
 			}
 			if patch.Status != nil && !validLoopStatus(*patch.Status) {
@@ -729,7 +737,10 @@ func validateProtocolShape(p Proposal) error {
 		return err
 	}
 	for _, link := range p.EvidenceLinks {
-		if strings.TrimSpace(link.EntityID) == "" || strings.TrimSpace(link.EvidenceID) == "" || !validRelation(link.Relation) {
+		if !validStableID(link.EntityID) || !validStableID(link.EvidenceID) {
+			return fmt.Errorf("invalid stable id in evidence link %+v", link)
+		}
+		if !validRelation(link.Relation) {
 			return fmt.Errorf("invalid evidence link %+v", link)
 		}
 	}
@@ -737,13 +748,19 @@ func validateProtocolShape(p Proposal) error {
 }
 
 func validateDecision(item ledger.Decision) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validDecisionStatus(item.Status) {
+	if !validStableID(item.ID) {
+		return fmt.Errorf("invalid stable id for decision %q", item.ID)
+	}
+	if strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validDecisionStatus(item.Status) {
 		return fmt.Errorf("invalid decision %q", item.ID)
 	}
 	if item.Tags == nil || item.Supersedes == nil || item.SourceSessions == nil || item.Evidence == nil || item.Alternatives == nil || item.RejectedPaths == nil {
 		return fmt.Errorf("decision %q omits a required array", item.ID)
 	}
-	for name, values := range map[string][]string{"tags": item.Tags, "supersedes": item.Supersedes, "source_sessions": item.SourceSessions} {
+	if err := validateUniqueStableIDs(item.Supersedes, "decision supersedes"); err != nil {
+		return err
+	}
+	for name, values := range map[string][]string{"tags": item.Tags, "source_sessions": item.SourceSessions} {
 		if err := validateUniqueStrings(values, "decision "+name, true); err != nil {
 			return err
 		}
@@ -752,7 +769,10 @@ func validateDecision(item ledger.Decision) error {
 }
 
 func validateOpenLoop(item ledger.OpenLoop) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validLoopStatus(item.Status) {
+	if !validStableID(item.ID) {
+		return fmt.Errorf("invalid stable id for open loop %q", item.ID)
+	}
+	if strings.TrimSpace(item.ProjectID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validLoopStatus(item.Status) {
 		return fmt.Errorf("invalid open loop %q", item.ID)
 	}
 	if item.Tags == nil || item.SourceSessions == nil || item.Evidence == nil || item.Attempts == nil {
@@ -768,7 +788,10 @@ func validateOpenLoop(item ledger.OpenLoop) error {
 }
 
 func validateTimeline(item ledger.TimelineEvent) error {
-	if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validFactClass(item.Class) || !validTime(item.OccurredAt) {
+	if !validStableID(item.ID) {
+		return fmt.Errorf("invalid stable id for timeline event %q", item.ID)
+	}
+	if strings.TrimSpace(item.Title) == "" || !positiveSafeInteger(item.Revision) || !validFactClass(item.Class) || !validTime(item.OccurredAt) {
 		return fmt.Errorf("invalid timeline event %q", item.ID)
 	}
 	if item.Evidence == nil || item.DecisionIDs == nil || item.OpenLoopIDs == nil {
@@ -777,14 +800,17 @@ func validateTimeline(item ledger.TimelineEvent) error {
 	if err := validateEvidenceRefs(item.Evidence); err != nil {
 		return err
 	}
-	if err := validateUniqueStrings(item.DecisionIDs, "timeline decision ids", true); err != nil {
+	if err := validateUniqueStableIDs(item.DecisionIDs, "timeline decision ids"); err != nil {
 		return err
 	}
-	return validateUniqueStrings(item.OpenLoopIDs, "timeline open-loop ids", true)
+	return validateUniqueStableIDs(item.OpenLoopIDs, "timeline open-loop ids")
 }
 
 func validateSessionReport(report ledger.SessionReport) error {
-	if strings.TrimSpace(report.ID) == "" || strings.TrimSpace(report.ProjectID) == "" || strings.TrimSpace(report.SessionID) == "" || !positiveSafeInteger(report.Revision) {
+	if !validStableID(report.ID) {
+		return fmt.Errorf("invalid stable id for session report %q", report.ID)
+	}
+	if strings.TrimSpace(report.ProjectID) == "" || strings.TrimSpace(report.SessionID) == "" || !positiveSafeInteger(report.Revision) {
 		return fmt.Errorf("invalid session report %q", report.ID)
 	}
 	arrays := map[string][]string{
@@ -801,6 +827,14 @@ func validateSessionReport(report ledger.SessionReport) error {
 			return fmt.Errorf("session report %q omits %s", report.ID, name)
 		}
 		if err := validateUniqueStrings(values, "session report "+name, false); err != nil {
+			return err
+		}
+	}
+	for name, values := range map[string][]string{
+		"decisions added": report.DecisionsAdded, "decisions revised": report.DecisionsRevised,
+		"open loops created": report.OpenLoopsCreated, "open loops closed": report.OpenLoopsClosed,
+	} {
+		if err := validateUniqueStableIDs(values, "session report "+name); err != nil {
 			return err
 		}
 	}
@@ -821,7 +855,10 @@ func validateSessionReport(report ledger.SessionReport) error {
 func validateEvidenceRefs(refs []ledger.EvidenceRef) error {
 	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if strings.TrimSpace(ref.EvidenceID) == "" || strings.TrimSpace(ref.SessionID) == "" || !positiveSafeInteger(ref.JSONLLine) || !lowercaseSHA256.MatchString(ref.SourceHash) {
+		if !validStableID(ref.EvidenceID) {
+			return fmt.Errorf("invalid stable id for evidence reference %q", ref.EvidenceID)
+		}
+		if strings.TrimSpace(ref.SessionID) == "" || !positiveSafeInteger(ref.JSONLLine) || !lowercaseSHA256.MatchString(ref.SourceHash) {
 			return fmt.Errorf("invalid evidence reference %q", ref.EvidenceID)
 		}
 		if _, duplicate := seen[ref.EvidenceID]; duplicate {
@@ -860,6 +897,34 @@ func validateOptionalNonemptyStringSlice(values *[]string, name string) error {
 		return fmt.Errorf("%s cannot be null", name)
 	}
 	return validateUniqueStrings(*values, name, true)
+}
+
+func validateOptionalStableIDSlice(values *[]string, name string) error {
+	if values == nil {
+		return nil
+	}
+	if *values == nil {
+		return fmt.Errorf("%s cannot be null", name)
+	}
+	return validateUniqueStableIDs(*values, name)
+}
+
+func validateUniqueStableIDs(values []string, name string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if !validStableID(value) {
+			return fmt.Errorf("%s contains invalid stable id %q", name, value)
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return fmt.Errorf("%s contains duplicate %q", name, value)
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func validStableID(value string) bool {
+	return stableID.MatchString(value)
 }
 
 func validateUniqueStrings(values []string, name string, nonempty bool) error {
@@ -1158,11 +1223,14 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 	if !nonnegativeSafeInteger(state.CurrentState.Revision) {
 		return nil, errors.New("negative current-state revision")
 	}
+	if err := validateStableEvidenceIDs(state.CurrentState.Evidence, "existing current-state evidence"); err != nil {
+		return nil, err
+	}
 	ids := make(map[string]string)
 	ids[currentStateEntityID] = "current_state"
 	reserve := func(id, kind string) error {
-		if strings.TrimSpace(id) == "" {
-			return fmt.Errorf("empty %s id", kind)
+		if !validStableID(id) {
+			return fmt.Errorf("invalid stable id for existing %s %q", kind, id)
 		}
 		if previous, exists := ids[id]; exists {
 			return fmt.Errorf("id %q is shared by %s and %s", id, previous, kind)
@@ -1177,12 +1245,21 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		if err := reserve(item.ID, "decision"); err != nil {
 			return nil, err
 		}
+		if err := validateUniqueStableIDs(item.Supersedes, "existing decision supersedes"); err != nil {
+			return nil, err
+		}
+		if err := validateStableEvidenceIDs(item.Evidence, "existing decision evidence"); err != nil {
+			return nil, err
+		}
 	}
 	for key, item := range state.OpenLoops {
 		if key != item.ID || item.ProjectID != projectID || !positiveSafeInteger(item.Revision) || !validLoopStatus(item.Status) {
 			return nil, fmt.Errorf("invalid existing open loop %q", key)
 		}
 		if err := reserve(item.ID, "open_loop"); err != nil {
+			return nil, err
+		}
+		if err := validateStableEvidenceIDs(item.Evidence, "existing open-loop evidence"); err != nil {
 			return nil, err
 		}
 	}
@@ -1193,6 +1270,15 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		if err := reserve(item.ID, "timeline"); err != nil {
 			return nil, err
 		}
+		if err := validateUniqueStableIDs(item.DecisionIDs, "existing timeline decision ids"); err != nil {
+			return nil, err
+		}
+		if err := validateUniqueStableIDs(item.OpenLoopIDs, "existing timeline open-loop ids"); err != nil {
+			return nil, err
+		}
+		if err := validateStableEvidenceIDs(item.Evidence, "existing timeline evidence"); err != nil {
+			return nil, err
+		}
 	}
 	for key, item := range state.Sessions {
 		if key != item.ID || item.ProjectID != projectID || !positiveSafeInteger(item.Revision) {
@@ -1200,6 +1286,22 @@ func validateState(state ledger.State, projectID string) (map[string]string, err
 		}
 		if err := reserve(item.ID, "session"); err != nil {
 			return nil, err
+		}
+		for name, values := range map[string][]string{
+			"decisions added": item.DecisionsAdded, "decisions revised": item.DecisionsRevised,
+			"open loops created": item.OpenLoopsCreated, "open loops closed": item.OpenLoopsClosed,
+		} {
+			if err := validateUniqueStableIDs(values, "existing session report "+name); err != nil {
+				return nil, err
+			}
+		}
+		if err := validateStableEvidenceIDs(item.Evidence, "existing session-report evidence"); err != nil {
+			return nil, err
+		}
+		for _, phase := range item.Phases {
+			if err := validateStableEvidenceIDs(phase.Evidence, "existing session-phase evidence"); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return ids, nil
@@ -1220,14 +1322,22 @@ func indexSessionReports(reports map[string]ledger.SessionReport) (map[string]st
 }
 
 func reserveNewID(ids map[string]string, id, kind string) error {
-	if strings.TrimSpace(id) == "" {
-		return fmt.Errorf("empty %s id", kind)
+	if !validStableID(id) {
+		return fmt.Errorf("invalid stable id for new %s %q", kind, id)
 	}
 	if previous, exists := ids[id]; exists {
 		return fmt.Errorf("new %s id %q already belongs to %s", kind, id, previous)
 	}
 	ids[id] = kind
 	return nil
+}
+
+func validateStableEvidenceIDs(refs []ledger.EvidenceRef, name string) error {
+	values := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		values = append(values, ref.EvidenceID)
+	}
+	return validateUniqueStableIDs(values, name)
 }
 
 func requireCurrentSession(values []string, sessionID, entity string) error {
