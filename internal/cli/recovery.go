@@ -65,22 +65,23 @@ func runRecovery(command string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "%s requires --ledger-only\n", command)
 		return 2
 	}
-	if *projectRoot == "" {
-		resolved, err := resolveImplicitProjectRoot()
-		if err != nil {
-			return writeDiagnostic(stderr, command, err)
-		}
-		*projectRoot = resolved
+	resolvedProject, err := resolveProjectRoot(*projectRoot)
+	if err != nil {
+		return writeDiagnostic(stderr, command, err)
+	}
+	*projectRoot = resolvedProject.Path
+	if err := runProjectRootResolvedHook(command, *projectRoot); err != nil {
+		return writeDiagnostic(stderr, command, err)
 	}
 	var markdown string
 	if command == "resume" {
-		view, err := recovery.ResumeLedgerOnly(*projectRoot)
+		view, err := recovery.ResumeLedgerOnlyExpected(*projectRoot, resolvedProject.Expected)
 		if err != nil {
 			return writeDiagnostic(stderr, command, err)
 		}
 		markdown = view.Markdown()
 	} else {
-		view, err := recovery.HistoryLedgerOnly(*projectRoot)
+		view, err := recovery.HistoryLedgerOnlyExpected(*projectRoot, resolvedProject.Expected)
 		if err != nil {
 			return writeDiagnostic(stderr, command, err)
 		}

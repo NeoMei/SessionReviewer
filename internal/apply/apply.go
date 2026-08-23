@@ -32,6 +32,7 @@ var safeApplyID = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 type Options struct {
 	ProposalPath, EvidencePath, ProjectRoot, DataDir string
 	Now                                              func() time.Time
+	ExpectedProjectRoot                              os.FileInfo
 	hooks                                            applyHooks
 }
 
@@ -440,6 +441,10 @@ func openInputs(opts Options) (_ inputContext, roots *applyRoots, retErr error) 
 	projectRoot, err := pathguard.Open(opts.ProjectRoot)
 	if err != nil {
 		return inputContext{}, nil, fmt.Errorf("invalid project root: %w", err)
+	}
+	if opts.ExpectedProjectRoot != nil && !os.SameFile(opts.ExpectedProjectRoot, projectRoot.Info()) {
+		_ = projectRoot.Close()
+		return inputContext{}, nil, errors.New("project root does not match expected identity")
 	}
 	dataRoot, err := pathguard.Open(opts.DataDir)
 	if err != nil {

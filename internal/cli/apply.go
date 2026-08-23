@@ -55,12 +55,13 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "apply requires --proposal and --evidence")
 		return 2
 	}
-	if *projectRoot == "" {
-		resolved, err := resolveImplicitProjectRoot()
-		if err != nil {
-			return writeDiagnostic(stderr, "apply", err)
-		}
-		*projectRoot = resolved
+	resolvedProject, err := resolveProjectRoot(*projectRoot)
+	if err != nil {
+		return writeDiagnostic(stderr, "apply", err)
+	}
+	*projectRoot = resolvedProject.Path
+	if err := runProjectRootResolvedHook("apply", *projectRoot); err != nil {
+		return writeDiagnostic(stderr, "apply", err)
 	}
 	if *dataRoot == "" {
 		resolved, err := platform.DataDir(currentEnv())
@@ -70,10 +71,11 @@ func runApply(args []string, stdout, stderr io.Writer) int {
 		*dataRoot = resolved
 	}
 	result, err := applyengine.Run(applyengine.Options{
-		ProposalPath: *proposalPath,
-		EvidencePath: *evidencePath,
-		ProjectRoot:  *projectRoot,
-		DataDir:      *dataRoot,
+		ProposalPath:        *proposalPath,
+		EvidencePath:        *evidencePath,
+		ProjectRoot:         *projectRoot,
+		DataDir:             *dataRoot,
+		ExpectedProjectRoot: resolvedProject.Expected,
 	})
 	if err != nil {
 		return writeDiagnostic(stderr, "apply", err)

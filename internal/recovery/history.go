@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"container/heap"
+	"os"
 	"sort"
 	"strings"
 
@@ -26,6 +27,18 @@ type HistoryView struct {
 // pending evidence or any derived/cache/repository surface.
 func HistoryLedgerOnly(projectRoot string) (HistoryView, error) {
 	state, err := ledger.Load(projectRoot)
+	return historyLedgerOnly(state, err)
+}
+
+// HistoryLedgerOnlyExpected derives the same accepted-only project history
+// while requiring the project root opened by ledger.LoadExpected to retain a
+// caller-pinned filesystem identity.
+func HistoryLedgerOnlyExpected(projectRoot string, expectedRoot os.FileInfo) (HistoryView, error) {
+	state, err := ledger.LoadExpected(projectRoot, expectedRoot)
+	return historyLedgerOnly(state, err)
+}
+
+func historyLedgerOnly(state ledger.State, err error) (HistoryView, error) {
 	if err != nil {
 		return HistoryView{}, err
 	}

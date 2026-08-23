@@ -152,6 +152,44 @@ func TestRunStaleCursorWritesNothing(t *testing.T) {
 	}
 }
 
+func TestRunExpectedProjectRootRejectsReplacementBeforeWrites(t *testing.T) {
+	f := newApplyTestFixture(t)
+	expected, err := os.Stat(f.projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options()
+	opts.ExpectedProjectRoot = expected
+	original := f.projectRoot + "-expected-original"
+	if err := os.Rename(f.projectRoot, original); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(f.projectRoot)
+		_ = os.Rename(original, f.projectRoot)
+	})
+	if err := copyTreeForTest(original, f.projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	replacementBefore := snapshotTree(t, f.projectRoot)
+	originalBefore := snapshotTree(t, original)
+	dataBefore := snapshotTree(t, f.dataDir)
+
+	got, err := Run(opts)
+	if err == nil || got.ProjectID != "" || got.SessionID != "" || got.FromCursor != 0 || got.ToCursor != 0 || len(got.ChangedFiles) != 0 || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if snapshotTree(t, f.projectRoot) != replacementBefore {
+		t.Fatal("replacement project was written")
+	}
+	if snapshotTree(t, original) != originalBefore {
+		t.Fatal("expected project was written")
+	}
+	if snapshotTree(t, f.dataDir) != dataBefore {
+		t.Fatal("data directory was written")
+	}
+}
+
 func TestRunRecoversPreparedAndPartialTransactions(t *testing.T) {
 	for _, tc := range []struct {
 		name string

@@ -3,6 +3,7 @@ package recovery
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"html"
 	"os"
 	"path/filepath"
@@ -107,6 +108,40 @@ func TestHistoryFollowsSupersedesAndGroupsOnlyUnresolvedEditableTags(t *testing.
 	}
 	if after := recoveryTree(t, root); !reflect.DeepEqual(before, after) {
 		t.Fatal("ledger-only history mutated project files")
+	}
+}
+
+func TestRecoveryExpectedProjectRootRejectsReplacement(t *testing.T) {
+	root := recoveryFixture(t)
+	expected, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := root + "-expected-original"
+	if err := os.Rename(root, original); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(root)
+		_ = os.Rename(original, root)
+	})
+	if err := copyRecoveryTreeForTest(original, root); err != nil {
+		t.Fatal(err)
+	}
+	replacementBefore := recoveryTree(t, root)
+	originalBefore := recoveryTree(t, original)
+
+	if _, err := ResumeLedgerOnlyExpected(root, expected); err == nil {
+		t.Fatal("resume accepted a replacement project root")
+	}
+	if _, err := HistoryLedgerOnlyExpected(root, expected); err == nil {
+		t.Fatal("history accepted a replacement project root")
+	}
+	if !reflect.DeepEqual(recoveryTree(t, root), replacementBefore) {
+		t.Fatal("replacement project was written")
+	}
+	if !reflect.DeepEqual(recoveryTree(t, original), originalBefore) {
+		t.Fatal("expected project was written")
 	}
 }
 
@@ -603,6 +638,34 @@ func recoveryTree(t *testing.T, root string) map[string][]byte {
 		t.Fatal(err)
 	}
 	return files
+}
+
+func copyRecoveryTreeForTest(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(destination, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unexpected fixture entry %q", relative)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(destination, body, info.Mode().Perm())
+	})
 }
 
 func replaceRecoveryFile(t *testing.T, root, relative, old, next string) {

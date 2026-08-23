@@ -3,6 +3,7 @@ package recovery
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"unicode"
@@ -38,6 +39,18 @@ type ResumeCard struct {
 // Markdown. ledger.Load is the sole project-state input boundary.
 func ResumeLedgerOnly(projectRoot string) (ResumeCard, error) {
 	state, err := ledger.Load(projectRoot)
+	return resumeLedgerOnly(state, err)
+}
+
+// ResumeLedgerOnlyExpected derives the same accepted-only recovery card while
+// requiring the project root opened by ledger.LoadExpected to retain a caller-
+// pinned filesystem identity.
+func ResumeLedgerOnlyExpected(projectRoot string, expectedRoot os.FileInfo) (ResumeCard, error) {
+	state, err := ledger.LoadExpected(projectRoot, expectedRoot)
+	return resumeLedgerOnly(state, err)
+}
+
+func resumeLedgerOnly(state ledger.State, err error) (ResumeCard, error) {
 	if err != nil {
 		return ResumeCard{}, err
 	}

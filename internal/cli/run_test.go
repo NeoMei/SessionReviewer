@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -282,6 +283,88 @@ func TestLedgerCommandsResolveOnlyImplicitLogicalSymlinkWorkingDirectory(t *test
 	err := command.Run()
 	if exitCode(err) != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_APPLY_FAILED") {
 		t.Fatalf("explicit data symlink code=%d stdout=%q stderr=%q", exitCode(err), out.String(), errOut.String())
+	}
+}
+
+func TestLedgerCommandsRejectProjectReplacementAfterResolution(t *testing.T) {
+	for _, test := range []struct {
+		command string
+		args    func(cliApplyFixture) []string
+	}{
+		{command: "apply", args: func(fixture cliApplyFixture) []string {
+			return []string{"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence}
+		}},
+		{command: "resume", args: func(cliApplyFixture) []string { return []string{"resume", "--ledger-only"} }},
+		{command: "history", args: func(cliApplyFixture) []string { return []string{"history", "--ledger-only"} }},
+	} {
+		for _, explicit := range []bool{false, true} {
+			mode := "implicit"
+			if explicit {
+				mode = "explicit"
+			}
+			t.Run(test.command+"/"+mode, func(t *testing.T) {
+				root := t.TempDir()
+				home := filepath.Join(root, "home")
+				fixture := newCLIApplyFixture(t, filepath.Join(home, ".local", "share", "session-reviewer"))
+				originalProject := snapshotCLITree(t, fixture.project)
+				originalData := snapshotCLITree(t, fixture.data)
+				oldWorkingDirectory, err := os.Getwd()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chdir(fixture.project); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chdir(oldWorkingDirectory) })
+				setCurrentEnv(t, platform.Env{GOOS: "darwin", Home: home})
+
+				var livePath, moved string
+				replaced := false
+				t.Cleanup(func() {
+					if replaced {
+						_ = os.RemoveAll(livePath)
+						_ = os.Rename(moved, livePath)
+					}
+				})
+				var replacementBefore string
+				projectRootResolvedHook = func(command, path string) error {
+					if command != test.command {
+						return fmt.Errorf("resolved command/path = %q/%q", command, path)
+					}
+					livePath = path
+					moved = path + "-verified-original"
+					if err := os.Rename(livePath, moved); err != nil {
+						return err
+					}
+					replaced = true
+					if err := copyCLITreeForTest(moved, livePath); err != nil {
+						return err
+					}
+					replacementBefore = snapshotCLITree(t, livePath)
+					return nil
+				}
+				t.Cleanup(func() { projectRootResolvedHook = nil })
+
+				var out, errOut bytes.Buffer
+				args := test.args(fixture)
+				if explicit {
+					args = append(args, "--project", fixture.project)
+				}
+				code := Run(args, &out, &errOut)
+				if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_") {
+					t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+				}
+				if got := snapshotCLITree(t, livePath); got != replacementBefore {
+					t.Fatalf("substituted project was written\nbefore:\n%s\nafter:\n%s\nstderr=%s", replacementBefore, got, errOut.String())
+				}
+				if got := snapshotCLITree(t, moved); got != originalProject {
+					t.Fatal("verified project was written")
+				}
+				if got := snapshotCLITree(t, fixture.data); got != originalData {
+					t.Fatal("data directory was written")
+				}
+			})
+		}
 	}
 }
 
@@ -1159,4 +1242,57 @@ func exitCode(err error) int {
 		return exitErr.ExitCode()
 	}
 	return -1
+}
+
+func copyCLITreeForTest(source, target string) error {
+	return filepath.Walk(source, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		if info.IsDir() {
+			return os.MkdirAll(destination, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unexpected fixture entry %q", relative)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(destination, body, info.Mode().Perm())
+	})
+}
+
+func snapshotCLITree(t *testing.T, root string) string {
+	t.Helper()
+	var snapshot strings.Builder
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&snapshot, "%s %s", filepath.ToSlash(relative), info.Mode())
+		if info.Mode().IsRegular() {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			digest := sha256.Sum256(body)
+			fmt.Fprintf(&snapshot, " %x", digest)
+		}
+		snapshot.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot.String()
 }

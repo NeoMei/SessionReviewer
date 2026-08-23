@@ -12,6 +12,15 @@ import (
 
 var Version = "dev"
 
+var projectRootResolvedHook func(command, path string) error
+
+func runProjectRootResolvedHook(command, path string) error {
+	if projectRootResolvedHook == nil {
+		return nil
+	}
+	return projectRootResolvedHook(command, path)
+}
+
 const rootHelp = `SessionReviewer prepares bounded evidence for durable session review.
 
 Usage: session-reviewer <command> [options]
@@ -79,30 +88,50 @@ func isHelpToken(arg string) bool {
 	return arg == "help" || arg == "-h" || arg == "--help"
 }
 
-func resolveImplicitProjectRoot() (_ string, retErr error) {
+type resolvedProjectRoot struct {
+	Path     string
+	Expected os.FileInfo
+}
+
+func resolveProjectRoot(value string) (resolvedProjectRoot, error) {
+	if value == "" {
+		return resolveImplicitProjectRoot()
+	}
+	return resolveExplicitProjectRoot(value)
+}
+
+func resolveImplicitProjectRoot() (resolvedProjectRoot, error) {
 	workingDirectoryInfo, err := os.Stat(".")
 	if err != nil {
-		return "", fmt.Errorf("inspect current directory: %w", err)
+		return resolvedProjectRoot{}, fmt.Errorf("inspect current directory: %w", err)
 	}
 	logicalPath, err := os.Getwd()
 	if err != nil {
-		return "", fmt.Errorf("read current directory: %w", err)
+		return resolvedProjectRoot{}, fmt.Errorf("read current directory: %w", err)
 	}
 	absolutePath, err := filepath.Abs(logicalPath)
 	if err != nil {
-		return "", fmt.Errorf("make current directory absolute: %w", err)
+		return resolvedProjectRoot{}, fmt.Errorf("make current directory absolute: %w", err)
 	}
 	physicalPath, err := filepath.EvalSymlinks(absolutePath)
 	if err != nil {
-		return "", fmt.Errorf("resolve current directory: %w", err)
+		return resolvedProjectRoot{}, fmt.Errorf("resolve current directory: %w", err)
 	}
-	directory, err := pathguard.Open(physicalPath)
+	resolved, err := resolveExplicitProjectRoot(physicalPath)
 	if err != nil {
-		return "", fmt.Errorf("open resolved current directory: %w", err)
+		return resolvedProjectRoot{}, fmt.Errorf("open resolved current directory: %w", err)
+	}
+	if !os.SameFile(workingDirectoryInfo, resolved.Expected) {
+		return resolvedProjectRoot{}, errors.New("resolved current directory identity changed")
+	}
+	return resolved, nil
+}
+
+func resolveExplicitProjectRoot(value string) (_ resolvedProjectRoot, retErr error) {
+	directory, err := pathguard.Open(value)
+	if err != nil {
+		return resolvedProjectRoot{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, directory.Close()) }()
-	if !os.SameFile(workingDirectoryInfo, directory.Info()) {
-		return "", errors.New("resolved current directory identity changed")
-	}
-	return directory.Path, nil
+	return resolvedProjectRoot{Path: directory.Path, Expected: directory.Info()}, nil
 }
