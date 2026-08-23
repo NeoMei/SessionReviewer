@@ -67,3 +67,16 @@ func TestPathKeyRejectsUnknownCaseMode(t *testing.T) {
 		t.Fatal("expected invalid case mode error")
 	}
 }
+
+func TestPathKeyRejectsWindowsSuperscriptDeviceNames(t *testing.T) {
+	for _, relative := range []string{
+		"folder/COM¹", "folder/com².txt", "folder/Com³.log",
+		"folder/LPT¹", "folder/lpt².txt", "folder/LpT³.log",
+	} {
+		t.Run(relative, func(t *testing.T) {
+			if got, err := PathKey("darwin", CaseSensitive, relative); err == nil {
+				t.Fatalf("PathKey(%q)=%q, want reserved-device error", relative, got)
+			}
+		})
+	}
+}

@@ -58,7 +58,7 @@ func validateRelativePath(relative string) (string, error) {
 				return "", fmt.Errorf("path component contains a forbidden character")
 			}
 		}
-		if isWindowsReservedComponent(component) {
+		if IsWindowsReservedName(component) {
 			return "", fmt.Errorf("path contains a Windows reserved component")
 		}
 	}
@@ -69,7 +69,9 @@ func hasWindowsDrivePrefix(value string) bool {
 	return len(value) >= 2 && value[1] == ':' && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z'))
 }
 
-func isWindowsReservedComponent(component string) bool {
+// IsWindowsReservedName reports whether a single path component is a Windows
+// device name, including the superscript digit spellings recognized by Win32.
+func IsWindowsReservedName(component string) bool {
 	base := component
 	if dot := strings.IndexByte(base, '.'); dot >= 0 {
 		base = base[:dot]
@@ -78,7 +80,12 @@ func isWindowsReservedComponent(component string) bool {
 	if base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" {
 		return true
 	}
-	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+	runes := []rune(base)
+	if len(runes) != 4 || (string(runes[:3]) != "COM" && string(runes[:3]) != "LPT") {
+		return false
+	}
+	digit := runes[3]
+	return (digit >= '1' && digit <= '9') || digit == '¹' || digit == '²' || digit == '³'
 }
 
 func asciiUpper(value string) string {

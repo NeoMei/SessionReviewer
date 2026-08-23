@@ -411,6 +411,162 @@ func TestInitializeNewOverviewContainsReservedSyncIdentity(t *testing.T) {
 	}
 }
 
+func TestInitializeRollsBackNewStateWhenBeforeOverviewFails(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	sentinel := errors.New("stop before overview")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random:              bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeOverviewWrite: func() error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
+
+	result, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x3b}, 8)),
+	})
+	if err != nil || result.ProjectID != "project-3b3b3b3b3b3b3b3b" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(filepath.Join(data, "projects", "project-2a2a2a2a2a2a2a2a")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old state survived retry: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(data, "projects", result.ProjectID)); err != nil || !info.IsDir() {
+		t.Fatalf("new state info=%v err=%v", info, err)
+	}
+}
+
+func TestInitializeRollsBackNewStateAfterRealOverviewWriteFailure(t *testing.T) {
+	root, vault, data, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeOverviewWrite: func() error {
+			return os.Symlink(outside, filepath.Join(root, "docs"))
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("err=%v", err)
+	}
+	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
+	if _, err := os.Stat(filepath.Join(outside, "session-review", "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("overview escaped through redirect: %v", err)
+	}
+}
+
+func TestInitializeRollsBackNewOverviewAndStateBeforeConfigWrite(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	sentinel := errors.New("stop before config")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random:            bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeConfigWrite: func() error { return sentinel },
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
+}
+
+func TestInitializeRollbackPreservesChangedOverviewAndJoinsCleanupError(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	sentinel := errors.New("stop after user edit")
+	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeConfigWrite: func() error {
+			if writeErr := os.WriteFile(overviewPath, []byte("user changed overview\n"), 0o644); writeErr != nil {
+				return writeErr
+			}
+			return sentinel
+		},
+	})
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "overview changed") {
+		t.Fatalf("err=%v", err)
+	}
+	body, readErr := os.ReadFile(overviewPath)
+	if readErr != nil || string(body) != "user changed overview\n" {
+		t.Fatalf("changed overview was removed: body=%q err=%v", body, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(data, "projects", "project-2a2a2a2a2a2a2a2a")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("owned state survived rollback: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(data, "config.toml")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("config exists: %v", statErr)
+	}
+}
+
+func TestInitializeRollbackPreservesUnexpectedStateContentAndJoinsCleanupError(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	sentinel := errors.New("stop after state changed")
+	id := "project-2a2a2a2a2a2a2a2a"
+	marker := filepath.Join(data, "projects", id, "queue", "user-state")
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeOverviewWrite: func() error {
+			if writeErr := os.WriteFile(marker, []byte("keep"), 0o600); writeErr != nil {
+				return writeErr
+			}
+			return sentinel
+		},
+	})
+	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "unexpected content") {
+		t.Fatalf("err=%v", err)
+	}
+	body, readErr := os.ReadFile(marker)
+	if readErr != nil || string(body) != "keep" {
+		t.Fatalf("unexpected state content was removed: body=%q err=%v", body, readErr)
+	}
+	assertPathMissing(t, filepath.Join(root, "docs", "session-review", "project-overview.md"))
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+}
+
+func TestInitializeDoesNotDeletePreexistingGeneratedProjectState(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	stateRoot := filepath.Join(data, "projects", id)
+	if err := os.MkdirAll(stateRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(stateRoot, "user-state")
+	if err := os.WriteFile(marker, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+	})
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("err=%v", err)
+	}
+	body, readErr := os.ReadFile(marker)
+	if readErr != nil || string(body) != "keep" {
+		t.Fatalf("preexisting state changed: body=%q err=%v", body, readErr)
+	}
+	assertPathMissing(t, filepath.Join(root, "docs", "session-review", "project-overview.md"))
+	assertPathMissing(t, filepath.Join(data, "config.toml"))
+}
+
+func assertNewInitializationAbsent(t *testing.T, projectRoot, dataRoot, projectID string) {
+	t.Helper()
+	assertPathMissing(t, filepath.Join(dataRoot, "projects", projectID))
+	assertPathMissing(t, filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"))
+	assertPathMissing(t, filepath.Join(dataRoot, "config.toml"))
+	assertPathMissing(t, filepath.Join(dataRoot, "config.toml.session-reviewer-backup"))
+}
+
+func assertPathMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("path %s exists or is inaccessible: %v", path, err)
+	}
+}
+
 func TestPreviewInitializationDoesNotCreateDataOrLedger(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
