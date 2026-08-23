@@ -557,6 +557,129 @@ func TestRunRejectsDifferentProposalWhileSameBoundaryReceiptIsPending(t *testing
 	}
 }
 
+func TestRunRejectsDifferentProposalWhileAnyPreparedReceiptOwnsProject(t *testing.T) {
+	t.Run("changed end boundary", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		stop := f.options()
+		stop.hooks.afterPreparedReceipt = func() error { return errors.New("stop after prepared receipt") }
+		if _, err := Run(stop); err == nil {
+			t.Fatal("expected interruption")
+		}
+		beforeLedger := snapshotTree(t, f.projectRoot)
+		beforeState := snapshotTree(t, f.projectData)
+
+		f.packet.ToCursor = 3
+		f.packet.NextCursor = evidence.CursorBoundary{Line: 3, SourceHash: testHashA}
+		f.packet.Events = append(f.packet.Events, evidence.Item{
+			ID: "ev-later", Timestamp: "2026-08-23T01:04:03Z", JSONLLine: 3,
+			SourceHash: testHashA, Kind: "message", Role: "assistant", Summary: "Later boundary",
+		})
+		rewriteFixtureInputs(t, f)
+
+		if _, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) {
+			t.Fatalf("err=%v", err)
+		}
+		if got := snapshotTree(t, f.projectRoot); got != beforeLedger {
+			t.Fatalf("conflict changed ledger\nbefore:\n%s\nafter:\n%s", beforeLedger, got)
+		}
+		if got := snapshotTree(t, f.projectData); got != beforeState {
+			t.Fatalf("conflict changed transaction state\nbefore:\n%s\nafter:\n%s", beforeState, got)
+		}
+	})
+
+	t.Run("different session after partial ledger", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		stop := f.options()
+		stop.hooks.afterFile = func(index int, _ string) error {
+			if index == 0 {
+				return errors.New("stop after first ledger file")
+			}
+			return nil
+		}
+		if _, err := Run(stop); err == nil {
+			t.Fatal("expected interruption")
+		}
+		beforeLedger := snapshotTree(t, f.projectRoot)
+		beforeState := snapshotTree(t, f.projectData)
+
+		f.packet.SessionID = "session-other"
+		rewriteFixtureInputs(t, f)
+		if _, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) {
+			t.Fatalf("err=%v", err)
+		}
+		if got := snapshotTree(t, f.projectRoot); got != beforeLedger {
+			t.Fatalf("conflict changed partial ledger\nbefore:\n%s\nafter:\n%s", beforeLedger, got)
+		}
+		if got := snapshotTree(t, f.projectData); got != beforeState {
+			t.Fatalf("conflict changed transaction state\nbefore:\n%s\nafter:\n%s", beforeState, got)
+		}
+	})
+
+	t.Run("different session while applied receipt lacks cursor CAS", func(t *testing.T) {
+		f := newApplyTestFixture(t)
+		stop := f.options()
+		stop.hooks.afterAppliedReceipt = func() error { return errors.New("stop before cursor CAS") }
+		if _, err := Run(stop); err == nil {
+			t.Fatal("expected interruption")
+		}
+		f.packet.SessionID = "session-other"
+		rewriteFixtureInputs(t, f)
+		if _, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestRunLaterCursorWithoutExactReceiptIsPureStalePreflight(t *testing.T) {
+	f := newApplyTestFixture(t)
+	if err := os.MkdirAll(f.projectData, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	advanced := cursor.Cursor{SessionID: testSessionID, LastLine: 3, LastHash: testHashA, UpdatedAt: f.now}
+	if err := (cursor.Store{Root: f.projectData}).Commit(testSessionID, cursor.Cursor{}, advanced); err != nil {
+		t.Fatal(err)
+	}
+	receipts := filepath.Join(f.projectData, "applied-proposals")
+	if err := os.Mkdir(receipts, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(receipts, ".session-reviewer-"+strings.Repeat("a", 32))
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotTree(t, f.dataDir)
+	if got, err := Run(f.options()); !errors.Is(err, cursor.ErrStale) || got.CursorAdvanced || got.AlreadyApplied {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if after := snapshotTree(t, f.dataDir); after != before {
+		t.Fatalf("later-cursor stale preflight mutated state\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestOutstandingReceiptOwnershipAllowsOnlyConclusiveAppliedReceipt(t *testing.T) {
+	root := t.TempDir()
+	store := cursor.Store{Root: root}
+	next := evidence.CursorBoundary{Line: 2, SourceHash: testHashB}
+	advanced := cursor.Cursor{SessionID: "session-other", LastLine: next.Line, LastHash: next.SourceHash, UpdatedAt: time.Now().UTC()}
+	if err := store.Commit("session-other", cursor.Cursor{}, advanced); err != nil {
+		t.Fatal(err)
+	}
+	applied := applyReceipt{State: receiptApplied, SessionID: "session-other", NextCursor: next}
+	if err := rejectOutstandingProjectReceipts(store, []applyReceipt{applied}); err != nil {
+		t.Fatalf("conclusive applied receipt blocked: %v", err)
+	}
+	prepared := applied
+	prepared.State = receiptPrepared
+	if err := rejectOutstandingProjectReceipts(store, []applyReceipt{prepared}); !errors.Is(err, ErrPendingReceiptConflict) {
+		t.Fatalf("prepared receipt err=%v", err)
+	}
+	uncommitted := applied
+	uncommitted.SessionID = "session-uncommitted"
+	if err := rejectOutstandingProjectReceipts(store, []applyReceipt{uncommitted}); !errors.Is(err, ErrPendingReceiptConflict) {
+		t.Fatalf("uncommitted applied receipt err=%v", err)
+	}
+}
+
 func TestRunAfterRenderFailureWritesNoReceiptOrLedger(t *testing.T) {
 	f := newApplyTestFixture(t)
 	before := hashLedger(t, f.projectRoot)
@@ -792,7 +915,7 @@ func TestRunBoundsReceiptDirectoryScan(t *testing.T) {
 	})
 }
 
-func TestRunIgnoresValidReceiptForDifferentSessionOrBoundary(t *testing.T) {
+func TestRunRejectsPreparedReceiptForDifferentSessionOrBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*inputContext)
@@ -827,8 +950,16 @@ func TestRunIgnoresValidReceiptForDifferentSessionOrBoundary(t *testing.T) {
 			if err := root.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if got, err := Run(f.options()); err != nil || !got.CursorAdvanced {
+			beforeLedger := snapshotTree(t, f.projectRoot)
+			beforeState := snapshotTree(t, f.projectData)
+			if got, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) || got.CursorAdvanced || got.AlreadyApplied {
 				t.Fatalf("got=%+v err=%v", got, err)
+			}
+			if got := snapshotTree(t, f.projectRoot); got != beforeLedger {
+				t.Fatal("pending receipt changed ledger")
+			}
+			if got := snapshotTree(t, f.projectData); got != beforeState {
+				t.Fatal("pending receipt changed transaction state")
 			}
 		})
 	}
@@ -1238,10 +1369,11 @@ func TestFinishReceiptClampsClockRegression(t *testing.T) {
 
 func TestProjectApplyLockIsCrossProcess(t *testing.T) {
 	if os.Getenv("SESSION_REVIEWER_APPLY_LOCK_HELPER") == "1" {
+		projectRoot := os.Getenv("SESSION_REVIEWER_APPLY_LOCK_PROJECT")
 		dataDir := os.Getenv("SESSION_REVIEWER_APPLY_LOCK_DATA")
 		ready := os.Getenv("SESSION_REVIEWER_APPLY_LOCK_READY")
 		release := os.Getenv("SESSION_REVIEWER_APPLY_LOCK_RELEASE")
-		lock, err := acquireProjectApplyLock(dataDir, testProjectID)
+		lock, err := acquireProjectApplyLock(projectRoot, dataDir, testProjectID)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -1260,6 +1392,7 @@ func TestProjectApplyLockIsCrossProcess(t *testing.T) {
 		os.Exit(4)
 	}
 	dataDir := t.TempDir()
+	projectRoot := t.TempDir()
 	ready := filepath.Join(t.TempDir(), "ready")
 	release := filepath.Join(t.TempDir(), "release")
 	executable, err := os.Executable()
@@ -1269,6 +1402,7 @@ func TestProjectApplyLockIsCrossProcess(t *testing.T) {
 	cmd := exec.Command(executable, "-test.run=^TestProjectApplyLockIsCrossProcess$")
 	cmd.Env = append(os.Environ(),
 		"SESSION_REVIEWER_APPLY_LOCK_HELPER=1",
+		"SESSION_REVIEWER_APPLY_LOCK_PROJECT="+projectRoot,
 		"SESSION_REVIEWER_APPLY_LOCK_DATA="+dataDir,
 		"SESSION_REVIEWER_APPLY_LOCK_READY="+ready,
 		"SESSION_REVIEWER_APPLY_LOCK_RELEASE="+release,
@@ -1293,7 +1427,7 @@ func TestProjectApplyLockIsCrossProcess(t *testing.T) {
 		t.Fatalf("helper did not acquire lock: %v", err)
 	}
 	started := time.Now()
-	if lock, err := acquireProjectApplyLock(dataDir, testProjectID); err == nil {
+	if lock, err := acquireProjectApplyLock(projectRoot, dataDir, testProjectID); err == nil {
 		_ = lock.Release()
 		t.Fatal("second process acquired live project lock")
 	} else if time.Since(started) < applyLockTimeout {
@@ -1304,6 +1438,67 @@ func TestProjectApplyLockIsCrossProcess(t *testing.T) {
 	}
 	if err := cmd.Wait(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProjectApplyLockAllowsIndependentProjects(t *testing.T) {
+	dataDir := t.TempDir()
+	first, err := acquireProjectApplyLock(t.TempDir(), dataDir, "project-aaaaaaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+	started := time.Now()
+	second, err := acquireProjectApplyLock(t.TempDir(), dataDir, "project-bbbbbbbbbbbbbbbb")
+	if err != nil {
+		t.Fatalf("independent project lock blocked: %v", err)
+	}
+	defer second.Release()
+	if elapsed := time.Since(started); elapsed >= applyLockTimeout {
+		t.Fatalf("independent project lock waited %v", elapsed)
+	}
+}
+
+func TestRunProjectRootReplacementCannotBypassProjectDataLock(t *testing.T) {
+	f := newApplyTestFixture(t)
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	first := f.options()
+	first.hooks.afterPreparedReceipt = func() error {
+		close(ready)
+		<-release
+		return errors.New("release first transaction")
+	}
+	go func() {
+		_, err := Run(first)
+		firstDone <- err
+	}()
+	<-ready
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	original := f.projectRoot + "-original"
+	if err := os.Rename(f.projectRoot, original); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyTreeForTest(original, f.projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "locked by a live owner") {
+		t.Fatalf("replacement entrant err=%v", err)
+	}
+	if elapsed := time.Since(started); elapsed < applyLockTimeout {
+		t.Fatalf("replacement entrant failed before lock timeout: %v", elapsed)
+	}
+	close(release)
+	if err := <-firstDone; err == nil {
+		t.Fatal("first transaction unexpectedly succeeded after root replacement")
 	}
 }
 
@@ -1322,6 +1517,34 @@ func replaceDirectoryForTest(live, moved string) error {
 		return err
 	}
 	return os.Mkdir(live, 0o700)
+}
+
+func copyTreeForTest(source, target string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		destination := filepath.Join(target, relative)
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(destination, info.Mode().Perm())
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("unexpected non-regular fixture entry %s", relative)
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(destination, body, info.Mode().Perm())
+	})
 }
 
 func makeExpectedCursorStale(t *testing.T, f *applyTestFixture) {
@@ -1350,6 +1573,41 @@ func makeExpectedCursorStale(t *testing.T, f *applyTestFixture) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.FromCursor = f.packet.FromCursor
+	p.ToCursor = f.packet.ToCursor
+	p.EvidencePacketSHA256 = digest
+	body, err = json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.proposalPath, append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func rewriteFixtureInputs(t *testing.T, f *applyTestFixture) {
+	t.Helper()
+	evidenceBody, err := json.Marshal(f.packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(f.evidencePath, append(evidenceBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, err := evidence.Digest(f.packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(f.proposalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := proposal.Decode(bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.ProjectID = f.packet.ProjectID
+	p.SessionID = f.packet.SessionID
 	p.FromCursor = f.packet.FromCursor
 	p.ToCursor = f.packet.ToCursor
 	p.EvidencePacketSHA256 = digest

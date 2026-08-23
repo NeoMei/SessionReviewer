@@ -16,27 +16,50 @@ func isApplyRedirect(info fs.FileInfo) bool {
 }
 
 type applyPlatformLock struct {
-	file *os.File
+	projectRoot *os.File
+	projectData *os.File
 }
 
-func acquireApplyPlatformLock(root *os.Root, _, _ string, timeout time.Duration) (*applyPlatformLock, error) {
+func acquireApplyPlatformLock(projectRoot, _ *os.Root, _, _ string, timeout time.Duration) (*applyPlatformLock, error) {
+	file, err := projectRoot.Open(".")
+	if err != nil {
+		return nil, fmt.Errorf("open pinned project root for apply lock: %w", err)
+	}
+	if err := acquireApplyFileLock(file, timeout); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("acquire project-root apply lock: %w", err)
+	}
+	return &applyPlatformLock{projectRoot: file}, nil
+}
+
+func attachApplyProjectDataLock(lock *applyPlatformLock, root *os.Root, timeout time.Duration) error {
+	if lock == nil || lock.projectRoot == nil || root == nil {
+		return errors.New("project apply lock and project data root are required")
+	}
 	file, err := root.Open(".")
 	if err != nil {
-		return nil, fmt.Errorf("open pinned data root for apply lock: %w", err)
+		return fmt.Errorf("open pinned project data root for apply lock: %w", err)
 	}
+	if err := acquireApplyFileLock(file, timeout); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("acquire project-data apply lock: %w", err)
+	}
+	lock.projectData = file
+	return nil
+}
+
+func acquireApplyFileLock(file *os.File, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
 		locked, err := tryApplyPlatformLock(file)
 		if err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("acquire data-root apply lock: %w", err)
+			return err
 		}
 		if locked {
-			return &applyPlatformLock{file: file}, nil
+			return nil
 		}
 		if !time.Now().Before(deadline) {
-			_ = file.Close()
-			return nil, errors.New("project apply transaction remains locked by a live owner")
+			return errors.New("project apply transaction remains locked by a live owner")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -54,8 +77,15 @@ func tryApplyPlatformLock(file *os.File) (bool, error) {
 }
 
 func releaseApplyPlatformLock(lock *applyPlatformLock) error {
-	if lock == nil || lock.file == nil {
+	if lock == nil {
 		return nil
 	}
-	return errors.Join(syscall.Flock(int(lock.file.Fd()), syscall.LOCK_UN), lock.file.Close())
+	var err error
+	if lock.projectData != nil {
+		err = errors.Join(err, syscall.Flock(int(lock.projectData.Fd()), syscall.LOCK_UN), lock.projectData.Close())
+	}
+	if lock.projectRoot != nil {
+		err = errors.Join(err, syscall.Flock(int(lock.projectRoot.Fd()), syscall.LOCK_UN), lock.projectRoot.Close())
+	}
+	return err
 }

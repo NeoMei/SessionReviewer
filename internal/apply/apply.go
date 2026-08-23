@@ -98,27 +98,35 @@ type projectApplyLock struct {
 	projectDataInfo os.FileInfo
 }
 
-func acquireProjectApplyLock(dataDir, projectID string) (*projectApplyLock, error) {
+func acquireProjectApplyLock(projectRoot, dataDir, projectID string) (*projectApplyLock, error) {
+	project, err := pathguard.Open(projectRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer project.Close()
 	data, err := pathguard.Open(dataDir)
 	if err != nil {
 		return nil, err
 	}
 	defer data.Close()
-	return acquireProjectApplyLockRoot(data, projectID)
+	return acquireProjectApplyLockRoot(project, data, projectID)
 }
 
-func acquireProjectApplyLockRoot(data *pathguard.Directory, projectID string) (*projectApplyLock, error) {
+func acquireProjectApplyLockRoot(project, data *pathguard.Directory, projectID string) (*projectApplyLock, error) {
 	if !safeIdentifier(projectID) {
 		return nil, errors.New("invalid project ID for apply lock")
 	}
-	if data == nil || data.Root == nil {
-		return nil, errors.New("initialized data root is required")
+	if project == nil || project.Root == nil || data == nil || data.Root == nil {
+		return nil, errors.New("initialized project and data roots are required")
 	}
-	// DataDir is an initialized, trusted application boundary. The retained
-	// root identity and later pathname rechecks fail closed on namespace
-	// replacement, but this cooperative lock is not filesystem-wide exclusion
-	// against a hostile writer replacing arbitrary entries below DataDir.
-	platform, err := acquireApplyPlatformLock(data.Root, data.Path, projectID, applyLockTimeout)
+	// DataDir is the trusted application boundary. Unix first locks the pinned
+	// project root and, after rooted initialization, also locks the pinned
+	// project-data directory so replacing the project-root pathname cannot
+	// create a second transaction owner. Windows uses one DataDir-identity and
+	// project-ID named mutex. Replacing DataDir itself remains outside this
+	// cooperative trust boundary; retained identities and path rechecks fail
+	// the active operation closed when such replacement is observed.
+	platform, err := acquireApplyPlatformLock(project.Root, data.Root, data.Path, projectID, applyLockTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -166,6 +174,11 @@ func (lock *projectApplyLock) initializeProjectData(data *pathguard.Directory, p
 		_ = projectData.Close()
 		_ = projects.Close()
 		return errors.New("project data directory identity changed while opening")
+	}
+	if err := attachApplyProjectDataLock(lock.platform, projectData, applyLockTimeout); err != nil {
+		_ = projectData.Close()
+		_ = projects.Close()
+		return err
 	}
 	lock.projectDataPath = projectDataPath
 	lock.projects = projects
@@ -264,10 +277,10 @@ func Run(opts Options) (result Result, retErr error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if !cursorCompatibleWithInput(current, ctx.Packet) {
-		return Result{}, cursor.ErrStale
+	if err := preflightCursorAndExactReceipt(roots.data.Root, current, ctx); err != nil {
+		return Result{}, err
 	}
-	lock, err := acquireProjectApplyLockRoot(roots.data, ctx.Packet.ProjectID)
+	lock, err := acquireProjectApplyLockRoot(roots.project, roots.data, ctx.Packet.ProjectID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -282,8 +295,8 @@ func Run(opts Options) (result Result, retErr error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if !cursorCompatibleWithInput(current, ctx.Packet) {
-		return Result{}, cursor.ErrStale
+	if err := preflightCursorAndExactReceipt(roots.data.Root, current, ctx); err != nil {
+		return Result{}, err
 	}
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
@@ -302,8 +315,11 @@ func Run(opts Options) (result Result, retErr error) {
 	if !cursorCompatibleWithInput(current, ctx.Packet) {
 		return Result{}, cursor.ErrStale
 	}
-	receipt, found, err := scanReceipts(lock.projectData, ctx, opts.hooks)
+	receipt, found, otherReceipts, err := scanReceipts(lock.projectData, ctx, opts.hooks)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := rejectOutstandingProjectReceipts(store, otherReceipts); err != nil {
 		return Result{}, err
 	}
 	if found {
@@ -374,6 +390,39 @@ func Run(opts Options) (result Result, retErr error) {
 		}
 	}
 	return finishReceipt(store, current, receipt, opts, written, roots.project.Info(), verifyIdentity)
+}
+
+func preflightCursorAndExactReceipt(dataRoot *os.Root, current cursor.Cursor, ctx inputContext) error {
+	if cursorAtBoundary(current, ctx.Packet.ExpectedCursor) {
+		return nil
+	}
+	if !cursorAtOrBeyond(current, ctx.Packet.NextCursor) {
+		return cursor.ErrStale
+	}
+	_, found, err := loadExactReceiptReadOnly(dataRoot, ctx)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return cursor.ErrStale
+	}
+	return nil
+}
+
+func rejectOutstandingProjectReceipts(store cursor.Store, receipts []applyReceipt) error {
+	for _, receipt := range receipts {
+		if receipt.State != receiptApplied {
+			return ErrPendingReceiptConflict
+		}
+		current, err := store.Load(receipt.SessionID)
+		if err != nil {
+			return err
+		}
+		if !cursorAtOrBeyond(current, receipt.NextCursor) {
+			return ErrPendingReceiptConflict
+		}
+	}
+	return nil
 }
 
 func openInputs(opts Options) (_ inputContext, roots *applyRoots, retErr error) {

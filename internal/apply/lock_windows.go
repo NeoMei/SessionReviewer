@@ -40,8 +40,8 @@ type applyPlatformLock struct {
 	handle syscall.Handle
 }
 
-func acquireApplyPlatformLock(root *os.Root, fallbackPath, projectID string, timeout time.Duration) (*applyPlatformLock, error) {
-	identity, err := canonicalApplyDataIdentity(root, fallbackPath)
+func acquireApplyPlatformLock(_, dataRoot *os.Root, fallbackPath, projectID string, timeout time.Duration) (*applyPlatformLock, error) {
+	identity, err := canonicalApplyDataIdentity(dataRoot, fallbackPath)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +64,13 @@ func acquireApplyPlatformLock(root *os.Root, fallbackPath, projectID string, tim
 		return nil, errors.New("project apply transaction remains locked by a live owner")
 	}
 	return nil, fmt.Errorf("wait for apply mutex: %w", waitErr)
+}
+
+func attachApplyProjectDataLock(lock *applyPlatformLock, root *os.Root, _ time.Duration) error {
+	if lock == nil || lock.handle == 0 || root == nil {
+		return errors.New("project apply mutex and project data root are required")
+	}
+	return nil
 }
 
 func canonicalApplyDataIdentity(root *os.Root, fallbackPath string) (string, error) {
