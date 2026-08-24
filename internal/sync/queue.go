@@ -26,24 +26,37 @@ const (
 	QueueBlocked QueueState = "blocked"
 )
 
+type QueueErrorClass string
+
+const (
+	QueueErrorSharingViolation QueueErrorClass = "sharing_violation"
+	QueueErrorLockViolation    QueueErrorClass = "lock_violation"
+	QueueErrorTransientWrite   QueueErrorClass = "transient_write"
+	QueueErrorVaultUnavailable QueueErrorClass = "vault_unavailable"
+)
+
 type QueueItem struct {
-	Version          int        `json:"version"`
-	ID               string     `json:"id"`
-	EntityID         string     `json:"entity_id"`
-	Target           Side       `json:"target"`
-	ExpectedBaseHash string     `json:"expected_base_hash"`
-	Attempts         int        `json:"attempts"`
-	NotBefore        time.Time  `json:"not_before"`
-	State            QueueState `json:"state"`
-	LastErrorClass   string     `json:"last_error_class"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
+	Version          int             `json:"version"`
+	ID               string          `json:"id"`
+	EntityID         string          `json:"entity_id"`
+	Target           Side            `json:"target"`
+	ExpectedBaseHash string          `json:"expected_base_hash"`
+	Attempts         int             `json:"attempts"`
+	NotBefore        time.Time       `json:"not_before"`
+	State            QueueState      `json:"state"`
+	LastErrorClass   QueueErrorClass `json:"last_error_class"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
 type Queue struct {
 	Root  *os.Root
 	Retry RetryPolicy
 	Now   func() time.Time
+
+	// beforeMutation is a test-only race probe. Returning nil cannot bypass
+	// the authenticated checkpoint that always follows it.
+	beforeMutation func(operation string, checkpoint int, root *os.Root, leaf string) error
 }
 
 type loadedQueueItem struct {
@@ -80,7 +93,10 @@ func (q Queue) Enqueue(item QueueItem) (QueueItem, error) {
 	if err := validateQueueItem(item); err != nil {
 		return QueueItem{}, err
 	}
-	records, err := loadQueueItems(q.Root)
+	if item.Attempts != 0 || item.State != QueuePending || item.LastErrorClass != "" {
+		return QueueItem{}, errors.New("new queue item must be pending without attempts")
+	}
+	records, err := loadQueueItems(q.Root, q.Retry)
 	if err != nil {
 		return QueueItem{}, err
 	}
@@ -90,7 +106,7 @@ func (q Queue) Enqueue(item QueueItem) (QueueItem, error) {
 	if _, err := q.Root.Lstat(queueRecordPath(item.ID)); !errors.Is(err, os.ErrNotExist) {
 		return QueueItem{}, errors.New("queue state changed before enqueue")
 	}
-	if err := writeQueueItem(q.Root, item); err != nil {
+	if err := writeQueueItemCAS(q.Root, item, q.Retry, nil, q.beforeMutation, "enqueue"); err != nil {
 		return QueueItem{}, err
 	}
 	return item, nil
@@ -103,7 +119,7 @@ func (q Queue) Ready(now time.Time, limit int) ([]QueueItem, error) {
 	if now.IsZero() || now.Location() != time.UTC || limit < 0 {
 		return nil, errors.New("invalid queue readiness request")
 	}
-	records, err := loadQueueItems(q.Root)
+	records, err := loadQueueItems(q.Root, q.Retry)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +151,7 @@ func (q Queue) Ack(id string) error {
 	if !queueIDPattern(id) {
 		return errors.New("invalid queue item ID")
 	}
-	records, err := loadQueueItems(q.Root)
+	records, err := loadQueueItems(q.Root, q.Retry)
 	if err != nil {
 		return err
 	}
@@ -143,7 +159,19 @@ func (q Queue) Ack(id string) error {
 	if !found {
 		return nil
 	}
-	if err := verifyQueuePreimage(q.Root, id, current); err != nil {
+	if err := writeQueueItemCAS(q.Root, current.item, q.Retry, &current, q.beforeMutation, "ack"); err != nil {
+		return err
+	}
+	published, err := loadQueueItemByID(q.Root, id, q.Retry)
+	if err != nil {
+		return err
+	}
+	if q.beforeMutation != nil {
+		if err := q.beforeMutation("ack", 4, q.Root, queueRecordPath(id)); err != nil {
+			return errors.New("queue acknowledgement checkpoint failed")
+		}
+	}
+	if err := verifyQueuePreimage(q.Root, id, published); err != nil {
 		return err
 	}
 	if err := atomicfile.RemoveRoot(q.Root, queueRecordPath(id)); err != nil {
@@ -163,7 +191,7 @@ func (q Queue) Reschedule(id, errorClass string) (QueueItem, error) {
 	if !queueIDPattern(id) || !queueErrorClass(errorClass) {
 		return QueueItem{}, errors.New("invalid queue reschedule request")
 	}
-	records, err := loadQueueItems(q.Root)
+	records, err := loadQueueItems(q.Root, q.Retry)
 	if err != nil {
 		return QueueItem{}, err
 	}
@@ -174,25 +202,22 @@ func (q Queue) Reschedule(id, errorClass string) (QueueItem, error) {
 	if current.item.State == QueueBlocked {
 		return QueueItem{}, errors.New("queue item is blocked")
 	}
-	if err := verifyQueuePreimage(q.Root, id, current); err != nil {
-		return QueueItem{}, err
-	}
-	delay := q.Retry.Initial
-	for attempt := 0; attempt < current.item.Attempts; attempt++ {
-		delay = nextRetryDelay(delay, q.Retry.Max)
-	}
+	delay := queueRetryDelay(q.Retry, current.item.Attempts)
 	next := current.item
 	next.Attempts++
 	next.NotBefore = now.Add(delay)
 	next.UpdatedAt = now
-	next.LastErrorClass = errorClass
+	next.LastErrorClass = QueueErrorClass(errorClass)
 	if next.Attempts >= q.Retry.QueueAttempts {
 		next.State = QueueBlocked
 	}
 	if err := validateQueueItem(next); err != nil {
 		return QueueItem{}, err
 	}
-	if err := writeQueueItem(q.Root, next); err != nil {
+	if err := validateQueuePolicy(next, q.Retry); err != nil {
+		return QueueItem{}, err
+	}
+	if err := writeQueueItemCAS(q.Root, next, q.Retry, &current, q.beforeMutation, "reschedule"); err != nil {
 		return QueueItem{}, err
 	}
 	return next, nil
@@ -248,15 +273,12 @@ func queueIDPattern(value string) bool {
 }
 
 func queueErrorClass(value string) bool {
-	if value == "" || len(value) > 64 || value[0] < 'a' || value[0] > 'z' {
+	switch QueueErrorClass(value) {
+	case QueueErrorSharingViolation, QueueErrorLockViolation, QueueErrorTransientWrite, QueueErrorVaultUnavailable:
+		return true
+	default:
 		return false
 	}
-	for _, character := range value[1:] {
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
-			return false
-		}
-	}
-	return true
 }
 
 func validateQueueItem(item QueueItem) error {
@@ -275,7 +297,7 @@ func validateQueueItem(item QueueItem) error {
 	if item.Attempts < 0 || (item.State != QueuePending && item.State != QueueBlocked) {
 		return errors.New("invalid queue item state")
 	}
-	if item.LastErrorClass != "" && !queueErrorClass(item.LastErrorClass) {
+	if item.LastErrorClass != "" && !queueErrorClass(string(item.LastErrorClass)) {
 		return errors.New("invalid queue error class")
 	}
 	for _, value := range []time.Time{item.NotBefore, item.CreatedAt, item.UpdatedAt} {
@@ -283,10 +305,38 @@ func validateQueueItem(item QueueItem) error {
 			return errors.New("queue times must be UTC")
 		}
 	}
+	if item.UpdatedAt.Before(item.CreatedAt) || item.NotBefore.Before(item.CreatedAt) {
+		return errors.New("invalid queue time ordering")
+	}
 	return nil
 }
 
-func loadQueueItems(root *os.Root) (map[string]loadedQueueItem, error) {
+func validateQueuePolicy(item QueueItem, policy RetryPolicy) error {
+	if item.Attempts > policy.QueueAttempts {
+		return errors.New("queue attempts exceed retry policy")
+	}
+	if item.State == QueuePending && item.Attempts >= policy.QueueAttempts {
+		return errors.New("pending queue item reached retry limit")
+	}
+	if item.State == QueueBlocked && item.Attempts != policy.QueueAttempts {
+		return errors.New("blocked queue item does not match retry limit")
+	}
+	if (item.Attempts == 0) != (item.LastErrorClass == "") {
+		return errors.New("queue error class does not match attempts")
+	}
+	return nil
+}
+
+func queueRetryDelay(policy RetryPolicy, previousAttempts int) time.Duration {
+	delay := policy.Initial
+	for previousAttempts > 0 && delay < policy.Max {
+		delay = nextRetryDelay(delay, policy.Max)
+		previousAttempts--
+	}
+	return delay
+}
+
+func loadQueueItems(root *os.Root, policy RetryPolicy) (map[string]loadedQueueItem, error) {
 	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
 		return nil, errors.New("cannot inspect queue state")
@@ -310,6 +360,9 @@ func loadQueueItems(root *os.Root) (map[string]loadedQueueItem, error) {
 		}
 		item, encoded, err := readQueueItem(root, name, info)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateQueuePolicy(item, policy); err != nil {
 			return nil, err
 		}
 		if item.ID != id {
@@ -423,7 +476,7 @@ func verifyQueuePreimage(root *os.Root, id string, current loadedQueueItem) erro
 	return nil
 }
 
-func writeQueueItem(root *os.Root, item QueueItem) error {
+func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expected *loadedQueueItem, hook func(string, int, *os.Root, string) error, operation string) error {
 	encoded, err := json.MarshalIndent(item, "", "  ")
 	if err != nil {
 		return errors.New("cannot encode queue state")
@@ -432,16 +485,57 @@ func writeQueueItem(root *os.Root, item QueueItem) error {
 	if len(encoded) > maxQueueRecordBytes {
 		return errors.New("queue state exceeds size limit")
 	}
-	if err := atomicfile.WriteRoot(root, queueRecordPath(item.ID), encoded, 0o600); err != nil {
+	leaf := queueRecordPath(item.ID)
+	checkpoint := 0
+	if err := atomicfile.WriteRootFileChecked(root, leaf, encoded, 0o600, func() error {
+		checkpoint++
+		if hook != nil {
+			if err := hook(operation, checkpoint, root, leaf); err != nil {
+				return errors.New("queue mutation probe failed")
+			}
+		}
+		if checkpoint < 3 {
+			return verifyQueueExpected(root, item.ID, expected)
+		}
+		return verifyQueuePublication(root, item, encoded, policy)
+	}); err != nil {
 		return errors.New("cannot persist queue state")
 	}
-	info, err := root.Lstat(queueRecordPath(item.ID))
-	if err != nil || info == nil || !info.Mode().IsRegular() || isStateRedirect(info) || !privateStateMode(info, 0o600) {
-		return errors.New("queue state failed post-write verification")
-	}
-	written, _, err := readQueueItem(root, queueRecordPath(item.ID), info)
-	if err != nil || written != item {
+	if err := verifyQueuePublication(root, item, encoded, policy); err != nil {
 		return errors.New("queue state failed post-write verification")
 	}
 	return nil
+}
+
+func verifyQueueExpected(root *os.Root, id string, expected *loadedQueueItem) error {
+	if expected == nil {
+		if _, err := root.Lstat(queueRecordPath(id)); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return errors.New("queue state changed before publication")
+	}
+	return verifyQueuePreimage(root, id, *expected)
+}
+
+func verifyQueuePublication(root *os.Root, item QueueItem, encoded []byte, policy RetryPolicy) error {
+	current, err := loadQueueItemByID(root, item.ID, policy)
+	if err != nil || current.item != item || !bytes.Equal(current.encoded, encoded) {
+		return errors.New("queue publication failed authentication")
+	}
+	return nil
+}
+
+func loadQueueItemByID(root *os.Root, id string, policy RetryPolicy) (loadedQueueItem, error) {
+	info, err := root.Lstat(queueRecordPath(id))
+	if err != nil || info == nil || !info.Mode().IsRegular() || isStateRedirect(info) || !privateStateMode(info, 0o600) {
+		return loadedQueueItem{}, errors.New("queue state is redirected, invalid, or not private")
+	}
+	item, encoded, err := readQueueItem(root, queueRecordPath(id), info)
+	if err != nil {
+		return loadedQueueItem{}, err
+	}
+	if err := validateQueuePolicy(item, policy); err != nil {
+		return loadedQueueItem{}, err
+	}
+	return loadedQueueItem{item: item, info: info, encoded: encoded}, nil
 }
