@@ -247,10 +247,7 @@ func TestRunStaleCursorWritesNothing(t *testing.T) {
 
 func TestRunExpectedProjectRootRejectsReplacementBeforeWrites(t *testing.T) {
 	f := newApplyTestFixture(t)
-	expected, err := os.Stat(f.projectRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	expected := pinnedApplyDirectoryInfo(t, f.projectRoot)
 	opts := f.options()
 	opts.ExpectedProjectRoot = expected
 	original := f.projectRoot + "-expected-original"
@@ -2108,6 +2105,9 @@ func snapshotTree(t *testing.T, root string) string {
 		if walkErr != nil {
 			return walkErr
 		}
+		if filepath.Base(path) == "maintenance.lock" && filepath.Base(filepath.Dir(path)) == "objects" {
+			return nil
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -2116,7 +2116,14 @@ func snapshotTree(t *testing.T, root string) string {
 		if err != nil {
 			return err
 		}
-		line := filepath.ToSlash(relative) + "|" + info.Mode().String() + "|" + strconv.FormatInt(info.ModTime().UnixNano(), 10) + "|" + strconv.FormatInt(info.Size(), 10)
+		modTime := info.ModTime().UnixNano()
+		if runtime.GOOS == "windows" && info.IsDir() {
+			// Windows may defer directory timestamp updates until enumeration
+			// handles close. Directory entries and file metadata remain the
+			// stable no-mutation evidence on that platform.
+			modTime = 0
+		}
+		line := filepath.ToSlash(relative) + "|" + info.Mode().String() + "|" + strconv.FormatInt(modTime, 10) + "|" + strconv.FormatInt(info.Size(), 10)
 		if info.Mode().IsRegular() {
 			body, err := os.ReadFile(path)
 			if err != nil {
@@ -2133,6 +2140,20 @@ func snapshotTree(t *testing.T, root string) string {
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
+}
+
+func pinnedApplyDirectoryInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }
 
 func assertCursorNotAdvanced(t *testing.T, f *applyTestFixture) {

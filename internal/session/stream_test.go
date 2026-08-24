@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -76,7 +77,7 @@ func TestStreamRejectsOversizedRecord(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "exceeds 1024 bytes") {
 		t.Fatalf("err=%v", err)
 	}
-	if !strings.Contains(err.Error(), path) {
+	if !strings.Contains(err.Error(), path) && !strings.Contains(err.Error(), strconv.Quote(path)) {
 		t.Fatalf("oversized error lacks source path: %v", err)
 	}
 }

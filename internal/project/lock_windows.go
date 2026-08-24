@@ -22,7 +22,6 @@ var projectProcReOpenFile = projectKernel32.NewProc("ReOpenFile")
 var projectProcGetFinalPathNameByHandleW = projectKernel32.NewProc("GetFinalPathNameByHandleW")
 
 const (
-	projectFileAttributeNormal    = 0x00000080
 	projectFileFlagBackupSemantic = 0x02000000
 )
 
@@ -132,7 +131,9 @@ func isProjectLockRedirect(info fs.FileInfo) bool {
 func privateProjectLockMode(fs.FileInfo) bool { return true }
 
 func stabilizeProjectLockFile(file *os.File) (*os.File, error) {
-	return reopenProjectHandleWithoutDelete(file, syscall.GENERIC_READ|syscall.GENERIC_WRITE, projectFileAttributeNormal)
+	// ReOpenFile accepts file flags here, not FILE_ATTRIBUTE_NORMAL. Zero keeps
+	// the regular file semantics while changing only access and sharing.
+	return reopenProjectHandleWithoutDelete(file, syscall.GENERIC_READ|syscall.GENERIC_WRITE, 0)
 }
 
 func reopenProjectHandleWithoutDelete(file *os.File, access, flags uint32) (*os.File, error) {

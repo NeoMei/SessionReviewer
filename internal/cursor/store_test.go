@@ -679,10 +679,7 @@ func TestStoreExpectedRootRejectsReplacementBeforeActualOpen(t *testing.T) {
 	if err := os.Mkdir(live, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	expected, err := os.Stat(live)
-	if err != nil {
-		t.Fatal(err)
-	}
+	expected := pinnedCursorDirectoryInfo(t, live)
 	store := Store{
 		Root:         live,
 		ExpectedRoot: expected,
@@ -701,6 +698,20 @@ func TestStoreExpectedRootRejectsReplacementBeforeActualOpen(t *testing.T) {
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("replacement root entries=%v err=%v", entries, err)
 	}
+}
+
+func pinnedCursorDirectoryInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }
 
 func TestStoreRejectsCaseCollidingSessionID(t *testing.T) {

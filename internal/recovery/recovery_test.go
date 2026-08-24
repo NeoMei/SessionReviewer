@@ -117,10 +117,7 @@ func TestHistoryFollowsSupersedesAndGroupsOnlyUnresolvedEditableTags(t *testing.
 
 func TestRecoveryExpectedProjectRootRejectsReplacement(t *testing.T) {
 	root := recoveryFixture(t)
-	expected, err := os.Stat(root)
-	if err != nil {
-		t.Fatal(err)
-	}
+	expected := pinnedRecoveryDirectoryInfo(t, root)
 	original := root + "-expected-original"
 	if err := os.Rename(root, original); err != nil {
 		t.Fatal(err)
@@ -147,6 +144,20 @@ func TestRecoveryExpectedProjectRootRejectsReplacement(t *testing.T) {
 	if !reflect.DeepEqual(recoveryTree(t, original), originalBefore) {
 		t.Fatal("expected project was written")
 	}
+}
+
+func pinnedRecoveryDirectoryInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }
 
 func TestHistoryRejectsMissingAndCyclicSupersedes(t *testing.T) {

@@ -937,10 +937,8 @@ func TestExpectedProjectRootRejectsReplacementInsideLedgerOpen(t *testing.T) {
 	t.Run("load", func(t *testing.T) {
 		root := ledgerFixture(t)
 		moved := root + "-moved"
-		expected, err := os.Stat(root)
-		if err != nil {
-			t.Fatal(err)
-		}
+		expected := pinnedLedgerDirectoryInfo(t, root)
+		var err error
 		_, err = loadWithRootOptions(root, rootOpenOptions{
 			expectedRoot: expected,
 			beforeOpen: func() error {
@@ -961,13 +959,10 @@ func TestExpectedProjectRootRejectsReplacementInsideLedgerOpen(t *testing.T) {
 	t.Run("apply", func(t *testing.T) {
 		root := ledgerFixture(t)
 		moved := root + "-moved"
-		expected, err := os.Stat(root)
-		if err != nil {
-			t.Fatal(err)
-		}
+		expected := pinnedLedgerDirectoryInfo(t, root)
 		relative := "docs/session-review/decisions/replacement.md"
 		plan := WritePlan{ProjectRoot: root, Files: []PlannedFile{{RelativePath: relative, Data: decisionDocument("replacement", testProjectID), Perm: 0o644}}}
-		_, err = applyWithRootOptions(plan, rootOpenOptions{
+		_, err := applyWithRootOptions(plan, rootOpenOptions{
 			expectedRoot: expected,
 			beforeOpen: func() error {
 				if err := os.Rename(root, moved); err != nil {
@@ -1063,7 +1058,7 @@ func TestApplyRejectsTraversalRedirectAndConcurrentEdit(t *testing.T) {
 		}
 		path := filepath.Join(root, "docs/session-review/decisions/decision-1.md")
 		before, _ := os.ReadFile(path)
-		if err := os.Chmod(path, 0o600); err != nil {
+		if err := os.Chmod(path, 0o444); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := Apply(plan); err == nil {
@@ -1071,10 +1066,24 @@ func TestApplyRejectsTraversalRedirectAndConcurrentEdit(t *testing.T) {
 		}
 		after, _ := os.ReadFile(path)
 		info, _ := os.Stat(path)
-		if !bytes.Equal(before, after) || info.Mode().Perm() != 0o600 {
+		if !bytes.Equal(before, after) || info.Mode().Perm() != 0o444 {
 			t.Fatalf("content or mode changed")
 		}
 	})
+}
+
+func pinnedLedgerDirectoryInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
 }
 
 func TestApplySortsPathsSkipsIdenticalAndUsesRequestedMode(t *testing.T) {

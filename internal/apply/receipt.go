@@ -83,10 +83,11 @@ func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan, ledgerSnapshotS
 	for _, file := range plan.Files {
 		entry := receiptFile{
 			RelativePath: file.RelativePath, PreimageExists: file.ExpectedExists,
-			PreimageMode: normalizeApplyMode(file.ExpectedPerm), TargetMode: normalizeApplyMode(file.Perm),
+			TargetMode:   normalizeApplyMode(file.Perm),
 			TargetSHA256: digestBytes(file.Data), TargetData: append([]byte(nil), file.Data...),
 		}
 		if file.ExpectedExists {
+			entry.PreimageMode = normalizeApplyMode(file.ExpectedPerm)
 			entry.PreimageSHA256 = digestBytes(file.ExpectedData)
 		}
 		receipt.Files = append(receipt.Files, entry)

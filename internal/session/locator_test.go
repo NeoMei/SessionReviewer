@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -361,7 +362,7 @@ func requireErrorContains(t *testing.T, err error, parts ...string) {
 		t.Fatalf("expected error containing %q", parts)
 	}
 	for _, part := range parts {
-		if !strings.Contains(err.Error(), part) {
+		if !strings.Contains(err.Error(), part) && !strings.Contains(err.Error(), strconv.Quote(part)) {
 			t.Fatalf("error %q does not contain %q", err, part)
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -597,10 +598,7 @@ func TestWriteRootFileCheckedRestoresTamperedRollbackByCopyOnWrite(t *testing.T)
 			if err := os.Link(destination, witness); err != nil {
 				t.Fatal(err)
 			}
-			oldInfo, err := os.Stat(destination)
-			if err != nil {
-				t.Fatal(err)
-			}
+			oldInfo := pinnedAtomicFileInfo(t, destination)
 			root, err := os.OpenRoot(directory)
 			if err != nil {
 				t.Fatal(err)
@@ -639,6 +637,9 @@ func TestWriteRootFileCheckedRestoresTamperedRollbackByCopyOnWrite(t *testing.T)
 }
 
 func TestWriteRootFileCheckedRestoresCapturedModeAfterModeOnlyTamper(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows exposes only read-only versus writable mode semantics")
+	}
 	for _, checkpoint := range []int{2, 3} {
 		for _, tamperedMode := range []os.FileMode{0o600, 0o666} {
 			t.Run(fmt.Sprintf("checkpoint-%d/%04o", checkpoint, tamperedMode), func(t *testing.T) {
@@ -710,10 +711,7 @@ func TestWriteRootFileCheckedCopyOnWriteFailureNeverModifiesUniqueOldInode(t *te
 			if err := os.Link(destination, witness); err != nil {
 				t.Fatal(err)
 			}
-			originalInfo, err := os.Stat(destination)
-			if err != nil {
-				t.Fatal(err)
-			}
+			originalInfo := pinnedAtomicFileInfo(t, destination)
 			root, err := os.OpenRoot(directory)
 			if err != nil {
 				t.Fatal(err)
@@ -833,7 +831,7 @@ func TestRecoverRootFileRollbackConvergesAfterCopyPublicationSyncFailure(t *test
 	if got, err := os.ReadFile(destination); err != nil || string(got) != "ORIGINAL" {
 		t.Fatalf("destination content=%q err=%v", got, err)
 	}
-	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o644 {
+	if info, err := os.Stat(destination); err != nil || !atomicTestModeEqual(info.Mode(), 0o644) {
 		t.Fatalf("destination mode=%v err=%v", info, err)
 	}
 	for _, path := range []string{backup, witness} {
@@ -869,6 +867,9 @@ func TestRecoverRootFileRollbackConvergesAfterCopyPublicationSyncFailure(t *test
 }
 
 func TestWriteRootFileCheckedRecoversPrivateParentModeAndCleanupAfterCheckpointFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory ACLs are not represented by os.FileMode")
+	}
 	for _, failedCheckpoint := range []int{2, 3} {
 		t.Run(fmt.Sprintf("checkpoint-%d", failedCheckpoint), func(t *testing.T) {
 			directory := t.TempDir()
@@ -921,6 +922,9 @@ func TestWriteRootFileCheckedRecoversPrivateParentModeAndCleanupAfterCheckpointF
 }
 
 func TestWriteRootFileCheckedDoesNotChmodParentWhoseOriginalModeWasNotPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory ACLs are not represented by os.FileMode")
+	}
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o755); err != nil {
 		t.Fatal(err)
@@ -1067,7 +1071,7 @@ func TestRecoverRootFileRollbackAcceptsWriterSafeCrashArtifactModes(t *testing.T
 				if got, err := os.ReadFile(destination); err != nil || string(got) != "old" {
 					t.Fatalf("destination content=%q err=%v", got, err)
 				}
-				if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != mode {
+				if info, err := os.Stat(destination); err != nil || !atomicTestModeEqual(info.Mode(), mode) {
 					t.Fatalf("destination mode=%v err=%v", info, err)
 				}
 			})
@@ -1109,6 +1113,9 @@ func TestWriteRootFileCheckedReconcilesWriterSafeSameInodeCrashArtifacts(t *test
 }
 
 func TestRecoverRootFileRollbackRejectsWriterUnsafeModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot represent owner/group write distinctions")
+	}
 	for _, mode := range []os.FileMode{0o660, 0o602, 0o610} {
 		t.Run(fmt.Sprintf("%04o", mode), func(t *testing.T) {
 			directory := t.TempDir()
@@ -1162,6 +1169,9 @@ func TestRecoverRootFileRollbackDoesNotOverwriteIndependentDestination(t *testin
 }
 
 func TestRecoverRootFileRollbackRejectsNonPrivateBackupWithoutMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot represent owner/group write distinctions")
+	}
 	directory := t.TempDir()
 	backup := filepath.Join(directory, BackupPath("state.json"))
 	if err := os.WriteFile(backup, []byte("old"), 0o666); err != nil {
@@ -1274,6 +1284,9 @@ func TestWriteRootFileCheckedRejectsOversizeRollbackSnapshotBeforeMutation(t *te
 }
 
 func TestWriteRootFileCheckedRejectsUnsafeExistingModeBeforeNewContentIO(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows cannot represent owner/group write distinctions")
+	}
 	directory := t.TempDir()
 	destination := filepath.Join(directory, "state.json")
 	if err := os.WriteFile(destination, []byte("old"), 0o600); err != nil {
@@ -1310,6 +1323,27 @@ func TestWriteRootFileCheckedRejectsUnsafeExistingModeBeforeNewContentIO(t *test
 func rollbackTestHash(content []byte) string {
 	digest := sha256.Sum256(content)
 	return hex.EncodeToString(digest[:])
+}
+
+func pinnedAtomicFileInfo(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info
+}
+
+func atomicTestModeEqual(actual, desired os.FileMode) bool {
+	if runtime.GOOS == "windows" {
+		return actual.Perm()&0o200 == desired.Perm()&0o200
+	}
+	return actual.Perm() == desired.Perm()
 }
 
 func TestWriteRootCannotBeRedirectedByDirectoryPathReplacement(t *testing.T) {
