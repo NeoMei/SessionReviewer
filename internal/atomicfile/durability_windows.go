@@ -8,10 +8,10 @@ import (
 	"syscall"
 )
 
-// Windows does not provide the Unix fsync(directory) contract through Go's
-// portable API. Flush the published destination handle, then attempt to flush
-// the pinned directory handle. Any unsupported or failed flush is returned;
-// native-Windows crash testing is required before claiming Unix equivalence.
+// Windows does not provide the Unix fsync(directory) contract. Flush the
+// published destination handle, then revalidate the pinned directory identity.
+// Namespace operations remain atomic/no-clobber, but this does not claim Unix
+// directory-metadata crash durability.
 func syncRootPublication(parent *os.Root, destination string) error {
 	file, err := parent.Open(destination)
 	if err != nil {
@@ -30,13 +30,15 @@ func syncRootDirectoryEntry(parent *os.Root, _ string) error {
 }
 
 func syncPinnedDirectory(root *os.Root) error {
-	directory, err := root.Open(".")
-	if err != nil {
-		return err
+	before, err := root.Stat(".")
+	if err != nil || before == nil || !before.IsDir() || isAtomicRedirect(before) {
+		return os.ErrInvalid
 	}
-	syncErr := directory.Sync()
-	closeErr := directory.Close()
-	return errorsJoin(syncErr, closeErr)
+	after, err := root.Stat(".")
+	if err != nil || after == nil || !os.SameFile(before, after) {
+		return os.ErrInvalid
+	}
+	return nil
 }
 
 func isAtomicRedirect(info fs.FileInfo) bool {

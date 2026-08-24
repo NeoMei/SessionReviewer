@@ -27,6 +27,16 @@ func TestSchemaCopyMatches(t *testing.T) {
 	}
 }
 
+func TestRepositoryCheckoutPreservesSkillLineEndings(t *testing.T) {
+	body, err := os.ReadFile("../../../.gitattributes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(body, []byte("* text=auto eol=lf")) {
+		t.Fatal("repository text files must stay LF on Windows checkouts")
+	}
+}
+
 func TestProposalSchemaPlacesAccountingOnSessionReport(t *testing.T) {
 	body, err := os.ReadFile("../../../schemas/proposal-v1.schema.json")
 	if err != nil {
@@ -411,7 +421,8 @@ func TestPowerShellWrappersRejectMissingAndNonApplicationShadowWhenAvailable(t *
 			for _, arg := range test.args {
 				command += " " + powerShellLiteral(arg)
 			}
-			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+			driver := writePowerShellDriver(t, command)
+			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", driver)
 			cmd.Env = append(os.Environ(), "PATH="+emptyPath)
 			output, err := cmd.CombinedOutput()
 			if exitCode(err) != 127 || !bytes.Contains(output, []byte("session-reviewer application executable not found")) {
@@ -471,7 +482,8 @@ func TestPowerShellWrappersBypassFunctionShadowAndCaptureImmediateExitWhenAvaila
 			for _, arg := range test.args {
 				command += " " + powerShellLiteral(arg)
 			}
-			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
+			driver := writePowerShellDriver(t, command)
+			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", driver)
 			cmd.Env = append(os.Environ(), "PATH="+path, "SESSION_REVIEWER_TEST_CAPTURE="+capture, "SESSION_REVIEWER_TEST_EXIT=41")
 			output, err := cmd.CombinedOutput()
 			if exitCode(err) != 41 {
@@ -483,6 +495,15 @@ func TestPowerShellWrappersBypassFunctionShadowAndCaptureImmediateExitWhenAvaila
 			}
 		})
 	}
+}
+
+func writePowerShellDriver(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "driver.ps1")
+	if err := os.WriteFile(path, []byte(body+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestPowerShellWrappersHandleApplicationStartFailureWhenAvailable(t *testing.T) {
