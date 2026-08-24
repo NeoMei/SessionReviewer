@@ -421,11 +421,13 @@ func TestPowerShellWrappersRejectMissingAndNonApplicationShadowWhenAvailable(t *
 			for _, arg := range test.args {
 				command += " " + powerShellLiteral(arg)
 			}
-			driver := writePowerShellDriver(t, command)
-			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", driver)
+			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
 			cmd.Env = append(os.Environ(), "PATH="+emptyPath)
 			output, err := cmd.CombinedOutput()
-			if exitCode(err) != 127 || !bytes.Contains(output, []byte("session-reviewer application executable not found")) {
+			// PowerShell's -Command host folds a script's non-zero exit into
+			// process status 1. Direct -File status preservation is covered by
+			// TestPowerShellWrappersPreserveArgumentsAndExitCodesWhenAvailable.
+			if exitCode(err) != 1 || !bytes.Contains(output, []byte("session-reviewer application executable not found")) {
 				t.Fatalf("exit=%d err=%v output=%s", exitCode(err), err, output)
 			}
 		})
@@ -482,12 +484,11 @@ func TestPowerShellWrappersBypassFunctionShadowAndCaptureImmediateExitWhenAvaila
 			for _, arg := range test.args {
 				command += " " + powerShellLiteral(arg)
 			}
-			driver := writePowerShellDriver(t, command)
-			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", driver)
+			cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command)
 			cmd.Env = append(os.Environ(), "PATH="+path, "SESSION_REVIEWER_TEST_CAPTURE="+capture, "SESSION_REVIEWER_TEST_EXIT=41")
 			output, err := cmd.CombinedOutput()
-			if exitCode(err) != 41 {
-				t.Fatalf("exit code was not captured immediately: %v\n%s", err, output)
+			if exitCode(err) != 1 {
+				t.Fatalf("PowerShell -Command did not report wrapper failure: %v\n%s", err, output)
 			}
 			assertCapturedArgs(t, capture, test.want)
 			if _, err := os.Stat(canary); !os.IsNotExist(err) {
@@ -495,15 +496,6 @@ func TestPowerShellWrappersBypassFunctionShadowAndCaptureImmediateExitWhenAvaila
 			}
 		})
 	}
-}
-
-func writePowerShellDriver(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "driver.ps1")
-	if err := os.WriteFile(path, []byte(body+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 
 func TestPowerShellWrappersHandleApplicationStartFailureWhenAvailable(t *testing.T) {

@@ -13,7 +13,10 @@ import (
 // Namespace operations remain atomic/no-clobber, but this does not claim Unix
 // directory-metadata crash durability.
 func syncRootPublication(parent *os.Root, destination string) error {
-	file, err := parent.Open(destination)
+	// FlushFileBuffers requires a handle opened for writing on Windows. The
+	// destination is a regular file created by the writer, so reopen it through
+	// the already pinned root with read/write access before flushing it.
+	file, err := parent.OpenFile(destination, os.O_RDWR, 0)
 	if err != nil {
 		return err
 	}
