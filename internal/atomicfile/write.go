@@ -292,10 +292,42 @@ func RecoverRootFileRollback(parent *os.Root, leaf, expectedOldHash string) (ret
 	if err != nil {
 		return err
 	}
+	expectedBytes, _ := hex.DecodeString(expectedOldHash)
+	authenticatedDestination, destinationAuthenticated := authenticatedRootFile(parent, leaf, expectedBytes)
 	backupName := BackupPath(leaf)
 	backupInfo, err := parent.Lstat(backupName)
+	if errors.Is(err, os.ErrNotExist) {
+		if !destinationAuthenticated {
+			return ErrRootRollbackRecoveryRequired
+		}
+		return guard.run(parent, func() error {
+			if _, ok := authenticatedRootFile(parent, leaf, expectedBytes); !ok {
+				return ErrRootRollbackRecoveryRequired
+			}
+			return syncRootDirectoryEntry(parent, backupName)
+		})
+	}
 	if err != nil || !secureAtomicRecoveryFile(backupInfo) {
 		return ErrRootRollbackRecoveryRequired
+	}
+	if destinationAuthenticated {
+		return guard.run(parent, func() error {
+			currentDestination, ok := authenticatedRootFile(parent, leaf, expectedBytes)
+			if !ok || !os.SameFile(authenticatedDestination, currentDestination) {
+				return ErrRootRollbackRecoveryRequired
+			}
+			currentBackup, err := parent.Lstat(backupName)
+			if err != nil || !os.SameFile(backupInfo, currentBackup) || !secureAtomicRecoveryFile(currentBackup) {
+				return ErrRootRollbackRecoveryRequired
+			}
+			if err := parent.Remove(backupName); err != nil {
+				return errors.New("cannot remove converged atomic rollback backup")
+			}
+			if err := syncRootDirectoryEntry(parent, backupName); err != nil {
+				return errors.New("cannot sync converged atomic rollback cleanup")
+			}
+			return nil
+		})
 	}
 	backupFile, err := parent.Open(backupName)
 	if err != nil {
@@ -310,7 +342,6 @@ func RecoverRootFileRollback(parent *os.Root, leaf, expectedOldHash string) (ret
 	if err != nil {
 		return ErrRootRollbackRecoveryRequired
 	}
-	expectedBytes, _ := hex.DecodeString(expectedOldHash)
 	actualHash := sha256.Sum256(snapshot)
 	if !bytes.Equal(actualHash[:], expectedBytes) {
 		return ErrRootRollbackRecoveryRequired
@@ -377,6 +408,28 @@ func RecoverRootFileRollback(parent *os.Root, leaf, expectedOldHash string) (ret
 		}
 		return removeRootRollback(parent, &rollback)
 	})
+}
+
+func authenticatedRootFile(parent *os.Root, leaf string, expectedHash []byte) (os.FileInfo, bool) {
+	before, err := parent.Lstat(leaf)
+	if err != nil || !secureAtomicRecoveryFile(before) {
+		return nil, false
+	}
+	file, err := parent.Open(leaf)
+	if err != nil {
+		return nil, false
+	}
+	opened, statErr := file.Stat()
+	content, readErr := readStableRollbackSnapshot(file, opened)
+	closeErr := file.Close()
+	after, nameErr := parent.Lstat(leaf)
+	digest := sha256.Sum256(content)
+	if statErr != nil || readErr != nil || closeErr != nil || nameErr != nil ||
+		!os.SameFile(before, opened) || !os.SameFile(opened, after) || !secureAtomicRecoveryFile(opened) ||
+		!secureAtomicRecoveryFile(after) || !bytes.Equal(digest[:], expectedHash) {
+		return nil, false
+	}
+	return after, true
 }
 
 func validRootRollbackHash(value string) bool {
@@ -504,7 +557,7 @@ func ensureRootRollbackContent(parent *os.Root, destination string, rollback *ro
 	current, err := rollback.file.Stat()
 	if err == nil && os.SameFile(rollback.original, current) {
 		content, readErr := readStableRollbackSnapshot(rollback.file, current)
-		if readErr == nil && sha256.Sum256(content) == rollback.hash {
+		if readErr == nil && sha256.Sum256(content) == rollback.hash && current.Mode() == rollback.original.Mode() {
 			return nil
 		}
 	}
@@ -601,7 +654,7 @@ func restoreRootRollbackCopy(parent *os.Root, destination string, expectedDestin
 		return errors.New("restored atomic rollback copy failed verification")
 	}
 	if err := ops.syncPublication(parent, destination); err != nil {
-		return errors.New("cannot sync restored atomic rollback copy")
+		return fmt.Errorf("cannot sync restored atomic rollback copy: %w", err)
 	}
 	if err := removeRootRollbackEntry(parent, rollback); err != nil {
 		return err
@@ -730,7 +783,7 @@ func rollbackRootPublication(parent *os.Root, destination string, publishedInfo 
 		}
 		current, err := rollback.file.Stat()
 		content, readErr := readStableRollbackSnapshot(rollback.file, current)
-		if err != nil || readErr != nil || !os.SameFile(rollback.original, current) || sha256.Sum256(content) != rollback.hash {
+		if err != nil || readErr != nil || !os.SameFile(rollback.original, current) || sha256.Sum256(content) != rollback.hash || current.Mode() != rollback.original.Mode() {
 			if err := verifyPublishedRootFileOwned(parent, destination, publishedInfo, desired); err != nil {
 				return err
 			}

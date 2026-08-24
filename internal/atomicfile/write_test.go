@@ -597,6 +597,57 @@ func TestWriteRootFileCheckedRestoresTamperedRollbackByCopyOnWrite(t *testing.T)
 	}
 }
 
+func TestWriteRootFileCheckedRestoresCapturedModeAfterModeOnlyTamper(t *testing.T) {
+	for _, checkpoint := range []int{2, 3} {
+		for _, tamperedMode := range []os.FileMode{0o600, 0o666} {
+			t.Run(fmt.Sprintf("checkpoint-%d/%04o", checkpoint, tamperedMode), func(t *testing.T) {
+				directory := t.TempDir()
+				destination := filepath.Join(directory, "state.json")
+				backup := filepath.Join(directory, BackupPath("state.json"))
+				if err := os.WriteFile(destination, []byte("ORIGINAL"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(destination, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				root, err := os.OpenRoot(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				checkpointErr := errors.New("namespace changed")
+				checks := 0
+				err = WriteRootFileChecked(root, "state.json", []byte("SECRET-NEW"), 0o644, func() error {
+					checks++
+					if checks != checkpoint {
+						return nil
+					}
+					tamperTarget := destination
+					if checkpoint == 3 {
+						tamperTarget = backup
+					}
+					if err := os.Chmod(tamperTarget, tamperedMode); err != nil {
+						return err
+					}
+					return checkpointErr
+				})
+				if !errors.Is(err, checkpointErr) || strings.Contains(err.Error(), "ORIGINAL") || strings.Contains(err.Error(), "SECRET-NEW") {
+					t.Fatalf("error=%v", err)
+				}
+				if got, err := os.ReadFile(destination); err != nil || string(got) != "ORIGINAL" {
+					t.Fatalf("destination content=%q err=%v", got, err)
+				}
+				if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o644 {
+					t.Fatalf("destination mode=%v err=%v", info, err)
+				}
+				if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("rollback backup remains: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestWriteRootFileCheckedCopyOnWriteFailureNeverModifiesUniqueOldInode(t *testing.T) {
 	probeErr := errors.New("injected recovery failure")
 	for _, failure := range []string{"short-write", "sync", "publish"} {
@@ -682,6 +733,97 @@ func TestWriteRootFileCheckedCopyOnWriteFailureNeverModifiesUniqueOldInode(t *te
 				t.Fatalf("recovery temp remains: entries=%v err=%v", entries, err)
 			}
 		})
+	}
+}
+
+func TestRecoverRootFileRollbackConvergesAfterCopyPublicationSyncFailure(t *testing.T) {
+	base := t.TempDir()
+	directory := filepath.Join(base, "parent")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "state.json")
+	backup := filepath.Join(directory, BackupPath("state.json"))
+	witness := filepath.Join(base, "old-inode-witness")
+	if err := os.WriteFile(destination, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(destination, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(destination, witness); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	ops := defaultDurabilityOps()
+	probeErr := errors.New("injected recovery publication sync failure")
+	syncCalls := 0
+	ops.syncPublication = func(parent *os.Root, leaf string) error {
+		syncCalls++
+		if syncCalls == 2 {
+			return probeErr
+		}
+		return syncRootPublication(parent, leaf)
+	}
+	checkpointErr := errors.New("namespace changed")
+	checks := 0
+	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET-NEW"), 0o644, func() error {
+		checks++
+		if checks != 3 {
+			return nil
+		}
+		if err := os.WriteFile(backup, []byte("TAMPERED"), 0o644); err != nil {
+			return err
+		}
+		return checkpointErr
+	}, ops)
+	if !errors.Is(err, checkpointErr) || !errors.Is(err, probeErr) {
+		t.Fatalf("error=%v", err)
+	}
+	for _, forbidden := range []string{"ORIGINAL", "SECRET-NEW", "TAMPERED"} {
+		if strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("error leaks content: %v", err)
+		}
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "ORIGINAL" {
+		t.Fatalf("destination content=%q err=%v", got, err)
+	}
+	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("destination mode=%v err=%v", info, err)
+	}
+	for _, path := range []string{backup, witness} {
+		if got, err := os.ReadFile(path); err != nil || string(got) != "TAMPERED" {
+			t.Fatalf("%s content=%q err=%v", filepath.Base(path), got, err)
+		}
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 2 {
+		t.Fatalf("unexpected crash state entries=%v err=%v", entries, err)
+	}
+	expectedOldHash := rollbackTestHash([]byte("ORIGINAL"))
+	if err := RecoverRootFileRollback(root, "state.json", expectedOldHash); err != nil {
+		t.Fatalf("explicit recovery: %v", err)
+	}
+	if err := RecoverRootFileRollback(root, "state.json", expectedOldHash); err != nil {
+		t.Fatalf("idempotent explicit recovery: %v", err)
+	}
+	if _, err := os.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback backup remains after recovery: %v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "ORIGINAL" {
+		t.Fatalf("recovered destination content=%q err=%v", got, err)
+	}
+	if err := WriteRootFileChecked(root, "state.json", []byte("AFTER"), 0o644, func() error { return nil }); err != nil {
+		t.Fatalf("next writer: %v", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "AFTER" {
+		t.Fatalf("next writer content=%q err=%v", got, err)
+	}
+	if entries, err := os.ReadDir(directory); err != nil || len(entries) != 1 || entries[0].Name() != "state.json" {
+		t.Fatalf("final artifacts=%v err=%v", entries, err)
 	}
 }
 
