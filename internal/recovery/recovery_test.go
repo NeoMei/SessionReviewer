@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
@@ -79,6 +80,9 @@ func TestHistoryFollowsSupersedesAndGroupsOnlyUnresolvedEditableTags(t *testing.
 	if got := openLoopIDs(view.OpenLoops); !reflect.DeepEqual(got, []string{"loop-abandoned", "loop-blocked", "loop-open", "loop-resolved"}) {
 		t.Fatalf("open-loop order=%v", got)
 	}
+	if got := sessionIDs(view.Sessions); !reflect.DeepEqual(got, []string{"z-earlier", "a-latest"}) {
+		t.Fatalf("session order=%v", got)
+	}
 	wantThemes := []Theme{
 		{Name: " Durability ", DecisionIDs: []string{"decision-old"}, OpenLoopIDs: []string{}},
 		{Name: " alpha ", DecisionIDs: []string{"decision-new"}, OpenLoopIDs: []string{}},
@@ -93,7 +97,7 @@ func TestHistoryFollowsSupersedesAndGroupsOnlyUnresolvedEditableTags(t *testing.
 	}
 	markdown := view.Markdown()
 	visible := renderGFMVisibleText(t, markdown)
-	for _, required := range []string{"Project history", "decision-new", "decision-old", "Supersedes", "loop-resolved", "ALPHA", "durability"} {
+	for _, required := range []string{"Project history", "z-earlier", "a-latest", "Earlier stop", "Latest accepted stop", "decision-new", "decision-old", "Supersedes", "loop-resolved", "ALPHA", "durability"} {
 		if !strings.Contains(visible, required) {
 			t.Fatalf("history omitted %q:\n%s", required, markdown)
 		}
@@ -708,6 +712,14 @@ func openLoopIDs(items []ledger.OpenLoop) []string {
 	return ids
 }
 
+func sessionIDs(items []ledger.SessionReport) []string {
+	ids := make([]string, len(items))
+	for index, item := range items {
+		ids[index] = item.SessionID
+	}
+	return ids
+}
+
 func cloneResumeCard(card ResumeCard) ResumeCard {
 	card.Drift = cloneTestStrings(card.Drift)
 	card.Blockers = cloneTestStrings(card.Blockers)
@@ -724,9 +736,11 @@ func cloneTestStrings(values []string) []string {
 }
 
 func cloneHistoryView(view HistoryView) HistoryView {
+	view.Accounting.Models = append([]accounting.ProjectModelSummary(nil), view.Accounting.Models...)
 	view.Timeline = append([]ledger.TimelineEvent(nil), view.Timeline...)
 	view.Decisions = append([]ledger.Decision(nil), view.Decisions...)
 	view.OpenLoops = append([]ledger.OpenLoop(nil), view.OpenLoops...)
+	view.Sessions = append([]ledger.SessionReport(nil), view.Sessions...)
 	view.Themes = append([]Theme(nil), view.Themes...)
 	return view
 }

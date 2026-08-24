@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 )
@@ -141,6 +142,37 @@ func TestValidateExactPacket(t *testing.T) {
 	}
 	if changes.Current == nil || changes.Current.Revision != 1 || len(changes.Timeline) != 1 || len(changes.Sessions) != 1 {
 		t.Fatalf("incomplete changes: %+v", changes)
+	}
+}
+
+func TestValidateAcceptsDescriptiveLastVerifiedState(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	p.CurrentStatePatch.LastVerified = strptr("Focused tests pass")
+
+	changes, err := Validate(p, packet, state)
+	if err != nil {
+		t.Fatalf("descriptive last-verified state rejected: %v", err)
+	}
+	if changes.Current == nil || changes.Current.LastVerified != "Focused tests pass" {
+		t.Fatalf("current state=%+v", changes.Current)
+	}
+}
+
+func TestValidateBindsSessionAccountingToPacketUsage(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	packet.SessionUsage = &accounting.SessionUsage{StartedAt: "2026-08-23T01:00:00Z", EndedAt: "2026-08-23T01:03:03Z", DurationMS: 183000, Models: []accounting.ModelUsage{{Model: "gpt-5.6-sol", TokenUsage: accounting.TokenUsage{InputTokens: 1000, CachedInputTokens: 400, CacheWriteInputTokens: 100, OutputTokens: 200, ReasoningOutputTokens: 50, TotalTokens: 1200}}}, TotalTokens: 1200}
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+	p.SessionReport.Accounting = &accounting.SessionAccounting{StartedAt: packet.SessionUsage.StartedAt, EndedAt: packet.SessionUsage.EndedAt, DurationMS: packet.SessionUsage.DurationMS, Models: []accounting.ModelAccounting{{ModelUsage: packet.SessionUsage.Models[0], Pricing: accounting.Pricing{Currency: "USD", InputPerMillion: 4, CachedInputPerMillion: .4, CacheWriteInputPerMillion: 5, OutputPerMillion: 20, Source: "https://developers.openai.com/api/docs/models/gpt-5.6-sol", AsOf: "2026-08-24"}, CostUSD: .00666}}, TotalTokens: 1200, TotalCostUSD: .00666}
+	if _, err := Validate(p, packet, state); err != nil {
+		t.Fatal(err)
+	}
+	p.SessionReport.Accounting.TotalCostUSD = 1
+	if _, err := Validate(p, packet, state); err == nil {
+		t.Fatal("accepted incorrect session cost")
 	}
 }
 

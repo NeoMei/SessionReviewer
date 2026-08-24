@@ -11,6 +11,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
@@ -659,6 +660,25 @@ func TestPacketFullBoundaryStopsAtLastFullyConsumedRecord(t *testing.T) {
 	packet := x.Packet()
 	if packet.NextCursor != (CursorBoundary{Line: 2, SourceHash: accepted.SourceHash}) || packet.ToCursor != 2 || !packet.HasMore {
 		t.Fatalf("packet=%+v", packet)
+	}
+}
+
+func TestSessionUsageRedactsModelIdentifiersBeforePacketPersistence(t *testing.T) {
+	x := newExtractor(t, "s1", "/p", 1, DefaultLimits())
+	usage := &accounting.SessionUsage{StartedAt: testTimestamp, EndedAt: testTimestamp, Models: []accounting.ModelUsage{{Model: canary}}, TotalTokens: 0}
+	if err := x.SetSessionUsage(usage); err != nil {
+		t.Fatal(err)
+	}
+	packet := x.Packet()
+	body, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), canary) || packet.SessionUsage.Models[0].Model == canary {
+		t.Fatalf("model identifier leaked: %s", body)
+	}
+	if len(packet.Warnings) == 0 {
+		t.Fatalf("redaction warning omitted: %+v", packet)
 	}
 }
 

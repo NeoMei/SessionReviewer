@@ -87,7 +87,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "history":
 		return runRecovery("history", args[1:], stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "unknown command %q\n", args[0])
+		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
+		fmt.Fprint(stderr, rootHelp)
 		return 2
 	}
 }

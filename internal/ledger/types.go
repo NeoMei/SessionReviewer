@@ -1,6 +1,10 @@
 package ledger
 
-import "io/fs"
+import (
+	"io/fs"
+
+	"github.com/neomei/SessionReviewer/internal/accounting"
+)
 
 type FactClass string
 
@@ -89,23 +93,24 @@ type SessionPhase struct {
 }
 
 type SessionReport struct {
-	ID                string         `json:"id"`
-	ProjectID         string         `json:"project_id"`
-	SessionID         string         `json:"session_id"`
-	Revision          int            `json:"revision"`
-	InitialGoal       string         `json:"initial_goal"`
-	GoalChanges       []string       `json:"goal_changes"`
-	Phases            []SessionPhase `json:"phases"`
-	Files             []string       `json:"files"`
-	Commits           []string       `json:"commits"`
-	Verification      []string       `json:"verification"`
-	DecisionsAdded    []string       `json:"decisions_added"`
-	DecisionsRevised  []string       `json:"decisions_revised"`
-	OpenLoopsCreated  []string       `json:"open_loops_created"`
-	OpenLoopsClosed   []string       `json:"open_loops_closed"`
-	PreviousSessionID string         `json:"previous_session_id"`
-	NextSessionID     string         `json:"next_session_id"`
-	Evidence          []EvidenceRef  `json:"evidence"`
+	ID                string                        `json:"id"`
+	ProjectID         string                        `json:"project_id"`
+	SessionID         string                        `json:"session_id"`
+	Revision          int                           `json:"revision"`
+	InitialGoal       string                        `json:"initial_goal"`
+	GoalChanges       []string                      `json:"goal_changes"`
+	Phases            []SessionPhase                `json:"phases"`
+	Files             []string                      `json:"files"`
+	Commits           []string                      `json:"commits"`
+	Verification      []string                      `json:"verification"`
+	DecisionsAdded    []string                      `json:"decisions_added"`
+	DecisionsRevised  []string                      `json:"decisions_revised"`
+	OpenLoopsCreated  []string                      `json:"open_loops_created"`
+	OpenLoopsClosed   []string                      `json:"open_loops_closed"`
+	PreviousSessionID string                        `json:"previous_session_id"`
+	NextSessionID     string                        `json:"next_session_id"`
+	Evidence          []EvidenceRef                 `json:"evidence"`
+	Accounting        *accounting.SessionAccounting `json:"accounting,omitempty"`
 }
 
 type State struct {

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
@@ -46,14 +47,15 @@ func (l Limits) Validate() error {
 }
 
 type Extractor struct {
-	packet        Packet
-	redactor      redact.Redactor
-	limits        Limits
-	currentCWD    string
-	warningCounts map[string]int
-	usedIDs       map[string]struct{}
-	full          bool
-	expectedSet   bool
+	packet             Packet
+	redactor           redact.Redactor
+	limits             Limits
+	currentCWD         string
+	warningCounts      map[string]int
+	usageWarningCounts map[string]int
+	usedIDs            map[string]struct{}
+	full               bool
+	expectedSet        bool
 }
 
 // NewWithProjectID constructs an extractor whose packet-size accounting includes
@@ -66,11 +68,12 @@ func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redac
 		return nil, err
 	}
 	x := &Extractor{
-		redactor:      redactor,
-		limits:        limits,
-		currentCWD:    cwd,
-		warningCounts: make(map[string]int),
-		usedIDs:       make(map[string]struct{}),
+		redactor:           redactor,
+		limits:             limits,
+		currentCWD:         cwd,
+		warningCounts:      make(map[string]int),
+		usageWarningCounts: make(map[string]int),
+		usedIDs:            make(map[string]struct{}),
 	}
 
 	safeProjectID, projectFindings := x.redact(projectID)
@@ -266,7 +269,7 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 	}
 	candidate := x.Packet()
 	candidate.Events = append(candidate.Events, item)
-	candidate.Warnings = warningsWith(x.warningCounts, findings)
+	candidate.Warnings = warningsWith(x.combinedWarningCounts(), findings)
 	advancePacket(&candidate, record)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
@@ -291,7 +294,55 @@ func (x *Extractor) Packet() Packet {
 		snapshot.Events = []Item{}
 	}
 	snapshot.Warnings = append([]string(nil), x.packet.Warnings...)
+	if x.packet.SessionUsage != nil {
+		usage := *x.packet.SessionUsage
+		usage.Models = append([]accounting.ModelUsage{}, usage.Models...)
+		snapshot.SessionUsage = &usage
+	}
 	return snapshot
+}
+
+func (x *Extractor) SetSessionUsage(usage *accounting.SessionUsage) error {
+	if x == nil {
+		return ErrInvalidLimits
+	}
+	if usage == nil {
+		x.packet.SessionUsage = nil
+		x.usageWarningCounts = make(map[string]int)
+		x.refreshWarnings()
+		return nil
+	}
+	if len(usage.Models) > 128 {
+		return errors.New("session usage has too many models")
+	}
+	copyUsage := *usage
+	copyUsage.Models = append([]accounting.ModelUsage{}, usage.Models...)
+	usageWarnings := make(map[string]int)
+	for index := range copyUsage.Models {
+		safe, findings := x.redact(copyUsage.Models[index].Model)
+		copyUsage.Models[index].Model = safe
+		for _, finding := range findings {
+			if finding.Rule != "" && finding.Count > 0 {
+				usageWarnings[finding.Rule] += finding.Count
+			}
+		}
+	}
+	sort.Slice(copyUsage.Models, func(i, j int) bool { return copyUsage.Models[i].Model < copyUsage.Models[j].Model })
+	for index := 1; index < len(copyUsage.Models); index++ {
+		if copyUsage.Models[index-1].Model == copyUsage.Models[index].Model {
+			return errors.New("redacted session model identifiers collide")
+		}
+	}
+	candidate := x.Packet()
+	candidate.SessionUsage = &copyUsage
+	candidate.Warnings = formatWarnings(mergeWarningCounts(x.warningCounts, usageWarnings))
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return ErrPacketFull
+	}
+	x.packet.SessionUsage = &copyUsage
+	x.usageWarningCounts = usageWarnings
+	x.refreshWarnings()
+	return nil
 }
 
 // AddWarning appends a structural warning without bypassing packet bounds.
@@ -337,7 +388,22 @@ func (x *Extractor) mergeFindings(findings []redact.Finding) {
 }
 
 func (x *Extractor) refreshWarnings() {
-	x.packet.Warnings = formatWarnings(x.warningCounts)
+	x.packet.Warnings = formatWarnings(x.combinedWarningCounts())
+}
+
+func (x *Extractor) combinedWarningCounts() map[string]int {
+	return mergeWarningCounts(x.warningCounts, x.usageWarningCounts)
+}
+
+func mergeWarningCounts(first, second map[string]int) map[string]int {
+	result := make(map[string]int, len(first)+len(second))
+	for rule, count := range first {
+		result[rule] += count
+	}
+	for rule, count := range second {
+		result[rule] += count
+	}
+	return result
 }
 
 func warningsWith(existing map[string]int, findings []redact.Finding) []string {

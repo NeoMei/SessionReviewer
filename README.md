@@ -123,6 +123,8 @@ session-reviewer apply \
 
 `apply` 成功时输出 `changed_files`、`cursor_advanced` 和 `already_applied`。如果 packet 为 `has_more: true`，必须等该次 apply 成功且 `cursor_advanced: true` 后才能 prepare 下一包；下一包的 `expected_cursor` 必须与上一包的 `next_cursor` 完全相等。只有显式要求从 session 开头复查时，第一包才可使用 `review --from-start`；后续包和 `already_applied: true` 后的重试都必须省略 `--from-start`。
 
+packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包含会话起止时间、耗时、每个模型的 input/cached-input/cache-write/output/reasoning-output/total tokens 和总 tokens。Skill 必须把这些计数原样写入 session report，并为每个模型记录当前公开的 USD/百万 Token 标价、来源、日期与计算成本；订阅包含量不参与计算。CLI 会校验 usage、单价结构、逐模型成本和总成本。每次 accepted session 更新都会在 session Markdown 中写入会话统计，并在 `project-overview.md` 的 `Project accounting` 章节汇总项目总耗时、总 Token、总成本，以及各模型的 Token/成本占比；`history` 也显示同一份项目级汇总。
+
 重复 apply 同一个已接受 proposal 会返回 `already_applied: true`，不重写 ledger 或派生图，也不改变字节、哈希或修改时间。如果在写入后、cursor CAS 前中断，receipt 会用于校验并恢复该次接受；任何中间用户编辑或边界不匹配都会失败关闭。
 
 ledger 是可编辑 Markdown。未知 frontmatter 字段和 CLI 不拥有的自定义章节会在后续 apply 中保留；已接受的 title、status、tags 和 narrative 是后续 proposal 的当前基线，只能通过 revision/evidence 验证的显式变更更新。`docs/session-review/diagrams/project-evolution.md` 中的两张 Mermaid graph 由 accepted ledger 派生，不是独立的语义来源，不应手工编辑。

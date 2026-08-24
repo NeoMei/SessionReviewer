@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+
+	"github.com/neomei/SessionReviewer/internal/accounting"
 )
 
 // CursorBoundary binds a JSONL line to the hash of its exact source record.
@@ -14,17 +16,18 @@ type CursorBoundary struct {
 
 // Packet is the stable schema-v2 envelope passed to semantic consumers.
 type Packet struct {
-	SchemaVersion  int            `json:"schema_version"`
-	ProjectID      string         `json:"project_id"`
-	SessionID      string         `json:"session_id"`
-	CWD            string         `json:"cwd"`
-	FromCursor     int            `json:"from_cursor"`
-	ToCursor       int            `json:"to_cursor"`
-	ExpectedCursor CursorBoundary `json:"expected_cursor"`
-	NextCursor     CursorBoundary `json:"next_cursor"`
-	HasMore        bool           `json:"has_more"`
-	Events         []Item         `json:"events"`
-	Warnings       []string       `json:"warnings,omitempty"`
+	SchemaVersion  int                      `json:"schema_version"`
+	ProjectID      string                   `json:"project_id"`
+	SessionID      string                   `json:"session_id"`
+	CWD            string                   `json:"cwd"`
+	FromCursor     int                      `json:"from_cursor"`
+	ToCursor       int                      `json:"to_cursor"`
+	ExpectedCursor CursorBoundary           `json:"expected_cursor"`
+	NextCursor     CursorBoundary           `json:"next_cursor"`
+	HasMore        bool                     `json:"has_more"`
+	Events         []Item                   `json:"events"`
+	Warnings       []string                 `json:"warnings,omitempty"`
+	SessionUsage   *accounting.SessionUsage `json:"session_usage,omitempty"`
 }
 
 // Digest hashes the deterministic JSON encoding of the exact packet.

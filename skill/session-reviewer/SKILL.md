@@ -33,7 +33,8 @@ Before any command, resolve the user-selected project (or current project) once 
    - compute `evidence_packet_sha256` as `sha256:` plus the SHA-256 of the packet's compact JSON bytes (the prepared file without its single trailing LF);
    - preserve the packet's `expected_cursor` and `next_cursor` as the acceptance boundary even though they are not proposal fields;
    - cite only exact packet evidence tuples: evidence ID, session ID, JSONL line, source hash, and copy its `summary` byte-for-byte;
-   - include every required top-level field, using empty arrays where appropriate; use accepted entity revisions for patches; never upgrade an inference to verified without verification evidence.
+   - include every required top-level field, using empty arrays where appropriate; use accepted entity revisions for patches; never upgrade an inference to verified without verification evidence;
+   - when the packet contains `session_usage`, copy its timestamps, duration, per-model token counters, and total tokens exactly into `session_report.accounting`; attach current public list prices in USD per million tokens for every model, including source and as-of date, then calculate each model cost and the total without considering subscriptions.
 6. Apply only through `scripts/apply-proposal.sh <proposal> <packet> --project "$PROJECT_ROOT" [flags]` on POSIX or the corresponding `.ps1` wrapper in PowerShell. Treat validation, rendering, receipt, write, or compare-and-swap failure as rejection of the whole proposal.
 7. Delete only the explicit packet and proposal temporary files, then the known empty temporary directory, after successful acceptance. On failure, stop and report the retained diagnostic paths.
 

@@ -66,7 +66,11 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeDiagnostic(stderr, "init", err)
 	}
-	fmt.Fprintf(stdout, "action: %s\nproject_id: %s\nledger: %s\nconfig: %s\nwritten: false\n", preview.Action, preview.ProjectID, preview.LedgerRoot, preview.ConfigPath)
+	previewProjectID := preview.ProjectID
+	if previewProjectID == "" {
+		previewProjectID = "(generated on write)"
+	}
+	fmt.Fprintf(stdout, "action: %s\nproject_id: %s\nledger: %s\nconfig: %s\nwritten: false\n", preview.Action, previewProjectID, preview.LedgerRoot, preview.ConfigPath)
 	if !*write {
 		return 0
 	}

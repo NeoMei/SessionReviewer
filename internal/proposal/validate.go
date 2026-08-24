@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/redact"
@@ -503,6 +504,13 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	if report.ProjectID != p.ProjectID || report.SessionID != p.SessionID {
 		return fail(errors.New("session report identity does not match proposal"))
 	}
+	if packet.SessionUsage != nil {
+		if err := accounting.ValidateSessionAccounting(report.Accounting, packet.SessionUsage); err != nil {
+			return fail(err)
+		}
+	} else if report.Accounting != nil {
+		return fail(errors.New("session accounting is present without packet usage"))
+	}
 	if existingID, represented := sessionReportBySession[report.SessionID]; represented && existingID != report.ID {
 		return fail(fmt.Errorf("session %q is already represented by report %q", report.SessionID, existingID))
 	}
@@ -728,10 +736,8 @@ func validateProtocolShape(p Proposal) error {
 	if err := validateOptionalEvidence(p.CurrentStatePatch.Evidence); err != nil {
 		return err
 	}
-	for _, value := range []*string{p.CurrentStatePatch.LastVerified, p.CurrentStatePatch.LastUpdated} {
-		if value != nil && !validTime(*value) {
-			return fmt.Errorf("invalid current-state time %q", *value)
-		}
+	if value := p.CurrentStatePatch.LastUpdated; value != nil && !validTime(*value) {
+		return fmt.Errorf("invalid current-state time %q", *value)
 	}
 	if err := validateSessionReport(p.SessionReport); err != nil {
 		return err
@@ -1181,6 +1187,11 @@ func appendSessionReportText(values []string, report ledger.SessionReport) []str
 	for _, phase := range report.Phases {
 		values = append(values, phase.Title, phase.Summary)
 		values = appendEvidenceText(values, phase.Evidence)
+	}
+	if report.Accounting != nil {
+		for _, model := range report.Accounting.Models {
+			values = append(values, model.Model, model.Pricing.Currency, model.Pricing.Source, model.Pricing.AsOf)
+		}
 	}
 	return appendEvidenceText(values, report.Evidence)
 }

@@ -55,7 +55,7 @@ func TestRunRejectsArgumentsAfterRootHelpOrVersion(t *testing.T) {
 func TestRunRejectsUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := Run([]string{"unknown"}, &out, &errOut)
-	if code != 2 || !strings.Contains(errOut.String(), `unknown command "unknown"`) {
+	if code != 2 || out.Len() != 0 || !strings.Contains(errOut.String(), `unknown command "unknown"`) || !strings.Contains(errOut.String(), "Usage: session-reviewer") {
 		t.Fatalf("code=%d stderr=%q", code, errOut.String())
 	}
 }
@@ -591,6 +591,9 @@ func TestRunInitPreviewsWithoutWritingUntilWriteFlag(t *testing.T) {
 	var out, errOut bytes.Buffer
 	if code := Run(args, &out, &errOut); code != 0 || !strings.Contains(out.String(), "action: create") {
 		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errOut.String())
+	}
+	if strings.Contains(out.String(), "project_id: \n") || !strings.Contains(out.String(), "project_id: (generated on write)") {
+		t.Fatalf("create preview has an ambiguous project ID: %q", out.String())
 	}
 	if _, err := os.Stat(filepath.Join(projectRoot, "docs")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("preview wrote docs: %v", err)

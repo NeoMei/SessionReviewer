@@ -5,6 +5,7 @@ Read this reference whenever synthesizing a proposal. JSON Schema checks shape; 
 ## Packet and evidence binding
 
 - Bind the proposal to the exact schema-v2 packet identity, cursor range, and digest. Packet `expected_cursor` must be `from_cursor - 1`; `next_cursor` must be `to_cursor`; an empty packet has equal boundaries.
+- If the packet has `session_usage`, `session_report.accounting` is mandatory. Its usage values must match the packet exactly. Use public list pricing in USD per million tokens, with an explicit source and `as_of` date. Cost is `(uncached_input * input_rate + cached_input * cached_rate + cache_write_input * cache_write_rate + output * output_rate) / 1_000_000`; output already includes reasoning output, so do not charge reasoning twice.
 - Each evidence reference is an exact packet tuple: `evidence_id`, current `session_id`, `jsonl_line`, `source_hash`, and `summary`. The summary must equal the packet summary exactly; do not paraphrase it inside the evidence reference.
 - Every changed entity needs non-empty current-packet evidence. Final `source_sessions` for decisions, open loops, and current state must include the current session.
 - Add exactly one `evidence_link` for every changed-entity/evidence pair, with no link to unchanged or unbound data. Use `supports`, `verifies`, or `contradicts`. An inference or pending-confirmation timeline upgraded to verified needs a `verifies` link.

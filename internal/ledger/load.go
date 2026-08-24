@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"gopkg.in/yaml.v3"
 )
@@ -524,7 +525,7 @@ func decodeSession(doc Document, projectID string) (SessionReport, error) {
 		name   string
 		target any
 	}{
-		{"session_id", &item.SessionID}, {"initial_goal", &item.InitialGoal}, {"goal_changes", &item.GoalChanges}, {"phases", &item.Phases}, {"files", &item.Files}, {"commits", &item.Commits}, {"verification", &item.Verification}, {"decisions_added", &item.DecisionsAdded}, {"decisions_revised", &item.DecisionsRevised}, {"open_loops_created", &item.OpenLoopsCreated}, {"open_loops_closed", &item.OpenLoopsClosed}, {"previous_session_id", &item.PreviousSessionID}, {"next_session_id", &item.NextSessionID}, {"evidence", &item.Evidence},
+		{"session_id", &item.SessionID}, {"initial_goal", &item.InitialGoal}, {"goal_changes", &item.GoalChanges}, {"phases", &item.Phases}, {"files", &item.Files}, {"commits", &item.Commits}, {"verification", &item.Verification}, {"decisions_added", &item.DecisionsAdded}, {"decisions_revised", &item.DecisionsRevised}, {"open_loops_created", &item.OpenLoopsCreated}, {"open_loops_closed", &item.OpenLoopsClosed}, {"previous_session_id", &item.PreviousSessionID}, {"next_session_id", &item.NextSessionID}, {"evidence", &item.Evidence}, {"accounting", &item.Accounting},
 	} {
 		if err := decodeOptionalField(&doc.Frontmatter, field.name, field.target); err != nil {
 			return SessionReport{}, err
@@ -553,6 +554,9 @@ func decodeSession(doc Document, projectID string) (SessionReport, error) {
 		if err := validateLedgerEvidence(phase.Evidence); err != nil {
 			return SessionReport{}, err
 		}
+	}
+	if err := accounting.ValidateStoredSessionAccounting(item.Accounting); err != nil {
+		return SessionReport{}, fmt.Errorf("invalid session accounting: %w", err)
 	}
 	return item, nil
 }

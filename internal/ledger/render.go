@@ -13,6 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
@@ -65,6 +66,17 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		}
 		if err := appendRendered(ledgerRootRelative+"/current-state.md", doc, state.documents.current); err != nil {
 			return fail(err)
+		}
+	}
+	if len(changes.Sessions) != 0 {
+		doc, supported, err := renderProjectAccountingDocument(next)
+		if err != nil {
+			return fail(err)
+		}
+		if supported {
+			if err := appendRendered(ledgerRootRelative+"/project-overview.md", doc, state.documents.overview); err != nil {
+				return fail(err)
+			}
 		}
 	}
 	if len(changes.Timeline) != 0 {
@@ -571,6 +583,9 @@ func renderSessionDocument(old, incoming SessionReport, loaded *loadedDocument) 
 		}
 	}
 	fields := map[string]any{"session_id": incoming.SessionID, "source_sessions": []string{incoming.SessionID}, "initial_goal": incoming.InitialGoal, "goal_changes": incoming.GoalChanges, "phases": incoming.Phases, "files": incoming.Files, "commits": incoming.Commits, "verification": incoming.Verification, "decisions_added": sortedStrings(incoming.DecisionsAdded), "decisions_revised": sortedStrings(incoming.DecisionsRevised), "open_loops_created": sortedStrings(incoming.OpenLoopsCreated), "open_loops_closed": sortedStrings(incoming.OpenLoopsClosed), "previous_session_id": incoming.PreviousSessionID, "next_session_id": incoming.NextSessionID, "evidence": sortedEvidence(incoming.Evidence)}
+	if incoming.Accounting != nil {
+		fields["accounting"] = incoming.Accounting
+	}
 	if err := setKnownFrontmatter(&doc, fields); err != nil {
 		return Document{}, err
 	}
@@ -578,7 +593,7 @@ func renderSessionDocument(old, incoming SessionReport, loaded *loadedDocument) 
 		name      string
 		old, next any
 		body      string
-	}{{"Initial goal", old.InitialGoal, incoming.InitialGoal, incoming.InitialGoal}, {"Goal changes", old.GoalChanges, incoming.GoalChanges, bulletList(incoming.GoalChanges)}, {"Interaction phases", old.Phases, incoming.Phases, phasesMarkdown(incoming.Phases)}, {"Files", old.Files, incoming.Files, bulletList(incoming.Files)}, {"Commits", old.Commits, incoming.Commits, bulletList(incoming.Commits)}, {"Verification", old.Verification, incoming.Verification, bulletList(incoming.Verification)}, {"Decisions added", old.DecisionsAdded, incoming.DecisionsAdded, bulletList(incoming.DecisionsAdded)}, {"Decisions revised", old.DecisionsRevised, incoming.DecisionsRevised, bulletList(incoming.DecisionsRevised)}, {"Open loops created", old.OpenLoopsCreated, incoming.OpenLoopsCreated, bulletList(incoming.OpenLoopsCreated)}, {"Open loops closed", old.OpenLoopsClosed, incoming.OpenLoopsClosed, bulletList(incoming.OpenLoopsClosed)}, {"Previous session", old.PreviousSessionID, incoming.PreviousSessionID, incoming.PreviousSessionID}, {"Next session", old.NextSessionID, incoming.NextSessionID, incoming.NextSessionID}, {"Evidence", old.Evidence, incoming.Evidence, evidenceMarkdown(incoming.Evidence)}}
+	}{{"Initial goal", old.InitialGoal, incoming.InitialGoal, incoming.InitialGoal}, {"Goal changes", old.GoalChanges, incoming.GoalChanges, bulletList(incoming.GoalChanges)}, {"Interaction phases", old.Phases, incoming.Phases, phasesMarkdown(incoming.Phases)}, {"Files", old.Files, incoming.Files, bulletList(incoming.Files)}, {"Commits", old.Commits, incoming.Commits, bulletList(incoming.Commits)}, {"Verification", old.Verification, incoming.Verification, bulletList(incoming.Verification)}, {"Decisions added", old.DecisionsAdded, incoming.DecisionsAdded, bulletList(incoming.DecisionsAdded)}, {"Decisions revised", old.DecisionsRevised, incoming.DecisionsRevised, bulletList(incoming.DecisionsRevised)}, {"Open loops created", old.OpenLoopsCreated, incoming.OpenLoopsCreated, bulletList(incoming.OpenLoopsCreated)}, {"Open loops closed", old.OpenLoopsClosed, incoming.OpenLoopsClosed, bulletList(incoming.OpenLoopsClosed)}, {"Previous session", old.PreviousSessionID, incoming.PreviousSessionID, incoming.PreviousSessionID}, {"Next session", old.NextSessionID, incoming.NextSessionID, incoming.NextSessionID}, {"Usage accounting", old.Accounting, incoming.Accounting, sessionAccountingMarkdown(incoming.Accounting)}, {"Evidence", old.Evidence, incoming.Evidence, evidenceMarkdown(incoming.Evidence)}}
 	for _, section := range sections {
 		if fresh || !reflect.DeepEqual(section.old, section.next) {
 			if err := doc.UpsertSection(section.name, section.body); err != nil {
@@ -587,6 +602,49 @@ func renderSessionDocument(old, incoming SessionReport, loaded *loadedDocument) 
 		}
 	}
 	return doc, nil
+}
+
+func renderProjectAccountingDocument(state State) (Document, bool, error) {
+	if state.documents.overview == nil {
+		return Document{}, false, errors.New("project overview is required")
+	}
+	doc, err := ParseDocument(state.documents.overview.Original)
+	if err != nil {
+		return Document{}, false, nil
+	}
+	sessions := make([]*accounting.SessionAccounting, 0, len(state.Sessions))
+	for _, report := range state.Sessions {
+		sessions = append(sessions, report.Accounting)
+	}
+	summary, err := accounting.Aggregate(sessions)
+	if err != nil {
+		return Document{}, false, err
+	}
+	if err := doc.UpsertSection("Project accounting", projectAccountingMarkdown(summary)); err != nil {
+		return Document{}, false, err
+	}
+	return doc, true, nil
+}
+
+func sessionAccountingMarkdown(value *accounting.SessionAccounting) string {
+	if value == nil {
+		return ""
+	}
+	var out strings.Builder
+	fmt.Fprintf(&out, "- Duration: %s (%d ms)\n- Total tokens: %d\n- Total cost: $%.9f USD\n", accounting.FormatDurationMS(value.DurationMS), value.DurationMS, value.TotalTokens, value.TotalCostUSD)
+	for _, model := range value.Models {
+		fmt.Fprintf(&out, "- `%s`: %d tokens; $%.9f USD; rates per 1M input/cached/cache-write/output = %.6f/%.6f/%.6f/%.6f USD; as of %s; source %s\n", model.Model, model.TotalTokens, model.CostUSD, model.Pricing.InputPerMillion, model.Pricing.CachedInputPerMillion, model.Pricing.CacheWriteInputPerMillion, model.Pricing.OutputPerMillion, model.Pricing.AsOf, model.Pricing.Source)
+	}
+	return strings.TrimSuffix(out.String(), "\n")
+}
+
+func projectAccountingMarkdown(value accounting.ProjectSummary) string {
+	var out strings.Builder
+	fmt.Fprintf(&out, "- Total session duration: %s (%d ms)\n- Total tokens: %d\n- Total cost: $%.9f USD\n", accounting.FormatDurationMS(value.TotalDurationMS), value.TotalDurationMS, value.TotalTokens, value.TotalCostUSD)
+	for _, model := range value.Models {
+		fmt.Fprintf(&out, "- `%s`: %d tokens (%.4f%%); $%.9f USD (%.4f%% of cost)\n", model.Model, model.TotalTokens, model.TokenSharePct, model.TotalCostUSD, model.CostSharePct)
+	}
+	return strings.TrimSuffix(out.String(), "\n")
 }
 
 func documentFor(loaded *loadedDocument, id, entityType, projectID string, revision int, title string) (Document, bool, error) {
@@ -758,6 +816,11 @@ func cloneSession(item SessionReport) SessionReport {
 	item.OpenLoopsCreated = append([]string(nil), item.OpenLoopsCreated...)
 	item.OpenLoopsClosed = append([]string(nil), item.OpenLoopsClosed...)
 	item.Evidence = cloneEvidence(item.Evidence)
+	if item.Accounting != nil {
+		copyAccounting := *item.Accounting
+		copyAccounting.Models = append([]accounting.ModelAccounting(nil), item.Accounting.Models...)
+		item.Accounting = &copyAccounting
+	}
 	return item
 }
 
@@ -899,6 +962,9 @@ func validateLedgerRelativePath(relative string) error {
 		return errors.New("invalid ledger relative path")
 	}
 	if relative == ledgerRootRelative+"/current-state.md" || relative == ledgerRootRelative+"/evolution-timeline.md" {
+		return nil
+	}
+	if relative == ledgerRootRelative+"/project-overview.md" {
 		return nil
 	}
 	if relative == ledgerRootRelative+"/diagrams/project-evolution.md" {

@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
@@ -1993,6 +1994,9 @@ func (f *multiPacketFixture) applyOptions(t *testing.T, packet evidence.Packet, 
 	p.EvidencePacketSHA256, err = evidence.Digest(packet)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if packet.SessionUsage != nil {
+		p.SessionReport.Accounting = &accounting.SessionAccounting{StartedAt: packet.SessionUsage.StartedAt, EndedAt: packet.SessionUsage.EndedAt, DurationMS: packet.SessionUsage.DurationMS, Models: []accounting.ModelAccounting{}, TotalTokens: packet.SessionUsage.TotalTokens, TotalCostUSD: 0}
 	}
 	if len(packet.Events) != 2 {
 		t.Fatalf("packet events=%d want=2", len(packet.Events))

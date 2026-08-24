@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
@@ -152,25 +153,35 @@ func Run(opts Options) (evidence.Packet, error) {
 		return evidence.Packet{}, fmt.Errorf("bind evidence packet to accepted cursor: %w", err)
 	}
 	cursorValidated := stored.LastLine == 0
-	visit := x.Add
-	streamFrom := from
-	if !opts.FromStart && stored.LastLine > 0 {
-		streamFrom = stored.LastLine
-		visit = func(record session.Record) error {
-			if record.Line == stored.LastLine {
-				if record.SourceHash != stored.LastHash {
-					return ErrCursorSourceDrift
-				}
-				cursorValidated = true
-				return nil
+	usage := accounting.NewAccumulator(chosen.StartedAt)
+	visit := func(record session.Record) error {
+		previousUsage := x.Packet().SessionUsage
+		observe := func() error {
+			if err := usage.Observe(record); err != nil {
+				return err
 			}
-			if record.Line > stored.LastLine {
-				return x.Add(record)
-			}
-			return nil
+			return x.SetSessionUsage(usage.Snapshot())
 		}
+		if !opts.FromStart && record.Line < stored.LastLine {
+			return observe()
+		}
+		if !opts.FromStart && record.Line == stored.LastLine {
+			if record.SourceHash != stored.LastHash {
+				return ErrCursorSourceDrift
+			}
+			cursorValidated = true
+			return observe()
+		}
+		if err := observe(); err != nil {
+			return err
+		}
+		if err := x.Add(record); err != nil {
+			_ = x.SetSessionUsage(previousUsage)
+			return err
+		}
+		return nil
 	}
-	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: streamFrom, MaxRecordBytes: opts.MaxRecordBytes}, visit)
+	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: 1, MaxRecordBytes: opts.MaxRecordBytes}, visit)
 	if errors.Is(streamErr, ErrCursorSourceDrift) {
 		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor hash does not match the selected source", ErrCursorSourceDrift)
 	}

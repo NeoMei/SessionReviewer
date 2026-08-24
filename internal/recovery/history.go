@@ -2,10 +2,12 @@ package recovery
 
 import (
 	"container/heap"
+	"fmt"
 	"os"
 	"sort"
 	"strings"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 )
 
@@ -16,11 +18,13 @@ type Theme struct {
 }
 
 type HistoryView struct {
-	ProjectID string
-	Timeline  []ledger.TimelineEvent
-	Decisions []ledger.Decision
-	OpenLoops []ledger.OpenLoop
-	Themes    []Theme
+	ProjectID  string
+	Accounting accounting.ProjectSummary
+	Sessions   []ledger.SessionReport
+	Timeline   []ledger.TimelineEvent
+	Decisions  []ledger.Decision
+	OpenLoops  []ledger.OpenLoop
+	Themes     []Theme
 }
 
 // HistoryLedgerOnly renders accepted cross-session history. It never consults
@@ -47,6 +51,18 @@ func historyLedgerOnly(state ledger.State, err error) (HistoryView, error) {
 	}
 
 	view := HistoryView{ProjectID: state.ProjectID}
+	view.Sessions, err = orderedSessionReports(state.Sessions)
+	if err != nil {
+		return HistoryView{}, err
+	}
+	accountingInputs := make([]*accounting.SessionAccounting, 0, len(view.Sessions))
+	for _, report := range view.Sessions {
+		accountingInputs = append(accountingInputs, report.Accounting)
+	}
+	view.Accounting, err = accounting.Aggregate(accountingInputs)
+	if err != nil {
+		return HistoryView{}, err
+	}
 	view.Timeline = cloneTimeline(state.Timeline)
 	sort.Slice(view.Timeline, func(i, j int) bool {
 		if view.Timeline[i].OccurredAt != view.Timeline[j].OccurredAt {
@@ -71,6 +87,51 @@ func (view HistoryView) Markdown() string {
 	}
 	if !out.field("Project", view.ProjectID) {
 		return out.finish()
+	}
+	if !out.raw("## Project accounting\n\n") || !out.raw("- Total session duration: ") || !out.escaped(fmt.Sprintf("%s (%d ms)", accounting.FormatDurationMS(view.Accounting.TotalDurationMS), view.Accounting.TotalDurationMS)) || !out.raw("\n- Total tokens: ") || !out.escaped(fmt.Sprintf("%d", view.Accounting.TotalTokens)) || !out.raw("\n- Total cost: ") || !out.escaped(fmt.Sprintf("$%.9f USD", view.Accounting.TotalCostUSD)) || !out.raw("\n") {
+		return out.finish()
+	}
+	for _, model := range view.Accounting.Models {
+		if !out.raw("- ") || !out.escaped(model.Model) || !out.raw(": ") || !out.escaped(fmt.Sprintf("%d tokens (%.4f%%); $%.9f USD", model.TotalTokens, model.TokenSharePct, model.TotalCostUSD)) || !out.raw("\n") {
+			return out.finish()
+		}
+	}
+	if !out.raw("\n") {
+		return out.finish()
+	}
+	if len(view.Sessions) != 0 {
+		if !out.raw("## Sessions\n\n") {
+			return out.finish()
+		}
+		for _, report := range view.Sessions {
+			if !out.raw("- ") || !out.escaped(report.SessionID) || !out.raw(" [") || !out.escaped(report.ID) || !out.raw("]") {
+				return out.finish()
+			}
+			if strings.TrimSpace(report.InitialGoal) != "" {
+				if !out.raw(" | ") || !out.escaped(report.InitialGoal) {
+					return out.finish()
+				}
+			}
+			if !out.raw("\n") {
+				return out.finish()
+			}
+			for _, phase := range report.Phases {
+				if !out.raw("  - ") || !out.escaped(phase.Title) {
+					return out.finish()
+				}
+				if strings.TrimSpace(phase.Summary) != "" {
+					if !out.raw(": ") || !out.escaped(phase.Summary) {
+						return out.finish()
+					}
+				}
+				if !out.raw("\n") {
+					return out.finish()
+				}
+			}
+		}
+		if !out.raw("\n") {
+			return out.finish()
+		}
 	}
 	if len(view.Timeline) != 0 {
 		if !out.raw("## Timeline\n\n") {
@@ -181,6 +242,28 @@ func orderedDecisions(byID map[string]ledger.Decision) []ledger.Decision {
 	return ordered
 }
 
+func orderedSessionReports(byID map[string]ledger.SessionReport) ([]ledger.SessionReport, error) {
+	if len(byID) == 0 {
+		return []ledger.SessionReport{}, nil
+	}
+	if _, _, err := latestAcceptedSession(byID); err != nil {
+		return nil, err
+	}
+	bySessionID := make(map[string]ledger.SessionReport, len(byID))
+	head := ""
+	for _, report := range byID {
+		bySessionID[report.SessionID] = report
+		if report.PreviousSessionID == "" {
+			head = report.SessionID
+		}
+	}
+	ordered := make([]ledger.SessionReport, 0, len(byID))
+	for sessionID := head; sessionID != ""; sessionID = bySessionID[sessionID].NextSessionID {
+		ordered = append(ordered, cloneSessionReport(bySessionID[sessionID]))
+	}
+	return ordered, nil
+}
+
 type bytewiseIDHeap []string
 
 func (items bytewiseIDHeap) Len() int           { return len(items) }
@@ -276,5 +359,22 @@ func cloneOpenLoop(item ledger.OpenLoop) ledger.OpenLoop {
 	item.SourceSessions = append([]string(nil), item.SourceSessions...)
 	item.Evidence = append([]ledger.EvidenceRef(nil), item.Evidence...)
 	item.Attempts = append([]string(nil), item.Attempts...)
+	return item
+}
+
+func cloneSessionReport(item ledger.SessionReport) ledger.SessionReport {
+	item.GoalChanges = append([]string(nil), item.GoalChanges...)
+	item.Phases = append([]ledger.SessionPhase(nil), item.Phases...)
+	for index := range item.Phases {
+		item.Phases[index].Evidence = append([]ledger.EvidenceRef(nil), item.Phases[index].Evidence...)
+	}
+	item.Files = append([]string(nil), item.Files...)
+	item.Commits = append([]string(nil), item.Commits...)
+	item.Verification = append([]string(nil), item.Verification...)
+	item.DecisionsAdded = append([]string(nil), item.DecisionsAdded...)
+	item.DecisionsRevised = append([]string(nil), item.DecisionsRevised...)
+	item.OpenLoopsCreated = append([]string(nil), item.OpenLoopsCreated...)
+	item.OpenLoopsClosed = append([]string(nil), item.OpenLoopsClosed...)
+	item.Evidence = append([]ledger.EvidenceRef(nil), item.Evidence...)
 	return item
 }
