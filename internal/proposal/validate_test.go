@@ -145,6 +145,107 @@ func TestValidateExactPacket(t *testing.T) {
 	}
 }
 
+func TestValidateNewSessionAppendsAndReciprocallyLinksPreviousReport(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	previous := p.SessionReport
+	previous.ID = "session-report-previous"
+	previous.SessionID = "session-previous"
+	previous.Revision = 1
+	previous.PreviousSessionID = ""
+	previous.NextSessionID = ""
+	state.Sessions[previous.ID] = previous
+	p.SessionReport.PreviousSessionID = previous.SessionID
+
+	changes, err := Validate(p, packet, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes.Sessions) != 2 {
+		t.Fatalf("session changes=%+v", changes.Sessions)
+	}
+	byID := make(map[string]ledger.SessionReport, len(changes.Sessions))
+	for _, report := range changes.Sessions {
+		byID[report.ID] = report
+	}
+	linked := byID[previous.ID]
+	if linked.Revision != 2 || linked.NextSessionID != p.SessionID {
+		t.Fatalf("previous report was not linked atomically: %+v", linked)
+	}
+	current := byID[p.SessionReport.ID]
+	if current.PreviousSessionID != previous.SessionID || current.NextSessionID != "" {
+		t.Fatalf("new report chain links changed: %+v", current)
+	}
+}
+
+func TestValidateRejectsInvalidSessionChainChanges(t *testing.T) {
+	base, packet, _ := fixedProposalPacketState(t, "valid-first.json")
+	previous := base.SessionReport
+	previous.ID = "session-report-previous"
+	previous.SessionID = "session-previous"
+	previous.Revision = 1
+	previous.PreviousSessionID = ""
+	previous.NextSessionID = ""
+
+	tests := map[string]func(*Proposal, *ledger.State){
+		"append omits previous": func(p *Proposal, state *ledger.State) {
+			state.Sessions[previous.ID] = previous
+		},
+		"append declares next": func(p *Proposal, state *ledger.State) {
+			state.Sessions[previous.ID] = previous
+			p.SessionReport.PreviousSessionID = previous.SessionID
+			p.SessionReport.NextSessionID = "future"
+		},
+		"append references missing previous": func(p *Proposal, state *ledger.State) {
+			state.Sessions[previous.ID] = previous
+			p.SessionReport.PreviousSessionID = "missing"
+		},
+		"append branches from nonterminal": func(p *Proposal, state *ledger.State) {
+			linked := previous
+			linked.NextSessionID = "future"
+			state.Sessions[linked.ID] = linked
+			state.Sessions["session-report-future"] = ledger.SessionReport{ID: "session-report-future", ProjectID: projectID, SessionID: "future", Revision: 1, PreviousSessionID: previous.SessionID}
+			p.SessionReport.PreviousSessionID = previous.SessionID
+		},
+		"append rejects a nonreciprocal accepted chain": func(p *Proposal, state *ledger.State) {
+			head := previous
+			head.NextSessionID = "session-terminal"
+			terminal := previous
+			terminal.ID = "session-report-terminal"
+			terminal.SessionID = "session-terminal"
+			terminal.PreviousSessionID = ""
+			state.Sessions[head.ID] = head
+			state.Sessions[terminal.ID] = terminal
+			p.SessionReport.PreviousSessionID = terminal.SessionID
+		},
+		"existing report rewrites chain": func(p *Proposal, state *ledger.State) {
+			existing := p.SessionReport
+			existing.Revision = 1
+			state.Sessions[existing.ID] = existing
+			p.SessionReport.Revision = 2
+			p.SessionReport.PreviousSessionID = "rewritten"
+		},
+		"existing report preserves a corrupt chain": func(p *Proposal, state *ledger.State) {
+			existing := p.SessionReport
+			existing.Revision = 1
+			existing.NextSessionID = "missing"
+			state.Sessions[existing.ID] = existing
+			p.SessionReport.Revision = 2
+			p.SessionReport.NextSessionID = "missing"
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := cloneProposal(t, base)
+			state := fixedState()
+			mutate(&p, &state)
+			changes, err := Validate(p, packet, state)
+			if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("invalid session chain accepted: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsDescriptiveLastVerifiedState(t *testing.T) {
 	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	p.CurrentStatePatch.LastVerified = strptr("Focused tests pass")

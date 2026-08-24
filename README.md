@@ -129,6 +129,8 @@ packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包
 
 ledger 是可编辑 Markdown。未知 frontmatter 字段和 CLI 不拥有的自定义章节会在后续 apply 中保留；已接受的 title、status、tags 和 narrative 是后续 proposal 的当前基线，只能通过 revision/evidence 验证的显式变更更新。`docs/session-review/diagrams/project-evolution.md` 中的两张 Mermaid graph 由 accepted ledger 派生，不是独立的语义来源，不应手工编辑。
 
+session report 形成一条可恢复的双向链。首个报告的 `previous_session_id` 和 `next_session_id` 都为空；后续新报告必须把 `previous_session_id` 指向当前 accepted 终点并保持 `next_session_id` 为空。apply 会在同一事务中自动提升上一报告的 revision 并写入互惠的 `next_session_id`，因此第二个及后续 session 的 `changed_files` 会同时包含上一份 session report。已有报告的链接不能由后续 proposal 改写。
+
 ## accepted-ledger-only 恢复
 
 ```bash

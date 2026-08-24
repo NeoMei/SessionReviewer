@@ -345,6 +345,11 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	if err != nil {
 		return fail(err)
 	}
+	if len(state.Sessions) != 0 {
+		if err := validateExistingSessionChain(state.Sessions, sessionReportBySession); err != nil {
+			return fail(err)
+		}
+	}
 
 	result := ledger.ChangeSet{}
 	changeEvidence := make(map[string]map[string]struct{})
@@ -521,12 +526,22 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 		if old.Revision >= maxSafeInteger || report.Revision != old.Revision+1 {
 			return fail(fmt.Errorf("session report %q revision mismatch or overflow", report.ID))
 		}
+		if old.PreviousSessionID != report.PreviousSessionID || old.NextSessionID != report.NextSessionID {
+			return fail(fmt.Errorf("session report %q chain identity cannot change", report.ID))
+		}
 	} else {
 		if err := reserveNewID(ids, report.ID, "session"); err != nil {
 			return fail(err)
 		}
 		if report.Revision != 1 {
 			return fail(fmt.Errorf("new session report %q revision must be 1", report.ID))
+		}
+		previous, err := appendPreviousSessionReport(state.Sessions, sessionReportBySession, report)
+		if err != nil {
+			return fail(err)
+		}
+		if previous != nil {
+			result.Sessions = append(result.Sessions, *previous)
 		}
 	}
 	reportRefs := append([]ledger.EvidenceRef(nil), report.Evidence...)
@@ -563,6 +578,82 @@ func Validate(p Proposal, packet evidence.Packet, state ledger.State) (ledger.Ch
 	sort.Slice(result.Timeline, func(i, j int) bool { return result.Timeline[i].ID < result.Timeline[j].ID })
 	sort.Slice(result.Sessions, func(i, j int) bool { return result.Sessions[i].ID < result.Sessions[j].ID })
 	return result, nil
+}
+
+func appendPreviousSessionReport(sessions map[string]ledger.SessionReport, bySessionID map[string]string, report ledger.SessionReport) (*ledger.SessionReport, error) {
+	if len(sessions) == 0 {
+		if report.PreviousSessionID != "" || report.NextSessionID != "" {
+			return nil, errors.New("first session report cannot declare chain links")
+		}
+		return nil, nil
+	}
+	if report.PreviousSessionID == "" || report.NextSessionID != "" {
+		return nil, errors.New("new session report must append to one previous session and cannot declare a next session")
+	}
+	previousReportID, exists := bySessionID[report.PreviousSessionID]
+	if !exists {
+		return nil, fmt.Errorf("new session report references missing previous session %q", report.PreviousSessionID)
+	}
+	previous := sessions[previousReportID]
+	if previous.NextSessionID != "" {
+		return nil, fmt.Errorf("previous session %q is not the accepted chain terminal", report.PreviousSessionID)
+	}
+	terminals := 0
+	for _, existing := range sessions {
+		if existing.NextSessionID == "" {
+			terminals++
+		}
+	}
+	if terminals != 1 {
+		return nil, errors.New("accepted session reports do not have one unambiguous terminal")
+	}
+	if previous.Revision >= maxSafeInteger {
+		return nil, fmt.Errorf("previous session report %q revision overflows", previous.ID)
+	}
+	previous.Revision++
+	previous.NextSessionID = report.SessionID
+	return &previous, nil
+}
+
+func validateExistingSessionChain(sessions map[string]ledger.SessionReport, bySessionID map[string]string) error {
+	head := ""
+	heads := 0
+	terminals := 0
+	for _, report := range sessions {
+		if report.PreviousSessionID == "" {
+			head = report.SessionID
+			heads++
+		} else {
+			previousID, exists := bySessionID[report.PreviousSessionID]
+			if !exists || sessions[previousID].NextSessionID != report.SessionID {
+				return fmt.Errorf("accepted session chain link into %q is missing or nonreciprocal", report.SessionID)
+			}
+		}
+		if report.NextSessionID == "" {
+			terminals++
+		} else {
+			nextID, exists := bySessionID[report.NextSessionID]
+			if !exists || sessions[nextID].PreviousSessionID != report.SessionID {
+				return fmt.Errorf("accepted session chain link out of %q is missing or nonreciprocal", report.SessionID)
+			}
+		}
+	}
+	if heads != 1 || terminals != 1 {
+		return errors.New("accepted session reports do not form one unambiguous chain")
+	}
+	visited := make(map[string]struct{}, len(sessions))
+	for sessionID := head; sessionID != ""; {
+		if _, duplicate := visited[sessionID]; duplicate {
+			return fmt.Errorf("accepted session chain contains a cycle at %q", sessionID)
+		}
+		visited[sessionID] = struct{}{}
+		reportID := bySessionID[sessionID]
+		sessionID = sessions[reportID].NextSessionID
+	}
+	if len(visited) != len(sessions) {
+		return errors.New("accepted session reports form a disconnected chain")
+	}
+	return nil
 }
 
 func validateSessionReportEffects(report ledger.SessionReport, state ledger.State, changes ledger.ChangeSet) error {

@@ -290,8 +290,7 @@
       "properties": {
         "title": { "$ref": "#/$defs/nonempty_string" },
         "summary": { "type": "string" },
-        "evidence": { "$ref": "#/$defs/evidence_array" },
-        "accounting": { "$ref": "#/$defs/session_accounting" }
+        "evidence": { "$ref": "#/$defs/evidence_array" }
       }
     },
     "pricing": {
@@ -359,7 +358,8 @@
         "open_loops_closed": { "$ref": "#/$defs/stable_id_array" },
         "previous_session_id": { "type": "string" },
         "next_session_id": { "type": "string" },
-        "evidence": { "$ref": "#/$defs/evidence_array" }
+        "evidence": { "$ref": "#/$defs/evidence_array" },
+        "accounting": { "$ref": "#/$defs/session_accounting" }
       }
     },
     "evidence_link": {

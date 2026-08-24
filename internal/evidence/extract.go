@@ -58,6 +58,13 @@ type Extractor struct {
 	expectedSet        bool
 }
 
+// SessionUsageState is an opaque snapshot used to restore usage metadata and
+// its redaction audit trail together after a candidate record is rejected.
+type SessionUsageState struct {
+	usage         *accounting.SessionUsage
+	warningCounts map[string]int
+}
+
 // NewWithProjectID constructs an extractor whose packet-size accounting includes
 // the final project identifier from the beginning of extraction.
 func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redact.Redactor, limits Limits) (*Extractor, error) {
@@ -302,6 +309,32 @@ func (x *Extractor) Packet() Packet {
 	return snapshot
 }
 
+func (x *Extractor) SnapshotSessionUsage() SessionUsageState {
+	if x == nil {
+		return SessionUsageState{}
+	}
+	return SessionUsageState{
+		usage:         cloneSessionUsage(x.packet.SessionUsage),
+		warningCounts: cloneCounts(x.usageWarningCounts),
+	}
+}
+
+func (x *Extractor) RestoreSessionUsage(state SessionUsageState) error {
+	if x == nil {
+		return ErrInvalidLimits
+	}
+	candidate := x.Packet()
+	candidate.SessionUsage = cloneSessionUsage(state.usage)
+	candidate.Warnings = formatWarnings(mergeWarningCounts(x.warningCounts, state.warningCounts))
+	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
+		return ErrPacketFull
+	}
+	x.packet.SessionUsage = cloneSessionUsage(state.usage)
+	x.usageWarningCounts = cloneCounts(state.warningCounts)
+	x.refreshWarnings()
+	return nil
+}
+
 func (x *Extractor) SetSessionUsage(usage *accounting.SessionUsage) error {
 	if x == nil {
 		return ErrInvalidLimits
@@ -315,8 +348,7 @@ func (x *Extractor) SetSessionUsage(usage *accounting.SessionUsage) error {
 	if len(usage.Models) > 128 {
 		return errors.New("session usage has too many models")
 	}
-	copyUsage := *usage
-	copyUsage.Models = append([]accounting.ModelUsage{}, usage.Models...)
+	copyUsage := *cloneSessionUsage(usage)
 	usageWarnings := make(map[string]int)
 	for index := range copyUsage.Models {
 		safe, findings := x.redact(copyUsage.Models[index].Model)
@@ -343,6 +375,23 @@ func (x *Extractor) SetSessionUsage(usage *accounting.SessionUsage) error {
 	x.usageWarningCounts = usageWarnings
 	x.refreshWarnings()
 	return nil
+}
+
+func cloneSessionUsage(usage *accounting.SessionUsage) *accounting.SessionUsage {
+	if usage == nil {
+		return nil
+	}
+	copyUsage := *usage
+	copyUsage.Models = append([]accounting.ModelUsage{}, usage.Models...)
+	return &copyUsage
+}
+
+func cloneCounts(counts map[string]int) map[string]int {
+	result := make(map[string]int, len(counts))
+	for rule, count := range counts {
+		result[rule] = count
+	}
+	return result
 }
 
 // AddWarning appends a structural warning without bypassing packet bounds.

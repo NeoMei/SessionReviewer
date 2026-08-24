@@ -155,7 +155,7 @@ func Run(opts Options) (evidence.Packet, error) {
 	cursorValidated := stored.LastLine == 0
 	usage := accounting.NewAccumulator(chosen.StartedAt)
 	visit := func(record session.Record) error {
-		previousUsage := x.Packet().SessionUsage
+		previousUsage := x.SnapshotSessionUsage()
 		observe := func() error {
 			if err := usage.Observe(record); err != nil {
 				return err
@@ -176,7 +176,9 @@ func Run(opts Options) (evidence.Packet, error) {
 			return err
 		}
 		if err := x.Add(record); err != nil {
-			_ = x.SetSessionUsage(previousUsage)
+			if restoreErr := x.RestoreSessionUsage(previousUsage); restoreErr != nil {
+				return fmt.Errorf("restore accepted session usage after rejected record: %w", restoreErr)
+			}
 			return err
 		}
 		return nil

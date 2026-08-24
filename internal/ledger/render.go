@@ -908,9 +908,8 @@ func applyWithRootOptionsAndHooks(plan WritePlan, options rootOpenOptions, hooks
 			}
 		}
 		// This closes the observable preflight-to-write window for later files.
-		// A filesystem TOCTOU nanorace remains between this recheck and rename.
-		// TODO(task-5): perform Apply under the project lock and prepared/applied
-		// receipt protocol so cooperative writers serialize and crashes recover.
+		// The apply engine calls this while holding the project lock and surrounds
+		// the write plan with its prepared/applied receipt recovery protocol.
 		skip, err := validatePlannedTarget(directory, item.file)
 		if err != nil {
 			return written, err

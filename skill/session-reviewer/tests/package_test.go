@@ -27,6 +27,27 @@ func TestSchemaCopyMatches(t *testing.T) {
 	}
 }
 
+func TestProposalSchemaPlacesAccountingOnSessionReport(t *testing.T) {
+	body, err := os.ReadFile("../../../schemas/proposal-v1.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(body, &schema); err != nil {
+		t.Fatal(err)
+	}
+	defs := schema["$defs"].(map[string]any)
+	reportProperties := defs["session_report"].(map[string]any)["properties"].(map[string]any)
+	accounting, ok := reportProperties["accounting"].(map[string]any)
+	if !ok || accounting["$ref"] != "#/$defs/session_accounting" {
+		t.Fatalf("session_report accounting contract is missing: %+v", accounting)
+	}
+	phaseProperties := defs["session_phase"].(map[string]any)["properties"].(map[string]any)
+	if _, misplaced := phaseProperties["accounting"]; misplaced {
+		t.Fatal("accounting is incorrectly accepted on individual session phases")
+	}
+}
+
 func TestSkillIsConciseDiscoverableAndRoutesToSchema(t *testing.T) {
 	body, err := os.ReadFile("../SKILL.md")
 	if err != nil {
@@ -155,6 +176,7 @@ func TestApplyInvariantReferenceIsProgressiveAndComplete(t *testing.T) {
 		"decisions_added", "decisions_revised", "open_loops_created", "open_loops_closed",
 		"sorted exact packet effects", "report and phase evidence", "inference", "verifies",
 		"supersedes", "cycle", "redaction",
+		"accepted terminal session", "reciprocal next link", "existing report updates preserve both links",
 	} {
 		if !strings.Contains(text, strings.ToLower(required)) {
 			t.Errorf("apply invariant reference missing %q", required)

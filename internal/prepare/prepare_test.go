@@ -535,6 +535,43 @@ func TestRunPacketFullIsSuccessfulSegmentedOutput(t *testing.T) {
 	}
 }
 
+func TestRunPacketFullPreservesAcceptedUsageRedactionWarning(t *testing.T) {
+	const modelCanary = "sk-canary-123456789012345678901234567890"
+	f := newRunFixture(t, sessionBody("PROJECT",
+		`{"timestamp":"2026-08-22T10:00:30Z","type":"turn_context","payload":{"cwd":"PROJECT","model":"`+modelCanary+`"}}`,
+		`{"timestamp":"2026-08-22T10:00:40Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}}`,
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"accepted"}]}}`,
+		`{"timestamp":"2026-08-22T10:02:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"rejected"}]}}`))
+	path := filepath.Join(f.sessions, "s1.jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.ReplaceAll(body, []byte("PROJECT"), []byte(filepath.ToSlash(f.projectRoot))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, f.now, f.now); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options("review")
+	opts.Limits = evidence.DefaultLimits()
+	opts.Limits.MaxEvents = 1
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), modelCanary) {
+		t.Fatalf("model identifier leaked: %s", encoded)
+	}
+	if !containsString(packet.Warnings, "redacted:openai_key:1") {
+		t.Fatalf("accepted usage redaction warning was lost on rollback: %+v", packet.Warnings)
+	}
+}
+
 func TestRunRejectsMalformedCandidateWithoutLeakingItsContents(t *testing.T) {
 	const canary = "MALFORMED-CANARY-DO-NOT-LEAK"
 	f := newRunFixture(t, sessionBody("PROJECT",
