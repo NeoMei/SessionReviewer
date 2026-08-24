@@ -1,9 +1,11 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -21,11 +23,8 @@ func TestLoadUsesValidBackupWhenPrimaryMissing(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := Load(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Projects) != 2 || !reflect.DeepEqual(got.Projects[1], want.Projects[1]) {
-		t.Fatalf("got=%+v", got)
+	if err != nil || len(got.Projects) != 2 || !reflect.DeepEqual(got.Projects[1], want.Projects[1]) {
+		t.Fatalf("got=%+v err=%v", got, err)
 	}
 }
 
@@ -108,6 +107,74 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestLoadRejectsNonPrivateConfiguration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX owner-only modes")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "version = 1\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = '/work'\nvault_root = '/vault'\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("non-private configuration accepted")
+	}
+}
+
+func TestSaveFailsClosedAndPreservesUntrustedBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	backup := path + ".session-reviewer-backup"
+	if err := os.WriteFile(backup, []byte("untrusted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(backup, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := Save(path, Config{Version: 1, Projects: []ProjectMapping{{ID: "project-1111111111111111", Root: "/work", VaultRoot: "/vault"}}}); err == nil || !strings.Contains(err.Error(), "recovery backup") {
+		t.Fatalf("err=%v", err)
+	}
+	if got, readErr := os.ReadFile(backup); readErr != nil || string(got) != "untrusted" {
+		t.Fatalf("untrusted backup was changed: body=%q err=%v", got, readErr)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("primary was unexpectedly written: %v", statErr)
+	}
+}
+
+func TestSaveCleansOnlyByteIdenticalStaleBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	old := Config{Version: 1, Projects: []ProjectMapping{{ID: "project-1111111111111111", Root: "/old", VaultRoot: "/vault"}}}
+	if err := Save(path, old); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".session-reviewer-backup"
+	if err := os.WriteFile(backup, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := Config{Version: 1, Projects: []ProjectMapping{{ID: "project-1111111111111111", Root: "/new", VaultRoot: "/vault"}}}
+	if err := Save(path, next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil || got.Projects[0].Root != "/new" {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("converged backup remains: %v", err)
 	}
 }
 

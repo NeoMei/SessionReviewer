@@ -79,6 +79,52 @@ func TestQueueIsDurableDeduplicatedAndContentFree(t *testing.T) {
 	}
 }
 
+func TestQueueRestartIgnoresPrivateAtomicTemporary(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	queue := Queue{Root: root, Retry: DefaultRetryPolicy(), Now: func() time.Time { return fixedTime }}
+	item, err := queue.Enqueue(QueueItem{Version: 1, EntityID: "decision-temp-restart", Target: SideVault, ExpectedBaseHash: hash("base"), CreatedAt: fixedTime, UpdatedAt: fixedTime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporary := ".session-reviewer-" + strings.Repeat("a", 32)
+	if err := os.WriteFile(filepath.Join(directory, temporary), []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := queue.Ready(fixedTime, 0)
+	if err != nil || len(ready) != 1 || ready[0].ID != item.ID {
+		t.Fatalf("restart ready=%+v err=%v", ready, err)
+	}
+}
+
+func TestQueueRestartRejectsUntrustedAtomicTemporary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX owner-only modes")
+	}
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	temporary := ".session-reviewer-" + strings.Repeat("b", 32)
+	path := filepath.Join(directory, temporary)
+	if err := os.WriteFile(path, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	queue := Queue{Root: root, Retry: DefaultRetryPolicy(), Now: func() time.Time { return fixedTime }}
+	if _, err := queue.Ready(fixedTime, 0); err == nil {
+		t.Fatal("untrusted atomic temporary was ignored")
+	}
+}
+
 func TestQueueReadyRescheduleBlockAndAckAreDeterministic(t *testing.T) {
 	root, err := os.OpenRoot(t.TempDir())
 	if err != nil {

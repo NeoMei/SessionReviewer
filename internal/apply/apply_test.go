@@ -106,6 +106,15 @@ func (f *applyTestFixture) options() Options {
 	}
 }
 
+func mustLedgerSnapshot(t *testing.T, projectRoot string) []ledger.SnapshotFile {
+	t.Helper()
+	files, err := ledger.SnapshotExpected(projectRoot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
 func TestRunWritesThenAdvancesCursor(t *testing.T) {
 	f := newApplyTestFixture(t)
 	got, err := Run(f.options())
@@ -597,7 +606,7 @@ func TestRunReceiptScanRejectsEntriesAddedAfterEnumeration(t *testing.T) {
 				Packet: f.packet, ProposalDigest: "sha256:" + strings.Repeat("c", 64),
 				EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashB,
 			}
-			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}}, digestLedgerSnapshot(nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -863,6 +872,64 @@ func TestRunAfterRenderFailureWritesNoReceiptOrLedger(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnplannedLedgerDocumentAddedAfterRender(t *testing.T) {
+	f := newApplyTestFixture(t)
+	opts := f.options()
+	injected := filepath.Join(f.projectRoot, "docs", "session-review", "open-loops", "decision-1.md")
+	opts.hooks.afterRender = func() error {
+		if err := os.MkdirAll(filepath.Dir(injected), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(injected, openLoopFixtureDocument("decision-1"), 0o644)
+	}
+	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "ledger namespace has an intervening") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := os.Stat(receiptPathForTest(t, f)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("receipt exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("planned ledger write occurred: %v", err)
+	}
+	if _, err := os.Stat(injected); err != nil {
+		t.Fatalf("unplanned user document was not preserved: %v", err)
+	}
+	assertCursorNotAdvanced(t, f)
+}
+
+func TestPreparedReceiptPinsWholeLedgerNamespaceAcrossRecovery(t *testing.T) {
+	f := newApplyTestFixture(t)
+	injected := filepath.Join(f.projectRoot, "docs", "session-review", "open-loops", "external-loop.md")
+	opts := f.options()
+	opts.hooks.afterPreparedReceipt = func() error {
+		if err := os.MkdirAll(filepath.Dir(injected), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(injected, openLoopFixtureDocument("external-loop"), 0o644)
+	}
+	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "ledger namespace has an intervening") {
+		t.Fatalf("initial err=%v", err)
+	}
+	if _, err := os.Stat(receiptPathForTest(t, f)); err != nil {
+		t.Fatalf("prepared receipt missing: %v", err)
+	}
+	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "ledger namespace has an intervening") {
+		t.Fatalf("recovery err=%v", err)
+	}
+	assertCursorNotAdvanced(t, f)
+	if err := os.Remove(injected); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Run(f.options())
+	if err != nil || !got.CursorAdvanced {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+}
+
+func openLoopFixtureDocument(id string) []byte {
+	return []byte("---\nid: " + id + "\nentity_type: open_loop\nproject_id: " + testProjectID + "\nrevision: 1\ntitle: External loop\nstatus: open\ntags: []\nsource_sessions: []\nevidence: []\n---\n\n# External loop\n\n## Attempted paths\n")
+}
+
 func TestRunPartialRecoveryFailsClosedOnUserEdit(t *testing.T) {
 	f := newApplyTestFixture(t)
 	opts := f.options()
@@ -894,7 +961,7 @@ func TestRunPartialRecoveryFailsClosedOnUserEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte("user edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening user edit") {
+	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening edit") {
 		t.Fatalf("err=%v", err)
 	}
 	c, err := (cursor.Store{Root: f.projectData}).Load(testSessionID)
@@ -1099,7 +1166,7 @@ func TestRunRejectsPreparedReceiptForDifferentSessionOrBoundary(t *testing.T) {
 			f := newApplyTestFixture(t)
 			ctx := inputContext{Packet: f.packet, ProposalDigest: "sha256:" + strings.Repeat("c", 64), EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashB}
 			tc.mutate(&ctx)
-			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+			receipt, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}}, digestLedgerSnapshot(nil))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1352,7 +1419,7 @@ func TestNewPreparedReceiptRejectsAggregateEncodedSizeAndFileCount(t *testing.T)
 		for i := range files {
 			files[i] = ledger.PlannedFile{RelativePath: fmt.Sprintf("docs/session-review/decisions/decision-%02d.md", i), Data: data, Perm: 0o644}
 		}
-		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}); err == nil || !strings.Contains(err.Error(), "encoded size") {
+		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}, digestLedgerSnapshot(nil)); err == nil || !strings.Contains(err.Error(), "encoded size") {
 			t.Fatalf("err=%v", err)
 		}
 	})
@@ -1362,10 +1429,25 @@ func TestNewPreparedReceiptRejectsAggregateEncodedSizeAndFileCount(t *testing.T)
 		for i := range files {
 			files[i] = ledger.PlannedFile{RelativePath: fmt.Sprintf("docs/session-review/decisions/decision-%04d.md", i), Data: []byte("x"), Perm: 0o644}
 		}
-		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}); err == nil || !strings.Contains(err.Error(), "file count") {
+		if _, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: files}, digestLedgerSnapshot(nil)); err == nil || !strings.Contains(err.Error(), "file count") {
 			t.Fatalf("err=%v", err)
 		}
 	})
+}
+
+func TestValidateLedgerTargetUsageRejectsUnrecoverableNewDocument(t *testing.T) {
+	baseline := ledger.SnapshotUsage{
+		Files:            []ledger.SnapshotFile{{RelativePath: "docs/session-review/project-overview.md", Size: 1}},
+		DirectoryEntries: 10_000,
+	}
+	plan := ledger.WritePlan{Files: []ledger.PlannedFile{{
+		RelativePath: "docs/session-review/decisions/new.md",
+		Data:         []byte("new"),
+		Perm:         0o644,
+	}}}
+	if err := validateLedgerTargetUsage(baseline, plan); err == nil || !strings.Contains(err.Error(), "cannot be recovered") {
+		t.Fatalf("err=%v", err)
+	}
 }
 
 func TestReceiptValidateRejectsTraversalPathsDirectly(t *testing.T) {
@@ -1373,7 +1455,7 @@ func TestReceiptValidateRejectsTraversalPathsDirectly(t *testing.T) {
 		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
 		ExpectedCursor: evidence.CursorBoundary{}, NextCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
 	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
-	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{{RelativePath: "docs/session-review/current-state.md", Data: []byte("x"), Perm: 0o644}}})
+	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{{RelativePath: "docs/session-review/current-state.md", Data: []byte("x"), Perm: 0o644}}}, digestLedgerSnapshot(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1394,7 +1476,7 @@ func TestReceiptValidateRejectsMalformedInputDigests(t *testing.T) {
 		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
 		ExpectedCursor: evidence.CursorBoundary{}, NextCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
 	}, ProposalDigest: "sha256:" + testHashA, EvidenceFileDigest: "sha256:" + testHashA, EvidencePacketDigest: "sha256:" + testHashA}
-	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}})
+	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{}}, digestLedgerSnapshot(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1424,7 +1506,7 @@ func TestReceiptValidateRejectsMalformedRecoveryMetadata(t *testing.T) {
 	base, err := newPreparedReceipt(ctx, ledger.WritePlan{Files: []ledger.PlannedFile{{
 		RelativePath: "docs/session-review/current-state.md", Data: []byte("new"), Perm: 0o644,
 		ExpectedExists: true, ExpectedData: []byte("old"), ExpectedPerm: 0o644,
-	}}})
+	}}}, digestLedgerSnapshot(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1524,6 +1606,7 @@ func TestRunAcceptsLaterCursorOnlyWhileReceiptTargetsMatch(t *testing.T) {
 }
 
 func TestFinishReceiptClampsClockRegression(t *testing.T) {
+	f := newApplyTestFixture(t)
 	projectData := t.TempDir()
 	store := cursor.Store{Root: projectData}
 	future := time.Date(2026, 8, 24, 0, 0, 0, 0, time.UTC)
@@ -1533,8 +1616,9 @@ func TestFinishReceiptClampsClockRegression(t *testing.T) {
 	}
 	receipt := applyReceipt{ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 2, ToCursor: 2,
 		ExpectedCursor: evidence.CursorBoundary{Line: 1, SourceHash: testHashA},
-		NextCursor:     evidence.CursorBoundary{Line: 2, SourceHash: testHashB}, Files: []receiptFile{}, ChangedFiles: []string{}}
-	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: t.TempDir(), Now: func() time.Time { return future.Add(-time.Hour) }}, nil, nil, nil)
+		NextCursor:     evidence.CursorBoundary{Line: 2, SourceHash: testHashB}, Files: []receiptFile{}, ChangedFiles: []string{},
+		LedgerSnapshotSHA256: digestLedgerSnapshot(mustLedgerSnapshot(t, f.projectRoot))}
+	got, err := finishReceipt(store, current, receipt, Options{ProjectRoot: f.projectRoot, Now: func() time.Time { return future.Add(-time.Hour) }}, nil, nil, nil)
 	if err != nil || !got.CursorAdvanced {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}

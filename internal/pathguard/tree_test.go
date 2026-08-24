@@ -42,6 +42,68 @@ func TestTreeRejectsUnsafeRelativePaths(t *testing.T) {
 	}
 }
 
+func TestReadStableRegularRootFileRejectsInPlaceMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state")
+	if err := os.WriteFile(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before, err := root.Lstat("state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = readStableRegularRootFile(root, "state", before, 1024, func() error {
+		return os.WriteFile(path, []byte("second-longer"), 0o600)
+	})
+	if err == nil {
+		t.Fatal("in-place mutation was accepted as a stable snapshot")
+	}
+}
+
+func TestReadBoundedMarkdownEntriesRejectsOversizedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.md", "b.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before, err := root.Stat(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readBoundedMarkdownEntries(root, before, 1); err == nil {
+		t.Fatal("oversized directory entry set was accepted")
+	}
+}
+
+func TestWalkMarkdownRootRejectsExhaustedTreeEntryBudget(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.md", "b.md"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	remaining := 1
+	if err := walkMarkdownRoot(root, "", func(string, []byte) error { return nil }, nil, &remaining); err == nil {
+		t.Fatal("exhausted tree entry budget was accepted")
+	}
+}
+
 func TestTreeEnsuresPinnedPrivateDirectories(t *testing.T) {
 	rootPath := t.TempDir()
 	directory, err := Open(rootPath)

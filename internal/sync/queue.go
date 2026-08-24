@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"sort"
 	"strings"
@@ -454,7 +453,7 @@ func queueRetryDelay(policy RetryPolicy, previousAttempts int) time.Duration {
 }
 
 func loadQueueItems(root *os.Root, policy RetryPolicy) (map[string]loadedQueueItem, error) {
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedSyncStateEntries(root, maxSyncStateDirectoryEntries, "queue state")
 	if err != nil {
 		return nil, errors.New("cannot inspect queue state")
 	}
@@ -462,6 +461,12 @@ func loadQueueItems(root *os.Root, policy RetryPolicy) (map[string]loadedQueueIt
 	seenNames := make(map[string]string, len(entries))
 	for _, entry := range entries {
 		name := entry.Name()
+		if baseTempName.MatchString(name) {
+			if err := validateIgnoredBaseEntry(root, name, "queue temporary"); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		folded := strings.ToLower(name)
 		if previous, found := seenNames[folded]; found && previous != name {
 			return nil, errors.New("queue state names collide")

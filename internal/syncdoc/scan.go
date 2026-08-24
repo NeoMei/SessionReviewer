@@ -12,6 +12,11 @@ import (
 
 var stableScanID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
+const (
+	maxScanMarkdownFiles = 4_096
+	maxScanMarkdownBytes = 64 << 20
+)
+
 type Entry struct {
 	Identity     Identity
 	RelativePath string
@@ -51,9 +56,31 @@ type SourceDocument struct {
 // Scan walks a pinned tree, removes synchronization metadata from the source
 // set, and returns an inventory whose parse diagnostics never include content.
 func Scan(root *pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode) Inventory {
+	return scanWithLimits(root, rootRelative, goos, caseMode, maxScanMarkdownFiles, maxScanMarkdownBytes)
+}
+
+func scanWithLimits(root *pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode, maxFiles, maxBytes int) Inventory {
 	sources := make([]SourceDocument, 0)
-	err := root.WalkMarkdown(rootRelative, func(relative string, content []byte) error {
-		sources = append(sources, SourceDocument{RelativePath: relative, Content: bytes.Clone(content)})
+	files, totalBytes := 0, 0
+	consume := func(size int) error {
+		if maxFiles < 0 || maxBytes < 0 || files >= maxFiles || size > maxBytes-totalBytes {
+			return errors.New("Markdown scan exceeds aggregate budget")
+		}
+		files++
+		totalBytes += size
+		return nil
+	}
+	err := root.WalkMarkdownIsolated(rootRelative, func(relative string, content []byte) error {
+		if err := consume(len(content)); err != nil {
+			return err
+		}
+		sources = append(sources, SourceDocument{RelativePath: relative, Content: content})
+		return nil
+	}, func(relative string) error {
+		if err := consume(0); err != nil {
+			return err
+		}
+		sources = append(sources, SourceDocument{RelativePath: relative})
 		return nil
 	})
 	if err != nil {
@@ -154,15 +181,7 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 			})
 		}
 	}
-	sort.SliceStable(issues, func(first, second int) bool {
-		if issues[first].RelativePath != issues[second].RelativePath {
-			return issues[first].RelativePath < issues[second].RelativePath
-		}
-		if issues[first].Kind != issues[second].Kind {
-			return issues[first].Kind < issues[second].Kind
-		}
-		return issues[first].EntityID < issues[second].EntityID
-	})
+	sortScanIssues(issues)
 
 	inventory := Inventory{ByID: make(map[string]Entry), Issues: issues}
 	for index, source := range analyzed {
@@ -174,6 +193,18 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 		}
 	}
 	return inventory
+}
+
+func sortScanIssues(issues []ScanIssue) {
+	sort.SliceStable(issues, func(first, second int) bool {
+		if issues[first].RelativePath != issues[second].RelativePath {
+			return issues[first].RelativePath < issues[second].RelativePath
+		}
+		if issues[first].Kind != issues[second].Kind {
+			return issues[first].Kind < issues[second].Kind
+		}
+		return issues[first].EntityID < issues[second].EntityID
+	})
 }
 
 func malformedScanIssue(relative string) ScanIssue {

@@ -339,11 +339,25 @@ func Run(opts Options) (result Result, retErr error) {
 	if state.ProjectID != ctx.Packet.ProjectID {
 		return Result{}, fmt.Errorf("ledger project ID does not match evidence")
 	}
+	baselineUsage, err := ledger.SnapshotUsageExpected(opts.ProjectRoot, roots.project.Info())
+	if err != nil {
+		return Result{}, err
+	}
+	if digestLedgerSnapshot(baselineUsage.Files) != digestLedgerSnapshot(ledger.SnapshotFiles(state)) {
+		return Result{}, errors.New("ledger namespace changed after loading")
+	}
 	changes, err := proposal.Validate(ctx.Proposal, ctx.Packet, state)
 	if err != nil {
 		return Result{}, err
 	}
 	plan, err := ledger.Render(state, changes)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := validateLedgerTargetUsage(baselineUsage, plan); err != nil {
+		return Result{}, err
+	}
+	receipt, err = newPreparedReceipt(ctx, plan, digestLedgerSnapshot(baselineUsage.Files))
 	if err != nil {
 		return Result{}, err
 	}
@@ -355,8 +369,7 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-	receipt, err = newPreparedReceipt(ctx, plan)
-	if err != nil {
+	if err := verifyLedgerNamespace(opts.ProjectRoot, roots.project.Info(), receipt); err != nil {
 		return Result{}, err
 	}
 	if err := verifyIdentity(); err != nil {
@@ -589,6 +602,9 @@ func applyReceiptFiles(projectRoot string, expectedRoot os.FileInfo, receipt app
 				return written, err
 			}
 		}
+		if err := verifyLedgerNamespace(projectRoot, expectedRoot, receipt); err != nil {
+			return written, err
+		}
 		current, exists, mode, err := readProjectTarget(projectRoot, expectedRoot, file.RelativePath)
 		if err != nil {
 			return written, err
@@ -622,6 +638,9 @@ func applyReceiptFiles(projectRoot string, expectedRoot os.FileInfo, receipt app
 				return written, err
 			}
 		}
+	}
+	if err := verifyLedgerNamespace(projectRoot, expectedRoot, receipt); err != nil {
+		return written, err
 	}
 	return written, nil
 }
@@ -676,6 +695,9 @@ func recoverReceipt(store cursor.Store, current cursor.Cursor, receipt applyRece
 		if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 			return Result{}, err
 		}
+		if err := verifyLedgerNamespace(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+			return Result{}, err
+		}
 		result := baseResult(ctx)
 		result.AlreadyApplied = true
 		return result, nil
@@ -714,6 +736,9 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 		return Result{}, err
 	}
+	if err := verifyLedgerNamespace(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+		return Result{}, err
+	}
 	if opts.hooks.beforeCAS != nil {
 		if err := opts.hooks.beforeCAS(); err != nil {
 			return Result{}, err
@@ -734,6 +759,9 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 	if err := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); err != nil {
 		return Result{}, err
 	}
+	if err := verifyLedgerNamespace(opts.ProjectRoot, expectedRoot, receipt); err != nil {
+		return Result{}, err
+	}
 	next := cursor.Cursor{SessionID: receipt.SessionID, LastLine: receipt.NextCursor.Line, LastHash: receipt.NextCursor.SourceHash, UpdatedAt: now}
 	if err := store.Commit(receipt.SessionID, current, next); err != nil {
 		if !errors.Is(err, cursor.ErrStale) {
@@ -749,6 +777,9 @@ func finishReceipt(store cursor.Store, current cursor.Cursor, receipt applyRecei
 			return Result{}, cursor.ErrStale
 		}
 		if verifyErr := verifyReceiptTargets(opts.ProjectRoot, expectedRoot, receipt, opts.hooks.publicationSync()); verifyErr != nil {
+			return Result{}, verifyErr
+		}
+		if verifyErr := verifyLedgerNamespace(opts.ProjectRoot, expectedRoot, receipt); verifyErr != nil {
 			return Result{}, verifyErr
 		}
 		result := resultFromReceipt(receipt)
@@ -773,6 +804,107 @@ func verifyReceiptTargets(projectRoot string, expectedRoot os.FileInfo, receipt 
 		if err := syncProjectTargetPublication(projectRoot, expectedRoot, file.RelativePath, syncPublication); err != nil {
 			return fmt.Errorf("sync ledger file %s publication: %w", file.RelativePath, err)
 		}
+	}
+	return nil
+}
+
+type ledgerSnapshotEntry struct {
+	RelativePath string `json:"relative_path"`
+	SHA256       string `json:"sha256"`
+	Mode         uint32 `json:"mode"`
+}
+
+func digestLedgerSnapshot(files []ledger.SnapshotFile) string {
+	entries := make([]ledgerSnapshotEntry, 0, len(files))
+	for _, file := range files {
+		entries = append(entries, ledgerSnapshotEntry{
+			RelativePath: file.RelativePath,
+			SHA256:       file.SHA256,
+			Mode:         normalizeApplyMode(file.Perm),
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].RelativePath < entries[j].RelativePath })
+	body, err := json.Marshal(entries)
+	if err != nil {
+		panic("marshal ledger snapshot: " + err.Error())
+	}
+	return digestBytes(body)
+}
+
+func validateLedgerTargetUsage(baseline ledger.SnapshotUsage, plan ledger.WritePlan) error {
+	targets := make(map[string]ledger.SnapshotFile, len(baseline.Files)+len(plan.Files))
+	for _, file := range baseline.Files {
+		targets[file.RelativePath] = file
+	}
+	entries := baseline.DirectoryEntries
+	for _, planned := range plan.Files {
+		if !ledger.IsSnapshotPath(planned.RelativePath) {
+			continue
+		}
+		if _, exists := targets[planned.RelativePath]; !exists && ledger.IsCollectionSnapshotPath(planned.RelativePath) {
+			entries++
+		}
+		targets[planned.RelativePath] = ledger.SnapshotFile{
+			RelativePath: planned.RelativePath,
+			SHA256:       digestBytes(planned.Data),
+			Perm:         planned.Perm,
+			Size:         int64(len(planned.Data)),
+		}
+	}
+	files := make([]ledger.SnapshotFile, 0, len(targets))
+	for _, file := range targets {
+		files = append(files, file)
+	}
+	if err := ledger.ValidateSnapshotUsage(ledger.SnapshotUsage{Files: files, DirectoryEntries: entries}); err != nil {
+		return fmt.Errorf("apply target cannot be recovered within ledger limits: %w", err)
+	}
+	return nil
+}
+
+func verifyLedgerNamespace(projectRoot string, expectedRoot os.FileInfo, receipt applyReceipt) error {
+	files, err := ledger.SnapshotExpected(projectRoot, expectedRoot)
+	if err != nil {
+		return fmt.Errorf("read ledger namespace snapshot: %w", err)
+	}
+	current := make(map[string]ledger.SnapshotFile, len(files))
+	for _, file := range files {
+		if _, duplicate := current[file.RelativePath]; duplicate {
+			return fmt.Errorf("duplicate ledger snapshot path %q", file.RelativePath)
+		}
+		current[file.RelativePath] = file
+	}
+	for _, planned := range receipt.Files {
+		if !ledger.IsSnapshotPath(planned.RelativePath) {
+			continue
+		}
+		file, exists := current[planned.RelativePath]
+		if exists && file.SHA256 == planned.TargetSHA256 && applyModeEqual(file.Perm, planned.TargetMode) {
+			if planned.PreimageExists {
+				current[planned.RelativePath] = ledger.SnapshotFile{
+					RelativePath: planned.RelativePath,
+					SHA256:       planned.PreimageSHA256,
+					Perm:         fs.FileMode(planned.PreimageMode),
+					Size:         file.Size,
+				}
+			} else {
+				delete(current, planned.RelativePath)
+			}
+			continue
+		}
+		if exists && planned.PreimageExists && file.SHA256 == planned.PreimageSHA256 && applyModeEqual(file.Perm, planned.PreimageMode) {
+			continue
+		}
+		if !exists && !planned.PreimageExists {
+			continue
+		}
+		return fmt.Errorf("ledger namespace path %s has an intervening edit", planned.RelativePath)
+	}
+	normalized := make([]ledger.SnapshotFile, 0, len(current))
+	for _, file := range current {
+		normalized = append(normalized, file)
+	}
+	if digestLedgerSnapshot(normalized) != receipt.LedgerSnapshotSHA256 {
+		return errors.New("ledger namespace has an intervening addition, removal, or edit")
 	}
 	return nil
 }

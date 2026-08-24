@@ -801,7 +801,7 @@ func TestParseRejectsMalformedAndHostileDocuments(t *testing.T) {
 }
 
 func TestParseRejectsUnsafeRelativePaths(t *testing.T) {
-	for _, name := range []string{"", ".", "../x.md", "/absolute.md", "a\\b.md", "a/../b.md", "a//b.md"} {
+	for _, name := range []string{"", ".", "../x.md", "/absolute.md", "C:/outside.md", "z:/outside.md", "a\\b.md", "a/../b.md", "a//b.md"} {
 		if _, err := Parse(name, entity("decision-1", "project-1", "Base")); !errors.Is(err, ErrInvalidPath) {
 			t.Fatalf("path=%q err=%v", name, err)
 		}

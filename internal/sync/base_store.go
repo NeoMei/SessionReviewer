@@ -252,7 +252,7 @@ type baseStatePair struct {
 }
 
 func inspectBaseStateNames(root *os.Root) ([]baseStatePair, error) {
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedSyncStateEntries(root, maxSyncStateDirectoryEntries, "merge-base directory")
 	if err != nil {
 		return nil, errors.New("cannot inspect merge-base directory")
 	}
@@ -344,7 +344,7 @@ func loadAllBaseRecords(root *os.Root) ([]BaseRecord, error) {
 }
 
 func rejectExpectedStateCaseCollision(root *os.Root, allowed ...string) error {
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedSyncStateEntries(root, maxSyncStateDirectoryEntries, "merge-base directory")
 	if err != nil {
 		return errors.New("cannot inspect merge-base directory")
 	}

@@ -425,7 +425,7 @@ func ContentHash(content []byte) string {
 }
 
 func validateRelativePath(relativePath string) error {
-	if relativePath == "" || relativePath == "." || strings.Contains(relativePath, "\\") || strings.ContainsRune(relativePath, 0) || strings.HasPrefix(relativePath, "/") || path.Clean(relativePath) != relativePath {
+	if relativePath == "" || relativePath == "." || hasDrivePrefix(relativePath) || strings.Contains(relativePath, "\\") || strings.ContainsRune(relativePath, 0) || strings.HasPrefix(relativePath, "/") || path.Clean(relativePath) != relativePath {
 		return ErrInvalidPath
 	}
 	for _, part := range strings.Split(relativePath, "/") {
@@ -434,6 +434,10 @@ func validateRelativePath(relativePath string) error {
 		}
 	}
 	return nil
+}
+
+func hasDrivePrefix(value string) bool {
+	return len(value) >= 2 && value[1] == ':' && ((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z'))
 }
 
 func splitFrontmatter(content []byte) ([]byte, []byte, error) {

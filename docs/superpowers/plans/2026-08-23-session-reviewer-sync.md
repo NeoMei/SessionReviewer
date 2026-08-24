@@ -848,7 +848,7 @@ func TestQueueIsDurableDeduplicatedAndContentFree(t *testing.T) {
 
 func TestEventGateSuppressesSelfLoopAndDebouncesRapidSaves(t *testing.T) {
 	lookup := &fakeHashLookup{entities:map[string]string{"decisions/d1.md":"decision-1"}, hashes:map[string]string{"decision-1|project":"written-hash"}}
-	gate := NewEventGate(200*time.Millisecond, lookup)
+	gate := NewEventGate(200*time.Millisecond, lookup, "windows", platform.CaseInsensitive)
 	if got, _ := gate.Observe(FileEvent{Side:SideProject, RelativePath:"decisions/d1.md", ObservedHash:"written-hash", At:t0}); got != EventIgnoredSelf { t.Fatalf("got=%s",got) }
 	if got, _ := gate.Observe(FileEvent{Side:SideVault, RelativePath:"decisions/d1.md", ObservedHash:"edit-1", At:t0}); got != EventDebounced { t.Fatalf("got=%s",got) }
 	gate.Observe(FileEvent{Side:SideVault, RelativePath:"decisions/d1.md", ObservedHash:"edit-2", At:t0.Add(100*time.Millisecond)})
@@ -895,7 +895,7 @@ const ( EventIgnoredSelf EventDisposition = "ignored_self"; EventDebounced Event
 type FileEvent struct { Side Side; RelativePath, ObservedHash string; At time.Time }
 type HashLookup interface { EntityForPath(Side,string)(string,bool,error); LastWrittenHash(string,Side)(string,bool,error) }
 type EventGate struct { /* mutex, window, lookup, pending by entity */ }
-func NewEventGate(window time.Duration, hashes HashLookup) *EventGate
+func NewEventGate(window time.Duration, hashes HashLookup, goos string, caseMode platform.CaseMode) *EventGate
 func (g *EventGate) Observe(FileEvent) (EventDisposition,error)
 func (g *EventGate) Ready(now time.Time) []string
 ```

@@ -33,6 +33,110 @@ func TestEnsureSafeParentsPropagatesDurableCreatorFailure(t *testing.T) {
 	}
 }
 
+func TestReadLedgerSnapshotRejectsSameInodeMutationAfterInspection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.md")
+	if err := os.WriteFile(path, []byte("first"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := pathguard.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	before, err := directory.Root.Lstat("state.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("second-longer"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readLedgerSnapshot(directory, "state.md", before); err == nil {
+		t.Fatal("same-inode ledger mutation was accepted")
+	}
+}
+
+func TestLedgerReadBudgetsFailClosed(t *testing.T) {
+	t.Run("aggregate bytes", func(t *testing.T) {
+		root := ledgerFixture(t)
+		directory, err := pathguard.Open(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer directory.Close()
+		budget := &ledgerReadBudget{remainingFiles: 1, remainingBytes: 1}
+		if _, _, err := readLedgerRegularBudget(directory, ledgerRootRelative+"/project-overview.md", true, budget); err == nil || !strings.Contains(err.Error(), "aggregate read budget") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+
+	t.Run("directory entries", func(t *testing.T) {
+		root := ledgerFixture(t)
+		writeLedgerFile(t, root, "decisions/a.md", decisionDocument("a", testProjectID), 0o644)
+		writeLedgerFile(t, root, "decisions/b.md", decisionDocument("b", testProjectID), 0o644)
+		directory, err := pathguard.Open(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer directory.Close()
+		remaining := 1
+		if _, err := readLedgerDirectory(directory, ledgerRootRelative+"/decisions", &remaining); err == nil || !strings.Contains(err.Error(), "directory entry budget") {
+			t.Fatalf("err=%v", err)
+		}
+	})
+}
+
+func TestStateSnapshotMatchesFreshNamespaceSnapshot(t *testing.T) {
+	root := ledgerFixture(t)
+	writeLedgerFile(t, root, "decisions/decision-1.md", decisionDocument("decision-1", testProjectID), 0o644)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := SnapshotExpected(root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(SnapshotFiles(state), fresh) {
+		t.Fatalf("state snapshot=%+v fresh=%+v", SnapshotFiles(state), fresh)
+	}
+}
+
+func TestValidateSnapshotUsageAcceptsExactLimitsAndRejectsOverflow(t *testing.T) {
+	files := make([]SnapshotFile, maxLedgerLoadFiles)
+	for index := range files {
+		files[index] = SnapshotFile{RelativePath: fmt.Sprintf("file-%04d.md", index), Size: maxLedgerLoadBytes / maxLedgerLoadFiles}
+	}
+	exact := SnapshotUsage{Files: files, DirectoryEntries: maxLedgerLoadEntries}
+	if err := ValidateSnapshotUsage(exact); err != nil {
+		t.Fatalf("exact limits rejected: %v", err)
+	}
+	tooManyEntries := exact
+	tooManyEntries.DirectoryEntries++
+	if err := ValidateSnapshotUsage(tooManyEntries); err == nil {
+		t.Fatal("directory entry overflow accepted")
+	}
+	tooManyFiles := exact
+	tooManyFiles.Files = append(append([]SnapshotFile(nil), exact.Files...), SnapshotFile{RelativePath: "extra.md"})
+	if err := ValidateSnapshotUsage(tooManyFiles); err == nil {
+		t.Fatal("file count overflow accepted")
+	}
+	tooManyBytes := exact
+	tooManyBytes.Files = append([]SnapshotFile(nil), exact.Files...)
+	tooManyBytes.Files[0].Size++
+	if err := ValidateSnapshotUsage(tooManyBytes); err == nil {
+		t.Fatal("aggregate byte overflow accepted")
+	}
+}
+
 func TestEnsureSafeParentsRetryResyncsExistingParents(t *testing.T) {
 	directory, err := pathguard.Open(t.TempDir())
 	if err != nil {

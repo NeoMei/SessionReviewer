@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	receiptSchemaVersion       = 1
+	receiptSchemaVersion       = 2
 	receiptPrepared            = "prepared"
 	receiptApplied             = "applied"
 	maxReceiptBytes            = 64 << 20
@@ -44,6 +44,7 @@ type applyReceipt struct {
 	ProposalSHA256       string                  `json:"proposal_sha256"`
 	EvidenceFileSHA256   string                  `json:"evidence_file_sha256"`
 	EvidencePacketSHA256 string                  `json:"evidence_packet_sha256"`
+	LedgerSnapshotSHA256 string                  `json:"ledger_snapshot_sha256"`
 	ExpectedCursor       evidence.CursorBoundary `json:"expected_cursor"`
 	NextCursor           evidence.CursorBoundary `json:"next_cursor"`
 	Files                []receiptFile           `json:"files"`
@@ -65,7 +66,7 @@ type scannedReceipt struct {
 	info os.FileInfo
 }
 
-func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, error) {
+func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan, ledgerSnapshotSHA256 string) (applyReceipt, error) {
 	if err := validatePreparedReceiptBudget(plan); err != nil {
 		return applyReceipt{}, err
 	}
@@ -75,6 +76,7 @@ func newPreparedReceipt(ctx inputContext, plan ledger.WritePlan) (applyReceipt, 
 		FromCursor: ctx.Packet.FromCursor, ToCursor: ctx.Packet.ToCursor,
 		ProposalSHA256: ctx.ProposalDigest, EvidenceFileSHA256: ctx.EvidenceFileDigest,
 		EvidencePacketSHA256: ctx.EvidencePacketDigest,
+		LedgerSnapshotSHA256: ledgerSnapshotSHA256,
 		ExpectedCursor:       ctx.Packet.ExpectedCursor, NextCursor: ctx.Packet.NextCursor,
 		Files: make([]receiptFile, 0, len(plan.Files)), ChangedFiles: []string{},
 	}
@@ -137,7 +139,7 @@ func (receipt applyReceipt) validate() error {
 	if receipt.SchemaVersion != receiptSchemaVersion || (receipt.State != receiptPrepared && receipt.State != receiptApplied) {
 		return errors.New("invalid apply receipt schema or state")
 	}
-	if !safeIdentifier(receipt.ProjectID) || !safeIdentifier(receipt.SessionID) || !validReceiptDigest(receipt.ProposalSHA256) || !validReceiptDigest(receipt.EvidenceFileSHA256) || !validReceiptDigest(receipt.EvidencePacketSHA256) {
+	if !safeIdentifier(receipt.ProjectID) || !safeIdentifier(receipt.SessionID) || !validReceiptDigest(receipt.ProposalSHA256) || !validReceiptDigest(receipt.EvidenceFileSHA256) || !validReceiptDigest(receipt.EvidencePacketSHA256) || !validReceiptDigest(receipt.LedgerSnapshotSHA256) {
 		return errors.New("invalid apply receipt identity or input digest")
 	}
 	if receipt.FromCursor < 1 || receipt.ToCursor < receipt.FromCursor || receipt.ExpectedCursor.Line != receipt.FromCursor-1 || receipt.NextCursor.Line != receipt.ToCursor {
@@ -722,31 +724,11 @@ func receiptDigestFromName(name string) (string, error) {
 }
 
 func rejectReceiptCaseCollisions(root *os.Root, name string) error {
-	return rejectEntryCaseCollisions(root, name, atomicfile.BackupPath(name))
+	return rejectEntryCaseCollisionsBounded(root, maxReceiptPreflightEntries, name, atomicfile.BackupPath(name))
 }
 
 func rejectDirectoryCaseCollision(root *os.Root, name string) error {
-	return rejectEntryCaseCollisions(root, name)
-}
-
-func rejectEntryCaseCollisions(root *os.Root, names ...string) error {
-	file, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	entries, err := file.ReadDir(-1)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		for _, name := range names {
-			if strings.EqualFold(entry.Name(), name) && entry.Name() != name {
-				return fmt.Errorf("case-colliding apply state entry %q", entry.Name())
-			}
-		}
-	}
-	return nil
+	return rejectEntryCaseCollisionsBounded(root, maxReceiptPreflightEntries, name)
 }
 
 func rejectEntryCaseCollisionsBounded(root *os.Root, limit int, names ...string) error {

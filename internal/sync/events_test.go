@@ -16,7 +16,7 @@ func TestEventGateSuppressesSelfLoopAndDebouncesRapidSaves(t *testing.T) {
 		entities: map[string]string{"decisions/d1.md": "decision-1"},
 		hashes:   map[string]string{"decision-1|project": "written-hash"},
 	}
-	gate := NewEventGate(200*time.Millisecond, lookup)
+	gate := NewEventGate(200*time.Millisecond, lookup, "windows", platform.CaseInsensitive)
 	if got, err := gate.Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "written-hash", At: fixedTime}); err != nil || got != EventIgnoredSelf {
 		t.Fatalf("self disposition=%s err=%v", got, err)
 	}
@@ -43,7 +43,7 @@ func TestEventGateNormalizesUnicodeCaseAndIgnoresOperationalArtifacts(t *testing
 		t.Fatal(err)
 	}
 	lookup := &fakeHashLookup{entities: map[string]string{canonical: "decision-cafe"}, hashes: map[string]string{}}
-	gate := NewEventGate(100*time.Millisecond, lookup)
+	gate := NewEventGate(100*time.Millisecond, lookup, "windows", platform.CaseInsensitive)
 
 	for index, relative := range []string{"Decisions/Café.md", "DECISIONS/Cafe\u0301.md"} {
 		got, err := gate.Observe(FileEvent{Side: SideProject, RelativePath: relative, ObservedHash: "human", At: fixedTime.Add(time.Duration(index) * 50 * time.Millisecond)})
@@ -83,7 +83,7 @@ func TestEventGateSuppressesOnlyVerifiedHashForObservedSide(t *testing.T) {
 			"decision-1|vault":   "vault-written",
 		},
 	}
-	gate := NewEventGate(time.Second, lookup)
+	gate := NewEventGate(time.Second, lookup, "windows", platform.CaseInsensitive)
 	for _, event := range []FileEvent{
 		{Side: SideVault, RelativePath: "decisions/d1.md", ObservedHash: "project-written", At: fixedTime},
 		{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "different", At: fixedTime.Add(time.Second)},
@@ -103,7 +103,7 @@ func TestEventGateConcurrentObserveIsSafeAndReadyIsSorted(t *testing.T) {
 		"decisions/a.md": "decision-a",
 		"decisions/z.md": "decision-z",
 	}, hashes: map[string]string{}}
-	gate := NewEventGate(25*time.Millisecond, lookup)
+	gate := NewEventGate(25*time.Millisecond, lookup, "windows", platform.CaseInsensitive)
 	var wait sync.WaitGroup
 	for index := 0; index < 64; index++ {
 		wait.Add(1)
@@ -129,15 +129,15 @@ func TestEventGateRejectsInvalidEventsWithoutContentInErrors(t *testing.T) {
 		{Side: SideProject, RelativePath: "../CANARY-CONTENT", ObservedHash: "hash", At: fixedTime},
 		{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "hash", At: time.Time{}},
 	} {
-		_, err := NewEventGate(time.Second, lookup).Observe(event)
+		_, err := NewEventGate(time.Second, lookup, "windows", platform.CaseInsensitive).Observe(event)
 		if err == nil || strings.Contains(err.Error(), "CANARY-CONTENT") {
 			t.Fatalf("event=%+v error=%v", event, err)
 		}
 	}
-	if _, err := NewEventGate(-time.Second, lookup).Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "hash", At: fixedTime}); err == nil {
+	if _, err := NewEventGate(-time.Second, lookup, "windows", platform.CaseInsensitive).Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "hash", At: fixedTime}); err == nil {
 		t.Fatal("negative debounce window accepted")
 	}
-	if _, err := NewEventGate(time.Second, nil).Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "hash", At: fixedTime}); err == nil {
+	if _, err := NewEventGate(time.Second, nil, "windows", platform.CaseInsensitive).Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", ObservedHash: "hash", At: fixedTime}); err == nil {
 		t.Fatal("nil hash lookup accepted")
 	}
 }
@@ -145,13 +145,28 @@ func TestEventGateRejectsInvalidEventsWithoutContentInErrors(t *testing.T) {
 func TestEventGateAcceptsLocalTimeAndMissingObservedHash(t *testing.T) {
 	lookup := &fakeHashLookup{entities: map[string]string{"decisions/d1.md": "decision-1"}, hashes: map[string]string{}}
 	local := fixedTime.In(time.FixedZone("local", 8*60*60))
-	gate := NewEventGate(time.Second, lookup)
+	gate := NewEventGate(time.Second, lookup, "windows", platform.CaseInsensitive)
 	got, err := gate.Observe(FileEvent{Side: SideProject, RelativePath: "decisions/d1.md", At: local})
 	if err != nil || got != EventDebounced {
 		t.Fatalf("missing-file event disposition=%s err=%v", got, err)
 	}
 	if ready := gate.Ready(local.Add(time.Second)); !reflect.DeepEqual(ready, []string{"decision-1"}) {
 		t.Fatalf("missing-file event ready=%v", ready)
+	}
+}
+
+func TestEventGatePreservesCaseSensitivePathRouting(t *testing.T) {
+	lookup := &fakeHashLookup{entities: map[string]string{
+		"decisions/Decision.md": "decision-upper",
+		"decisions/decision.md": "decision-lower",
+	}, hashes: map[string]string{}}
+	gate := NewEventGate(0, lookup, "darwin", platform.CaseSensitive)
+	got, err := gate.Observe(FileEvent{Side: SideVault, RelativePath: "decisions/Decision.md", ObservedHash: "human", At: fixedTime})
+	if err != nil || got != EventReady {
+		t.Fatalf("disposition=%s err=%v", got, err)
+	}
+	if ready := gate.Ready(fixedTime); !reflect.DeepEqual(ready, []string{"decision-upper"}) {
+		t.Fatalf("case-sensitive route=%v", ready)
 	}
 }
 

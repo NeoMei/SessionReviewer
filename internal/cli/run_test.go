@@ -43,6 +43,15 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestRunRejectsArgumentsAfterRootHelpOrVersion(t *testing.T) {
+	for _, args := range [][]string{{"version", "unexpected"}, {"help", "unexpected"}, {"--help", "unexpected"}} {
+		var out, errOut bytes.Buffer
+		if code := Run(args, &out, &errOut); code != 2 || out.Len() != 0 || errOut.Len() == 0 {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+		}
+	}
+}
+
 func TestRunRejectsUnknownCommand(t *testing.T) {
 	var out, errOut bytes.Buffer
 	code := Run([]string{"unknown"}, &out, &errOut)

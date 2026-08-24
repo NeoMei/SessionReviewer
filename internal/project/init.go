@@ -1004,24 +1004,11 @@ func readOverviewFile(root *os.Root, name string) ([]byte, bool, error) {
 	if err != nil {
 		return nil, true, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 1<<20 {
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
 		return nil, true, fmt.Errorf("invalid project overview")
 	}
-	file, err := root.Open(name)
+	body, err := pathguard.ReadStableRegularRootFile(root, name, info, 1<<20)
 	if err != nil {
-		return nil, true, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) {
-		return nil, true, fmt.Errorf("project overview changed while opening")
-	}
-	body, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
-	if err != nil {
-		return nil, true, err
-	}
-	after, err := root.Lstat(name)
-	if err != nil || !os.SameFile(opened, after) {
 		return nil, true, fmt.Errorf("project overview changed while reading")
 	}
 	return body, true, nil

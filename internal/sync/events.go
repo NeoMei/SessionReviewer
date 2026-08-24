@@ -34,14 +34,16 @@ type HashLookup interface {
 }
 
 type EventGate struct {
-	mu      sync.Mutex
-	window  time.Duration
-	lookup  HashLookup
-	pending map[string]time.Time
+	mu       sync.Mutex
+	window   time.Duration
+	lookup   HashLookup
+	goos     string
+	caseMode platform.CaseMode
+	pending  map[string]time.Time
 }
 
-func NewEventGate(window time.Duration, hashes HashLookup) *EventGate {
-	return &EventGate{window: window, lookup: hashes, pending: make(map[string]time.Time)}
+func NewEventGate(window time.Duration, hashes HashLookup, goos string, caseMode platform.CaseMode) *EventGate {
+	return &EventGate{window: window, lookup: hashes, goos: goos, caseMode: caseMode, pending: make(map[string]time.Time)}
 }
 
 func (gate *EventGate) Observe(event FileEvent) (EventDisposition, error) {
@@ -54,7 +56,7 @@ func (gate *EventGate) Observe(event FileEvent) (EventDisposition, error) {
 	if event.At.IsZero() || !validObservedHash(event.ObservedHash) {
 		return "", errors.New("invalid filesystem event")
 	}
-	pathKey, err := platform.PathKey("windows", platform.CaseInsensitive, event.RelativePath)
+	pathKey, err := platform.PathKey(gate.goos, gate.caseMode, event.RelativePath)
 	if err != nil {
 		return "", errors.New("invalid filesystem event path")
 	}

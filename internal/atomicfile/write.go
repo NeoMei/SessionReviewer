@@ -276,10 +276,6 @@ func secureAtomicRecoveryFile(info os.FileInfo) bool {
 		safeAtomicWriterMode(info.Mode())
 }
 
-func safeAtomicWriterMode(mode fs.FileMode) bool {
-	return mode == mode.Perm() && mode&0o700 == 0o600 && mode&0o133 == 0
-}
-
 // RecoverRootFileRollback restores an authenticated rollback backup left by an
 // interrupted checked write. expectedOldHash is the lowercase hexadecimal
 // SHA-256 of the old content, supplied by the higher-level transaction record.
@@ -409,6 +405,59 @@ func RecoverRootFileRollback(parent *os.Root, leaf, expectedOldHash string) (ret
 			return errors.New("cannot sync authenticated atomic recovery")
 		}
 		return removeRootRollback(parent, &rollback)
+	})
+}
+
+// RemoveRootFileIfHashMatches durably removes one private regular leaf only
+// when its stable content matches the caller-authenticated SHA-256. It is used
+// to retire a converged migration backup without deleting an unrelated file
+// merely because it occupies the recovery name.
+func RemoveRootFileIfHashMatches(parent *os.Root, leaf, expectedHash string) (retErr error) {
+	if parent == nil || !strictRootLeaf(leaf) || !validRootRollbackHash(expectedHash) {
+		return errors.New("atomic cleanup input is invalid")
+	}
+	guard, err := captureRootParentCleanupGuard(parent)
+	if err != nil {
+		return err
+	}
+	before, err := parent.Lstat(leaf)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !secureAtomicRecoveryFile(before) {
+		return ErrRootRollbackRecoveryRequired
+	}
+	file, err := parent.Open(leaf)
+	if err != nil {
+		return ErrRootRollbackRecoveryRequired
+	}
+	defer func() { retErr = errors.Join(retErr, file.Close()) }()
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) || !secureAtomicRecoveryFile(opened) {
+		return ErrRootRollbackRecoveryRequired
+	}
+	snapshot, err := readStableRollbackSnapshot(file, opened)
+	snapshotHash := sha256.Sum256(snapshot)
+	if err != nil || hex.EncodeToString(snapshotHash[:]) != expectedHash {
+		return ErrRootRollbackRecoveryRequired
+	}
+	after, err := parent.Lstat(leaf)
+	if err != nil || !os.SameFile(before, after) || !secureAtomicRecoveryFile(after) || after.Size() != before.Size() || after.Mode() != before.Mode() || !after.ModTime().Equal(before.ModTime()) {
+		return ErrRootRollbackRecoveryRequired
+	}
+	expectedBytes, _ := hex.DecodeString(expectedHash)
+	return guard.run(parent, func() error {
+		current, ok := authenticatedRootFile(parent, leaf, expectedBytes)
+		if !ok || !os.SameFile(before, current) {
+			return ErrRootRollbackRecoveryRequired
+		}
+		if err := parent.Remove(leaf); err != nil {
+			return errors.New("cannot remove authenticated atomic file")
+		}
+		if err := syncRootDirectoryEntry(parent, leaf); err != nil {
+			return errors.New("cannot sync authenticated atomic file cleanup")
+		}
+		return nil
 	})
 }
 

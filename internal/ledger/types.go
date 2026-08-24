@@ -150,6 +150,7 @@ type loadedDocument struct {
 }
 
 type stateDocuments struct {
+	overview  *loadedDocument
 	current   *loadedDocument
 	timeline  *loadedDocument
 	decisions map[string]loadedDocument

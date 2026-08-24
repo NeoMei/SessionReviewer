@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -19,6 +18,12 @@ import (
 )
 
 const ledgerRootRelative = "docs/session-review"
+
+const (
+	maxLedgerLoadFiles   = 4_096
+	maxLedgerLoadBytes   = 64 << 20
+	maxLedgerLoadEntries = 10_000
+)
 
 var (
 	stableLedgerID  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
@@ -69,8 +74,9 @@ func openLedgerProjectRoot(projectRoot string, options rootOpenOptions) (*pathgu
 }
 
 func loadFromDirectory(directory *pathguard.Directory) (State, error) {
+	budget := &ledgerReadBudget{remainingFiles: maxLedgerLoadFiles, remainingBytes: maxLedgerLoadBytes}
 	overviewPath := ledgerRootRelative + "/project-overview.md"
-	overview, _, err := readLedgerRegular(directory, overviewPath, true)
+	overview, overviewPerm, err := readLedgerRegularBudget(directory, overviewPath, true, budget)
 	if err != nil {
 		return State{}, fmt.Errorf("load project overview: %w", err)
 	}
@@ -87,6 +93,7 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 		OpenLoops:       make(map[string]OpenLoop),
 		Sessions:        make(map[string]SessionReport),
 		documents: stateDocuments{
+			overview:  &loadedDocument{RelativePath: overviewPath, Original: append([]byte(nil), overview...), Perm: overviewPerm},
 			decisions: make(map[string]loadedDocument),
 			openLoops: make(map[string]loadedDocument),
 			sessions:  make(map[string]loadedDocument),
@@ -95,7 +102,7 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 	ids := map[string]string{"current-state": "reserved current state", "evolution-timeline": "reserved timeline"}
 	sessionIDs := make(map[string]string)
 
-	if loaded, found, err := loadDocument(directory, ledgerRootRelative+"/current-state.md"); err != nil {
+	if loaded, found, err := loadDocument(directory, ledgerRootRelative+"/current-state.md", budget); err != nil {
 		return State{}, err
 	} else if found {
 		current, err := decodeCurrentState(loaded.Document, projectID)
@@ -106,7 +113,7 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 		state.documents.current = &loaded
 	}
 
-	if loaded, found, err := loadDocument(directory, ledgerRootRelative+"/evolution-timeline.md"); err != nil {
+	if loaded, found, err := loadDocument(directory, ledgerRootRelative+"/evolution-timeline.md", budget); err != nil {
 		return State{}, err
 	} else if found {
 		timeline, err := decodeTimeline(loaded.Document, projectID)
@@ -160,9 +167,10 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 			return nil
 		}},
 	}
+	remainingEntries := maxLedgerLoadEntries
 	for _, class := range classes {
 		relativeDir := ledgerRootRelative + "/" + class.dir
-		entries, err := readLedgerDirectory(directory, relativeDir)
+		entries, err := readLedgerDirectory(directory, relativeDir, &remainingEntries)
 		if err != nil {
 			return State{}, fmt.Errorf("enumerate %s: %w", class.dir, err)
 		}
@@ -171,7 +179,7 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 				continue
 			}
 			relative := relativeDir + "/" + entry.Name()
-			loaded, found, err := loadDocument(directory, relative)
+			loaded, found, err := loadDocument(directory, relative, budget)
 			if err != nil || !found {
 				if err == nil {
 					err = errors.New("ledger entry disappeared")
@@ -225,6 +233,27 @@ func parseOverviewProjectID(src []byte) (string, error) {
 }
 
 func readLedgerRegular(directory *pathguard.Directory, relative string, required bool) ([]byte, fs.FileMode, error) {
+	return readLedgerRegularBudget(directory, relative, required, nil)
+}
+
+type ledgerReadBudget struct {
+	remainingFiles int
+	remainingBytes int64
+}
+
+func (budget *ledgerReadBudget) consume(size int64) error {
+	if budget == nil {
+		return nil
+	}
+	if size < 0 || budget.remainingFiles <= 0 || size > budget.remainingBytes {
+		return errors.New("ledger exceeds aggregate read budget")
+	}
+	budget.remainingFiles--
+	budget.remainingBytes -= size
+	return nil
+}
+
+func readLedgerRegularBudget(directory *pathguard.Directory, relative string, required bool, budget *ledgerReadBudget) ([]byte, fs.FileMode, error) {
 	file, info, err := directory.OpenRegular(relative)
 	if err != nil {
 		if !required && errors.Is(err, os.ErrNotExist) {
@@ -232,26 +261,28 @@ func readLedgerRegular(directory *pathguard.Directory, relative string, required
 		}
 		return nil, 0, err
 	}
-	defer file.Close()
+	if err := file.Close(); err != nil {
+		return nil, 0, err
+	}
 	if info.Size() > MaxDocumentBytes {
 		return nil, 0, invalidDocument("document exceeds size limit")
 	}
-	body, err := io.ReadAll(io.LimitReader(file, MaxDocumentBytes+1))
-	if err != nil {
+	if err := budget.consume(info.Size()); err != nil {
 		return nil, 0, err
 	}
-	if len(body) > MaxDocumentBytes {
-		return nil, 0, invalidDocument("document exceeds size limit")
-	}
-	after, err := directory.Root.Lstat(filepath.FromSlash(relative))
-	if err != nil || !os.SameFile(info, after) {
+	body, err := readLedgerSnapshot(directory, relative, info)
+	if err != nil {
 		return nil, 0, errors.New("ledger file changed while reading")
 	}
 	return body, info.Mode().Perm(), nil
 }
 
-func loadDocument(directory *pathguard.Directory, relative string) (loadedDocument, bool, error) {
-	body, perm, err := readLedgerRegular(directory, relative, false)
+func readLedgerSnapshot(directory *pathguard.Directory, relative string, before os.FileInfo) ([]byte, error) {
+	return pathguard.ReadStableRegularRootFile(directory.Root, relative, before, MaxDocumentBytes)
+}
+
+func loadDocument(directory *pathguard.Directory, relative string, budget *ledgerReadBudget) (loadedDocument, bool, error) {
+	body, perm, err := readLedgerRegularBudget(directory, relative, false, budget)
 	if errors.Is(err, os.ErrNotExist) {
 		return loadedDocument{}, false, nil
 	}
@@ -265,7 +296,7 @@ func loadDocument(directory *pathguard.Directory, relative string) (loadedDocume
 	return loadedDocument{Document: doc, RelativePath: relative, Original: append([]byte(nil), body...), Perm: perm}, true, nil
 }
 
-func readLedgerDirectory(directory *pathguard.Directory, relative string) ([]os.DirEntry, error) {
+func readLedgerDirectory(directory *pathguard.Directory, relative string, remainingEntries *int) ([]os.DirEntry, error) {
 	subdirectory, subdirectoryInfo, err := directory.OpenDirectory(relative)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
@@ -283,10 +314,24 @@ func readLedgerDirectory(directory *pathguard.Directory, relative string) ([]os.
 	if err != nil || !os.SameFile(subdirectoryInfo, opened) {
 		return nil, errors.New("ledger directory changed while opening")
 	}
-	entries, err := file.ReadDir(-1)
-	if err != nil {
-		return nil, err
+	if remainingEntries == nil || *remainingEntries < 0 {
+		return nil, errors.New("ledger directory entry budget is invalid")
 	}
+	entries := make([]os.DirEntry, 0, min(*remainingEntries, 256))
+	for {
+		batch, readErr := file.ReadDir(256)
+		if len(batch) > *remainingEntries-len(entries) {
+			return nil, errors.New("ledger exceeds directory entry budget")
+		}
+		entries = append(entries, batch...)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+	*remainingEntries -= len(entries)
 	after, err := subdirectory.Stat(".")
 	if err != nil || !os.SameFile(opened, after) {
 		return nil, errors.New("ledger directory changed while reading")

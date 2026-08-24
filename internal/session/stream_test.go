@@ -37,6 +37,12 @@ func TestStreamReturnsVisitorError(t *testing.T) {
 	}
 }
 
+func TestStreamReaderRejectsNilVisitor(t *testing.T) {
+	if _, err := StreamReader(strings.NewReader("{\"type\":\"event\"}\n"), DecodeOptions{}, nil); err == nil {
+		t.Fatal("nil visitor accepted")
+	}
+}
+
 func TestStreamPreservesProvenanceAndWarnsOnMalformedLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout.jsonl")
 	content := "{\"timestamp\":\"2026-08-22T10:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\"}}\nnot-json\n"

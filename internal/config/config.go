@@ -2,14 +2,17 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -64,8 +67,7 @@ func Save(path string, cfg Config) error {
 }
 
 // LoadRoot reads a typed transaction snapshot. The destination is authoritative
-// when valid; otherwise a valid atomic-replacement backup is used. Any state
-// files with no valid snapshot fail closed.
+// when valid; otherwise a valid migration recovery backup is used.
 func LoadRoot(root *os.Root, name string) (Config, error) {
 	primary, primaryFound, primaryErr := readConfig(root, name)
 	backup, backupFound, backupErr := readConfig(root, atomicfile.BackupPath(name))
@@ -89,17 +91,59 @@ func SaveRoot(root *os.Root, name string, cfg Config) error {
 	if err != nil {
 		return err
 	}
+	if err := cleanupConvergedConfigBackup(root, name); err != nil {
+		return err
+	}
 	if err := atomicfile.WriteRoot(root, name, b, 0o600); err != nil {
 		return err
 	}
-	if _, err := root.Lstat(atomicfile.BackupPath(name)); err == nil {
-		if err := root.Remove(atomicfile.BackupPath(name)); err != nil {
-			return fmt.Errorf("remove stale configuration backup: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+	if _, err := root.Lstat(atomicfile.BackupPath(name)); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("configuration recovery backup appeared during save")
 	}
 	return nil
+}
+
+func cleanupConvergedConfigBackup(root *os.Root, name string) error {
+	backupName := atomicfile.BackupPath(name)
+	if _, err := root.Lstat(backupName); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return errors.New("cannot inspect configuration recovery backup")
+	}
+	if _, found, err := readConfig(root, name); err == nil && found {
+		hash, err := stableConfigHash(root, name)
+		if err != nil {
+			return err
+		}
+		if err := atomicfile.RemoveRootFileIfHashMatches(root, backupName, hash); err != nil {
+			return errors.New("configuration recovery backup requires explicit resolution")
+		}
+		return nil
+	}
+	if _, found, err := readConfig(root, backupName); err != nil || !found {
+		return errors.New("configuration recovery backup does not match an authenticated primary")
+	}
+	hash, err := stableConfigHash(root, backupName)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.RecoverRootFileRollback(root, name, hash); err != nil {
+		return errors.New("configuration recovery backup requires explicit resolution")
+	}
+	return nil
+}
+
+func stableConfigHash(root *os.Root, name string) (string, error) {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return "", errors.New("cannot inspect configuration state for recovery")
+	}
+	body, err := pathguard.ReadStableRegularRootFile(root, name, info, 4<<20)
+	if err != nil {
+		return "", errors.New("configuration state changed during recovery")
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func readConfig(root *os.Root, name string) (Config, bool, error) {
@@ -110,21 +154,12 @@ func readConfig(root *os.Root, name string) (Config, bool, error) {
 	if err != nil {
 		return Config{}, true, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 4<<20 {
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) || info.Size() > 4<<20 {
 		return Config{}, true, fmt.Errorf("invalid configuration state")
 	}
-	file, err := root.Open(name)
+	b, err := pathguard.ReadStableRegularRootFile(root, name, info, 4<<20)
 	if err != nil {
-		return Config{}, true, err
-	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
-		return Config{}, true, fmt.Errorf("configuration changed while opening")
-	}
-	b, err := io.ReadAll(io.LimitReader(file, (4<<20)+1))
-	if err != nil {
-		return Config{}, true, err
+		return Config{}, true, fmt.Errorf("configuration changed while reading")
 	}
 	var cfg Config
 	decoder := toml.NewDecoder(bytes.NewReader(b)).DisallowUnknownFields()
@@ -133,10 +168,6 @@ func readConfig(root *os.Root, name string) (Config, bool, error) {
 	}
 	if err := validate(cfg); err != nil {
 		return Config{}, true, err
-	}
-	after, err := root.Lstat(name)
-	if err != nil || !os.SameFile(opened, after) {
-		return Config{}, true, fmt.Errorf("configuration changed while reading")
 	}
 	return cfg, true, nil
 }

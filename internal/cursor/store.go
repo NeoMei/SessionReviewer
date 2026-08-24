@@ -1,6 +1,9 @@
 package cursor
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +17,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 var ErrStale = errors.New("stale cursor")
@@ -27,6 +31,8 @@ const (
 	lockPollInterval = 10 * time.Millisecond
 	lockTimeout      = 2 * time.Second
 	maxCursorBytes   = 64 << 10
+	maxCursorRecords = 4_096
+	maxCursorEntries = 2*maxCursorRecords + 2 // primary+backup per session, one lock and one temporary
 )
 
 type Cursor struct {
@@ -116,6 +122,9 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 	if !cursorEqual(current, expected) {
 		return ErrStale
 	}
+	if err := root.cleanupConvergedBackup(); err != nil {
+		return err
+	}
 	if err := validateCursor(next, sessionID, false); err != nil {
 		return fmt.Errorf("invalid next cursor: %w", err)
 	}
@@ -146,6 +155,12 @@ func (s Store) Commit(sessionID string, expected, next Cursor) (retErr error) {
 			return err
 		}
 		return fmt.Errorf("cursor file is missing after commit")
+	}
+	if _, found, err := regularEntry(root.cursors, root.backupName, "cursor backup"); err != nil || found {
+		if err != nil {
+			return err
+		}
+		return errors.New("cursor recovery backup appeared during commit")
 	}
 	return nil
 }
@@ -315,39 +330,20 @@ func (root *storeRoot) loadLocked(sessionID string, syncPublication func(*os.Roo
 	if destinationFound {
 		destination, destinationErr = readCursor(root.cursors, root.cursorName, sessionID, destinationInfo)
 	}
-	var backup Cursor
-	var backupErr error
-	if backupFound {
-		backup, backupErr = readCursor(root.cursors, root.backupName, sessionID, backupInfo)
-	}
-
 	if destinationFound && destinationErr == nil {
 		if err := syncPublication(root.cursors, root.cursorName); err != nil {
 			return Cursor{}, fmt.Errorf("sync cursor publication: %w", err)
 		}
-		if backupFound {
-			if err := atomicfile.RemoveRoot(root.cursors, root.backupName); err != nil {
-				return Cursor{}, fmt.Errorf("remove stale cursor backup: %w", err)
-			}
-		}
 		return destination, nil
 	}
-	if backupFound && backupErr == nil {
-		if err := syncPublication(root.cursors, root.backupName); err != nil {
-			return Cursor{}, fmt.Errorf("sync cursor backup publication: %w", err)
-		}
-		if destinationFound {
-			if err := atomicfile.RemoveRoot(root.cursors, root.cursorName); err != nil {
-				return Cursor{}, fmt.Errorf("remove corrupt replacement cursor: %w", err)
+	if backupFound {
+		backup, backupErr := readCursor(root.cursors, root.backupName, sessionID, backupInfo)
+		if backupErr == nil {
+			if err := syncPublication(root.cursors, root.backupName); err != nil {
+				return Cursor{}, fmt.Errorf("sync cursor backup publication: %w", err)
 			}
+			return backup, nil
 		}
-		if err := atomicfile.RenameRoot(root.cursors, root.backupName, root.cursorName); err != nil {
-			return Cursor{}, fmt.Errorf("restore cursor backup: %w", err)
-		}
-		if err := syncPublication(root.cursors, root.cursorName); err != nil {
-			return Cursor{}, fmt.Errorf("sync restored cursor publication: %w", err)
-		}
-		return backup, nil
 	}
 	return Cursor{}, fmt.Errorf("cursor state and recovery backup are corrupt")
 }
@@ -375,6 +371,44 @@ func (root *storeRoot) loadReadOnlyLocked(sessionID string) (Cursor, error) {
 		}
 	}
 	return Cursor{}, fmt.Errorf("cursor state and recovery backup are corrupt")
+}
+
+func (root *storeRoot) cleanupConvergedBackup() error {
+	_, found, err := regularEntry(root.cursors, root.backupName, "cursor backup")
+	if err != nil || !found {
+		return err
+	}
+	if info, primaryFound, primaryErr := regularEntry(root.cursors, root.cursorName, "cursor file"); primaryErr == nil && primaryFound {
+		hash, err := stableCursorFileHash(root.cursors, root.cursorName, info)
+		if err != nil {
+			return err
+		}
+		if err := atomicfile.RemoveRootFileIfHashMatches(root.cursors, root.backupName, hash); err != nil {
+			return errors.New("cursor recovery backup requires explicit resolution")
+		}
+		return nil
+	}
+	backupInfo, found, err := regularEntry(root.cursors, root.backupName, "cursor backup")
+	if err != nil || !found {
+		return errors.New("cursor recovery backup does not match an authenticated primary")
+	}
+	hash, err := stableCursorFileHash(root.cursors, root.backupName, backupInfo)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.RecoverRootFileRollback(root.cursors, root.cursorName, hash); err != nil {
+		return errors.New("cursor recovery backup requires explicit resolution")
+	}
+	return nil
+}
+
+func stableCursorFileHash(root *os.Root, name string, info os.FileInfo) (string, error) {
+	body, err := pathguard.ReadStableRegularRootFile(root, name, info, maxCursorBytes)
+	if err != nil {
+		return "", errors.New("cursor state changed during backup cleanup")
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func validateSessionID(sessionID string) error {
@@ -469,11 +503,14 @@ func regularEntry(root *os.Root, name, label string) (os.FileInfo, bool, error) 
 	if isSymlinkOrReparse(info) || !info.Mode().IsRegular() {
 		return nil, true, fmt.Errorf("%s is a symlink, reparse point, or non-regular file", label)
 	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+		return nil, true, fmt.Errorf("%s permissions are not private", label)
+	}
 	return info, true, nil
 }
 
 func rejectCaseCollision(root *os.Root, allowed ...string) error {
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedCursorEntries(root, maxCursorEntries)
 	if err != nil {
 		return fmt.Errorf("inspect cursor directory: %w", err)
 	}
@@ -487,23 +524,40 @@ func rejectCaseCollision(root *os.Root, allowed ...string) error {
 	return nil
 }
 
+func readBoundedCursorEntries(root *os.Root, limit int) ([]fs.DirEntry, error) {
+	if root == nil || limit <= 0 {
+		return nil, errors.New("invalid cursor directory budget")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := directory.ReadDir(limit + 1)
+	closeErr := directory.Close()
+	if errors.Is(readErr, io.EOF) {
+		readErr = nil
+	}
+	if err := errors.Join(readErr, closeErr); err != nil {
+		return nil, err
+	}
+	if len(entries) > limit {
+		return nil, errors.New("cursor directory exceeds entry limit")
+	}
+	return entries, nil
+}
+
 func readCursor(root *os.Root, name, sessionID string, before os.FileInfo) (Cursor, error) {
 	if before.Size() > maxCursorBytes {
 		return Cursor{}, fmt.Errorf("cursor state is corrupt")
 	}
-	file, err := root.Open(name)
+	encoded, err := pathguard.ReadStableRegularRootFile(root, name, before, maxCursorBytes)
 	if err != nil {
-		return Cursor{}, fmt.Errorf("open cursor state: %w", err)
+		return Cursor{}, fmt.Errorf("cursor file changed while reading")
 	}
-	defer file.Close()
-	opened, err := file.Stat()
-	if err != nil {
-		return Cursor{}, fmt.Errorf("inspect open cursor state: %w", err)
+	if err := validateFlatCursorJSON(encoded); err != nil {
+		return Cursor{}, err
 	}
-	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
-		return Cursor{}, fmt.Errorf("cursor file changed while opening")
-	}
-	decoder := json.NewDecoder(io.LimitReader(file, maxCursorBytes+1))
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
 	decoder.DisallowUnknownFields()
 	var current Cursor
 	if err := decoder.Decode(&current); err != nil {
@@ -513,15 +567,43 @@ func readCursor(root *os.Root, name, sessionID string, before os.FileInfo) (Curs
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return Cursor{}, fmt.Errorf("cursor state is corrupt")
 	}
-	after, found, err := regularEntry(root, name, "cursor file")
-	if err != nil || !found || !os.SameFile(opened, after) {
-		return Cursor{}, fmt.Errorf("cursor file changed while reading")
-	}
 	if err := validateCursor(current, sessionID, false); err != nil {
 		return Cursor{}, fmt.Errorf("cursor state is invalid: %w", err)
 	}
 	current.LastHash = strings.ToLower(current.LastHash)
 	return current, nil
+}
+
+func validateFlatCursorJSON(encoded []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return fmt.Errorf("cursor state is corrupt")
+	}
+	seen := make(map[string]struct{})
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return fmt.Errorf("cursor state is corrupt")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return fmt.Errorf("cursor state is corrupt")
+		}
+		seen[key] = struct{}{}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("cursor state is corrupt")
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return fmt.Errorf("cursor state is corrupt")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("cursor state is corrupt")
+	}
+	return nil
 }
 
 func acquireCursorLock(root *os.Root, name string) (*cursorLock, error) {

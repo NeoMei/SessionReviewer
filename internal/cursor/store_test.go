@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,15 @@ import (
 )
 
 const validHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+func encodeCursorForTest(t *testing.T, cursor Cursor) []byte {
+	t.Helper()
+	body, err := json.MarshalIndent(cursor, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(body, '\n')
+}
 
 func TestStoreCommitAndReload(t *testing.T) {
 	store := Store{Root: t.TempDir()}
@@ -297,6 +307,70 @@ func TestStoreRejectsStaleCommit(t *testing.T) {
 	err := store.Commit("s1", Cursor{}, Cursor{SessionID: "s1", LastLine: 20})
 	if !errors.Is(err, ErrStale) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+func TestReadBoundedCursorEntriesRejectsOverflow(t *testing.T) {
+	path := t.TempDir()
+	for _, name := range []string{"a", "b"} {
+		if err := os.WriteFile(filepath.Join(path, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if _, err := readBoundedCursorEntries(root, 1); err == nil {
+		t.Fatal("cursor directory overflow accepted")
+	}
+}
+
+func TestStoreCommitAllowsCursorRecordLimitPlusOperationalLock(t *testing.T) {
+	root := t.TempDir()
+	cursors := filepath.Join(root, "cursors")
+	if err := os.Mkdir(cursors, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < maxCursorRecords; index++ {
+		name := filepath.Join(cursors, fmt.Sprintf("filler-%04d", index))
+		if err := os.WriteFile(name, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	store := Store{Root: root}
+	next := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := store.Commit("s1", Cursor{}, next); err != nil {
+		t.Fatalf("commit at cursor record boundary: %v", err)
+	}
+}
+
+func TestStoreCommitCleansByteIdenticalStaleBackupBeforePublishing(t *testing.T) {
+	store := Store{Root: t.TempDir()}
+	current := Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash}
+	if err := store.Commit("s1", Cursor{}, current); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.Root, "cursors", "s1.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := path + ".session-reviewer-backup"
+	if err := os.WriteFile(backup, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next := Cursor{SessionID: "s1", LastLine: 2, LastHash: strings.Repeat("b", 64)}
+	if err := store.Commit("s1", current, next); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load("s1")
+	if err != nil || got != next {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("converged backup remains: %v", err)
 	}
 }
 
@@ -809,8 +883,11 @@ func TestStoreLoadWaitsForTransactionAndRecoversBackup(t *testing.T) {
 	if result.err != nil || result.cursor != current {
 		t.Fatalf("recovered cursor=%+v err=%v", result.cursor, result.err)
 	}
-	if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("backup remains after recovery: %v", err)
+	if got, err := os.ReadFile(backup); err != nil || !bytes.Equal(got, encodeCursorForTest(t, current)) {
+		t.Fatalf("backup was not preserved: body=%q err=%v", got, err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("load unexpectedly repaired primary: %v", err)
 	}
 }
 
@@ -863,15 +940,96 @@ func TestStoreReconcilesInterruptedReplacementStates(t *testing.T) {
 				if err == nil {
 					t.Fatalf("got=%+v, expected corruption error", got)
 				}
-				return
-			}
-			if err != nil || got != test.want {
+			} else if err != nil || got != test.want {
 				t.Fatalf("got=%+v err=%v want=%+v", got, err, test.want)
 			}
-			if _, err := os.Stat(path + ".session-reviewer-backup"); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("backup remains after reconciliation: %v", err)
+			if test.backup != nil {
+				if got, err := os.ReadFile(path + ".session-reviewer-backup"); err != nil || !bytes.Equal(got, test.backup) {
+					t.Fatalf("backup changed during load: body=%q err=%v", got, err)
+				}
+			}
+			if test.destination != nil {
+				if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, test.destination) {
+					t.Fatalf("primary changed during load: body=%q err=%v", got, err)
+				}
 			}
 		})
+	}
+}
+
+func TestStoreRejectsNonPrivateCursorState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not expose POSIX owner-only modes")
+	}
+	store := Store{Root: t.TempDir()}
+	dir := filepath.Join(store.Root, "cursors")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := encodeCursorForTest(t, Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash})
+	path := filepath.Join(dir, "s1.json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadReadOnly("s1"); err == nil {
+		t.Fatal("non-private cursor state accepted")
+	}
+}
+
+func TestReadCursorRejectsSameInodeMutationAfterInspection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "s1.json")
+	first := encodeCursorForTest(t, Cursor{SessionID: "s1", LastLine: 1, LastHash: validHash})
+	second := encodeCursorForTest(t, Cursor{SessionID: "s1", LastLine: 999, LastHash: strings.Repeat("b", 64)})
+	if err := os.WriteFile(path, first, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before, err := root.Lstat("s1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(second); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCursor(root, "s1.json", "s1", before); err == nil {
+		t.Fatal("same-inode cursor mutation was accepted")
+	}
+}
+
+func TestReadCursorRejectsDuplicateJSONFields(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`{"session_id":"s1","last_line":1,"last_line":999,"last_hash":%q,"updated_at":"0001-01-01T00:00:00Z"}`, validHash)
+	path := filepath.Join(dir, "s1.json")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before, err := root.Lstat("s1.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCursor(root, "s1.json", "s1", before); err == nil {
+		t.Fatal("duplicate cursor JSON field was accepted")
 	}
 }
 

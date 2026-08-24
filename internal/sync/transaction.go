@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -304,7 +303,7 @@ func loadAllTransactions(root *os.Root, firstReadHook func() error) ([]Transacti
 }
 
 func inspectTransactionNames(root *os.Root) (map[string]transactionStatePair, error) {
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedSyncStateEntries(root, maxSyncStateDirectoryEntries, "transaction directory")
 	if err != nil {
 		return nil, errors.New("cannot inspect transaction directory")
 	}

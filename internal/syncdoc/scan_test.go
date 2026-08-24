@@ -278,3 +278,66 @@ func TestScanReturnsSanitizedWalkFailure(t *testing.T) {
 		t.Fatal("scanner should return a sanitized classification, not a raw rooted error")
 	}
 }
+
+func TestScanRejectsAggregateFileAndByteBudgetWithoutPartialInventory(t *testing.T) {
+	rootPath := t.TempDir()
+	docs := filepath.Join(rootPath, "decisions")
+	if err := os.MkdirAll(docs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{
+		"a.md": entity("decision-a", "project-1", "a"),
+		"b.md": entity("decision-b", "project-1", "b"),
+	} {
+		if err := os.WriteFile(filepath.Join(docs, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	directory, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	for _, limits := range []struct {
+		files int
+		bytes int
+	}{{files: 1, bytes: 1 << 20}, {files: 10, bytes: 1}} {
+		got := scanWithLimits(directory, "decisions", "darwin", platform.CaseSensitive, limits.files, limits.bytes)
+		if len(got.ByID) != 0 || len(got.Issues) != 1 || got.Issues[0].RelativePath != "decisions" || got.Issues[0].Kind != IssueMalformed {
+			t.Fatalf("limits=%+v inventory=%+v", limits, got)
+		}
+	}
+}
+
+func TestScanIsolatesUnreadableMarkdownAndKeepsUnrelatedEntities(t *testing.T) {
+	rootPath := t.TempDir()
+	docs := filepath.Join(rootPath, "decisions")
+	if err := os.MkdirAll(docs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(docs, "good.md"), entity("decision-good", "project-1", "good"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oversized, err := os.OpenFile(filepath.Join(docs, "oversized.md"), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Truncate(MaxDocumentBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := oversized.Close(); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	got := Scan(directory, "decisions", "darwin", platform.CaseSensitive)
+	if len(got.ByID) != 1 || got.ByID["decision-good"].RelativePath != "decisions/good.md" {
+		t.Fatalf("unrelated entity lost: %+v", got)
+	}
+	if len(got.Issues) != 1 || got.Issues[0].Kind != IssueMalformed || got.Issues[0].RelativePath != "decisions/oversized.md" {
+		t.Fatalf("isolated issue=%+v", got.Issues)
+	}
+}

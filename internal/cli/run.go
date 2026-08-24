@@ -63,9 +63,17 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	switch args[0] {
 	case "help", "-h", "--help":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "root help does not accept arguments")
+			return 2
+		}
 		fmt.Fprint(stdout, rootHelp)
 		return 0
 	case "version":
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "version does not accept arguments")
+			return 2
+		}
 		fmt.Fprintln(stdout, Version)
 		return 0
 	case "init":

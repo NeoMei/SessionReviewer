@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
@@ -15,8 +16,10 @@ import (
 )
 
 const (
-	maxWalkMarkdownBytes int64 = 4 << 20
-	maxReadRegularBytes  int64 = 64 << 20
+	maxWalkMarkdownBytes    int64 = 4 << 20
+	maxReadRegularBytes     int64 = 64 << 20
+	maxWalkDirectoryEntries       = 10_000
+	maxWalkTreeEntries            = 100_000
 )
 
 type treeParentIdentity struct {
@@ -175,6 +178,20 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 // their contents. Redirects elsewhere are rejected, and each directory/file
 // identity is checked again after it has been consumed.
 func (directory *Directory) WalkMarkdown(relative string, visit func(relative string, content []byte) error) error {
+	return directory.walkMarkdown(relative, visit, nil)
+}
+
+// WalkMarkdownIsolated reports unreadable regular Markdown files through
+// reject and continues with unrelated files. Directory, namespace, and
+// redirection failures still abort the walk.
+func (directory *Directory) WalkMarkdownIsolated(relative string, visit func(relative string, content []byte) error, reject func(relative string) error) error {
+	if reject == nil {
+		return errors.New("Markdown rejection visitor is required")
+	}
+	return directory.walkMarkdown(relative, visit, reject)
+}
+
+func (directory *Directory) walkMarkdown(relative string, visit func(relative string, content []byte) error, reject func(relative string) error) error {
 	components, err := cleanTreeRelative(relative, true)
 	if err != nil {
 		return err
@@ -216,7 +233,8 @@ func (directory *Directory) WalkMarkdown(relative string, visit func(relative st
 		current = next
 		prefix = path.Join(prefix, component)
 	}
-	if err := walkMarkdownRoot(current, prefix, visit); err != nil {
+	remainingEntries := maxWalkTreeEntries
+	if err := walkMarkdownRoot(current, prefix, visit, reject, &remainingEntries); err != nil {
 		return err
 	}
 	for _, parent := range parents {
@@ -228,15 +246,19 @@ func (directory *Directory) WalkMarkdown(relative string, visit func(relative st
 	return directory.validatePinnedRoot()
 }
 
-func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) error) error {
+func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) error, reject func(string) error, remainingEntries *int) error {
 	beforeDirectory, err := root.Stat(".")
 	if err != nil || beforeDirectory == nil || !beforeDirectory.IsDir() || isRedirect(beforeDirectory) {
 		return errors.New("walk directory is redirected or invalid")
 	}
-	entries, err := fs.ReadDir(root.FS(), ".")
+	entries, err := readBoundedMarkdownEntries(root, beforeDirectory, maxWalkDirectoryEntries)
 	if err != nil {
 		return fmt.Errorf("enumerate Markdown directory: %w", err)
 	}
+	if remainingEntries == nil || len(entries) > *remainingEntries {
+		return errors.New("Markdown tree exceeds entry limit")
+	}
+	*remainingEntries -= len(entries)
 	for _, entry := range entries {
 		name := entry.Name()
 		if skipMarkdownTreeEntry(name) {
@@ -260,7 +282,7 @@ func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) e
 				_ = child.Close()
 				return errors.New("Markdown directory changed while opening")
 			}
-			err = walkMarkdownRoot(child, relative, visit)
+			err = walkMarkdownRoot(child, relative, visit, reject, remainingEntries)
 			closeErr := child.Close()
 			if err := errors.Join(err, closeErr); err != nil {
 				return err
@@ -276,7 +298,13 @@ func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) e
 		}
 		content, err := readMarkdownRootFile(root, name, info)
 		if err != nil {
-			return err
+			if reject == nil {
+				return err
+			}
+			if err := reject(relative); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := visit(relative, content); err != nil {
 			return err
@@ -287,6 +315,65 @@ func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) e
 		return errors.New("Markdown directory changed while walking")
 	}
 	return nil
+}
+
+func readBoundedMarkdownEntries(root *os.Root, expected os.FileInfo, limit int) ([]fs.DirEntry, error) {
+	if root == nil || expected == nil || limit < 0 {
+		return nil, errors.New("invalid Markdown directory budget")
+	}
+	directory, err := root.Open(".")
+	if err != nil {
+		return nil, errors.New("cannot open Markdown directory")
+	}
+	defer directory.Close()
+	opened, err := directory.Stat()
+	if err != nil || !os.SameFile(expected, opened) || !opened.IsDir() || isRedirect(opened) {
+		return nil, errors.New("Markdown directory changed while opening")
+	}
+	entries := make([]fs.DirEntry, 0, min(limit, 256))
+	for {
+		batch, readErr := directory.ReadDir(256)
+		if len(entries)+len(batch) > limit {
+			return nil, errors.New("Markdown directory exceeds entry limit")
+		}
+		entries = append(entries, batch...)
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, errors.New("cannot enumerate Markdown directory")
+		}
+	}
+	sort.Slice(entries, func(first, second int) bool { return entries[first].Name() < entries[second].Name() })
+	return entries, nil
+}
+
+// ReadStableRegularRootFile returns a bounded snapshot of one regular file in
+// an already pinned root. It pins every parent, rejects redirects, and rejects
+// in-place metadata/content changes observed during a double read.
+func ReadStableRegularRootFile(root *os.Root, name string, before os.FileInfo, max int64) ([]byte, error) {
+	return readStableRegularRootFile(root, name, before, max, nil)
+}
+
+func readStableRegularRootFile(root *os.Root, name string, before os.FileInfo, max int64, afterFirstRead func() error) ([]byte, error) {
+	components, err := cleanTreeRelative(name, false)
+	if err != nil || len(components) == 0 || root == nil || before == nil || !before.Mode().IsRegular() || isRedirect(before) || before.Size() > max {
+		return nil, errors.New("regular file is redirected, invalid, or exceeds read limit")
+	}
+	rootInfo, err := root.Stat(".")
+	if err != nil || rootInfo == nil || !rootInfo.IsDir() || isRedirect(rootInfo) {
+		return nil, errors.New("regular file root is redirected or invalid")
+	}
+	directory := &Directory{Root: root, Ancestors: []os.FileInfo{rootInfo}}
+	content, found, err := directory.readRegularWithHook(name, max, afterFirstRead)
+	if err != nil || !found {
+		return nil, errors.New("regular file changed while reading")
+	}
+	after, err := root.Lstat(name)
+	if err != nil || !sameStableFileMetadata(before, after) || isRedirect(after) || !after.Mode().IsRegular() {
+		return nil, errors.New("regular file changed while reading")
+	}
+	return bytes.Clone(content), nil
 }
 
 func skipMarkdownTreeEntry(name string) bool {

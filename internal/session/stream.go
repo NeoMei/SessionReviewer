@@ -41,6 +41,9 @@ func StreamReader(source io.Reader, opts DecodeOptions, visit func(Record) error
 	if source == nil {
 		return DecodeSummary{}, fmt.Errorf("session reader is required")
 	}
+	if visit == nil {
+		return DecodeSummary{}, fmt.Errorf("session record visitor is required")
+	}
 	if opts.MaxRecordBytes == 0 {
 		opts.MaxRecordBytes = defaultMaxRecordBytes
 	}
