@@ -680,6 +680,66 @@ func TestQueueRecoveryReceiptHashesExactEncodedPreimageAndReturnsPolicyView(t *t
 	}
 }
 
+func TestQueueRecoveryAuthenticatesItemIdentityBeforeMutation(t *testing.T) {
+	wantedEntityID := "decision-recovery-wanted"
+	wantedID := queueID(wantedEntityID, SideVault, hash("base"))
+	other := QueueItem{
+		Version:          1,
+		ID:               queueID("decision-recovery-other", SideVault, hash("base")),
+		EntityID:         "decision-recovery-other",
+		Target:           SideVault,
+		ExpectedBaseHash: hash("base"),
+		Attempts:         0,
+		NotBefore:        fixedTime,
+		State:            QueuePending,
+		CreatedAt:        fixedTime,
+		UpdatedAt:        fixedTime,
+	}
+	encoded, err := json.MarshalIndent(other, "", "    ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded = append(encoded, '\n')
+	digest := sha256.Sum256(encoded)
+	receipt := QueueRecoveryReceipt{ItemID: wantedID, ExpectedOldHash: fmt.Sprintf("%x", digest)}
+
+	for _, location := range []string{"backup", "primary"} {
+		t.Run(location, func(t *testing.T) {
+			directory := t.TempDir()
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			leaf := queueRecordPath(wantedID)
+			if location == "backup" {
+				leaf = atomicfile.BackupPath(leaf)
+			}
+			if err := os.WriteFile(filepath.Join(directory, leaf), encoded, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			queue := Queue{Root: root, Retry: DefaultRetryPolicy(), Now: func() time.Time { return fixedTime }}
+			before := snapshotQueueDirectoryForTest(t, directory)
+			if _, err := queue.Recover(receipt); err == nil {
+				t.Fatal("recovery receipt accepted a different internal item identity")
+			}
+			if after := snapshotQueueDirectoryForTest(t, directory); !reflect.DeepEqual(before, after) {
+				t.Fatalf("identity mismatch mutated queue: before=%v after=%v", before, after)
+			}
+			if got, err := os.ReadFile(filepath.Join(directory, leaf)); err != nil || !bytes.Equal(got, encoded) {
+				t.Fatalf("identity mismatch changed authenticated source: got=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func TestQueueRecoveryValidatesReceiptFormatBeforeQueueState(t *testing.T) {
+	_, err := (Queue{}).Recover(QueueRecoveryReceipt{ItemID: "invalid", ExpectedOldHash: strings.Repeat("0", 64)})
+	if err == nil || err.Error() != "invalid queue recovery receipt" {
+		t.Fatalf("receipt format was not the first validation: %v", err)
+	}
+}
+
 func queueEntityIDs(items []QueueItem) []string {
 	result := make([]string, len(items))
 	for index := range items {

@@ -256,13 +256,35 @@ func (q Queue) Reschedule(id, errorClass string) (QueueItem, error) {
 }
 
 func (q Queue) Recover(receipt QueueRecoveryReceipt) (QueueItem, error) {
-	if _, err := q.validate(); err != nil {
-		return QueueItem{}, err
-	}
 	if !queueIDPattern(receipt.ItemID) || !lowerSHA256.MatchString(receipt.ExpectedOldHash) {
 		return QueueItem{}, errors.New("invalid queue recovery receipt")
 	}
+	if _, err := q.validate(); err != nil {
+		return QueueItem{}, err
+	}
 	leaf := queueRecordPath(receipt.ItemID)
+	backup := atomicfile.BackupPath(leaf)
+	backupInfo, backupErr := q.Root.Lstat(backup)
+	if backupErr == nil {
+		if _, err := authenticateQueueRecoveryRecord(q.Root, backup, backupInfo, receipt, q.Retry); err != nil {
+			return QueueItem{}, errors.New("queue recovery preflight failed")
+		}
+	} else if errors.Is(backupErr, os.ErrNotExist) {
+		primaryInfo, err := q.Root.Lstat(leaf)
+		if err != nil {
+			return QueueItem{}, errors.New("queue recovery preflight failed")
+		}
+		recovered, err := authenticateQueueRecoveryRecord(q.Root, leaf, primaryInfo, receipt, q.Retry)
+		if err != nil {
+			return QueueItem{}, errors.New("queue recovery preflight failed")
+		}
+		if _, err := q.Root.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+			return QueueItem{}, errors.New("queue recovery preflight failed")
+		}
+		return recovered.item, nil
+	} else {
+		return QueueItem{}, errors.New("queue recovery preflight failed")
+	}
 	if err := atomicfile.RecoverRootFileRollback(q.Root, leaf, receipt.ExpectedOldHash); err != nil {
 		return QueueItem{}, errors.New("queue recovery failed")
 	}
@@ -282,6 +304,29 @@ func (q Queue) Recover(receipt QueueRecoveryReceipt) (QueueItem, error) {
 		return QueueItem{}, errors.New("queue recovery cleanup verification failed")
 	}
 	return recovered.item, nil
+}
+
+func authenticateQueueRecoveryRecord(root *os.Root, name string, before os.FileInfo, receipt QueueRecoveryReceipt, policy RetryPolicy) (loadedQueueItem, error) {
+	if before == nil || !before.Mode().IsRegular() || isStateRedirect(before) || !privateStateMode(before, 0o600) {
+		return loadedQueueItem{}, errors.New("invalid queue recovery state")
+	}
+	item, encoded, err := readQueueItem(root, name, before)
+	if err != nil {
+		return loadedQueueItem{}, errors.New("invalid queue recovery state")
+	}
+	digest := sha256.Sum256(encoded)
+	if hex.EncodeToString(digest[:]) != receipt.ExpectedOldHash || item.ID != receipt.ItemID {
+		return loadedQueueItem{}, errors.New("queue recovery state does not match receipt")
+	}
+	item = queuePolicyView(item, policy)
+	if err := validateQueuePolicy(item, policy); err != nil {
+		return loadedQueueItem{}, errors.New("invalid queue recovery policy state")
+	}
+	after, err := root.Lstat(name)
+	if err != nil || !sameBaseFileMetadata(before, after) || !after.Mode().IsRegular() || isStateRedirect(after) || !privateStateMode(after, 0o600) {
+		return loadedQueueItem{}, errors.New("queue recovery state changed during preflight")
+	}
+	return loadedQueueItem{item: item, info: after, encoded: encoded}, nil
 }
 
 func (q Queue) validate() (time.Time, error) {
