@@ -17,7 +17,10 @@ import (
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 )
 
-const maxQueueRecordBytes = 64 << 10
+const (
+	maxQueueRecordBytes     = 64 << 10
+	maxDurableQueueAttempts = 64
+)
 
 type QueueState string
 
@@ -205,8 +208,14 @@ func (q Queue) Reschedule(id, errorClass string) (QueueItem, error) {
 	delay := queueRetryDelay(q.Retry, current.item.Attempts)
 	next := current.item
 	next.Attempts++
-	next.NotBefore = now.Add(delay)
 	next.UpdatedAt = now
+	if current.item.UpdatedAt.After(next.UpdatedAt) {
+		next.UpdatedAt = current.item.UpdatedAt
+	}
+	next.NotBefore = next.UpdatedAt.Add(delay)
+	if current.item.NotBefore.After(next.NotBefore) {
+		next.NotBefore = current.item.NotBefore
+	}
 	next.LastErrorClass = QueueErrorClass(errorClass)
 	if next.Attempts >= q.Retry.QueueAttempts {
 		next.State = QueueBlocked
@@ -227,7 +236,7 @@ func (q Queue) validate() (time.Time, error) {
 	if q.Root == nil || q.Now == nil {
 		return time.Time{}, errors.New("queue root and clock are required")
 	}
-	if err := validateRetryPolicy(q.Retry); err != nil {
+	if err := validateQueueRetryPolicy(q.Retry); err != nil {
 		return time.Time{}, errors.New("invalid queue retry policy")
 	}
 	info, err := q.Root.Stat(".")
@@ -294,7 +303,7 @@ func validateQueueItem(item QueueItem) error {
 	if !queueIDPattern(item.ID) || item.ID != queueID(item.EntityID, item.Target, item.ExpectedBaseHash) {
 		return errors.New("queue item ID mismatch")
 	}
-	if item.Attempts < 0 || (item.State != QueuePending && item.State != QueueBlocked) {
+	if item.Attempts < 0 || item.Attempts > maxDurableQueueAttempts || (item.State != QueuePending && item.State != QueueBlocked) {
 		return errors.New("invalid queue item state")
 	}
 	if item.LastErrorClass != "" && !queueErrorClass(string(item.LastErrorClass)) {
@@ -312,17 +321,21 @@ func validateQueueItem(item QueueItem) error {
 }
 
 func validateQueuePolicy(item QueueItem, policy RetryPolicy) error {
-	if item.Attempts > policy.QueueAttempts {
-		return errors.New("queue attempts exceed retry policy")
-	}
 	if item.State == QueuePending && item.Attempts >= policy.QueueAttempts {
 		return errors.New("pending queue item reached retry limit")
 	}
-	if item.State == QueueBlocked && item.Attempts != policy.QueueAttempts {
-		return errors.New("blocked queue item does not match retry limit")
+	if item.State == QueueBlocked && item.Attempts == 0 {
+		return errors.New("blocked queue item has no attempts")
 	}
 	if (item.Attempts == 0) != (item.LastErrorClass == "") {
 		return errors.New("queue error class does not match attempts")
+	}
+	return nil
+}
+
+func validateQueueRetryPolicy(policy RetryPolicy) error {
+	if err := validateRetryPolicy(policy); err != nil || policy.QueueAttempts > maxDurableQueueAttempts {
+		return errors.New("invalid bounded queue retry policy")
 	}
 	return nil
 }
@@ -499,10 +512,39 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 		}
 		return verifyQueuePublication(root, item, encoded, policy)
 	}); err != nil {
+		if cleanupErr := cleanupQueueRollbackBackup(root, item.ID, expected); cleanupErr != nil {
+			return errors.New("cannot persist or clean queue state")
+		}
 		return errors.New("cannot persist queue state")
 	}
 	if err := verifyQueuePublication(root, item, encoded, policy); err != nil {
 		return errors.New("queue state failed post-write verification")
+	}
+	return nil
+}
+
+func cleanupQueueRollbackBackup(root *os.Root, id string, expected *loadedQueueItem) error {
+	backup := atomicfile.BackupPath(queueRecordPath(id))
+	info, err := root.Lstat(backup)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || expected == nil || info == nil || !info.Mode().IsRegular() || isStateRedirect(info) || !privateStateMode(info, 0o600) || !sameBaseFileMetadata(expected.info, info) {
+		return errors.New("queue rollback backup is not authenticated")
+	}
+	item, encoded, err := readQueueItem(root, backup, info)
+	if err != nil || item != expected.item || !bytes.Equal(encoded, expected.encoded) {
+		return errors.New("queue rollback backup is not authenticated")
+	}
+	final, err := root.Lstat(backup)
+	if err != nil || !sameBaseFileMetadata(info, final) {
+		return errors.New("queue rollback backup changed before cleanup")
+	}
+	if err := atomicfile.RemoveRoot(root, backup); err != nil {
+		return errors.New("cannot remove authenticated queue rollback backup")
+	}
+	if _, err := root.Lstat(backup); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("queue rollback backup remains after cleanup")
 	}
 	return nil
 }

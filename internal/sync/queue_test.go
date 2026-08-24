@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -233,14 +235,6 @@ func TestQueueRejectsAttemptStateAndTimePolicyViolations(t *testing.T) {
 		"pending-at-limit": func(item *QueueItem) {
 			item.Attempts = policy.QueueAttempts
 		},
-		"blocked-below-limit": func(item *QueueItem) {
-			item.Attempts = policy.QueueAttempts - 1
-			item.State = QueueBlocked
-		},
-		"blocked-above-limit": func(item *QueueItem) {
-			item.Attempts = policy.QueueAttempts + 1
-			item.State = QueueBlocked
-		},
 		"updated-before-created": func(item *QueueItem) {
 			item.UpdatedAt = item.CreatedAt.Add(-time.Nanosecond)
 		},
@@ -267,6 +261,80 @@ func TestQueueRejectsAttemptStateAndTimePolicyViolations(t *testing.T) {
 				t.Fatalf("validation/backoff depended on attempts: %s", elapsed)
 			}
 		})
+	}
+}
+
+func TestQueueReschedulePersistsMonotonicTimesAcrossClockRollback(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	now := fixedTime.Add(10 * time.Second)
+	policy := RetryPolicy{Initial: 100 * time.Millisecond, Max: time.Second, InlineAttempts: 1, QueueAttempts: 4}
+	queue := Queue{Root: root, Retry: policy, Now: func() time.Time { return now }}
+	item, err := queue.Enqueue(QueueItem{Version: 1, EntityID: "decision-clock", Target: SideVault, ExpectedBaseHash: hash("base"), CreatedAt: fixedTime, UpdatedAt: fixedTime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := queue.Reschedule(item.ID, string(QueueErrorSharingViolation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = fixedTime.Add(5 * time.Second)
+	second, err := queue.Reschedule(item.ID, string(QueueErrorLockViolation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.UpdatedAt.Equal(first.UpdatedAt) || second.NotBefore.Before(first.NotBefore) || !second.NotBefore.Equal(first.UpdatedAt.Add(200*time.Millisecond)) {
+		t.Fatalf("clock rollback moved durable times: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestQueueBlockedStateSurvivesRetryPolicyChanges(t *testing.T) {
+	for _, test := range []struct {
+		attempts int
+		limit    int
+	}{
+		{attempts: 2, limit: 3},
+		{attempts: 3, limit: 2},
+	} {
+		t.Run(fmt.Sprintf("attempts-%d-limit-%d", test.attempts, test.limit), func(t *testing.T) {
+			directory := t.TempDir()
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			item := QueueItem{
+				Version: 1, EntityID: "decision-policy-change", Target: SideVault, ExpectedBaseHash: hash("base"),
+				Attempts: test.attempts, State: QueueBlocked, LastErrorClass: QueueErrorTransientWrite,
+				CreatedAt: fixedTime, UpdatedAt: fixedTime.Add(time.Second), NotBefore: fixedTime.Add(time.Second),
+			}
+			item.ID = queueID(item.EntityID, item.Target, item.ExpectedBaseHash)
+			writeRawQueueItemForTest(t, directory, item)
+			policy := RetryPolicy{Initial: time.Millisecond, Max: time.Second, InlineAttempts: 1, QueueAttempts: test.limit}
+			queue := Queue{Root: root, Retry: policy, Now: func() time.Time { return fixedTime.Add(time.Hour) }}
+			ready, err := queue.Ready(fixedTime.Add(time.Hour), 0)
+			if err != nil || len(ready) != 1 || ready[0].State != QueueBlocked {
+				t.Fatalf("blocked state lost after policy change: ready=%+v err=%v", ready, err)
+			}
+			if _, err := queue.Reschedule(item.ID, string(QueueErrorSharingViolation)); err == nil {
+				t.Fatal("rescheduled blocked item after policy change")
+			}
+		})
+	}
+
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	policy := RetryPolicy{Initial: time.Nanosecond, Max: time.Duration(math.MaxInt64), InlineAttempts: 1, QueueAttempts: math.MaxInt}
+	started := time.Now()
+	_, err = (Queue{Root: root, Retry: policy, Now: func() time.Time { return fixedTime }}).Ready(fixedTime, 0)
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("unbounded queue retry policy error=%v elapsed=%s", err, time.Since(started))
 	}
 }
 
@@ -404,6 +472,55 @@ func TestQueueAckRechecksOwnedPublicationImmediatelyBeforeRemove(t *testing.T) {
 	}
 }
 
+func TestQueueMutationFailureCleansOnlyAuthenticatedRollbackArtifacts(t *testing.T) {
+	for _, operation := range []string{"reschedule", "ack"} {
+		for _, checkpoint := range []int{2, 3} {
+			t.Run(operation+"-checkpoint-"+strconv.Itoa(checkpoint), func(t *testing.T) {
+				directory := t.TempDir()
+				root, err := os.OpenRoot(directory)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer root.Close()
+				queue := Queue{Root: root, Retry: DefaultRetryPolicy(), Now: func() time.Time { return fixedTime }}
+				item, err := queue.Enqueue(QueueItem{Version: 1, EntityID: "decision-artifact", Target: SideVault, ExpectedBaseHash: hash("base"), CreatedAt: fixedTime, UpdatedAt: fixedTime})
+				if err != nil {
+					t.Fatal(err)
+				}
+				original := readQueueRecordForTest(t, root, item.ID)
+				queue.beforeMutation = func(gotOperation string, gotCheckpoint int, mutationRoot *os.Root, leaf string) error {
+					if gotOperation == operation && gotCheckpoint == checkpoint {
+						replaceQueueLeafForTest(t, mutationRoot, leaf, []byte("THIRD-PARTY-ARTIFACT"))
+					}
+					return nil
+				}
+				switch operation {
+				case "reschedule":
+					_, err = queue.Reschedule(item.ID, string(QueueErrorSharingViolation))
+				case "ack":
+					err = queue.Ack(item.ID)
+				}
+				if err == nil || strings.Contains(err.Error(), "THIRD-PARTY-ARTIFACT") {
+					t.Fatalf("mutation error=%v", err)
+				}
+				entries, readDirErr := os.ReadDir(directory)
+				if readDirErr != nil || len(entries) != 1 || entries[0].Name() != queueRecordPath(item.ID) {
+					t.Fatalf("mutation artifacts=%v err=%v", entryNamesForTest(entries), readDirErr)
+				}
+				if got, readErr := os.ReadFile(filepath.Join(directory, queueRecordPath(item.ID))); readErr != nil || string(got) != "THIRD-PARTY-ARTIFACT" {
+					t.Fatalf("third-party target=%q err=%v", got, readErr)
+				}
+				replaceQueueLeafForTest(t, root, queueRecordPath(item.ID), original)
+				queue.beforeMutation = nil
+				ready, readyErr := queue.Ready(fixedTime.Add(time.Hour), 0)
+				if readyErr != nil || len(ready) != 1 || ready[0].ID != item.ID {
+					t.Fatalf("queue did not recover after original restoration: ready=%+v err=%v", ready, readyErr)
+				}
+			})
+		}
+	}
+}
+
 func queueEntityIDs(items []QueueItem) []string {
 	result := make([]string, len(items))
 	for index := range items {
@@ -453,4 +570,12 @@ func replaceQueueLeafForTest(t *testing.T, root *os.Root, leaf string, content [
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func entryNamesForTest(entries []os.DirEntry) []string {
+	names := make([]string, len(entries))
+	for index, entry := range entries {
+		names[index] = entry.Name()
+	}
+	return names
 }

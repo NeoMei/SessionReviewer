@@ -127,6 +127,47 @@ func TestWriteRootFileCheckedDoesNotDeleteReplacedPublication(t *testing.T) {
 	}
 }
 
+func TestWriteRootFileCheckedRejectsSameBytesFreshInodeAfterFinalCheckpoint(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	var replacement os.FileInfo
+	err = WriteRootFileChecked(root, "state.json", []byte("same-bytes"), 0o600, func() error {
+		checks++
+		if checks != 3 {
+			return nil
+		}
+		if err := root.Remove("state.json"); err != nil {
+			return err
+		}
+		file, err := root.OpenFile("state.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		if _, err := file.Write([]byte("same-bytes")); err != nil {
+			_ = file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+		replacement, err = root.Lstat("state.json")
+		return err
+	})
+	if err == nil {
+		t.Fatal("same-bytes fresh inode was accepted")
+	}
+	after, statErr := root.Lstat("state.json")
+	got, readErr := os.ReadFile(filepath.Join(directory, "state.json"))
+	if statErr != nil || readErr != nil || replacement == nil || !os.SameFile(replacement, after) || string(got) != "same-bytes" {
+		t.Fatalf("replacement changed: info=%v replacement=%v content=%q stat=%v read=%v", after, replacement, got, statErr, readErr)
+	}
+}
+
 func TestWriteRootFileCheckedDoesNotDeleteReplacedTemporary(t *testing.T) {
 	directory := t.TempDir()
 	root, err := os.OpenRoot(directory)

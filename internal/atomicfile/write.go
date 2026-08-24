@@ -223,13 +223,15 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 		return fmt.Errorf("sync published file metadata: %w", err)
 	}
 	if checkpoint != nil {
-		if err = checkpoint(); err != nil {
+		checkpointErr := checkpoint()
+		ownershipErr := verifyPublishedRootFileOwned(parent, name, publishedInfo, data)
+		if checkpointErr != nil || ownershipErr != nil {
 			rollbackErr := parentGuard.run(parent, func() error {
 				return rollbackRootPublication(parent, name, publishedInfo, data, &rollback, ops)
 			})
 			rollbackFinalized = rollbackErr == nil
 			sanitizeOnReturn = rollbackErr != nil
-			return errors.Join(err, rollbackErr)
+			return errors.Join(checkpointErr, ownershipErr, rollbackErr)
 		}
 	}
 	if rollback.active {
