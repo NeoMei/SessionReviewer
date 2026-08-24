@@ -37,7 +37,8 @@ var applyProcCloseHandle = applyKernel32.NewProc("CloseHandle")
 var applyProcGetFinalPathNameByHandleW = applyKernel32.NewProc("GetFinalPathNameByHandleW")
 
 type applyPlatformLock struct {
-	handle syscall.Handle
+	handle       syscall.Handle
+	threadPinned bool
 }
 
 func acquireApplyPlatformLock(_, dataRoot *os.Root, fallbackPath, projectID string, timeout time.Duration) (*applyPlatformLock, error) {
@@ -54,12 +55,17 @@ func acquireApplyPlatformLock(_, dataRoot *os.Root, fallbackPath, projectID stri
 	if handle == 0 {
 		return nil, fmt.Errorf("create apply mutex: %w", callErr)
 	}
+	// A Windows mutex is owned by the acquiring OS thread. Keep this goroutine
+	// on that thread until release so the Go scheduler cannot migrate it and
+	// cause ReleaseMutex to fail with ERROR_NOT_OWNER.
+	runtime.LockOSThread()
 	waitMillis := uintptr(timeout / time.Millisecond)
 	result, _, waitErr := applyProcWaitForSingleObject.Call(handle, waitMillis)
 	if result == applyWaitObject0 || result == applyWaitAbandoned {
-		return &applyPlatformLock{handle: syscall.Handle(handle)}, nil
+		return &applyPlatformLock{handle: syscall.Handle(handle), threadPinned: true}, nil
 	}
 	_, _, _ = applyProcCloseHandle.Call(handle)
+	runtime.UnlockOSThread()
 	if result == applyWaitTimeout {
 		return nil, errors.New("project apply transaction remains locked by a live owner")
 	}
@@ -106,8 +112,15 @@ func releaseApplyPlatformLock(lock *applyPlatformLock) error {
 	if lock == nil || lock.handle == 0 {
 		return nil
 	}
+	defer func() {
+		if lock.threadPinned {
+			lock.threadPinned = false
+			runtime.UnlockOSThread()
+		}
+	}()
 	released, _, releaseErr := applyProcReleaseMutex.Call(uintptr(lock.handle))
 	closed, _, closeErr := applyProcCloseHandle.Call(uintptr(lock.handle))
+	lock.handle = 0
 	if released == 0 || closed == 0 {
 		return errors.Join(releaseErr, closeErr)
 	}

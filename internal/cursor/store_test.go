@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -217,7 +218,14 @@ func TestLoadReadOnlyRootUsesPinnedDataRootWithoutCreatingState(t *testing.T) {
 	}
 	defer root.Close()
 	if err := os.Rename(data, moved); err != nil {
-		t.Fatal(err)
+		if !windowsDeniedOpenDirectoryRename(err) {
+			t.Fatal(err)
+		}
+		got, loadErr := LoadReadOnlyRoot(root, "p1", "s1")
+		if loadErr != nil || got != want {
+			t.Fatalf("pinned read after denied replacement got=%+v err=%v", got, loadErr)
+		}
+		return
 	}
 	if err := os.Symlink(decoy, data); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -650,7 +658,13 @@ func TestProtectCursorDirectoryCannotBeRedirectedByRootReplacement(t *testing.T)
 	}
 	defer root.close()
 	if err := os.Rename(live, moved); err != nil {
-		t.Fatal(err)
+		if !windowsDeniedOpenDirectoryRename(err) {
+			t.Fatal(err)
+		}
+		if _, statErr := os.Stat(filepath.Join(outside, "cursors")); statErr != nil {
+			t.Fatal(statErr)
+		}
+		return
 	}
 	if err := os.Symlink(outside, live); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
@@ -670,6 +684,10 @@ func TestProtectCursorDirectoryCannotBeRedirectedByRootReplacement(t *testing.T)
 			t.Fatalf("%s mode=%#o want=%#o", path, got, want)
 		}
 	}
+}
+
+func windowsDeniedOpenDirectoryRename(err error) bool {
+	return runtime.GOOS == "windows" && (errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.Errno(32)))
 }
 
 func TestStoreExpectedRootRejectsReplacementBeforeActualOpen(t *testing.T) {
@@ -763,7 +781,14 @@ func TestStoreUsesPrivateModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := info.Mode().Perm(); got != want {
+		if runtime.GOOS == "windows" {
+			if path == filepath.Join(store.Root, "cursors") && !info.IsDir() {
+				t.Fatalf("%s is not a directory", path)
+			}
+			if path != filepath.Join(store.Root, "cursors") && (!info.Mode().IsRegular() || info.Mode().Perm()&0o200 == 0) {
+				t.Fatalf("%s mode=%#o want writable regular file", path, info.Mode().Perm())
+			}
+		} else if got := info.Mode().Perm(); got != want {
 			t.Fatalf("%s mode=%#o want=%#o", path, got, want)
 		}
 	}

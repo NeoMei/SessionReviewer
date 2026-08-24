@@ -105,7 +105,11 @@ func TestSaveAndLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS == "windows" {
+		if info.Mode().Perm()&0o200 == 0 {
+			t.Fatalf("mode=%o, want writable", info.Mode().Perm())
+		}
+	} else if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%o, want 600", info.Mode().Perm())
 	}
 }

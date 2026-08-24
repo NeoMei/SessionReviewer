@@ -340,6 +340,14 @@ func TestLedgerCommandsRejectProjectReplacementAfterResolution(t *testing.T) {
 					if command != test.command {
 						return fmt.Errorf("resolved command/path = %q/%q", command, path)
 					}
+					if runtime.GOOS == "windows" {
+						// Windows does not rename the process working directory.
+						// Resolution is already complete, so leave it before replacing
+						// the pathname and exercise the same identity check.
+						if err := os.Chdir(oldWorkingDirectory); err != nil {
+							return err
+						}
+					}
 					livePath = path
 					moved = path + "-verified-original"
 					if err := os.Rename(livePath, moved); err != nil {

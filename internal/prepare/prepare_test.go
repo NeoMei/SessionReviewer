@@ -683,7 +683,11 @@ func TestRunWritesPrivateOutputAndBoundsFinalJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS == "windows" {
+		if info.Mode().Perm()&0o200 == 0 {
+			t.Fatalf("mode=%#o, want writable", info.Mode().Perm())
+		}
+	} else if info.Mode().Perm() != 0o600 {
 		t.Fatalf("mode=%#o", info.Mode().Perm())
 	}
 	body, err := os.ReadFile(f.output)
@@ -819,10 +823,15 @@ func TestRunRejectsAmbiguousConfiguredProject(t *testing.T) {
 
 func TestRunResolvesRelativeWorkingDirectoryToConfiguredProject(t *testing.T) {
 	f := newRunFixture(t, "")
-	workingDirectory, err := os.Getwd()
+	originalWorkingDirectory, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
+	workingDirectory := filepath.Dir(f.projectRoot)
+	if err := os.Chdir(workingDirectory); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(originalWorkingDirectory) })
 	relative, err := filepath.Rel(workingDirectory, f.projectRoot)
 	if err != nil {
 		t.Fatal(err)

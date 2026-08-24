@@ -1294,15 +1294,25 @@ func TestRunFailsClosedWhenPinnedRootsAreReplaced(t *testing.T) {
 	t.Run("data root after render", func(t *testing.T) {
 		f := newApplyTestFixture(t)
 		original := f.dataDir + "-original"
+		before := snapshotTree(t, f.dataDir)
+		renameDenied := false
 		opts := f.options()
 		opts.hooks.afterRender = func() error {
 			if err := os.Rename(f.dataDir, original); err != nil {
+				renameDenied = runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission)
 				return err
 			}
 			return os.Mkdir(f.dataDir, 0o700)
 		}
-		if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "identity") {
+		_, err := Run(opts)
+		if err == nil || (!renameDenied && !strings.Contains(err.Error(), "identity")) {
 			t.Fatalf("err=%v", err)
+		}
+		if renameDenied {
+			if after := snapshotTree(t, f.dataDir); after != before {
+				t.Fatalf("denied replacement mutated data root\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+			return
 		}
 		entries, err := os.ReadDir(f.dataDir)
 		if err != nil || len(entries) != 0 {
@@ -2117,13 +2127,15 @@ func snapshotTree(t *testing.T, root string) string {
 			return err
 		}
 		modTime := info.ModTime().UnixNano()
-		if runtime.GOOS == "windows" && info.IsDir() {
-			// Windows may defer directory timestamp updates until enumeration
-			// handles close. Directory entries and file metadata remain the
-			// stable no-mutation evidence on that platform.
+		size := info.Size()
+		if info.IsDir() {
+			// Directory timestamps and allocation sizes can change when a
+			// platform or Git creates and removes an internal transient lock.
+			// Entry names and regular-file metadata below are stable evidence.
 			modTime = 0
+			size = 0
 		}
-		line := filepath.ToSlash(relative) + "|" + info.Mode().String() + "|" + strconv.FormatInt(modTime, 10) + "|" + strconv.FormatInt(info.Size(), 10)
+		line := filepath.ToSlash(relative) + "|" + info.Mode().String() + "|" + strconv.FormatInt(modTime, 10) + "|" + strconv.FormatInt(size, 10)
 		if info.Mode().IsRegular() {
 			body, err := os.ReadFile(path)
 			if err != nil {

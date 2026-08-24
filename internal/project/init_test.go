@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1478,12 +1479,23 @@ func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	renameDenied := false
 	_, err := Initialize(InitOptions{ProjectRoot: t.TempDir(), VaultRoot: t.TempDir(), DataDir: data, beforeConfigWrite: func() error {
 		if err := os.Rename(data, moved); err != nil {
+			renameDenied = runtime.GOOS == "windows" && (errors.Is(err, os.ErrPermission) || errors.Is(err, syscall.Errno(32)))
 			return err
 		}
 		return os.Symlink(outside, data)
 	}})
+	if renameDenied {
+		if err == nil {
+			t.Fatal("denied data-root replacement was accepted")
+		}
+		if _, statErr := os.Stat(filepath.Join(outside, "config.toml")); !os.IsNotExist(statErr) {
+			t.Fatalf("outside write after denied replacement: %v", statErr)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
