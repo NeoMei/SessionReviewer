@@ -26,6 +26,27 @@ type QueueState string
 
 var ErrQueueRecoveryRequired = errors.New("queue rollback recovery is required")
 
+type QueueRecoveryReceipt struct {
+	ItemID          string
+	ExpectedOldHash string
+}
+
+type QueueRecoveryError struct {
+	ItemID          string
+	ExpectedOldHash string
+}
+
+func (*QueueRecoveryError) Error() string { return "queue rollback recovery is required" }
+
+func (*QueueRecoveryError) Unwrap() error { return ErrQueueRecoveryRequired }
+
+func (recovery *QueueRecoveryError) Receipt() QueueRecoveryReceipt {
+	if recovery == nil {
+		return QueueRecoveryReceipt{}
+	}
+	return QueueRecoveryReceipt{ItemID: recovery.ItemID, ExpectedOldHash: recovery.ExpectedOldHash}
+}
+
 const (
 	QueuePending QueueState = "pending"
 	QueueBlocked QueueState = "blocked"
@@ -232,6 +253,35 @@ func (q Queue) Reschedule(id, errorClass string) (QueueItem, error) {
 		return QueueItem{}, err
 	}
 	return next, nil
+}
+
+func (q Queue) Recover(receipt QueueRecoveryReceipt) (QueueItem, error) {
+	if _, err := q.validate(); err != nil {
+		return QueueItem{}, err
+	}
+	if !queueIDPattern(receipt.ItemID) || !lowerSHA256.MatchString(receipt.ExpectedOldHash) {
+		return QueueItem{}, errors.New("invalid queue recovery receipt")
+	}
+	leaf := queueRecordPath(receipt.ItemID)
+	if err := atomicfile.RecoverRootFileRollback(q.Root, leaf, receipt.ExpectedOldHash); err != nil {
+		return QueueItem{}, errors.New("queue recovery failed")
+	}
+	records, err := loadQueueItems(q.Root, q.Retry)
+	if err != nil {
+		return QueueItem{}, errors.New("queue recovery verification failed")
+	}
+	recovered, found := records[receipt.ItemID]
+	if !found {
+		return QueueItem{}, errors.New("queue recovery verification failed")
+	}
+	digest := sha256.Sum256(recovered.encoded)
+	if hex.EncodeToString(digest[:]) != receipt.ExpectedOldHash {
+		return QueueItem{}, errors.New("queue recovery verification failed")
+	}
+	if _, err := q.Root.Lstat(atomicfile.BackupPath(leaf)); !errors.Is(err, os.ErrNotExist) {
+		return QueueItem{}, errors.New("queue recovery cleanup verification failed")
+	}
+	return recovered.item, nil
 }
 
 func (q Queue) validate() (time.Time, error) {
@@ -524,6 +574,9 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 	}); err != nil {
 		if cleanupErr := cleanupQueueRollbackBackup(root, item.ID, expected, encoded); cleanupErr != nil {
 			if errors.Is(cleanupErr, ErrQueueRecoveryRequired) {
+				if expected != nil {
+					return newQueueRecoveryError(*expected)
+				}
 				return ErrQueueRecoveryRequired
 			}
 			return errors.New("cannot persist or clean queue state")
@@ -534,6 +587,11 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 		return errors.New("queue state failed post-write verification")
 	}
 	return nil
+}
+
+func newQueueRecoveryError(expected loadedQueueItem) *QueueRecoveryError {
+	digest := sha256.Sum256(expected.encoded)
+	return &QueueRecoveryError{ItemID: expected.item.ID, ExpectedOldHash: hex.EncodeToString(digest[:])}
 }
 
 func cleanupQueueRollbackBackup(root *os.Root, id string, expected *loadedQueueItem, desired []byte) error {

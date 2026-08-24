@@ -596,12 +596,29 @@ func TestQueueMutationFailurePreservesRecoveryBackupForMissingOrZeroPrimary(t *t
 					if !errors.Is(err, ErrQueueRecoveryRequired) {
 						t.Fatalf("error=%v", err)
 					}
+					var recovery *QueueRecoveryError
+					if !errors.As(err, &recovery) || recovery.Error() != "queue rollback recovery is required" || recovery.ItemID != item.ID {
+						t.Fatalf("typed recovery error=%#v err=%v", recovery, err)
+					}
 					backup := atomicfile.BackupPath(queueRecordPath(item.ID))
 					if got, readErr := os.ReadFile(filepath.Join(directory, backup)); readErr != nil || !bytes.Equal(got, original) {
 						t.Fatalf("recovery backup=%q err=%v", got, readErr)
 					}
 					digest := sha256.Sum256(original)
-					if err := atomicfile.RecoverRootFileRollback(root, queueRecordPath(item.ID), fmt.Sprintf("%x", digest[:])); err != nil {
+					if recovery.ExpectedOldHash != fmt.Sprintf("%x", digest[:]) {
+						t.Fatalf("receipt hash=%q", recovery.ExpectedOldHash)
+					}
+					beforeWrong := snapshotQueueDirectoryForTest(t, directory)
+					wrong := recovery.Receipt()
+					wrong.ExpectedOldHash = strings.Repeat("0", 64)
+					if _, err := queue.Recover(wrong); err == nil {
+						t.Fatal("wrong recovery receipt accepted")
+					}
+					if afterWrong := snapshotQueueDirectoryForTest(t, directory); !reflect.DeepEqual(beforeWrong, afterWrong) {
+						t.Fatalf("wrong receipt mutated queue: before=%v after=%v", beforeWrong, afterWrong)
+					}
+					restored, err := queue.Recover(recovery.Receipt())
+					if err != nil || restored.ID != item.ID {
 						t.Fatal(err)
 					}
 					entries, readDirErr := os.ReadDir(directory)
@@ -613,9 +630,53 @@ func TestQueueMutationFailurePreservesRecoveryBackupForMissingOrZeroPrimary(t *t
 					if readyErr != nil || len(ready) != 1 || ready[0].ID != item.ID {
 						t.Fatalf("recovered queue=%+v err=%v", ready, readyErr)
 					}
+					if repeated, err := queue.Recover(recovery.Receipt()); err != nil || repeated.ID != item.ID {
+						t.Fatalf("idempotent recovery=%+v err=%v", repeated, err)
+					}
 				})
 			}
 		}
+	}
+}
+
+func TestQueueRecoveryReceiptHashesExactEncodedPreimageAndReturnsPolicyView(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	entityID := "decision-receipt-encoding"
+	id := queueID(entityID, SideVault, hash("base"))
+	raw := []byte(fmt.Sprintf("{\n  \"updated_at\": %q, \"version\": 1,\n  \"last_error_class\": \"transient_write\", \"attempts\": 3,\n  \"target\": \"vault\", \"id\": %q, \"entity_id\": %q,\n  \"expected_base_hash\": %q, \"not_before\": %q,\n  \"state\": \"pending\", \"created_at\": %q\n}\n",
+		fixedTime.Add(time.Second).Format(time.RFC3339Nano), id, entityID, hash("base"), fixedTime.Add(time.Second).Format(time.RFC3339Nano), fixedTime.Format(time.RFC3339Nano)))
+	if err := os.WriteFile(filepath.Join(directory, queueRecordPath(id)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	policy := RetryPolicy{Initial: time.Millisecond, Max: time.Second, InlineAttempts: 1, QueueAttempts: 2}
+	queue := Queue{Root: root, Retry: policy, Now: func() time.Time { return fixedTime.Add(time.Hour) }}
+	queue.beforeMutation = func(operation string, checkpoint int, mutationRoot *os.Root, leaf string) error {
+		if operation == "ack" && checkpoint == 2 {
+			return mutationRoot.Remove(leaf)
+		}
+		return nil
+	}
+	err = queue.Ack(id)
+	var recovery *QueueRecoveryError
+	if !errors.As(err, &recovery) {
+		t.Fatalf("typed recovery error=%v", err)
+	}
+	digest := sha256.Sum256(raw)
+	if recovery.ExpectedOldHash != fmt.Sprintf("%x", digest[:]) {
+		t.Fatalf("receipt used re-encoding: got=%q want=%x", recovery.ExpectedOldHash, digest)
+	}
+	queue.beforeMutation = nil
+	restored, err := queue.Recover(recovery.Receipt())
+	if err != nil || restored.State != QueueBlocked || restored.Attempts != 3 {
+		t.Fatalf("policy recovery view=%+v err=%v", restored, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(directory, queueRecordPath(id))); err != nil || !bytes.Equal(got, raw) {
+		t.Fatalf("exact encoded preimage not restored: got=%q err=%v", got, err)
 	}
 }
 
@@ -676,4 +737,22 @@ func entryNamesForTest(entries []os.DirEntry) []string {
 		names[index] = entry.Name()
 	}
 	return names
+}
+
+func snapshotQueueDirectoryForTest(t *testing.T, directory string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := make(map[string]string, len(entries))
+	for _, entry := range entries {
+		content, readErr := os.ReadFile(filepath.Join(directory, entry.Name()))
+		info, statErr := entry.Info()
+		if readErr != nil || statErr != nil {
+			t.Fatalf("snapshot %q read=%v stat=%v", entry.Name(), readErr, statErr)
+		}
+		result[entry.Name()] = fmt.Sprintf("%o:%x", info.Mode(), sha256.Sum256(content))
+	}
+	return result
 }
