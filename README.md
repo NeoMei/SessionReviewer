@@ -9,7 +9,7 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 - 从源码构建需要 Go 1.26
 - 不需要管理员权限，也不需要单独配置 OpenAI API key
 
-仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。当前本地验收只包含 Windows x64 交叉编译；在获得当前提交的 `windows-latest` 原生运行回执前，Windows 原生运行验证仍为待完成。即使该 CI 回执通过，本仓库也不把它表述为完整的 Windows 端到端人工验收。
+仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。当前 `main` 已取得三个目标的原生 CI 通过回执；这证明了自动化测试、竞态检查与构建通过，但不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
 
 ## 构建、测试与用户级安装
 
