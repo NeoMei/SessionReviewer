@@ -24,6 +24,8 @@ const (
 
 type QueueState string
 
+var ErrQueueRecoveryRequired = errors.New("queue rollback recovery is required")
+
 const (
 	QueuePending QueueState = "pending"
 	QueueBlocked QueueState = "blocked"
@@ -333,6 +335,13 @@ func validateQueuePolicy(item QueueItem, policy RetryPolicy) error {
 	return nil
 }
 
+func queuePolicyView(item QueueItem, policy RetryPolicy) QueueItem {
+	if item.State == QueuePending && item.Attempts >= policy.QueueAttempts {
+		item.State = QueueBlocked
+	}
+	return item
+}
+
 func validateQueueRetryPolicy(policy RetryPolicy) error {
 	if err := validateRetryPolicy(policy); err != nil || policy.QueueAttempts > maxDurableQueueAttempts {
 		return errors.New("invalid bounded queue retry policy")
@@ -375,6 +384,7 @@ func loadQueueItems(root *os.Root, policy RetryPolicy) (map[string]loadedQueueIt
 		if err != nil {
 			return nil, err
 		}
+		item = queuePolicyView(item, policy)
 		if err := validateQueuePolicy(item, policy); err != nil {
 			return nil, err
 		}
@@ -512,7 +522,10 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 		}
 		return verifyQueuePublication(root, item, encoded, policy)
 	}); err != nil {
-		if cleanupErr := cleanupQueueRollbackBackup(root, item.ID, expected); cleanupErr != nil {
+		if cleanupErr := cleanupQueueRollbackBackup(root, item.ID, expected, encoded); cleanupErr != nil {
+			if errors.Is(cleanupErr, ErrQueueRecoveryRequired) {
+				return ErrQueueRecoveryRequired
+			}
 			return errors.New("cannot persist or clean queue state")
 		}
 		return errors.New("cannot persist queue state")
@@ -523,18 +536,29 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 	return nil
 }
 
-func cleanupQueueRollbackBackup(root *os.Root, id string, expected *loadedQueueItem) error {
+func cleanupQueueRollbackBackup(root *os.Root, id string, expected *loadedQueueItem, desired []byte) error {
 	backup := atomicfile.BackupPath(queueRecordPath(id))
 	info, err := root.Lstat(backup)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil || expected == nil || info == nil || !info.Mode().IsRegular() || isStateRedirect(info) || !privateStateMode(info, 0o600) || !sameBaseFileMetadata(expected.info, info) {
-		return errors.New("queue rollback backup is not authenticated")
+		return ErrQueueRecoveryRequired
 	}
-	item, encoded, err := readQueueItem(root, backup, info)
-	if err != nil || item != expected.item || !bytes.Equal(encoded, expected.encoded) {
-		return errors.New("queue rollback backup is not authenticated")
+	_, encoded, err := readQueueItem(root, backup, info)
+	if err != nil || !bytes.Equal(encoded, expected.encoded) {
+		return ErrQueueRecoveryRequired
+	}
+	primary, err := root.Lstat(queueRecordPath(id))
+	if errors.Is(err, os.ErrNotExist) {
+		return ErrQueueRecoveryRequired
+	}
+	if err != nil || primary == nil || !primary.Mode().IsRegular() || isStateRedirect(primary) || !privateStateMode(primary, 0o600) || os.SameFile(info, primary) {
+		return ErrQueueRecoveryRequired
+	}
+	primaryBytes, err := readStableQueueBytes(root, queueRecordPath(id), primary)
+	if err != nil || len(primaryBytes) == 0 || bytes.Equal(primaryBytes, desired) {
+		return ErrQueueRecoveryRequired
 	}
 	final, err := root.Lstat(backup)
 	if err != nil || !sameBaseFileMetadata(info, final) {
@@ -547,6 +571,42 @@ func cleanupQueueRollbackBackup(root *os.Root, id string, expected *loadedQueueI
 		return errors.New("queue rollback backup remains after cleanup")
 	}
 	return nil
+}
+
+func readStableQueueBytes(root *os.Root, name string, before os.FileInfo) ([]byte, error) {
+	if before == nil || before.Size() > maxQueueRecordBytes {
+		return nil, errors.New("queue state exceeds size limit")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, errors.New("cannot open queue state")
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !sameBaseFileMetadata(before, opened) {
+		return nil, errors.New("queue state changed while opening")
+	}
+	first, err := readQueueSnapshot(file)
+	if err != nil {
+		return nil, err
+	}
+	middle, err := file.Stat()
+	if err != nil || !sameBaseFileMetadata(opened, middle) {
+		return nil, errors.New("queue state changed while reading")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, errors.New("queue state cannot be reread")
+	}
+	second, err := readQueueSnapshot(file)
+	if err != nil {
+		return nil, err
+	}
+	afterOpen, statErr := file.Stat()
+	afterName, nameErr := root.Lstat(name)
+	if statErr != nil || nameErr != nil || !sameBaseFileMetadata(opened, afterOpen) || !sameBaseFileMetadata(opened, afterName) || !bytes.Equal(first, second) {
+		return nil, errors.New("queue state changed while reading")
+	}
+	return first, nil
 }
 
 func verifyQueueExpected(root *os.Root, id string, expected *loadedQueueItem) error {
@@ -576,6 +636,7 @@ func loadQueueItemByID(root *os.Root, id string, policy RetryPolicy) (loadedQueu
 	if err != nil {
 		return loadedQueueItem{}, err
 	}
+	item = queuePolicyView(item, policy)
 	if err := validateQueuePolicy(item, policy); err != nil {
 		return loadedQueueItem{}, err
 	}

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 )
 
 func TestQueueIsDurableDeduplicatedAndContentFree(t *testing.T) {
@@ -232,9 +235,6 @@ func TestQueueRejectsAttemptStateAndTimePolicyViolations(t *testing.T) {
 	valid.ID = queueID(valid.EntityID, valid.Target, valid.ExpectedBaseHash)
 	for name, mutate := range map[string]func(*QueueItem){
 		"max-int": func(item *QueueItem) { item.Attempts = math.MaxInt },
-		"pending-at-limit": func(item *QueueItem) {
-			item.Attempts = policy.QueueAttempts
-		},
 		"updated-before-created": func(item *QueueItem) {
 			item.UpdatedAt = item.CreatedAt.Add(-time.Nanosecond)
 		},
@@ -335,6 +335,45 @@ func TestQueueBlockedStateSurvivesRetryPolicyChanges(t *testing.T) {
 	_, err = (Queue{Root: root, Retry: policy, Now: func() time.Time { return fixedTime }}).Ready(fixedTime, 0)
 	if err == nil || time.Since(started) > time.Second {
 		t.Fatalf("unbounded queue retry policy error=%v elapsed=%s", err, time.Since(started))
+	}
+}
+
+func TestQueuePendingBeyondLoweredPolicyIsPresentedBlocked(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		attempts  int
+		limit     int
+		wantState QueueState
+	}{
+		{name: "lowered", attempts: 3, limit: 2, wantState: QueueBlocked},
+		{name: "raised", attempts: 1, limit: 4, wantState: QueuePending},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			item := QueueItem{
+				Version: 1, EntityID: "decision-pending-policy", Target: SideVault, ExpectedBaseHash: hash("base"),
+				Attempts: test.attempts, State: QueuePending, LastErrorClass: QueueErrorTransientWrite,
+				CreatedAt: fixedTime, UpdatedAt: fixedTime.Add(time.Second), NotBefore: fixedTime.Add(time.Second),
+			}
+			item.ID = queueID(item.EntityID, item.Target, item.ExpectedBaseHash)
+			writeRawQueueItemForTest(t, directory, item)
+			policy := RetryPolicy{Initial: time.Millisecond, Max: time.Second, InlineAttempts: 1, QueueAttempts: test.limit}
+			queue := Queue{Root: root, Retry: policy, Now: func() time.Time { return fixedTime.Add(time.Hour) }}
+			ready, err := queue.Ready(fixedTime.Add(time.Hour), 0)
+			if err != nil || len(ready) != 1 || ready[0].State != test.wantState {
+				t.Fatalf("policy-derived state=%+v err=%v", ready, err)
+			}
+			if test.wantState == QueueBlocked {
+				if _, err := queue.Reschedule(item.ID, string(QueueErrorSharingViolation)); err == nil {
+					t.Fatal("lowered-policy item was automatically retried")
+				}
+			}
+		})
 	}
 }
 
@@ -517,6 +556,65 @@ func TestQueueMutationFailureCleansOnlyAuthenticatedRollbackArtifacts(t *testing
 					t.Fatalf("queue did not recover after original restoration: ready=%+v err=%v", ready, readyErr)
 				}
 			})
+		}
+	}
+}
+
+func TestQueueMutationFailurePreservesRecoveryBackupForMissingOrZeroPrimary(t *testing.T) {
+	for _, operation := range []string{"reschedule", "ack"} {
+		for _, checkpoint := range []int{2, 3} {
+			for _, primaryState := range []string{"missing", "zero"} {
+				t.Run(fmt.Sprintf("%s-checkpoint-%d-%s", operation, checkpoint, primaryState), func(t *testing.T) {
+					directory := t.TempDir()
+					root, err := os.OpenRoot(directory)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer root.Close()
+					queue := Queue{Root: root, Retry: DefaultRetryPolicy(), Now: func() time.Time { return fixedTime }}
+					item, err := queue.Enqueue(QueueItem{Version: 1, EntityID: "decision-recovery", Target: SideVault, ExpectedBaseHash: hash("base"), CreatedAt: fixedTime, UpdatedAt: fixedTime})
+					if err != nil {
+						t.Fatal(err)
+					}
+					original := readQueueRecordForTest(t, root, item.ID)
+					queue.beforeMutation = func(gotOperation string, gotCheckpoint int, mutationRoot *os.Root, leaf string) error {
+						if gotOperation != operation || gotCheckpoint != checkpoint {
+							return nil
+						}
+						if primaryState == "missing" {
+							return mutationRoot.Remove(leaf)
+						}
+						replaceQueueLeafForTest(t, mutationRoot, leaf, nil)
+						return nil
+					}
+					switch operation {
+					case "reschedule":
+						_, err = queue.Reschedule(item.ID, string(QueueErrorSharingViolation))
+					case "ack":
+						err = queue.Ack(item.ID)
+					}
+					if !errors.Is(err, ErrQueueRecoveryRequired) {
+						t.Fatalf("error=%v", err)
+					}
+					backup := atomicfile.BackupPath(queueRecordPath(item.ID))
+					if got, readErr := os.ReadFile(filepath.Join(directory, backup)); readErr != nil || !bytes.Equal(got, original) {
+						t.Fatalf("recovery backup=%q err=%v", got, readErr)
+					}
+					digest := sha256.Sum256(original)
+					if err := atomicfile.RecoverRootFileRollback(root, queueRecordPath(item.ID), fmt.Sprintf("%x", digest[:])); err != nil {
+						t.Fatal(err)
+					}
+					entries, readDirErr := os.ReadDir(directory)
+					if readDirErr != nil || len(entries) != 1 || entries[0].Name() != queueRecordPath(item.ID) {
+						t.Fatalf("recovery entries=%v err=%v", entryNamesForTest(entries), readDirErr)
+					}
+					queue.beforeMutation = nil
+					ready, readyErr := queue.Ready(fixedTime.Add(time.Hour), 0)
+					if readyErr != nil || len(ready) != 1 || ready[0].ID != item.ID {
+						t.Fatalf("recovered queue=%+v err=%v", ready, readyErr)
+					}
+				})
+			}
 		}
 	}
 }
