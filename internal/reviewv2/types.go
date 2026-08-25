@@ -73,8 +73,9 @@ type MachineLedger struct {
 }
 
 type CurrentRiskProvenance struct {
-	RiskID string `json:"risk_id"`
-	Kind   string `json:"kind"`
+	RiskID    string `json:"risk_id"`
+	Kind      string `json:"kind"`
+	SourceKey string `json:"source_key"`
 }
 
 // LegacyCompatibility retains the accepted inputs that proposal, resume, and

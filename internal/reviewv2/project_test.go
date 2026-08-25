@@ -150,6 +150,94 @@ func TestProjectLegacyRejectsMalformedIdentityAndReferenceGraphBeforeProjection(
 	}
 }
 
+func TestProjectLegacyAcceptsOpaqueNonblankUniqueSourceSessionIDs(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	const opaque = "Session_UPPER.case:source_1"
+	rewriteEvidenceSession := func(refs []ledger.EvidenceRef) {
+		for index := range refs {
+			refs[index].SessionID = opaque
+		}
+	}
+	legacy.CurrentState.SourceSessions = []string{opaque}
+	rewriteEvidenceSession(legacy.CurrentState.Evidence)
+	for index := range legacy.Timeline {
+		rewriteEvidenceSession(legacy.Timeline[index].Evidence)
+	}
+	for id, value := range legacy.Decisions {
+		value.SourceSessions = []string{opaque}
+		rewriteEvidenceSession(value.Evidence)
+		legacy.Decisions[id] = value
+	}
+	for id, value := range legacy.OpenLoops {
+		value.SourceSessions = []string{opaque}
+		rewriteEvidenceSession(value.Evidence)
+		legacy.OpenLoops[id] = value
+	}
+	for id, value := range legacy.Sessions {
+		value.SessionID = opaque
+		rewriteEvidenceSession(value.Evidence)
+		for phaseIndex := range value.Phases {
+			rewriteEvidenceSession(value.Phases[phaseIndex].Evidence)
+		}
+		legacy.Sessions[id] = value
+	}
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatalf("opaque legacy source session ID rejected: %v", err)
+	}
+	roundTrip, err := LegacyState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.Sessions["session-report-1"].SessionID != opaque {
+		t.Fatalf("opaque source session changed: %+v", roundTrip.Sessions)
+	}
+}
+
+func TestProjectLegacyRejectsInvalidSupersedesGraphs(t *testing.T) {
+	addSecond := func(state *ledger.State) {
+		state.Decisions["decision-second"] = ledger.Decision{
+			ID: "decision-second", ProjectID: state.ProjectID, Title: "second", Status: "accepted", Revision: 1,
+			Tags: []string{}, Supersedes: []string{}, SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+			Rationale: "second rationale", Consequences: "second consequence", Alternatives: []string{}, RejectedPaths: []string{},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*ledger.State)
+	}{
+		{"self", func(state *ledger.State) {
+			value := state.Decisions["decision-local-cli"]
+			value.Supersedes = []string{value.ID}
+			state.Decisions[value.ID] = value
+		}},
+		{"duplicate edge", func(state *ledger.State) {
+			addSecond(state)
+			value := state.Decisions["decision-local-cli"]
+			value.Supersedes = []string{"decision-second", "decision-second"}
+			state.Decisions[value.ID] = value
+		}},
+		{"two node cycle", func(state *ledger.State) {
+			addSecond(state)
+			first := state.Decisions["decision-local-cli"]
+			first.Supersedes = []string{"decision-second"}
+			state.Decisions[first.ID] = first
+			second := state.Decisions["decision-second"]
+			second.Supersedes = []string{first.ID}
+			state.Decisions[second.ID] = second
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := legacyFixtureState(t)
+			test.mutate(&legacy)
+			if _, err := ProjectLegacy(legacy); err == nil {
+				t.Fatalf("invalid supersedes graph %q was projected", test.name)
+			}
+		})
+	}
+}
+
 func TestApplyChangeSetReturnsThreeFilePlanWithExactPreimages(t *testing.T) {
 	root, _ := writeV2Fixture(t)
 	accepted, err := Load(root)
@@ -346,6 +434,160 @@ func TestApplyChangeSetKeepsCurrentRiskIdentityAndHumanFieldsWhenTitleChanges(t 
 	}
 }
 
+func TestApplyChangeSetCurrentRiskIdentityMatchingDoesNotTransferHumanFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		before     []string
+		after      []string
+		wantStable []string
+		wantFresh  []string
+	}{
+		{"front deletion", []string{"A", "B", "C"}, []string{"B", "C"}, []string{"B", "C"}, nil},
+		{"middle deletion", []string{"A", "B", "C"}, []string{"A", "C"}, []string{"A", "C"}, nil},
+		{"front insertion", []string{"A", "B"}, []string{"X", "A", "B"}, []string{"A", "B"}, []string{"X"}},
+		{"middle insertion", []string{"A", "B"}, []string{"A", "X", "B"}, []string{"A", "B"}, []string{"X"}},
+		{"reorder", []string{"A", "B", "C"}, []string{"C", "A", "B"}, []string{"A", "B", "C"}, nil},
+		{"simultaneous rename", []string{"A", "B"}, []string{"A2", "B2"}, nil, []string{"A2", "B2"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := legacyFixtureState(t)
+			legacy.CurrentState.Blockers = append([]string(nil), test.before...)
+			root := writeProjectedLegacyFixture(t, legacy)
+			accepted, err := Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeIDs := currentRiskIDsByValue(t, accepted.State)
+			reviewBody := accepted.files[ReviewRelativePath].body
+			for title, id := range beforeIDs {
+				for _, edit := range []EditUnit{
+					{Document: "review", UnitID: id, Field: "risk.status", Value: "human-status-" + title},
+					{Document: "review", UnitID: id, Field: "risk.detail", Value: "human-detail-" + title},
+				} {
+					edit.ExpectedSHA256 = sha256Hex(reviewBody)
+					reviewBody, err = PatchReviewUnit(reviewBody, edit)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, accepted.files[HistoryRelativePath].body)
+			accepted, err = Load(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			incoming := cloneLegacyCurrentState(accepted.Legacy.CurrentState)
+			incoming.Revision++
+			incoming.Blockers = append([]string(nil), test.after...)
+			plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Current: &incoming})
+			if err != nil {
+				t.Fatal(err)
+			}
+			nextReview, err := ParseReview(plannedData(t, plan, ReviewRelativePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			nextMachine, err := ParseMachineLedger(plannedData(t, plan, MachineLedgerRelativePath))
+			if err != nil {
+				t.Fatal(err)
+			}
+			nextState := State{Review: nextReview.Model, Machine: nextMachine}
+			nextIDs := currentRiskIDsByValue(t, nextState)
+			nextRisks := riskByID(nextReview.Model.Risks)
+			for _, title := range test.wantStable {
+				if nextIDs[title] != beforeIDs[title] {
+					t.Fatalf("%q identity moved: before=%q after=%q", title, beforeIDs[title], nextIDs[title])
+				}
+				risk := nextRisks[nextIDs[title]]
+				if risk.Status != "human-status-"+title || risk.Detail != "human-detail-"+title {
+					t.Fatalf("%q human fields moved: %+v", title, risk)
+				}
+			}
+			oldIDs := make(map[string]struct{}, len(beforeIDs))
+			for _, id := range beforeIDs {
+				oldIDs[id] = struct{}{}
+			}
+			for _, title := range test.wantFresh {
+				if _, reused := oldIDs[nextIDs[title]]; reused {
+					t.Fatalf("%q incorrectly inherited old identity %q", title, nextIDs[title])
+				}
+				risk := nextRisks[nextIDs[title]]
+				if strings.HasPrefix(risk.Status, "human-status-") || strings.HasPrefix(risk.Detail, "human-detail-") {
+					t.Fatalf("%q inherited unrelated human fields: %+v", title, risk)
+				}
+			}
+		})
+	}
+}
+
+func TestValidateRejectsSwappedCurrentRiskProvenanceKinds(t *testing.T) {
+	state, err := ProjectLegacy(legacyFixtureState(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Machine.LegacyCompatibility.CurrentRisks) != 2 {
+		t.Fatalf("provenance=%+v", state.Machine.LegacyCompatibility.CurrentRisks)
+	}
+	state.Machine.LegacyCompatibility.CurrentRisks[0].Kind, state.Machine.LegacyCompatibility.CurrentRisks[1].Kind =
+		state.Machine.LegacyCompatibility.CurrentRisks[1].Kind, state.Machine.LegacyCompatibility.CurrentRisks[0].Kind
+	if err := Validate(state); err == nil {
+		t.Fatal("swapped blocker/open-risk provenance was accepted")
+	}
+}
+
+func TestValidateRejectsForgedCurrentRiskProvenanceSourceKey(t *testing.T) {
+	state, err := ProjectLegacy(legacyFixtureState(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.Machine.LegacyCompatibility.CurrentRisks[0].SourceKey = strings.Repeat("a", 64)
+	if err := Validate(state); err == nil {
+		t.Fatal("forged current-risk source key was accepted")
+	}
+}
+
+func writeProjectedLegacyFixture(t *testing.T, legacy ledger.State) string {
+	t.Helper()
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	plan, err := Render(root, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files {
+		path := filepath.Join(root, filepath.FromSlash(file.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, file.Perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func currentRiskIDsByValue(t *testing.T, state State) map[string]string {
+	t.Helper()
+	result := make(map[string]string)
+	blockerIndex, riskIndex := 0, 0
+	for _, provenance := range state.Machine.LegacyCompatibility.CurrentRisks {
+		var value string
+		if provenance.Kind == "blocker" {
+			value = state.Machine.LegacyCompatibility.CurrentState.Blockers[blockerIndex]
+			blockerIndex++
+		} else {
+			value = state.Machine.LegacyCompatibility.CurrentState.OpenRisks[riskIndex]
+			riskIndex++
+		}
+		result[value] = provenance.RiskID
+	}
+	return result
+}
+
 func TestApplyChangeSetInsertsNewDecisionWithoutCanonicalizingAcceptedProse(t *testing.T) {
 	root, _ := writeV2Fixture(t)
 	accepted, err := Load(root)
@@ -388,6 +630,86 @@ func TestApplyChangeSetInsertsNewDecisionWithoutCanonicalizingAcceptedProse(t *t
 	}
 	if got := decisionByID(next.Model.Decisions)[incoming.ID]; got.Title != incoming.Title {
 		t.Fatalf("new decision not inserted: %+v", got)
+	}
+}
+
+func TestApplyChangeSetReordersReviewMarkerBlocksLosslessly(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody := accepted.files[ReviewRelativePath].body
+	decisionBlock, err := markerBlockByID(reviewBody, "decision", "decision-local-cli")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody = spliceSource(reviewBody, sourceSpan{start: decisionBlock.close.start, end: decisionBlock.close.start}, []byte("#### 保留的决策子节\n  decision bytes  \n"))
+	riskBlock, err := markerBlockByID(reviewBody, "risk", "risk-install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody = spliceSource(reviewBody, sourceSpan{start: riskBlock.open.start, end: riskBlock.open.start}, []byte("<!-- retain-risk-gap -->\n"))
+	riskBlock, err = markerBlockByID(reviewBody, "risk", "risk-install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody = spliceSource(reviewBody, sourceSpan{start: riskBlock.close.start, end: riskBlock.close.start}, []byte("#### 保留的风险子节\n  risk bytes  \n"))
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, accepted.files[HistoryRelativePath].body)
+	accepted, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newDecision := ledger.Decision{
+		ID: "decision-newest", ProjectID: accepted.Legacy.ProjectID, Title: "newest accepted decision",
+		Status: "accepted", Revision: 1, Tags: []string{}, Supersedes: []string{}, SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+		Rationale: "new evidence", Consequences: "must sort first", Alternatives: []string{}, RejectedPaths: []string{},
+	}
+	evidence := accepted.Legacy.CurrentState.Evidence[0]
+	newEvent := ledger.TimelineEvent{
+		ID: "timeline-newest", OccurredAt: "2026-08-25T10:00:00Z", Revision: 1, Class: ledger.DecisionFact,
+		Title: "newest event", Summary: "accepted newest decision", Evidence: []ledger.EvidenceRef{evidence},
+		DecisionIDs: []string{newDecision.ID}, OpenLoopIDs: []string{},
+	}
+	changedLoop := accepted.Legacy.OpenLoops["risk-install"]
+	changedLoop.Revision++
+	changedLoop.Status = "zzz"
+	newLoop := ledger.OpenLoop{
+		ID: "risk-alpha", ProjectID: accepted.Legacy.ProjectID, Title: "sort first risk", Status: "aaa", Revision: 1,
+		Tags: []string{}, SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{}, Attempts: []string{},
+		Question: "new ordered risk", NextExperiment: "verify ordering", CompletionCriterion: "ordered",
+	}
+	changes := ledger.ChangeSet{
+		Timeline: []ledger.TimelineEvent{newEvent}, Decisions: []ledger.Decision{newDecision},
+		OpenLoops: []ledger.OpenLoop{changedLoop, newLoop},
+	}
+	plan, err := ApplyChangeSet(accepted, changes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextBody := plannedData(t, plan, ReviewRelativePath)
+	next, err := ParseReview(nextBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Model.Decisions) < 2 || next.Model.Decisions[0].ID != newDecision.ID {
+		t.Fatalf("decision order is not newest-first: %+v", next.Model.Decisions)
+	}
+	for index := 1; index < len(next.Model.Risks); index++ {
+		left, right := next.Model.Risks[index-1], next.Model.Risks[index]
+		if left.Status > right.Status || (left.Status == right.Status && left.ID > right.ID) {
+			t.Fatalf("risk order is not status/ID canonical: %+v", next.Model.Risks)
+		}
+	}
+	for _, sentinel := range [][]byte{
+		[]byte("#### 保留的决策子节\n  decision bytes  \n"),
+		[]byte("<!-- retain-risk-gap -->\n"),
+		[]byte("#### 保留的风险子节\n  risk bytes  \n"),
+	} {
+		if !bytes.Contains(nextBody, sentinel) {
+			t.Fatalf("review reorder lost bytes %q:\n%s", sentinel, nextBody)
+		}
 	}
 }
 

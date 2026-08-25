@@ -152,6 +152,22 @@ func patchAcceptedReview(document ReviewDocument, desired Review) ([]byte, error
 		}
 	}
 	source = applyDocumentPatches(document.source, patches)
+	riskOrder := make([]string, len(desired.Risks))
+	for index, risk := range desired.Risks {
+		riskOrder[index] = risk.ID
+	}
+	source, err = reorderReviewMarkerBlocks(source, "risk", riskOrder)
+	if err != nil {
+		return nil, err
+	}
+	decisionOrder := make([]string, len(desired.Decisions))
+	for index, decision := range desired.Decisions {
+		decisionOrder[index] = decision.ID
+	}
+	source, err = reorderReviewMarkerBlocks(source, "decision", decisionOrder)
+	if err != nil {
+		return nil, err
+	}
 	parsed, err := ParseReview(source)
 	if err != nil {
 		return nil, fmt.Errorf("patch accepted review: %w", err)
@@ -408,6 +424,55 @@ func reorderHistoryMarkerBlocks(source []byte, ordered []Event) ([]byte, error) 
 		result = append(result, source[gapStart:gapEnd]...)
 	}
 	return result, nil
+}
+
+func reorderReviewMarkerBlocks(source []byte, kind string, orderedIDs []string) ([]byte, error) {
+	identity, err := parseFrontmatter(source, "project-overview", "project_review")
+	if err != nil {
+		return nil, err
+	}
+	containers, err := reviewMarkerContainers(source, identity.bodyStart)
+	if err != nil {
+		return nil, err
+	}
+	container, exists := containers[kind]
+	if !exists {
+		return nil, fmt.Errorf("review has no %s marker container", kind)
+	}
+	allBlocks, err := scanMarkerBlocks(source, identity.bodyStart)
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]markerBlock, 0, len(orderedIDs))
+	byID := make(map[string]markerBlock, len(orderedIDs))
+	for _, block := range allBlocks {
+		if block.kind == kind && spanContains(container, block.whole) {
+			blocks = append(blocks, block)
+			byID[block.id] = block
+		}
+	}
+	if len(blocks) != len(orderedIDs) || len(byID) != len(orderedIDs) {
+		return nil, fmt.Errorf("review %s marker count does not match desired order", kind)
+	}
+	if len(blocks) < 2 {
+		return source, nil
+	}
+	var body bytes.Buffer
+	body.Write(source[container.start:blocks[0].whole.start])
+	for index, id := range orderedIDs {
+		block, exists := byID[id]
+		if !exists {
+			return nil, fmt.Errorf("review %s marker %q is missing", kind, id)
+		}
+		body.Write(source[block.whole.start:block.whole.end])
+		gapStart := blocks[index].whole.end
+		gapEnd := container.end
+		if index+1 < len(blocks) {
+			gapEnd = blocks[index+1].whole.start
+		}
+		body.Write(source[gapStart:gapEnd])
+	}
+	return spliceSource(source, container, body.Bytes()), nil
 }
 
 func reviewRiskBlock(value Risk) []byte {

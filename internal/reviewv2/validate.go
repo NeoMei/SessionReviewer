@@ -245,19 +245,34 @@ func validateLegacyCompatibility(value LegacyCompatibility, projectID string, se
 		return err
 	}
 	seenRisks := make(map[string]struct{}, len(value.CurrentRisks))
-	for _, risk := range value.CurrentRisks {
-		if strings.TrimSpace(risk.RiskID) == "" || (risk.Kind != "blocker" && risk.Kind != "open_risk") {
-			return errors.New("current-risk provenance requires an ID and blocker/open_risk kind")
+	expectedRisks := expectedCurrentRiskProvenance(value.CurrentState)
+	if len(value.CurrentRisks) != len(expectedRisks) {
+		return errors.New("current-risk provenance count does not match legacy current state")
+	}
+	for index, risk := range value.CurrentRisks {
+		if !validStableID(risk.RiskID) || (risk.Kind != "blocker" && risk.Kind != "open_risk") || !lowercaseSHA256.MatchString(risk.SourceKey) {
+			return errors.New("current-risk provenance requires a stable ID, bound source key, and blocker/open_risk kind")
 		}
 		if _, duplicate := seenRisks[risk.RiskID]; duplicate {
 			return fmt.Errorf("duplicate current-risk provenance %q", risk.RiskID)
 		}
 		seenRisks[risk.RiskID] = struct{}{}
-	}
-	if len(value.CurrentRisks) != len(value.CurrentState.Blockers)+len(value.CurrentState.OpenRisks) {
-		return errors.New("current-risk provenance count does not match legacy current state")
+		if risk.Kind != expectedRisks[index].Kind || risk.SourceKey != expectedRisks[index].SourceKey {
+			return fmt.Errorf("current-risk provenance %q is not bound to legacy current-state source %d", risk.RiskID, index)
+		}
 	}
 	return nil
+}
+
+func expectedCurrentRiskProvenance(current ledger.CurrentState) []CurrentRiskProvenance {
+	result := make([]CurrentRiskProvenance, 0, len(current.Blockers)+len(current.OpenRisks))
+	for index, value := range current.Blockers {
+		result = append(result, CurrentRiskProvenance{Kind: "blocker", SourceKey: currentRiskSourceKey("blocker", index, value)})
+	}
+	for index, value := range current.OpenRisks {
+		result = append(result, CurrentRiskProvenance{Kind: "open_risk", SourceKey: currentRiskSourceKey("open_risk", index, value)})
+	}
+	return result
 }
 
 // validateLegacyProjectionInput runs before any lossy projection so malformed
@@ -270,7 +285,6 @@ func validateLegacyProjectionInput(state ledger.State) error {
 	entities := make(map[string]string, len(state.Timeline)+len(state.Decisions)+len(state.OpenLoops)+len(state.Sessions))
 	decisions := make(map[string]struct{}, len(state.Decisions))
 	loops := make(map[string]struct{}, len(state.OpenLoops))
-	sessionReports := make(map[string]struct{}, len(state.Sessions))
 	sourceSessions := make(map[string]struct{}, len(state.Sessions))
 	for key, value := range state.Decisions {
 		if !validStableID(key) || !validStableID(value.ID) {
@@ -303,7 +317,7 @@ func validateLegacyProjectionInput(state ledger.State) error {
 		loops[value.ID] = struct{}{}
 	}
 	for key, value := range state.Sessions {
-		if !validStableID(key) || !validStableID(value.ID) || !validStableID(value.SessionID) {
+		if !validStableID(key) || !validStableID(value.ID) {
 			return fmt.Errorf("legacy session %q has an invalid identity", value.ID)
 		}
 		if key != value.ID {
@@ -322,7 +336,6 @@ func validateLegacyProjectionInput(state ledger.State) error {
 			return fmt.Errorf("duplicate legacy source session identity %q", value.SessionID)
 		}
 		sourceSessions[value.SessionID] = struct{}{}
-		sessionReports[value.ID] = struct{}{}
 	}
 	for _, event := range state.Timeline {
 		if !validStableID(event.ID) {
@@ -345,6 +358,9 @@ func validateLegacyProjectionInput(state ledger.State) error {
 		if err := validateReferences(decision.SourceSessions, sourceSessions, fmt.Sprintf("legacy decision %q source session", decision.ID)); err != nil {
 			return err
 		}
+	}
+	if err := validateDecisionSupersedesGraph(state.Decisions); err != nil {
+		return err
 	}
 	for _, loop := range state.OpenLoops {
 		if err := validateReferences(loop.SourceSessions, sourceSessions, fmt.Sprintf("legacy open loop %q source session", loop.ID)); err != nil {
@@ -395,7 +411,41 @@ func validateLegacyProjectionInput(state ledger.State) error {
 	if err := validateSessionChain(sessions); err != nil {
 		return fmt.Errorf("legacy session chain: %w", err)
 	}
-	_ = sessionReports
+	return nil
+}
+
+func validateDecisionSupersedesGraph(decisions map[string]ledger.Decision) error {
+	const (
+		unvisited = iota
+		visiting
+		visited
+	)
+	colors := make(map[string]int, len(decisions))
+	var visit func(string) error
+	visit = func(id string) error {
+		switch colors[id] {
+		case visiting:
+			return fmt.Errorf("legacy decision supersedes graph contains a cycle at %q", id)
+		case visited:
+			return nil
+		}
+		colors[id] = visiting
+		for _, target := range decisions[id].Supersedes {
+			if target == id {
+				return fmt.Errorf("legacy decision %q cannot supersede itself", id)
+			}
+			if err := visit(target); err != nil {
+				return err
+			}
+		}
+		colors[id] = visited
+		return nil
+	}
+	for id := range decisions {
+		if err := visit(id); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

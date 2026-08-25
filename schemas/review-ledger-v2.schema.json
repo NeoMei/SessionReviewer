@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/neomei/SessionReviewer/schemas/review-ledger-v2.schema.json",
   "title": "SessionReviewer machine ledger v2",
-  "$comment": "JSON Schema validates structural shape. The Go ParseMachineLedger and Validate APIs additionally reject duplicate JSON object keys, enforce case-sensitive object-key allowlists, cross-item identity uniqueness, evidence owner and source-session existence, entity-reference closure, and one reciprocal acyclic session chain.",
+  "$comment": "JSON Schema validates structural shape. The Go ParseMachineLedger and Validate APIs additionally reject duplicate JSON object keys, enforce case-sensitive object-key allowlists, cross-item identity uniqueness, evidence owner and source-session existence, entity-reference closure, forged current-risk source provenance, decision-supersedes cycles, and require one reciprocal acyclic session chain.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -87,8 +87,8 @@
 	  }
 	},
 	"current_risk_provenance": {
-	  "type": "object", "additionalProperties": false, "required": ["risk_id", "kind"],
-	  "properties": { "risk_id": { "type": "string", "minLength": 1 }, "kind": { "enum": ["blocker", "open_risk"] } }
+	  "type": "object", "additionalProperties": false, "required": ["risk_id", "kind", "source_key"],
+	  "properties": { "risk_id": { "type": "string", "minLength": 1 }, "kind": { "enum": ["blocker", "open_risk"] }, "source_key": { "$ref": "#/$defs/lowercase_sha256" } }
 	},
     "lowercase_sha256": {
       "type": "string",
