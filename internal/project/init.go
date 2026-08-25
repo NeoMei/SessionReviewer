@@ -813,14 +813,19 @@ func readBoundedRootEntries(root *os.Root, limit int) ([]os.DirEntry, error) {
 		return nil, errors.Join(readErr, closeErr)
 	}
 	visible := make([]os.DirEntry, 0, len(entries))
+	lockSeen := false
 	for _, entry := range entries {
-		if !atomicfile.IsRootDirectoryLockLikeName(entry.Name()) {
-			visible = append(visible, entry)
+		if atomicfile.IsRootDirectoryLockName(entry.Name()) {
+			if lockSeen || atomicfile.ValidateRootDirectoryLock(root, entry.Name()) != nil {
+				return nil, errors.New("initialization directory lock artifact is unsafe")
+			}
+			lockSeen = true
 			continue
 		}
-		if !atomicfile.IsRootDirectoryLockName(entry.Name()) || atomicfile.ValidateRootDirectoryLock(root, entry.Name()) != nil {
+		if atomicfile.IsRootDirectoryLockLikeName(entry.Name()) {
 			return nil, errors.New("initialization directory lock artifact is unsafe")
 		}
+		visible = append(visible, entry)
 	}
 	return visible, nil
 }

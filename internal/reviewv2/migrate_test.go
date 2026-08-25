@@ -366,6 +366,9 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 	if err := os.Mkdir(filepath.Join(rootPath, "archive", "existing"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(filepath.Join(rootPath, "archive", "existing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	secureCalls := 0
 	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/existing", 0o755, nil,
 		func(*os.File) error { secureCalls++; return nil },

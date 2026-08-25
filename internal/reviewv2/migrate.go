@@ -622,17 +622,22 @@ func scanMigrationInventory(project *pathguard.Directory, scanRoot, mappedRoot s
 			return err
 		}
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+		lockSeen := false
 		for _, child := range children {
 			name := child.Name()
-			if atomicfile.IsRootDirectoryLockLikeName(name) {
-				if !atomicfile.IsRootDirectoryLockName(name) {
+			if atomicfile.IsRootDirectoryLockName(name) {
+				if lockSeen {
 					return errors.New("migration tree contains an extra directory lock artifact")
 				}
+				lockSeen = true
 				validateErr := atomicfile.ValidateRootDirectoryLock(root, name)
 				if validateErr != nil {
 					return errors.New("migration tree directory lock is unsafe")
 				}
 				continue
+			}
+			if atomicfile.IsRootDirectoryLockLikeName(name) {
+				return errors.New("migration tree contains an extra directory lock artifact")
 			}
 			if atomicfile.IsRootDirectoryTemporaryName(name) || atomicfile.IsRootDirectoryQuarantineName(name) {
 				return errors.New("migration tree contains incomplete machine directory recovery")
@@ -920,17 +925,22 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 			return errors.New("cannot enumerate migration backup")
 		}
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+		lockSeen := false
 		for _, child := range children {
 			itemCount++
-			if atomicfile.IsRootDirectoryLockLikeName(child.Name()) {
-				if !atomicfile.IsRootDirectoryLockName(child.Name()) {
+			if atomicfile.IsRootDirectoryLockName(child.Name()) {
+				if lockSeen {
 					return errors.New("migration backup contains an extra directory lock artifact")
 				}
+				lockSeen = true
 				validateErr := atomicfile.ValidateRootDirectoryLock(directory, child.Name())
 				if validateErr != nil {
 					return errors.New("migration backup directory lock is unsafe")
 				}
 				continue
+			}
+			if atomicfile.IsRootDirectoryLockLikeName(child.Name()) {
+				return errors.New("migration backup contains an extra directory lock artifact")
 			}
 			if atomicfile.IsRootDirectoryTemporaryName(child.Name()) || atomicfile.IsRootDirectoryQuarantineName(child.Name()) {
 				return errors.New("migration backup contains incomplete directory recovery")

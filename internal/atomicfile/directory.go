@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
 var (
@@ -36,13 +38,20 @@ func IsRootDirectoryQuarantineName(name string) bool {
 // IsRootDirectoryLockName reports the one persistent advisory-lock leaf
 // reserved inside each pinned parent used for directory publication.
 func IsRootDirectoryLockName(name string) bool {
-	return name == rootDirectoryLockName
+	key, ok := rootDirectoryPortableComponentKey(name)
+	return ok && key == rootDirectoryLockName
 }
 
 // IsRootDirectoryLockLikeName reserves the lock leaf namespace so aliases or
 // extra lock-looking content cannot be mistaken for user inventory.
 func IsRootDirectoryLockLikeName(name string) bool {
-	return strings.HasPrefix(name, rootDirectoryLockName)
+	key, ok := rootDirectoryPortableComponentKey(name)
+	return ok && strings.HasPrefix(key, rootDirectoryLockName)
+}
+
+func rootDirectoryPortableComponentKey(name string) (string, bool) {
+	key, err := platform.PathKey("windows", platform.CaseInsensitive, name)
+	return key, err == nil
 }
 
 func isRootDirectoryMachineName(name, prefix string) bool {
