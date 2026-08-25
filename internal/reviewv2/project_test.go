@@ -459,6 +459,87 @@ func TestApplyChangeSetAssignsFreshCurrentRiskIdentityWhenOnlyTitleChanges(t *te
 	}
 }
 
+func TestApplyChangeSetPreservesAcceptedCurrentRiskHumanBlockAcrossUnrelatedChange(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenance := accepted.State.Machine.LegacyCompatibility.CurrentRisks[0]
+	if provenance.Kind != "blocker" {
+		t.Fatalf("first fixture current risk is not a blocker: %+v", provenance)
+	}
+	const (
+		acceptedTitle  = "human-edited accepted blocker title"
+		acceptedStatus = "human-accepted-status"
+		acceptedDetail = "human accepted detail with exact formatting"
+	)
+	reviewBody := accepted.files[ReviewRelativePath].body
+	for _, edit := range []EditUnit{
+		{Document: "review", UnitID: provenance.RiskID, Field: "risk.title", Value: acceptedTitle},
+		{Document: "review", UnitID: provenance.RiskID, Field: "risk.status", Value: acceptedStatus},
+		{Document: "review", UnitID: provenance.RiskID, Field: "risk.detail", Value: acceptedDetail},
+	} {
+		edit.ExpectedSHA256 = sha256Hex(reviewBody)
+		reviewBody, err = PatchReviewUnit(reviewBody, edit)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	block, err := markerBlockByID(reviewBody, "risk", provenance.RiskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := []byte("#### 人工保留子节\n  keep exact bytes  \n")
+	reviewBody = spliceSource(reviewBody, sourceSpan{start: block.close.start, end: block.close.start}, unknown)
+	block, err = markerBlockByID(reviewBody, "risk", provenance.RiskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedBlock := append([]byte(nil), reviewBody[block.whole.start:block.whole.end]...)
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, accepted.files[HistoryRelativePath].body)
+
+	accepted, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := cloneLegacyCurrentState(accepted.Legacy.CurrentState)
+	incoming.Revision++
+	incoming.Goal = "unrelated goal-only change"
+	plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Current: &incoming})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextReviewBody := plannedData(t, plan, ReviewRelativePath)
+	nextBlock, err := markerBlockByID(nextReviewBody, "risk", provenance.RiskID)
+	if err != nil {
+		t.Fatalf("accepted current-risk marker changed after unrelated apply: %v", err)
+	}
+	if got := nextReviewBody[nextBlock.whole.start:nextBlock.whole.end]; !bytes.Equal(got, acceptedBlock) {
+		t.Fatalf("accepted current-risk block changed after unrelated apply:\nwant:\n%s\ngot:\n%s", acceptedBlock, got)
+	}
+	nextReview, err := ParseReview(nextReviewBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	risk, exists := riskByID(nextReview.Model.Risks)[provenance.RiskID]
+	if !exists || risk.Title != acceptedTitle || risk.Status != acceptedStatus || risk.Detail != acceptedDetail {
+		t.Fatalf("accepted current-risk semantics changed: %+v", risk)
+	}
+	nextMachine, err := ParseMachineLedger(plannedData(t, plan, MachineLedgerRelativePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := currentRiskProvenanceByID(nextMachine.LegacyCompatibility, provenance.RiskID)
+	if bound == nil || len(nextMachine.LegacyCompatibility.CurrentState.Blockers) == 0 || nextMachine.LegacyCompatibility.CurrentState.Blockers[0] != acceptedTitle {
+		t.Fatalf("accepted title was not promoted into hidden compatibility: provenance=%+v current=%+v", bound, nextMachine.LegacyCompatibility.CurrentState)
+	}
+	wantSourceKey := currentRiskSourceKey(provenance.RiskID, "blocker", 0, acceptedTitle)
+	if bound.SourceKey != wantSourceKey {
+		t.Fatalf("accepted current-risk provenance was not rebound: got=%q want=%q", bound.SourceKey, wantSourceKey)
+	}
+}
+
 func TestApplyChangeSetCurrentRiskIdentityMatchingDoesNotTransferHumanFields(t *testing.T) {
 	tests := []struct {
 		name       string

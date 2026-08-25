@@ -486,13 +486,14 @@ func canonicalizeReviewOrder(review *Review) {
 }
 
 type currentRiskIdentityEntry struct {
-	kind        string
-	value       string
-	riskID      string
-	sourceKey   string
-	sourceIndex int
-	riskIndex   int
-	provenance  int
+	kind         string
+	value        string
+	visibleValue string
+	riskID       string
+	sourceKey    string
+	sourceIndex  int
+	riskIndex    int
+	provenance   int
 }
 
 func preserveCurrentRiskIdentities(next *State, current State) error {
@@ -512,10 +513,12 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 	type match struct{ old, next int }
 	matches := make([]match, 0, min(len(oldEntries), len(newEntries)))
 	// A source-key match is exact across visible identity, kind, normalized
-	// value, and source position.
+	// hidden value, and source position. It is eligible only while the next
+	// value also equals the accepted visible title: an accepted title edit is
+	// authoritative for deciding whether a later ChangeSet changed semantics.
 	for nextIndex := range newEntries {
 		for oldIndex := range oldEntries {
-			if oldMatched[oldIndex] || oldEntries[oldIndex].sourceKey != newEntries[nextIndex].sourceKey {
+			if oldMatched[oldIndex] || oldEntries[oldIndex].sourceKey != newEntries[nextIndex].sourceKey || oldEntries[oldIndex].visibleValue != newEntries[nextIndex].value {
 				continue
 			}
 			oldMatched[oldIndex], newMatched[nextIndex] = true, true
@@ -523,16 +526,28 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 			break
 		}
 	}
-	// Then retain an exact content identity only when that unmatched content is
-	// unique on both sides. Duplicate content cannot safely carry distinct
-	// human status/detail across a positional edit.
+	// If the complete ordered current-risk lists are unchanged from the
+	// accepted visible titles, source position is explicit enough to preserve
+	// even duplicate-title identities.
+	if currentRiskListsEqualAcceptedVisible(oldEntries, newEntries) {
+		for index := range newEntries {
+			if oldMatched[index] || newMatched[index] {
+				continue
+			}
+			oldMatched[index], newMatched[index] = true, true
+			matches = append(matches, match{old: index, next: index})
+		}
+	}
+	// Otherwise retain an exact accepted-visible-title identity only when that
+	// unmatched content is unique on both sides. Duplicate content cannot
+	// safely carry distinct human status/detail across a positional edit.
 	for nextIndex := range newEntries {
 		if newMatched[nextIndex] {
 			continue
 		}
 		oldCandidate, oldCount, newCount := -1, 0, 0
 		for oldIndex := range oldEntries {
-			if !oldMatched[oldIndex] && oldEntries[oldIndex].kind == newEntries[nextIndex].kind && oldEntries[oldIndex].value == newEntries[nextIndex].value {
+			if !oldMatched[oldIndex] && oldEntries[oldIndex].kind == newEntries[nextIndex].kind && oldEntries[oldIndex].visibleValue == newEntries[nextIndex].value {
 				oldCandidate, oldCount = oldIndex, oldCount+1
 			}
 		}
@@ -602,6 +617,18 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 	return nil
 }
 
+func currentRiskListsEqualAcceptedVisible(oldEntries, newEntries []currentRiskIdentityEntry) bool {
+	if len(oldEntries) != len(newEntries) {
+		return false
+	}
+	for index := range oldEntries {
+		if oldEntries[index].kind != newEntries[index].kind || oldEntries[index].visibleValue != newEntries[index].value {
+			return false
+		}
+	}
+	return true
+}
+
 func currentRiskIdentityEntries(state State) ([]currentRiskIdentityEntry, error) {
 	compatibility := state.Machine.LegacyCompatibility
 	riskIndexes := make(map[string]int, len(state.Review.Risks))
@@ -636,8 +663,14 @@ func currentRiskIdentityEntries(state State) ([]currentRiskIdentityEntry, error)
 			return nil, fmt.Errorf("current-risk provenance %q has no visible risk", provenance.RiskID)
 		}
 		entries = append(entries, currentRiskIdentityEntry{
-			kind: provenance.Kind, value: strings.TrimSpace(normalizeMarkdownText(value)),
-			riskID: provenance.RiskID, sourceKey: provenance.SourceKey, sourceIndex: sourceIndex, riskIndex: riskIndex, provenance: provenanceIndex,
+			kind:         provenance.Kind,
+			value:        strings.TrimSpace(normalizeMarkdownText(value)),
+			visibleValue: strings.TrimSpace(normalizeMarkdownText(state.Review.Risks[riskIndex].Title)),
+			riskID:       provenance.RiskID,
+			sourceKey:    provenance.SourceKey,
+			sourceIndex:  sourceIndex,
+			riskIndex:    riskIndex,
+			provenance:   provenanceIndex,
 		})
 	}
 	return entries, nil
