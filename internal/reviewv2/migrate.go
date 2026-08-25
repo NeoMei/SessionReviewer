@@ -624,6 +624,9 @@ func scanMigrationInventory(project *pathguard.Directory, scanRoot, mappedRoot s
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
 		for _, child := range children {
 			name := child.Name()
+			if atomicfile.IsRootDirectoryTemporaryName(name) {
+				return errors.New("migration tree contains incomplete machine directory staging")
+			}
 			if actual == migrationReviewRoot && name == ".session-reviewer" {
 				continue
 			}
@@ -909,6 +912,9 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
 		for _, child := range children {
 			itemCount++
+			if atomicfile.IsRootDirectoryTemporaryName(child.Name()) {
+				return errors.New("migration backup contains incomplete directory staging")
+			}
 			candidate := path.Join(relative, child.Name())
 			if !safeMigrationRelative(migrationReviewRoot + "/" + candidate) {
 				return errors.New("migration backup contains an unsafe path")

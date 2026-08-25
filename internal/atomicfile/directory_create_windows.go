@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func createRootDirectoryFile(parent *os.Root, name string, _ fs.FileMode) (*os.File, error) {
+func createRootDirectoryFile(parent *os.Root, name string, _ fs.FileMode, _ rootDirectoryCreationHooks) (*rootDirectoryCreation, error) {
 	parentFile, err := parent.Open(".")
 	if err != nil {
 		return nil, err
@@ -35,5 +35,5 @@ func createRootDirectoryFile(parent *os.Root, name string, _ fs.FileMode) (*os.F
 		_ = windows.CloseHandle(handle)
 		return nil, os.ErrInvalid
 	}
-	return file, nil
+	return &rootDirectoryCreation{file: file, published: true}, nil
 }

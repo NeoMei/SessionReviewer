@@ -5,6 +5,7 @@ package reviewv2
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -45,6 +46,31 @@ func TestArchiveInventoryDirectoryRestoresExactLegacyModeAfterUmask(t *testing.T
 				t.Fatalf("mode=%v want=%v", info.Mode().Perm(), test.mode)
 			}
 		})
+	}
+}
+
+func TestMigrationInventoryRejectsDirectoryStagingResidue(t *testing.T) {
+	rootPath := t.TempDir()
+	reviewRoot := filepath.Join(rootPath, filepath.FromSlash(migrationReviewRoot))
+	if err := os.MkdirAll(reviewRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	residue := ".session-reviewer-directory-" + strings.Repeat("a", 32)
+	if err := os.Mkdir(filepath.Join(reviewRoot, residue), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	project, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer project.Close()
+
+	entries, err := scanMigrationInventory(project, migrationReviewRoot, migrationReviewRoot, false)
+	if err == nil || !strings.Contains(err.Error(), "incomplete machine directory staging") || len(entries) != 0 {
+		t.Fatalf("entries=%v err=%v", entries, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(reviewRoot, residue)); statErr != nil {
+		t.Fatal(statErr)
 	}
 }
 

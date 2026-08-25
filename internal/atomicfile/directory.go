@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,6 +11,20 @@ import (
 )
 
 var ErrRootDirectoryIdentityChanged = errors.New("root directory identity changed during creation")
+
+const rootDirectoryTemporaryPrefix = ".session-reviewer-directory-"
+
+// IsRootDirectoryTemporaryName reports the exact bounded name shape reserved
+// for an unpublished rooted directory. Inventory scanners can reject a
+// process-crash residue instead of treating it as user or migration content.
+func IsRootDirectoryTemporaryName(name string) bool {
+	encoded := strings.TrimPrefix(name, rootDirectoryTemporaryPrefix)
+	if encoded == name || len(encoded) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(encoded)
+	return err == nil
+}
 
 // EnsureRootDir creates exactly one directory below an existing, pinned
 // parent and does not return success until the parent's directory entry has
@@ -23,8 +38,9 @@ func EnsureRootDir(root *os.Root, path string, perm fs.FileMode) error {
 }
 
 // EnsureRootDirCreated is EnsureRootDir plus an ownership result. created is
-// true only when this call's Mkdir succeeded; an entry found before Mkdir or
-// won by a concurrent creator reports false and must not be silently repaired.
+// true only when this call's identity-bound creation was published at the
+// requested leaf. A pre-existing entry or no-replace publication winner
+// reports false and must not be silently repaired.
 func EnsureRootDirCreated(root *os.Root, path string, perm fs.FileMode) (created bool, err error) {
 	return ensureRootDirCreatedWithOps(root, path, perm, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
 }
@@ -40,8 +56,23 @@ func EnsureRootDirPrepared(root *os.Root, path string, perm fs.FileMode, beforeP
 }
 
 type directoryDurabilityOps struct {
-	createDirectory func(*os.Root, string, fs.FileMode) (*os.File, error)
-	syncParent      func(*os.Root, string) error
+	createDirectory        func(*os.Root, string, fs.FileMode) (*os.File, error)
+	afterStagingIdentity   func(*os.Root, string, string) error
+	beforeDirectoryPublish func(*os.Root, string, string) error
+	syncParent             func(*os.Root, string) error
+}
+
+type rootDirectoryCreation struct {
+	file      *os.File
+	info      os.FileInfo
+	published bool
+	publish   func() error
+	cleanup   func() error
+}
+
+type rootDirectoryCreationHooks struct {
+	afterStagingIdentity   func(*os.Root, string, string) error
+	beforeDirectoryPublish func(*os.Root, string, string) error
 }
 
 func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) error {
@@ -53,7 +84,7 @@ func ensureRootDirCreatedWithOps(root *os.Root, path string, perm fs.FileMode, o
 	return ensureRootDirPreparedWithOps(root, path, perm, nil, nil, ops)
 }
 
-func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error, ops directoryDurabilityOps) (bool, error) {
+func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error, ops directoryDurabilityOps) (created bool, retErr error) {
 	if root == nil {
 		return false, fmt.Errorf("atomic file root is required")
 	}
@@ -76,11 +107,19 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 	if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("inspect directory: %w", err)
 	}
-	createDirectory := ops.createDirectory
-	if createDirectory == nil {
-		createDirectory = createRootDirectoryFile
+	var creation *rootDirectoryCreation
+	if ops.createDirectory != nil {
+		createdFile, createErr := ops.createDirectory(parent, name, perm)
+		if createErr == nil {
+			creation = &rootDirectoryCreation{file: createdFile, published: true}
+		}
+		err = createErr
+	} else {
+		creation, err = createRootDirectoryFile(parent, name, perm, rootDirectoryCreationHooks{
+			afterStagingIdentity:   ops.afterStagingIdentity,
+			beforeDirectoryPublish: ops.beforeDirectoryPublish,
+		})
 	}
-	createdFile, err := createDirectory(parent, name, perm)
 	if err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return false, fmt.Errorf("create directory: %w", err)
@@ -97,10 +136,59 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 		}
 		return false, validateRootDirectoryIdentity(parent, name, info)
 	}
-	defer createdFile.Close()
-	createdInfo, err := createdFile.Stat()
-	if err != nil || !createdInfo.IsDir() || isAtomicRedirect(createdInfo) {
-		return true, ErrRootDirectoryIdentityChanged
+	if creation == nil || creation.file == nil {
+		return false, ErrRootDirectoryIdentityChanged
+	}
+	cleanupPending := creation.cleanup != nil && !creation.published
+	defer func() {
+		if cleanupPending {
+			retErr = errors.Join(retErr, creation.cleanup())
+		}
+		retErr = errors.Join(retErr, creation.file.Close())
+	}()
+	createdInfo := creation.info
+	openedInfo, err := creation.file.Stat()
+	if createdInfo == nil {
+		createdInfo = openedInfo
+	}
+	if err != nil || createdInfo == nil || !createdInfo.IsDir() || isAtomicRedirect(createdInfo) || !os.SameFile(createdInfo, openedInfo) {
+		return false, ErrRootDirectoryIdentityChanged
+	}
+	modePrepared := false
+	if !creation.published {
+		if err := setExactCreatedRootDirectoryMode(creation.file, perm); err != nil {
+			return false, fmt.Errorf("set exact staged directory mode: %w", err)
+		}
+		if err := syncCreatedRootDirectory(creation.file); err != nil {
+			return false, fmt.Errorf("sync staged directory handle: %w", err)
+		}
+		modePrepared = true
+		if creation.publish == nil {
+			return false, ErrRootDirectoryIdentityChanged
+		}
+		if err := creation.publish(); err != nil {
+			if !errors.Is(err, os.ErrExist) {
+				return false, fmt.Errorf("publish directory: %w", err)
+			}
+			cleanupErr := creation.cleanup()
+			cleanupPending = false
+			if cleanupErr != nil {
+				return false, fmt.Errorf("clean unpublished directory staging: %w", cleanupErr)
+			}
+			info, err = parent.Lstat(name)
+			if err != nil {
+				return false, fmt.Errorf("inspect concurrently published directory: %w", err)
+			}
+			if err := validateRootDirectory(parent, name, info); err != nil {
+				return false, err
+			}
+			if err := ops.syncParent(parent, name); err != nil {
+				return false, fmt.Errorf("sync concurrently published directory entry: %w", err)
+			}
+			return false, validateRootDirectoryIdentity(parent, name, info)
+		}
+		creation.published = true
+		cleanupPending = false
 	}
 	current, err := parent.Lstat(name)
 	if err != nil || !os.SameFile(createdInfo, current) || !current.IsDir() || isAtomicRedirect(current) {
@@ -111,18 +199,20 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 			return true, err
 		}
 	}
-	if err := setExactCreatedRootDirectoryMode(createdFile, perm); err != nil {
-		return true, fmt.Errorf("set exact created directory mode: %w", err)
+	if !modePrepared {
+		if err := setExactCreatedRootDirectoryMode(creation.file, perm); err != nil {
+			return true, fmt.Errorf("set exact created directory mode: %w", err)
+		}
 	}
 	if prepare != nil {
-		if err := prepare(createdFile); err != nil {
+		if err := prepare(creation.file); err != nil {
 			return true, err
 		}
 	}
-	if err := syncCreatedRootDirectory(createdFile); err != nil {
+	if err := syncCreatedRootDirectory(creation.file); err != nil {
 		return true, fmt.Errorf("sync created directory handle: %w", err)
 	}
-	afterPrepare, err := createdFile.Stat()
+	afterPrepare, err := creation.file.Stat()
 	current, currentErr := parent.Lstat(name)
 	if err != nil || currentErr != nil || !os.SameFile(createdInfo, afterPrepare) || !os.SameFile(createdInfo, current) {
 		return true, ErrRootDirectoryIdentityChanged

@@ -51,6 +51,9 @@ func TestEnsureRootDirPreparedNeverChmodsExistingDirectory(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(rootPath, "existing"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(filepath.Join(rootPath, "existing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	root, err := os.OpenRoot(rootPath)
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +161,160 @@ func TestEnsureRootDirPreparedChmodsCreatedHandleNotReplacement(t *testing.T) {
 	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
 	if readErr != nil || string(body) != "replacement" {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
+	}
+}
+
+func TestEnsureRootDirPreparedDoesNotAdoptStagingReplacementBeforeOpen(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	var stagingName string
+	createdAway := filepath.Join(rootPath, "created-away")
+	created, err := ensureRootDirPreparedWithOps(root, "legacy", 0o751, nil, nil, directoryDurabilityOps{
+		afterStagingIdentity: func(parent *os.Root, temporary, final string) error {
+			if final != "legacy" || temporary == final || !IsRootDirectoryTemporaryName(temporary) {
+				return errors.New("invalid staging publication names")
+			}
+			stagingName = temporary
+			if err := os.Rename(filepath.Join(rootPath, temporary), createdAway); err != nil {
+				return err
+			}
+			if err := parent.Mkdir(temporary, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(filepath.Join(rootPath, temporary), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(rootPath, temporary, "user.txt"), []byte("replacement"), 0o644)
+		},
+		syncParent: func(*os.Root, string) error { return nil },
+	})
+	if created || !errors.Is(err, ErrRootDirectoryIdentityChanged) {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if stagingName == "" {
+		t.Fatal("staging identity hook did not run")
+	}
+	if _, statErr := os.Lstat(filepath.Join(rootPath, "legacy")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("final directory was unexpectedly published: %v", statErr)
+	}
+	if info, statErr := os.Stat(filepath.Join(rootPath, stagingName)); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o755 {
+		t.Fatalf("staging replacement was chmodded: mode=%v", info.Mode().Perm())
+	}
+	body, readErr := os.ReadFile(filepath.Join(rootPath, stagingName, "user.txt"))
+	if readErr != nil || string(body) != "replacement" {
+		t.Fatalf("staging replacement bytes changed: body=%q err=%v", body, readErr)
+	}
+	if info, statErr := os.Stat(createdAway); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Fatalf("unopened original staging mode=%v want=0700", info.Mode().Perm())
+	}
+}
+
+func TestEnsureRootDirPreparedFinalCollisionCleansOnlyOwnedStaging(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	prepareCalls := 0
+	var stagingName string
+	created, err := ensureRootDirPreparedWithOps(root, "legacy", 0o751, nil, func(*os.File) error {
+		prepareCalls++
+		return nil
+	}, directoryDurabilityOps{
+		beforeDirectoryPublish: func(parent *os.Root, temporary, final string) error {
+			stagingName = temporary
+			staging, err := parent.Open(temporary)
+			if err != nil {
+				return err
+			}
+			info, statErr := staging.Stat()
+			closeErr := staging.Close()
+			if statErr != nil || closeErr != nil || info.Mode().Perm() != 0o751 {
+				return errors.New("staging directory was not prepared before publication")
+			}
+			if err := parent.Mkdir(final, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(filepath.Join(rootPath, final), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(rootPath, final, "user.txt"), []byte("winner"), 0o644)
+		},
+		syncParent: syncRootDirectoryEntry,
+	})
+	if err != nil || created || prepareCalls != 0 {
+		t.Fatalf("created=%v prepareCalls=%d err=%v", created, prepareCalls, err)
+	}
+	if info, statErr := os.Stat(filepath.Join(rootPath, "legacy")); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o755 {
+		t.Fatalf("final winner was chmodded: mode=%v", info.Mode().Perm())
+	}
+	body, readErr := os.ReadFile(filepath.Join(rootPath, "legacy", "user.txt"))
+	if readErr != nil || string(body) != "winner" {
+		t.Fatalf("final winner bytes changed: body=%q err=%v", body, readErr)
+	}
+	if _, statErr := os.Lstat(filepath.Join(rootPath, stagingName)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("owned staging was not cleaned after collision: %v", statErr)
+	}
+}
+
+func TestEnsureRootDirPreparedDoesNotPublishStagingReplacement(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	var stagingName string
+	createdAway := filepath.Join(rootPath, "created-away")
+	created, err := ensureRootDirPreparedWithOps(root, "legacy", 0o751, nil, nil, directoryDurabilityOps{
+		beforeDirectoryPublish: func(parent *os.Root, temporary, _ string) error {
+			stagingName = temporary
+			if err := os.Rename(filepath.Join(rootPath, temporary), createdAway); err != nil {
+				return err
+			}
+			if err := parent.Mkdir(temporary, 0o700); err != nil {
+				return err
+			}
+			if err := os.Chmod(filepath.Join(rootPath, temporary), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(rootPath, temporary, "user.txt"), []byte("replacement"), 0o644)
+		},
+		syncParent: func(*os.Root, string) error { return nil },
+	})
+	if created || !errors.Is(err, ErrRootDirectoryIdentityChanged) {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(rootPath, "legacy")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("staging replacement was published: %v", statErr)
+	}
+	if info, statErr := os.Stat(filepath.Join(rootPath, stagingName)); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o755 {
+		t.Fatalf("staging replacement was chmodded: mode=%v", info.Mode().Perm())
+	}
+	body, readErr := os.ReadFile(filepath.Join(rootPath, stagingName, "user.txt"))
+	if readErr != nil || string(body) != "replacement" {
+		t.Fatalf("staging replacement bytes changed: body=%q err=%v", body, readErr)
+	}
+	if info, statErr := os.Stat(createdAway); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o751 {
+		t.Fatalf("owned staging handle mode=%v want=0751", info.Mode().Perm())
 	}
 }
 
