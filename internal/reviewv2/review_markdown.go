@@ -32,11 +32,15 @@ func ParseReview(source []byte) (ReviewDocument, error) {
 	if err != nil {
 		return ReviewDocument{}, fmt.Errorf("parse review: %w", err)
 	}
-	blocks, err := scanMarkerBlocks(source)
+	blocks, err := scanMarkerBlocks(source, identity.bodyStart)
 	if err != nil {
 		return ReviewDocument{}, fmt.Errorf("parse review markers: %w", err)
 	}
-	name, err := firstDocumentTitle(source, identity.bodyStart)
+	firstControlled, err := firstReviewControlledStart(source, identity.bodyStart, blocks)
+	if err != nil {
+		return ReviewDocument{}, err
+	}
+	name, err := strictDocumentRootTitle(source, identity.bodyStart, firstControlled, "")
 	if err != nil {
 		return ReviewDocument{}, fmt.Errorf("parse review: %w", err)
 	}
@@ -83,6 +87,27 @@ func ParseReview(source []byte) (ReviewDocument, error) {
 		}
 	}
 	return document, nil
+}
+
+func firstReviewControlledStart(source []byte, bodyStart int, blocks []markerBlock) (int, error) {
+	first := firstMarkerStart(blocks, len(source))
+	headings, err := markdownHeadings(source[bodyStart:], bodyStart)
+	if err != nil {
+		return 0, fmt.Errorf("parse review headings: %w", err)
+	}
+	controlled := map[string]struct{}{
+		"项目目标": {}, "当前阶段": {}, "当前状态": {}, "下一步": {},
+		"风险与待办": {}, "关键决策": {}, "最近验证": {},
+	}
+	for _, heading := range headings {
+		if heading.level != 2 {
+			continue
+		}
+		if _, ok := controlled[heading.name]; ok && heading.start < first {
+			first = heading.start
+		}
+	}
+	return first, nil
 }
 
 func reviewMarkerContainers(source []byte, bodyStart int) (map[string]sourceSpan, error) {

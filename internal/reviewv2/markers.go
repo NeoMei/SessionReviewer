@@ -191,23 +191,25 @@ func requiredFrontmatterInt(mapping *yaml.Node, name string) (int, error) {
 	return value, nil
 }
 
-func scanMarkerBlocks(source []byte) ([]markerBlock, error) {
+func scanMarkerBlocks(source []byte, bodyStart int) ([]markerBlock, error) {
+	fenced, err := fencedCodeSpans(source[bodyStart:], bodyStart)
+	if err != nil {
+		return nil, err
+	}
 	blocks := make([]markerBlock, 0)
 	ids := make(map[string]struct{})
 	var active *markerBlock
-	inFence := false
-	var fenceByte byte
-	fenceWidth := 0
+	fenceIndex := 0
 
-	for start := 0; start <= len(source); {
+	for start := bodyStart; start <= len(source); {
 		end, next := physicalLine(source, start)
 		line := source[start:end]
-		if inFence {
-			if closesFence(line, fenceByte, fenceWidth) {
-				inFence = false
-			}
-		} else if marker, width, ok := opensFence(line); ok {
-			inFence, fenceByte, fenceWidth = true, marker, width
+		for fenceIndex < len(fenced) && start >= fenced[fenceIndex].end {
+			fenceIndex++
+		}
+		if fenceIndex < len(fenced) && start >= fenced[fenceIndex].start && start < fenced[fenceIndex].end {
+			// Goldmark, rather than marker scanning heuristics, is authoritative
+			// about whether this physical line belongs to Markdown fenced code.
 		} else if kind, id, recognized, err := parseOpeningMarker(line); recognized {
 			if err != nil {
 				return nil, fmt.Errorf("invalid marker at byte %d: %w", start, err)
@@ -250,6 +252,126 @@ func scanMarkerBlocks(source []byte) ([]markerBlock, error) {
 		return nil, fmt.Errorf("marker %s %q is missing its closing marker", active.kind, active.id)
 	}
 	return blocks, nil
+}
+
+func fencedCodeSpans(body []byte, offset int) ([]sourceSpan, error) {
+	root := goldmark.DefaultParser().Parse(text.NewReader(body))
+	spans := make([]sourceSpan, 0)
+	err := ast.Walk(root, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		block, ok := node.(*ast.FencedCodeBlock)
+		if !ok {
+			return ast.WalkContinue, nil
+		}
+		openingStart, ok := fencedOpeningStart(body, block)
+		if !ok {
+			// An empty closed fence contains no marker-bearing line. Goldmark
+			// exposes no source segment for its delimiter-only form.
+			return ast.WalkContinue, nil
+		}
+		openingEnd, afterOpening := physicalLine(body, openingStart)
+		marker, width, ok := fenceRun(body[openingStart:openingEnd])
+		if !ok {
+			return ast.WalkStop, errors.New("cannot locate Goldmark fenced-code opening delimiter")
+		}
+		closingStart := afterOpening
+		if block.Lines().Len() != 0 {
+			closingStart = block.Lines().At(block.Lines().Len() - 1).Stop
+		}
+		if closingStart >= len(body) {
+			return ast.WalkStop, fmt.Errorf("unclosed fenced code at byte %d", offset+openingStart)
+		}
+		closingEnd, afterClosing := physicalLine(body, closingStart)
+		if !closesFenceAnywhere(body[closingStart:closingEnd], marker, width) {
+			return ast.WalkStop, fmt.Errorf("unclosed fenced code at byte %d", offset+openingStart)
+		}
+		spans = append(spans, sourceSpan{start: offset + openingStart, end: offset + afterClosing})
+		return ast.WalkContinue, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return spans, nil
+}
+
+func fencedOpeningStart(source []byte, block *ast.FencedCodeBlock) (int, bool) {
+	if block.Info != nil {
+		return physicalLineStartAt(source, block.Info.Segment.Start), true
+	}
+	if block.Lines().Len() == 0 {
+		return 0, false
+	}
+	contentStart := physicalLineStartAt(source, block.Lines().At(0).Start)
+	if contentStart == 0 {
+		return 0, false
+	}
+	return previousPhysicalLineStart(source, contentStart), true
+}
+
+func physicalLineStartAt(source []byte, position int) int {
+	if position < 0 {
+		position = 0
+	}
+	if position > len(source) {
+		position = len(source)
+	}
+	if index := bytes.LastIndexByte(source[:position], '\n'); index >= 0 {
+		return index + 1
+	}
+	return 0
+}
+
+func previousPhysicalLineStart(source []byte, lineStart int) int {
+	if lineStart <= 0 {
+		return 0
+	}
+	position := lineStart - 1
+	if position > 0 && source[position-1] == '\r' {
+		position--
+	}
+	return physicalLineStartAt(source, position)
+}
+
+func fenceRun(line []byte) (byte, int, bool) {
+	for index := 0; index < len(line); index++ {
+		if line[index] != '`' && line[index] != '~' {
+			continue
+		}
+		end := index
+		for end < len(line) && line[end] == line[index] {
+			end++
+		}
+		if end-index >= 3 {
+			return line[index], end - index, true
+		}
+		index = end - 1
+	}
+	return 0, 0, false
+}
+
+func closesFenceAnywhere(line []byte, marker byte, minimum int) bool {
+	for index := 0; index < len(line); index++ {
+		if line[index] != marker {
+			continue
+		}
+		end := index
+		for end < len(line) && line[end] == marker {
+			end++
+		}
+		if end-index < minimum {
+			index = end - 1
+			continue
+		}
+		for suffix := end; suffix < len(line); suffix++ {
+			if line[suffix] != ' ' && line[suffix] != '\t' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func reservedMarkerComment(line []byte) bool {
@@ -311,48 +433,6 @@ func validStableID(id string) bool {
 		}
 		previousDash = false
 		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
-			return false
-		}
-	}
-	return true
-}
-
-func opensFence(line []byte) (byte, int, bool) {
-	index := 0
-	for index < len(line) && index < 3 && line[index] == ' ' {
-		index++
-	}
-	if index >= len(line) || (line[index] != '`' && line[index] != '~') {
-		return 0, 0, false
-	}
-	marker := line[index]
-	end := index
-	for end < len(line) && line[end] == marker {
-		end++
-	}
-	if end-index < 3 {
-		return 0, 0, false
-	}
-	if marker == '`' && bytes.ContainsRune(line[end:], '`') {
-		return 0, 0, false
-	}
-	return marker, end - index, true
-}
-
-func closesFence(line []byte, marker byte, minimum int) bool {
-	index := 0
-	for index < len(line) && index < 3 && line[index] == ' ' {
-		index++
-	}
-	end := index
-	for end < len(line) && line[end] == marker {
-		end++
-	}
-	if end-index < minimum {
-		return false
-	}
-	for ; end < len(line); end++ {
-		if line[end] != ' ' && line[end] != '\t' {
 			return false
 		}
 	}
@@ -444,15 +524,39 @@ func parseMarkdownList(value string) []string {
 	return items
 }
 
-func firstDocumentTitle(source []byte, bodyStart int) (string, error) {
+func strictDocumentRootTitle(source []byte, bodyStart, firstControlled int, expected string) (string, error) {
 	headings, err := markdownHeadings(source[bodyStart:], bodyStart)
 	if err != nil {
 		return "", err
 	}
+	rootHeadings := make([]markdownHeading, 0, 1)
 	for _, heading := range headings {
 		if heading.level == 1 {
-			return heading.name, nil
+			rootHeadings = append(rootHeadings, heading)
 		}
 	}
-	return "", errors.New("document is missing its level-one title")
+	if len(rootHeadings) != 1 {
+		return "", fmt.Errorf("document must contain exactly one root H1, found %d", len(rootHeadings))
+	}
+	root := rootHeadings[0]
+	if root.start >= firstControlled {
+		return "", errors.New("document root H1 must precede controlled sections and markers")
+	}
+	if expected != "" && root.name != expected {
+		return "", fmt.Errorf("document root H1 must be %q", expected)
+	}
+	return root.name, nil
+}
+
+func firstMarkerStart(blocks []markerBlock, fallback int) int {
+	if len(blocks) == 0 {
+		return fallback
+	}
+	first := blocks[0].open.start
+	for _, block := range blocks[1:] {
+		if block.open.start < first {
+			first = block.open.start
+		}
+	}
+	return first
 }

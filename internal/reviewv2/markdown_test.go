@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -392,4 +393,155 @@ func TestTwoDocumentCanonicalRenderAcceptsExplicitEmptyCollections(t *testing.T)
 func markdownSHA256(source []byte) string {
 	digest := sha256.Sum256(source)
 	return fmt.Sprintf("%x", digest)
+}
+
+func TestMarkerScannerUsesGoldmarkFencedCodeSpansOnlyAfterFrontmatter(t *testing.T) {
+	base := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
+	withoutEmbeddedFence := bytes.Replace(base, []byte("```mermaid\nflowchart LR\n  A[信任] --> B[收敛]\n  <!-- session-reviewer:event id=\"timeline-in-fence\" -->\n```\n"), nil, 1)
+	tests := []struct {
+		name      string
+		source    []byte
+		wantError string
+	}{
+		{
+			name:   "unknown frontmatter block scalar cannot hide event",
+			source: bytes.Replace(base, []byte("custom_view: timeline\n"), []byte("custom_view: timeline\ncustom_note: |\n  ```\n"), 1),
+		},
+		{
+			name:   "backticks inside HTML block are not a Markdown fence",
+			source: bytes.Replace(base, []byte("<!-- session-reviewer:event"), []byte("<div>\n```not-a-markdown-fence\n</div>\n\n<!-- session-reviewer:event"), 1),
+		},
+		{
+			name:   "list nested fenced code ignores fake marker",
+			source: bytes.Replace(base, []byte("<!-- session-reviewer:event"), []byte("- 示例\n\n  ```html\n  <!-- session-reviewer:event id=\"event-fake-list\" -->\n  <!-- /session-reviewer:event -->\n  ```\n\n<!-- session-reviewer:event"), 1),
+		},
+		{
+			name:      "unclosed real Markdown fence fails closed",
+			source:    bytes.Replace(withoutEmbeddedFence, []byte("<!-- session-reviewer:event"), []byte("```text\n<!-- session-reviewer:event"), 1),
+			wantError: "unclosed fenced code",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			document, err := ParseHistory(test.source)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("hostile fence accepted or misclassified: events=%v err=%v", document.Events, err)
+				}
+				return
+			}
+			if err != nil || len(document.Events) != 1 || document.Events[0].ID != "timeline-trust-chain" {
+				t.Fatalf("real event silently disappeared: events=%+v err=%v", document.Events, err)
+			}
+		})
+	}
+}
+
+func TestHistoryCanonicalOrderUsesParsedTimeThenStableIDWithoutMutatingCaller(t *testing.T) {
+	events := []Event{
+		historyTestEvent("event-early", "2026-08-23T01:00:00Z"),
+		historyTestEvent("event-same-z", "2026-08-24T01:00:00Z"),
+		historyTestEvent("event-late", "2026-08-25T01:00:00.123Z"),
+		historyTestEvent("event-same-a", "2026-08-24T01:00:00+00:00"),
+	}
+	before := append([]Event(nil), events...)
+	rendered, err := RenderHistory("project-history-order", 1, events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(events, before) {
+		t.Fatalf("RenderHistory mutated caller events: got=%+v want=%+v", events, before)
+	}
+	document, err := ParseHistory(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, len(document.Events))
+	for index, event := range document.Events {
+		got[index] = event.ID
+	}
+	want := []string{"event-late", "event-same-a", "event-same-z", "event-early"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("history order=%v want=%v", got, want)
+	}
+}
+
+func TestHistoryRejectsNonCanonicalOrderAndInvalidOccurredAt(t *testing.T) {
+	base := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
+	blockStart := bytes.Index(base, []byte("<!-- session-reviewer:event"))
+	if blockStart < 0 {
+		t.Fatal("fixture has no event block")
+	}
+	block := bytes.Clone(base[blockStart:])
+
+	laterBlock := bytes.ReplaceAll(block, []byte("timeline-trust-chain"), []byte("timeline-later"))
+	laterBlock = bytes.Replace(laterBlock, []byte("## 2026-08-25 ·"), []byte("## 2026-08-26 ·"), 1)
+	ascending := append(bytes.Clone(base), laterBlock...)
+	if _, err := ParseHistory(ascending); err == nil || !strings.Contains(err.Error(), "reverse chronological") {
+		t.Fatalf("ascending history accepted: %v", err)
+	}
+
+	tieWrong := append(bytes.Clone(base), bytes.ReplaceAll(block, []byte("timeline-trust-chain"), []byte("timeline-aaa"))...)
+	if _, err := ParseHistory(tieWrong); err == nil || !strings.Contains(err.Error(), "stable ID") {
+		t.Fatalf("noncanonical same-time IDs accepted: %v", err)
+	}
+
+	invalid := bytes.Replace(base, []byte("2026-08-25 ·"), []byte("tomorrow ·"), 1)
+	if _, err := ParseHistory(invalid); err == nil || !strings.Contains(err.Error(), "occurred_at") {
+		t.Fatalf("invalid parsed time accepted: %v", err)
+	}
+	event := historyTestEvent("event-invalid", "tomorrow")
+	if out, err := RenderHistory("project-invalid-time", 1, []Event{event}); err == nil || out != nil || !strings.Contains(err.Error(), "occurred_at") {
+		t.Fatalf("invalid rendered time accepted: out=%q err=%v", out, err)
+	}
+}
+
+func TestDocumentRootH1IsUniqueCanonicalAndPrecedesControlledContent(t *testing.T) {
+	history := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
+	review := mustFixture(t, "../../testdata/review-v2/项目回顾.valid.md")
+	tests := []struct {
+		name  string
+		parse func([]byte) error
+		body  []byte
+	}{
+		{
+			name:  "history title must be canonical",
+			parse: func(source []byte) error { _, err := ParseHistory(source); return err },
+			body:  bytes.Replace(history, []byte("# 项目历史"), []byte("# 历史"), 1),
+		},
+		{
+			name:  "history title cannot appear after event",
+			parse: func(source []byte) error { _, err := ParseHistory(source); return err },
+			body:  append(bytes.Replace(history, []byte("# 项目历史\n"), nil, 1), []byte("\n# 项目历史\n")...),
+		},
+		{
+			name:  "history root title is unique",
+			parse: func(source []byte) error { _, err := ParseHistory(source); return err },
+			body:  append(bytes.Clone(history), []byte("\n# 重复根标题\n")...),
+		},
+		{
+			name:  "review title cannot appear after controlled section",
+			parse: func(source []byte) error { _, err := ParseReview(source); return err },
+			body:  append(bytes.Replace(review, []byte("# SessionReviewer v2\n"), nil, 1), []byte("\n# SessionReviewer v2\n")...),
+		},
+		{
+			name:  "review root title is unique",
+			parse: func(source []byte) error { _, err := ParseReview(source); return err },
+			body:  append(bytes.Clone(review), []byte("\n# 重复项目名\n")...),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.parse(test.body); err == nil || !strings.Contains(err.Error(), "root H1") {
+				t.Fatalf("invalid root title accepted or misclassified: %v", err)
+			}
+		})
+	}
+}
+
+func historyTestEvent(id, occurredAt string) Event {
+	return Event{
+		ID: id, OccurredAt: occurredAt, Kind: "验证", Title: id, Meaning: "meaning", Summary: "summary",
+		Why: "why", Changes: []string{"change"}, Results: []string{"result"}, Next: "next",
+	}
 }

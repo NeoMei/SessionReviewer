@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
+	"time"
 )
 
 type HistoryDocument struct {
@@ -26,12 +28,12 @@ func ParseHistory(source []byte) (HistoryDocument, error) {
 	if err != nil {
 		return HistoryDocument{}, fmt.Errorf("parse history: %w", err)
 	}
-	if _, err := firstDocumentTitle(source, identity.bodyStart); err != nil {
-		return HistoryDocument{}, fmt.Errorf("parse history: %w", err)
-	}
-	blocks, err := scanMarkerBlocks(source)
+	blocks, err := scanMarkerBlocks(source, identity.bodyStart)
 	if err != nil {
 		return HistoryDocument{}, fmt.Errorf("parse history markers: %w", err)
+	}
+	if _, err := strictDocumentRootTitle(source, identity.bodyStart, firstMarkerStart(blocks, len(source)), "项目历史"); err != nil {
+		return HistoryDocument{}, fmt.Errorf("parse history: %w", err)
 	}
 	document := HistoryDocument{
 		ProjectID: identity.projectID,
@@ -54,6 +56,9 @@ func ParseHistory(source []byte) (HistoryDocument, error) {
 			document.fields[semanticField{unitID: event.ID, field: field}] = span
 		}
 	}
+	if err := validateHistoryOrder(document.Events); err != nil {
+		return HistoryDocument{}, err
+	}
 	return document, nil
 }
 
@@ -71,17 +76,15 @@ func RenderHistory(projectID string, revision int, events []Event) ([]byte, erro
 	if revision < 1 {
 		return nil, errors.New("render history: revision must be positive")
 	}
-	if len(events) == 0 {
-		events = nil
+	ordered, err := canonicalHistoryEvents(events)
+	if err != nil {
+		return nil, err
 	}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "---\nid: project-history\nentity_type: project_history\nproject_id: %s\nschema_version: %d\nrevision: %d\n---\n# 项目历史\n\n> 按时间逆序排列。\n\n", projectID, SchemaVersion, revision)
-	for _, event := range events {
+	for _, event := range ordered {
 		if !validStableID(event.ID) {
 			return nil, fmt.Errorf("render history: invalid event ID %q", event.ID)
-		}
-		if strings.TrimSpace(event.OccurredAt) == "" || strings.ContainsAny(event.OccurredAt, "\r\n") {
-			return nil, fmt.Errorf("render history: event %q must have one-line occurred_at", event.ID)
 		}
 		if err := validateHeadingValue("event title", event.Title); err != nil {
 			return nil, err
@@ -108,10 +111,81 @@ func RenderHistory(projectID string, revision int, events []Event) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("render history: generated Markdown is invalid: %w", err)
 	}
-	if !reflect.DeepEqual(normalizedEvents(document.Events), normalizedEvents(events)) || document.ProjectID != projectID || document.Revision != revision {
+	if !reflect.DeepEqual(normalizedEvents(document.Events), normalizedEvents(ordered)) || document.ProjectID != projectID || document.Revision != revision {
 		return nil, errors.New("render history: generated Markdown changed semantic fields")
 	}
 	return bytes.Clone(rendered), nil
+}
+
+type timedHistoryEvent struct {
+	event Event
+	time  time.Time
+}
+
+func canonicalHistoryEvents(events []Event) ([]Event, error) {
+	if len(events) == 0 {
+		return nil, nil
+	}
+	timed := make([]timedHistoryEvent, len(events))
+	for index, event := range events {
+		occurred, err := parseEventOccurredAt(event.OccurredAt)
+		if err != nil {
+			return nil, fmt.Errorf("render history: event %q occurred_at: %w", event.ID, err)
+		}
+		timed[index] = timedHistoryEvent{event: event, time: occurred}
+	}
+	sort.Slice(timed, func(left, right int) bool {
+		if !timed[left].time.Equal(timed[right].time) {
+			return timed[left].time.After(timed[right].time)
+		}
+		return timed[left].event.ID < timed[right].event.ID
+	})
+	ordered := make([]Event, len(timed))
+	for index := range timed {
+		ordered[index] = timed[index].event
+	}
+	return ordered, nil
+}
+
+func validateHistoryOrder(events []Event) error {
+	if len(events) < 2 {
+		return nil
+	}
+	previousTime, err := parseEventOccurredAt(events[0].OccurredAt)
+	if err != nil {
+		return fmt.Errorf("event %q occurred_at: %w", events[0].ID, err)
+	}
+	for index := 1; index < len(events); index++ {
+		currentTime, err := parseEventOccurredAt(events[index].OccurredAt)
+		if err != nil {
+			return fmt.Errorf("event %q occurred_at: %w", events[index].ID, err)
+		}
+		if previousTime.Before(currentTime) {
+			return fmt.Errorf("history events are not in reverse chronological order at %q", events[index].ID)
+		}
+		if previousTime.Equal(currentTime) && events[index-1].ID > events[index].ID {
+			return fmt.Errorf("history events at the same time are not ordered by stable ID at %q", events[index].ID)
+		}
+		previousTime = currentTime
+	}
+	return nil
+}
+
+func parseEventOccurredAt(value string) (time.Time, error) {
+	if value != strings.TrimSpace(value) || value == "" || strings.ContainsAny(value, "\r\n") {
+		return time.Time{}, errors.New("must be YYYY-MM-DD or RFC3339Nano")
+	}
+	if len(value) == len("2006-01-02") {
+		parsed, err := time.Parse("2006-01-02", value)
+		if err == nil {
+			return parsed, nil
+		}
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, errors.New("must be YYYY-MM-DD or RFC3339Nano")
+	}
+	return parsed, nil
 }
 
 func normalizedEvents(events []Event) []Event {
@@ -266,6 +340,9 @@ func parseEventBlock(source []byte, block markerBlock) (Event, map[string]source
 		return Event{}, nil, fmt.Errorf("event %q title must use date middle-dot title form", block.id)
 	}
 	event := Event{ID: block.id, OccurredAt: strings.TrimSpace(occurredAt), Title: strings.TrimSpace(title)}
+	if _, err := parseEventOccurredAt(event.OccurredAt); err != nil {
+		return Event{}, nil, fmt.Errorf("event %q occurred_at: %w", block.id, err)
+	}
 	spans := map[string]sourceSpan{"event.title": {start: headings[0].start, end: headings[0].lineEnd}}
 	seen := make(map[string]struct{})
 	for index := 1; index < len(headings); index++ {
