@@ -22,6 +22,7 @@ func securePrivateMigrationPath(path string) error        { return setPrivateMig
 func securePrivateMigrationDirectory(path string) error   { return setPrivateMigrationDACL(path) }
 func securePrivateMigrationFile(file *os.File) error      { return setPrivateMigrationDACL(file.Name()) }
 func secureArchiveSourceForPublication(path string) error { return setPrivateMigrationDACL(path) }
+func secureArchiveInventoryDirectory(path string) error   { return setPrivateMigrationDACL(path) }
 func migrationSourceModeOK(string, fs.FileMode) bool      { return true }
 
 func setPrivateMigrationDACL(path string) error {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 func TestMigrationDryRunWritesNothingAndCrashRecoveryConverges(t *testing.T) {
@@ -338,6 +339,43 @@ func TestMigrationRecoveryConvergesAfterPartialArchiveDirectoryCreation(t *testi
 		t.Fatal(err)
 	}
 	assertV2OnlyVisible(t, fixture.project)
+}
+
+func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "archive"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	project, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer project.Close()
+	secured := false
+	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/new", 0o751,
+		func(string) error { secured = true; return nil },
+		func(string, os.FileMode) bool { return secured },
+	)
+	if err != nil || !secured {
+		t.Fatalf("new archive directory was not secured before validation: secured=%v err=%v", secured, err)
+	}
+	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "new")); statErr != nil || info.Mode().Perm() != 0o751 {
+		t.Fatalf("non-Windows archive mode changed: mode=%v err=%v", info, statErr)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "archive", "existing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secureCalls := 0
+	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/existing", 0o755,
+		func(string) error { secureCalls++; return nil },
+		func(string, os.FileMode) bool { return false },
+	)
+	if err == nil || secureCalls != 0 {
+		t.Fatalf("existing unsafe directory repaired: secureCalls=%d err=%v", secureCalls, err)
+	}
+	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "existing")); statErr != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("existing mode was changed: mode=%v err=%v", info, statErr)
+	}
 }
 
 func TestMigrationRecoveryConvergesAfterCrashFollowingArchiveLink(t *testing.T) {

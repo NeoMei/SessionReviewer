@@ -13,7 +13,7 @@ import (
 
 func setPermissiveMigrationDACL(t *testing.T, path string) {
 	t.Helper()
-	sd, err := windows.SecurityDescriptorFromString("D:(A;;FA;;;WD)")
+	sd, err := windows.SecurityDescriptorFromString("D:(A;OICI;FA;;;WD)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,10 @@ func setPermissiveMigrationDACL(t *testing.T, path string) {
 
 func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T) {
 	fixture := newLegacyMigrationFixture(t)
+	nested := filepath.Join(fixture.project, "docs", "session-review", "nested", "level-two")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	setPermissiveMigrationDACL(t, fixture.project)
 	setPermissiveMigrationDACL(t, fixture.data)
 	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
@@ -36,7 +40,7 @@ func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T)
 	}
 	stop := errors.New("stop")
 	err = applyMigrationWithHook(plan, func(stage Stage) error {
-		if stage == StageBackupComplete {
+		if stage == StageLegacyMoved {
 			return stop
 		}
 		return nil
@@ -49,13 +53,17 @@ func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T)
 		filepath.Join(fixture.data, filepath.FromSlash(migrationJournalRelative(plan.projectKey))),
 		filepath.Join(fixture.project, filepath.FromSlash(migrationReviewRoot+"/.session-reviewer")),
 		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot)),
+		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot+"/archive")),
+		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot+"/archive/nested")),
+		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot+"/archive/nested/level-two")),
+		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot+"/quarantine")),
 	}
 	for _, path := range privatePaths {
 		if !privateMigrationPath(path, 0) {
 			t.Fatalf("private ACL missing: %s", path)
 		}
 	}
-	setPermissiveMigrationDACL(t, privatePaths[0])
+	setPermissiveMigrationDACL(t, privatePaths[len(privatePaths)-2])
 	before, err := os.ReadFile(privatePaths[1])
 	if err != nil {
 		t.Fatal(err)

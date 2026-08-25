@@ -11,6 +11,7 @@ func securePrivateMigrationPath(path string) error      { return os.Chmod(path, 
 func securePrivateMigrationDirectory(path string) error { return os.Chmod(path, 0o700) }
 func securePrivateMigrationFile(file *os.File) error    { return nil }
 func secureArchiveSourceForPublication(string) error    { return nil }
+func secureArchiveInventoryDirectory(string) error      { return nil }
 func migrationSourceModeOK(path string, want fs.FileMode) bool {
 	return privateMigrationPath(path, want)
 }

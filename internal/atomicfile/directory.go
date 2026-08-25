@@ -14,9 +14,17 @@ import (
 // passed the platform durability operation. Existing directories are resynced
 // so a retry can resolve an earlier create-then-sync failure.
 func EnsureRootDir(root *os.Root, path string, perm fs.FileMode) error {
-	return ensureRootDirWithOps(root, path, perm, directoryDurabilityOps{
+	_, err := ensureRootDirCreatedWithOps(root, path, perm, directoryDurabilityOps{
 		syncParent: syncRootDirectoryEntry,
 	})
+	return err
+}
+
+// EnsureRootDirCreated is EnsureRootDir plus an ownership result. created is
+// true only when this call's Mkdir succeeded; an entry found before Mkdir or
+// won by a concurrent creator reports false and must not be silently repaired.
+func EnsureRootDirCreated(root *os.Root, path string, perm fs.FileMode) (created bool, err error) {
+	return ensureRootDirCreatedWithOps(root, path, perm, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
 }
 
 type directoryDurabilityOps struct {
@@ -24,52 +32,57 @@ type directoryDurabilityOps struct {
 }
 
 func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) error {
+	_, err := ensureRootDirCreatedWithOps(root, path, perm, ops)
+	return err
+}
+
+func ensureRootDirCreatedWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) (bool, error) {
 	if root == nil {
-		return fmt.Errorf("atomic file root is required")
+		return false, fmt.Errorf("atomic file root is required")
 	}
 	parent, name, err := openPinnedParent(root, path)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer parent.Close()
 
 	info, err := parent.Lstat(name)
 	if err == nil {
 		if err := validateRootDirectory(parent, name, info); err != nil {
-			return err
+			return false, err
 		}
 		if err := ops.syncParent(parent, name); err != nil {
-			return fmt.Errorf("sync existing directory entry: %w", err)
+			return false, fmt.Errorf("sync existing directory entry: %w", err)
 		}
-		return validateRootDirectoryIdentity(parent, name, info)
+		return false, validateRootDirectoryIdentity(parent, name, info)
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect directory: %w", err)
+		return false, fmt.Errorf("inspect directory: %w", err)
 	}
 	if err := parent.Mkdir(name, perm); err != nil {
 		if !errors.Is(err, os.ErrExist) {
-			return fmt.Errorf("create directory: %w", err)
+			return false, fmt.Errorf("create directory: %w", err)
 		}
 		info, err = parent.Lstat(name)
 		if err != nil {
-			return fmt.Errorf("inspect concurrently created directory: %w", err)
+			return false, fmt.Errorf("inspect concurrently created directory: %w", err)
 		}
 		if err := validateRootDirectory(parent, name, info); err != nil {
-			return err
+			return false, err
 		}
 		if err := ops.syncParent(parent, name); err != nil {
-			return fmt.Errorf("sync concurrently created directory entry: %w", err)
+			return false, fmt.Errorf("sync concurrently created directory entry: %w", err)
 		}
-		return validateRootDirectoryIdentity(parent, name, info)
+		return false, validateRootDirectoryIdentity(parent, name, info)
 	}
 	if err := ops.syncParent(parent, name); err != nil {
-		return fmt.Errorf("sync created directory entry: %w", err)
+		return true, fmt.Errorf("sync created directory entry: %w", err)
 	}
 	info, err = parent.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("inspect created directory: %w", err)
+		return true, fmt.Errorf("inspect created directory: %w", err)
 	}
-	return validateRootDirectory(parent, name, info)
+	return true, validateRootDirectory(parent, name, info)
 }
 
 func validateRootDirectoryIdentity(parent *os.Root, name string, before os.FileInfo) error {

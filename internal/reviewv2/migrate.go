@@ -1173,11 +1173,18 @@ func archiveMigrationSources(project *pathguard.Directory, journal migrationJour
 }
 
 func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative string, mode fs.FileMode) error {
-	if exists, err := migrationEntryExists(project, relative); err != nil {
+	return ensureArchiveInventoryDirectoryWithPrivacy(project, relative, mode, secureArchiveInventoryDirectory, privateMigrationPath)
+}
+
+func ensureArchiveInventoryDirectoryWithPrivacy(project *pathguard.Directory, relative string, mode fs.FileMode, secure func(string) error, private func(string, fs.FileMode) bool) error {
+	created, err := atomicfile.EnsureRootDirCreated(project.Root, filepath.FromSlash(relative), mode.Perm())
+	if err != nil {
 		return err
-	} else if !exists {
-		if err := atomicfile.EnsureRootDir(project.Root, filepath.FromSlash(relative), mode.Perm()); err != nil {
-			return err
+	}
+	full := filepath.Join(project.Path, filepath.FromSlash(relative))
+	if created {
+		if err := secure(full); err != nil {
+			return fmt.Errorf("secure legacy archive directory: %w", err)
 		}
 	}
 	opened, _, err := project.OpenDirectory(relative)
@@ -1185,7 +1192,7 @@ func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative stri
 		return staleMigration("legacy archive directory collided or was redirected")
 	}
 	closeErr := opened.Close()
-	if closeErr != nil || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
+	if closeErr != nil || !private(full, mode) {
 		return staleMigration("legacy archive directory mode changed")
 	}
 	return nil
@@ -1428,12 +1435,8 @@ func ensureMigrationDirectory(directory *pathguard.Directory, relative, privateF
 	current := ""
 	for _, component := range components {
 		current = path.Join(current, component)
-		_, existsErr := directory.Root.Lstat(filepath.FromSlash(current))
-		existed := existsErr == nil
-		if existsErr != nil && !errors.Is(existsErr, os.ErrNotExist) {
-			return existsErr
-		}
-		if err := atomicfile.EnsureRootDir(directory.Root, filepath.FromSlash(current), 0o700); err != nil {
+		created, err := atomicfile.EnsureRootDirCreated(directory.Root, filepath.FromSlash(current), 0o700)
+		if err != nil {
 			return err
 		}
 		opened, _, err := directory.OpenDirectory(current)
@@ -1446,7 +1449,7 @@ func ensureMigrationDirectory(directory *pathguard.Directory, relative, privateF
 		}
 		if current == privateFrom || strings.HasPrefix(current, privateFrom+"/") {
 			full := filepath.Join(directory.Path, filepath.FromSlash(current))
-			if !existed {
+			if created {
 				if err := securePrivateMigrationDirectory(full); err != nil {
 					return fmt.Errorf("secure migration private directory: %w", err)
 				}

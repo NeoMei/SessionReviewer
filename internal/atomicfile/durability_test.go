@@ -113,6 +113,30 @@ func TestEnsureRootDirRetryResyncsExistingDirectory(t *testing.T) {
 	}
 }
 
+func TestEnsureRootDirCreatedDistinguishesOwnedCreationFromExisting(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	created, err := EnsureRootDirCreated(root, "created", 0o700)
+	if err != nil || !created {
+		t.Fatalf("new directory created=%v err=%v", created, err)
+	}
+	created, err = EnsureRootDirCreated(root, "created", 0o700)
+	if err != nil || created {
+		t.Fatalf("existing directory created=%v err=%v", created, err)
+	}
+	if err := os.Mkdir(filepath.Join(rootPath, "existing"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	created, err = EnsureRootDirCreated(root, "existing", 0o700)
+	if err != nil || created {
+		t.Fatalf("preexisting directory created=%v err=%v", created, err)
+	}
+}
+
 func TestSyncRootPublicationRetriesExistingPublishedFile(t *testing.T) {
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)
