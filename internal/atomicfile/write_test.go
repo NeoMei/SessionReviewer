@@ -44,6 +44,53 @@ func TestWriteRootFileRejectsNonLeafPaths(t *testing.T) {
 	}
 }
 
+func TestWriteRootFileCreateIfAbsentNeverReplacesConcurrentPublisher(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	userBytes := []byte("user-published-during-migration")
+	err = WriteRootFileCreateIfAbsent(root, "state.json", []byte("migration-bytes"), 0o600, func() error {
+		return os.WriteFile(filepath.Join(directory, "state.json"), userBytes, 0o600)
+	})
+	if err == nil {
+		t.Fatal("concurrent destination publication was accepted")
+	}
+	got, readErr := os.ReadFile(filepath.Join(directory, "state.json"))
+	if readErr != nil || string(got) != string(userBytes) {
+		t.Fatalf("concurrent publisher overwritten: got=%q err=%v", got, readErr)
+	}
+	entries, readDirErr := os.ReadDir(directory)
+	if readDirErr != nil || len(entries) != 1 || entries[0].Name() != "state.json" {
+		t.Fatalf("failed create left artifacts=%v err=%v", entries, readDirErr)
+	}
+}
+
+func TestWriteRootFileCreateIfAbsentPublishesNewFile(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	checks := 0
+	if err := WriteRootFileCreateIfAbsent(root, "state.json", []byte("migration-bytes"), 0o600, func() error {
+		checks++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 {
+		t.Fatalf("before-publication hook calls=%d", checks)
+	}
+	got, err := os.ReadFile(filepath.Join(directory, "state.json"))
+	if err != nil || string(got) != "migration-bytes" {
+		t.Fatalf("published bytes=%q err=%v", got, err)
+	}
+}
+
 func TestWriteRootFileCheckedRejectsInvalidLeafBeforeCheckpointOrTemp(t *testing.T) {
 	directory := t.TempDir()
 	root, err := os.OpenRoot(directory)

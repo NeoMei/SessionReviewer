@@ -311,7 +311,7 @@ func ApplyChangeSet(current Accepted, changes ledger.ChangeSet) (ledger.WritePla
 	}
 	plan := ledger.WritePlan{ProjectRoot: current.projectRoot, Files: []ledger.PlannedFile{
 		{RelativePath: HistoryRelativePath, Data: historyBody, Perm: 0o644},
-		{RelativePath: MachineLedgerRelativePath, Data: machineBody, Perm: 0o644},
+		{RelativePath: MachineLedgerRelativePath, Data: machineBody, Perm: 0o600},
 		{RelativePath: ReviewRelativePath, Data: reviewBody, Perm: 0o644},
 	}}
 	for index := range plan.Files {
@@ -712,7 +712,7 @@ func Render(projectRoot string, state State) (ledger.WritePlan, error) {
 	}
 	return ledger.WritePlan{ProjectRoot: projectRoot, Files: []ledger.PlannedFile{
 		{RelativePath: HistoryRelativePath, Data: historyBody, Perm: 0o644},
-		{RelativePath: MachineLedgerRelativePath, Data: machineBody, Perm: 0o644},
+		{RelativePath: MachineLedgerRelativePath, Data: machineBody, Perm: 0o600},
 		{RelativePath: ReviewRelativePath, Data: reviewBody, Perm: 0o644},
 	}}, nil
 }

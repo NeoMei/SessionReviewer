@@ -79,6 +79,33 @@ func TestWalkMarkdownPrunesSessionReviewerBackupsButExactLedgerReadRemainsAvaila
 	}
 }
 
+func TestBackupPruningUsesPortableComponentAwarePathKey(t *testing.T) {
+	for _, test := range []struct {
+		prefix string
+		name   string
+	}{
+		{"DOCS/SESSION-REVIEW/.SESSION-REVIEWER", "backups"},
+		{"docs/session-review/.session-reviewer", "BACKUPS"},
+		{"Docs/Session-Review/.Session-Reviewer", "Backups"},
+	} {
+		if !skipMarkdownTreeEntry(test.prefix, test.name) {
+			t.Fatalf("portable backup path was not pruned: %s/%s", test.prefix, test.name)
+		}
+	}
+	for _, test := range []struct {
+		prefix string
+		name   string
+	}{
+		{"docs/session-review", "backups"},
+		{"docs/session-review/.session-reviewer/backups", "nested"},
+		{"docs/session-review/.session-reviewer", "backups-extra"},
+	} {
+		if skipMarkdownTreeEntry(test.prefix, test.name) {
+			t.Fatalf("non-component backup path was pruned: %s/%s", test.prefix, test.name)
+		}
+	}
+}
+
 func TestReadStableRegularRootFileRejectsInPlaceMutation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state")
@@ -425,5 +452,55 @@ func TestTreeRejectsNonDirectoryWalkRoot(t *testing.T) {
 	defer directory.Close()
 	if err := directory.WalkMarkdown("file.md", func(string, []byte) error { return nil }); err == nil {
 		t.Fatal("non-directory walk root accepted")
+	}
+}
+
+func TestDirectoryPhysicalIdentitySurvivesReopenAndRejectsReplacement(t *testing.T) {
+	parent := t.TempDir()
+	rootPath := filepath.Join(parent, "root")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	first, err := Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstToken, err := first.PhysicalIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopenedToken, err := reopened.PhysicalIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
+	if !firstToken.Valid() || firstToken != reopenedToken {
+		t.Fatalf("reopened identity changed: first=%+v reopened=%+v", firstToken, reopenedToken)
+	}
+	retired := filepath.Join(parent, "retired")
+	if err := os.Rename(rootPath, retired); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementToken, err := replacement.PhysicalIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = replacement.Close()
+	if replacementToken == firstToken {
+		t.Fatalf("replacement reused physical identity: %+v", replacementToken)
 	}
 }

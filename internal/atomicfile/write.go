@@ -67,6 +67,39 @@ func WriteRootFileChecked(parent *os.Root, leaf string, data []byte, perm fs.Fil
 	return writeRootAtParentCheckedWithOps(parent, leaf, data, perm, checkpoint, defaultDurabilityOps())
 }
 
+// WriteRootFileCreateIfAbsent durably publishes a new regular file without
+// ever replacing an existing destination. beforePublish runs after the
+// temporary file is durable and immediately before the no-replace link.
+func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm fs.FileMode, beforePublish func() error) error {
+	if parent == nil {
+		return fmt.Errorf("atomic file root is required")
+	}
+	if !strictRootLeaf(leaf) {
+		return fmt.Errorf("atomic file leaf is invalid")
+	}
+	if _, err := parent.Lstat(leaf); err == nil {
+		return fs.ErrExist
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	ops := defaultDurabilityOps()
+	ops.publish = func(root *os.Root, temporary, destination string) error {
+		if err := root.Link(temporary, destination); err != nil {
+			return err
+		}
+		return root.Remove(temporary)
+	}
+	checkpointCalls := 0
+	checkpoint := func() error {
+		checkpointCalls++
+		if checkpointCalls == 2 && beforePublish != nil {
+			return beforePublish()
+		}
+		return nil
+	}
+	return writeRootAtParentCheckedWithOps(parent, leaf, data, perm, checkpoint, ops)
+}
+
 func strictRootLeaf(leaf string) bool {
 	return leaf != "" && leaf != "." && leaf != ".." &&
 		!strings.ContainsAny(leaf, `/\:`) && !filepath.IsAbs(leaf) &&

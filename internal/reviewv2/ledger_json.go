@@ -175,6 +175,7 @@ func scanExactJSONFields(decoder *json.Decoder, expected reflect.Type, path stri
 		if err != nil {
 			return err
 		}
+		seen := make(map[string]struct{}, len(fields))
 		for decoder.More() {
 			nameToken, err := decoder.Token()
 			if err != nil {
@@ -188,6 +189,7 @@ func scanExactJSONFields(decoder *json.Decoder, expected reflect.Type, path stri
 			if !allowed {
 				return fmt.Errorf("unknown JSON object key %q at %s", name, path)
 			}
+			seen[name] = struct{}{}
 			if err := scanExactJSONFields(decoder, fieldType, path+"."+name, cache); err != nil {
 				return err
 			}
@@ -195,6 +197,13 @@ func scanExactJSONFields(decoder *json.Decoder, expected reflect.Type, path stri
 		end, err := decoder.Token()
 		if err != nil || end != json.Delim('}') {
 			return errors.New("unterminated JSON object")
+		}
+		required := make(map[string]struct{})
+		collectRequiredJSONFields(expected, required)
+		for name := range required {
+			if _, found := seen[name]; !found {
+				return fmt.Errorf("missing required JSON object key %q at %s", name, path)
+			}
 		}
 	case '[':
 		if expected.Kind() != reflect.Slice && expected.Kind() != reflect.Array {
@@ -213,6 +222,32 @@ func scanExactJSONFields(decoder *json.Decoder, expected reflect.Type, path stri
 		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
 	return nil
+}
+
+func collectRequiredJSONFields(structType reflect.Type, required map[string]struct{}) {
+	structType = dereferenceJSONType(structType)
+	for index := 0; index < structType.NumField(); index++ {
+		field := structType.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		tagName, options, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if tagName == "-" {
+			continue
+		}
+		fieldType := dereferenceJSONType(field.Type)
+		if field.Anonymous && tagName == "" && fieldType.Kind() == reflect.Struct {
+			collectRequiredJSONFields(fieldType, required)
+			continue
+		}
+		if strings.Contains(","+options+",", ",omitempty,") {
+			continue
+		}
+		if tagName == "" {
+			tagName = field.Name
+		}
+		required[tagName] = struct{}{}
+	}
 }
 
 func exactJSONFieldTypes(structType reflect.Type, cache map[reflect.Type]map[string]reflect.Type) (map[string]reflect.Type, error) {

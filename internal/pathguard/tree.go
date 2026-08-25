@@ -449,7 +449,9 @@ func readStableRegularRootFile(root *os.Root, name string, before os.FileInfo, m
 }
 
 func skipMarkdownTreeEntry(prefix, name string) bool {
-	return path.Join(prefix, name) == "docs/session-review/.session-reviewer/backups" ||
+	candidateKey, candidateErr := platform.PathKey("windows", platform.CaseInsensitive, path.Join(prefix, name))
+	backupKey, backupErr := platform.PathKey("windows", platform.CaseInsensitive, "docs/session-review/.session-reviewer/backups")
+	return (candidateErr == nil && backupErr == nil && candidateKey == backupKey) ||
 		strings.HasPrefix(name, ".") ||
 		strings.EqualFold(name, "sync-conflicts") ||
 		strings.HasSuffix(name, strings.TrimPrefix(atomicfile.BackupPath("x"), "x"))

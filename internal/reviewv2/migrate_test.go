@@ -3,6 +3,7 @@ package reviewv2
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -135,6 +136,297 @@ func TestRecoverMigrationNeverOverwritesUserEditAfterInterruption(t *testing.T) 
 			after, readErr := os.ReadFile(full)
 			if readErr != nil || !bytes.Equal(after, edited) {
 				t.Fatalf("user edit overwritten: got=%q err=%v", after, readErr)
+			}
+		})
+	}
+}
+
+func TestMigrationV2PublicationNeverReplacesConcurrentUserFile(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userBytes := []byte("user-published-between-check-and-publish")
+	injected := false
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		beforeV2Publish: func(relative string) error {
+			if injected || relative != ReviewRelativePath {
+				return nil
+			}
+			injected = true
+			return os.WriteFile(filepath.Join(fixture.project, filepath.FromSlash(relative)), userBytes, 0o644)
+		},
+	})
+	if !errors.Is(err, ErrStaleMigration) {
+		t.Fatalf("publication race error=%v", err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(ReviewRelativePath)))
+	if readErr != nil || !bytes.Equal(got, userBytes) {
+		t.Fatalf("concurrent user file overwritten: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestMigrationArchiveNeverReplacesConcurrentDestination(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "docs/session-review/current-state.md"
+	destination := plan.BackupRoot + "/archive/current-state.md"
+	original, err := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(source)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	userBytes := []byte("user-owned-archive-destination")
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		beforeArchivePublish: func(gotSource, gotDestination string) error {
+			if gotSource != source || gotDestination != destination {
+				return nil
+			}
+			return os.WriteFile(filepath.Join(fixture.project, filepath.FromSlash(destination)), userBytes, 0o600)
+		},
+	})
+	if !errors.Is(err, ErrStaleMigration) {
+		t.Fatalf("archive collision error=%v", err)
+	}
+	gotDestination, destinationErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(destination)))
+	gotSource, sourceErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(source)))
+	if destinationErr != nil || !bytes.Equal(gotDestination, userBytes) {
+		t.Fatalf("archive destination overwritten: got=%q err=%v", gotDestination, destinationErr)
+	}
+	if sourceErr != nil || !bytes.Equal(gotSource, original) {
+		t.Fatalf("archive source lost after collision: got=%q err=%v", gotSource, sourceErr)
+	}
+}
+
+func TestMigrationArchiveRollsBackWhenSourceReplacedAfterPublish(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "docs/session-review/current-state.md"
+	destination := plan.BackupRoot + "/archive/current-state.md"
+	userBytes := []byte("user-replaced-source-after-archive-publish")
+	injected := false
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		afterArchivePublish: func(gotSource, gotDestination string) error {
+			if injected || gotSource != source || gotDestination != destination {
+				return nil
+			}
+			injected = true
+			temporary := filepath.Join(fixture.project, "replacement.tmp")
+			if err := os.WriteFile(temporary, userBytes, 0o644); err != nil {
+				return err
+			}
+			return os.Rename(temporary, filepath.Join(fixture.project, filepath.FromSlash(source)))
+		},
+	})
+	if !errors.Is(err, ErrStaleMigration) {
+		t.Fatalf("source replacement error=%v", err)
+	}
+	gotSource, sourceErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(source)))
+	if sourceErr != nil || !bytes.Equal(gotSource, userBytes) {
+		t.Fatalf("replacement source overwritten: got=%q err=%v", gotSource, sourceErr)
+	}
+	if _, destinationErr := os.Lstat(filepath.Join(fixture.project, filepath.FromSlash(destination))); !errors.Is(destinationErr, os.ErrNotExist) {
+		t.Fatalf("archive rollback did not remove owned destination: %v", destinationErr)
+	}
+}
+
+func TestMigrationRecoveryConvergesAfterPartialArchiveDirectoryCreation(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := errors.New("stop after archive directory creation")
+	created := false
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		afterArchiveDirectory: func(string) error {
+			if created {
+				return nil
+			}
+			created = true
+			return stop
+		},
+	})
+	if !errors.Is(err, stop) || !created {
+		t.Fatalf("partial archive interruption=%v created=%v", err, created)
+	}
+	if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err != nil {
+		t.Fatal(err)
+	}
+	assertV2OnlyVisible(t, fixture.project)
+}
+
+func TestMigrationRecoveryConvergesAfterCrashFollowingArchiveLink(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				crashed = true
+			}
+		}()
+		_ = applyMigrationWithHooks(plan, migrationHooks{
+			afterArchivePublish: func(string, string) error {
+				panic("simulated process death after no-replace link")
+			},
+		})
+	}()
+	if !crashed {
+		t.Fatal("archive link crash was not injected")
+	}
+	if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err != nil {
+		t.Fatal(err)
+	}
+	assertV2OnlyVisible(t, fixture.project)
+}
+
+func TestMigrationAuthenticatesV2ModesAtEveryRecoveryStage(t *testing.T) {
+	for _, stage := range []Stage{StageV2Written, StageLegacyMoved, StageCommitted} {
+		for _, target := range []string{ReviewRelativePath, HistoryRelativePath, MachineLedgerRelativePath} {
+			t.Run(string(stage)+"/"+filepath.Base(target), func(t *testing.T) {
+				fixture := newLegacyMigrationFixture(t)
+				plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				stop := errors.New("stop after stage")
+				if err := applyMigrationWithHook(plan, func(current Stage) error {
+					if current == stage {
+						return stop
+					}
+					return nil
+				}); !errors.Is(err, stop) {
+					t.Fatalf("stage interruption=%v", err)
+				}
+				expected := os.FileMode(0o644)
+				mutated := os.FileMode(0o600)
+				if target == MachineLedgerRelativePath {
+					expected, mutated = 0o600, 0o644
+				}
+				full := filepath.Join(fixture.project, filepath.FromSlash(target))
+				before, err := os.Stat(full)
+				if err != nil || before.Mode().Perm() != expected {
+					t.Fatalf("initial mode=%v want=%v err=%v", before, expected, err)
+				}
+				if err := os.Chmod(full, mutated); err != nil {
+					t.Fatal(err)
+				}
+				err = RecoverMigration(fixture.project, fixture.projectInfo, fixture.data)
+				if !errors.Is(err, ErrStaleMigration) {
+					t.Fatalf("mode mutation recovery=%v", err)
+				}
+				after, statErr := os.Stat(full)
+				if statErr != nil || after.Mode().Perm() != mutated {
+					t.Fatalf("recovery changed user mode=%v err=%v", after, statErr)
+				}
+			})
+		}
+	}
+}
+
+func TestRecoveryRejectsNonPrivateMachineDirectoriesWithoutRepair(t *testing.T) {
+	tests := []struct {
+		stage    Stage
+		rootKind string
+		relative func(MigrationPlan) string
+	}{
+		{StageBackupComplete, "data", func(MigrationPlan) string { return migrationJournalDir }},
+		{StageBackupComplete, "project", func(MigrationPlan) string { return "docs/session-review/.session-reviewer" }},
+		{StageBackupComplete, "project", func(MigrationPlan) string { return migrationBackupRoot }},
+		{StageBackupComplete, "project", func(plan MigrationPlan) string { return plan.BackupRoot }},
+		{StageBackupComplete, "project", func(plan MigrationPlan) string { return plan.BackupRoot + "/objects" }},
+		{StageLegacyMoved, "project", func(plan MigrationPlan) string { return plan.BackupRoot + "/archive" }},
+	}
+	for _, test := range tests {
+		t.Run(test.rootKind+"/"+filepath.Base(test.relative(MigrationPlan{BackupRoot: "backup"})), func(t *testing.T) {
+			fixture := newLegacyMigrationFixture(t)
+			plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop := errors.New("stop after stage")
+			if err := applyMigrationWithHook(plan, func(current Stage) error {
+				if current == test.stage {
+					return stop
+				}
+				return nil
+			}); !errors.Is(err, stop) {
+				t.Fatalf("stage interruption=%v", err)
+			}
+			root := fixture.project
+			if test.rootKind == "data" {
+				root = fixture.data
+			}
+			full := filepath.Join(root, filepath.FromSlash(test.relative(plan)))
+			if err := os.Chmod(full, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			before := fixture.snapshot()
+			err = RecoverMigration(fixture.project, fixture.projectInfo, fixture.data)
+			if err == nil {
+				t.Fatal("non-private machine directory was accepted")
+			}
+			if after := fixture.snapshot(); !reflect.DeepEqual(before, after) {
+				t.Fatal("recovery wrote after directory mode became unsafe")
+			}
+			info, statErr := os.Stat(full)
+			if statErr != nil || info.Mode().Perm() != 0o755 {
+				t.Fatalf("recovery silently repaired mode=%v err=%v", info, statErr)
+			}
+		})
+	}
+}
+
+func TestRecoveryRejectsUnexpectedBackupNamespaceEntries(t *testing.T) {
+	tests := []struct {
+		stage    Stage
+		relative func(MigrationPlan) string
+	}{
+		{StageBackupComplete, func(plan MigrationPlan) string { return plan.BackupRoot + "/unexpected.bin" }},
+		{StageBackupComplete, func(plan MigrationPlan) string { return plan.BackupRoot + "/objects/extra" }},
+		{StageLegacyMoved, func(plan MigrationPlan) string { return plan.BackupRoot + "/archive/unexpected.md" }},
+	}
+	for index, test := range tests {
+		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
+			fixture := newLegacyMigrationFixture(t)
+			plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop := errors.New("stop after stage")
+			if err := applyMigrationWithHook(plan, func(current Stage) error {
+				if current == test.stage {
+					return stop
+				}
+				return nil
+			}); !errors.Is(err, stop) {
+				t.Fatalf("stage interruption=%v", err)
+			}
+			extra := filepath.Join(fixture.project, filepath.FromSlash(test.relative(plan)))
+			if err := os.MkdirAll(filepath.Dir(extra), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			userBytes := []byte("unexpected-user-backup-entry")
+			if err := os.WriteFile(extra, userBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err = RecoverMigration(fixture.project, fixture.projectInfo, fixture.data)
+			if err == nil {
+				t.Fatal("unexpected backup namespace entry was accepted")
+			}
+			got, readErr := os.ReadFile(extra)
+			if readErr != nil || !bytes.Equal(got, userBytes) {
+				t.Fatalf("unexpected entry changed: got=%q err=%v", got, readErr)
 			}
 		})
 	}

@@ -52,13 +52,15 @@ type MigrationPlan struct {
 	Writes         []ledger.PlannedFile
 	ManifestSHA256 string
 
-	DataRoot   string
-	dataInfo   os.FileInfo
-	projectKey string
-	projectID  string
-	plannedAt  time.Time
-	inventory  []migrationJournalEntry
-	report     MigrationReport
+	DataRoot            string
+	dataInfo            os.FileInfo
+	projectRootIdentity migrationJournalRoot
+	dataRootIdentity    migrationJournalRoot
+	projectKey          string
+	projectID           string
+	plannedAt           time.Time
+	inventory           []migrationJournalEntry
+	report              MigrationReport
 }
 
 type MigrationReport struct {
@@ -67,6 +69,14 @@ type MigrationReport struct {
 	BackupRelative string   `json:"backup_relative,omitempty"`
 	Creates        []string `json:"creates"`
 	Archives       []string `json:"archives"`
+}
+
+type migrationHooks struct {
+	afterStage            func(Stage) error
+	beforeV2Publish       func(relative string) error
+	afterArchiveDirectory func(destination string) error
+	beforeArchivePublish  func(source, destination string) error
+	afterArchivePublish   func(source, destination string) error
 }
 
 type backupManifest struct {
@@ -109,6 +119,14 @@ func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string,
 		return MigrationPlan{}, fmt.Errorf("open migration data root: %w", err)
 	}
 	defer data.Close()
+	projectIdentity, err := captureMigrationRoot(project)
+	if err != nil {
+		return MigrationPlan{}, err
+	}
+	dataIdentity, err := captureMigrationRoot(data)
+	if err != nil {
+		return MigrationPlan{}, err
+	}
 	projectKey, err := migrationProjectKey(project.Path)
 	if err != nil {
 		return MigrationPlan{}, err
@@ -126,7 +144,7 @@ func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string,
 		return MigrationPlan{}, errors.New("mixed legacy and v2 state has no matching migration journal")
 	}
 	if version == VersionV2 {
-		return MigrationPlan{ProjectRoot: projectRoot, ProjectInfo: projectInfo, DataRoot: dataRoot, dataInfo: data.Info(), report: MigrationReport{DryRun: true, Creates: []string{}, Archives: []string{}}}, nil
+		return MigrationPlan{ProjectRoot: projectRoot, ProjectInfo: projectInfo, DataRoot: dataRoot, dataInfo: data.Info(), projectRootIdentity: projectIdentity, dataRootIdentity: dataIdentity, report: MigrationReport{DryRun: true, Creates: []string{}, Archives: []string{}}}, nil
 	}
 	if version != VersionLegacy {
 		return MigrationPlan{}, errors.New("review ledger is not a migratable legacy ledger")
@@ -175,7 +193,7 @@ func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string,
 	plan := MigrationPlan{
 		ProjectRoot: projectRoot, ProjectInfo: projectInfo, BackupRoot: backupRoot,
 		Legacy: append([]ledger.SnapshotFile(nil), usage.Files...), Writes: clonePlannedFiles(writes.Files), ManifestSHA256: manifestSHA256,
-		DataRoot: dataRoot, dataInfo: data.Info(), projectKey: projectKey, projectID: legacyState.ProjectID, plannedAt: now.UTC(), inventory: append([]migrationJournalEntry(nil), inventory...),
+		DataRoot: dataRoot, dataInfo: data.Info(), projectRootIdentity: projectIdentity, dataRootIdentity: dataIdentity, projectKey: projectKey, projectID: legacyState.ProjectID, plannedAt: now.UTC(), inventory: append([]migrationJournalEntry(nil), inventory...),
 		report: MigrationReport{Required: true, DryRun: true, BackupRelative: backupRoot, Creates: creates, Archives: archives},
 	}
 	return plan, nil
@@ -197,6 +215,10 @@ func ApplyMigration(plan MigrationPlan) (MigrationReport, error) {
 }
 
 func applyMigrationWithHook(plan MigrationPlan, hook func(Stage) error) error {
+	return applyMigrationWithHooks(plan, migrationHooks{afterStage: hook})
+}
+
+func applyMigrationWithHooks(plan MigrationPlan, hooks migrationHooks) error {
 	journal, err := journalFromMigrationPlan(plan)
 	if err != nil {
 		return err
@@ -223,15 +245,18 @@ func applyMigrationWithHook(plan MigrationPlan, hook func(Stage) error) error {
 	if err := validateAbsentMigrationV2Preimages(project, journal); err != nil {
 		return err
 	}
+	if err := validateMigrationRootBindings(project, data, journal); err != nil {
+		return err
+	}
 	if err := saveMigrationJournal(data, journal); err != nil {
 		return err
 	}
-	if hook != nil {
-		if err := hook(StagePlanned); err != nil {
+	if hooks.afterStage != nil {
+		if err := hooks.afterStage(StagePlanned); err != nil {
 			return err
 		}
 	}
-	return resumeMigration(project, data, &journal, clonePlannedFiles(plan.Writes), hook)
+	return resumeMigration(project, data, &journal, clonePlannedFiles(plan.Writes), hooks)
 }
 
 func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string) error {
@@ -270,7 +295,7 @@ func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot stri
 	if err != nil {
 		return err
 	}
-	return resumeMigration(project, data, &journal, writes, nil)
+	return resumeMigration(project, data, &journal, writes, migrationHooks{})
 }
 
 func openMigrationRoots(projectRoot string, projectInfo os.FileInfo, dataRoot string, dataInfo os.FileInfo) (*pathguard.Directory, *pathguard.Directory, error) {
@@ -303,6 +328,7 @@ func journalFromMigrationPlan(plan MigrationPlan) (migrationJournal, error) {
 	journal := migrationJournal{
 		Version: migrationJournalVersion, ProjectKey: projectKey, ProjectID: plan.projectID,
 		ManifestSHA256: plan.ManifestSHA256, BackupRelative: plan.BackupRoot, Stage: StagePlanned, PlannedAt: plan.plannedAt,
+		ProjectRoot: plan.projectRootIdentity, DataRoot: plan.dataRootIdentity,
 		Legacy: snapshotJournalFiles(plan.Legacy), Writes: plannedJournalFiles(plan.Writes), VisibleInventory: append([]migrationJournalEntry(nil), plan.inventory...),
 	}
 	sortMigrationJournal(&journal)
@@ -312,11 +338,14 @@ func journalFromMigrationPlan(plan MigrationPlan) (migrationJournal, error) {
 	return journal, nil
 }
 
-func resumeMigration(project, data *pathguard.Directory, journal *migrationJournal, writes []ledger.PlannedFile, hook func(Stage) error) error {
+func resumeMigration(project, data *pathguard.Directory, journal *migrationJournal, writes []ledger.PlannedFile, hooks migrationHooks) error {
 	if project == nil || data == nil || journal == nil {
 		return errors.New("migration recovery state is required")
 	}
 	if journal.Stage == StagePlanned {
+		if err := validateMigrationRootBindings(project, data, *journal); err != nil {
+			return err
+		}
 		if err := validateMigrationSources(project, *journal, false); err != nil {
 			return err
 		}
@@ -326,13 +355,16 @@ func resumeMigration(project, data *pathguard.Directory, journal *migrationJourn
 		if err := advanceMigrationJournal(data, journal, StageBackupComplete); err != nil {
 			return err
 		}
-		if hook != nil {
-			if err := hook(StageBackupComplete); err != nil {
+		if hooks.afterStage != nil {
+			if err := hooks.afterStage(StageBackupComplete); err != nil {
 				return err
 			}
 		}
 	}
 	if journal.Stage == StageBackupComplete {
+		if err := validateMigrationRootBindings(project, data, *journal); err != nil {
+			return err
+		}
 		if err := validateMigrationSources(project, *journal, false); err != nil {
 			return err
 		}
@@ -342,7 +374,7 @@ func resumeMigration(project, data *pathguard.Directory, journal *migrationJourn
 		if len(writes) != 3 {
 			return staleMigration("cannot reconstruct planned v2 documents")
 		}
-		if err := writeMigrationV2(project, *journal, writes); err != nil {
+		if err := writeMigrationV2(project, *journal, writes, hooks); err != nil {
 			return err
 		}
 		if err := validateMigrationSources(project, *journal, false); err != nil {
@@ -351,13 +383,16 @@ func resumeMigration(project, data *pathguard.Directory, journal *migrationJourn
 		if err := advanceMigrationJournal(data, journal, StageV2Written); err != nil {
 			return err
 		}
-		if hook != nil {
-			if err := hook(StageV2Written); err != nil {
+		if hooks.afterStage != nil {
+			if err := hooks.afterStage(StageV2Written); err != nil {
 				return err
 			}
 		}
 	}
 	if journal.Stage == StageV2Written {
+		if err := validateMigrationRootBindings(project, data, *journal); err != nil {
+			return err
+		}
 		if err := validateMigrationV2(project, *journal); err != nil {
 			return err
 		}
@@ -367,27 +402,30 @@ func resumeMigration(project, data *pathguard.Directory, journal *migrationJourn
 		if err := verifyMigrationBackup(project, *journal, false); err != nil {
 			return err
 		}
-		if err := archiveMigrationSources(project, *journal); err != nil {
+		if err := archiveMigrationSources(project, *journal, hooks); err != nil {
 			return err
 		}
 		if err := advanceMigrationJournal(data, journal, StageLegacyMoved); err != nil {
 			return err
 		}
-		if hook != nil {
-			if err := hook(StageLegacyMoved); err != nil {
+		if hooks.afterStage != nil {
+			if err := hooks.afterStage(StageLegacyMoved); err != nil {
 				return err
 			}
 		}
 	}
 	if journal.Stage == StageLegacyMoved {
+		if err := validateMigrationRootBindings(project, data, *journal); err != nil {
+			return err
+		}
 		if err := verifyCommittedMigration(project, *journal); err != nil {
 			return err
 		}
 		if err := advanceMigrationJournal(data, journal, StageCommitted); err != nil {
 			return err
 		}
-		if hook != nil {
-			if err := hook(StageCommitted); err != nil {
+		if hooks.afterStage != nil {
+			if err := hooks.afterStage(StageCommitted); err != nil {
 				return err
 			}
 		}
@@ -395,10 +433,50 @@ func resumeMigration(project, data *pathguard.Directory, journal *migrationJourn
 	if journal.Stage != StageCommitted {
 		return errors.New("migration did not reach committed stage")
 	}
+	if err := validateMigrationRootBindings(project, data, *journal); err != nil {
+		return err
+	}
 	if err := verifyCommittedMigration(project, *journal); err != nil {
 		return err
 	}
 	return removeMigrationJournal(data, *journal)
+}
+
+func captureMigrationRoot(directory *pathguard.Directory) (migrationJournalRoot, error) {
+	if directory == nil || directory.Root == nil || !filepath.IsAbs(directory.Path) {
+		return migrationJournalRoot{}, errors.New("migration root is required")
+	}
+	identity, err := directory.PhysicalIdentity()
+	if err != nil {
+		return migrationJournalRoot{}, fmt.Errorf("capture migration root identity: %w", err)
+	}
+	return migrationJournalRoot{CanonicalPath: directory.Path, Identity: identity}, nil
+}
+
+func validateMigrationRootBindings(project, data *pathguard.Directory, journal migrationJournal) error {
+	for _, item := range []struct {
+		name      string
+		directory *pathguard.Directory
+		expected  migrationJournalRoot
+	}{
+		{name: "project", directory: project, expected: journal.ProjectRoot},
+		{name: "data", directory: data, expected: journal.DataRoot},
+	} {
+		current, err := captureMigrationRoot(item.directory)
+		if err != nil || current != item.expected {
+			return staleMigration("physical " + item.name + " root identity changed")
+		}
+		reopened, err := pathguard.Open(item.expected.CanonicalPath)
+		if err != nil {
+			return staleMigration("physical " + item.name + " root identity changed")
+		}
+		reopenedIdentity, identityErr := captureMigrationRoot(reopened)
+		closeErr := reopened.Close()
+		if identityErr != nil || closeErr != nil || reopenedIdentity != item.expected {
+			return staleMigration("physical " + item.name + " root identity changed")
+		}
+	}
+	return nil
 }
 
 func advanceMigrationJournal(data *pathguard.Directory, journal *migrationJournal, stage Stage) error {
@@ -452,12 +530,45 @@ func validateMigrationSources(project *pathguard.Directory, journal migrationJou
 	if !allowArchived && len(archived) != 0 {
 		return staleMigration("legacy archive advanced beyond the journal stage")
 	}
-	combined := append(append([]migrationJournalEntry(nil), active...), archived...)
+	combined, err := combineMigrationLocations(project, journal, active, archived, allowArchived)
+	if err != nil {
+		return err
+	}
 	sort.Slice(combined, func(i, j int) bool { return combined[i].RelativePath < combined[j].RelativePath })
 	if !equalMigrationInventory(combined, journal.VisibleInventory) {
 		return staleMigration("legacy files were added, removed, modified, or moved after planning")
 	}
 	return nil
+}
+
+func combineMigrationLocations(project *pathguard.Directory, journal migrationJournal, active, archived []migrationJournalEntry, allowAliases bool) ([]migrationJournalEntry, error) {
+	combined := make(map[string]migrationJournalEntry, len(active)+len(archived))
+	for _, entry := range active {
+		combined[entry.RelativePath] = entry
+	}
+	for _, entry := range archived {
+		if previous, duplicate := combined[entry.RelativePath]; duplicate {
+			if !allowAliases || previous != entry {
+				return nil, staleMigration("migration source location is ambiguous or unsafe")
+			}
+			if entry.Kind == "directory" {
+				continue
+			}
+			activeInfo, activeErr := project.Root.Lstat(filepath.FromSlash(entry.RelativePath))
+			archiveRelative := journal.BackupRelative + "/archive/" + strings.TrimPrefix(entry.RelativePath, migrationReviewRoot+"/")
+			archiveInfo, archiveErr := project.Root.Lstat(filepath.FromSlash(archiveRelative))
+			if activeErr != nil || archiveErr != nil || !os.SameFile(activeInfo, archiveInfo) {
+				return nil, staleMigration("migration source location is ambiguous or unsafe")
+			}
+			continue
+		}
+		combined[entry.RelativePath] = entry
+	}
+	result := make([]migrationJournalEntry, 0, len(combined))
+	for _, entry := range combined {
+		result = append(result, entry)
+	}
+	return result, nil
 }
 
 func scanActiveMigrationInventory(project *pathguard.Directory) ([]migrationJournalEntry, error) {
@@ -630,6 +741,9 @@ func createAndVerifyMigrationBackup(project *pathguard.Directory, journal migrat
 			return fmt.Errorf("create migration backup tree: %w", err)
 		}
 	}
+	if err := scanExactMigrationBackup(project, journal, manifest, manifestBody, false, false); err != nil {
+		return err
+	}
 	objects, _, err := project.OpenDirectory(journal.BackupRelative + "/objects")
 	if err != nil {
 		return err
@@ -661,6 +775,24 @@ func verifyMigrationBackup(project *pathguard.Directory, journal migrationJourna
 	if err != nil || digest != journal.ManifestSHA256 {
 		return errors.New("migration backup manifest does not match journal")
 	}
+	if err := scanExactMigrationBackup(project, journal, manifest, manifestBody, requireArchive, true); err != nil {
+		return err
+	}
+	for _, relative := range []string{
+		migrationReviewRoot + "/.session-reviewer",
+		migrationBackupRoot,
+		journal.BackupRelative,
+		journal.BackupRelative + "/objects",
+	} {
+		if err := requireMigrationDirectoryMode(project, relative, 0o700); err != nil {
+			return errors.New("migration backup directory is redirected, changed, or not private")
+		}
+	}
+	if requireArchive {
+		if err := requireMigrationDirectoryMode(project, journal.BackupRelative+"/archive", 0o700); err != nil {
+			return errors.New("migration archive directory is redirected, changed, or not private")
+		}
+	}
 	body, found, err := project.ReadRegularOptional(journal.BackupRelative+"/manifest.json", int64(len(manifestBody)))
 	if err != nil || !found || !bytes.Equal(body, manifestBody) {
 		return errors.New("migration backup manifest is missing or changed")
@@ -683,6 +815,161 @@ func verifyMigrationBackup(project *pathguard.Directory, journal migrationJourna
 				return errors.New("migration archive is missing or changed")
 			}
 		}
+	}
+	return nil
+}
+
+type expectedMigrationBackupEntry struct {
+	kind   string
+	hash   string
+	size   int64
+	mode   fs.FileMode
+	needed bool
+}
+
+func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJournal, manifest backupManifest, manifestBody []byte, requireArchive, requireBase bool) error {
+	expected := map[string]expectedMigrationBackupEntry{
+		"manifest.json": {kind: "file", hash: hashPrefixed(manifestBody), size: int64(len(manifestBody)), mode: 0o600, needed: requireBase},
+		"objects":       {kind: "directory", mode: 0o700, needed: requireBase},
+	}
+	for _, file := range manifest.Files {
+		expected[file.ObjectRelative] = expectedMigrationBackupEntry{kind: "file", hash: file.SHA256, size: file.Size, mode: 0o600, needed: requireBase}
+	}
+	archiveAllowed := journal.Stage == StageV2Written || requireArchive
+	if archiveAllowed {
+		expected["archive"] = expectedMigrationBackupEntry{kind: "directory", mode: 0o700, needed: requireArchive}
+		for _, entry := range journal.VisibleInventory {
+			relative := "archive/" + strings.TrimPrefix(entry.RelativePath, migrationReviewRoot+"/")
+			expected[relative] = expectedMigrationBackupEntry{
+				kind: entry.Kind, hash: entry.SHA256, size: entry.Size, mode: fs.FileMode(entry.Mode), needed: requireArchive,
+			}
+		}
+	}
+	root, _, err := project.OpenDirectory(journal.BackupRelative)
+	if err != nil {
+		return errors.New("migration backup root is redirected or invalid")
+	}
+	_ = root.Close()
+	seen := make(map[string]struct{}, len(expected))
+	portable := make(map[string]string, len(expected))
+	itemCount := 0
+	fileCount := 0
+	totalBytes := int64(0)
+	var walk func(string) error
+	walk = func(relative string) error {
+		actualRoot := journal.BackupRelative
+		if relative != "" {
+			actualRoot += "/" + relative
+		}
+		directory, before, err := project.OpenDirectory(actualRoot)
+		if err != nil {
+			return errors.New("migration backup directory is redirected or invalid")
+		}
+		defer directory.Close()
+		file, err := directory.Open(".")
+		if err != nil {
+			return errors.New("cannot enumerate migration backup")
+		}
+		children := make([]os.DirEntry, 0, 64)
+		for {
+			batch, readErr := file.ReadDir(256)
+			if len(children)+len(batch) > maxMigrationTreeItems-itemCount {
+				_ = file.Close()
+				return errors.New("migration backup exceeds entry limit")
+			}
+			children = append(children, batch...)
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			if readErr != nil {
+				_ = file.Close()
+				return errors.New("cannot enumerate migration backup")
+			}
+		}
+		if err := file.Close(); err != nil {
+			return errors.New("cannot enumerate migration backup")
+		}
+		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+		for _, child := range children {
+			itemCount++
+			candidate := path.Join(relative, child.Name())
+			if !safeMigrationRelative(migrationReviewRoot + "/" + candidate) {
+				return errors.New("migration backup contains an unsafe path")
+			}
+			key, err := platform.PathKey("windows", platform.CaseInsensitive, candidate)
+			if err != nil {
+				return errors.New("migration backup contains an unsafe portable path")
+			}
+			if previous, collision := portable[key]; collision && previous != candidate {
+				return errors.New("migration backup paths collide by case or NFC")
+			}
+			portable[key] = candidate
+			want, allowed := expected[candidate]
+			if !allowed {
+				return errors.New("migration backup contains an unexpected entry")
+			}
+			info, err := project.Root.Lstat(filepath.FromSlash(journal.BackupRelative + "/" + candidate))
+			if err != nil {
+				return errors.New("migration backup changed while scanning")
+			}
+			if want.kind == "directory" {
+				if !info.IsDir() || !privateMigrationMode(info, want.mode) {
+					return errors.New("migration backup directory type or mode changed")
+				}
+				seen[candidate] = struct{}{}
+				if err := walk(candidate); err != nil {
+					return err
+				}
+				continue
+			}
+			if !info.Mode().IsRegular() || !privateMigrationMode(info, want.mode) || info.Size() != want.size {
+				if strings.HasPrefix(candidate, "objects/") {
+					return errors.New("migration backup object type, size, or mode changed")
+				}
+				return errors.New("migration backup file type, size, or mode changed")
+			}
+			fileCount++
+			if fileCount > 2*maxMigrationFiles+1 || info.Size() < 0 || info.Size() > 2*maxMigrationBytes+maxMigrationJournalBytes-totalBytes {
+				return errors.New("migration backup exceeds bounded namespace budget")
+			}
+			totalBytes += info.Size()
+			body, found, err := project.ReadRegular(journal.BackupRelative+"/"+candidate, want.size)
+			if err != nil || !found || int64(len(body)) != want.size || hashPrefixed(body) != want.hash {
+				if strings.HasPrefix(candidate, "objects/") {
+					return errors.New("migration backup object content changed")
+				}
+				return errors.New("migration backup file content changed")
+			}
+			seen[candidate] = struct{}{}
+		}
+		after, err := directory.Stat(".")
+		if err != nil || !os.SameFile(before, after) {
+			return errors.New("migration backup directory changed while scanning")
+		}
+		return nil
+	}
+	if err := walk(""); err != nil {
+		return err
+	}
+	for relative, want := range expected {
+		if want.needed {
+			if _, found := seen[relative]; !found {
+				return errors.New("migration backup namespace is incomplete")
+			}
+		}
+	}
+	return nil
+}
+
+func requireMigrationDirectoryMode(project *pathguard.Directory, relative string, mode fs.FileMode) error {
+	root, expected, err := project.OpenDirectory(relative)
+	if err != nil {
+		return err
+	}
+	after, inspectErr := root.Stat(".")
+	closeErr := root.Close()
+	if inspectErr != nil || closeErr != nil || !os.SameFile(expected, after) || !privateMigrationMode(after, mode) {
+		return errors.New("migration directory identity or mode changed")
 	}
 	return nil
 }
@@ -717,7 +1004,7 @@ func readMigrationSource(project *pathguard.Directory, journal migrationJournal,
 	return body, nil
 }
 
-func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, writes []ledger.PlannedFile) error {
+func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, writes []ledger.PlannedFile, hooks migrationHooks) error {
 	byPath := make(map[string]ledger.PlannedFile, len(writes))
 	for _, file := range writes {
 		byPath[file.RelativePath] = file
@@ -749,8 +1036,22 @@ func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, wr
 		if exists {
 			continue
 		}
-		if err := atomicfile.WriteRoot(project.Root, filepath.FromSlash(file.RelativePath), file.Data, file.Perm.Perm()); err != nil {
-			return fmt.Errorf("write v2 migration target: %w", err)
+		parent, _, err := project.OpenDirectory(path.Dir(file.RelativePath))
+		if err != nil {
+			return err
+		}
+		publishErr := atomicfile.WriteRootFileCreateIfAbsent(parent, path.Base(file.RelativePath), file.Data, file.Perm.Perm(), func() error {
+			if hooks.beforeV2Publish != nil {
+				return hooks.beforeV2Publish(file.RelativePath)
+			}
+			return nil
+		})
+		closeErr := parent.Close()
+		if publishErr != nil {
+			return staleMigration("a v2 target was created or redirected before atomic publication")
+		}
+		if closeErr != nil {
+			return closeErr
 		}
 		body, found, err := project.ReadRegular(file.RelativePath, expected.Size)
 		if err != nil || !found || hashPrefixed(body) != expected.SHA256 {
@@ -776,52 +1077,197 @@ func validateMigrationV2(project *pathguard.Directory, journal migrationJournal)
 		if err != nil || !found || int64(len(body)) != expected.Size || hashPrefixed(body) != expected.SHA256 {
 			return staleMigration("v2 migration target is missing or was edited")
 		}
+		if err := requireMigrationFileMode(project, expected.RelativePath, fs.FileMode(expected.Mode)); err != nil {
+			return staleMigration("v2 migration target mode changed")
+		}
 	}
 	return nil
 }
 
-func archiveMigrationSources(project *pathguard.Directory, journal migrationJournal) error {
+func archiveMigrationSources(project *pathguard.Directory, journal migrationJournal, hooks migrationHooks) error {
 	if err := ensureMigrationDirectory(project, journal.BackupRelative+"/archive", migrationReviewRoot+"/.session-reviewer"); err != nil {
 		return err
 	}
 	if err := validateMigrationSources(project, journal, true); err != nil {
 		return err
 	}
-	tops := migrationTopLevelEntries(journal.VisibleInventory)
-	for _, top := range tops {
-		source := migrationReviewRoot + "/" + top
-		destination := journal.BackupRelative + "/archive/" + top
-		sourceInfo, sourceErr := project.Root.Lstat(filepath.FromSlash(source))
-		destinationInfo, destinationErr := project.Root.Lstat(filepath.FromSlash(destination))
-		sourceFound := sourceErr == nil
-		destinationFound := destinationErr == nil
-		if sourceFound == destinationFound {
-			return staleMigration("legacy archive destination collided or source disappeared")
+	entries := append([]migrationJournalEntry(nil), journal.VisibleInventory...)
+	sort.Slice(entries, func(i, j int) bool {
+		leftDepth := strings.Count(entries[i].RelativePath, "/")
+		rightDepth := strings.Count(entries[j].RelativePath, "/")
+		if entries[i].Kind != entries[j].Kind {
+			return entries[i].Kind == "directory"
 		}
-		if destinationFound {
-			_ = destinationInfo
+		if entries[i].Kind == "directory" && leftDepth != rightDepth {
+			return leftDepth < rightDepth
+		}
+		return entries[i].RelativePath < entries[j].RelativePath
+	})
+	for _, entry := range entries {
+		if entry.Kind != "directory" {
 			continue
 		}
-		if sourceInfo == nil {
-			return staleMigration("legacy source disappeared")
-		}
-		sourceParent, _, err := project.OpenDirectory(migrationReviewRoot)
-		if err != nil {
+		destination := journal.BackupRelative + "/archive/" + strings.TrimPrefix(entry.RelativePath, migrationReviewRoot+"/")
+		if err := ensureArchiveInventoryDirectory(project, destination, fs.FileMode(entry.Mode)); err != nil {
 			return err
 		}
-		destinationParent, _, err := project.OpenDirectory(journal.BackupRelative + "/archive")
-		if err != nil {
-			_ = sourceParent.Close()
+		if hooks.afterArchiveDirectory != nil {
+			if err := hooks.afterArchiveDirectory(destination); err != nil {
+				return err
+			}
+		}
+	}
+	for _, entry := range entries {
+		if entry.Kind != "file" {
+			continue
+		}
+		if err := archiveMigrationFile(project, journal, entry, hooks); err != nil {
 			return err
 		}
-		renameErr := project.Root.Rename(filepath.FromSlash(source), filepath.FromSlash(destination))
-		syncErr := errors.Join(atomicfile.SyncRootDirectory(sourceParent), atomicfile.SyncRootDirectory(destinationParent))
-		closeErr := errors.Join(sourceParent.Close(), destinationParent.Close())
-		if err := errors.Join(renameErr, syncErr, closeErr); err != nil {
-			return fmt.Errorf("archive legacy migration entry: %w", err)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		leftDepth := strings.Count(entries[i].RelativePath, "/")
+		rightDepth := strings.Count(entries[j].RelativePath, "/")
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return entries[i].RelativePath > entries[j].RelativePath
+	})
+	for _, entry := range entries {
+		if entry.Kind != "directory" {
+			continue
+		}
+		if err := removeEmptyMigrationDirectory(project, entry.RelativePath); err != nil {
+			return err
 		}
 	}
 	return validateMigrationSources(project, journal, true)
+}
+
+func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative string, mode fs.FileMode) error {
+	if exists, err := migrationEntryExists(project, relative); err != nil {
+		return err
+	} else if !exists {
+		if err := atomicfile.EnsureRootDir(project.Root, filepath.FromSlash(relative), mode.Perm()); err != nil {
+			return err
+		}
+	}
+	opened, info, err := project.OpenDirectory(relative)
+	if err != nil {
+		return staleMigration("legacy archive directory collided or was redirected")
+	}
+	closeErr := opened.Close()
+	if closeErr != nil || !privateMigrationMode(info, mode) {
+		return staleMigration("legacy archive directory mode changed")
+	}
+	return nil
+}
+
+func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal, entry migrationJournalEntry, hooks migrationHooks) error {
+	source := entry.RelativePath
+	destination := journal.BackupRelative + "/archive/" + strings.TrimPrefix(source, migrationReviewRoot+"/")
+	sourceInfo, sourceErr := project.Root.Lstat(filepath.FromSlash(source))
+	destinationInfo, destinationErr := project.Root.Lstat(filepath.FromSlash(destination))
+	if errors.Is(sourceErr, os.ErrNotExist) && destinationErr == nil {
+		return verifyMigrationArchiveFile(project, destination, destinationInfo, entry)
+	}
+	if sourceErr == nil && destinationErr == nil {
+		if !os.SameFile(sourceInfo, destinationInfo) {
+			return staleMigration("legacy archive destination collided with a different identity")
+		}
+		if err := verifyMigrationArchiveFile(project, source, sourceInfo, entry); err != nil {
+			return err
+		}
+		if err := verifyMigrationArchiveFile(project, destination, destinationInfo, entry); err != nil {
+			return err
+		}
+		if err := atomicfile.SyncRootPublication(project.Root, filepath.FromSlash(destination)); err != nil {
+			return err
+		}
+		currentSource, err := project.Root.Lstat(filepath.FromSlash(source))
+		if err != nil || !os.SameFile(sourceInfo, currentSource) {
+			return staleMigration("legacy source identity changed before alias retirement")
+		}
+		if err := atomicfile.RemoveRoot(project.Root, filepath.FromSlash(source)); err != nil {
+			return err
+		}
+		afterMove, err := project.Root.Lstat(filepath.FromSlash(destination))
+		if err != nil || !os.SameFile(sourceInfo, afterMove) {
+			return staleMigration("legacy archive moved identity changed")
+		}
+		return verifyMigrationArchiveFile(project, destination, afterMove, entry)
+	}
+	if sourceErr != nil || (destinationErr != nil && !errors.Is(destinationErr, os.ErrNotExist)) || destinationErr == nil {
+		return staleMigration("legacy archive destination collided or source disappeared")
+	}
+	if err := verifyMigrationArchiveFile(project, source, sourceInfo, entry); err != nil {
+		return err
+	}
+	if hooks.beforeArchivePublish != nil {
+		if err := hooks.beforeArchivePublish(source, destination); err != nil {
+			return err
+		}
+	}
+	if err := project.Root.Link(filepath.FromSlash(source), filepath.FromSlash(destination)); err != nil {
+		return staleMigration("legacy archive destination collided before publication")
+	}
+	rollback := func() error {
+		published, err := project.Root.Lstat(filepath.FromSlash(destination))
+		if err != nil || !os.SameFile(sourceInfo, published) {
+			return errors.New("cannot safely roll back legacy archive publication")
+		}
+		return atomicfile.RemoveRoot(project.Root, filepath.FromSlash(destination))
+	}
+	if hooks.afterArchivePublish != nil {
+		if err := hooks.afterArchivePublish(source, destination); err != nil {
+			return errors.Join(err, rollback())
+		}
+	}
+	if err := verifyMigrationArchiveFile(project, source, sourceInfo, entry); err != nil {
+		return errors.Join(err, rollback())
+	}
+	currentSource, err := project.Root.Lstat(filepath.FromSlash(source))
+	if err != nil || !os.SameFile(sourceInfo, currentSource) {
+		return errors.Join(staleMigration("legacy source identity changed after archive publication"), rollback())
+	}
+	published, err := project.Root.Lstat(filepath.FromSlash(destination))
+	if err != nil || !os.SameFile(sourceInfo, published) {
+		return errors.Join(staleMigration("legacy archive publication identity changed"), rollback())
+	}
+	if err := atomicfile.SyncRootPublication(project.Root, filepath.FromSlash(destination)); err != nil {
+		return errors.Join(fmt.Errorf("sync legacy archive publication: %w", err), rollback())
+	}
+	if err := atomicfile.RemoveRoot(project.Root, filepath.FromSlash(source)); err != nil {
+		return errors.Join(fmt.Errorf("retire legacy migration source: %w", err), rollback())
+	}
+	afterMove, err := project.Root.Lstat(filepath.FromSlash(destination))
+	if err != nil || !os.SameFile(sourceInfo, afterMove) {
+		return staleMigration("legacy archive moved identity changed")
+	}
+	return verifyMigrationArchiveFile(project, destination, afterMove, entry)
+}
+
+func verifyMigrationArchiveFile(project *pathguard.Directory, relative string, info os.FileInfo, entry migrationJournalEntry) error {
+	if info == nil || !info.Mode().IsRegular() || !privateMigrationMode(info, fs.FileMode(entry.Mode)) || info.Size() != entry.Size {
+		return staleMigration("legacy archive file identity or mode changed")
+	}
+	body, found, err := project.ReadRegular(relative, entry.Size)
+	if err != nil || !found || int64(len(body)) != entry.Size || hashPrefixed(body) != entry.SHA256 {
+		return staleMigration("legacy archive file content changed")
+	}
+	return nil
+}
+
+func removeEmptyMigrationDirectory(project *pathguard.Directory, relative string) error {
+	if _, err := project.Root.Lstat(filepath.FromSlash(relative)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := project.Root.Remove(filepath.FromSlash(relative)); err != nil {
+		return staleMigration("legacy directory changed before archive retirement")
+	}
+	return nil
 }
 
 func verifyCommittedMigration(project *pathguard.Directory, journal migrationJournal) error {
@@ -1067,23 +1513,6 @@ func migrationFilePaths(entries []migrationJournalEntry) []string {
 		if entry.Kind == "file" {
 			result = append(result, entry.RelativePath)
 		}
-	}
-	sort.Strings(result)
-	return result
-}
-
-func migrationTopLevelEntries(entries []migrationJournalEntry) []string {
-	set := make(map[string]struct{})
-	for _, entry := range entries {
-		relative := strings.TrimPrefix(entry.RelativePath, migrationReviewRoot+"/")
-		top := strings.SplitN(relative, "/", 2)[0]
-		if top != "" {
-			set[top] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(set))
-	for value := range set {
-		result = append(result, value)
 	}
 	sort.Strings(result)
 	return result

@@ -36,9 +36,14 @@ type migrationJournalFile struct {
 type migrationJournalEntry struct {
 	RelativePath string `json:"relative_path"`
 	Kind         string `json:"kind"`
-	SHA256       string `json:"sha256,omitempty"`
-	Size         int64  `json:"size,omitempty"`
+	SHA256       string `json:"sha256"`
+	Size         int64  `json:"size"`
 	Mode         uint32 `json:"mode"`
+}
+
+type migrationJournalRoot struct {
+	CanonicalPath string                  `json:"canonical_path"`
+	Identity      pathguard.IdentityToken `json:"identity"`
 }
 
 type migrationJournal struct {
@@ -49,6 +54,8 @@ type migrationJournal struct {
 	BackupRelative   string                  `json:"backup_relative"`
 	Stage            Stage                   `json:"stage"`
 	PlannedAt        time.Time               `json:"planned_at"`
+	ProjectRoot      migrationJournalRoot    `json:"project_root"`
+	DataRoot         migrationJournalRoot    `json:"data_root"`
 	Legacy           []migrationJournalFile  `json:"legacy"`
 	Writes           []migrationJournalFile  `json:"writes"`
 	VisibleInventory []migrationJournalEntry `json:"visible_inventory"`
@@ -114,7 +121,11 @@ func decodeMigrationJournal(encoded []byte) (migrationJournal, error) {
 func validateMigrationJournal(value migrationJournal) error {
 	if value.Version != migrationJournalVersion || !lowerHexSHA256(value.ProjectKey) || !validStableID(value.ProjectID) || !strings.HasPrefix(value.ProjectID, "project-") ||
 		!lowerHexSHA256(value.ManifestSHA256) || value.BackupRelative != migrationBackupRelative(value.ManifestSHA256) ||
-		value.PlannedAt.IsZero() || value.PlannedAt.Location() != time.UTC {
+		value.PlannedAt.IsZero() || value.PlannedAt.Location() != time.UTC || !validMigrationJournalRoot(value.ProjectRoot) || !validMigrationJournalRoot(value.DataRoot) {
+		return errors.New("migration journal is corrupt")
+	}
+	projectKey, err := migrationProjectKey(value.ProjectRoot.CanonicalPath)
+	if err != nil || projectKey != value.ProjectKey {
 		return errors.New("migration journal is corrupt")
 	}
 	if _, ok := migrationStageIndex(value.Stage); !ok {
@@ -126,19 +137,42 @@ func validateMigrationJournal(value migrationJournal) error {
 	if err := validateJournalFiles(value.Writes, true); err != nil {
 		return err
 	}
-	if len(value.Writes) != 3 {
+	if len(value.Legacy) == 0 || len(value.Writes) != 3 || len(value.VisibleInventory) == 0 {
 		return errors.New("migration journal is corrupt")
 	}
+	writesByPath := make(map[string]migrationJournalFile, len(value.Writes))
+	for _, file := range value.Writes {
+		writesByPath[file.RelativePath] = file
+	}
+	for relative, mode := range map[string]uint32{
+		ReviewRelativePath: 0o644, HistoryRelativePath: 0o644, MachineLedgerRelativePath: 0o600,
+	} {
+		file, found := writesByPath[relative]
+		if !found || file.Mode != mode {
+			return errors.New("migration journal is corrupt")
+		}
+	}
 	seen := make(map[string]struct{}, len(value.VisibleInventory))
+	portableSeen := make(map[string]string, len(value.VisibleInventory))
+	inventoryByPath := make(map[string]migrationJournalEntry, len(value.VisibleInventory))
 	fileCount := 0
 	totalBytes := int64(0)
 	if len(value.VisibleInventory) > maxMigrationTreeItems {
 		return errors.New("migration journal exceeds recovery inventory budget")
 	}
 	for _, entry := range value.VisibleInventory {
-		if !safeMigrationRelative(entry.RelativePath) || (entry.Kind != "file" && entry.Kind != "directory") || entry.Mode == 0 {
+		if !safeMigrationRelative(entry.RelativePath) || !strings.HasPrefix(entry.RelativePath, migrationReviewRoot+"/") ||
+			(entry.Kind != "file" && entry.Kind != "directory") || entry.Mode == 0 {
 			return errors.New("migration journal is corrupt")
 		}
+		portableKey, err := migrationPortableInventoryKey(entry.RelativePath)
+		if err != nil {
+			return errors.New("migration journal is corrupt")
+		}
+		if previous, collision := portableSeen[portableKey]; collision && previous != entry.RelativePath {
+			return errors.New("migration journal contains case or NFC colliding inventory paths")
+		}
+		portableSeen[portableKey] = entry.RelativePath
 		if entry.Kind == "file" {
 			if !strings.HasPrefix(entry.SHA256, "sha256:") || !lowerHexSHA256(strings.TrimPrefix(entry.SHA256, "sha256:")) || entry.Size < 0 {
 				return errors.New("migration journal is corrupt")
@@ -155,8 +189,23 @@ func validateMigrationJournal(value migrationJournal) error {
 			return errors.New("migration journal contains duplicate inventory paths")
 		}
 		seen[entry.RelativePath] = struct{}{}
+		inventoryByPath[entry.RelativePath] = entry
+	}
+	for _, legacy := range value.Legacy {
+		entry, found := inventoryByPath[legacy.RelativePath]
+		if !found || entry.Kind != "file" || entry.SHA256 != legacy.SHA256 || entry.Size != legacy.Size || entry.Mode != legacy.Mode {
+			return errors.New("migration journal legacy files do not match inventory")
+		}
+	}
+	_, _, manifestDigest, err := buildBackupManifest(value.ProjectID, value.VisibleInventory)
+	if err != nil || manifestDigest != value.ManifestSHA256 {
+		return errors.New("migration journal manifest does not match inventory")
 	}
 	return nil
+}
+
+func validMigrationJournalRoot(root migrationJournalRoot) bool {
+	return filepath.IsAbs(root.CanonicalPath) && filepath.Clean(root.CanonicalPath) == root.CanonicalPath && root.Identity.Valid()
 }
 
 func validateJournalFiles(files []migrationJournalFile, writes bool) error {
@@ -283,6 +332,9 @@ func inspectMigrationJournalNamespace(data *pathguard.Directory) error {
 		return errors.New("migration journal directory is redirected or invalid")
 	}
 	defer directory.Close()
+	if !privateMigrationMode(expected, 0o700) {
+		return errors.New("migration journal directory is not private")
+	}
 	file, err := directory.Open(".")
 	if err != nil {
 		return errors.New("cannot inspect migration journal directory")
