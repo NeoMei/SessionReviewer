@@ -87,7 +87,7 @@ func TestMigrationInventoryValidatesPersistentDirectoryLock(t *testing.T) {
 		wantErr  string
 	}{
 		{name: "empty-private", lockName: ".session-reviewer-directory.lock", mode: 0o600},
-		{name: "uppercase-canonical", lockName: ".SESSION-REVIEWER-DIRECTORY.LOCK", mode: 0o600},
+		{name: "uppercase-canonical-alias", lockName: ".SESSION-REVIEWER-DIRECTORY.LOCK", mode: 0o600, wantErr: "extra"},
 		{name: "nonempty-private", lockName: ".session-reviewer-directory.lock", body: []byte("user-owned"), mode: 0o600, wantErr: "unsafe"},
 		{name: "empty-public", lockName: ".session-reviewer-directory.lock", mode: 0o644, wantErr: "unsafe"},
 		{name: "extra-alias", lockName: ".session-reviewer-directory.lock.extra", mode: 0o600, wantErr: "extra"},

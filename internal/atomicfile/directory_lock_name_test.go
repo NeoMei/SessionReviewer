@@ -9,7 +9,7 @@ func TestRootDirectoryLockNamesUsePortableComponentIdentity(t *testing.T) {
 		lockLike  bool
 	}{
 		{name: ".session-reviewer-directory.lock", canonical: true, lockLike: true},
-		{name: ".SESSION-REVIEWER-DIRECTORY.LOCK", canonical: true, lockLike: true},
+		{name: ".SESSION-REVIEWER-DIRECTORY.LOCK", lockLike: true},
 		{name: ".session-reviewer-directory.lock.extra", lockLike: true},
 		{name: ".SESSION-REVIEWER-DIRECTORY.LOCK.EXTRA", lockLike: true},
 		{name: ".SESSION-REVIEWER-DIRECTORY.LOCK.e\u0301xtra", lockLike: true},

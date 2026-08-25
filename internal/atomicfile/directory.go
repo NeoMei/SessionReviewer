@@ -38,8 +38,7 @@ func IsRootDirectoryQuarantineName(name string) bool {
 // IsRootDirectoryLockName reports the one persistent advisory-lock leaf
 // reserved inside each pinned parent used for directory publication.
 func IsRootDirectoryLockName(name string) bool {
-	key, ok := rootDirectoryPortableComponentKey(name)
-	return ok && key == rootDirectoryLockName
+	return name == rootDirectoryLockName
 }
 
 // IsRootDirectoryLockLikeName reserves the lock leaf namespace so aliases or
