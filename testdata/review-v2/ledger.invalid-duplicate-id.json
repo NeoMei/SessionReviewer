@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "project_id": "project-review-v2",
+  "accepted_revision": 3,
+  "review_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "history_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "accounting": {
+    "total_duration_ms": 0,
+    "total_tokens": 0,
+    "total_cost_usd": 0,
+    "models": []
+  },
+  "sessions": [],
+  "evidence": [
+    {
+      "id": "decision-duplicate",
+      "refs": [
+        {
+          "evidence_id": "evidence-duplicate",
+          "session_id": "session-a",
+          "jsonl_line": 4,
+          "source_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "summary": "First copy"
+        },
+        {
+          "evidence_id": "evidence-duplicate",
+          "session_id": "session-a",
+          "jsonl_line": 4,
+          "source_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "summary": "Duplicate copy"
+        }
+      ]
+    }
+  ]
+}
