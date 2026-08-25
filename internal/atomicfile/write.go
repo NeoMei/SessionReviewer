@@ -71,6 +71,12 @@ func WriteRootFileChecked(parent *os.Root, leaf string, data []byte, perm fs.Fil
 // ever replacing an existing destination. beforePublish runs after the
 // temporary file is durable and immediately before the no-replace link.
 func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm fs.FileMode, beforePublish func() error) error {
+	return WriteRootFileCreateIfAbsentPrepared(parent, leaf, data, perm, nil, beforePublish)
+}
+
+// WriteRootFileCreateIfAbsentPrepared applies prepare to the unpublished
+// temporary before caller bytes are written.
+func WriteRootFileCreateIfAbsentPrepared(parent *os.Root, leaf string, data []byte, perm fs.FileMode, prepare func(*os.File) error, beforePublish func() error) error {
 	if parent == nil {
 		return fmt.Errorf("atomic file root is required")
 	}
@@ -83,6 +89,7 @@ func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm
 		return err
 	}
 	ops := defaultDurabilityOps()
+	ops.prepareTemporary = prepare
 	ops.publish = func(root *os.Root, temporary, destination string) error {
 		if err := root.Link(temporary, destination); err != nil {
 			return err
@@ -123,12 +130,26 @@ func writeRootAtParent(parent *os.Root, name string, data []byte, perm fs.FileMo
 }
 
 type durabilityOps struct {
+	prepareTemporary      func(*os.File) error
 	syncTemporary         func(*os.File) error
 	sanitizeTemporary     func(*os.File) error
 	publish               func(*os.Root, string, string) error
 	syncPublication       func(*os.Root, string) error
 	linkRollback          func(*os.Root, string, string) error
 	writeRecoverySnapshot func(*os.File, []byte) error
+}
+
+// WriteRootPrepared is WriteRoot with a creation-time hook applied to the
+// still-private temporary file before any caller data is written or published.
+func WriteRootPrepared(root *os.Root, path string, data []byte, perm fs.FileMode, prepare func(*os.File) error) error {
+	parent, err := root.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	ops := defaultDurabilityOps()
+	ops.prepareTemporary = prepare
+	return writeRootAtParentWithOps(parent, filepath.Base(path), data, perm, ops)
 }
 
 func defaultDurabilityOps() durabilityOps {
@@ -188,6 +209,11 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 	}()
 	if err = tmp.Chmod(perm); err != nil {
 		return err
+	}
+	if ops.prepareTemporary != nil {
+		if err = ops.prepareTemporary(tmp); err != nil {
+			return err
+		}
 	}
 	if _, err = tmp.Write(data); err != nil {
 		return err

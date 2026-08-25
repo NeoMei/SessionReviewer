@@ -152,6 +152,32 @@ func RenameRoot(root *os.Root, oldPath, newPath string) error {
 	return renameRootWithSync(root, oldPath, newPath, syncRootDirectoryEntry)
 }
 
+// RenameRootNoReplace atomically moves the entry currently named by oldPath
+// to an absent newPath. It never replaces the destination. Both parents are
+// pinned below root and synced after the move.
+func RenameRootNoReplace(root *os.Root, oldPath, newPath string) error {
+	oldParent, oldName, err := openPinnedParent(root, oldPath)
+	if err != nil {
+		return err
+	}
+	defer oldParent.Close()
+	newParent, newName, err := openPinnedParent(root, newPath)
+	if err != nil {
+		return err
+	}
+	defer newParent.Close()
+	if err := renameRootNoReplace(oldParent, oldName, newParent, newName); err != nil {
+		return err
+	}
+	if err := syncRootDirectoryEntry(oldParent, oldName); err != nil {
+		return fmt.Errorf("sync no-replace rename source: %w", err)
+	}
+	if err := syncRootDirectoryEntry(newParent, newName); err != nil {
+		return fmt.Errorf("sync no-replace rename destination: %w", err)
+	}
+	return nil
+}
+
 func renameRootWithSync(root *os.Root, oldPath, newPath string, syncParent func(*os.Root, string) error) error {
 	oldClean, err := cleanRootRelative(oldPath)
 	if err != nil {

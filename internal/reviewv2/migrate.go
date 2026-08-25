@@ -13,7 +13,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -72,11 +71,14 @@ type MigrationReport struct {
 }
 
 type migrationHooks struct {
-	afterStage            func(Stage) error
-	beforeV2Publish       func(relative string) error
-	afterArchiveDirectory func(destination string) error
-	beforeArchivePublish  func(source, destination string) error
-	afterArchivePublish   func(source, destination string) error
+	afterStage                  func(Stage) error
+	beforeV2Publish             func(relative string) error
+	afterArchiveDirectory       func(destination string) error
+	beforeArchivePublish        func(source, destination string) error
+	afterArchivePublish         func(source, destination string) error
+	beforeArchiveRetire         func(source, quarantine string) error
+	afterArchiveRetire          func(source, quarantine string) error
+	beforeArchiveRollbackRetire func(destination, quarantine string) error
 }
 
 type backupManifest struct {
@@ -792,6 +794,9 @@ func verifyMigrationBackup(project *pathguard.Directory, journal migrationJourna
 		if err := requireMigrationDirectoryMode(project, journal.BackupRelative+"/archive", 0o700); err != nil {
 			return errors.New("migration archive directory is redirected, changed, or not private")
 		}
+		if err := requireMigrationDirectoryMode(project, journal.BackupRelative+"/quarantine", 0o700); err != nil {
+			return errors.New("migration quarantine directory is redirected, changed, or not private")
+		}
 	}
 	body, found, err := project.ReadRegularOptional(journal.BackupRelative+"/manifest.json", int64(len(manifestBody)))
 	if err != nil || !found || !bytes.Equal(body, manifestBody) {
@@ -813,6 +818,11 @@ func verifyMigrationBackup(project *pathguard.Directory, journal migrationJourna
 			archived, found, err := project.ReadRegularOptional(journal.BackupRelative+"/"+file.ArchiveRelative, file.Size)
 			if err != nil || !found || int64(len(archived)) != file.Size || hashPrefixed(archived) != file.SHA256 {
 				return errors.New("migration archive is missing or changed")
+			}
+			entry := migrationInventoryByPath(journal.VisibleInventory)[file.RelativePath]
+			retired, found, err := project.ReadRegularOptional(migrationQuarantinePath(journal, entry, "retired"), file.Size)
+			if err != nil || !found || int64(len(retired)) != file.Size || hashPrefixed(retired) != file.SHA256 {
+				return errors.New("migration retirement quarantine is missing or changed")
 			}
 		}
 	}
@@ -838,10 +848,17 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 	archiveAllowed := journal.Stage == StageV2Written || requireArchive
 	if archiveAllowed {
 		expected["archive"] = expectedMigrationBackupEntry{kind: "directory", mode: 0o700, needed: requireArchive}
+		expected["quarantine"] = expectedMigrationBackupEntry{kind: "directory", mode: 0o700, needed: requireArchive}
 		for _, entry := range journal.VisibleInventory {
 			relative := "archive/" + strings.TrimPrefix(entry.RelativePath, migrationReviewRoot+"/")
 			expected[relative] = expectedMigrationBackupEntry{
 				kind: entry.Kind, hash: entry.SHA256, size: entry.Size, mode: fs.FileMode(entry.Mode), needed: requireArchive,
+			}
+			if entry.Kind == "file" {
+				retired := strings.TrimPrefix(migrationQuarantinePath(journal, entry, "retired"), journal.BackupRelative+"/")
+				expected[retired] = expectedMigrationBackupEntry{kind: "file", hash: entry.SHA256, size: entry.Size, mode: fs.FileMode(entry.Mode), needed: requireArchive}
+				rollback := strings.TrimPrefix(migrationQuarantinePath(journal, entry, "rollback"), journal.BackupRelative+"/")
+				expected[rollback] = expectedMigrationBackupEntry{kind: "file", hash: entry.SHA256, size: entry.Size, mode: fs.FileMode(entry.Mode), needed: false}
 			}
 		}
 	}
@@ -913,7 +930,7 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 				return errors.New("migration backup changed while scanning")
 			}
 			if want.kind == "directory" {
-				if !info.IsDir() || !privateMigrationMode(info, want.mode) {
+				if !info.IsDir() || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(journal.BackupRelative+"/"+candidate)), want.mode) {
 					return errors.New("migration backup directory type or mode changed")
 				}
 				seen[candidate] = struct{}{}
@@ -922,17 +939,19 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 				}
 				continue
 			}
-			if !info.Mode().IsRegular() || !privateMigrationMode(info, want.mode) || info.Size() != want.size {
+			if !info.Mode().IsRegular() || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(journal.BackupRelative+"/"+candidate)), want.mode) || info.Size() != want.size {
 				if strings.HasPrefix(candidate, "objects/") {
 					return errors.New("migration backup object type, size, or mode changed")
 				}
 				return errors.New("migration backup file type, size, or mode changed")
 			}
-			fileCount++
-			if fileCount > 2*maxMigrationFiles+1 || info.Size() < 0 || info.Size() > 2*maxMigrationBytes+maxMigrationJournalBytes-totalBytes {
-				return errors.New("migration backup exceeds bounded namespace budget")
+			if !strings.HasPrefix(candidate, "quarantine/") {
+				fileCount++
+				if fileCount > 2*maxMigrationFiles+1 || info.Size() < 0 || info.Size() > 2*maxMigrationBytes+maxMigrationJournalBytes-totalBytes {
+					return errors.New("migration backup exceeds bounded namespace budget")
+				}
+				totalBytes += info.Size()
 			}
-			totalBytes += info.Size()
 			body, found, err := project.ReadRegular(journal.BackupRelative+"/"+candidate, want.size)
 			if err != nil || !found || int64(len(body)) != want.size || hashPrefixed(body) != want.hash {
 				if strings.HasPrefix(candidate, "objects/") {
@@ -968,19 +987,19 @@ func requireMigrationDirectoryMode(project *pathguard.Directory, relative string
 	}
 	after, inspectErr := root.Stat(".")
 	closeErr := root.Close()
-	if inspectErr != nil || closeErr != nil || !os.SameFile(expected, after) || !privateMigrationMode(after, mode) {
+	if inspectErr != nil || closeErr != nil || !os.SameFile(expected, after) || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
 		return errors.New("migration directory identity or mode changed")
 	}
 	return nil
 }
 
 func requireMigrationFileMode(project *pathguard.Directory, relative string, mode fs.FileMode) error {
-	file, info, err := project.OpenRegular(relative)
+	file, _, err := project.OpenRegular(relative)
 	if err != nil {
 		return err
 	}
 	closeErr := file.Close()
-	if closeErr != nil || !privateMigrationMode(info, mode) {
+	if closeErr != nil || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
 		return errors.New("migration file mode does not match")
 	}
 	return nil
@@ -1040,7 +1059,13 @@ func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, wr
 		if err != nil {
 			return err
 		}
-		publishErr := atomicfile.WriteRootFileCreateIfAbsent(parent, path.Base(file.RelativePath), file.Data, file.Perm.Perm(), func() error {
+		prepare := func(created *os.File) error {
+			if file.Perm.Perm() == 0o600 {
+				return securePrivateMigrationFile(created)
+			}
+			return nil
+		}
+		publishErr := atomicfile.WriteRootFileCreateIfAbsentPrepared(parent, path.Base(file.RelativePath), file.Data, file.Perm.Perm(), prepare, func() error {
 			if hooks.beforeV2Publish != nil {
 				return hooks.beforeV2Publish(file.RelativePath)
 			}
@@ -1086,6 +1111,9 @@ func validateMigrationV2(project *pathguard.Directory, journal migrationJournal)
 
 func archiveMigrationSources(project *pathguard.Directory, journal migrationJournal, hooks migrationHooks) error {
 	if err := ensureMigrationDirectory(project, journal.BackupRelative+"/archive", migrationReviewRoot+"/.session-reviewer"); err != nil {
+		return err
+	}
+	if err := ensureMigrationDirectory(project, journal.BackupRelative+"/quarantine", migrationReviewRoot+"/.session-reviewer"); err != nil {
 		return err
 	}
 	if err := validateMigrationSources(project, journal, true); err != nil {
@@ -1152,12 +1180,12 @@ func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative stri
 			return err
 		}
 	}
-	opened, info, err := project.OpenDirectory(relative)
+	opened, _, err := project.OpenDirectory(relative)
 	if err != nil {
 		return staleMigration("legacy archive directory collided or was redirected")
 	}
 	closeErr := opened.Close()
-	if closeErr != nil || !privateMigrationMode(info, mode) {
+	if closeErr != nil || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
 		return staleMigration("legacy archive directory mode changed")
 	}
 	return nil
@@ -1166,10 +1194,27 @@ func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative stri
 func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal, entry migrationJournalEntry, hooks migrationHooks) error {
 	source := entry.RelativePath
 	destination := journal.BackupRelative + "/archive/" + strings.TrimPrefix(source, migrationReviewRoot+"/")
+	retirement := migrationQuarantinePath(journal, entry, "retired")
 	sourceInfo, sourceErr := project.Root.Lstat(filepath.FromSlash(source))
 	destinationInfo, destinationErr := project.Root.Lstat(filepath.FromSlash(destination))
 	if errors.Is(sourceErr, os.ErrNotExist) && destinationErr == nil {
-		return verifyMigrationArchiveFile(project, destination, destinationInfo, entry)
+		if err := verifyMigrationArchiveFile(project, destination, destinationInfo, entry); err != nil {
+			return err
+		}
+		retiredInfo, err := project.Root.Lstat(filepath.FromSlash(retirement))
+		if errors.Is(err, os.ErrNotExist) {
+			if err := project.Root.Link(filepath.FromSlash(destination), filepath.FromSlash(retirement)); err != nil {
+				return staleMigration("legacy retirement quarantine could not be recovered")
+			}
+			if err := atomicfile.SyncRootPublication(project.Root, filepath.FromSlash(retirement)); err != nil {
+				return err
+			}
+			retiredInfo, err = project.Root.Lstat(filepath.FromSlash(retirement))
+		}
+		if err != nil || !os.SameFile(destinationInfo, retiredInfo) {
+			return staleMigration("legacy retirement quarantine changed")
+		}
+		return verifyMigrationArchiveFile(project, retirement, retiredInfo, entry)
 	}
 	if sourceErr == nil && destinationErr == nil {
 		if !os.SameFile(sourceInfo, destinationInfo) {
@@ -1184,12 +1229,22 @@ func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal
 		if err := atomicfile.SyncRootPublication(project.Root, filepath.FromSlash(destination)); err != nil {
 			return err
 		}
-		currentSource, err := project.Root.Lstat(filepath.FromSlash(source))
-		if err != nil || !os.SameFile(sourceInfo, currentSource) {
-			return staleMigration("legacy source identity changed before alias retirement")
+		if hooks.beforeArchiveRetire != nil {
+			if err := hooks.beforeArchiveRetire(source, retirement); err != nil {
+				return err
+			}
 		}
-		if err := atomicfile.RemoveRoot(project.Root, filepath.FromSlash(source)); err != nil {
-			return err
+		if err := atomicfile.RenameRootNoReplace(project.Root, filepath.FromSlash(source), filepath.FromSlash(retirement)); err != nil {
+			return staleMigration("legacy source could not be retired without replacement")
+		}
+		if hooks.afterArchiveRetire != nil {
+			if err := hooks.afterArchiveRetire(source, retirement); err != nil {
+				return err
+			}
+		}
+		retiredInfo, err := project.Root.Lstat(filepath.FromSlash(retirement))
+		if err != nil || !os.SameFile(sourceInfo, retiredInfo) {
+			return staleMigration("legacy source replacement preserved in retirement quarantine")
 		}
 		afterMove, err := project.Root.Lstat(filepath.FromSlash(destination))
 		if err != nil || !os.SameFile(sourceInfo, afterMove) {
@@ -1200,7 +1255,10 @@ func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal
 	if sourceErr != nil || (destinationErr != nil && !errors.Is(destinationErr, os.ErrNotExist)) || destinationErr == nil {
 		return staleMigration("legacy archive destination collided or source disappeared")
 	}
-	if err := verifyMigrationArchiveFile(project, source, sourceInfo, entry); err != nil {
+	if err := verifyMigrationSourceFile(project, source, sourceInfo, entry); err != nil {
+		return err
+	}
+	if err := secureArchiveSourceForPublication(filepath.Join(project.Path, filepath.FromSlash(source))); err != nil {
 		return err
 	}
 	if hooks.beforeArchivePublish != nil {
@@ -1216,7 +1274,20 @@ func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal
 		if err != nil || !os.SameFile(sourceInfo, published) {
 			return errors.New("cannot safely roll back legacy archive publication")
 		}
-		return atomicfile.RemoveRoot(project.Root, filepath.FromSlash(destination))
+		quarantine := migrationQuarantinePath(journal, entry, "rollback")
+		if hooks.beforeArchiveRollbackRetire != nil {
+			if err := hooks.beforeArchiveRollbackRetire(destination, quarantine); err != nil {
+				return err
+			}
+		}
+		if err := atomicfile.RenameRootNoReplace(project.Root, filepath.FromSlash(destination), filepath.FromSlash(quarantine)); err != nil {
+			return errors.New("cannot safely quarantine legacy archive rollback")
+		}
+		moved, err := project.Root.Lstat(filepath.FromSlash(quarantine))
+		if err != nil || !os.SameFile(sourceInfo, moved) {
+			return staleMigration("archive destination replacement preserved in rollback quarantine")
+		}
+		return nil
 	}
 	if hooks.afterArchivePublish != nil {
 		if err := hooks.afterArchivePublish(source, destination); err != nil {
@@ -1237,8 +1308,22 @@ func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal
 	if err := atomicfile.SyncRootPublication(project.Root, filepath.FromSlash(destination)); err != nil {
 		return errors.Join(fmt.Errorf("sync legacy archive publication: %w", err), rollback())
 	}
-	if err := atomicfile.RemoveRoot(project.Root, filepath.FromSlash(source)); err != nil {
-		return errors.Join(fmt.Errorf("retire legacy migration source: %w", err), rollback())
+	if hooks.beforeArchiveRetire != nil {
+		if err := hooks.beforeArchiveRetire(source, retirement); err != nil {
+			return errors.Join(err, rollback())
+		}
+	}
+	if err := atomicfile.RenameRootNoReplace(project.Root, filepath.FromSlash(source), filepath.FromSlash(retirement)); err != nil {
+		return errors.Join(staleMigration("legacy source could not be retired without replacement"), rollback())
+	}
+	if hooks.afterArchiveRetire != nil {
+		if err := hooks.afterArchiveRetire(source, retirement); err != nil {
+			return err
+		}
+	}
+	retiredInfo, err := project.Root.Lstat(filepath.FromSlash(retirement))
+	if err != nil || !os.SameFile(sourceInfo, retiredInfo) {
+		return staleMigration("legacy source replacement preserved in retirement quarantine")
 	}
 	afterMove, err := project.Root.Lstat(filepath.FromSlash(destination))
 	if err != nil || !os.SameFile(sourceInfo, afterMove) {
@@ -1247,13 +1332,29 @@ func archiveMigrationFile(project *pathguard.Directory, journal migrationJournal
 	return verifyMigrationArchiveFile(project, destination, afterMove, entry)
 }
 
+func migrationQuarantinePath(journal migrationJournal, entry migrationJournalEntry, kind string) string {
+	digest := sha256.Sum256([]byte(entry.RelativePath))
+	return journal.BackupRelative + "/quarantine/" + kind + "-" + hex.EncodeToString(digest[:])
+}
+
 func verifyMigrationArchiveFile(project *pathguard.Directory, relative string, info os.FileInfo, entry migrationJournalEntry) error {
-	if info == nil || !info.Mode().IsRegular() || !privateMigrationMode(info, fs.FileMode(entry.Mode)) || info.Size() != entry.Size {
+	if info == nil || !info.Mode().IsRegular() || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), fs.FileMode(entry.Mode)) || info.Size() != entry.Size {
 		return staleMigration("legacy archive file identity or mode changed")
 	}
 	body, found, err := project.ReadRegular(relative, entry.Size)
 	if err != nil || !found || int64(len(body)) != entry.Size || hashPrefixed(body) != entry.SHA256 {
 		return staleMigration("legacy archive file content changed")
+	}
+	return nil
+}
+
+func verifyMigrationSourceFile(project *pathguard.Directory, relative string, info os.FileInfo, entry migrationJournalEntry) error {
+	if info == nil || !info.Mode().IsRegular() || !migrationSourceModeOK(filepath.Join(project.Path, filepath.FromSlash(relative)), fs.FileMode(entry.Mode)) || info.Size() != entry.Size {
+		return staleMigration("legacy source identity or mode changed")
+	}
+	body, found, err := project.ReadRegular(relative, entry.Size)
+	if err != nil || !found || int64(len(body)) != entry.Size || hashPrefixed(body) != entry.SHA256 {
+		return staleMigration("legacy source content changed")
 	}
 	return nil
 }
@@ -1327,10 +1428,15 @@ func ensureMigrationDirectory(directory *pathguard.Directory, relative, privateF
 	current := ""
 	for _, component := range components {
 		current = path.Join(current, component)
+		_, existsErr := directory.Root.Lstat(filepath.FromSlash(current))
+		existed := existsErr == nil
+		if existsErr != nil && !errors.Is(existsErr, os.ErrNotExist) {
+			return existsErr
+		}
 		if err := atomicfile.EnsureRootDir(directory.Root, filepath.FromSlash(current), 0o700); err != nil {
 			return err
 		}
-		opened, info, err := directory.OpenDirectory(current)
+		opened, _, err := directory.OpenDirectory(current)
 		if err != nil {
 			return errors.New("migration directory is redirected or invalid")
 		}
@@ -1338,15 +1444,19 @@ func ensureMigrationDirectory(directory *pathguard.Directory, relative, privateF
 		if closeErr != nil {
 			return closeErr
 		}
-		if (current == privateFrom || strings.HasPrefix(current, privateFrom+"/")) && !privateMigrationMode(info, 0o700) {
-			return errors.New("migration private directory permissions are unsafe")
+		if current == privateFrom || strings.HasPrefix(current, privateFrom+"/") {
+			full := filepath.Join(directory.Path, filepath.FromSlash(current))
+			if !existed {
+				if err := securePrivateMigrationDirectory(full); err != nil {
+					return fmt.Errorf("secure migration private directory: %w", err)
+				}
+			}
+			if !privateMigrationPath(full, 0o700) {
+				return errors.New("migration private directory permissions are unsafe")
+			}
 		}
 	}
 	return nil
-}
-
-func privateMigrationMode(info os.FileInfo, want fs.FileMode) bool {
-	return info != nil && (runtime.GOOS == "windows" || info.Mode().Perm() == want.Perm())
 }
 
 func writeRootCreateIfAbsent(parent *os.Root, leaf string, body []byte, mode fs.FileMode) error {
@@ -1374,6 +1484,10 @@ func writeRootCreateIfAbsent(parent *os.Root, leaf string, body []byte, mode fs.
 		}
 	}()
 	if err := file.Chmod(mode.Perm()); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := securePrivateMigrationFile(file); err != nil {
 		_ = file.Close()
 		return err
 	}
@@ -1409,7 +1523,7 @@ func writeRootCreateIfAbsent(parent *os.Root, leaf string, body []byte, mode fs.
 }
 
 func verifyRootRegular(parent *os.Root, leaf string, before os.FileInfo, body []byte, mode fs.FileMode) error {
-	if before == nil || !before.Mode().IsRegular() || !privateMigrationMode(before, mode) || before.Size() != int64(len(body)) {
+	if before == nil || !before.Mode().IsRegular() || !privateMigrationPath(filepath.Join(parent.Name(), leaf), mode) || before.Size() != int64(len(body)) {
 		return errors.New("create-if-absent destination collision")
 	}
 	file, err := parent.Open(leaf)

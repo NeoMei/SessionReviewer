@@ -236,6 +236,84 @@ func TestMigrationArchiveRollsBackWhenSourceReplacedAfterPublish(t *testing.T) {
 	}
 }
 
+func TestMigrationArchiveRetirementNeverDeletesFinalWindowSourceReplacement(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "docs/session-review/current-state.md"
+	userBytes := []byte("user-replaced-source-in-final-retirement-window")
+	injected := false
+	quarantine := ""
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		beforeArchiveRetire: func(gotSource, gotQuarantine string) error {
+			if injected || gotSource != source {
+				return nil
+			}
+			injected = true
+			quarantine = gotQuarantine
+			temporary := filepath.Join(fixture.project, "retirement-replacement.tmp")
+			if err := os.WriteFile(temporary, userBytes, 0o644); err != nil {
+				return err
+			}
+			return os.Rename(temporary, filepath.Join(fixture.project, filepath.FromSlash(source)))
+		},
+	})
+	if !errors.Is(err, ErrStaleMigration) {
+		t.Fatalf("retirement race error=%v", err)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(source))); readErr == nil && bytes.Equal(got, userBytes) {
+		return
+	}
+	if got, readErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(quarantine))); readErr == nil && bytes.Equal(got, userBytes) {
+		return
+	}
+	t.Fatal("final-window source replacement was neither retained at source nor recoverable quarantine")
+}
+
+func TestMigrationArchiveRollbackNeverDeletesFinalWindowDestinationReplacement(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := "docs/session-review/current-state.md"
+	destination := plan.BackupRoot + "/archive/current-state.md"
+	userBytes := []byte("user-replaced-destination-in-final-rollback-window")
+	quarantine := ""
+	err = applyMigrationWithHooks(plan, migrationHooks{
+		afterArchivePublish: func(gotSource, _ string) error {
+			if gotSource != source {
+				return nil
+			}
+			return errors.New("force rollback")
+		},
+		beforeArchiveRollbackRetire: func(_, gotDestination string) error {
+			// The second hook argument is the deterministic quarantine path.
+			quarantine = gotDestination
+			if quarantine == "" {
+				return nil
+			}
+			temporary := filepath.Join(fixture.project, "rollback-replacement.tmp")
+			if err := os.WriteFile(temporary, userBytes, 0o600); err != nil {
+				return err
+			}
+			return os.Rename(temporary, filepath.Join(fixture.project, filepath.FromSlash(destination)))
+		},
+	})
+	if err == nil {
+		t.Fatal("rollback race unexpectedly succeeded")
+	}
+	if got, readErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(destination))); readErr == nil && bytes.Equal(got, userBytes) {
+		return
+	}
+	if got, readErr := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(quarantine))); readErr == nil && bytes.Equal(got, userBytes) {
+		return
+	}
+	t.Fatal("final-window destination replacement was neither retained nor recoverable quarantine")
+}
+
 func TestMigrationRecoveryConvergesAfterPartialArchiveDirectoryCreation(t *testing.T) {
 	fixture := newLegacyMigrationFixture(t)
 	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
@@ -288,6 +366,29 @@ func TestMigrationRecoveryConvergesAfterCrashFollowingArchiveLink(t *testing.T) 
 		t.Fatal(err)
 	}
 	assertV2OnlyVisible(t, fixture.project)
+}
+
+func TestMigrationRecoveryConvergesAfterCrashFollowingArchiveRetirement(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := false
+	func() {
+		defer func() { crashed = recover() != nil }()
+		_ = applyMigrationWithHooks(plan, migrationHooks{
+			afterArchiveRetire: func(string, string) error { panic("simulated process death after durable quarantine rename") },
+		})
+	}()
+	if !crashed {
+		t.Fatal("archive retirement crash was not injected")
+	}
+	if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err != nil {
+		t.Fatal(err)
+	}
+	assertV2OnlyVisible(t, fixture.project)
+	assertBackupManifestComplete(t, fixture.project)
 }
 
 func TestMigrationAuthenticatesV2ModesAtEveryRecoveryStage(t *testing.T) {

@@ -287,7 +287,7 @@ func saveMigrationJournal(data *pathguard.Directory, next migrationJournal) erro
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.WriteRoot(data.Root, filepath.FromSlash(relative), encoded, 0o600); err != nil {
+	if err := atomicfile.WriteRootPrepared(data.Root, filepath.FromSlash(relative), encoded, 0o600, securePrivateMigrationFile); err != nil {
 		return fmt.Errorf("persist migration journal: %w", err)
 	}
 	loaded, found, err := loadMigrationJournal(data, next.ProjectKey)
@@ -310,7 +310,7 @@ func loadMigrationJournal(data *pathguard.Directory, projectKey string) (migrati
 		return migrationJournal{}, found, err
 	}
 	info, err := data.Root.Lstat(filepath.FromSlash(relative))
-	if err != nil || !info.Mode().IsRegular() || !privateMigrationMode(info, fs.FileMode(0o600)) {
+	if err != nil || !info.Mode().IsRegular() || !privateMigrationPath(filepath.Join(data.Path, filepath.FromSlash(relative)), fs.FileMode(0o600)) {
 		return migrationJournal{}, true, errors.New("migration journal is redirected, invalid, or not private")
 	}
 	value, err := decodeMigrationJournal(encoded)
@@ -332,7 +332,7 @@ func inspectMigrationJournalNamespace(data *pathguard.Directory) error {
 		return errors.New("migration journal directory is redirected or invalid")
 	}
 	defer directory.Close()
-	if !privateMigrationMode(expected, 0o700) {
+	if !privateMigrationPath(filepath.Join(data.Path, filepath.FromSlash(migrationJournalDir)), 0o700) {
 		return errors.New("migration journal directory is not private")
 	}
 	file, err := directory.Open(".")
@@ -365,8 +365,8 @@ func inspectMigrationJournalNamespace(data *pathguard.Directory) error {
 		if len(name) != 69 || !strings.HasSuffix(name, ".json") || !lowerHexSHA256(strings.TrimSuffix(name, ".json")) {
 			return errors.New("invalid migration journal filename or recovery backup collision")
 		}
-		opened, info, err := data.OpenRegular(filepath.ToSlash(filepath.Join(migrationJournalDir, name)))
-		if err != nil || !privateMigrationMode(info, fs.FileMode(0o600)) {
+		opened, _, err := data.OpenRegular(filepath.ToSlash(filepath.Join(migrationJournalDir, name)))
+		if err != nil || !privateMigrationPath(filepath.Join(data.Path, filepath.FromSlash(filepath.ToSlash(filepath.Join(migrationJournalDir, name)))), fs.FileMode(0o600)) {
 			if opened != nil {
 				_ = opened.Close()
 			}
