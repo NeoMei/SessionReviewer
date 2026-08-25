@@ -153,6 +153,9 @@ func TestEnsureRootDirPreparedDoesNotMutateFinalWindowReplacement(t *testing.T) 
 		if err := os.Mkdir(replacement, 0o755); err != nil {
 			return err
 		}
+		if err := os.Chmod(replacement, 0o755); err != nil {
+			return err
+		}
 		return os.WriteFile(filepath.Join(replacement, "user.txt"), []byte("user-owned"), 0o644)
 	}, func(file *os.File) error {
 		return file.Chmod(0o700)
@@ -160,17 +163,43 @@ func TestEnsureRootDirPreparedDoesNotMutateFinalWindowReplacement(t *testing.T) 
 	if !created || !errors.Is(err, ErrRootDirectoryIdentityChanged) {
 		t.Fatalf("created=%v err=%v", created, err)
 	}
-	info, statErr := os.Stat(replacement)
+	if _, statErr := os.Lstat(replacement); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("replacement remained at public leaf: err=%v", statErr)
+	}
+	preserved := findRootDirectoryQuarantine(t, rootPath)
+	info, statErr := os.Stat(preserved)
 	if statErr != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("replacement was silently hardened: mode=%v err=%v", info, statErr)
 	}
-	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	body, readErr := os.ReadFile(filepath.Join(preserved, "user.txt"))
 	if readErr != nil || string(body) != "user-owned" {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}
 	if info, statErr := os.Stat(quarantine); statErr != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("created handle was not hardened in isolation: mode=%v err=%v", info, statErr)
 	}
+}
+
+func findRootDirectoryQuarantine(t *testing.T, rootPath string) string {
+	t.Helper()
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := ""
+	for _, entry := range entries {
+		if !IsRootDirectoryQuarantineName(entry.Name()) {
+			continue
+		}
+		if found != "" {
+			t.Fatalf("multiple directory quarantines: %q and %q", found, entry.Name())
+		}
+		found = filepath.Join(rootPath, entry.Name())
+	}
+	if found == "" {
+		t.Fatal("directory replacement was not preserved in quarantine")
+	}
+	return found
 }
 
 func TestEnsureRootDirPreparedErrExistWinnerNeverRunsPrepare(t *testing.T) {

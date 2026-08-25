@@ -624,8 +624,18 @@ func scanMigrationInventory(project *pathguard.Directory, scanRoot, mappedRoot s
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
 		for _, child := range children {
 			name := child.Name()
-			if atomicfile.IsRootDirectoryTemporaryName(name) {
-				return errors.New("migration tree contains incomplete machine directory staging")
+			if atomicfile.IsRootDirectoryLockLikeName(name) {
+				if !atomicfile.IsRootDirectoryLockName(name) {
+					return errors.New("migration tree contains an extra directory lock artifact")
+				}
+				validateErr := atomicfile.ValidateRootDirectoryLock(root, name)
+				if validateErr != nil {
+					return errors.New("migration tree directory lock is unsafe")
+				}
+				continue
+			}
+			if atomicfile.IsRootDirectoryTemporaryName(name) || atomicfile.IsRootDirectoryQuarantineName(name) {
+				return errors.New("migration tree contains incomplete machine directory recovery")
 			}
 			if actual == migrationReviewRoot && name == ".session-reviewer" {
 				continue
@@ -912,8 +922,18 @@ func scanExactMigrationBackup(project *pathguard.Directory, journal migrationJou
 		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
 		for _, child := range children {
 			itemCount++
-			if atomicfile.IsRootDirectoryTemporaryName(child.Name()) {
-				return errors.New("migration backup contains incomplete directory staging")
+			if atomicfile.IsRootDirectoryLockLikeName(child.Name()) {
+				if !atomicfile.IsRootDirectoryLockName(child.Name()) {
+					return errors.New("migration backup contains an extra directory lock artifact")
+				}
+				validateErr := atomicfile.ValidateRootDirectoryLock(directory, child.Name())
+				if validateErr != nil {
+					return errors.New("migration backup directory lock is unsafe")
+				}
+				continue
+			}
+			if atomicfile.IsRootDirectoryTemporaryName(child.Name()) || atomicfile.IsRootDirectoryQuarantineName(child.Name()) {
+				return errors.New("migration backup contains incomplete directory recovery")
 			}
 			candidate := path.Join(relative, child.Name())
 			if !safeMigrationRelative(migrationReviewRoot + "/" + candidate) {
@@ -1185,7 +1205,7 @@ func ensureArchiveInventoryDirectory(project *pathguard.Directory, relative stri
 func ensureArchiveInventoryDirectoryWithPrivacy(project *pathguard.Directory, relative string, mode fs.FileMode, beforeSecure func() error, secure func(*os.File) error, private func(string, fs.FileMode) bool) error {
 	_, err := atomicfile.EnsureRootDirPrepared(project.Root, filepath.FromSlash(relative), mode.Perm(), beforeSecure, secure)
 	if err != nil {
-		if errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) {
+		if errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) || errors.Is(err, atomicfile.ErrRootDirectoryPublicationCollision) {
 			return staleMigration("legacy archive directory changed before privacy hardening")
 		}
 		return err
@@ -1446,7 +1466,7 @@ func ensureMigrationDirectory(directory *pathguard.Directory, relative, privateF
 		}
 		_, err := atomicfile.EnsureRootDirPrepared(directory.Root, filepath.FromSlash(current), 0o700, nil, prepare)
 		if err != nil {
-			if errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) {
+			if errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) || errors.Is(err, atomicfile.ErrRootDirectoryPublicationCollision) {
 				return staleMigration("migration directory changed before privacy hardening")
 			}
 			return err

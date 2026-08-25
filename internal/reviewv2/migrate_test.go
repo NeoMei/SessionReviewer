@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
@@ -397,16 +398,35 @@ func TestArchiveInventoryDirectoryReplacementBeforeSecureIsStaleAndUntouched(t *
 		if err := os.Mkdir(replacement, 0o755); err != nil {
 			return err
 		}
+		if err := os.Chmod(replacement, 0o755); err != nil {
+			return err
+		}
 		return os.WriteFile(filepath.Join(replacement, "user.txt"), []byte("replacement"), 0o644)
 	}, func(file *os.File) error { return file.Chmod(0o700) }, func(string, os.FileMode) bool { return true })
 	if !errors.Is(err, ErrStaleMigration) {
 		t.Fatalf("replacement race error=%v", err)
 	}
-	info, statErr := os.Stat(replacement)
+	if _, statErr := os.Lstat(replacement); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("replacement remained at public archive leaf: %v", statErr)
+	}
+	entries, readDirErr := os.ReadDir(filepath.Join(rootPath, "archive"))
+	if readDirErr != nil {
+		t.Fatal(readDirErr)
+	}
+	preserved := ""
+	for _, entry := range entries {
+		if atomicfile.IsRootDirectoryQuarantineName(entry.Name()) {
+			preserved = filepath.Join(rootPath, "archive", entry.Name())
+		}
+	}
+	if preserved == "" {
+		t.Fatal("replacement was not recoverably quarantined")
+	}
+	info, statErr := os.Stat(preserved)
 	if statErr != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("replacement was repaired: mode=%v err=%v", info, statErr)
 	}
-	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	body, readErr := os.ReadFile(filepath.Join(preserved, "user.txt"))
 	if readErr != nil || string(body) != "replacement" {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}

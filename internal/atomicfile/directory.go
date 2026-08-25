@@ -1,6 +1,7 @@
 package atomicfile
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,20 +11,55 @@ import (
 	"strings"
 )
 
-var ErrRootDirectoryIdentityChanged = errors.New("root directory identity changed during creation")
+var (
+	ErrRootDirectoryIdentityChanged      = errors.New("root directory identity changed during creation")
+	ErrRootDirectoryPublicationCollision = errors.New("root directory publication collided")
+)
 
 const rootDirectoryTemporaryPrefix = ".session-reviewer-directory-"
+const rootDirectoryQuarantinePrefix = ".session-reviewer-directory-quarantine-"
+const rootDirectoryLockName = ".session-reviewer-directory.lock"
 
 // IsRootDirectoryTemporaryName reports the exact bounded name shape reserved
 // for an unpublished rooted directory. Inventory scanners can reject a
 // process-crash residue instead of treating it as user or migration content.
 func IsRootDirectoryTemporaryName(name string) bool {
-	encoded := strings.TrimPrefix(name, rootDirectoryTemporaryPrefix)
+	return isRootDirectoryMachineName(name, rootDirectoryTemporaryPrefix)
+}
+
+// IsRootDirectoryQuarantineName reports the reserved recoverable name used
+// when an unexpected final-window directory occupant has already been moved.
+func IsRootDirectoryQuarantineName(name string) bool {
+	return isRootDirectoryMachineName(name, rootDirectoryQuarantinePrefix)
+}
+
+// IsRootDirectoryLockName reports the one persistent advisory-lock leaf
+// reserved inside each pinned parent used for directory publication.
+func IsRootDirectoryLockName(name string) bool {
+	return name == rootDirectoryLockName
+}
+
+// IsRootDirectoryLockLikeName reserves the lock leaf namespace so aliases or
+// extra lock-looking content cannot be mistaken for user inventory.
+func IsRootDirectoryLockLikeName(name string) bool {
+	return strings.HasPrefix(name, rootDirectoryLockName)
+}
+
+func isRootDirectoryMachineName(name, prefix string) bool {
+	encoded := strings.TrimPrefix(name, prefix)
 	if encoded == name || len(encoded) != 32 {
 		return false
 	}
 	_, err := hex.DecodeString(encoded)
 	return err == nil
+}
+
+func randomRootDirectoryMachineName(prefix string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", err
+	}
+	return prefix + hex.EncodeToString(random[:]), nil
 }
 
 // EnsureRootDir creates exactly one directory below an existing, pinned
@@ -46,33 +82,39 @@ func EnsureRootDirCreated(root *os.Root, path string, perm fs.FileMode) (created
 }
 
 // EnsureRootDirPrepared keeps an identity-bound handle to a directory created
-// by this invocation. POSIX restores the requested mode on that handle after
-// creation so the process umask cannot weaken the exact-mode contract. prepare
-// also operates on the handle, never on the pathname. beforePrepare is a
-// deterministic final-window checkpoint used by callers and tests. Existing
-// and concurrent ErrExist winners are never changed and never invoke callbacks.
+// by this invocation. Cooperative SessionReviewer processes serialize the
+// complete operation with an advisory exclusive lock file opened relative to
+// the pinned parent, so pathname replacement cannot redirect the lock outside
+// that namespace.
+// POSIX restores the requested mode on the retained handle before no-replace
+// publication, so the process umask cannot weaken the exact-mode contract.
+// Callers that deliberately ignore the advisory lock are outside the ownership
+// guarantee; detected substitutions are preserved and reported, never removed
+// or overwritten. Existing entries never change and never invoke callbacks.
 func EnsureRootDirPrepared(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error) (created bool, err error) {
 	return ensureRootDirPreparedWithOps(root, path, perm, beforePrepare, prepare, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
 }
 
 type directoryDurabilityOps struct {
-	createDirectory        func(*os.Root, string, fs.FileMode) (*os.File, error)
-	afterStagingIdentity   func(*os.Root, string, string) error
-	beforeDirectoryPublish func(*os.Root, string, string) error
-	syncParent             func(*os.Root, string) error
+	createDirectory              func(*os.Root, string, fs.FileMode) (*os.File, error)
+	afterStagingIdentity         func(*os.Root, string, string) error
+	beforeDirectoryPublish       func(*os.Root, string, string) error
+	afterStagingPublicationCheck func(*os.Root, string, string) error
+	syncParent                   func(*os.Root, string) error
 }
 
 type rootDirectoryCreation struct {
-	file      *os.File
-	info      os.FileInfo
-	published bool
-	publish   func() error
-	cleanup   func() error
+	file         *os.File
+	info         os.FileInfo
+	published    bool
+	recoveryName string
+	publish      func() error
 }
 
 type rootDirectoryCreationHooks struct {
-	afterStagingIdentity   func(*os.Root, string, string) error
-	beforeDirectoryPublish func(*os.Root, string, string) error
+	afterStagingIdentity         func(*os.Root, string, string) error
+	beforeDirectoryPublish       func(*os.Root, string, string) error
+	afterStagingPublicationCheck func(*os.Root, string, string) error
 }
 
 func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) error {
@@ -93,6 +135,11 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 		return false, err
 	}
 	defer parent.Close()
+	releaseParentLock, err := lockRootDirectoryParent(parent)
+	if err != nil {
+		return false, fmt.Errorf("lock directory creation parent: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, releaseParentLock()) }()
 
 	info, err := parent.Lstat(name)
 	if err == nil {
@@ -116,8 +163,9 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 		err = createErr
 	} else {
 		creation, err = createRootDirectoryFile(parent, name, perm, rootDirectoryCreationHooks{
-			afterStagingIdentity:   ops.afterStagingIdentity,
-			beforeDirectoryPublish: ops.beforeDirectoryPublish,
+			afterStagingIdentity:         ops.afterStagingIdentity,
+			beforeDirectoryPublish:       ops.beforeDirectoryPublish,
+			afterStagingPublicationCheck: ops.afterStagingPublicationCheck,
 		})
 	}
 	if err != nil {
@@ -139,11 +187,7 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 	if creation == nil || creation.file == nil {
 		return false, ErrRootDirectoryIdentityChanged
 	}
-	cleanupPending := creation.cleanup != nil && !creation.published
 	defer func() {
-		if cleanupPending {
-			retErr = errors.Join(retErr, creation.cleanup())
-		}
 		retErr = errors.Join(retErr, creation.file.Close())
 	}()
 	createdInfo := creation.info
@@ -170,11 +214,6 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 			if !errors.Is(err, os.ErrExist) {
 				return false, fmt.Errorf("publish directory: %w", err)
 			}
-			cleanupErr := creation.cleanup()
-			cleanupPending = false
-			if cleanupErr != nil {
-				return false, fmt.Errorf("clean unpublished directory staging: %w", cleanupErr)
-			}
 			info, err = parent.Lstat(name)
 			if err != nil {
 				return false, fmt.Errorf("inspect concurrently published directory: %w", err)
@@ -182,17 +221,17 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 			if err := validateRootDirectory(parent, name, info); err != nil {
 				return false, err
 			}
-			if err := ops.syncParent(parent, name); err != nil {
-				return false, fmt.Errorf("sync concurrently published directory entry: %w", err)
-			}
-			return false, validateRootDirectoryIdentity(parent, name, info)
+			return false, fmt.Errorf("%w: owned staging retained at %s", ErrRootDirectoryPublicationCollision, creation.recoveryName)
 		}
 		creation.published = true
-		cleanupPending = false
 	}
 	current, err := parent.Lstat(name)
 	if err != nil || !os.SameFile(createdInfo, current) || !current.IsDir() || isAtomicRedirect(current) {
-		return true, ErrRootDirectoryIdentityChanged
+		quarantine, quarantineErr := quarantineUnexpectedRootDirectory(parent, name, current)
+		if quarantine != "" {
+			return false, errors.Join(fmt.Errorf("%w: unexpected publication preserved at %s", ErrRootDirectoryIdentityChanged, quarantine), quarantineErr)
+		}
+		return false, errors.Join(ErrRootDirectoryIdentityChanged, quarantineErr)
 	}
 	if beforePrepare != nil {
 		if err := beforePrepare(); err != nil {
@@ -215,19 +254,51 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 	afterPrepare, err := creation.file.Stat()
 	current, currentErr := parent.Lstat(name)
 	if err != nil || currentErr != nil || !os.SameFile(createdInfo, afterPrepare) || !os.SameFile(createdInfo, current) {
-		return true, ErrRootDirectoryIdentityChanged
+		return true, preserveUnexpectedRootDirectory(parent, name, createdInfo, current, currentErr)
 	}
 	if err := ops.syncParent(parent, name); err != nil {
 		return true, fmt.Errorf("sync created directory entry: %w", err)
 	}
 	info, err = parent.Lstat(name)
 	if err != nil || !os.SameFile(createdInfo, info) {
-		if err == nil {
-			return true, ErrRootDirectoryIdentityChanged
-		}
-		return true, fmt.Errorf("inspect created directory: %w", err)
+		return true, preserveUnexpectedRootDirectory(parent, name, createdInfo, info, err)
 	}
 	return true, validateRootDirectoryIdentity(parent, name, createdInfo)
+}
+
+func preserveUnexpectedRootDirectory(parent *os.Root, name string, owned, current os.FileInfo, inspectErr error) error {
+	if inspectErr != nil || current == nil || (owned != nil && os.SameFile(owned, current)) {
+		return errors.Join(ErrRootDirectoryIdentityChanged, inspectErr)
+	}
+	quarantine, quarantineErr := quarantineUnexpectedRootDirectory(parent, name, current)
+	if quarantine != "" {
+		return errors.Join(fmt.Errorf("%w: unexpected publication preserved at %s", ErrRootDirectoryIdentityChanged, quarantine), quarantineErr)
+	}
+	return errors.Join(ErrRootDirectoryIdentityChanged, quarantineErr)
+}
+
+func quarantineUnexpectedRootDirectory(parent *os.Root, name string, expected os.FileInfo) (string, error) {
+	for range 100 {
+		quarantine, err := randomRootDirectoryMachineName(rootDirectoryQuarantinePrefix)
+		if err != nil {
+			return "", fmt.Errorf("generate directory quarantine name: %w", err)
+		}
+		if err := renameRootNoReplace(parent, name, parent, quarantine); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				continue
+			}
+			return "", fmt.Errorf("quarantine unexpected directory publication: %w", err)
+		}
+		moved, inspectErr := parent.Lstat(quarantine)
+		if syncErr := syncRootDirectoryEntry(parent, quarantine); syncErr != nil {
+			return quarantine, fmt.Errorf("sync unexpected directory quarantine: %w", syncErr)
+		}
+		if inspectErr != nil || expected == nil || !os.SameFile(expected, moved) {
+			return quarantine, ErrRootDirectoryIdentityChanged
+		}
+		return quarantine, nil
+	}
+	return "", errors.New("create unique directory quarantine name")
 }
 
 func validateRootDirectoryIdentity(parent *os.Root, name string, before os.FileInfo) error {

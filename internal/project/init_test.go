@@ -927,8 +927,26 @@ func assertExactInitializationScaffold(t *testing.T, dataRoot, projectID string)
 	if err != nil {
 		t.Fatal(err)
 	}
+	stateRootHandle, err := os.OpenRoot(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filtered := entries[:0]
+	for _, entry := range entries {
+		if atomicfile.IsRootDirectoryLockName(entry.Name()) {
+			if err := atomicfile.ValidateRootDirectoryLock(stateRootHandle, entry.Name()); err != nil {
+				_ = stateRootHandle.Close()
+				t.Fatal(err)
+			}
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if err := stateRootHandle.Close(); err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"locks", "merge-bases", "queue", "transactions"}
-	if got := entryNames(entries); !reflect.DeepEqual(got, want) {
+	if got := entryNames(filtered); !reflect.DeepEqual(got, want) {
 		t.Fatalf("state entries=%q want=%q", got, want)
 	}
 	for _, name := range []string{"merge-bases", "queue", "transactions"} {

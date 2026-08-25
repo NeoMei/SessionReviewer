@@ -804,11 +804,25 @@ func readBoundedRootEntries(root *os.Root, limit int) ([]os.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, readErr := directory.ReadDir(limit)
+	entries, readErr := directory.ReadDir(limit + 1)
 	if errors.Is(readErr, io.EOF) {
 		readErr = nil
 	}
-	return entries, errors.Join(readErr, directory.Close())
+	closeErr := directory.Close()
+	if readErr != nil || closeErr != nil {
+		return nil, errors.Join(readErr, closeErr)
+	}
+	visible := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if !atomicfile.IsRootDirectoryLockLikeName(entry.Name()) {
+			visible = append(visible, entry)
+			continue
+		}
+		if !atomicfile.IsRootDirectoryLockName(entry.Name()) || atomicfile.ValidateRootDirectoryLock(root, entry.Name()) != nil {
+			return nil, errors.New("initialization directory lock artifact is unsafe")
+		}
+	}
+	return visible, nil
 }
 
 func ensureProjectSyncState(dataRoot *os.Root, projectID string) error {
