@@ -489,6 +489,7 @@ func parseDecisionBlock(source []byte, block markerBlock) (Decision, map[string]
 		switch heading.name {
 		case "日期":
 			field, decision.OccurredAt = "occurred_at", cleanMarkdownText(source, span)
+			spans["decision.occurred_at"] = span
 		case "原因":
 			field, decision.Rationale = "rationale", cleanMarkdownText(source, span)
 			spans["decision.rationale"] = span
@@ -497,6 +498,7 @@ func parseDecisionBlock(source []byte, block markerBlock) (Decision, map[string]
 			spans["decision.impact"] = span
 		case "状态":
 			field, decision.Status = "status", cleanMarkdownText(source, span)
+			spans["decision.status"] = span
 		}
 		if field != "" {
 			if _, duplicate := seen[field]; duplicate {

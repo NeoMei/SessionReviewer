@@ -8,8 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"reflect"
 	"sort"
-	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -45,6 +45,8 @@ type Accepted struct {
 	projectRoot string
 	projectInfo os.FileInfo
 	files       map[string]acceptedFile
+	reviewDoc   ReviewDocument
+	historyDoc  HistoryDocument
 	v2          bool
 }
 
@@ -54,7 +56,8 @@ type acceptedFile struct {
 }
 
 type loadHooks struct {
-	afterFilesRead func() error
+	afterFilesRead  func() error
+	afterLegacyLoad func() error
 }
 
 func DetectVersion(projectRoot string) (Version, error) {
@@ -126,9 +129,26 @@ func loadAcceptedWithHooks(projectRoot string, expectedRoot os.FileInfo, allowLe
 		if !allowLegacy {
 			return Accepted{}, &ErrMigrationRequired{ProjectRoot: projectRoot}
 		}
+		if hooks.afterLegacyLoad != nil {
+			if err := hooks.afterLegacyLoad(); err != nil {
+				return Accepted{}, err
+			}
+		}
 		snapshot, snapshotErr := ledger.SnapshotUsageExpected(projectRoot, directory.Info())
 		if snapshotErr != nil {
 			return Accepted{}, snapshotErr
+		}
+		if !reflect.DeepEqual(ledger.SnapshotFiles(legacy), snapshot.Files) {
+			return Accepted{}, errors.New("legacy ledger changed while loading")
+		}
+		reloaded, reloadErr := ledger.LoadExpected(projectRoot, directory.Info())
+		if reloadErr != nil {
+			return Accepted{}, errors.New("legacy ledger changed while loading")
+		}
+		finalSnapshot, finalSnapshotErr := ledger.SnapshotUsageExpected(projectRoot, directory.Info())
+		if finalSnapshotErr != nil || !reflect.DeepEqual(snapshot, finalSnapshot) ||
+			!reflect.DeepEqual(ledger.SnapshotFiles(reloaded), finalSnapshot.Files) {
+			return Accepted{}, errors.New("legacy ledger changed while loading")
 		}
 		projected, _ := ProjectLegacy(legacy)
 		return Accepted{
@@ -222,6 +242,8 @@ func loadV2FromDirectory(projectRoot string, directory *pathguard.Directory, hoo
 		projectRoot: projectRoot,
 		projectInfo: directory.Info(),
 		files:       files,
+		reviewDoc:   reviewDocument,
+		historyDoc:  historyDocument,
 		v2:          true,
 	}, nil
 }
@@ -396,17 +418,4 @@ func sortLegacyTimeline(values []ledger.TimelineEvent) {
 		}
 		return values[left].ID < values[right].ID
 	})
-}
-
-func generatedCurrentRisk(id string) (string, bool) {
-	const prefix = "risk-current-"
-	if !strings.HasPrefix(id, prefix) {
-		return "", false
-	}
-	remainder := strings.TrimPrefix(id, prefix)
-	kind, _, ok := strings.Cut(remainder, "-")
-	if !ok || (kind != "blocker" && kind != "risk") {
-		return "", false
-	}
-	return kind, true
 }

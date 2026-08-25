@@ -129,10 +129,22 @@ func TestValidateProjectSummaryRecomputesEveryModelWithExplicitTolerances(t *tes
 
 	withinTolerance := valid
 	withinTolerance.Models = append([]ProjectModelSummary(nil), valid.Models...)
-	withinTolerance.TotalCostUSD += 1e-9
-	withinTolerance.Models[0].TokenSharePct += 1e-6
+	withinTolerance.TotalCostUSD = math.Nextafter(valid.TotalCostUSD+1e-9, valid.TotalCostUSD)
+	withinTolerance.Models[0].TokenSharePct = math.Nextafter(valid.Models[0].TokenSharePct+1e-6, valid.Models[0].TokenSharePct)
 	if err := ValidateProjectSummary(withinTolerance, sessions); err != nil {
 		t.Fatalf("values at tolerance boundary rejected: %v", err)
+	}
+}
+
+func TestAbsoluteToleranceUsesExactInclusiveNextafterBoundary(t *testing.T) {
+	for _, tolerance := range []float64{1e-9, 1e-6} {
+		if !withinAbsoluteTolerance(0, tolerance, tolerance) {
+			t.Fatalf("exact tolerance %g was rejected", tolerance)
+		}
+		outside := math.Nextafter(tolerance, math.Inf(1))
+		if withinAbsoluteTolerance(0, outside, tolerance) {
+			t.Fatalf("nextafter outside tolerance accepted: tolerance=%g outside=%g", tolerance, outside)
+		}
 	}
 }
 

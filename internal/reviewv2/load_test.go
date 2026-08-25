@@ -158,6 +158,26 @@ func TestLoadRejectsCrossFileMutationAfterInitialSnapshots(t *testing.T) {
 	}
 }
 
+func TestLegacyReadOnlyLoadRejectsMutationBetweenStateAndSnapshot(t *testing.T) {
+	root := t.TempDir()
+	writeLegacyOverview(t, root)
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overviewPath := filepath.Join(root, "docs", "session-review", "project-overview.md")
+	_, err = loadAcceptedWithHooks(root, rootInfo, true, loadHooks{afterLegacyLoad: func() error {
+		body, readErr := os.ReadFile(overviewPath)
+		if readErr != nil {
+			return readErr
+		}
+		return os.WriteFile(overviewPath, append(body, []byte("\nconcurrent legacy edit\n")...), 0o644)
+	}})
+	if err == nil || !strings.Contains(err.Error(), "changed while loading") {
+		t.Fatalf("legacy cross-snapshot mutation err=%v", err)
+	}
+}
+
 func writeV2Fixture(t *testing.T) (string, State) {
 	t.Helper()
 	state, err := ProjectLegacy(legacyFixtureState(t))

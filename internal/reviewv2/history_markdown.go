@@ -356,6 +356,7 @@ func parseEventBlock(source []byte, block markerBlock) (Event, map[string]source
 		switch heading.name {
 		case "事件类别":
 			field, event.Kind = "kind", value
+			spans["event.kind"] = span
 		case "节点意义":
 			field, event.Meaning = "meaning", value
 			spans["event.meaning"] = span
@@ -373,6 +374,7 @@ func parseEventBlock(source []byte, block markerBlock) (Event, map[string]source
 			spans["event.results"] = span
 		case "关联决策":
 			field, event.DecisionIDs = "decision_ids", parseMarkdownList(value)
+			spans["event.decision_ids"] = span
 		case "留下的问题或下一步":
 			field, event.Next = "next", value
 			spans["event.next"] = span

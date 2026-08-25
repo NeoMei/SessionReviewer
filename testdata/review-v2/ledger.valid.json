@@ -121,6 +121,73 @@
       }
     }
   ],
+  "legacy_compatibility": {
+    "current_state": {
+      "project_id": "project-review-v2",
+      "revision": 3,
+      "goal": "",
+      "last_verified": "",
+      "branch": "",
+      "uncommitted_changes": [],
+      "blockers": [],
+      "open_risks": [],
+      "next_action": "",
+      "first_inspection": "",
+      "last_updated": "",
+      "source_sessions": [],
+      "evidence": []
+    },
+    "timeline": [
+      {
+        "id": "event-a",
+        "occurred_at": "2026-08-25T08:00:00Z",
+        "revision": 3,
+        "class": "verified",
+        "title": "",
+        "summary": "",
+        "evidence": [],
+        "decision_ids": ["decision-a"],
+        "open_loop_ids": []
+      }
+    ],
+    "decisions": [
+      {
+        "id": "decision-a",
+        "project_id": "project-review-v2",
+        "title": "",
+        "status": "",
+        "revision": 3,
+        "tags": [],
+        "supersedes": [],
+        "source_sessions": [],
+        "evidence": [],
+        "context": "",
+        "rationale": "",
+        "consequences": "",
+        "reevaluate_when": "",
+        "alternatives": [],
+        "rejected_paths": []
+      }
+    ],
+    "open_loops": [
+      {
+        "id": "risk-a",
+        "project_id": "project-review-v2",
+        "title": "",
+        "status": "",
+        "revision": 3,
+        "tags": [],
+        "source_sessions": [],
+        "evidence": [],
+        "question": "",
+        "attempts": [],
+        "blocker": "",
+        "next_experiment": "",
+        "completion_criterion": ""
+      }
+    ],
+    "current_risks": []
+  },
   "evidence": [
     {
       "id": "decision-a",

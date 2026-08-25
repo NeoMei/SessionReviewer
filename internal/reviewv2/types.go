@@ -60,15 +60,32 @@ type Review struct {
 }
 
 type MachineLedger struct {
-	SchemaVersion      int                             `json:"schema_version"`
-	ProjectID          string                          `json:"project_id"`
-	AcceptedRevision   int                             `json:"accepted_revision"`
-	ReviewSHA256       string                          `json:"review_sha256"`
-	HistorySHA256      string                          `json:"history_sha256"`
-	LastSuccessfulSync string                          `json:"last_successful_sync,omitempty"`
-	Accounting         accounting.ProjectSummary       `json:"accounting"`
-	Sessions           []ledger.SessionReport          `json:"sessions"`
-	Evidence           map[string][]ledger.EvidenceRef `json:"evidence"`
+	SchemaVersion       int                             `json:"schema_version"`
+	ProjectID           string                          `json:"project_id"`
+	AcceptedRevision    int                             `json:"accepted_revision"`
+	ReviewSHA256        string                          `json:"review_sha256"`
+	HistorySHA256       string                          `json:"history_sha256"`
+	LastSuccessfulSync  string                          `json:"last_successful_sync,omitempty"`
+	Accounting          accounting.ProjectSummary       `json:"accounting"`
+	Sessions            []ledger.SessionReport          `json:"sessions"`
+	Evidence            map[string][]ledger.EvidenceRef `json:"evidence"`
+	LegacyCompatibility LegacyCompatibility             `json:"legacy_compatibility"`
+}
+
+type CurrentRiskProvenance struct {
+	RiskID string `json:"risk_id"`
+	Kind   string `json:"kind"`
+}
+
+// LegacyCompatibility retains the accepted inputs that proposal, resume, and
+// history still consume but which are not fully visible in the two v2 human
+// documents. Slices give the machine codec deterministic, duplicate-safe IDs.
+type LegacyCompatibility struct {
+	CurrentState ledger.CurrentState     `json:"current_state"`
+	Timeline     []ledger.TimelineEvent  `json:"timeline"`
+	Decisions    []ledger.Decision       `json:"decisions"`
+	OpenLoops    []ledger.OpenLoop       `json:"open_loops"`
+	CurrentRisks []CurrentRiskProvenance `json:"current_risks"`
 }
 
 type State struct {

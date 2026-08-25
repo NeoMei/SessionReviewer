@@ -57,6 +57,99 @@ func TestProjectLegacyAssignsStableDistinctIDsToRepeatedCurrentRisks(t *testing.
 	}
 }
 
+func TestProjectRenderLoadLegacyStatePreservesCompatibilitySemantics(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	legacy.CurrentState.UncommittedChanges = []string{"internal/reviewv2/project.go", "docs/note.md"}
+	legacy.CurrentState.FirstInspection = "inspect source slices before projection"
+	legacy.CurrentState.LastUpdated = "2026-08-25T09:11:12Z"
+	decision := legacy.Decisions["decision-local-cli"]
+	decision.ReevaluateWhen = "the local trust boundary changes"
+	decision.Supersedes = []string{}
+	legacy.Decisions[decision.ID] = decision
+	loop := legacy.OpenLoops["risk-install"]
+	delete(legacy.OpenLoops, loop.ID)
+	loop.ID = "risk-current-blocker-custom"
+	legacy.OpenLoops[loop.ID] = loop
+	legacy.Timeline[0].OpenLoopIDs = []string{loop.ID}
+	report := legacy.Sessions["session-report-1"]
+	report.OpenLoopsCreated = []string{loop.ID}
+	legacy.Sessions[report.ID] = report
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	plan, err := Render(root, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files {
+		path := filepath.Join(root, filepath.FromSlash(file.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, file.Data, file.Perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(accepted.Legacy, legacy) {
+		t.Fatalf("legacy compatibility round trip changed state:\nwant=%+v\ngot=%+v", legacy, accepted.Legacy)
+	}
+	if _, exists := accepted.Legacy.OpenLoops[loop.ID]; !exists {
+		t.Fatalf("legitimate open loop with generated-looking ID was consumed: %+v", accepted.Legacy.OpenLoops)
+	}
+}
+
+func TestProjectLegacyRejectsMalformedIdentityAndReferenceGraphBeforeProjection(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ledger.State)
+	}{
+		{"map key identity", func(state *ledger.State) {
+			value := state.Decisions["decision-local-cli"]
+			delete(state.Decisions, value.ID)
+			state.Decisions["decision-wrong-key"] = value
+		}},
+		{"entity project", func(state *ledger.State) {
+			value := state.OpenLoops["risk-install"]
+			value.ProjectID = "project-fedcba9876543210"
+			state.OpenLoops[value.ID] = value
+		}},
+		{"global identity", func(state *ledger.State) { state.Timeline[0].ID = "decision-local-cli" }},
+		{"decision supersedes", func(state *ledger.State) {
+			value := state.Decisions["decision-local-cli"]
+			value.Supersedes = []string{"decision-missing"}
+			state.Decisions[value.ID] = value
+		}},
+		{"timeline open loop", func(state *ledger.State) { state.Timeline[0].OpenLoopIDs = []string{"risk-missing"} }},
+		{"session decision", func(state *ledger.State) {
+			value := state.Sessions["session-report-1"]
+			value.DecisionsAdded = []string{"decision-missing"}
+			state.Sessions[value.ID] = value
+		}},
+		{"session chain", func(state *ledger.State) {
+			value := state.Sessions["session-report-1"]
+			value.PreviousSessionID = "session-missing"
+			state.Sessions[value.ID] = value
+		}},
+		{"evidence closure", func(state *ledger.State) { state.CurrentState.Evidence[0].SessionID = "session-missing" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			legacy := legacyFixtureState(t)
+			test.mutate(&legacy)
+			if _, err := ProjectLegacy(legacy); err == nil {
+				t.Fatalf("malformed legacy graph %q was projected", test.name)
+			}
+		})
+	}
+}
+
 func TestApplyChangeSetReturnsThreeFilePlanWithExactPreimages(t *testing.T) {
 	root, _ := writeV2Fixture(t)
 	accepted, err := Load(root)
@@ -104,6 +197,243 @@ func TestApplyChangeSetReturnsThreeFilePlanWithExactPreimages(t *testing.T) {
 	if !reflect.DeepEqual(next.State.Events, accepted.State.Events) {
 		t.Fatalf("unrelated decision change rewrote accepted event fields:\nbefore=%+v\nafter=%+v", accepted.State.Events, next.State.Events)
 	}
+}
+
+func TestApplyChangeSetPatchesLosslessAcceptedDocuments(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	reviewPath := filepath.Join(root, filepath.FromSlash(ReviewRelativePath))
+	historyPath := filepath.Join(root, filepath.FromSlash(HistoryRelativePath))
+	reviewBody, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBody, err := os.ReadFile(historyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody = bytes.Replace(reviewBody, []byte("## 项目目标\n"), []byte("<!-- keep-review-comment -->\n## 自定义说明\n  保留原始格式  \n\n## 项目目标\n"), 1)
+	reviewBody = bytes.Replace(reviewBody, []byte("<!-- /session-reviewer:decision -->"), []byte("#### 自定义决策子节\n  原样保留  \n<!-- /session-reviewer:decision -->"), 1)
+	historyBody = bytes.Replace(historyBody, []byte("# 项目历史\n\n"), []byte("# 项目历史\n\n<!-- keep-history-comment -->\n自定义历史说明\n\n"), 1)
+	historyBody = bytes.Replace(historyBody, []byte("<!-- /session-reviewer:event -->"), []byte("### 自定义事件子节\n  原样保留 event  \n<!-- /session-reviewer:event -->"), 1)
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, historyBody)
+
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := accepted.Legacy.CurrentState
+	incoming.Revision++
+	incoming.Goal = "accept changes without rewriting human prose"
+	plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Current: &incoming})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextReview := plannedData(t, plan, ReviewRelativePath)
+	nextHistory := plannedData(t, plan, HistoryRelativePath)
+	for _, sentinel := range [][]byte{
+		[]byte("<!-- keep-review-comment -->\n## 自定义说明\n  保留原始格式  \n"),
+		[]byte("#### 自定义决策子节\n  原样保留  \n"),
+	} {
+		if !bytes.Contains(nextReview, sentinel) {
+			t.Fatalf("review lost accepted bytes %q:\n%s", sentinel, nextReview)
+		}
+	}
+	for _, sentinel := range [][]byte{
+		[]byte("<!-- keep-history-comment -->\n自定义历史说明\n"),
+		[]byte("### 自定义事件子节\n  原样保留 event  \n"),
+	} {
+		if !bytes.Contains(nextHistory, sentinel) {
+			t.Fatalf("history lost accepted bytes %q:\n%s", sentinel, nextHistory)
+		}
+	}
+	parsedReview, err := ParseReview(nextReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedHistory, err := ParseHistory(nextHistory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsedReview.Model.Goal != incoming.Goal || parsedReview.Model.Revision != accepted.State.Review.Revision+1 || parsedHistory.Revision != parsedReview.Model.Revision {
+		t.Fatalf("lossless patch has wrong semantics: review=%+v history_revision=%d", parsedReview.Model, parsedHistory.Revision)
+	}
+}
+
+func TestApplyChangeSetOverlaysUnchangedHumanStatusAndCurrentRiskFields(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	reviewPath := filepath.Join(root, filepath.FromSlash(ReviewRelativePath))
+	reviewBody, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := ParseReview(reviewBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var currentRisk Risk
+	for _, risk := range document.Model.Risks {
+		if strings.HasPrefix(risk.ID, "risk-current-blocker-") {
+			currentRisk = risk
+			break
+		}
+	}
+	if currentRisk.ID == "" {
+		t.Fatal("fixture has no projected current blocker")
+	}
+	for _, edit := range []EditUnit{
+		{Document: "review", UnitID: "project-overview", Field: "status", Value: "paused"},
+		{Document: "review", UnitID: currentRisk.ID, Field: "risk.status", Value: "acknowledged"},
+		{Document: "review", UnitID: currentRisk.ID, Field: "risk.detail", Value: "human-authored current-risk detail"},
+	} {
+		edit.ExpectedSHA256 = sha256Hex(reviewBody)
+		reviewBody, err = PatchReviewUnit(reviewBody, edit)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	historyBody, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(HistoryRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, historyBody)
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := accepted.Legacy.CurrentState
+	incoming.Revision++
+	incoming.Goal = "only the goal changed"
+	plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Current: &incoming})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := ParseReview(plannedData(t, plan, ReviewRelativePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Model.Status != "paused" {
+		t.Fatalf("human status was overwritten: %q", next.Model.Status)
+	}
+	risk := riskByID(next.Model.Risks)[currentRisk.ID]
+	if risk.Status != "acknowledged" || risk.Detail != "human-authored current-risk detail" {
+		t.Fatalf("unchanged current risk fields were overwritten: %+v", risk)
+	}
+}
+
+func TestApplyChangeSetKeepsCurrentRiskIdentityAndHumanFieldsWhenTitleChanges(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provenance := accepted.State.Machine.LegacyCompatibility.CurrentRisks[0]
+	previous := riskByID(accepted.State.Review.Risks)[provenance.RiskID]
+	incoming := accepted.Legacy.CurrentState
+	incoming.Revision++
+	incoming.Blockers = append([]string(nil), incoming.Blockers...)
+	incoming.Blockers[0] = "release approval is now documented"
+	plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Current: &incoming})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := ParseReview(plannedData(t, plan, ReviewRelativePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, exists := riskByID(next.Model.Risks)[provenance.RiskID]
+	if !exists || updated.Title != incoming.Blockers[0] || updated.Status != previous.Status {
+		t.Fatalf("current-risk identity/overlay changed unexpectedly: before=%+v after=%+v", previous, updated)
+	}
+}
+
+func TestApplyChangeSetInsertsNewDecisionWithoutCanonicalizingAcceptedProse(t *testing.T) {
+	root, _ := writeV2Fixture(t)
+	accepted, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewPath := filepath.Join(root, filepath.FromSlash(ReviewRelativePath))
+	reviewBody, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewBody = bytes.Replace(reviewBody, []byte("## 项目目标\n"), []byte("<!-- retain-around-insertion -->\n## 项目目标\n"), 1)
+	historyBody, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(HistoryRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, historyBody)
+	accepted, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incoming := ledger.Decision{
+		ID: "decision-new-contract", ProjectID: accepted.Legacy.ProjectID,
+		Title: "retain source spans", Status: "accepted", Revision: 1,
+		Tags: []string{}, Supersedes: []string{}, SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+		Rationale: "human prose is accepted state", Consequences: "updates patch only controlled fields",
+		Alternatives: []string{}, RejectedPaths: []string{},
+	}
+	plan, err := ApplyChangeSet(accepted, ledger.ChangeSet{Decisions: []ledger.Decision{incoming}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextBody := plannedData(t, plan, ReviewRelativePath)
+	if !bytes.Contains(nextBody, []byte("<!-- retain-around-insertion -->")) {
+		t.Fatalf("insertion canonicalized accepted prose:\n%s", nextBody)
+	}
+	next, err := ParseReview(nextBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := decisionByID(next.Model.Decisions)[incoming.ID]; got.Title != incoming.Title {
+		t.Fatalf("new decision not inserted: %+v", got)
+	}
+}
+
+func writeAcceptedDocumentsWithUpdatedHashes(t *testing.T, root string, reviewBody, historyBody []byte) {
+	t.Helper()
+	if _, err := ParseReview(reviewBody); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseHistory(historyBody); err != nil {
+		t.Fatal(err)
+	}
+	machinePath := filepath.Join(root, filepath.FromSlash(MachineLedgerRelativePath))
+	machineBody, err := os.ReadFile(machinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := ParseMachineLedger(machineBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine.ReviewSHA256 = sha256Hex(reviewBody)
+	machine.HistorySHA256 = sha256Hex(historyBody)
+	machineBody, err = RenderMachineLedger(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string][]byte{
+		filepath.Join(root, filepath.FromSlash(ReviewRelativePath)):        reviewBody,
+		filepath.Join(root, filepath.FromSlash(HistoryRelativePath)):       historyBody,
+		filepath.Join(root, filepath.FromSlash(MachineLedgerRelativePath)): machineBody,
+	} {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func plannedData(t *testing.T, plan ledger.WritePlan, relative string) []byte {
+	t.Helper()
+	for _, file := range plan.Files {
+		if file.RelativePath == relative {
+			return file.Data
+		}
+	}
+	t.Fatalf("plan omits %s", relative)
+	return nil
 }
 
 func TestApplyChangeSetPlanRejectsPostRenderEditBeforeAnyWrite(t *testing.T) {

@@ -20,15 +20,16 @@ type evidenceWire struct {
 }
 
 type machineLedgerWire struct {
-	SchemaVersion      int                       `json:"schema_version"`
-	ProjectID          string                    `json:"project_id"`
-	AcceptedRevision   int                       `json:"accepted_revision"`
-	ReviewSHA256       string                    `json:"review_sha256"`
-	HistorySHA256      string                    `json:"history_sha256"`
-	LastSuccessfulSync string                    `json:"last_successful_sync,omitempty"`
-	Accounting         accounting.ProjectSummary `json:"accounting"`
-	Sessions           []ledger.SessionReport    `json:"sessions"`
-	Evidence           []evidenceWire            `json:"evidence"`
+	SchemaVersion       int                       `json:"schema_version"`
+	ProjectID           string                    `json:"project_id"`
+	AcceptedRevision    int                       `json:"accepted_revision"`
+	ReviewSHA256        string                    `json:"review_sha256"`
+	HistorySHA256       string                    `json:"history_sha256"`
+	LastSuccessfulSync  string                    `json:"last_successful_sync,omitempty"`
+	Accounting          accounting.ProjectSummary `json:"accounting"`
+	Sessions            []ledger.SessionReport    `json:"sessions"`
+	Evidence            []evidenceWire            `json:"evidence"`
+	LegacyCompatibility LegacyCompatibility       `json:"legacy_compatibility"`
 }
 
 func ParseMachineLedger(body []byte) (MachineLedger, error) {
@@ -58,15 +59,16 @@ func ParseMachineLedger(body []byte) (MachineLedger, error) {
 	}
 
 	value := MachineLedger{
-		SchemaVersion:      wire.SchemaVersion,
-		ProjectID:          wire.ProjectID,
-		AcceptedRevision:   wire.AcceptedRevision,
-		ReviewSHA256:       wire.ReviewSHA256,
-		HistorySHA256:      wire.HistorySHA256,
-		LastSuccessfulSync: wire.LastSuccessfulSync,
-		Accounting:         wire.Accounting,
-		Sessions:           wire.Sessions,
-		Evidence:           make(map[string][]ledger.EvidenceRef, len(wire.Evidence)),
+		SchemaVersion:       wire.SchemaVersion,
+		ProjectID:           wire.ProjectID,
+		AcceptedRevision:    wire.AcceptedRevision,
+		ReviewSHA256:        wire.ReviewSHA256,
+		HistorySHA256:       wire.HistorySHA256,
+		LastSuccessfulSync:  wire.LastSuccessfulSync,
+		Accounting:          wire.Accounting,
+		Sessions:            wire.Sessions,
+		Evidence:            make(map[string][]ledger.EvidenceRef, len(wire.Evidence)),
+		LegacyCompatibility: wire.LegacyCompatibility,
 	}
 	for _, entry := range wire.Evidence {
 		if _, duplicate := value.Evidence[entry.ID]; duplicate {
@@ -283,15 +285,16 @@ func RenderMachineLedger(value MachineLedger) ([]byte, error) {
 		evidence = append(evidence, evidenceWire{ID: id, Refs: value.Evidence[id]})
 	}
 	wire := machineLedgerWire{
-		SchemaVersion:      value.SchemaVersion,
-		ProjectID:          value.ProjectID,
-		AcceptedRevision:   value.AcceptedRevision,
-		ReviewSHA256:       value.ReviewSHA256,
-		HistorySHA256:      value.HistorySHA256,
-		LastSuccessfulSync: value.LastSuccessfulSync,
-		Accounting:         value.Accounting,
-		Sessions:           sessions,
-		Evidence:           evidence,
+		SchemaVersion:       value.SchemaVersion,
+		ProjectID:           value.ProjectID,
+		AcceptedRevision:    value.AcceptedRevision,
+		ReviewSHA256:        value.ReviewSHA256,
+		HistorySHA256:       value.HistorySHA256,
+		LastSuccessfulSync:  value.LastSuccessfulSync,
+		Accounting:          value.Accounting,
+		Sessions:            sessions,
+		Evidence:            evidence,
+		LegacyCompatibility: value.LegacyCompatibility,
 	}
 	var output bytes.Buffer
 	encoder := json.NewEncoder(&output)
@@ -335,12 +338,40 @@ func normalizedMachineLedger(value MachineLedger) MachineLedger {
 		evidence[id] = append([]ledger.EvidenceRef{}, refs...)
 	}
 	value.Evidence = evidence
+	value.LegacyCompatibility = cloneLegacyCompatibility(value.LegacyCompatibility)
+	if value.LegacyCompatibility.CurrentState.ProjectID == "" {
+		value.LegacyCompatibility.CurrentState.ProjectID = value.ProjectID
+		value.LegacyCompatibility.CurrentState.Revision = value.AcceptedRevision
+	}
 	return value
 }
 
 func validateMachineLedgerWireShape(wire machineLedgerWire) error {
-	if wire.Sessions == nil || wire.Evidence == nil || wire.Accounting.Models == nil {
+	if wire.Sessions == nil || wire.Evidence == nil || wire.Accounting.Models == nil ||
+		wire.LegacyCompatibility.Timeline == nil || wire.LegacyCompatibility.Decisions == nil ||
+		wire.LegacyCompatibility.OpenLoops == nil || wire.LegacyCompatibility.CurrentRisks == nil {
 		return errors.New("machine ledger array fields must not be null or omitted")
+	}
+	current := wire.LegacyCompatibility.CurrentState
+	if current.UncommittedChanges == nil || current.Blockers == nil || current.OpenRisks == nil ||
+		current.SourceSessions == nil || current.Evidence == nil {
+		return errors.New("legacy compatibility current-state arrays must not be null or omitted")
+	}
+	for _, event := range wire.LegacyCompatibility.Timeline {
+		if event.Evidence == nil || event.DecisionIDs == nil || event.OpenLoopIDs == nil {
+			return fmt.Errorf("legacy compatibility timeline event %q arrays must not be null or omitted", event.ID)
+		}
+	}
+	for _, decision := range wire.LegacyCompatibility.Decisions {
+		if decision.Tags == nil || decision.Supersedes == nil || decision.SourceSessions == nil ||
+			decision.Evidence == nil || decision.Alternatives == nil || decision.RejectedPaths == nil {
+			return fmt.Errorf("legacy compatibility decision %q arrays must not be null or omitted", decision.ID)
+		}
+	}
+	for _, loop := range wire.LegacyCompatibility.OpenLoops {
+		if loop.Tags == nil || loop.SourceSessions == nil || loop.Evidence == nil || loop.Attempts == nil {
+			return fmt.Errorf("legacy compatibility open loop %q arrays must not be null or omitted", loop.ID)
+		}
 	}
 	for _, session := range wire.Sessions {
 		if session.GoalChanges == nil || session.Phases == nil || session.Files == nil ||
@@ -385,6 +416,7 @@ func requireMachineLedgerFields(body []byte) error {
 	for _, name := range []string{
 		"schema_version", "project_id", "accepted_revision", "review_sha256",
 		"history_sha256", "accounting", "sessions", "evidence",
+		"legacy_compatibility",
 	} {
 		if _, ok := fields[name]; !ok {
 			return fmt.Errorf("machine ledger field %q is required", name)

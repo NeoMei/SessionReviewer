@@ -13,7 +13,8 @@
     "history_sha256",
     "accounting",
     "sessions",
-    "evidence"
+    "evidence",
+    "legacy_compatibility"
   ],
   "properties": {
     "schema_version": { "const": 2 },
@@ -30,9 +31,65 @@
     "evidence": {
       "type": "array",
       "items": { "$ref": "#/$defs/evidence_entry" }
-    }
+    },
+    "legacy_compatibility": { "$ref": "#/$defs/legacy_compatibility" }
   },
   "$defs": {
+	"legacy_compatibility": {
+	  "type": "object",
+	  "additionalProperties": false,
+	  "required": ["current_state", "timeline", "decisions", "open_loops", "current_risks"],
+	  "properties": {
+		"current_state": { "$ref": "#/$defs/current_state" },
+		"timeline": { "type": "array", "items": { "$ref": "#/$defs/timeline_event" } },
+		"decisions": { "type": "array", "items": { "$ref": "#/$defs/decision" } },
+		"open_loops": { "type": "array", "items": { "$ref": "#/$defs/open_loop" } },
+		"current_risks": { "type": "array", "items": { "$ref": "#/$defs/current_risk_provenance" } }
+	  }
+	},
+	"current_state": {
+	  "type": "object", "additionalProperties": false,
+	  "required": ["project_id", "revision", "goal", "last_verified", "branch", "uncommitted_changes", "blockers", "open_risks", "next_action", "first_inspection", "last_updated", "source_sessions", "evidence"],
+	  "properties": {
+		"project_id": { "type": "string", "minLength": 1 }, "revision": { "type": "integer", "minimum": 0 },
+		"goal": { "type": "string" }, "last_verified": { "type": "string" }, "branch": { "type": "string" },
+		"uncommitted_changes": { "$ref": "#/$defs/string_array" }, "blockers": { "$ref": "#/$defs/string_array" }, "open_risks": { "$ref": "#/$defs/string_array" },
+		"next_action": { "type": "string" }, "first_inspection": { "type": "string" }, "last_updated": { "type": "string" },
+		"source_sessions": { "$ref": "#/$defs/string_array" }, "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence_ref" } }
+	  }
+	},
+	"timeline_event": {
+	  "type": "object", "additionalProperties": false,
+	  "required": ["id", "occurred_at", "revision", "class", "title", "summary", "evidence", "decision_ids", "open_loop_ids"],
+	  "properties": {
+		"id": { "type": "string", "minLength": 1 }, "occurred_at": { "type": "string" }, "revision": { "type": "integer", "minimum": 0 },
+		"class": { "type": "string" }, "title": { "type": "string" }, "summary": { "type": "string" },
+		"evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence_ref" } },
+		"decision_ids": { "$ref": "#/$defs/string_array" }, "open_loop_ids": { "$ref": "#/$defs/string_array" }
+	  }
+	},
+	"decision": {
+	  "type": "object", "additionalProperties": false,
+	  "required": ["id", "project_id", "title", "status", "revision", "tags", "supersedes", "source_sessions", "evidence", "context", "rationale", "consequences", "reevaluate_when", "alternatives", "rejected_paths"],
+	  "properties": {
+		"id": { "type": "string", "minLength": 1 }, "project_id": { "type": "string", "minLength": 1 }, "title": { "type": "string" }, "status": { "type": "string" }, "revision": { "type": "integer", "minimum": 0 },
+		"tags": { "$ref": "#/$defs/string_array" }, "supersedes": { "$ref": "#/$defs/string_array" }, "source_sessions": { "$ref": "#/$defs/string_array" }, "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence_ref" } },
+		"context": { "type": "string" }, "rationale": { "type": "string" }, "consequences": { "type": "string" }, "reevaluate_when": { "type": "string" }, "alternatives": { "$ref": "#/$defs/string_array" }, "rejected_paths": { "$ref": "#/$defs/string_array" }
+	  }
+	},
+	"open_loop": {
+	  "type": "object", "additionalProperties": false,
+	  "required": ["id", "project_id", "title", "status", "revision", "tags", "source_sessions", "evidence", "question", "attempts", "blocker", "next_experiment", "completion_criterion"],
+	  "properties": {
+		"id": { "type": "string", "minLength": 1 }, "project_id": { "type": "string", "minLength": 1 }, "title": { "type": "string" }, "status": { "type": "string" }, "revision": { "type": "integer", "minimum": 0 },
+		"tags": { "$ref": "#/$defs/string_array" }, "source_sessions": { "$ref": "#/$defs/string_array" }, "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence_ref" } },
+		"question": { "type": "string" }, "attempts": { "$ref": "#/$defs/string_array" }, "blocker": { "type": "string" }, "next_experiment": { "type": "string" }, "completion_criterion": { "type": "string" }
+	  }
+	},
+	"current_risk_provenance": {
+	  "type": "object", "additionalProperties": false, "required": ["risk_id", "kind"],
+	  "properties": { "risk_id": { "type": "string", "minLength": 1 }, "kind": { "enum": ["blocker", "open_risk"] } }
+	},
     "lowercase_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"

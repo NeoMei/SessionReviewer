@@ -260,7 +260,7 @@ func withinAbsoluteTolerance(left, right, tolerance float64) bool {
 	if !finiteNonnegativeNumber(left) || !finiteNonnegativeNumber(right) {
 		return false
 	}
-	return math.Abs(left-right) <= tolerance+tolerance*1e-6
+	return math.Abs(left-right) <= tolerance
 }
 
 type Accumulator struct {

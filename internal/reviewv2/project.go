@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"fmt"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,6 +17,9 @@ import (
 // ProjectLegacy deterministically projects the public legacy model into the
 // two human documents and the machine-owned ledger. It performs no I/O.
 func ProjectLegacy(legacy ledger.State) (State, error) {
+	if err := validateLegacyProjectionInput(legacy); err != nil {
+		return State{}, fmt.Errorf("project legacy state: %w", err)
+	}
 	state := State{
 		Review: Review{
 			ProjectID:        legacy.ProjectID,
@@ -28,10 +32,11 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 			LastVerification: legacy.CurrentState.LastVerified,
 		},
 		Machine: MachineLedger{
-			SchemaVersion:    SchemaVersion,
-			ProjectID:        legacy.ProjectID,
-			AcceptedRevision: legacy.CurrentState.Revision,
-			Evidence:         make(map[string][]ledger.EvidenceRef),
+			SchemaVersion:       SchemaVersion,
+			ProjectID:           legacy.ProjectID,
+			AcceptedRevision:    legacy.CurrentState.Revision,
+			Evidence:            make(map[string][]ledger.EvidenceRef),
+			LegacyCompatibility: legacyCompatibilityFromState(legacy),
 		},
 	}
 	if state.Review.Revision < 1 {
@@ -81,10 +86,14 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 		appendMachineEvidence(state.Machine.Evidence, id, value.Evidence)
 	}
 	for _, blocker := range legacy.CurrentState.Blockers {
-		state.Review.Risks = append(state.Review.Risks, currentStateRisk("blocker", "blocked", blocker, usedRiskIDs))
+		risk := currentStateRisk("blocker", "blocked", blocker, usedRiskIDs)
+		state.Review.Risks = append(state.Review.Risks, risk)
+		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: risk.ID, Kind: "blocker"})
 	}
 	for _, risk := range legacy.CurrentState.OpenRisks {
-		state.Review.Risks = append(state.Review.Risks, currentStateRisk("risk", "open", risk, usedRiskIDs))
+		projected := currentStateRisk("risk", "open", risk, usedRiskIDs)
+		state.Review.Risks = append(state.Review.Risks, projected)
+		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: projected.ID, Kind: "open_risk"})
 	}
 	sort.Slice(state.Review.Risks, func(left, right int) bool {
 		if state.Review.Risks[left].Status != state.Review.Risks[right].Status {
@@ -148,89 +157,91 @@ func LegacyState(state State) (ledger.State, error) {
 	if err := Validate(state); err != nil {
 		return ledger.State{}, err
 	}
+	compatibility := cloneLegacyCompatibility(state.Machine.LegacyCompatibility)
 	legacy := ledger.State{
-		ProjectID: state.Review.ProjectID,
-		CurrentState: ledger.CurrentState{
-			ProjectID:          state.Review.ProjectID,
-			Revision:           state.Review.Revision,
-			Goal:               state.Review.Goal,
-			LastVerified:       state.Review.LastVerification,
-			Branch:             state.Review.Stage,
-			UncommittedChanges: []string{},
-			Blockers:           []string{},
-			OpenRisks:          []string{},
-			NextAction:         state.Review.NextAction,
-			FirstInspection:    "",
-			LastUpdated:        latestEventTime(state.Events),
-			SourceSessions:     []string{},
-			Evidence:           sortedAllEvidence(state.Machine.Evidence),
-		},
-		Decisions: make(map[string]ledger.Decision, len(state.Review.Decisions)),
-		OpenLoops: make(map[string]ledger.OpenLoop, len(state.Review.Risks)),
-		Sessions:  make(map[string]ledger.SessionReport, len(state.Machine.Sessions)),
+		ProjectID:    state.Review.ProjectID,
+		CurrentState: compatibility.CurrentState,
+		Decisions:    make(map[string]ledger.Decision, len(state.Review.Decisions)),
+		OpenLoops:    make(map[string]ledger.OpenLoop, len(state.Review.Risks)),
+		Sessions:     make(map[string]ledger.SessionReport, len(state.Machine.Sessions)),
+	}
+	legacy.CurrentState.ProjectID = state.Review.ProjectID
+	legacy.CurrentState.Revision = state.Review.Revision
+	legacy.CurrentState.Goal = state.Review.Goal
+	legacy.CurrentState.LastVerified = state.Review.LastVerification
+	legacy.CurrentState.Branch = state.Review.Stage
+	legacy.CurrentState.NextAction = state.Review.NextAction
+	legacy.CurrentState.Blockers = nil
+	legacy.CurrentState.OpenRisks = nil
+
+	compatibleDecisions := make(map[string]ledger.Decision, len(compatibility.Decisions))
+	for _, value := range compatibility.Decisions {
+		compatibleDecisions[value.ID] = value
 	}
 	for _, decision := range state.Review.Decisions {
-		evidence := cloneEvidenceRefs(state.Machine.Evidence[decision.ID])
-		legacy.Decisions[decision.ID] = ledger.Decision{
-			ID:             decision.ID,
-			ProjectID:      state.Review.ProjectID,
-			Title:          decision.Title,
-			Status:         decision.Status,
-			Revision:       state.Review.Revision,
-			Tags:           []string{},
-			Supersedes:     []string{},
-			SourceSessions: sortedEvidenceSessionIDs(evidence),
-			Evidence:       evidence,
-			Rationale:      decision.Rationale,
-			Consequences:   decision.Impact,
-			Alternatives:   []string{},
-			RejectedPaths:  []string{},
+		value, exists := compatibleDecisions[decision.ID]
+		if !exists {
+			return ledger.State{}, fmt.Errorf("decision %q has no legacy compatibility record", decision.ID)
 		}
+		value.Title = decision.Title
+		value.Status = decision.Status
+		value.Rationale = decision.Rationale
+		value.Consequences = decision.Impact
+		legacy.Decisions[decision.ID] = value
+	}
+	currentRisks := make(map[string]CurrentRiskProvenance, len(compatibility.CurrentRisks))
+	for _, provenance := range compatibility.CurrentRisks {
+		currentRisks[provenance.RiskID] = provenance
+	}
+	compatibleLoops := make(map[string]ledger.OpenLoop, len(compatibility.OpenLoops))
+	for _, value := range compatibility.OpenLoops {
+		compatibleLoops[value.ID] = value
 	}
 	for _, risk := range state.Review.Risks {
-		if kind, generated := generatedCurrentRisk(risk.ID); generated {
-			if kind == "blocker" {
-				legacy.CurrentState.Blockers = append(legacy.CurrentState.Blockers, risk.Title)
-			} else {
-				legacy.CurrentState.OpenRisks = append(legacy.CurrentState.OpenRisks, risk.Title)
-			}
+		if _, generated := currentRisks[risk.ID]; generated {
 			continue
 		}
-		evidence := cloneEvidenceRefs(state.Machine.Evidence[risk.ID])
-		legacy.OpenLoops[risk.ID] = ledger.OpenLoop{
-			ID:             risk.ID,
-			ProjectID:      state.Review.ProjectID,
-			Title:          risk.Title,
-			Status:         risk.Status,
-			Revision:       state.Review.Revision,
-			Tags:           []string{},
-			SourceSessions: sortedEvidenceSessionIDs(evidence),
-			Evidence:       evidence,
-			Question:       risk.Detail,
-			Attempts:       []string{},
-			NextExperiment: state.Review.NextAction,
+		value, exists := compatibleLoops[risk.ID]
+		if !exists {
+			return ledger.State{}, fmt.Errorf("risk %q has no legacy compatibility record or current-risk provenance", risk.ID)
+		}
+		value.Title = risk.Title
+		value.Status = risk.Status
+		legacy.OpenLoops[risk.ID] = value
+	}
+	reviewRisks := riskByID(state.Review.Risks)
+	for _, provenance := range compatibility.CurrentRisks {
+		risk, exists := reviewRisks[provenance.RiskID]
+		if !exists {
+			return ledger.State{}, fmt.Errorf("current-risk provenance %q has no visible risk", provenance.RiskID)
+		}
+		if provenance.Kind == "blocker" {
+			legacy.CurrentState.Blockers = append(legacy.CurrentState.Blockers, risk.Title)
+		} else {
+			legacy.CurrentState.OpenRisks = append(legacy.CurrentState.OpenRisks, risk.Title)
 		}
 	}
+	compatibleEvents := make(map[string]ledger.TimelineEvent, len(compatibility.Timeline))
+	for _, value := range compatibility.Timeline {
+		compatibleEvents[value.ID] = value
+	}
 	for _, event := range state.Events {
-		legacy.Timeline = append(legacy.Timeline, ledger.TimelineEvent{
-			ID:          event.ID,
-			OccurredAt:  event.OccurredAt,
-			Revision:    state.Review.Revision,
-			Class:       ledger.FactClass(event.Kind),
-			Title:       event.Title,
-			Summary:     event.Summary,
-			Evidence:    cloneEvidenceRefs(state.Machine.Evidence[event.ID]),
-			DecisionIDs: append([]string(nil), event.DecisionIDs...),
-			OpenLoopIDs: []string{},
-		})
+		value, exists := compatibleEvents[event.ID]
+		if !exists {
+			return ledger.State{}, fmt.Errorf("event %q has no legacy compatibility record", event.ID)
+		}
+		value.OccurredAt = event.OccurredAt
+		value.Class = ledger.FactClass(event.Kind)
+		value.Title = event.Title
+		value.Summary = event.Summary
+		value.DecisionIDs = append([]string(nil), event.DecisionIDs...)
+		legacy.Timeline = append(legacy.Timeline, value)
 	}
 	sortLegacyTimeline(legacy.Timeline)
 	for _, report := range state.Machine.Sessions {
 		copy := cloneLegacySession(report)
 		legacy.Sessions[copy.ID] = copy
-		legacy.CurrentState.SourceSessions = append(legacy.CurrentState.SourceSessions, copy.SessionID)
 	}
-	legacy.CurrentState.SourceSessions = uniqueNonemptySorted(legacy.CurrentState.SourceSessions)
 	return legacy, nil
 }
 
@@ -259,14 +270,44 @@ func ApplyChangeSet(current Accepted, changes ledger.ChangeSet) (ledger.WritePla
 	next.Machine.AcceptedRevision = next.Review.Revision
 	next.Review.Name = current.State.Review.Name
 	next.Machine.LastSuccessfulSync = current.State.Machine.LastSuccessfulSync
-	preserveUnchangedReviewUnits(&next, current.State, changes)
-	if err := setDocumentHashes(&next); err != nil {
-		return ledger.WritePlan{}, err
-	}
-	plan, err := Render(current.projectRoot, next)
+	baseline, err := ProjectLegacy(current.Legacy)
 	if err != nil {
 		return ledger.WritePlan{}, err
 	}
+	preserveCurrentRiskIdentities(&baseline, current.State)
+	preserveCurrentRiskIdentities(&next, current.State)
+	overlayUnchangedHumanFields(&next, current.State, baseline, changes)
+	reviewBody, historyBody, err := patchAcceptedDocuments(current, next)
+	if err != nil {
+		return ledger.WritePlan{}, err
+	}
+	reviewDocument, err := ParseReview(reviewBody)
+	if err != nil {
+		return ledger.WritePlan{}, err
+	}
+	historyDocument, err := ParseHistory(historyBody)
+	if err != nil {
+		return ledger.WritePlan{}, err
+	}
+	next.Review = reviewDocument.Model
+	next.Events = historyDocument.Events
+	next.Machine.ReviewSHA256 = sha256Hex(reviewBody)
+	next.Machine.HistorySHA256 = sha256Hex(historyBody)
+	if err := validateStateProjectAccounting(next); err != nil {
+		return ledger.WritePlan{}, err
+	}
+	if err := Validate(next); err != nil {
+		return ledger.WritePlan{}, err
+	}
+	machineBody, err := RenderMachineLedger(next.Machine)
+	if err != nil {
+		return ledger.WritePlan{}, err
+	}
+	plan := ledger.WritePlan{ProjectRoot: current.projectRoot, Files: []ledger.PlannedFile{
+		{RelativePath: HistoryRelativePath, Data: historyBody, Perm: 0o644},
+		{RelativePath: MachineLedgerRelativePath, Data: machineBody, Perm: 0o644},
+		{RelativePath: ReviewRelativePath, Data: reviewBody, Perm: 0o644},
+	}}
 	for index := range plan.Files {
 		previous, exists := current.files[plan.Files[index].RelativePath]
 		if !exists {
@@ -310,60 +351,155 @@ func emptyChangeSet(changes ledger.ChangeSet) bool {
 	return changes.Current == nil && len(changes.Timeline) == 0 && len(changes.Decisions) == 0 && len(changes.OpenLoops) == 0 && len(changes.Sessions) == 0
 }
 
-func preserveUnchangedReviewUnits(next *State, current State, changes ledger.ChangeSet) {
-	changedDecisions := make(map[string]struct{}, len(changes.Decisions))
-	for _, value := range changes.Decisions {
-		changedDecisions[value.ID] = struct{}{}
+func overlayUnchangedHumanFields(next *State, current, baseline State, changes ledger.ChangeSet) {
+	if next == nil {
+		return
 	}
-	oldDecisions := make(map[string]Decision, len(current.Review.Decisions))
-	for _, value := range current.Review.Decisions {
-		oldDecisions[value.ID] = value
+	if next.Review.Goal == baseline.Review.Goal {
+		next.Review.Goal = current.Review.Goal
 	}
-	for index := range next.Review.Decisions {
-		if _, changed := changedDecisions[next.Review.Decisions[index].ID]; changed {
-			continue
-		}
-		if previous, exists := oldDecisions[next.Review.Decisions[index].ID]; exists {
-			next.Review.Decisions[index] = previous
-		}
+	if next.Review.Stage == baseline.Review.Stage {
+		next.Review.Stage = current.Review.Stage
+	}
+	if next.Review.Status == baseline.Review.Status {
+		next.Review.Status = current.Review.Status
+	}
+	if next.Review.NextAction == baseline.Review.NextAction {
+		next.Review.NextAction = current.Review.NextAction
+	}
+	if next.Review.LastVerification == baseline.Review.LastVerification {
+		next.Review.LastVerification = current.Review.LastVerification
 	}
 
-	changedRisks := make(map[string]struct{}, len(changes.OpenLoops))
-	for _, value := range changes.OpenLoops {
-		changedRisks[value.ID] = struct{}{}
-	}
-	oldRisks := make(map[string]Risk, len(current.Review.Risks))
-	for _, value := range current.Review.Risks {
-		oldRisks[value.ID] = value
-	}
+	currentRisks, baselineRisks := riskByID(current.Review.Risks), riskByID(baseline.Review.Risks)
 	for index := range next.Review.Risks {
-		if _, changed := changedRisks[next.Review.Risks[index].ID]; changed {
+		value := &next.Review.Risks[index]
+		previous, exists := currentRisks[value.ID]
+		before, hadBaseline := baselineRisks[value.ID]
+		if !exists || !hadBaseline {
 			continue
 		}
-		if _, generated := generatedCurrentRisk(next.Review.Risks[index].ID); generated && changes.Current != nil {
+		if currentRiskProvenanceByID(next.Machine.LegacyCompatibility, value.ID) != nil {
+			if value.Title == before.Title {
+				value.Title = previous.Title
+			}
+			value.Status = previous.Status
+			value.Detail = previous.Detail
 			continue
 		}
-		if previous, exists := oldRisks[next.Review.Risks[index].ID]; exists {
-			next.Review.Risks[index] = previous
+		if value.Title == before.Title {
+			value.Title = previous.Title
+		}
+		if value.Status == before.Status {
+			value.Status = previous.Status
+		}
+		if value.Detail == before.Detail {
+			value.Detail = previous.Detail
 		}
 	}
-
+	currentDecisions, baselineDecisions := decisionByID(current.Review.Decisions), decisionByID(baseline.Review.Decisions)
+	for index := range next.Review.Decisions {
+		value := &next.Review.Decisions[index]
+		previous, exists := currentDecisions[value.ID]
+		before, hadBaseline := baselineDecisions[value.ID]
+		if !exists || !hadBaseline {
+			continue
+		}
+		if value.Title == before.Title {
+			value.Title = previous.Title
+		}
+		if value.Rationale == before.Rationale {
+			value.Rationale = previous.Rationale
+		}
+		if value.Impact == before.Impact {
+			value.Impact = previous.Impact
+		}
+	}
+	currentEvents, baselineEvents := eventByID(current.Events), eventByID(baseline.Events)
 	changedEvents := make(map[string]struct{}, len(changes.Timeline))
 	for _, value := range changes.Timeline {
 		changedEvents[value.ID] = struct{}{}
 	}
-	oldEvents := make(map[string]Event, len(current.Events))
-	for _, value := range current.Events {
-		oldEvents[value.ID] = value
-	}
 	for index := range next.Events {
-		if _, changed := changedEvents[next.Events[index].ID]; changed {
+		value := &next.Events[index]
+		previous, exists := currentEvents[value.ID]
+		before, hadBaseline := baselineEvents[value.ID]
+		if !exists || !hadBaseline {
 			continue
 		}
-		if previous, exists := oldEvents[next.Events[index].ID]; exists {
-			next.Events[index] = previous
+		if _, changed := changedEvents[value.ID]; !changed {
+			value.Title = previous.Title
+			value.Meaning = previous.Meaning
+			value.Summary = previous.Summary
+			value.Why = previous.Why
+			value.Changes = append([]string(nil), previous.Changes...)
+			value.Results = append([]string(nil), previous.Results...)
+			value.Next = previous.Next
+			continue
+		}
+		if value.Title == before.Title {
+			value.Title = previous.Title
+		}
+		if value.Meaning == before.Meaning {
+			value.Meaning = previous.Meaning
+		}
+		if value.Summary == before.Summary {
+			value.Summary = previous.Summary
+		}
+		if value.Why == before.Why {
+			value.Why = previous.Why
+		}
+		if reflect.DeepEqual(value.Changes, before.Changes) {
+			value.Changes = append([]string(nil), previous.Changes...)
+		}
+		if reflect.DeepEqual(value.Results, before.Results) {
+			value.Results = append([]string(nil), previous.Results...)
+		}
+		if value.Next == before.Next {
+			value.Next = previous.Next
 		}
 	}
+}
+
+func preserveCurrentRiskIdentities(next *State, current State) {
+	if next == nil {
+		return
+	}
+	oldByKind := map[string][]string{"blocker": {}, "open_risk": {}}
+	for _, value := range current.Machine.LegacyCompatibility.CurrentRisks {
+		oldByKind[value.Kind] = append(oldByKind[value.Kind], value.RiskID)
+	}
+	nextRiskIndex := make(map[string]int, len(next.Review.Risks))
+	for index, risk := range next.Review.Risks {
+		nextRiskIndex[risk.ID] = index
+	}
+	positions := map[string]int{"blocker": 0, "open_risk": 0}
+	for index := range next.Machine.LegacyCompatibility.CurrentRisks {
+		provenance := &next.Machine.LegacyCompatibility.CurrentRisks[index]
+		position := positions[provenance.Kind]
+		positions[provenance.Kind]++
+		if position >= len(oldByKind[provenance.Kind]) {
+			continue
+		}
+		oldID := oldByKind[provenance.Kind][position]
+		riskIndex, exists := nextRiskIndex[provenance.RiskID]
+		if !exists {
+			continue
+		}
+		delete(nextRiskIndex, provenance.RiskID)
+		next.Review.Risks[riskIndex].ID = oldID
+		provenance.RiskID = oldID
+		nextRiskIndex[oldID] = riskIndex
+	}
+}
+
+func currentRiskProvenanceByID(value LegacyCompatibility, id string) *CurrentRiskProvenance {
+	for index := range value.CurrentRisks {
+		if value.CurrentRisks[index].RiskID == id {
+			return &value.CurrentRisks[index]
+		}
+	}
+	return nil
 }
 
 // Render returns the complete three-file accepted-state write plan. Fresh
@@ -631,6 +767,80 @@ func cloneLegacySession(value ledger.SessionReport) ledger.SessionReport {
 		copy.Models = append([]accounting.ModelAccounting(nil), copy.Models...)
 		value.Accounting = &copy
 	}
+	return value
+}
+
+func legacyCompatibilityFromState(state ledger.State) LegacyCompatibility {
+	result := LegacyCompatibility{
+		CurrentState: cloneLegacyCurrentState(state.CurrentState),
+		Timeline:     make([]ledger.TimelineEvent, 0, len(state.Timeline)),
+		Decisions:    make([]ledger.Decision, 0, len(state.Decisions)),
+		OpenLoops:    make([]ledger.OpenLoop, 0, len(state.OpenLoops)),
+		CurrentRisks: []CurrentRiskProvenance{},
+	}
+	for _, event := range state.Timeline {
+		result.Timeline = append(result.Timeline, cloneLegacyTimelineEvent(event))
+	}
+	for _, id := range sortedMapKeys(state.Decisions) {
+		result.Decisions = append(result.Decisions, cloneLegacyDecision(state.Decisions[id]))
+	}
+	for _, id := range sortedMapKeys(state.OpenLoops) {
+		result.OpenLoops = append(result.OpenLoops, cloneLegacyOpenLoop(state.OpenLoops[id]))
+	}
+	return result
+}
+
+func cloneLegacyCompatibility(value LegacyCompatibility) LegacyCompatibility {
+	result := LegacyCompatibility{
+		CurrentState: cloneLegacyCurrentState(value.CurrentState),
+		Timeline:     make([]ledger.TimelineEvent, 0, len(value.Timeline)),
+		Decisions:    make([]ledger.Decision, 0, len(value.Decisions)),
+		OpenLoops:    make([]ledger.OpenLoop, 0, len(value.OpenLoops)),
+		CurrentRisks: append([]CurrentRiskProvenance{}, value.CurrentRisks...),
+	}
+	for _, event := range value.Timeline {
+		result.Timeline = append(result.Timeline, cloneLegacyTimelineEvent(event))
+	}
+	for _, decision := range value.Decisions {
+		result.Decisions = append(result.Decisions, cloneLegacyDecision(decision))
+	}
+	for _, loop := range value.OpenLoops {
+		result.OpenLoops = append(result.OpenLoops, cloneLegacyOpenLoop(loop))
+	}
+	return result
+}
+
+func cloneLegacyCurrentState(value ledger.CurrentState) ledger.CurrentState {
+	value.UncommittedChanges = append([]string{}, value.UncommittedChanges...)
+	value.Blockers = append([]string{}, value.Blockers...)
+	value.OpenRisks = append([]string{}, value.OpenRisks...)
+	value.SourceSessions = append([]string{}, value.SourceSessions...)
+	value.Evidence = append([]ledger.EvidenceRef{}, value.Evidence...)
+	return value
+}
+
+func cloneLegacyTimelineEvent(value ledger.TimelineEvent) ledger.TimelineEvent {
+	value.Evidence = append([]ledger.EvidenceRef{}, value.Evidence...)
+	value.DecisionIDs = append([]string{}, value.DecisionIDs...)
+	value.OpenLoopIDs = append([]string{}, value.OpenLoopIDs...)
+	return value
+}
+
+func cloneLegacyDecision(value ledger.Decision) ledger.Decision {
+	value.Tags = append([]string{}, value.Tags...)
+	value.Supersedes = append([]string{}, value.Supersedes...)
+	value.SourceSessions = append([]string{}, value.SourceSessions...)
+	value.Evidence = append([]ledger.EvidenceRef{}, value.Evidence...)
+	value.Alternatives = append([]string{}, value.Alternatives...)
+	value.RejectedPaths = append([]string{}, value.RejectedPaths...)
+	return value
+}
+
+func cloneLegacyOpenLoop(value ledger.OpenLoop) ledger.OpenLoop {
+	value.Tags = append([]string{}, value.Tags...)
+	value.SourceSessions = append([]string{}, value.SourceSessions...)
+	value.Evidence = append([]ledger.EvidenceRef{}, value.Evidence...)
+	value.Attempts = append([]string{}, value.Attempts...)
 	return value
 }
 
