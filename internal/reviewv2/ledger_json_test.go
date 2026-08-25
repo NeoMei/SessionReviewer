@@ -33,8 +33,8 @@ func TestMachineLedgerRoundTripIsDeterministicAndRejectsDuplicateIdentity(t *tes
 	if err != nil || !bytes.Equal(rendered, renderedAgain) {
 		t.Fatalf("non-deterministic render: err=%v", err)
 	}
-	if _, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.invalid-duplicate-id.json")); err == nil {
-		t.Fatal("duplicate identity accepted")
+	if _, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.invalid-duplicate-id.json")); err == nil || !strings.Contains(err.Error(), "duplicate evidence identity") {
+		t.Fatalf("duplicate evidence identity accepted or misclassified: %v", err)
 	}
 }
 
@@ -45,8 +45,8 @@ func TestMachineLedgerRenderUsesStableOrderAndJSONFormatting(t *testing.T) {
 	}
 	machine.Sessions[0], machine.Sessions[1] = machine.Sessions[1], machine.Sessions[0]
 	machine.Evidence = map[string][]ledger.EvidenceRef{
-		"session-z":  machine.Evidence["session-z"],
-		"decision-a": machine.Evidence["decision-a"],
+		"session-report-z": machine.Evidence["session-report-z"],
+		"decision-a":       machine.Evidence["decision-a"],
 	}
 
 	rendered, err := RenderMachineLedger(machine)
@@ -59,7 +59,8 @@ func TestMachineLedgerRenderUsesStableOrderAndJSONFormatting(t *testing.T) {
 	if bytes.Index(rendered, []byte(`"session_id": "session-a"`)) > bytes.Index(rendered, []byte(`"session_id": "session-z"`)) {
 		t.Fatalf("sessions are not sorted by session_id: %s", rendered)
 	}
-	if bytes.Index(rendered, []byte(`"id": "decision-a"`)) > bytes.Index(rendered, []byte(`"id": "session-z"`)) {
+	evidenceStart := bytes.LastIndex(rendered, []byte(`"evidence": [`))
+	if evidenceStart < 0 || bytes.Index(rendered[evidenceStart:], []byte(`"id": "decision-a"`)) > bytes.Index(rendered[evidenceStart:], []byte(`"id": "session-report-z"`)) {
 		t.Fatalf("evidence entries are not sorted by id: %s", rendered)
 	}
 }
@@ -86,21 +87,30 @@ func TestMachineLedgerRenderNormalizesEmptyArraysWithoutMutatingInput(t *testing
 	}
 }
 
-func TestValidateRejectsInvalidStateContracts(t *testing.T) {
-	machine, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+func TestMachineLedgerRenderNormalizesNilEvidenceRefsWithoutMutatingCaller(t *testing.T) {
+	value, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := State{
-		Review: Review{
-			ProjectID: machine.ProjectID,
-			Revision:  machine.AcceptedRevision,
-			Risks:     []Risk{{ID: "risk-a"}},
-			Decisions: []Decision{{ID: "decision-a"}},
-		},
-		Events:  []Event{{ID: "event-a", DecisionIDs: []string{"decision-a"}}},
-		Machine: machine,
+	value.Evidence["session-report-a"] = nil
+
+	rendered, err := RenderMachineLedger(value)
+	if err != nil {
+		t.Fatal(err)
 	}
+	if _, err := ParseMachineLedger(rendered); err != nil {
+		t.Fatalf("rendered ledger cannot be parsed: %v\n%s", err, rendered)
+	}
+	if !bytes.Contains(rendered, []byte(`"refs": []`)) || bytes.Contains(rendered, []byte(`"refs": null`)) {
+		t.Fatalf("nil evidence refs were not normalized to an array: %s", rendered)
+	}
+	if value.Evidence["session-report-a"] != nil {
+		t.Fatalf("render mutated caller evidence refs: %+v", value.Evidence["session-report-a"])
+	}
+}
+
+func TestValidateRejectsInvalidStateContracts(t *testing.T) {
+	valid := validState(t)
 	if err := Validate(valid); err != nil {
 		t.Fatalf("valid state rejected: %v", err)
 	}
@@ -129,6 +139,66 @@ func TestValidateRejectsInvalidStateContracts(t *testing.T) {
 		}},
 		{"project ID mismatch", func(state *State) { state.Machine.ProjectID = "project-other" }},
 		{"revision mismatch", func(state *State) { state.Machine.AcceptedRevision++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state := cloneState(t, valid)
+			test.mutate(&state)
+			if err := Validate(state); err == nil {
+				t.Fatalf("%s accepted", test.name)
+			}
+		})
+	}
+}
+
+func TestValidateRejectsBrokenIdentityAndReferenceClosure(t *testing.T) {
+	valid := validState(t)
+	tests := []struct {
+		name   string
+		mutate func(*State)
+	}{
+		{"risk and decision share an ID", func(state *State) { state.Review.Risks[0].ID = "decision-a" }},
+		{"event and session report share an ID", func(state *State) { state.Events[0].ID = "session-report-a" }},
+		{"unknown evidence owner", func(state *State) { state.Machine.Evidence["entity-missing"] = []ledger.EvidenceRef{} }},
+		{"unknown evidence source session", func(state *State) {
+			refs := state.Machine.Evidence["decision-a"]
+			refs[0].SessionID = "session-missing"
+			state.Machine.Evidence["decision-a"] = refs
+		}},
+		{"unknown session-report evidence source session", func(state *State) {
+			ref := state.Machine.Evidence["decision-a"][0]
+			ref.SessionID = "session-missing"
+			state.Machine.Sessions[0].Evidence = []ledger.EvidenceRef{ref}
+		}},
+		{"unknown session-phase evidence source session", func(state *State) {
+			ref := state.Machine.Evidence["decision-a"][0]
+			ref.SessionID = "session-missing"
+			state.Machine.Sessions[0].Phases = []ledger.SessionPhase{{Evidence: []ledger.EvidenceRef{ref}}}
+		}},
+		{"duplicate event decision reference", func(state *State) { state.Events[0].DecisionIDs = []string{"decision-a", "decision-a"} }},
+		{"missing session decision reference", func(state *State) { state.Machine.Sessions[0].DecisionsAdded = []string{"decision-missing"} }},
+		{"duplicate session decision reference", func(state *State) {
+			state.Machine.Sessions[0].DecisionsAdded = []string{"decision-a"}
+			state.Machine.Sessions[0].DecisionsRevised = []string{"decision-a"}
+		}},
+		{"missing session risk reference", func(state *State) { state.Machine.Sessions[0].OpenLoopsCreated = []string{"risk-missing"} }},
+		{"duplicate session risk reference", func(state *State) {
+			state.Machine.Sessions[0].OpenLoopsCreated = []string{"risk-a"}
+			state.Machine.Sessions[0].OpenLoopsClosed = []string{"risk-a"}
+		}},
+		{"missing previous session", func(state *State) { state.Machine.Sessions[1].PreviousSessionID = "session-missing" }},
+		{"missing next session", func(state *State) { state.Machine.Sessions[0].NextSessionID = "session-missing" }},
+		{"nonreciprocal session link", func(state *State) { state.Machine.Sessions[0].NextSessionID = "" }},
+		{"disconnected session chain", func(state *State) {
+			state.Machine.Sessions[0].NextSessionID = ""
+			state.Machine.Sessions[1].PreviousSessionID = ""
+		}},
+		{"cyclic session chain", func(state *State) {
+			state.Machine.Sessions[0].PreviousSessionID = "session-z"
+			state.Machine.Sessions[0].NextSessionID = "session-z"
+			state.Machine.Sessions[1].PreviousSessionID = "session-a"
+			state.Machine.Sessions[1].NextSessionID = "session-a"
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -181,6 +251,29 @@ func TestMachineLedgerRejectsUnsafeNumbersHashesVersionsAndSizes(t *testing.T) {
 	}
 }
 
+func TestParseMachineLedgerRejectsDuplicateJSONKeysAtAnyDepth(t *testing.T) {
+	valid := string(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+	tests := map[string]string{
+		"top level": strings.Replace(valid,
+			`"schema_version": 2,`,
+			`"schema_version": 2, "schema_version": 2,`, 1),
+		"nested accounting": strings.Replace(valid,
+			`"total_cost_usd": 0.0038,`,
+			`"total_cost_usd": 0.0038, "total_cost_usd": 0.0038,`, 1),
+		"nested evidence": strings.Replace(valid,
+			`"evidence_id": "evidence-decision-a",`,
+			`"evidence_id": "evidence-decision-a", "evidence_id": "evidence-decision-a",`, 1),
+	}
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseMachineLedger([]byte(body))
+			if err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+				t.Fatalf("duplicate key accepted or misclassified: %v", err)
+			}
+		})
+	}
+}
+
 func TestMachineLedgerSchemaMatchesGoContractAndFixtures(t *testing.T) {
 	body := mustFixture(t, "../../schemas/review-ledger-v2.schema.json")
 	var schema map[string]any
@@ -189,6 +282,12 @@ func TestMachineLedgerSchemaMatchesGoContractAndFixtures(t *testing.T) {
 	}
 	if schema["$schema"] != "https://json-schema.org/draft/2020-12/schema" || schema["additionalProperties"] != false {
 		t.Fatalf("schema is not a closed draft-2020-12 object: %s", body)
+	}
+	comment, _ := schema["$comment"].(string)
+	for _, semanticContract := range []string{"duplicate JSON object keys", "cross-item identity uniqueness", "evidence owner and source-session existence", "entity-reference closure", "reciprocal acyclic session chain"} {
+		if !strings.Contains(comment, semanticContract) {
+			t.Fatalf("schema does not document codec-only semantic contract %q: %q", semanticContract, comment)
+		}
 	}
 	required, _ := schema["required"].([]any)
 	for _, field := range requiredMachineLedgerJSONFields(t) {
@@ -243,6 +342,24 @@ func cloneState(t *testing.T, value State) State {
 		t.Fatal(err)
 	}
 	return clone
+}
+
+func validState(t *testing.T) State {
+	t.Helper()
+	machine, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return State{
+		Review: Review{
+			ProjectID: machine.ProjectID,
+			Revision:  machine.AcceptedRevision,
+			Risks:     []Risk{{ID: "risk-a"}},
+			Decisions: []Decision{{ID: "decision-a"}},
+		},
+		Events:  []Event{{ID: "event-a", DecisionIDs: []string{"decision-a"}}},
+		Machine: machine,
+	}
 }
 
 func requiredMachineLedgerJSONFields(t *testing.T) []string {

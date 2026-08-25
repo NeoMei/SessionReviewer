@@ -27,40 +27,58 @@ func Validate(state State) error {
 	if state.Review.Revision < 0 || state.Review.Revision != state.Machine.AcceptedRevision {
 		return errors.New("review and machine ledger revisions must match")
 	}
+	if err := validateMachineLedger(state.Machine); err != nil {
+		return err
+	}
 
-	if err := validateUniqueIDs("risk", len(state.Review.Risks), func(index int) string {
-		return state.Review.Risks[index].ID
-	}); err != nil {
-		return err
-	}
+	entities := make(map[string]string, len(state.Review.Risks)+len(state.Review.Decisions)+len(state.Events)+len(state.Machine.Sessions))
+	risks := make(map[string]struct{}, len(state.Review.Risks))
 	decisions := make(map[string]struct{}, len(state.Review.Decisions))
-	if err := validateUniqueIDs("decision", len(state.Review.Decisions), func(index int) string {
-		id := state.Review.Decisions[index].ID
-		decisions[id] = struct{}{}
-		return id
-	}); err != nil {
-		return err
+	for _, risk := range state.Review.Risks {
+		if err := reserveIdentity(entities, risk.ID, "risk"); err != nil {
+			return err
+		}
+		risks[risk.ID] = struct{}{}
 	}
-	if err := validateUniqueIDs("event", len(state.Events), func(index int) string {
-		return state.Events[index].ID
-	}); err != nil {
-		return err
+	for _, decision := range state.Review.Decisions {
+		if err := reserveIdentity(entities, decision.ID, "decision"); err != nil {
+			return err
+		}
+		id := decision.ID
+		decisions[id] = struct{}{}
 	}
 	for _, event := range state.Events {
-		for _, decisionID := range event.DecisionIDs {
-			if _, ok := decisions[decisionID]; !ok {
-				return fmt.Errorf("event %q references missing decision %q", event.ID, decisionID)
-			}
+		if err := reserveIdentity(entities, event.ID, "event"); err != nil {
+			return err
 		}
 	}
 	for _, session := range state.Machine.Sessions {
-		for _, decisionID := range append(append([]string(nil), session.DecisionsAdded...), session.DecisionsRevised...) {
-			if _, ok := decisions[decisionID]; !ok {
-				return fmt.Errorf("session %q references missing decision %q", session.ID, decisionID)
-			}
+		if err := reserveIdentity(entities, session.ID, "session"); err != nil {
+			return err
 		}
 	}
-	return validateMachineLedger(state.Machine)
+
+	for _, event := range state.Events {
+		if err := validateReferences(event.DecisionIDs, decisions, fmt.Sprintf("event %q decision", event.ID)); err != nil {
+			return err
+		}
+	}
+	for _, session := range state.Machine.Sessions {
+		decisionIDs := append(append([]string(nil), session.DecisionsAdded...), session.DecisionsRevised...)
+		if err := validateReferences(decisionIDs, decisions, fmt.Sprintf("session %q decision", session.ID)); err != nil {
+			return err
+		}
+		riskIDs := append(append([]string(nil), session.OpenLoopsCreated...), session.OpenLoopsClosed...)
+		if err := validateReferences(riskIDs, risks, fmt.Sprintf("session %q risk", session.ID)); err != nil {
+			return err
+		}
+	}
+	for ownerID := range state.Machine.Evidence {
+		if _, exists := entities[ownerID]; !exists {
+			return fmt.Errorf("evidence owner %q does not identify a risk, decision, event, or session", ownerID)
+		}
+	}
+	return validateSessionChain(state.Machine.Sessions)
 }
 
 func validateMachineLedger(value MachineLedger) error {
@@ -112,12 +130,25 @@ func validateMachineLedger(value MachineLedger) error {
 			}
 		}
 	}
+	for _, session := range value.Sessions {
+		if err := validateEvidenceSessions(session.Evidence, sessionIDs); err != nil {
+			return fmt.Errorf("session %q evidence: %w", session.ID, err)
+		}
+		for index, phase := range session.Phases {
+			if err := validateEvidenceSessions(phase.Evidence, sessionIDs); err != nil {
+				return fmt.Errorf("session %q phase %d evidence: %w", session.ID, index, err)
+			}
+		}
+	}
 
 	for ownerID, refs := range value.Evidence {
 		if strings.TrimSpace(ownerID) == "" {
 			return errors.New("evidence owner identity is required")
 		}
 		if err := validateEvidenceRefs(refs); err != nil {
+			return fmt.Errorf("evidence for %q: %w", ownerID, err)
+		}
+		if err := validateEvidenceSessions(refs, sessionIDs); err != nil {
 			return fmt.Errorf("evidence for %q: %w", ownerID, err)
 		}
 	}
@@ -177,17 +208,82 @@ func validateEvidenceRefs(refs []ledger.EvidenceRef) error {
 	return nil
 }
 
-func validateUniqueIDs(kind string, length int, idAt func(int) string) error {
-	seen := make(map[string]struct{}, length)
-	for index := 0; index < length; index++ {
-		id := idAt(index)
-		if strings.TrimSpace(id) == "" {
-			return fmt.Errorf("%s identity is required", kind)
+func validateEvidenceSessions(refs []ledger.EvidenceRef, sessions map[string]struct{}) error {
+	for _, ref := range refs {
+		if _, exists := sessions[ref.SessionID]; !exists {
+			return fmt.Errorf("evidence %q references missing session %q", ref.EvidenceID, ref.SessionID)
 		}
+	}
+	return nil
+}
+
+func reserveIdentity(entities map[string]string, id, kind string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("%s identity is required", kind)
+	}
+	if previous, duplicate := entities[id]; duplicate {
+		return fmt.Errorf("identity %q is shared by %s and %s", id, previous, kind)
+	}
+	entities[id] = kind
+	return nil
+}
+
+func validateReferences(ids []string, targets map[string]struct{}, label string) error {
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
 		if _, duplicate := seen[id]; duplicate {
-			return fmt.Errorf("duplicate %s identity %q", kind, id)
+			return fmt.Errorf("duplicate %s reference %q", label, id)
 		}
 		seen[id] = struct{}{}
+		if _, exists := targets[id]; !exists {
+			return fmt.Errorf("%s references missing identity %q", label, id)
+		}
+	}
+	return nil
+}
+
+func validateSessionChain(sessions []ledger.SessionReport) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+	bySessionID := make(map[string]ledger.SessionReport, len(sessions))
+	for _, session := range sessions {
+		bySessionID[session.SessionID] = session
+	}
+	head := ""
+	heads := 0
+	terminals := 0
+	for _, session := range sessions {
+		if session.PreviousSessionID == "" {
+			head = session.SessionID
+			heads++
+		} else {
+			previous, exists := bySessionID[session.PreviousSessionID]
+			if !exists || previous.NextSessionID != session.SessionID {
+				return fmt.Errorf("accepted session chain link into %q is missing or nonreciprocal", session.SessionID)
+			}
+		}
+		if session.NextSessionID == "" {
+			terminals++
+		} else {
+			next, exists := bySessionID[session.NextSessionID]
+			if !exists || next.PreviousSessionID != session.SessionID {
+				return fmt.Errorf("accepted session chain link out of %q is missing or nonreciprocal", session.SessionID)
+			}
+		}
+	}
+	if heads != 1 || terminals != 1 {
+		return errors.New("accepted session reports do not form one unambiguous chain")
+	}
+	visited := make(map[string]struct{}, len(sessions))
+	for sessionID := head; sessionID != ""; sessionID = bySessionID[sessionID].NextSessionID {
+		if _, duplicate := visited[sessionID]; duplicate {
+			return fmt.Errorf("accepted session chain contains a cycle at %q", sessionID)
+		}
+		visited[sessionID] = struct{}{}
+	}
+	if len(visited) != len(sessions) {
+		return errors.New("accepted session reports form a disconnected chain")
 	}
 	return nil
 }

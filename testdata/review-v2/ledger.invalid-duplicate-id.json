@@ -10,7 +10,27 @@
     "total_cost_usd": 0,
     "models": []
   },
-  "sessions": [],
+  "sessions": [
+    {
+      "id": "session-report-a",
+      "project_id": "project-review-v2",
+      "session_id": "session-a",
+      "revision": 1,
+      "initial_goal": "Reject duplicate evidence identity",
+      "goal_changes": [],
+      "phases": [],
+      "files": [],
+      "commits": [],
+      "verification": [],
+      "decisions_added": [],
+      "decisions_revised": [],
+      "open_loops_created": [],
+      "open_loops_closed": [],
+      "previous_session_id": "",
+      "next_session_id": "",
+      "evidence": []
+    }
+  ],
   "evidence": [
     {
       "id": "decision-duplicate",

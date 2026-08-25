@@ -33,6 +33,9 @@ func ParseMachineLedger(body []byte) (MachineLedger, error) {
 	if len(body) > MaxMachineLedgerBytes {
 		return MachineLedger{}, fmt.Errorf("machine ledger exceeds %d bytes", MaxMachineLedgerBytes)
 	}
+	if err := rejectDuplicateJSONKeys(body); err != nil {
+		return MachineLedger{}, err
+	}
 	var wire machineLedgerWire
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
@@ -70,6 +73,67 @@ func ParseMachineLedger(body []byte) (MachineLedger, error) {
 		return MachineLedger{}, err
 	}
 	return value, nil
+}
+
+func rejectDuplicateJSONKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := scanJSONValue(decoder); err != nil {
+		return fmt.Errorf("decode machine ledger: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return err
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("JSON object member name is not a string")
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return fmt.Errorf("duplicate JSON object key %q", name)
+			}
+			seen[name] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return nil
 }
 
 func RenderMachineLedger(value MachineLedger) ([]byte, error) {
@@ -141,9 +205,11 @@ func normalizedMachineLedger(value MachineLedger) MachineLedger {
 			session.Accounting = &accountingCopy
 		}
 	}
-	if value.Evidence == nil {
-		value.Evidence = make(map[string][]ledger.EvidenceRef)
+	evidence := make(map[string][]ledger.EvidenceRef, len(value.Evidence))
+	for id, refs := range value.Evidence {
+		evidence[id] = append([]ledger.EvidenceRef{}, refs...)
 	}
+	value.Evidence = evidence
 	return value
 }
 
