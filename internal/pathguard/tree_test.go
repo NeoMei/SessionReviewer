@@ -42,6 +42,43 @@ func TestTreeRejectsUnsafeRelativePaths(t *testing.T) {
 	}
 }
 
+func TestWalkMarkdownPrunesSessionReviewerBackupsButExactLedgerReadRemainsAvailable(t *testing.T) {
+	root := t.TempDir()
+	ledgerPath := filepath.Join(root, "docs", "session-review", ".session-reviewer", "ledger.json")
+	backupPath := filepath.Join(root, "docs", "session-review", ".session-reviewer", "backups", "manifest", "legacy.md")
+	if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(backupPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(ledgerPath, []byte("{\"schema_version\":2}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backupPath, []byte("# legacy backup\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	var visited []string
+	if err := directory.WalkMarkdown("docs/session-review/.session-reviewer", func(relative string, _ []byte) error {
+		visited = append(visited, relative)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(visited) != 0 {
+		t.Fatalf("ordinary walk entered backup tree: %v", visited)
+	}
+	body, found, err := directory.ReadRegular("docs/session-review/.session-reviewer/ledger.json", 1024)
+	if err != nil || !found || string(body) != "{\"schema_version\":2}\n" {
+		t.Fatalf("exact ledger read found=%v body=%q err=%v", found, body, err)
+	}
+}
+
 func TestReadStableRegularRootFileRejectsInPlaceMutation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state")

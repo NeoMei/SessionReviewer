@@ -333,7 +333,7 @@ func walkMarkdownRoot(root *os.Root, prefix string, visit func(string, []byte) e
 	*remainingEntries -= len(entries)
 	for _, entry := range entries {
 		name := entry.Name()
-		if skipMarkdownTreeEntry(name) {
+		if skipMarkdownTreeEntry(prefix, name) {
 			continue
 		}
 		info, err := root.Lstat(name)
@@ -448,8 +448,9 @@ func readStableRegularRootFile(root *os.Root, name string, before os.FileInfo, m
 	return bytes.Clone(content), nil
 }
 
-func skipMarkdownTreeEntry(name string) bool {
-	return strings.HasPrefix(name, ".") ||
+func skipMarkdownTreeEntry(prefix, name string) bool {
+	return path.Join(prefix, name) == "docs/session-review/.session-reviewer/backups" ||
+		strings.HasPrefix(name, ".") ||
 		strings.EqualFold(name, "sync-conflicts") ||
 		strings.HasSuffix(name, strings.TrimPrefix(atomicfile.BackupPath("x"), "x"))
 }
