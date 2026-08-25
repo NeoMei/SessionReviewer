@@ -1,8 +1,10 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -20,6 +22,7 @@ var (
 	ErrSharingViolation = errors.New("sharing violation")
 	ErrLockViolation    = errors.New("lock violation")
 	ErrTransientWrite   = errors.New("transient rooted write failure")
+	ErrConcurrentWrite  = errors.New("rooted write target changed concurrently")
 )
 
 type RetryPolicy struct {
@@ -51,6 +54,23 @@ type RootedWriter struct {
 }
 
 func (writer RootedWriter) Write(ctx context.Context, side Side, relative string, content []byte, mode fs.FileMode) error {
+	return writer.write(ctx, side, relative, content, mode, nil)
+}
+
+// WriteIfUnchanged publishes only while the destination still has the exact
+// preimage observed by the caller. The check runs through the pinned parent
+// after the test/race hook and immediately before atomic publication.
+func (writer RootedWriter) WriteIfUnchanged(ctx context.Context, side Side, relative string, content []byte, mode fs.FileMode, expected []byte, expectedExists bool) error {
+	expectation := &writerExpectation{content: bytes.Clone(expected), exists: expectedExists}
+	return writer.write(ctx, side, relative, content, mode, expectation)
+}
+
+type writerExpectation struct {
+	content []byte
+	exists  bool
+}
+
+func (writer RootedWriter) write(ctx context.Context, side Side, relative string, content []byte, mode fs.FileMode, expectation *writerExpectation) error {
 	if ctx == nil {
 		return errors.New("rooted write context is required")
 	}
@@ -76,7 +96,7 @@ func (writer RootedWriter) Write(ctx context.Context, side Side, relative string
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		writeErr := writer.writeAttempt(side, directory, relative, content, mode)
+		writeErr := writer.writeAttempt(side, directory, relative, content, mode, expectation)
 		if writeErr == nil {
 			return nil
 		}
@@ -143,7 +163,7 @@ func validateWriterMode(mode fs.FileMode) error {
 	return nil
 }
 
-func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Directory, relative string, content []byte, mode fs.FileMode) error {
+func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Directory, relative string, content []byte, mode fs.FileMode, expectation *writerExpectation) error {
 	parent, parentInfo, parentRelative, leaf, err := openWriterImmediateParent(directory, relative)
 	if err != nil {
 		return err
@@ -154,9 +174,42 @@ func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Director
 			return err
 		}
 	}
+	if expectation != nil {
+		if err := verifyWriterPreimage(parent, leaf, *expectation); err != nil {
+			return err
+		}
+	}
 	return atomicfile.WriteRootFileChecked(parent, leaf, content, mode, func() error {
 		return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
 	})
+}
+
+func verifyWriterPreimage(parent *os.Root, leaf string, expected writerExpectation) error {
+	info, err := parent.Lstat(leaf)
+	if errors.Is(err, os.ErrNotExist) {
+		if expected.exists {
+			return ErrConcurrentWrite
+		}
+		return nil
+	}
+	if err != nil || !expected.exists || !info.Mode().IsRegular() || info.Mode()&fs.ModeSymlink != 0 {
+		return ErrConcurrentWrite
+	}
+	file, err := parent.Open(leaf)
+	if err != nil {
+		return ErrConcurrentWrite
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, int64(len(expected.content))+1))
+	afterHandle, statErr := file.Stat()
+	closeErr := file.Close()
+	afterPath, pathErr := parent.Lstat(leaf)
+	if readErr != nil || statErr != nil || closeErr != nil || pathErr != nil ||
+		!os.SameFile(info, afterHandle) || !os.SameFile(info, afterPath) ||
+		afterHandle.Size() != info.Size() || !afterHandle.ModTime().Equal(info.ModTime()) ||
+		!bytes.Equal(body, expected.content) {
+		return ErrConcurrentWrite
+	}
+	return nil
 }
 
 func openWriterImmediateParent(directory *pathguard.Directory, relative string) (*os.Root, os.FileInfo, string, string, error) {

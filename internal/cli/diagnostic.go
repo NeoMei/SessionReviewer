@@ -50,6 +50,24 @@ func writeDiagnostic(w io.Writer, action string, err error) int {
 			Message: "current session is ambiguous",
 			Hint:    "pass --session or --current-session-id explicitly",
 		}
+	case errors.Is(err, prepare.ErrSessionSegmentConflict):
+		diagnostic = Diagnostic{
+			Code:    "E_SESSION_SEGMENT_CONFLICT",
+			Message: "selected session has conflicting rollout segments",
+			Hint:    "use --sessions-root containing only one project's session segments, or back up and repair duplicate session metadata",
+		}
+	case errors.Is(err, prepare.ErrSessionFormatUnsupported):
+		diagnostic = Diagnostic{
+			Code:    "E_SESSION_FORMAT_UNSUPPORTED",
+			Message: "selected session record format is unsupported or invalid",
+			Hint:    "upgrade SessionReviewer and retry; if already current, preserve the source and report this code with session-reviewer version",
+		}
+	case errors.Is(err, prepare.ErrSessionDiscoveryLimit):
+		diagnostic = Diagnostic{
+			Code:    "E_SESSION_DISCOVERY_LIMIT",
+			Message: "session discovery exceeds supported safety limits",
+			Hint:    "narrow --sessions-root to the relevant Codex session tree, or select a smaller archived source",
+		}
 	case errors.Is(err, prepare.ErrProjectNotInitialized):
 		diagnostic = Diagnostic{
 			Code:    "E_PROJECT_NOT_INITIALIZED",
@@ -122,6 +140,12 @@ func fallbackDiagnostic(action string) Diagnostic {
 			Code:    "E_RECOVERY_FAILED",
 			Message: "ledger-only recovery failed",
 			Hint:    "inspect and repair the accepted Markdown ledger, then retry --ledger-only",
+		}
+	case "sync":
+		return Diagnostic{
+			Code:    "E_SYNC_FAILED",
+			Message: "synchronization failed",
+			Hint:    "run sync --dry-run and sync status --json, then repair the reported mapping or conflict before retrying",
 		}
 	default:
 		return Diagnostic{

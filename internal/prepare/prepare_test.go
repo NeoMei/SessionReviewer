@@ -199,6 +199,27 @@ func TestRunExplicitSessionIgnoresUnrelatedCorruptCandidate(t *testing.T) {
 	}
 }
 
+func TestRunExplicitSessionStreamsOrderedRolloutSegmentsAsOneTimeline(t *testing.T) {
+	f := newRunFixture(t, "")
+	second := `{"timestamp":"2026-08-22T12:00:00Z","type":"session_meta","payload":{"id":"s1","cwd":"` + filepath.ToSlash(f.projectRoot) + `","source":"vscode"}}` + "\n" +
+		`{"timestamp":"2026-08-22T12:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"continued"}]}}` + "\n"
+	f.writeSession(t, "s1-continuation.jsonl", second, f.now.Add(time.Minute))
+	opts := f.options("review")
+	opts.SessionID = "s1"
+	opts.FromStart = true
+
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet.Events) != 2 || packet.Events[0].Summary != "goal" || packet.Events[1].Summary != "continued" {
+		t.Fatalf("events=%+v", packet.Events)
+	}
+	if packet.Events[0].JSONLLine != 2 || packet.Events[1].JSONLLine != 4 || packet.NextCursor.Line != 4 {
+		t.Fatalf("boundaries=%+v events=%+v", packet.NextCursor, packet.Events)
+	}
+}
+
 func TestRunExplicitSessionRejectsSelectedCorruptCandidateWithoutOutputOrCursorAdvance(t *testing.T) {
 	f := newRunFixture(t, "")
 	f.commitCursor(t, 1)
@@ -595,6 +616,26 @@ func TestRunRejectsMalformedCandidateWithoutLeakingItsContents(t *testing.T) {
 	}
 	if _, statErr := os.Stat(f.output); !os.IsNotExist(statErr) {
 		t.Fatalf("output created: %v", statErr)
+	}
+}
+
+func TestRunClassifiesUnsupportedSelectedSessionRecordFormat(t *testing.T) {
+	f := newRunFixture(t, sessionBody("PROJECT",
+		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"custom_tool_call_output","id":"tool-1","output":{"unexpected":true}}}`))
+	path := filepath.Join(f.sessions, "s1.jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, bytes.ReplaceAll(body, []byte("PROJECT"), []byte(filepath.ToSlash(f.projectRoot))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, f.now, f.now); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Run(f.options("review"))
+	if !errors.Is(err, ErrSessionFormatUnsupported) {
+		t.Fatalf("error does not preserve unsupported-format sentinel: %v", err)
 	}
 }
 

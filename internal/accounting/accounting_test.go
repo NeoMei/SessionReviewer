@@ -44,6 +44,34 @@ func TestAccumulatorAttributesUsageAcrossModelsAndValidatesCost(t *testing.T) {
 	}
 }
 
+func TestAccumulatorIgnoresContextOnlyTokenHeartbeatWhenCumulativeUsageIsUnchanged(t *testing.T) {
+	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	accumulator := NewAccumulator(started)
+	records := []session.Record{
+		{Line: 1, Timestamp: "2026-08-24T10:01:00Z", Type: "turn_context", Payload: json.RawMessage(`{"model":"gpt-5.6-sol"}`)},
+		{Line: 2, Timestamp: "2026-08-24T10:02:00Z", Type: "event_msg", Payload: json.RawMessage(`{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}`)},
+		{Line: 3, Timestamp: "2026-08-24T10:03:00Z", Type: "event_msg", Payload: json.RawMessage(`{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":2048},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}`)},
+	}
+	for _, record := range records {
+		if err := accumulator.Observe(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	usage := accumulator.Snapshot()
+	if usage.TotalTokens != 15 || len(usage.Models) != 1 || usage.Models[0].TotalTokens != 15 {
+		t.Fatalf("usage=%+v", usage)
+	}
+}
+
+func TestAccumulatorRejectsContextOnlyTokenHeartbeatWithoutMatchingCumulativeUsage(t *testing.T) {
+	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	accumulator := NewAccumulator(started)
+	record := session.Record{Line: 1, Timestamp: "2026-08-24T10:01:00Z", Type: "event_msg", Payload: json.RawMessage(`{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":2048},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}`)}
+	if err := accumulator.Observe(record); err == nil {
+		t.Fatal("accepted aggregate-only token event without a matching prior cumulative snapshot")
+	}
+}
+
 func TestFormatDurationMS(t *testing.T) {
 	if got := FormatDurationMS(90_061_007); got != "1d 1h 1m 1s 7ms" {
 		t.Fatalf("duration=%q", got)

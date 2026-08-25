@@ -1,16 +1,16 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 
+	"github.com/neomei/SessionReviewer/internal/buildinfo"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
-
-var Version = "dev"
 
 var projectRootResolvedHook func(command, path string) error
 
@@ -32,6 +32,7 @@ Commands:
   apply                 Validate and apply a Skill proposal
   resume                Render accepted ledger recovery state
   history               Render accepted cross-session history
+  sync                  Synchronize editable Markdown with Obsidian
   version               Print the version
 
 Options:
@@ -40,6 +41,7 @@ Options:
            [--current-session-id] [--data-dir] [--from-start for review]
   apply: --proposal --evidence [--project] [--data-dir]
   resume/history: --ledger-only [--project]
+  sync: [--dry-run] [status --json] [--cwd] [--data-dir]
 
 Apply validates a Skill proposal against its exact bounded evidence packet.
 Ledger-only resume and history do not process pending sessions.
@@ -52,6 +54,7 @@ Examples:
   session-reviewer apply --proposal proposal.json --evidence evidence.json
   session-reviewer resume --ledger-only --project /path/to/project
   session-reviewer history --ledger-only --project /path/to/project
+  session-reviewer sync --dry-run
 
 Run session-reviewer <command> --help for details.
 `
@@ -70,12 +73,18 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, rootHelp)
 		return 0
 	case "version":
-		if len(args) != 1 {
-			fmt.Fprintln(stderr, "version does not accept arguments")
-			return 2
+		if len(args) == 1 {
+			fmt.Fprintln(stdout, buildinfo.Current().Version)
+			return 0
 		}
-		fmt.Fprintln(stdout, Version)
-		return 0
+		if len(args) == 2 && args[1] == "--json" {
+			if err := json.NewEncoder(stdout).Encode(buildinfo.Current()); err != nil {
+				return writeDiagnostic(stderr, "version", err)
+			}
+			return 0
+		}
+		fmt.Fprintln(stderr, "version accepts only --json")
+		return 2
 	case "init":
 		return runInit(args[1:], stdout, stderr)
 	case "prepare":
@@ -86,6 +95,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runRecovery("resume", args[1:], stdout, stderr)
 	case "history":
 		return runRecovery("history", args[1:], stdout, stderr)
+	case "sync":
+		return runSync(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, rootHelp)

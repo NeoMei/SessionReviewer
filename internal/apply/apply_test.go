@@ -200,8 +200,8 @@ func TestTwoPacketWorkflowIsIncrementalAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Count(diagramBody, []byte("```mermaid")) != 2 {
-		t.Fatalf("derived diagram does not contain both graphs: %q", diagramBody)
+	if bytes.Count(diagramBody, []byte("```mermaid")) != 3 {
+		t.Fatalf("derived diagram does not contain the recovery mainline and both appendices: %q", diagramBody)
 	}
 
 	before := snapshotTree(t, f.projectRoot)
@@ -959,7 +959,7 @@ func TestRunPartialRecoveryFailsClosedOnUserEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte("user edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening edit") {
+	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening user edit") {
 		t.Fatalf("err=%v", err)
 	}
 	c, err := (cursor.Store{Root: f.projectData}).Load(testSessionID)

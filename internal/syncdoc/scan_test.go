@@ -126,6 +126,10 @@ func TestScanWalkSkipsExactExcludedEntries(t *testing.T) {
 	rootPath := t.TempDir()
 	files := map[string][]byte{
 		"decisions/keep.md":                                            entity("decision-keep", "project-1", "keep"),
+		"diagrams/project-evolution.md":                                []byte("derived diagram without entity frontmatter"),
+		"decisions/00-目录说明.md":                                         []byte("generated index without entity frontmatter"),
+		"open-loops/00-目录说明.md":                                        []byte("generated index without entity frontmatter"),
+		"sessions/00-目录说明.md":                                          []byte("generated index without entity frontmatter"),
 		"decisions/non-md.txt":                                         entity("decision-text", "project-1", "text"),
 		"decisions/.hidden.md":                                         entity("decision-hidden", "project-1", "hidden"),
 		"decisions/.hidden/inside.md":                                  entity("decision-hidden-dir", "project-1", "hidden dir"),

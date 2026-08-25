@@ -28,9 +28,10 @@ const (
 type TransactionKind string
 
 const (
-	TxnEntitySync   TransactionKind = "entity_sync"
-	TxnConflictNote TransactionKind = "conflict_note"
-	TxnResolution   TransactionKind = "resolution"
+	TxnEntitySync     TransactionKind = "entity_sync"
+	TxnConflictNote   TransactionKind = "conflict_note"
+	TxnResolution     TransactionKind = "resolution"
+	TxnDerivedPublish TransactionKind = "derived_publish"
 )
 
 type TransactionStage string
@@ -43,15 +44,17 @@ const (
 )
 
 type Transaction struct {
-	Version          int              `json:"version"`
-	Kind             TransactionKind  `json:"kind"`
-	EntityID         string           `json:"entity_id"`
-	DesiredHash      string           `json:"desired_hash"`
-	ExpectedBaseHash string           `json:"expected_base_hash"`
-	FromPathKey      string           `json:"from_path_key"`
-	ToPathKey        string           `json:"to_path_key"`
-	Stage            TransactionStage `json:"stage"`
-	UpdatedAt        time.Time        `json:"updated_at"`
+	Version             int              `json:"version"`
+	Kind                TransactionKind  `json:"kind"`
+	EntityID            string           `json:"entity_id"`
+	DesiredHash         string           `json:"desired_hash"`
+	ExpectedBaseHash    string           `json:"expected_base_hash"`
+	ExpectedProjectHash string           `json:"expected_project_hash,omitempty"`
+	ExpectedVaultHash   string           `json:"expected_vault_hash,omitempty"`
+	FromPathKey         string           `json:"from_path_key"`
+	ToPathKey           string           `json:"to_path_key"`
+	Stage               TransactionStage `json:"stage"`
+	UpdatedAt           time.Time        `json:"updated_at"`
 }
 
 type TransactionStore struct {
@@ -501,7 +504,7 @@ func validateTransaction(record Transaction, expectedEntityID string) error {
 		return errors.New("invalid transaction version")
 	}
 	switch record.Kind {
-	case TxnEntitySync, TxnConflictNote, TxnResolution:
+	case TxnEntitySync, TxnConflictNote, TxnResolution, TxnDerivedPublish:
 	default:
 		return errors.New("invalid transaction kind")
 	}
@@ -512,6 +515,17 @@ func validateTransaction(record Transaction, expectedEntityID string) error {
 		(record.ExpectedBaseHash == "" && record.Kind != TxnEntitySync) ||
 		(record.ExpectedBaseHash != "" && !lowerSHA256.MatchString(record.ExpectedBaseHash)) {
 		return errors.New("invalid transaction hash")
+	}
+	for _, expected := range []string{record.ExpectedProjectHash, record.ExpectedVaultHash} {
+		if expected != "" && !lowerSHA256.MatchString(expected) {
+			return errors.New("invalid transaction target hash")
+		}
+	}
+	if record.Kind != TxnEntitySync && (record.ExpectedProjectHash != "" || record.ExpectedVaultHash != "") {
+		return errors.New("invalid transaction target hash owner")
+	}
+	if record.Kind == TxnDerivedPublish && (record.EntityID != derivedTransactionID || record.ExpectedBaseHash == "" || record.FromPathKey != "" || record.ToPathKey != "") {
+		return errors.New("invalid derived transaction")
 	}
 	switch record.Stage {
 	case TxnPlanned, TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted:
@@ -543,6 +557,7 @@ func normalizedTransactionPathKey(value string) bool {
 func validateTransactionTransition(current, next Transaction) error {
 	if current.Kind != next.Kind || current.EntityID != next.EntityID || current.Version != next.Version ||
 		current.DesiredHash != next.DesiredHash || current.ExpectedBaseHash != next.ExpectedBaseHash ||
+		current.ExpectedProjectHash != next.ExpectedProjectHash || current.ExpectedVaultHash != next.ExpectedVaultHash ||
 		current.FromPathKey != next.FromPathKey || current.ToPathKey != next.ToPathKey {
 		return errors.New("transaction immutable fields changed")
 	}

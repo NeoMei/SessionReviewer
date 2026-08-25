@@ -39,7 +39,7 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		return fail(err)
 	}
 
-	files := make([]PlannedFile, 0, 2+len(changes.Decisions)+len(changes.OpenLoops)+len(changes.Sessions))
+	files := make([]PlannedFile, 0, 6+len(changes.Decisions)+len(changes.OpenLoops)+len(changes.Sessions))
 	appendRendered := func(relative string, doc Document, old *loadedDocument) error {
 		body, err := doc.Render()
 		if err != nil {
@@ -67,17 +67,11 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		if err := appendRendered(ledgerRootRelative+"/current-state.md", doc, state.documents.current); err != nil {
 			return fail(err)
 		}
-	}
-	if len(changes.Sessions) != 0 {
-		doc, supported, err := renderProjectAccountingDocument(next)
+		loaded, err := loadedFromRendered(ledgerRootRelative+"/current-state.md", doc, state.documents.current)
 		if err != nil {
 			return fail(err)
 		}
-		if supported {
-			if err := appendRendered(ledgerRootRelative+"/project-overview.md", doc, state.documents.overview); err != nil {
-				return fail(err)
-			}
-		}
+		next.documents.current = &loaded
 	}
 	if len(changes.Timeline) != 0 {
 		doc, err := renderTimelineDocument(state.Timeline, next.Timeline, next.documents.timeline, state.ProjectID)
@@ -87,6 +81,11 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 		if err := appendRendered(ledgerRootRelative+"/evolution-timeline.md", doc, state.documents.timeline); err != nil {
 			return fail(err)
 		}
+		loaded, err := loadedFromRendered(ledgerRootRelative+"/evolution-timeline.md", doc, state.documents.timeline)
+		if err != nil {
+			return fail(err)
+		}
+		next.documents.timeline = &loaded
 	}
 
 	decisions := append([]Decision(nil), changes.Decisions...)
@@ -99,9 +98,17 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 			return fail(err)
 		}
 		relative := ledgerRootRelative + "/decisions/" + incoming.ID + ".md"
+		if loadedOK {
+			relative = loaded.RelativePath
+		}
 		if err := appendRendered(relative, doc, pointerIf(loaded, loadedOK)); err != nil {
 			return fail(err)
 		}
+		rendered, err := loadedFromRendered(relative, doc, pointerIf(loaded, loadedOK))
+		if err != nil {
+			return fail(err)
+		}
+		next.documents.decisions[incoming.ID] = rendered
 	}
 
 	loops := append([]OpenLoop(nil), changes.OpenLoops...)
@@ -114,9 +121,17 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 			return fail(err)
 		}
 		relative := ledgerRootRelative + "/open-loops/" + incoming.ID + ".md"
+		if ok {
+			relative = loaded.RelativePath
+		}
 		if err := appendRendered(relative, doc, pointerIf(loaded, ok)); err != nil {
 			return fail(err)
 		}
+		rendered, err := loadedFromRendered(relative, doc, pointerIf(loaded, ok))
+		if err != nil {
+			return fail(err)
+		}
+		next.documents.openLoops[incoming.ID] = rendered
 	}
 
 	sessions := append([]SessionReport(nil), changes.Sessions...)
@@ -129,50 +144,76 @@ func Render(state State, changes ChangeSet) (WritePlan, error) {
 			return fail(err)
 		}
 		relative := ledgerRootRelative + "/sessions/" + incoming.ID + ".md"
+		if ok {
+			relative = loaded.RelativePath
+		}
 		if err := appendRendered(relative, doc, pointerIf(loaded, ok)); err != nil {
 			return fail(err)
 		}
+		rendered, err := loadedFromRendered(relative, doc, pointerIf(loaded, ok))
+		if err != nil {
+			return fail(err)
+		}
+		next.documents.sessions[incoming.ID] = rendered
 	}
-	diagramBody, err := renderDiagram(next)
+
+	artifacts, err := RenderDerivedArtifacts(next)
 	if err != nil {
 		return fail(err)
 	}
-	if len(diagramBody) > MaxDocumentBytes {
-		return fail(errors.New("render diagram: document exceeds size limit"))
-	}
-	const diagramRelative = ledgerRootRelative + "/diagrams/project-evolution.md"
 	directory, err := openLedgerProjectRoot(state.projectRoot, rootOpenOptions{expectedRoot: state.projectRootInfo})
 	if err != nil {
-		return fail(fmt.Errorf("read derived diagram: %w", err))
+		return fail(fmt.Errorf("read derived navigation: %w", err))
 	}
-	existing, mode, readErr := readLedgerRegular(directory, diagramRelative, false)
-	safelyMissing := errors.Is(readErr, os.ErrNotExist) || safelyMissingTargetParent(directory, diagramRelative)
-	closeErr := directory.Close()
-	if readErr == nil {
-		if closeErr != nil {
-			return fail(closeErr)
+	planned := make(map[string]PlannedFile, len(files)+len(artifacts))
+	for _, file := range files {
+		if _, exists := planned[file.RelativePath]; exists {
+			_ = directory.Close()
+			return fail(errors.New("rendered target collision"))
 		}
-		if !bytes.Equal(existing, diagramBody) {
-			files = append(files, PlannedFile{
-				RelativePath:   diagramRelative,
-				Data:           diagramBody,
-				Perm:           mode,
-				ExpectedData:   append([]byte(nil), existing...),
-				ExpectedExists: true,
-				ExpectedPerm:   mode,
-			})
-		}
-	} else {
-		if closeErr != nil {
-			return fail(closeErr)
+		planned[file.RelativePath] = file
+	}
+	for _, artifact := range artifacts {
+		existing, mode, readErr := readLedgerRegular(directory, artifact.RelativePath, false)
+		safelyMissing := errors.Is(readErr, os.ErrNotExist) || safelyMissingTargetParent(directory, artifact.RelativePath)
+		if readErr == nil {
+			if bytes.Equal(existing, artifact.Data) {
+				delete(planned, artifact.RelativePath)
+				continue
+			}
+			planned[artifact.RelativePath] = PlannedFile{
+				RelativePath: artifact.RelativePath, Data: append([]byte(nil), artifact.Data...), Perm: mode,
+				ExpectedData: append([]byte(nil), existing...), ExpectedExists: true, ExpectedPerm: mode,
+			}
+			continue
 		}
 		if !safelyMissing {
-			return fail(fmt.Errorf("read derived diagram: %w", readErr))
+			_ = directory.Close()
+			return fail(fmt.Errorf("read derived navigation: %w", readErr))
 		}
-		files = append(files, PlannedFile{RelativePath: diagramRelative, Data: diagramBody, Perm: 0o644})
+		planned[artifact.RelativePath] = PlannedFile{RelativePath: artifact.RelativePath, Data: append([]byte(nil), artifact.Data...), Perm: artifact.Perm}
+	}
+	if err := directory.Close(); err != nil {
+		return fail(err)
+	}
+	files = files[:0]
+	for _, file := range planned {
+		files = append(files, file)
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
 	return WritePlan{ProjectRoot: state.projectRoot, Files: files}, nil
+}
+
+func loadedFromRendered(relative string, doc Document, previous *loadedDocument) (loadedDocument, error) {
+	body, err := doc.Render()
+	if err != nil {
+		return loadedDocument{}, err
+	}
+	perm := fs.FileMode(0o644)
+	if previous != nil {
+		perm = previous.Perm
+	}
+	return loadedDocument{Document: doc, RelativePath: relative, Original: body, Perm: perm}, nil
 }
 
 func pointerIf[T any](value T, ok bool) *T {
@@ -700,7 +741,9 @@ func evidenceMarkdown(values []EvidenceRef) string {
 	}
 	var out strings.Builder
 	for _, ref := range sortedEvidence(values) {
-		fmt.Fprintf(&out, "- `%s` (%s:%d): %s\n", ref.EvidenceID, ref.SessionID, ref.JSONLLine, strings.ReplaceAll(ref.Summary, "\n", " "))
+		summary := strings.TrimRight(ref.Summary, " \t\r\n")
+		summary = strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(summary)
+		fmt.Fprintf(&out, "- `%s` (%s:%d): %s\n", ref.EvidenceID, ref.SessionID, ref.JSONLLine, summary)
 	}
 	return strings.TrimSuffix(out.String(), "\n")
 }
@@ -966,7 +1009,7 @@ func validateLedgerRelativePath(relative string) error {
 	if relative == ledgerRootRelative+"/project-overview.md" {
 		return nil
 	}
-	if relative == ledgerRootRelative+"/diagrams/project-evolution.md" {
+	if IsStandaloneDerivedPath(relative) {
 		return nil
 	}
 	for _, dir := range []string{"decisions", "open-loops", "sessions"} {

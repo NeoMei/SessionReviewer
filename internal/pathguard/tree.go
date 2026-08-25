@@ -86,10 +86,76 @@ func (directory *Directory) EnsureDirectory(relative string, perm fs.FileMode) e
 // ReadRegular reads a bounded regular file without following redirects and
 // verifies that its namespace entry still names the opened file after reading.
 func (directory *Directory) ReadRegular(relative string, max int64) ([]byte, bool, error) {
-	return directory.readRegularWithHook(relative, max, nil)
+	return directory.readRegularWithOptions(relative, max, nil, false)
+}
+
+// ReadRegularOptional has the same redirect and namespace guarantees as
+// ReadRegular, but treats a missing parent directory as an absent file. It is
+// intended for read-only planners that must not create target directories.
+func (directory *Directory) ReadRegularOptional(relative string, max int64) ([]byte, bool, error) {
+	return directory.readRegularWithOptions(relative, max, nil, true)
+}
+
+// RemoveRegularIfHashMatches retires an exact regular file below the pinned
+// tree only when its stable SHA-256 matches the caller-authenticated value.
+// A missing leaf is already converged and succeeds without mutation.
+func (directory *Directory) RemoveRegularIfHashMatches(relative, expectedHash string) error {
+	components, err := cleanTreeRelative(relative, false)
+	if err != nil {
+		return err
+	}
+	if err := directory.validatePinnedRoot(); err != nil {
+		return err
+	}
+	current, err := directory.Root.OpenRoot(".")
+	if err != nil {
+		return fmt.Errorf("pin directory root: %w", err)
+	}
+	openedRoots := []*os.Root{current}
+	defer func() {
+		for index := len(openedRoots) - 1; index >= 0; index-- {
+			_ = openedRoots[index].Close()
+		}
+	}()
+	parents := make([]treeParentIdentity, 0, len(components)-1)
+	for _, component := range components[:len(components)-1] {
+		before, err := current.Lstat(component)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil || before == nil || !before.IsDir() || isRedirect(before) {
+			return errors.New("file parent is redirected or not a directory")
+		}
+		next, err := current.OpenRoot(component)
+		if err != nil {
+			return fmt.Errorf("open file parent: %w", err)
+		}
+		opened, err := next.Stat(".")
+		if err != nil || !os.SameFile(before, opened) {
+			_ = next.Close()
+			return errors.New("file parent changed while opening")
+		}
+		parents = append(parents, treeParentIdentity{parent: current, name: component, info: before})
+		openedRoots = append(openedRoots, next)
+		current = next
+	}
+	if err := atomicfile.RemoveRootFileIfHashMatches(current, components[len(components)-1], expectedHash); err != nil {
+		return err
+	}
+	for _, parent := range parents {
+		after, err := parent.parent.Lstat(parent.name)
+		if err != nil || !os.SameFile(parent.info, after) || isRedirect(after) || !after.IsDir() {
+			return errors.New("file parent changed while removing")
+		}
+	}
+	return directory.validatePinnedRoot()
 }
 
 func (directory *Directory) readRegularWithHook(relative string, max int64, afterRead func() error) ([]byte, bool, error) {
+	return directory.readRegularWithOptions(relative, max, afterRead, false)
+}
+
+func (directory *Directory) readRegularWithOptions(relative string, max int64, afterRead func() error, missingParentIsAbsent bool) ([]byte, bool, error) {
 	components, err := cleanTreeRelative(relative, false)
 	if err != nil {
 		return nil, false, err
@@ -113,6 +179,12 @@ func (directory *Directory) readRegularWithHook(relative string, max int64, afte
 	parents := make([]treeParentIdentity, 0, len(components)-1)
 	for _, component := range components[:len(components)-1] {
 		before, err := current.Lstat(component)
+		if errors.Is(err, os.ErrNotExist) && missingParentIsAbsent {
+			if err := directory.validatePinnedRoot(); err != nil {
+				return nil, false, err
+			}
+			return nil, false, nil
+		}
 		if err != nil || before == nil || !before.IsDir() || isRedirect(before) {
 			return nil, false, errors.New("file parent is redirected or not a directory")
 		}

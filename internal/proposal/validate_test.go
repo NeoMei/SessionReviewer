@@ -145,6 +145,20 @@ func TestValidateExactPacket(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsRFC3339FractionWithTrailingZero(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	packet.Events[0].Timestamp = "2026-08-23T01:02:03.310Z"
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	if _, err := Validate(p, packet, state); err != nil {
+		t.Fatalf("valid RFC3339Nano timestamp rejected: %v", err)
+	}
+}
+
 func TestValidateNewSessionAppendsAndReciprocallyLinksPreviousReport(t *testing.T) {
 	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	previous := p.SessionReport

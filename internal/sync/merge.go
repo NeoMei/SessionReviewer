@@ -106,20 +106,20 @@ func mergeFromBase(input MergeInput) MergeResult {
 		}
 	}
 
-	baseUnits := input.Base.Units()
+	baseUnits := input.Base.SemanticUnits()
 	projectUnits := baseUnits
 	if input.Project.Present {
-		projectUnits = input.Project.Document.Units()
+		projectUnits = input.Project.Document.SemanticUnits()
 	}
 	vaultUnits := baseUnits
 	if input.Vault.Present {
-		vaultUnits = input.Vault.Document.Units()
+		vaultUnits = input.Vault.Document.SemanticUnits()
 	}
 	merged, conflicts := mergeUnitSets(baseUnits, projectUnits, vaultUnits)
 	if len(conflicts) != 0 {
 		return conflictResult("unit_conflict", conflicts)
 	}
-	candidate, err := input.Base.WithUnits(merged)
+	candidate, err := input.Base.WithSemanticUnits(merged)
 	if err != nil {
 		return conflictResult("invalid_document", nil)
 	}
@@ -230,7 +230,7 @@ func candidateChangesOtherUnit(candidate Candidate, base syncdoc.Document) bool 
 	if !candidate.Present {
 		return false
 	}
-	baseUnits, candidateUnits := base.Units(), candidate.Document.Units()
+	baseUnits, candidateUnits := base.SemanticUnits(), candidate.Document.SemanticUnits()
 	for _, key := range sortedUnitKeys(baseUnits, candidateUnits) {
 		if !unitsEqual(baseUnits[key], candidateUnits[key]) {
 			return true
@@ -246,14 +246,18 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	if !validPathContext(input) {
 		return conflictResult("invalid_input", nil)
 	}
-	for _, candidate := range []Candidate{input.Project, input.Vault} {
+	for index, candidate := range []Candidate{input.Project, input.Vault} {
 		if !candidate.Present {
 			continue
 		}
 		if err := validateCandidateClaim(candidate); err != nil {
 			return conflictResult(candidateClaimReason(err), nil)
 		}
-		if !validNewCandidate(candidate.Document, input.EntityID, input.ProjectID) {
+		valid := validNewCandidate(candidate.Document, input.EntityID, input.ProjectID)
+		if index == 0 {
+			valid = validImportedProjectCandidate(candidate.Document, input.EntityID, input.ProjectID)
+		}
+		if !valid {
 			return conflictResult("invalid_new_entity", nil)
 		}
 	}
@@ -296,16 +300,16 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	}
 	projectUnits, vaultUnits := syncdoc.UnitSet{}, syncdoc.UnitSet{}
 	if input.Project.Present {
-		projectUnits = input.Project.Document.Units()
+		projectUnits = input.Project.Document.SemanticUnits()
 	}
 	if input.Vault.Present {
-		vaultUnits = input.Vault.Document.Units()
+		vaultUnits = input.Vault.Document.SemanticUnits()
 	}
 	merged, conflicts := mergeUnitSets(syncdoc.UnitSet{}, projectUnits, vaultUnits)
 	if len(conflicts) != 0 {
 		return conflictResult("unit_conflict", conflicts)
 	}
-	accepted, err := skeleton.WithUnits(merged)
+	accepted, err := skeleton.WithSemanticUnits(merged)
 	if err != nil {
 		return conflictResult("invalid_document", nil)
 	}
@@ -396,7 +400,30 @@ func validNewCandidate(document syncdoc.Document, entityID, projectID string) bo
 	return validDocumentShape(document)
 }
 
+func validImportedProjectCandidate(document syncdoc.Document, entityID, projectID string) bool {
+	identity, err := document.Identity()
+	if err != nil || identity.ID != entityID || identity.ProjectID != projectID || !stableBaseID.MatchString(identity.ID) {
+		return false
+	}
+	units := document.Units()
+	statusUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}]
+	status, statusValid := decodeStringUnit(units, "sync_status")
+	if (statusUnit.Present && (!statusValid || status != "synced")) || hasReservedHashUnit(units) {
+		return false
+	}
+	if identity.EntityType == "project_overview" {
+		var revision int
+		revisionUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
+		return identity.ID == "project-overview" && revisionUnit.Present && yaml.Unmarshal(revisionUnit.Value, &revision) == nil && revision >= 1 && revision <= 1<<53-1 && validOverviewCandidate(units)
+	}
+	return validDocumentShapeWithStatus(document, false)
+}
+
 func validDocumentShape(document syncdoc.Document) bool {
+	return validDocumentShapeWithStatus(document, true)
+}
+
+func validDocumentShapeWithStatus(document syncdoc.Document, requireStatus bool) bool {
 	identity, err := document.Identity()
 	if err != nil || !stableBaseID.MatchString(identity.ID) {
 		return false
@@ -405,7 +432,7 @@ func validDocumentShape(document syncdoc.Document) bool {
 	var revision int
 	revisionUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
 	status, statusOK := decodeStringUnit(units, "sync_status")
-	if !revisionUnit.Present || yaml.Unmarshal(revisionUnit.Value, &revision) != nil || revision < 1 || revision > 1<<53-1 || !statusOK || status != "synced" || hasReservedHashUnit(units) {
+	if !revisionUnit.Present || yaml.Unmarshal(revisionUnit.Value, &revision) != nil || revision < 1 || revision > 1<<53-1 || (requireStatus && !statusOK) || (statusOK && status != "synced") || hasReservedHashUnit(units) {
 		return false
 	}
 	if identity.EntityType == "project_overview" {
@@ -533,8 +560,20 @@ func validTimelineCandidate(document ledger.Document) bool {
 	}
 	seen := make(map[string]struct{}, len(events))
 	for _, event := range events {
-		parsed, timeErr := time.Parse(time.RFC3339Nano, event.OccurredAt)
-		if !stableBaseID.MatchString(event.ID) || event.Revision < 1 || event.Revision > 1<<53-1 || timeErr != nil || parsed.Format(time.RFC3339Nano) != event.OccurredAt ||
+		if (event.OccurredAt != "" && event.LegacyOccurredAt != "") || (event.DecisionIDs != nil && event.LegacyDecisionIDs != nil) || (event.OpenLoopIDs != nil && event.LegacyOpenLoopIDs != nil) {
+			return false
+		}
+		if event.OccurredAt == "" {
+			event.OccurredAt = event.LegacyOccurredAt
+		}
+		if event.DecisionIDs == nil {
+			event.DecisionIDs = event.LegacyDecisionIDs
+		}
+		if event.OpenLoopIDs == nil {
+			event.OpenLoopIDs = event.LegacyOpenLoopIDs
+		}
+		_, timeErr := time.Parse(time.RFC3339Nano, event.OccurredAt)
+		if !stableBaseID.MatchString(event.ID) || event.Revision < 1 || event.Revision > 1<<53-1 || timeErr != nil ||
 			!validFactClass(event.Class) || strings.TrimSpace(event.Title) == "" || event.Evidence == nil || !validEvidenceRefs(event.Evidence) ||
 			event.DecisionIDs == nil || !uniqueStrings(event.DecisionIDs, true, true) || event.OpenLoopIDs == nil || !uniqueStrings(event.OpenLoopIDs, true, true) {
 			return false
@@ -548,15 +587,18 @@ func validTimelineCandidate(document ledger.Document) bool {
 }
 
 type timelineCandidateEvent struct {
-	ID          string               `yaml:"id"`
-	OccurredAt  string               `yaml:"occurred_at"`
-	Revision    int                  `yaml:"revision"`
-	Class       ledger.FactClass     `yaml:"class"`
-	Title       string               `yaml:"title"`
-	Summary     string               `yaml:"summary"`
-	Evidence    []ledger.EvidenceRef `yaml:"evidence"`
-	DecisionIDs []string             `yaml:"decision_ids"`
-	OpenLoopIDs []string             `yaml:"open_loop_ids"`
+	ID                string               `yaml:"id"`
+	OccurredAt        string               `yaml:"occurred_at"`
+	Revision          int                  `yaml:"revision"`
+	Class             ledger.FactClass     `yaml:"class"`
+	Title             string               `yaml:"title"`
+	Summary           string               `yaml:"summary"`
+	Evidence          []ledger.EvidenceRef `yaml:"evidence"`
+	DecisionIDs       []string             `yaml:"decision_ids"`
+	OpenLoopIDs       []string             `yaml:"open_loop_ids"`
+	LegacyOccurredAt  string               `yaml:"occurredat"`
+	LegacyDecisionIDs []string             `yaml:"decisionids"`
+	LegacyOpenLoopIDs []string             `yaml:"openloopids"`
 }
 
 func decodeLedgerField(document ledger.Document, name string, target any) bool {
@@ -792,12 +834,7 @@ func candidateEquals(input MergeInput, candidate Candidate, target string, accep
 	if !candidate.Present || !candidatePathEquals(input, candidate.RelativePath, target) {
 		return false
 	}
-	candidateBytes, err := candidate.Document.Render()
-	if err != nil {
-		return false
-	}
-	acceptedBytes, err := accepted.Render()
-	return err == nil && bytes.Equal(candidateBytes, acceptedBytes)
+	return candidate.Document.SemanticEqual(accepted)
 }
 
 func candidatePathEquals(input MergeInput, candidatePath, target string) bool {

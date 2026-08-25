@@ -35,6 +35,40 @@ func TestResolveExplicitIDRejectsDuplicateCandidates(t *testing.T) {
 	requireErrorContains(t, err, "duplicate", "/sessions/one.jsonl", "/sessions/two.jsonl")
 }
 
+func TestResolveExplicitIDChainsOrderedSegmentsForOneProject(t *testing.T) {
+	firstStart := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	secondStart := firstStart.Add(2 * time.Hour)
+	candidates := []Candidate{
+		{ID: "s1", Path: "/sessions/later.jsonl", CWD: "/work/project", StartedAt: secondStart, ModTime: secondStart.Add(time.Minute)},
+		{ID: "s1", Path: "/sessions/first.jsonl", CWD: "/work/project", StartedAt: firstStart, ModTime: firstStart.Add(time.Minute)},
+	}
+
+	got, err := Resolve(candidates, ResolveOptions{SessionID: "s1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.segments) != 2 || got.segments[0].Path != "/sessions/first.jsonl" || got.segments[1].Path != "/sessions/later.jsonl" {
+		t.Fatalf("segments=%+v", got.segments)
+	}
+	if !got.StartedAt.Equal(firstStart) || !got.ModTime.Equal(secondStart.Add(time.Minute)) {
+		t.Fatalf("composite=%+v", got)
+	}
+}
+
+func TestResolveExplicitIDRejectsSegmentedIdentityAcrossProjects(t *testing.T) {
+	start := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	candidates := []Candidate{
+		{ID: "s1", Path: "/sessions/one.jsonl", CWD: "/work/one", StartedAt: start},
+		{ID: "s1", Path: "/sessions/two.jsonl", CWD: "/work/two", StartedAt: start.Add(time.Hour)},
+	}
+
+	_, err := Resolve(candidates, ResolveOptions{SessionID: "s1"})
+	requireErrorContains(t, err, "duplicate session id", "different projects")
+	if !errors.Is(err, ErrSessionConflict) {
+		t.Fatalf("error does not preserve session-conflict sentinel: %v", err)
+	}
+}
+
 func TestResolveExplicitIDBypassesFreshness(t *testing.T) {
 	candidate := Candidate{ID: "s1", Path: "one", ModTime: time.Time{}}
 	got, err := Resolve([]Candidate{candidate}, ResolveOptions{SessionID: "s1"})
@@ -148,6 +182,39 @@ func TestDiscoverReadsOnlyJSONLSessionMetadata(t *testing.T) {
 	wantStartedAt := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
 	if err != nil || len(discovery.Candidates) != 1 || discovery.Candidates[0].ID != "s1" || !discovery.Candidates[0].StartedAt.Equal(wantStartedAt) {
 		t.Fatalf("discovery=%+v err=%v", discovery, err)
+	}
+}
+
+func TestDiscoverEnforcesTreeCandidateAndAggregateByteBudgets(t *testing.T) {
+	root := t.TempDir()
+	writeCandidate(t, root, "one.jsonl", "one", "/project")
+	writeCandidate(t, root, "two.jsonl", "two", "/project")
+
+	tests := []struct {
+		name   string
+		limits DiscoveryLimits
+	}{
+		{"entries", DiscoveryLimits{MaxEntries: 1, MaxCandidates: 10, MaxBytes: 1 << 20}},
+		{"candidates", DiscoveryLimits{MaxEntries: 10, MaxCandidates: 1, MaxBytes: 1 << 20}},
+		{"bytes", DiscoveryLimits{MaxEntries: 10, MaxCandidates: 10, MaxBytes: 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := DiscoverWithLimits(root, "", test.limits); !errors.Is(err, ErrDiscoveryBudget) {
+				t.Fatalf("error=%v", err)
+			}
+		})
+	}
+}
+
+func TestResolveRejectsExcessiveSessionSegments(t *testing.T) {
+	candidates := make([]Candidate, maxSessionSegments+1)
+	start := time.Date(2026, 8, 22, 0, 0, 0, 0, time.UTC)
+	for index := range candidates {
+		candidates[index] = Candidate{ID: "segmented", Path: fmt.Sprintf("/%04d.jsonl", index), CWD: "/project", StartedAt: start.Add(time.Duration(index) * time.Second)}
+	}
+	if _, err := Resolve(candidates, ResolveOptions{SessionID: "segmented"}); !errors.Is(err, ErrDiscoveryBudget) {
+		t.Fatalf("error=%v", err)
 	}
 }
 

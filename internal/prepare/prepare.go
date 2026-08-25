@@ -41,11 +41,14 @@ type Options struct {
 }
 
 var (
-	ErrCursorSourceDrift     = errors.New("accepted cursor no longer matches session source")
-	ErrSessionNotFound       = errors.New("selected session was not found")
-	ErrSessionAmbiguous      = errors.New("current session is ambiguous")
-	ErrProjectNotInitialized = errors.New("selected project is not initialized")
-	ErrUnsafeOutput          = errors.New("evidence output path is unsafe")
+	ErrCursorSourceDrift        = errors.New("accepted cursor no longer matches session source")
+	ErrSessionNotFound          = errors.New("selected session was not found")
+	ErrSessionAmbiguous         = errors.New("current session is ambiguous")
+	ErrSessionSegmentConflict   = errors.New("selected session segments conflict")
+	ErrSessionFormatUnsupported = errors.New("selected session format is unsupported or invalid")
+	ErrSessionDiscoveryLimit    = errors.New("session discovery exceeds supported limits")
+	ErrProjectNotInitialized    = errors.New("selected project is not initialized")
+	ErrUnsafeOutput             = errors.New("evidence output path is unsafe")
 )
 
 func Run(opts Options) (evidence.Packet, error) {
@@ -69,6 +72,9 @@ func Run(opts Options) (evidence.Packet, error) {
 	}
 	discovery, err := session.Discover(opts.SessionsRoot, opts.SessionID)
 	if err != nil {
+		if errors.Is(err, session.ErrDiscoveryBudget) {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionDiscoveryLimit, err)
+		}
 		return evidence.Packet{}, fmt.Errorf("discover sessions: %w", err)
 	}
 	pathsEqual := func(first, second string) bool {
@@ -80,11 +86,20 @@ func Run(opts Options) (evidence.Packet, error) {
 		Now: opts.Now, AmbiguityWindow: opts.AmbiguityWindow, PathsEqual: pathsEqual,
 	})
 	if err != nil {
+		if errors.Is(err, session.ErrDiscoveryBudget) {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionDiscoveryLimit, err)
+		}
 		if opts.SessionID != "" && !discoveryContainsSessionID(discovery, opts.SessionID) {
 			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionNotFound, err)
 		}
 		if opts.SessionID == "" && errors.Is(err, session.ErrSessionAmbiguous) {
 			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionAmbiguous, err)
+		}
+		if errors.Is(err, session.ErrSessionConflict) {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionSegmentConflict, err)
+		}
+		if opts.SessionID != "" && discoveryContainsSessionID(discovery, opts.SessionID) {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrSessionFormatUnsupported, err)
 		}
 		return evidence.Packet{}, err
 	}
@@ -122,11 +137,15 @@ func Run(opts Options) (evidence.Packet, error) {
 			return evidence.Packet{}, fmt.Errorf("prepare session open: %w", err)
 		}
 	}
-	sessionFile, err := session.OpenCandidate(opts.SessionsRoot, chosen)
+	sessionFiles, err := session.OpenCandidates(opts.SessionsRoot, chosen)
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("open selected session: %w", err)
 	}
-	defer sessionFile.Close()
+	defer func() {
+		for _, file := range sessionFiles {
+			_ = file.Close()
+		}
+	}()
 	if opts.afterOpenSession != nil {
 		if err := opts.afterOpenSession(); err != nil {
 			return evidence.Packet{}, fmt.Errorf("prepare session stream: %w", err)
@@ -183,12 +202,12 @@ func Run(opts Options) (evidence.Packet, error) {
 		}
 		return nil
 	}
-	summary, streamErr := session.StreamFile(sessionFile, session.DecodeOptions{FromLine: 1, MaxRecordBytes: opts.MaxRecordBytes}, visit)
+	summary, streamErr := session.StreamFiles(sessionFiles, session.DecodeOptions{FromLine: 1, MaxRecordBytes: opts.MaxRecordBytes}, visit)
 	if errors.Is(streamErr, ErrCursorSourceDrift) {
 		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor hash does not match the selected source", ErrCursorSourceDrift)
 	}
 	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) {
-		return evidence.Packet{}, fmt.Errorf("extract session evidence from %q: %w", chosen.Path, streamErr)
+		return evidence.Packet{}, fmt.Errorf("%w: extract selected session evidence: %w", ErrSessionFormatUnsupported, streamErr)
 	}
 	if !cursorValidated {
 		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor line is absent from the selected source", ErrCursorSourceDrift)

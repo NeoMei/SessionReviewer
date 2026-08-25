@@ -100,6 +100,9 @@ func snapshotUsageFromDirectory(directory *pathguard.Directory) (SnapshotUsage, 
 				continue
 			}
 			relative := relativeDir + "/" + entry.Name()
+			if IsStandaloneDerivedPath(relative) {
+				continue
+			}
 			body, perm, err := readLedgerRegularBudget(directory, relative, true, budget)
 			if err != nil {
 				return SnapshotUsage{}, err
@@ -133,6 +136,9 @@ func ValidateSnapshotUsage(usage SnapshotUsage) error {
 // IsSnapshotPath reports whether a canonical slash path belongs to the source
 // ledger namespace. Derived diagrams intentionally do not participate.
 func IsSnapshotPath(relative string) bool {
+	if IsStandaloneDerivedPath(relative) {
+		return false
+	}
 	switch relative {
 	case ledgerRootRelative + "/project-overview.md", ledgerRootRelative + "/current-state.md", ledgerRootRelative + "/evolution-timeline.md":
 		return true

@@ -193,6 +193,13 @@ func renderDiagramWithOptions(state State, options diagramRenderOptions) ([]byte
 	output := newCappedDiagramBuffer(options.maxOutputBytes)
 	output.WriteString("# Project evolution\n\n")
 	output.WriteString("This file is derived from the accepted project ledger. Manual edits are overwritten on the next accepted render.\n\n")
+	recovery, err := RenderRecoveryMermaid(state)
+	if err != nil {
+		return nil, err
+	}
+	output.WriteString("## Recovery mainline\n\n```mermaid\n")
+	output.WriteString(recovery)
+	output.WriteString("```\n\n")
 	writeMermaidGraph(output, "Causal evolution", "flowchart LR", causalNodes, causalEdges, options.nodeDigest)
 	output.appendByte('\n')
 	writeMermaidGraph(output, "Project relationships", "graph TD", relationshipNodes, relationshipEdges, options.nodeDigest)

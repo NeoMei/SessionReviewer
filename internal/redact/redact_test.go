@@ -25,7 +25,7 @@ func TestDefaultRedactsCredentialCanaries(t *testing.T) {
 }
 
 func TestDefaultPreservesSessionAndItemIDs(t *testing.T) {
-	input := "session 01a02971-61d6-7251-bdcf-f999230f961d item msg_01a02974-3c83-7390-acd8-cb0fd17b6eef"
+	input := "session 01a02971-61d6-7251-bdcf-f999230f961d report session-report-01a02971-61d6-7251-bdcf-f999230f961d item msg_01a02974-3c83-7390-acd8-cb0fd17b6eef"
 	if got := Default().Text(input).Text; got != input {
 		t.Fatal("stable session or item ID was changed")
 	}

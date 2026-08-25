@@ -116,7 +116,7 @@ func TestRenderSortsEntitiesTagsAndEdges(t *testing.T) {
 		t.Fatalf("tags are not bytewise sorted:\n%s", got)
 	}
 
-	causal := graphBody(t, text, "flowchart LR")
+	causal := graphBody(t, text, "## Causal evolution\n\n```mermaid\nflowchart LR")
 	wantEdges := []string{
 		"  " + diagramNode("event", "event-a") + " --> " + diagramNode("event", "event-b"),
 		"  " + diagramNode("event", "event-b") + " --> " + diagramNode("decision", "decision-a"),
@@ -128,7 +128,7 @@ func TestRenderSortsEntitiesTagsAndEdges(t *testing.T) {
 		t.Fatalf("causal edges=%q want=%q\n%s", gotEdges, wantEdges, got)
 	}
 
-	relationships := graphBody(t, text, "graph TD")
+	relationships := graphBody(t, text, "## Project relationships\n\n```mermaid\ngraph TD")
 	for _, relation := range []string{
 		diagramNode("project", state.ProjectID) + " --> " + diagramNode("session", "session-a"),
 		diagramNode("project", state.ProjectID) + " --> " + diagramNode("decision", "decision-a"),
@@ -158,7 +158,7 @@ func TestRenderUsesOnlyExplicitTimelineEntityIDsForCausalEdges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	causal := graphBody(t, string(got), "flowchart LR")
+	causal := graphBody(t, string(got), "## Causal evolution\n\n```mermaid\nflowchart LR")
 	for _, forbidden := range []string{
 		diagramNode("event", "event-a") + " --> " + diagramNode("decision", "decision-b"),
 		diagramNode("event", "event-a") + " --> " + diagramNode("loop", "loop-a"),
@@ -176,7 +176,10 @@ func TestRenderEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(got, []byte("flowchart LR")) || !bytes.Contains(got, []byte("graph TD")) || len(edgeLines(string(got))) != 0 {
+	text := string(got)
+	if !bytes.Contains(got, []byte("项目目标")) || !bytes.Contains(got, []byte("graph TD")) ||
+		len(edgeLines(graphBody(t, text, "## Causal evolution\n\n```mermaid\nflowchart LR"))) != 0 ||
+		len(edgeLines(graphBody(t, text, "## Project relationships\n\n```mermaid\ngraph TD"))) != 0 {
 		t.Fatalf("empty diagram=%s", got)
 	}
 }

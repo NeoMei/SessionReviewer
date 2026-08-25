@@ -10,9 +10,41 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 )
+
+func TestMergeGeneratedOnlyDifferencesAreNoopWithoutRevisionIncrement(t *testing.T) {
+	const (
+		relative  = "decisions/decision-sync.md"
+		projectID = "project-1111111111111111"
+	)
+	base := fixtureDocument(t, "base-decision.md", relative)
+	units := base.Units()
+	units[syncdoc.UnitKey{Kind: syncdoc.UnitSection, Name: "Base decision@1#1 / 快速理解#1"}] = syncdoc.Unit{
+		Present: true, Value: []byte(ledger.GeneratedMarkerPrefix + "快速理解 -->\n\ncanonical\n"), HeadingPresentation: []byte("## 快速理解\n"),
+	}
+	var err error
+	base, err = base.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project := editSectionUnit(t, base, "Base decision@1#1 / 快速理解#1", ledger.GeneratedMarkerPrefix+"快速理解 -->\n\nproject edit\n")
+	vault := editSectionUnit(t, base, "Base decision@1#1 / 快速理解#1", ledger.GeneratedMarkerPrefix+"快速理解 -->\n\nvault edit\n")
+	got := Merge(MergeInput{
+		EntityID: "decision-sync", ProjectID: projectID, BasePath: relative,
+		Base: &base, Project: candidate(relative, project), Vault: candidate(relative, vault),
+		GOOS: "windows", CaseMode: platform.CaseInsensitive,
+	})
+	if got.Kind != MergeNoop || got.Accepted == nil {
+		t.Fatalf("merge=%+v", got)
+	}
+	revision := got.Accepted.Units()[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
+	if string(revision.Value) != "3\n" {
+		t.Fatalf("revision=%q", revision.Value)
+	}
+}
 
 func TestMergeUnitMatrix(t *testing.T) {
 	t.Parallel()
@@ -342,14 +374,12 @@ func TestMergeValidatesNewEntitiesAndProposalProvenance(t *testing.T) {
 		{"unstable-entity-id", "../decision", "project-1111111111111111", valid},
 		{"entity-id-mismatch", "other-decision", "project-1111111111111111", valid},
 		{"project-id-mismatch", "decision-sync", "project-2222222222222222", valid},
-		{"revision-not-one", "decision-sync", "project-1111111111111111", base},
 		{"unknown-entity-type", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "entity_type", "unknown\n")},
 		{"invalid-status", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "status", "not-a-status\n")},
 		{"duplicate-source-sessions", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "source_sessions", "[session-1, session-1]\n")},
 		{"invalid-nested-source-hash", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "evidence", "- evidence_id: evidence-1\n  session_id: session-1\n  jsonl_line: 7\n  source_hash: CANARY\n  summary: invalid\n")},
 		{"invalid-supersedes", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "supersedes", "[../decision]\n")},
 		{"reserved-hash-in-frontmatter", "decision-sync", "project-1111111111111111", editFrontmatterUnit(t, valid, "sync_hash", strings.Repeat("a", 64)+"\n")},
-		{"missing-sync-status", "decision-sync", "project-1111111111111111", removeFrontmatterUnit(t, valid, "sync_status")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -361,6 +391,41 @@ func TestMergeValidatesNewEntitiesAndProposalProvenance(t *testing.T) {
 				t.Fatalf("reason leaked invalid provenance: %q", got.Reason)
 			}
 		})
+	}
+}
+
+func TestMergeFirstSyncImportsMatureProjectLedgerWithoutSyncMetadata(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	mature := documentAtRevision(t, base, relative, 6)
+	mature = removeFrontmatterUnit(t, mature, "sync_status")
+	got := Merge(MergeInput{
+		EntityID: "decision-sync", ProjectID: "project-1111111111111111",
+		Project: candidate(relative, mature), GOOS: "darwin", CaseMode: platform.CaseSensitive,
+		OccupiedPathKeys: map[string]string{},
+	})
+	if got.Kind != MergeWriteBoth || got.Reason != "" || got.Accepted == nil {
+		t.Fatalf("got=%+v", got)
+	}
+	units := got.Accepted.Units()
+	if revision := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]; !revision.Present || string(revision.Value) != "6\n" {
+		t.Fatalf("accepted revision=%+v", revision)
+	}
+	if status := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}]; !status.Present || string(status.Value) != "synced\n" {
+		t.Fatalf("accepted sync_status=%+v", status)
+	}
+}
+
+func TestMergeFirstSyncRejectsMalformedOptionalProjectSyncStatus(t *testing.T) {
+	t.Parallel()
+	const relative = "decisions/decision-sync.md"
+	document := documentAtRevision(t, fixtureDocument(t, "base-decision.md", relative), relative, 6)
+	document = editFrontmatterUnit(t, document, "sync_status", "[synced]\n")
+	got := Merge(MergeInput{EntityID: "decision-sync", ProjectID: "project-1111111111111111", Project: candidate(relative, document), GOOS: "darwin", CaseMode: platform.CaseSensitive, OccupiedPathKeys: map[string]string{}})
+	if got.Kind != MergeConflict || got.Reason != "invalid_new_entity" {
+		t.Fatalf("got=%+v", got)
 	}
 }
 

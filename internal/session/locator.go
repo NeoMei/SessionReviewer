@@ -18,9 +18,26 @@ import (
 var (
 	ErrStop             = errors.New("stop stream")
 	ErrSessionAmbiguous = errors.New("current session is ambiguous")
+	ErrSessionConflict  = errors.New("session identity has conflicting candidates")
+	ErrDiscoveryBudget  = errors.New("session discovery budget exceeded")
 )
 
-const futureClockSkew = 5 * time.Minute
+const (
+	futureClockSkew    = 5 * time.Minute
+	maxSessionSegments = 256
+)
+
+type DiscoveryLimits struct {
+	MaxEntries    int
+	MaxCandidates int
+	MaxBytes      int64
+}
+
+var defaultDiscoveryLimits = DiscoveryLimits{
+	MaxEntries:    1_000_000,
+	MaxCandidates: 100_000,
+	MaxBytes:      64 << 30,
+}
 
 type Candidate struct {
 	ID        string
@@ -32,6 +49,7 @@ type Candidate struct {
 	fileInfo  os.FileInfo
 	rootInfo  os.FileInfo
 	relative  string
+	segments  []Candidate
 }
 
 type DiscoveryIssue struct {
@@ -55,6 +73,13 @@ type ResolveOptions struct {
 }
 
 func Discover(root, selectedSessionID string) (Discovery, error) {
+	return DiscoverWithLimits(root, selectedSessionID, defaultDiscoveryLimits)
+}
+
+func DiscoverWithLimits(root, selectedSessionID string, limits DiscoveryLimits) (Discovery, error) {
+	if limits.MaxEntries < 1 || limits.MaxCandidates < 1 || limits.MaxBytes < 1 {
+		return Discovery{}, fmt.Errorf("%w: limits must be positive", ErrDiscoveryBudget)
+	}
 	directory, err := pathguard.Open(root)
 	if err != nil {
 		return Discovery{}, fmt.Errorf("sessions path %q is redirected or invalid: %w", root, err)
@@ -62,9 +87,15 @@ func Discover(root, selectedSessionID string) (Discovery, error) {
 	defer directory.Close()
 
 	var discovery Discovery
+	entries, candidates := 0, 0
+	var bytes int64
 	err = fs.WalkDir(directory.Root.FS(), ".", func(relative string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		entries++
+		if entries > limits.MaxEntries {
+			return fmt.Errorf("%w: too many filesystem entries", ErrDiscoveryBudget)
 		}
 		path := filepath.Join(directory.Path, filepath.FromSlash(relative))
 		info, err := entry.Info()
@@ -77,6 +108,14 @@ func Discover(root, selectedSessionID string) (Discovery, error) {
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".jsonl") {
 			return nil
 		}
+		candidates++
+		if candidates > limits.MaxCandidates {
+			return fmt.Errorf("%w: too many JSONL candidates", ErrDiscoveryBudget)
+		}
+		if info.Size() < 0 || info.Size() > limits.MaxBytes-bytes {
+			return fmt.Errorf("%w: aggregate JSONL bytes exceed the limit", ErrDiscoveryBudget)
+		}
+		bytes += info.Size()
 
 		file, identity, err := directory.OpenRegular(relative)
 		if err != nil {
@@ -210,6 +249,27 @@ func OpenCandidate(root string, candidate Candidate) (*os.File, error) {
 	return file, nil
 }
 
+// OpenCandidates opens every ordered physical segment represented by a
+// resolved session candidate. A normal one-file session returns one handle.
+func OpenCandidates(root string, candidate Candidate) ([]*os.File, error) {
+	segments := candidate.segments
+	if len(segments) == 0 {
+		segments = []Candidate{candidate}
+	}
+	files := make([]*os.File, 0, len(segments))
+	for _, segment := range segments {
+		file, err := OpenCandidate(root, segment)
+		if err != nil {
+			for _, opened := range files {
+				_ = opened.Close()
+			}
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, nil
+}
+
 func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 	if opts.SessionID != "" {
 		var matches []Candidate
@@ -221,14 +281,10 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 		if len(matches) == 0 {
 			return Candidate{}, fmt.Errorf("session %q not found", opts.SessionID)
 		}
-		if len(matches) > 1 {
-			paths := make([]string, 0, len(matches))
-			for _, match := range matches {
-				paths = append(paths, match.Path)
-			}
-			return Candidate{}, fmt.Errorf("duplicate session id %q found at paths: %s", opts.SessionID, strings.Join(paths, ", "))
+		if len(matches) == 1 {
+			return matches[0], nil
 		}
-		return matches[0], nil
+		return resolveSegments(matches, opts)
 	}
 	if opts.AmbiguityWindow < 0 {
 		return Candidate{}, fmt.Errorf("ambiguity window must not be negative")
@@ -281,6 +337,45 @@ func Resolve(candidates []Candidate, opts ResolveOptions) (Candidate, error) {
 	return matches[0], nil
 }
 
+func resolveSegments(matches []Candidate, opts ResolveOptions) (Candidate, error) {
+	if len(matches) > maxSessionSegments {
+		return Candidate{}, fmt.Errorf("%w: session %q has too many physical segments", ErrDiscoveryBudget, opts.SessionID)
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].StartedAt.Equal(matches[j].StartedAt) {
+			return matches[i].Path < matches[j].Path
+		}
+		return matches[i].StartedAt.Before(matches[j].StartedAt)
+	})
+	paths := make([]string, 0, len(matches))
+	for _, match := range matches {
+		paths = append(paths, match.Path)
+	}
+	for index, match := range matches {
+		if match.StartedAt.IsZero() || (index > 0 && !match.StartedAt.After(matches[index-1].StartedAt)) {
+			return Candidate{}, fmt.Errorf("%w: duplicate session id %q found at paths: %s", ErrSessionConflict, opts.SessionID, strings.Join(paths, ", "))
+		}
+		if index == 0 {
+			continue
+		}
+		sameProject := platform.NormalizePath(opts.GOOS, matches[0].CWD) == platform.NormalizePath(opts.GOOS, match.CWD)
+		if opts.PathsEqual != nil {
+			sameProject = opts.PathsEqual(matches[0].CWD, match.CWD)
+		}
+		if !sameProject {
+			return Candidate{}, fmt.Errorf("%w: duplicate session id %q spans different projects", ErrSessionConflict, opts.SessionID)
+		}
+	}
+	composite := matches[0]
+	composite.segments = append([]Candidate(nil), matches...)
+	for _, match := range matches[1:] {
+		if match.ModTime.After(composite.ModTime) {
+			composite.ModTime = match.ModTime
+		}
+	}
+	return composite, nil
+}
+
 func ResolveDiscovery(discovery Discovery, opts ResolveOptions) (Candidate, error) {
 	if opts.SessionID == "" && len(discovery.Issues) > 0 {
 		return Candidate{}, fmt.Errorf("current-session discovery contains corrupt candidates; select a session explicitly")
@@ -299,13 +394,13 @@ func ResolveDiscovery(discovery Discovery, opts ResolveOptions) (Candidate, erro
 		}
 	}
 	if opts.SessionID != "" && selectedIssues > 0 && matches+selectedIssues > 1 {
-		return Candidate{}, fmt.Errorf("duplicate session id %q includes a corrupt candidate", opts.SessionID)
+		return Candidate{}, fmt.Errorf("%w: duplicate session id %q includes a corrupt candidate", ErrSessionConflict, opts.SessionID)
 	}
 	if selectedIssues == 1 {
 		return Candidate{}, fmt.Errorf("selected session candidate is corrupt")
 	}
 	if selectedIssues > 1 {
-		return Candidate{}, fmt.Errorf("duplicate session id %q includes corrupt candidates", opts.SessionID)
+		return Candidate{}, fmt.Errorf("%w: duplicate session id %q includes corrupt candidates", ErrSessionConflict, opts.SessionID)
 	}
 	return Resolve(discovery.Candidates, opts)
 }

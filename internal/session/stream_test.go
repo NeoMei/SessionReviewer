@@ -38,6 +38,42 @@ func TestStreamReturnsVisitorError(t *testing.T) {
 	}
 }
 
+func TestStreamFilesUsesStableGlobalLinesAndOffsets(t *testing.T) {
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first.jsonl")
+	secondPath := filepath.Join(root, "second.jsonl")
+	first := `{"timestamp":"2026-08-22T10:00:00Z","type":"one","payload":{}}` + "\n"
+	second := `{"timestamp":"2026-08-22T11:00:00Z","type":"two","payload":{}}` + "\n"
+	if err := os.WriteFile(firstPath, []byte(first), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte(second), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	firstFile, err := os.Open(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstFile.Close()
+	secondFile, err := os.Open(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondFile.Close()
+
+	var records []Record
+	summary, err := StreamFiles([]*os.File{firstFile, secondFile}, DecodeOptions{}, func(record Record) error {
+		records = append(records, record)
+		return nil
+	})
+	if err != nil || summary.Lines != 2 || summary.Records != 2 || len(records) != 2 {
+		t.Fatalf("summary=%+v records=%+v err=%v", summary, records, err)
+	}
+	if records[0].Line != 1 || records[0].ByteOffset != 0 || records[1].Line != 2 || records[1].ByteOffset != int64(len(first)) {
+		t.Fatalf("records=%+v", records)
+	}
+}
+
 func TestStreamReaderRejectsNilVisitor(t *testing.T) {
 	if _, err := StreamReader(strings.NewReader("{\"type\":\"event\"}\n"), DecodeOptions{}, nil); err == nil {
 		t.Fatal("nil visitor accepted")

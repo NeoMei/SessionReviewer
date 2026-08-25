@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 const defaultMaxRecordBytes = 64 << 20
@@ -35,6 +36,40 @@ func StreamFile(file *os.File, opts DecodeOptions, visit func(Record) error) (De
 		return DecodeSummary{}, fmt.Errorf("seek session file: %w", err)
 	}
 	return StreamReader(file, opts, visit)
+}
+
+// StreamFiles presents ordered rollout segments as one logical JSONL stream.
+// It inserts a logical newline only when a non-empty segment is unterminated,
+// so global line and byte offsets remain stable as later segments are added.
+func StreamFiles(files []*os.File, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {
+	if len(files) == 0 {
+		return DecodeSummary{}, fmt.Errorf("at least one session file is required")
+	}
+	readers := make([]io.Reader, 0, len(files)*2)
+	for _, file := range files {
+		if file == nil {
+			return DecodeSummary{}, fmt.Errorf("session file is required")
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return DecodeSummary{}, fmt.Errorf("seek session file: %w", err)
+		}
+		info, err := file.Stat()
+		if err != nil {
+			return DecodeSummary{}, fmt.Errorf("inspect session file: %w", err)
+		}
+		readers = append(readers, file)
+		if info.Size() == 0 {
+			continue
+		}
+		var last [1]byte
+		if _, err := file.ReadAt(last[:], info.Size()-1); err != nil {
+			return DecodeSummary{}, fmt.Errorf("inspect session file ending: %w", err)
+		}
+		if last[0] != '\n' {
+			readers = append(readers, strings.NewReader("\n"))
+		}
+	}
+	return StreamReader(io.MultiReader(readers...), opts, visit)
 }
 
 func StreamReader(source io.Reader, opts DecodeOptions, visit func(Record) error) (DecodeSummary, error) {

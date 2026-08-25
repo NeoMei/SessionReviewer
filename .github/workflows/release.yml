@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify tag and license gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f LICENSE
+          test -f NOTICE
+          test ! -e LICENSE_STATUS.md
+          grep -q "Apache License" LICENSE
+          grep -q "Copyright 2026 NeoMei and QUUKK" NOTICE
+          version="${GITHUB_REF_NAME#v}"
+          test "$version" != "$GITHUB_REF_NAME"
+          test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
+      - run: go test ./...
+      - run: go vet ./...
+      - name: Build deterministic release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          go run ./cmd/release-packager \
+            --source . \
+            --dist dist \
+            --version "$version" \
+            --commit "$(git rev-parse HEAD)" \
+            --built-at "$(git show -s --format=%cI HEAD)"
+          cd dist
+          sha256sum --check SHA256SUMS
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"

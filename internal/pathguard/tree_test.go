@@ -217,6 +217,24 @@ func TestTreeReadRegularBoundsContentAndReturnsMissing(t *testing.T) {
 	}
 }
 
+func TestReadRegularOptionalTreatsMissingParentAsAbsentButRejectsRedirect(t *testing.T) {
+	rootPath := t.TempDir()
+	directory, err := Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	if body, found, err := directory.ReadRegularOptional("missing/child/file.md", 1024); err != nil || found || body != nil {
+		t.Fatalf("body=%q found=%t err=%v", body, found, err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(rootPath, "redirect")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, _, err := directory.ReadRegularOptional("redirect/file.md", 1024); err == nil {
+		t.Fatal("redirected parent was treated as an absent path")
+	}
+}
+
 func TestTreeReadRegularRejectsOverflowingLimitWithoutReturningEmptySuccess(t *testing.T) {
 	rootPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rootPath, "state.md"), []byte("nonempty"), 0o600); err != nil {

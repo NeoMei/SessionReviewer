@@ -229,13 +229,20 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 		err = x.append(record, "tool_call", payload.ID, "", payload.Input, payload.Name)
 	case "custom_tool_call_output":
 		var payload struct {
-			ID     string `json:"id"`
-			Output string `json:"output"`
+			ID     string          `json:"id"`
+			Output json.RawMessage `json:"output"`
 		}
 		if err := json.Unmarshal(record.Payload, &payload); err != nil {
 			return errors.New("malformed custom_tool_call_output payload")
 		}
-		err = x.append(record, "tool_result", payload.ID, "", payload.Output, "")
+		output, err := decodeCustomToolOutput(payload.Output)
+		if err != nil {
+			return err
+		}
+		if output == "" {
+			return x.advance(record)
+		}
+		err = x.append(record, "tool_result", payload.ID, "", output, "")
 	default:
 		return x.advance(record)
 	}
@@ -243,6 +250,30 @@ func (x *Extractor) addResponseItem(record session.Record) error {
 		return err
 	}
 	return nil
+}
+
+func decodeCustomToolOutput(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", errors.New("malformed custom_tool_call_output payload")
+	}
+	var legacy string
+	if err := json.Unmarshal(raw, &legacy); err == nil {
+		return legacy, nil
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return "", errors.New("malformed custom_tool_call_output payload")
+	}
+	parts := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n"), nil
 }
 
 func (x *Extractor) append(record session.Record, kind, itemID, role, summary, toolName string) error {

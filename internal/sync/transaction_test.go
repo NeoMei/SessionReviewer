@@ -56,6 +56,46 @@ func TestTransactionJournalRoundTripsEveryKindAndStage(t *testing.T) {
 	}
 }
 
+func TestDerivedTransactionJournalIsContentFreeAndStageChecked(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store := TransactionStore{Root: root}
+	txn := Transaction{
+		Version: 1, Kind: TxnDerivedPublish, EntityID: derivedTransactionID,
+		DesiredHash: strings.Repeat("a", 64), ExpectedBaseHash: strings.Repeat("b", 64),
+		Stage: TxnPlanned, UpdatedAt: time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC),
+	}
+	if err := store.Save(txn); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(rootPath, transactionRecordPath(txn.Kind, txn.EntityID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte("project-overview")) || bytes.Contains(body, []byte("快速理解")) {
+		t.Fatalf("journal contains derived content: %s", body)
+	}
+	bad := txn
+	bad.EntityID = "other"
+	if err := store.Save(bad); err == nil {
+		t.Fatal("invalid derived transaction identity was accepted")
+	}
+	bad = txn
+	bad.Stage = TxnVaultWritten
+	if err := store.Save(bad); err == nil {
+		t.Fatal("derived transaction skipped a stage")
+	}
+	bad = txn
+	bad.ExpectedProjectHash = strings.Repeat("c", 64)
+	if err := store.Save(bad); err == nil {
+		t.Fatal("derived transaction accepted a target preimage hash")
+	}
+}
+
 func TestTransactionStoreAdvancesSequentiallyAndListsDeterministically(t *testing.T) {
 	root, err := os.OpenRoot(t.TempDir())
 	if err != nil {
@@ -171,6 +211,13 @@ func TestTransactionStoreRejectsStageSkipAndRegression(t *testing.T) {
 	if err := store.Save(skipped); err == nil {
 		t.Fatal("accepted skipped transaction stage")
 	}
+	changedPreimage := txn
+	changedPreimage.Stage = TxnProjectWritten
+	changedPreimage.ExpectedProjectHash = hash("different preimage")
+	changedPreimage.UpdatedAt = changedPreimage.UpdatedAt.Add(time.Second)
+	if err := store.Save(changedPreimage); err == nil {
+		t.Fatal("accepted changed transaction preimage hash")
+	}
 	txn.Stage = TxnProjectWritten
 	txn.UpdatedAt = txn.UpdatedAt.Add(time.Second)
 	if err := store.Save(txn); err != nil {
@@ -195,6 +242,8 @@ func TestTransactionStoreRejectsInvalidSchemaBeforeWriting(t *testing.T) {
 		{name: "entity", mutate: func(txn *Transaction) { txn.EntityID = "../CANARY" }},
 		{name: "desired hash", mutate: func(txn *Transaction) { txn.DesiredHash = "CANARY" }},
 		{name: "base hash", mutate: func(txn *Transaction) { txn.ExpectedBaseHash = "CANARY" }},
+		{name: "project target hash", mutate: func(txn *Transaction) { txn.ExpectedProjectHash = "CANARY" }},
+		{name: "target hash owner", mutate: func(txn *Transaction) { txn.Kind, txn.ExpectedVaultHash = TxnResolution, hash("vault") }},
 		{name: "local time", mutate: func(txn *Transaction) { txn.UpdatedAt = txn.UpdatedAt.In(time.FixedZone("local", 0)) }},
 		{name: "path key", mutate: func(txn *Transaction) { txn.FromPathKey, txn.ToPathKey = "../CANARY", "decisions/d2.md" }},
 		{name: "unpaired path key", mutate: func(txn *Transaction) { txn.FromPathKey = "decisions/d1.md" }},

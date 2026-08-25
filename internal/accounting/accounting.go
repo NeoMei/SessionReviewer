@@ -162,6 +162,7 @@ type Accumulator struct {
 	ended       time.Time
 	activeModel string
 	models      map[string]TokenUsage
+	lastTotal   *TokenUsage
 }
 
 func NewAccumulator(started time.Time) *Accumulator {
@@ -202,7 +203,8 @@ func (a *Accumulator) Observe(record session.Record) error {
 	var payload struct {
 		Type string `json:"type"`
 		Info *struct {
-			Last *TokenUsage `json:"last_token_usage"`
+			Last  *TokenUsage `json:"last_token_usage"`
+			Total *TokenUsage `json:"total_token_usage"`
 		} `json:"info"`
 	}
 	if err := json.Unmarshal(record.Payload, &payload); err != nil {
@@ -215,6 +217,17 @@ func (a *Accumulator) Observe(record session.Record) error {
 		return errors.New("token_count omits last_token_usage")
 	}
 	usage := *payload.Info.Last
+	if payload.Info.Total != nil {
+		if err := ValidateTokenUsage(*payload.Info.Total); err != nil {
+			return fmt.Errorf("invalid cumulative token_count at line %d: %w", record.Line, err)
+		}
+	}
+	if isContextOnlyTokenHeartbeat(usage) {
+		if a.lastTotal == nil || payload.Info.Total == nil || *a.lastTotal != *payload.Info.Total {
+			return fmt.Errorf("invalid token_count at line %d: aggregate-only usage lacks an unchanged cumulative snapshot", record.Line)
+		}
+		return nil
+	}
 	if err := ValidateTokenUsage(usage); err != nil {
 		return fmt.Errorf("invalid token_count at line %d: %w", record.Line, err)
 	}
@@ -223,7 +236,15 @@ func (a *Accumulator) Observe(record session.Record) error {
 		return err
 	}
 	a.models[a.activeModel] = current
+	if payload.Info.Total != nil {
+		copy := *payload.Info.Total
+		a.lastTotal = &copy
+	}
 	return nil
+}
+
+func isContextOnlyTokenHeartbeat(value TokenUsage) bool {
+	return value.InputTokens == 0 && value.CachedInputTokens == 0 && value.CacheWriteInputTokens == 0 && value.OutputTokens == 0 && value.ReasoningOutputTokens == 0 && value.TotalTokens > 0
 }
 
 func (a *Accumulator) Snapshot() *SessionUsage {

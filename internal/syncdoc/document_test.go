@@ -8,7 +8,77 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/ledger"
 )
+
+func TestGeneratedSectionsAreNonSemanticAndForgedMarkersFailClosed(t *testing.T) {
+	base := mustParsePath(t, "decisions/decision-1.md", generatedSyncDocument("canonical quick summary"))
+	units := base.Units()
+	quickKey := requireUnit(t, units, UnitSection, "Decision@1#1 / 快速理解#1")
+	quick := units[quickKey]
+	quick.Value = []byte(ledger.GeneratedMarkerPrefix + "快速理解 -->\n\nhand edited\n")
+	units[quickKey] = quick
+	edited, err := base.WithUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edited.ValidateHumanChanges(base); err != nil {
+		t.Fatalf("generated edit should be normalized, got %v", err)
+	}
+	if !edited.SemanticEqual(base) {
+		t.Fatal("generated text entered semantic equality")
+	}
+
+	deletedUnits := edited.Units()
+	delete(deletedUnits, quickKey)
+	deleted, err := edited.WithUnits(deletedUnits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleted.ValidateHumanChanges(base); err != nil || !deleted.SemanticEqual(base) {
+		t.Fatalf("generated deletion became semantic: equal=%t err=%v", deleted.SemanticEqual(base), err)
+	}
+
+	forged := mustParsePath(t, "decisions/decision-1.md", bytes.Replace(
+		generatedSyncDocument("canonical quick summary"),
+		[]byte("## Notes\n"),
+		[]byte("## Notes\n"+ledger.GeneratedMarkerPrefix+"快速理解 -->\n"),
+		1,
+	))
+	if err := forged.ValidateHumanChanges(base); !errors.Is(err, ErrReservedField) {
+		t.Fatalf("forged marker error=%v", err)
+	}
+}
+
+func TestWithSemanticUnitsStripsGeneratedShellAndPreservesHumanSections(t *testing.T) {
+	base := mustParsePath(t, "decisions/decision-1.md", generatedSyncDocument("canonical quick summary"))
+	semantic := base.SemanticUnits()
+	title := UnitKey{Kind: UnitFrontmatter, Name: "title"}
+	unit := semantic[title]
+	unit.Value = []byte("Human title\n")
+	semantic[title] = unit
+	updated, err := base.WithSemanticUnits(semantic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := updated.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"title: Human title", "## Notes"} {
+		if !bytes.Contains(body, []byte(want)) {
+			t.Fatalf("missing %q:\n%s", want, body)
+		}
+	}
+	if bytes.Contains(body, []byte("## 快速理解")) || bytes.Contains(body, []byte("canonical quick summary")) {
+		t.Fatalf("generated shell survived semantic reconstruction:\n%s", body)
+	}
+}
+
+func generatedSyncDocument(summary string) []byte {
+	return []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\ntitle: Base\nstatus: accepted\ntags: []\nsource_sessions: []\nevidence: []\nsupersedes: []\n---\n\n# Decision\n\n## 快速理解\n" + ledger.GeneratedMarkerPrefix + "快速理解 -->\n\n" + summary + "\n\n## Notes\nKeep.\n")
+}
 
 func TestDocumentPreservesUnknownFrontmatterAndBodySections(t *testing.T) {
 	input := []byte("---\nid: decision-1\nentity_type: decision\nproject_id: project-1\nrevision: 3\ntitle: 'Keep quotes'\nplugin_key:\n  nested: true\n---\n\nPreamble.\n\n## Context\nHuman edit.\n\n## Plugin Section\n```query\n# not a heading\n```\n")

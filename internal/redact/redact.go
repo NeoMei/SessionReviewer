@@ -34,7 +34,7 @@ type textSegment struct {
 
 var (
 	tokenCandidate        = regexp.MustCompile(`[A-Za-z0-9+/=_-]{40,}`)
-	stableID              = regexp.MustCompile(`^(?:msg_|rs_|ctc_|ctco_|ev-)(?:[A-Za-z0-9]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$`)
+	stableID              = regexp.MustCompile(`^(?:(?:msg_|rs_|ctc_|ctco_|ev-)(?:[A-Za-z0-9]{40}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})|session-report-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$`)
 	bearerCredential      = regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`)
 	privateKeyBegin       = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
 	namedSecretAssignment = regexp.MustCompile(`\b"?(?:(?i:(?:[A-Z0-9]+[_-])*(?:api[_-]?key|access[_-]?token|auth(?:orization)?|cookie|password|secret))|(?:[a-z][A-Za-z0-9]*(?:ApiKey|AccessToken|AuthToken|Authorization|Cookie|Password|Secret)))"?\s*[:=][ \t]*`)

@@ -348,10 +348,14 @@ func TestRenderCompleteLayoutPreservesUserContent(t *testing.T) {
 	}
 	want := []string{
 		"docs/session-review/current-state.md",
+		"docs/session-review/decisions/00-目录说明.md",
 		"docs/session-review/decisions/decision-1.md",
 		"docs/session-review/diagrams/project-evolution.md",
 		"docs/session-review/evolution-timeline.md",
+		"docs/session-review/open-loops/00-目录说明.md",
 		"docs/session-review/open-loops/loop-1.md",
+		"docs/session-review/project-overview.md",
+		"docs/session-review/sessions/00-目录说明.md",
 		"docs/session-review/sessions/session-s1.md",
 	}
 	if !reflect.DeepEqual(files, want) {
@@ -576,6 +580,20 @@ func TestTypedMarkdownListsRoundTripArbitraryPermittedStrings(t *testing.T) {
 	}
 }
 
+func TestEvidenceMarkdownDoesNotEmitTrailingWhitespace(t *testing.T) {
+	markdown := evidenceMarkdown([]EvidenceRef{{
+		EvidenceID: "evidence-1",
+		SessionID:  "session-1",
+		JSONLLine:  1,
+		Summary:    "summary with a source newline\n",
+	}})
+	for _, line := range strings.Split(markdown, "\n") {
+		if strings.TrimRight(line, " \t") != line {
+			t.Fatalf("evidence markdown contains trailing whitespace: %q", line)
+		}
+	}
+}
+
 func TestTypedListCodecRequiresExactSectionMarker(t *testing.T) {
 	t.Run("unmarked codec-like bullet remains literal", func(t *testing.T) {
 		doc, err := ParseDocument([]byte("---\nid: decision-1\nentity_type: decision\nproject_id: " + testProjectID + "\nrevision: 1\n---\n\n# Decision\n\n## Alternatives\n\n- sr-string: \"ordinary user text\"\n"))
@@ -677,7 +695,12 @@ func TestRenderFreshLayoutIsByteDeterministic(t *testing.T) {
 		if iteration == 0 {
 			baseline = current
 		} else if !reflect.DeepEqual(baseline, current) {
-			t.Fatalf("fresh render %d differs", iteration)
+			for relative, want := range baseline {
+				if got := current[relative]; !bytes.Equal(want, got) {
+					t.Fatalf("fresh render %d differs at %s\nwant:\n%s\ngot:\n%s", iteration, relative, want, got)
+				}
+			}
+			t.Fatalf("fresh render %d has a different path set", iteration)
 		}
 	}
 }
@@ -713,8 +736,8 @@ func TestLoadFailsClosedForUnsafeOrMalformedFiles(t *testing.T) {
 		"project mismatch": func(t *testing.T, root string) {
 			writeLedgerFile(t, root, "decisions/decision-1.md", decisionDocument("decision-1", "project-2222222222222222"), 0o644)
 		},
-		"filename mismatch": func(t *testing.T, root string) {
-			writeLedgerFile(t, root, "decisions/wrong.md", decisionDocument("decision-1", testProjectID), 0o644)
+		"invalid filename": func(t *testing.T, root string) {
+			writeLedgerFile(t, root, "decisions/Wrong!.md", decisionDocument("decision-1", testProjectID), 0o644)
 		},
 		"duplicate entity ID": func(t *testing.T, root string) {
 			writeLedgerFile(t, root, "decisions/same.md", decisionDocument("same", testProjectID), 0o644)
@@ -813,6 +836,73 @@ func TestRenderUpdatesCurrentAndTimelineIncrementally(t *testing.T) {
 	}
 	if loaded.CurrentState.NextAction != current.NextAction || loaded.Timeline[0].Summary != event.Summary {
 		t.Fatalf("current=%+v timeline=%+v", loaded.CurrentState, loaded.Timeline)
+	}
+}
+
+func TestRenderTimelineUsesCanonicalYAMLFieldNames(t *testing.T) {
+	root := ledgerFixture(t)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Render(state, completeChanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join(root, "docs", "session-review", "evolution-timeline.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, key := range []string{"occurred_at:", "decision_ids:", "open_loop_ids:"} {
+		if !strings.Contains(text, key) {
+			t.Fatalf("timeline frontmatter missing canonical key %q:\n%s", key, text)
+		}
+	}
+	for _, legacy := range []string{"occurredat:", "decisionids:", "openloopids:"} {
+		if strings.Contains(text, legacy) {
+			t.Fatalf("timeline frontmatter retained legacy key %q:\n%s", legacy, text)
+		}
+	}
+}
+
+func TestValidLedgerTimeAcceptsRFC3339FractionalTrailingZeros(t *testing.T) {
+	if !validLedgerTime("2026-08-25T10:11:12.120Z") {
+		t.Fatal("rejected a valid RFC3339 timestamp with a trailing fractional zero")
+	}
+}
+
+func TestLoadTimelineAcceptsLegacyFieldNames(t *testing.T) {
+	root := ledgerFixture(t)
+	state, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Render(state, completeChanges())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(root, "docs", "session-review", "evolution-timeline.md")
+	body, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.NewReplacer("occurred_at:", "occurredat:", "decision_ids:", "decisionids:", "open_loop_ids:", "openloopids:").Replace(string(body))
+	if err := os.WriteFile(filename, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Timeline) != 1 || loaded.Timeline[0].OccurredAt == "" || loaded.Timeline[0].DecisionIDs == nil || loaded.Timeline[0].OpenLoopIDs == nil {
+		t.Fatalf("legacy timeline=%+v", loaded.Timeline)
 	}
 }
 

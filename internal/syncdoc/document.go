@@ -214,6 +214,44 @@ func (d Document) Units() UnitSet {
 	return cloneUnitSet(units)
 }
 
+// SemanticUnits returns only human-mergeable units. Generator-owned
+// navigation sections are reproducible projections of the accepted ledger and
+// therefore never participate in revision or conflict decisions.
+func (d Document) SemanticUnits() UnitSet {
+	result := make(UnitSet)
+	for key, unit := range d.Units() {
+		if key.Kind == UnitSection && generatedSectionKey(key) {
+			continue
+		}
+		result[key] = cloneUnit(unit)
+	}
+	return result
+}
+
+// WithSemanticUnits applies semantic units without generator-owned sections.
+// This avoids orphaning a generated H2 subtree when a human renames its H1
+// ancestor. The post-merge derived publication restores canonical sections.
+func (d Document) WithSemanticUnits(units UnitSet) (Document, error) {
+	combined := make(UnitSet, len(units))
+	for key, unit := range units {
+		if key.Kind == UnitSection && generatedSectionKey(key) {
+			return Document{}, ErrReservedField
+		}
+		combined[key] = cloneUnit(unit)
+	}
+	return d.WithUnits(combined)
+}
+
+func (d Document) SemanticEqual(other Document) bool {
+	first, second := d.SemanticUnits(), other.SemanticUnits()
+	for _, key := range unionUnitKeys(first, second) {
+		if !unitsEqual(first[key], second[key]) {
+			return false
+		}
+	}
+	return true
+}
+
 func (d Document) WithUnits(units UnitSet) (Document, error) {
 	if d.frontmatter == nil {
 		return Document{}, invalidDocument("nil document")
@@ -323,7 +361,13 @@ func (d Document) ValidateHumanChanges(base Document) error {
 	if err := validateComparableDocuments(d, base); err != nil {
 		return err
 	}
-	editedUnits, baseUnits := d.Units(), base.Units()
+	if err := validateGeneratedOwnership(d); err != nil {
+		return err
+	}
+	if err := validateGeneratedOwnership(base); err != nil {
+		return err
+	}
+	editedUnits, baseUnits := d.SemanticUnits(), base.SemanticUnits()
 	keys := unionUnitKeys(editedUnits, baseUnits)
 	for _, key := range keys {
 		if unitsEqual(editedUnits[key], baseUnits[key]) {
@@ -350,11 +394,11 @@ func (d Document) FinalizeHumanMerge(base Document, changed bool) (Document, err
 	if err := d.ValidateHumanChanges(base); err != nil {
 		return Document{}, err
 	}
-	if !changed || documentsLogicallyEqual(d, base) {
+	if !changed || (d.relativePath == base.relativePath && d.SemanticEqual(base)) {
 		return cloneDocument(base), nil
 	}
-	baseUnits := base.Units()
-	units := d.Units()
+	baseUnits := base.SemanticUnits()
+	units := d.SemanticUnits()
 	for _, field := range [...]string{"revision", "source_sessions", "evidence", "supersedes"} {
 		key := UnitKey{Kind: UnitFrontmatter, Name: field}
 		if value, ok := baseUnits[key]; ok {
@@ -367,7 +411,7 @@ func (d Document) FinalizeHumanMerge(base Document, changed bool) (Document, err
 	if err != nil || baseRevision == int(^uint(0)>>1) {
 		return Document{}, invalidDocument("invalid base revision")
 	}
-	preIncrement, err := d.WithUnits(units)
+	preIncrement, err := d.WithSemanticUnits(units)
 	if err != nil {
 		return Document{}, err
 	}
@@ -399,7 +443,7 @@ func (d Document) FinalizeHumanMerge(base Document, changed bool) (Document, err
 		}
 	}
 	units[UnitKey{Kind: UnitFrontmatter, Name: "revision"}] = Unit{Present: true, Value: []byte(strconv.Itoa(baseRevision+1) + "\n")}
-	candidate, err := d.WithUnits(units)
+	candidate, err := d.WithSemanticUnits(units)
 	if err != nil {
 		return Document{}, err
 	}
@@ -685,6 +729,15 @@ func cloneUnitSet(units UnitSet) UnitSet {
 	return copy
 }
 
+func cloneUnit(unit Unit) Unit {
+	return Unit{
+		Present:             unit.Present,
+		Value:               bytes.Clone(unit.Value),
+		KeyPresentation:     bytes.Clone(unit.KeyPresentation),
+		HeadingPresentation: bytes.Clone(unit.HeadingPresentation),
+	}
+}
+
 func unitsEqual(first, second Unit) bool {
 	return first.Present == second.Present && bytes.Equal(first.Value, second.Value) && bytes.Equal(first.KeyPresentation, second.KeyPresentation) && bytes.Equal(first.HeadingPresentation, second.HeadingPresentation)
 }
@@ -724,17 +777,50 @@ func validateComparableDocuments(edited, base Document) error {
 }
 
 func documentsLogicallyEqual(first, second Document) bool {
-	if first.relativePath != second.relativePath {
+	return first.relativePath == second.relativePath && first.SemanticEqual(second)
+}
+
+func generatedSectionKey(key UnitKey) bool {
+	if key.Kind != UnitSection {
 		return false
 	}
-	firstUnits, secondUnits := first.Units(), second.Units()
-	keys := unionUnitKeys(firstUnits, secondUnits)
-	for _, key := range keys {
-		if !unitsEqual(firstUnits[key], secondUnits[key]) {
-			return false
+	identity, err := decodeSectionUnitName(key.Name)
+	if err != nil {
+		return false
+	}
+	for _, component := range identity.components {
+		if component.level == 2 && ledger.IsGeneratedSectionName(component.name) {
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+func validateGeneratedOwnership(document Document) error {
+	counts := make(map[string]int)
+	for _, section := range document.body.sections {
+		identity, err := decodeSectionUnitName(section.key.Name)
+		if err != nil || len(identity.components) == 0 {
+			return ErrInvalidDocument
+		}
+		leaf := identity.leaf()
+		generatedRoot := leaf.level == 2 && ledger.IsGeneratedSectionName(leaf.name)
+		if generatedRoot {
+			counts[leaf.name]++
+		}
+		if bytes.Contains(section.value, []byte(ledger.GeneratedMarkerPrefix)) && !generatedRoot {
+			return ErrReservedField
+		}
+	}
+	if bytes.Contains(document.body.preamble, []byte(ledger.GeneratedMarkerPrefix)) {
+		return ErrReservedField
+	}
+	for _, count := range counts {
+		if count > 1 {
+			return ErrReservedField
+		}
+	}
+	return nil
 }
 
 func cloneDocument(document Document) Document {

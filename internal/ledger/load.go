@@ -180,6 +180,9 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 				continue
 			}
 			relative := relativeDir + "/" + entry.Name()
+			if IsStandaloneDerivedPath(relative) {
+				continue
+			}
 			loaded, found, err := loadDocument(directory, relative, budget)
 			if err != nil || !found {
 				if err == nil {
@@ -192,7 +195,8 @@ func loadFromDirectory(directory *pathguard.Directory) (State, error) {
 				return State{}, fmt.Errorf("%s has mismatched entity class", relative)
 			}
 			id, err := requiredString(&loaded.Document.Frontmatter, "id")
-			if err != nil || !stableLedgerID.MatchString(id) || entry.Name() != id+".md" {
+			filenameID := strings.TrimSuffix(entry.Name(), ".md")
+			if err != nil || !stableLedgerID.MatchString(id) || !stableLedgerID.MatchString(filenameID) {
 				return State{}, fmt.Errorf("%s has mismatched or invalid ID", relative)
 			}
 			if previous, duplicate := ids[id]; duplicate {
@@ -392,9 +396,25 @@ func decodeTimeline(doc Document, projectID string) ([]TimelineEvent, error) {
 	if err := requireIdentity(doc, "evolution-timeline", "timeline", projectID); err != nil {
 		return nil, err
 	}
-	var timeline []TimelineEvent
-	if err := decodeOptionalField(&doc.Frontmatter, "events", &timeline); err != nil {
+	var encoded []timelineEventDocument
+	if err := decodeOptionalField(&doc.Frontmatter, "events", &encoded); err != nil {
 		return nil, err
+	}
+	timeline := make([]TimelineEvent, 0, len(encoded))
+	for _, value := range encoded {
+		if (value.OccurredAt != "" && value.LegacyOccurredAt != "") || (value.DecisionIDs != nil && value.LegacyDecisionIDs != nil) || (value.OpenLoopIDs != nil && value.LegacyOpenLoopIDs != nil) {
+			return nil, errors.New("timeline event mixes canonical and legacy field names")
+		}
+		if value.OccurredAt == "" {
+			value.OccurredAt = value.LegacyOccurredAt
+		}
+		if value.DecisionIDs == nil {
+			value.DecisionIDs = value.LegacyDecisionIDs
+		}
+		if value.OpenLoopIDs == nil {
+			value.OpenLoopIDs = value.LegacyOpenLoopIDs
+		}
+		timeline = append(timeline, value.TimelineEvent)
 	}
 	seen := make(map[string]struct{}, len(timeline))
 	for _, event := range timeline {
@@ -422,6 +442,15 @@ func decodeTimeline(doc Document, projectID string) ([]TimelineEvent, error) {
 		return timeline[i].ID < timeline[j].ID
 	})
 	return timeline, nil
+}
+
+// timelineEventDocument keeps older ledgers readable while all newly rendered
+// Markdown uses the canonical snake_case field names.
+type timelineEventDocument struct {
+	TimelineEvent     `yaml:",inline"`
+	LegacyOccurredAt  string   `yaml:"occurredat"`
+	LegacyDecisionIDs []string `yaml:"decisionids"`
+	LegacyOpenLoopIDs []string `yaml:"openloopids"`
 }
 
 func decodeDecision(doc Document, projectID string) (Decision, error) {
@@ -699,8 +728,8 @@ func validLedgerFactClass(class FactClass) bool {
 }
 
 func validLedgerTime(value string) bool {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	return err == nil && parsed.Format(time.RFC3339Nano) == value
+	_, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil
 }
 
 func validateUnique(values []string, label string, nonempty bool) error {

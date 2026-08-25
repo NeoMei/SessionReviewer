@@ -43,6 +43,19 @@ func TestRunVersion(t *testing.T) {
 	}
 }
 
+func TestRunVersionJSONIncludesBuildIdentity(t *testing.T) {
+	var out, errOut bytes.Buffer
+	code := Run([]string{"version", "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, field := range []string{`"version":"dev"`, `"commit":"unknown"`, `"built_at":"unknown"`, `"go_version":"go1.26`} {
+		if !strings.Contains(out.String(), field) {
+			t.Fatalf("json=%q missing %q", out.String(), field)
+		}
+	}
+}
+
 func TestRunRejectsArgumentsAfterRootHelpOrVersion(t *testing.T) {
 	for _, args := range [][]string{{"version", "unexpected"}, {"help", "unexpected"}, {"--help", "unexpected"}} {
 		var out, errOut bytes.Buffer
@@ -681,6 +694,9 @@ func TestWriteDiagnosticClosedPrepareMappingsDoNotDiscloseCauses(t *testing.T) {
 		{name: "project not initialized", err: fmt.Errorf("%s: %w", canary, prepare.ErrProjectNotInitialized), code: "E_PROJECT_NOT_INITIALIZED", hintPart: "session-reviewer init"},
 		{name: "unsafe output", err: fmt.Errorf("%s: %w", canary, prepare.ErrUnsafeOutput), code: "E_OUTPUT_UNSAFE", hintPart: "outside session/data roots"},
 		{name: "cursor drift", err: fmt.Errorf("%s: %w", canary, prepare.ErrCursorSourceDrift), code: "E_CURSOR_DRIFT", hintPart: "prepare review --from-start"},
+		{name: "session segment conflict", err: fmt.Errorf("%s: %w", canary, prepare.ErrSessionSegmentConflict), code: "E_SESSION_SEGMENT_CONFLICT", hintPart: "one project's session segments"},
+		{name: "unsupported session format", err: fmt.Errorf("%s: %w", canary, prepare.ErrSessionFormatUnsupported), code: "E_SESSION_FORMAT_UNSUPPORTED", hintPart: "upgrade SessionReviewer"},
+		{name: "session discovery limit", err: fmt.Errorf("%s: %w", canary, prepare.ErrSessionDiscoveryLimit), code: "E_SESSION_DISCOVERY_LIMIT", hintPart: "narrow --sessions-root"},
 		{name: "unknown", err: errors.New(canary), code: "E_PREPARE_FAILED", hintPart: "session-reviewer help"},
 	}
 	for _, test := range tests {

@@ -59,15 +59,15 @@ type OpenLoop struct {
 }
 
 type TimelineEvent struct {
-	ID          string        `json:"id"`
-	OccurredAt  string        `json:"occurred_at"`
-	Revision    int           `json:"revision"`
-	Class       FactClass     `json:"class"`
-	Title       string        `json:"title"`
-	Summary     string        `json:"summary"`
-	Evidence    []EvidenceRef `json:"evidence"`
-	DecisionIDs []string      `json:"decision_ids"`
-	OpenLoopIDs []string      `json:"open_loop_ids"`
+	ID          string        `json:"id" yaml:"id"`
+	OccurredAt  string        `json:"occurred_at" yaml:"occurred_at"`
+	Revision    int           `json:"revision" yaml:"revision"`
+	Class       FactClass     `json:"class" yaml:"class"`
+	Title       string        `json:"title" yaml:"title"`
+	Summary     string        `json:"summary" yaml:"summary"`
+	Evidence    []EvidenceRef `json:"evidence" yaml:"evidence"`
+	DecisionIDs []string      `json:"decision_ids" yaml:"decision_ids"`
+	OpenLoopIDs []string      `json:"open_loop_ids" yaml:"open_loop_ids"`
 }
 
 type CurrentState struct {

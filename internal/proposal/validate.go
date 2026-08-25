@@ -1075,8 +1075,8 @@ func validRelation(relation string) bool {
 }
 
 func validTime(value string) bool {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	return err == nil && parsed.Format(time.RFC3339Nano) == value
+	_, err := time.Parse(time.RFC3339Nano, value)
+	return err == nil
 }
 
 func nonnegativeSafeInteger(value int) bool {

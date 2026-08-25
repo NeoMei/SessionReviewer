@@ -3,9 +3,12 @@ package syncdoc
 import (
 	"bytes"
 	"errors"
+	"path"
 	"regexp"
 	"sort"
+	"strings"
 
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 )
@@ -71,12 +74,18 @@ func scanWithLimits(root *pathguard.Directory, rootRelative, goos string, caseMo
 		return nil
 	}
 	err := root.WalkMarkdownIsolated(rootRelative, func(relative string, content []byte) error {
+		if derivedDocument(relative, rootRelative) {
+			return nil
+		}
 		if err := consume(len(content)); err != nil {
 			return err
 		}
 		sources = append(sources, SourceDocument{RelativePath: relative, Content: content})
 		return nil
 	}, func(relative string) error {
+		if derivedDocument(relative, rootRelative) {
+			return nil
+		}
 		if err := consume(0); err != nil {
 			return err
 		}
@@ -94,6 +103,19 @@ func scanWithLimits(root *pathguard.Directory, rootRelative, goos string, caseMo
 		}
 	}
 	return BuildInventory(sources, goos, caseMode)
+}
+
+func derivedDocument(relative, rootRelative string) bool {
+	prefix := strings.TrimSuffix(rootRelative, "/") + "/"
+	within := strings.TrimPrefix(relative, prefix)
+	if within == "diagrams" || strings.HasPrefix(within, "diagrams/") {
+		return true
+	}
+	rootBase := path.Base(strings.TrimSuffix(rootRelative, "/"))
+	if rootBase == "decisions" || rootBase == "open-loops" || rootBase == "sessions" {
+		within = path.Join(rootBase, within)
+	}
+	return ledger.IsStandaloneDerivedPath(path.Join("docs/session-review", within))
 }
 
 // BuildInventory parses sources in deterministic slash-path order. Every

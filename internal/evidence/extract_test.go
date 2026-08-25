@@ -217,6 +217,18 @@ func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
 	}
 }
 
+func TestExtractorAcceptsStructuredCustomToolOutputTextBlocks(t *testing.T) {
+	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
+	input := record(t, 1, `{"type":"custom_tool_call_output","id":"o1","call_id":"c1","output":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}`)
+	if err := x.Add(input); err != nil {
+		t.Fatal(err)
+	}
+	packet := x.Packet()
+	if len(packet.Events) != 1 || packet.Events[0].Kind != "tool_result" || packet.Events[0].Summary != "first\nsecond" {
+		t.Fatalf("events=%+v", packet.Events)
+	}
+}
+
 func TestExtractorExcludesUnsafeAndUnknownContent(t *testing.T) {
 	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	inputs := []session.Record{
