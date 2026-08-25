@@ -352,8 +352,8 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 	}
 	defer project.Close()
 	secured := false
-	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/new", 0o751,
-		func(string) error { secured = true; return nil },
+	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/new", 0o751, nil,
+		func(*os.File) error { secured = true; return nil },
 		func(string, os.FileMode) bool { return secured },
 	)
 	if err != nil || !secured {
@@ -366,8 +366,8 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 		t.Fatal(err)
 	}
 	secureCalls := 0
-	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/existing", 0o755,
-		func(string) error { secureCalls++; return nil },
+	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/existing", 0o755, nil,
+		func(*os.File) error { secureCalls++; return nil },
 		func(string, os.FileMode) bool { return false },
 	)
 	if err == nil || secureCalls != 0 {
@@ -375,6 +375,40 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 	}
 	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "existing")); statErr != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("existing mode was changed: mode=%v err=%v", info, statErr)
+	}
+}
+
+func TestArchiveInventoryDirectoryReplacementBeforeSecureIsStaleAndUntouched(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "archive"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	project, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer project.Close()
+	replacement := filepath.Join(rootPath, "archive", "nested")
+	away := filepath.Join(rootPath, "archive", "created-away")
+	err = ensureArchiveInventoryDirectoryWithPrivacy(project, "archive/nested", 0o700, func() error {
+		if err := os.Rename(replacement, away); err != nil {
+			return err
+		}
+		if err := os.Mkdir(replacement, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(replacement, "user.txt"), []byte("replacement"), 0o644)
+	}, func(file *os.File) error { return file.Chmod(0o700) }, func(string, os.FileMode) bool { return true })
+	if !errors.Is(err, ErrStaleMigration) {
+		t.Fatalf("replacement race error=%v", err)
+	}
+	info, statErr := os.Stat(replacement)
+	if statErr != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("replacement was repaired: mode=%v err=%v", info, statErr)
+	}
+	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	if readErr != nil || string(body) != "replacement" {
+		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}
 }
 

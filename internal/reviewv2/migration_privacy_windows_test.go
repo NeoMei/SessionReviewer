@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"golang.org/x/sys/windows"
 )
 
@@ -23,6 +24,40 @@ func setPermissiveMigrationDACL(t *testing.T, path string) {
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWindowsCreatedDirectoryHandleDoesNotHardenReplacement(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	replacement := filepath.Join(rootPath, "private")
+	away := filepath.Join(rootPath, "created-away")
+	created, err := atomicfile.EnsureRootDirPrepared(root, "private", 0o700, func() error {
+		if err := os.Rename(replacement, away); err != nil {
+			return err
+		}
+		if err := os.Mkdir(replacement, 0o755); err != nil {
+			return err
+		}
+		setPermissiveMigrationDACL(t, replacement)
+		return os.WriteFile(filepath.Join(replacement, "user.txt"), []byte("replacement"), 0o644)
+	}, securePrivateMigrationDirectory)
+	if !created || !errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	if privateMigrationPath(replacement, 0) {
+		t.Fatal("replacement was silently hardened")
+	}
+	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	if readErr != nil || string(body) != "replacement" {
+		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
+	}
+	if !privateMigrationPath(away, 0) {
+		t.Fatal("identity-bound created directory was not hardened")
 	}
 }
 

@@ -137,6 +137,66 @@ func TestEnsureRootDirCreatedDistinguishesOwnedCreationFromExisting(t *testing.T
 	}
 }
 
+func TestEnsureRootDirPreparedDoesNotMutateFinalWindowReplacement(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	replacement := filepath.Join(rootPath, "private")
+	quarantine := filepath.Join(rootPath, "created-away")
+	created, err := EnsureRootDirPrepared(root, "private", 0o700, func() error {
+		if err := os.Rename(replacement, quarantine); err != nil {
+			return err
+		}
+		if err := os.Mkdir(replacement, 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(replacement, "user.txt"), []byte("user-owned"), 0o644)
+	}, func(file *os.File) error {
+		return file.Chmod(0o700)
+	})
+	if !created || !errors.Is(err, ErrRootDirectoryIdentityChanged) {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	info, statErr := os.Stat(replacement)
+	if statErr != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("replacement was silently hardened: mode=%v err=%v", info, statErr)
+	}
+	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	if readErr != nil || string(body) != "user-owned" {
+		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
+	}
+	if info, statErr := os.Stat(quarantine); statErr != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("created handle was not hardened in isolation: mode=%v err=%v", info, statErr)
+	}
+}
+
+func TestEnsureRootDirPreparedErrExistWinnerNeverRunsPrepare(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	prepareCalls := 0
+	created, err := ensureRootDirPreparedWithOps(root, "winner", 0o700, nil, func(*os.File) error {
+		prepareCalls++
+		return nil
+	}, directoryDurabilityOps{
+		createDirectory: func(parent *os.Root, name string, perm os.FileMode) (*os.File, error) {
+			if err := parent.Mkdir(name, perm); err != nil {
+				return nil, err
+			}
+			return nil, os.ErrExist
+		},
+		syncParent: func(*os.Root, string) error { return nil },
+	})
+	if err != nil || created || prepareCalls != 0 {
+		t.Fatalf("created=%v prepareCalls=%d err=%v", created, prepareCalls, err)
+	}
+}
+
 func TestSyncRootPublicationRetriesExistingPublishedFile(t *testing.T) {
 	dir := t.TempDir()
 	root, err := os.OpenRoot(dir)

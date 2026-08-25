@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+var ErrRootDirectoryIdentityChanged = errors.New("root directory identity changed during creation")
+
 // EnsureRootDir creates exactly one directory below an existing, pinned
 // parent and does not return success until the parent's directory entry has
 // passed the platform durability operation. Existing directories are resynced
@@ -27,8 +29,17 @@ func EnsureRootDirCreated(root *os.Root, path string, perm fs.FileMode) (created
 	return ensureRootDirCreatedWithOps(root, path, perm, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
 }
 
+// EnsureRootDirPrepared keeps an identity-bound handle to a directory created
+// by this invocation. prepare operates on that handle, never on the pathname.
+// beforePrepare is a deterministic final-window checkpoint used by callers and
+// tests. Existing and concurrent ErrExist winners never invoke either callback.
+func EnsureRootDirPrepared(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error) (created bool, err error) {
+	return ensureRootDirPreparedWithOps(root, path, perm, beforePrepare, prepare, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
+}
+
 type directoryDurabilityOps struct {
-	syncParent func(*os.Root, string) error
+	createDirectory func(*os.Root, string, fs.FileMode) (*os.File, error)
+	syncParent      func(*os.Root, string) error
 }
 
 func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) error {
@@ -37,6 +48,10 @@ func ensureRootDirWithOps(root *os.Root, path string, perm fs.FileMode, ops dire
 }
 
 func ensureRootDirCreatedWithOps(root *os.Root, path string, perm fs.FileMode, ops directoryDurabilityOps) (bool, error) {
+	return ensureRootDirPreparedWithOps(root, path, perm, nil, nil, ops)
+}
+
+func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error, ops directoryDurabilityOps) (bool, error) {
 	if root == nil {
 		return false, fmt.Errorf("atomic file root is required")
 	}
@@ -59,7 +74,12 @@ func ensureRootDirCreatedWithOps(root *os.Root, path string, perm fs.FileMode, o
 	if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("inspect directory: %w", err)
 	}
-	if err := parent.Mkdir(name, perm); err != nil {
+	createDirectory := ops.createDirectory
+	if createDirectory == nil {
+		createDirectory = createRootDirectoryFile
+	}
+	createdFile, err := createDirectory(parent, name, perm)
+	if err != nil {
 		if !errors.Is(err, os.ErrExist) {
 			return false, fmt.Errorf("create directory: %w", err)
 		}
@@ -75,14 +95,41 @@ func ensureRootDirCreatedWithOps(root *os.Root, path string, perm fs.FileMode, o
 		}
 		return false, validateRootDirectoryIdentity(parent, name, info)
 	}
+	defer createdFile.Close()
+	createdInfo, err := createdFile.Stat()
+	if err != nil || !createdInfo.IsDir() || isAtomicRedirect(createdInfo) {
+		return true, ErrRootDirectoryIdentityChanged
+	}
+	current, err := parent.Lstat(name)
+	if err != nil || !os.SameFile(createdInfo, current) || !current.IsDir() || isAtomicRedirect(current) {
+		return true, ErrRootDirectoryIdentityChanged
+	}
+	if beforePrepare != nil {
+		if err := beforePrepare(); err != nil {
+			return true, err
+		}
+	}
+	if prepare != nil {
+		if err := prepare(createdFile); err != nil {
+			return true, err
+		}
+	}
+	afterPrepare, err := createdFile.Stat()
+	current, currentErr := parent.Lstat(name)
+	if err != nil || currentErr != nil || !os.SameFile(createdInfo, afterPrepare) || !os.SameFile(createdInfo, current) {
+		return true, ErrRootDirectoryIdentityChanged
+	}
 	if err := ops.syncParent(parent, name); err != nil {
 		return true, fmt.Errorf("sync created directory entry: %w", err)
 	}
 	info, err = parent.Lstat(name)
-	if err != nil {
+	if err != nil || !os.SameFile(createdInfo, info) {
+		if err == nil {
+			return true, ErrRootDirectoryIdentityChanged
+		}
 		return true, fmt.Errorf("inspect created directory: %w", err)
 	}
-	return true, validateRootDirectory(parent, name, info)
+	return true, validateRootDirectoryIdentity(parent, name, createdInfo)
 }
 
 func validateRootDirectoryIdentity(parent *os.Root, name string, before os.FileInfo) error {

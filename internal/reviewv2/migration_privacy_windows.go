@@ -19,10 +19,10 @@ func privateMigrationSDDL() (string, error) {
 }
 
 func securePrivateMigrationPath(path string) error        { return setPrivateMigrationDACL(path) }
-func securePrivateMigrationDirectory(path string) error   { return setPrivateMigrationDACL(path) }
+func securePrivateMigrationDirectory(file *os.File) error { return setPrivateMigrationDACLHandle(file) }
 func securePrivateMigrationFile(file *os.File) error      { return setPrivateMigrationDACL(file.Name()) }
 func secureArchiveSourceForPublication(path string) error { return setPrivateMigrationDACL(path) }
-func secureArchiveInventoryDirectory(path string) error   { return setPrivateMigrationDACL(path) }
+func secureArchiveInventoryDirectory(file *os.File) error { return setPrivateMigrationDACLHandle(file) }
 func migrationSourceModeOK(string, fs.FileMode) bool      { return true }
 
 func setPrivateMigrationDACL(path string) error {
@@ -39,6 +39,22 @@ func setPrivateMigrationDACL(path string) error {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+}
+
+func setPrivateMigrationDACLHandle(file *os.File) error {
+	sddl, err := privateMigrationSDDL()
+	if err != nil {
+		return err
+	}
+	sd, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetSecurityInfo(windows.Handle(file.Fd()), windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
 }
 
 func privateMigrationPath(path string, _ fs.FileMode) bool {
