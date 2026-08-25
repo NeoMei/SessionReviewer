@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
@@ -461,22 +460,18 @@ func TestRecoveryMarkdownLargeInputUsesBoundedStreamingAllocation(t *testing.T) 
 	}
 }
 
-func TestHistoryMarkdownStopsBeforeScanningSummaryAfterOverflow(t *testing.T) {
+func TestHistoryMarkdownIgnoresSummaryAfterOverflow(t *testing.T) {
 	overflowingTimestamp := strings.Repeat("&", maxRecoveryMarkdownBytes)
 	hugeWhitespaceSummary := strings.Repeat(" ", 128<<20)
 	baseline := HistoryView{Timeline: []ledger.TimelineEvent{{OccurredAt: overflowingTimestamp}}}
 	hostile := HistoryView{Timeline: []ledger.TimelineEvent{{OccurredAt: overflowingTimestamp, Summary: hugeWhitespaceSummary}}}
 
-	// Warm code and memory before comparing minimum durations. A direct scan is
-	// the machine-local reference for the work the renderer must skip.
-	recoveryMarkdownTimingSink = baseline.Markdown()
-	recoveryMarkdownTimingSink = strings.TrimSpace(hugeWhitespaceSummary)
-	baselineDuration := minimumDuration(3, func() { recoveryMarkdownTimingSink = baseline.Markdown() })
-	scanDuration := minimumDuration(3, func() { recoveryMarkdownTimingSink = strings.TrimSpace(hugeWhitespaceSummary) })
-	hostileDuration := minimumDuration(3, func() { recoveryMarkdownTimingSink = hostile.Markdown() })
-
-	if hostileDuration > baselineDuration+scanDuration/2 {
-		t.Fatalf("post-overflow summary was scanned: baseline=%s scan=%s hostile=%s", baselineDuration, scanDuration, hostileDuration)
+	want := baseline.Markdown()
+	if got := hostile.Markdown(); got != want {
+		t.Fatalf("post-overflow summary changed output: got=%q want=%q", got, want)
+	}
+	if want != recoveryOmissionMarkdown {
+		t.Fatalf("overflow output=%q", want)
 	}
 }
 
@@ -798,7 +793,6 @@ func isTestASCIIPunctuation(character rune) bool {
 var renderedHTMLTag = regexp.MustCompile(`(?s)<[^>]*>`)
 
 var recoveryMarkdownAllocationSink string
-var recoveryMarkdownTimingSink string
 
 func allocatedBytes(t *testing.T, run func()) uint64 {
 	t.Helper()
@@ -808,18 +802,6 @@ func allocatedBytes(t *testing.T, run func()) uint64 {
 	run()
 	runtime.ReadMemStats(&after)
 	return after.TotalAlloc - before.TotalAlloc
-}
-
-func minimumDuration(runs int, run func()) time.Duration {
-	minimum := time.Duration(1<<63 - 1)
-	for index := 0; index < runs; index++ {
-		started := time.Now()
-		run()
-		if elapsed := time.Since(started); elapsed < minimum {
-			minimum = elapsed
-		}
-	}
-	return minimum
 }
 
 func renderGFMVisibleText(t *testing.T, markdown string) string {

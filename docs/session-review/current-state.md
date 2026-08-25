@@ -2,7 +2,7 @@
 id: current-state
 entity_type: current_state
 project_id: project-269b8cab6cbf69dd
-revision: 10
+revision: 11
 evidence:
   - evidence_id: ev-00fa9ad4d9db
     session_id: 01a02971-61d6-7251-bdcf-f999230f961d
@@ -50,7 +50,7 @@ sync_status: synced
 
 ## Last verified state
 
-已完成多轮任务核对、全仓代码审查和实际产品验收。最终集成门禁又以红绿测试修复了 evidence Markdown 行尾空格和语义编辑 dry-run 错误失败；真实项目已验证 dry-run 延迟派生、实际同步刷新、复跑零操作的完整链路。全量测试、race、随机顺序重复测试、vet、三平台交叉构建、可复现打包和 Obsidian UI 均通过。
+`v0.1.0` 已发布为公开 GitHub Release，标签固定在 `9c2397f`；macOS Intel、Apple Silicon、Windows x64 三个归档和 `SHA256SUMS` 均可下载并已在下载后复验。main 推送 CI、Release 工作流和标签 CI 均完成；标签 CI 首次运行暴露了一个墙钟计时测试抖动，Intel 失败任务重跑全绿，随后已把该门禁改为确定性的输出等价断言。真实 Project/Obsidian 同步仍为 14/14，派生文件 16，重复 dry-run 零操作。
 
 ## Repository
 
@@ -62,7 +62,7 @@ main
 
 ## Next action
 
-本轮变更已集成到本地 main；下一步由 NeoMei 决定是否推送。若发布 v0.1.0，需另行授权 tag 和 GitHub Release，并在远端对当前提交取得新的三平台 CI 回执。
+监测首批安装反馈；若发现影响运行时的缺陷，按语义化版本发布后续修复版。当前不移动已公开的 `v0.1.0` 标签。
 
 ## Uncommitted changes
 
@@ -71,14 +71,13 @@ main
 ## Open risks
 
 <!-- session-reviewer:list-codec=v1 -->
-- sr-string: "v0.1.0 GitHub Release 尚未发布"
-- sr-string: "当前本地集成尚未推送，因此没有对应的远端 CI 回执"
 - sr-string: "Windows x64 已交叉构建并由既有 CI 原生验证，但本轮没有 Windows 10/11 实机 UI 验收"
+- sr-string: "v0.1.0 标签包含原计时型回归测试；该测试曾在 Intel 标签 CI 偶发失败后重跑通过，确定性替代只存在于后续 main，不影响发布二进制"
 
 ## First inspection
 
-先打开 project-overview.md，沿五节点主线和快速入口恢复上下文；需要继续发布时再核对工作树、远端 CI、tag 与 Release 状态。
+先打开 project-overview.md，沿五节点主线和快速入口恢复上下文；处理发行问题时打开公开 `v0.1.0` Release、校验 `SHA256SUMS`，并区分标签源码与后续 main 的测试维护提交。
 
 ## Last updated
 
-2026-08-25T01:51:03Z
+2026-08-25T02:18:50Z

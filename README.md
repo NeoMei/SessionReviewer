@@ -9,9 +9,19 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 - 从源码构建需要 Go 1.26
 - 不需要管理员权限，也不需要单独配置 OpenAI API key
 
-仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。已推送到 `origin/main` 的提交 `a09088f` 取得了三个目标的原生 CI 通过回执；本地未提交变更仍需在推送后取得新的 CI 回执。这些回执证明自动化测试、竞态检查与构建通过，但不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
+仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。`v0.1.0` 标签固定在提交 `9c2397f`，main、标签和 Release 工作流均取得通过回执。这些回执证明自动化测试、竞态检查、构建和发布资产校验通过，但不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
 
 ## 构建、测试与用户级安装
+
+无需 Go 工具链时，从 [GitHub Release v0.1.0](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.1.0) 下载与平台对应的归档和 `SHA256SUMS`。解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+
+- Apple Silicon Mac：`session-reviewer_0.1.0_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.1.0_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.1.0_windows_amd64.zip`
+
+macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
+
+以下命令用于从源码构建和安装。
 
 macOS：
 
@@ -209,7 +219,7 @@ Windows PowerShell 使用：
 .\scripts\build-release.ps1 -Version 0.1.0 -Dist dist
 ```
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建并发布 `v0.1.0` 的确定性归档。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。已公开的 `v0.1.0` 包含三个平台归档和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 
@@ -218,7 +228,7 @@ Windows PowerShell 使用：
 - 脱离 Skill proposal 的 CLI semantic conclusions 或自动总结；
 - 后台 watcher；
 - 独立于当前 live Base/Project/Vault 状态的历史 conflict-note 归档；
-- 已通过最低版本实体机器安装验收的公开发行包。
+- macOS 13 与 Windows 10 22H2 最低版本实体机器上的人工端到端安装验收。
 
 当前 Obsidian 混合模型以 repository 内的 ledger 为 durable source，并对每个稳定实体比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）。显式 `sync` 已可处理首次镜像、单边编辑和不同单元合并；后台 watcher 与完整的持久冲突解决工作流仍是后续工作。
 

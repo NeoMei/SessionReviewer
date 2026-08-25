@@ -50,10 +50,11 @@ Run `session-reviewer sync` only when the dry-run has no conflict, malformed sou
 | Windows x64 | Cross-build plus SHA-256; native UI remains CI evidence | Cross-build PASS: `423740481356fdc98577db738d15cfa375754d8680ddc8775ea13ba2e21f60e0`; CLI and Skill test executables also cross-compiled; native Windows UI was not available in this local acceptance |
 | Real configured Obsidian Vault | Safe dry-run, converged hashes, visible Mermaid and links | PASS: relative path `Projects/SessionReviewer--269b8cab/Session Review`; 18 Markdown files byte-identical; `derived=current files=16`; repeat dry-run has zero operations/conflicts/issues/errors; homepage `当前状态` link opened the real detail document |
 | GitHub Mermaid | Public repository page visibly renders Mermaid and relative links | Not run; requires separately authorized push and public inspection |
+| GitHub Release v0.1.0 | Public tag, downloadable three-platform archives, checksum file, successful release workflow | PASS: tag `v0.1.0` targets `9c2397f`; Release workflow `32800187430` succeeded; all four assets were downloaded again and verified |
 
 ## Multi-pass review findings
 
-Six worthwhile defects were reproduced with regression tests and fixed during the final review and integration gate:
+Seven worthwhile defects were reproduced with regression tests and fixed during the final review, integration, and release gates:
 
 - malformed or blocked Base entities are no longer counted as `in_sync` by `sync status`;
 - a successful `sync resolve` releases its lock, runs a full reconciliation, and refreshes generated navigation in the same command;
@@ -61,6 +62,7 @@ Six worthwhile defects were reproduced with regression tests and fixed during th
 - generated Markdown navigation text now escapes raw HTML and Markdown control characters before Obsidian or GitHub renders it.
 - evidence summaries ending in a source newline no longer create trailing whitespace in generated Markdown;
 - a dry-run containing an unaccepted decision, open-loop, or Session semantic edit now defers derived planning instead of failing against the previous merge Base.
+- the release gate no longer relies on a machine-load-sensitive wall-clock assertion for post-overflow rendering; it uses a deterministic output-equivalence assertion instead.
 
 After these fixes, the repeated full race, shuffled-order, cross-build, package reproducibility, real Vault, and Obsidian UI gates found no additional worthwhile defect.
 
@@ -99,17 +101,18 @@ GitHub Mermaid screenshot: not run because no push is authorized by this accepta
 
 ## Artifact hashes
 
-All values below were recomputed after the final code changes on 2026-08-25.
+Public archive values below are the authoritative GitHub Release asset digests downloaded after publication. Standalone binary values are retained as local pre-release cross-build evidence; standalone binaries are not separate Release assets.
 
 | Artifact | SHA-256 |
 |---|---|
 | Native/Apple Silicon macOS binary | `8d60c71c4f877a9725e128f34246a07d0caedc0cc6a392b82a65444ba4cc3e0b` |
 | Intel macOS binary | `0b15285e31bd8834f7a53e51157886d3226a118c3e16315ab85591c760a3588a` |
 | Windows x64 binary | `423740481356fdc98577db738d15cfa375754d8680ddc8775ea13ba2e21f60e0` |
-| Deterministic macOS Intel archive | `076a3e9e2b9339928c363927c9d5ab573811cce2cabae22c287ff97a57432c2d` |
-| Deterministic macOS Apple Silicon archive | `60935c0d585ab149e2d6458536fcee6d4dcfea0c959515c661f24893034b2cf8` |
-| Deterministic Windows x64 archive | `84370f3d5ae9e3f0a6fa30fb8aefbc6384910201640f07d5a4333c09c5f3906a` |
-| Project and Vault `project-overview.md` | `f0c13769a89651e4146655eed652bf59be2c10d7fb8dadaf07050b4023551faa` |
-| Project and Vault `diagrams/project-evolution.md` | `e8c950906fd1f7959f2744f0fa1dee29678b78aab1bc0d3f8c02a04b7af0703b` |
+| Public v0.1.0 macOS Intel archive | `764dc57ccda13592a508c86a2e6c12a1cbb14b126af848af1cec33b61d66adc9` |
+| Public v0.1.0 macOS Apple Silicon archive | `b7c5cc4efc4458f4c41dce36df6ef25c3e986f582285f28d77e60030c8707bfb` |
+| Public v0.1.0 Windows x64 archive | `f2525a729d28ec770db8d8ca10225a96a7679629737de34f05f9c26cebc02d6c` |
+| Public v0.1.0 SHA256SUMS | `4c3e481dd24846192cadcb81dc5968aa09f33afe748ffe4f409233d11e2c797c` |
+| Project and Vault `project-overview.md` | `09b4c12b0262b0892eb5dcf7defb281256ba88ce51a12cdbbcd0fb2aaac47287` |
+| Project and Vault `diagrams/project-evolution.md` | `42f6a3b49040da2ed9d3aabe9af28411aebe01271e4fa2fb38e0c2ea6ebb9811` |
 
-The real configured status result was `in_sync=14`, `conflicted=0`, `malformed=0`, `blocked=0`, no pending entities, `derived_state=current`, and `derived_files=16`. A full recursive comparison of the Project and Vault review trees produced no differences. The deterministic package check above deliberately used the current pre-integration source tree with predecessor metadata `532a2ba` and its commit timestamp; it proves repeatability for identical inputs, not that those archives are release artifacts for the eventual integration commit. The public `origin/main` commit `a09088f` has a successful three-platform CI run, while this local integration has not been pushed and therefore has no remote CI or GitHub Release evidence.
+The real configured status result was `in_sync=14`, `conflicted=0`, `malformed=0`, `blocked=0`, no pending entities, `derived_state=current`, and `derived_files=16`. A full recursive comparison of the Project and Vault review trees produced no differences. Public `v0.1.0` targets `9c2397f`; main CI run `32799794297`, Release run `32800187430`, and the rerun-completed tag CI run `32800187442` are green. The published Release is neither a draft nor a prerelease and exposes the three platform archives plus `SHA256SUMS`.
