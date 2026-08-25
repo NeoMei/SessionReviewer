@@ -30,9 +30,11 @@ func EnsureRootDirCreated(root *os.Root, path string, perm fs.FileMode) (created
 }
 
 // EnsureRootDirPrepared keeps an identity-bound handle to a directory created
-// by this invocation. prepare operates on that handle, never on the pathname.
-// beforePrepare is a deterministic final-window checkpoint used by callers and
-// tests. Existing and concurrent ErrExist winners never invoke either callback.
+// by this invocation. POSIX restores the requested mode on that handle after
+// creation so the process umask cannot weaken the exact-mode contract. prepare
+// also operates on the handle, never on the pathname. beforePrepare is a
+// deterministic final-window checkpoint used by callers and tests. Existing
+// and concurrent ErrExist winners are never changed and never invoke callbacks.
 func EnsureRootDirPrepared(root *os.Root, path string, perm fs.FileMode, beforePrepare func() error, prepare func(*os.File) error) (created bool, err error) {
 	return ensureRootDirPreparedWithOps(root, path, perm, beforePrepare, prepare, directoryDurabilityOps{syncParent: syncRootDirectoryEntry})
 }
@@ -109,10 +111,16 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 			return true, err
 		}
 	}
+	if err := setExactCreatedRootDirectoryMode(createdFile, perm); err != nil {
+		return true, fmt.Errorf("set exact created directory mode: %w", err)
+	}
 	if prepare != nil {
 		if err := prepare(createdFile); err != nil {
 			return true, err
 		}
+	}
+	if err := syncCreatedRootDirectory(createdFile); err != nil {
+		return true, fmt.Errorf("sync created directory handle: %w", err)
 	}
 	afterPrepare, err := createdFile.Stat()
 	current, currentErr := parent.Lstat(name)
