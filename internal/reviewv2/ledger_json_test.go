@@ -274,6 +274,46 @@ func TestParseMachineLedgerRejectsDuplicateJSONKeysAtAnyDepth(t *testing.T) {
 	}
 }
 
+func TestParseMachineLedgerRejectsExactKeyWithCaseAliasConflict(t *testing.T) {
+	valid := string(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+	body := strings.Replace(valid,
+		`"schema_version": 2,`,
+		`"schema_version": 999, "SCHEMA_VERSION": 2,`, 1)
+	if body == valid {
+		t.Fatal("test did not inject schema-version alias")
+	}
+	if _, err := ParseMachineLedger([]byte(body)); err == nil || !strings.Contains(err.Error(), `unknown JSON object key "SCHEMA_VERSION"`) {
+		t.Fatalf("exact key plus case alias conflict accepted or misclassified: %v", err)
+	}
+}
+
+func TestParseMachineLedgerRejectsCaseAliasesThroughoutWireTree(t *testing.T) {
+	valid := string(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+	tests := map[string][2]string{
+		"root":               {`"project_id":`, `"PROJECT_ID":`},
+		"project accounting": {`"total_tokens":`, `"TOTAL_TOKENS":`},
+		"project model":      {`"token_share_pct":`, `"TOKEN_SHARE_PCT":`},
+		"session report":     {`"initial_goal":`, `"INITIAL_GOAL":`},
+		"session phase":      {`"title": "Contract",`, `"TITLE": "Contract",`},
+		"evidence entry":     {`"refs":`, `"REFS":`},
+		"evidence ref":       {`"evidence_id":`, `"EVIDENCE_ID":`},
+		"session accounting": {`"started_at":`, `"STARTED_AT":`},
+		"model accounting":   {`"input_tokens":`, `"INPUT_TOKENS":`},
+		"pricing":            {`"currency":`, `"CURRENCY":`},
+	}
+	for name, replacement := range tests {
+		t.Run(name, func(t *testing.T) {
+			body := strings.Replace(valid, replacement[0], replacement[1], 1)
+			if body == valid {
+				t.Fatalf("test did not inject alias %s", replacement[1])
+			}
+			if _, err := ParseMachineLedger([]byte(body)); err == nil || !strings.Contains(err.Error(), "unknown JSON object key") {
+				t.Fatalf("case alias %s accepted or misclassified: %v", replacement[1], err)
+			}
+		})
+	}
+}
+
 func TestMachineLedgerSchemaMatchesGoContractAndFixtures(t *testing.T) {
 	body := mustFixture(t, "../../schemas/review-ledger-v2.schema.json")
 	var schema map[string]any
@@ -284,7 +324,7 @@ func TestMachineLedgerSchemaMatchesGoContractAndFixtures(t *testing.T) {
 		t.Fatalf("schema is not a closed draft-2020-12 object: %s", body)
 	}
 	comment, _ := schema["$comment"].(string)
-	for _, semanticContract := range []string{"duplicate JSON object keys", "cross-item identity uniqueness", "evidence owner and source-session existence", "entity-reference closure", "reciprocal acyclic session chain"} {
+	for _, semanticContract := range []string{"duplicate JSON object keys", "case-sensitive object-key allowlists", "cross-item identity uniqueness", "evidence owner and source-session existence", "entity-reference closure", "reciprocal acyclic session chain"} {
 		if !strings.Contains(comment, semanticContract) {
 			t.Fatalf("schema does not document codec-only semantic contract %q: %q", semanticContract, comment)
 		}

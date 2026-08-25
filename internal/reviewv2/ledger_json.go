@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
@@ -34,6 +36,9 @@ func ParseMachineLedger(body []byte) (MachineLedger, error) {
 		return MachineLedger{}, fmt.Errorf("machine ledger exceeds %d bytes", MaxMachineLedgerBytes)
 	}
 	if err := rejectDuplicateJSONKeys(body); err != nil {
+		return MachineLedger{}, err
+	}
+	if err := rejectInexactJSONFields(body); err != nil {
 		return MachineLedger{}, err
 	}
 	var wire machineLedgerWire
@@ -134,6 +139,126 @@ func scanJSONValue(decoder *json.Decoder) error {
 		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
 	}
 	return nil
+}
+
+func rejectInexactJSONFields(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	cache := make(map[reflect.Type]map[string]reflect.Type)
+	if err := scanExactJSONFields(decoder, reflect.TypeOf(machineLedgerWire{}), "$", cache); err != nil {
+		return fmt.Errorf("decode machine ledger: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return err
+	}
+	return nil
+}
+
+func scanExactJSONFields(decoder *json.Decoder, expected reflect.Type, path string, cache map[reflect.Type]map[string]reflect.Type) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	expected = dereferenceJSONType(expected)
+	switch delimiter {
+	case '{':
+		if expected.Kind() != reflect.Struct {
+			return fmt.Errorf("JSON object at %s does not match %s", path, expected)
+		}
+		fields, err := exactJSONFieldTypes(expected, cache)
+		if err != nil {
+			return err
+		}
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := nameToken.(string)
+			if !ok {
+				return errors.New("JSON object member name is not a string")
+			}
+			fieldType, allowed := fields[name]
+			if !allowed {
+				return fmt.Errorf("unknown JSON object key %q at %s", name, path)
+			}
+			if err := scanExactJSONFields(decoder, fieldType, path+"."+name, cache); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return errors.New("unterminated JSON object")
+		}
+	case '[':
+		if expected.Kind() != reflect.Slice && expected.Kind() != reflect.Array {
+			return fmt.Errorf("JSON array at %s does not match %s", path, expected)
+		}
+		for index := 0; decoder.More(); index++ {
+			if err := scanExactJSONFields(decoder, expected.Elem(), fmt.Sprintf("%s[%d]", path, index), cache); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return errors.New("unterminated JSON array")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delimiter)
+	}
+	return nil
+}
+
+func exactJSONFieldTypes(structType reflect.Type, cache map[reflect.Type]map[string]reflect.Type) (map[string]reflect.Type, error) {
+	structType = dereferenceJSONType(structType)
+	if fields, ok := cache[structType]; ok {
+		return fields, nil
+	}
+	fields := make(map[string]reflect.Type)
+	if err := collectExactJSONFieldTypes(structType, fields); err != nil {
+		return nil, err
+	}
+	cache[structType] = fields
+	return fields, nil
+}
+
+func collectExactJSONFieldTypes(structType reflect.Type, fields map[string]reflect.Type) error {
+	for index := 0; index < structType.NumField(); index++ {
+		field := structType.Field(index)
+		if field.PkgPath != "" {
+			continue
+		}
+		tagName, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if tagName == "-" {
+			continue
+		}
+		fieldType := dereferenceJSONType(field.Type)
+		if field.Anonymous && tagName == "" && fieldType.Kind() == reflect.Struct {
+			if err := collectExactJSONFieldTypes(fieldType, fields); err != nil {
+				return err
+			}
+			continue
+		}
+		if tagName == "" {
+			tagName = field.Name
+		}
+		if _, duplicate := fields[tagName]; duplicate {
+			return fmt.Errorf("Go wire type %s has ambiguous JSON field %q", structType, tagName)
+		}
+		fields[tagName] = field.Type
+	}
+	return nil
+}
+
+func dereferenceJSONType(value reflect.Type) reflect.Type {
+	for value.Kind() == reflect.Pointer {
+		value = value.Elem()
+	}
+	return value
 }
 
 func RenderMachineLedger(value MachineLedger) ([]byte, error) {

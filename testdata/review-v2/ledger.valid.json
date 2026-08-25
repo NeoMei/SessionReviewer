@@ -27,7 +27,13 @@
       "revision": 1,
       "initial_goal": "Freeze the v2 contract",
       "goal_changes": [],
-      "phases": [],
+      "phases": [
+        {
+          "title": "Contract",
+          "summary": "Freeze the machine-ledger boundary",
+          "evidence": []
+        }
+      ],
       "files": ["internal/reviewv2/types.go"],
       "commits": [],
       "verification": ["go test ./internal/reviewv2"],
