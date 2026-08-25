@@ -22,6 +22,10 @@ const (
 	typedListCodecMarker = "<!-- session-reviewer:list-codec=v1 -->"
 	typedListCodecPrefix = "<!-- session-reviewer:list-codec"
 	typedListEntryPrefix = "- sr-string: "
+	v2ReviewPath         = "docs/session-review/项目回顾.md"
+	v2HistoryPath        = "docs/session-review/项目历史.md"
+	v2MachineLedgerPath  = "docs/session-review/.session-reviewer/ledger.json"
+	v2MachineLedgerBytes = 16 << 20
 )
 
 // Render validates and applies changes to a private state clone. Every target
@@ -261,6 +265,36 @@ func cloneState(state State) (State, error) {
 	}
 	clone.documents.sessions, err = cloneLoadedMap(state.documents.sessions)
 	if err != nil {
+		return State{}, err
+	}
+	return clone, nil
+}
+
+// ApplyChangeSetModel applies a ChangeSet to a deep clone of the public ledger
+// model. It deliberately drops loaded document and project-root state so model
+// projection remains pure and independent of rendering or filesystem access.
+func ApplyChangeSetModel(state State, changes ChangeSet) (State, error) {
+	clone := State{
+		ProjectID:    state.ProjectID,
+		CurrentState: cloneCurrent(state.CurrentState),
+		Timeline:     make([]TimelineEvent, len(state.Timeline)),
+		Decisions:    make(map[string]Decision, len(state.Decisions)),
+		OpenLoops:    make(map[string]OpenLoop, len(state.OpenLoops)),
+		Sessions:     make(map[string]SessionReport, len(state.Sessions)),
+	}
+	for index, item := range state.Timeline {
+		clone.Timeline[index] = cloneTimeline(item)
+	}
+	for id, item := range state.Decisions {
+		clone.Decisions[id] = cloneDecision(item)
+	}
+	for id, item := range state.OpenLoops {
+		clone.OpenLoops[id] = cloneOpenLoop(item)
+	}
+	for id, item := range state.Sessions {
+		clone.Sessions[id] = cloneSession(item)
+	}
+	if err := applyChanges(&clone, changes); err != nil {
 		return State{}, err
 	}
 	return clone, nil
@@ -921,7 +955,7 @@ func applyWithRootOptionsAndHooks(plan WritePlan, options rootOpenOptions, hooks
 		if file.Perm.Perm() != file.Perm || file.Perm == 0 {
 			return nil, fmt.Errorf("invalid mode for %s", file.RelativePath)
 		}
-		if len(file.Data) > MaxDocumentBytes || !utf8.Valid(file.Data) {
+		if int64(len(file.Data)) > maximumPlannedFileBytes(file.RelativePath) || !utf8.Valid(file.Data) {
 			return nil, fmt.Errorf("invalid document bytes for %s", file.RelativePath)
 		}
 		skip, err := validatePlannedTarget(directory, file)
@@ -969,7 +1003,7 @@ func applyWithRootOptionsAndHooks(plan WritePlan, options rootOpenOptions, hooks
 }
 
 func validatePlannedTarget(directory *pathguard.Directory, file PlannedFile) (bool, error) {
-	current, currentPerm, readErr := readLedgerRegular(directory, file.RelativePath, false)
+	current, currentPerm, readErr := readPlannedRegular(directory, file.RelativePath)
 	if readErr == nil {
 		// Expectations describe the exact snapshot Render consumed. Validate
 		// them before treating desired bytes as an idempotent no-op.
@@ -985,6 +1019,28 @@ func validatePlannedTarget(directory *pathguard.Directory, file PlannedFile) (bo
 		return false, nil
 	}
 	return false, readErr
+}
+
+func readPlannedRegular(directory *pathguard.Directory, relative string) ([]byte, fs.FileMode, error) {
+	maximum := maximumPlannedFileBytes(relative)
+	if maximum == MaxDocumentBytes {
+		return readLedgerRegular(directory, relative, false)
+	}
+	file, info, err := directory.OpenRegular(relative)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, 0, err
+	}
+	if info.Size() < 0 || info.Size() > maximum {
+		return nil, 0, invalidDocument("document exceeds size limit")
+	}
+	body, err := pathguard.ReadStableRegularRootFile(directory.Root, relative, info, maximum)
+	if err != nil {
+		return nil, 0, errors.New("ledger file changed while reading")
+	}
+	return body, info.Mode().Perm(), nil
 }
 
 func safelyMissingTargetParent(directory *pathguard.Directory, relative string) bool {
@@ -1009,6 +1065,9 @@ func validateLedgerRelativePath(relative string) error {
 	if relative == ledgerRootRelative+"/project-overview.md" {
 		return nil
 	}
+	if relative == v2ReviewPath || relative == v2HistoryPath || relative == v2MachineLedgerPath {
+		return nil
+	}
 	if IsStandaloneDerivedPath(relative) {
 		return nil
 	}
@@ -1022,6 +1081,13 @@ func validateLedgerRelativePath(relative string) error {
 		}
 	}
 	return errors.New("path is outside durable ledger documents")
+}
+
+func maximumPlannedFileBytes(relative string) int64 {
+	if relative == v2MachineLedgerPath {
+		return v2MachineLedgerBytes
+	}
+	return MaxDocumentBytes
 }
 
 func ensureSafeParents(directory *pathguard.Directory, relative string, perm fs.FileMode) error {

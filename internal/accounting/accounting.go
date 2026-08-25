@@ -121,15 +121,13 @@ func Aggregate(sessions []*SessionAccounting) (ProjectSummary, error) {
 		if session == nil {
 			continue
 		}
-		if session.DurationMS > math.MaxInt64-result.TotalDurationMS || session.TotalTokens > math.MaxInt64-result.TotalTokens {
-			return ProjectSummary{}, errors.New("project accounting totals overflow")
+		if err := validateAggregateSession(session); err != nil {
+			return ProjectSummary{}, fmt.Errorf("invalid stored session accounting: %w", err)
+		}
+		if session.DurationMS > math.MaxInt64-result.TotalDurationMS {
+			return ProjectSummary{}, errors.New("project accounting duration overflows")
 		}
 		result.TotalDurationMS += session.DurationMS
-		result.TotalTokens += session.TotalTokens
-		result.TotalCostUSD += session.TotalCostUSD
-		if math.IsNaN(result.TotalCostUSD) || math.IsInf(result.TotalCostUSD, 0) {
-			return ProjectSummary{}, errors.New("project accounting cost overflows")
-		}
 		for _, model := range session.Models {
 			value := byModel[model.Model]
 			if model.TotalTokens > math.MaxInt64-value.tokens {
@@ -141,6 +139,14 @@ func Aggregate(sessions []*SessionAccounting) (ProjectSummary, error) {
 				return ProjectSummary{}, errors.New("project model cost overflows")
 			}
 			byModel[model.Model] = value
+			if model.TotalTokens > math.MaxInt64-result.TotalTokens {
+				return ProjectSummary{}, errors.New("project accounting token total overflows")
+			}
+			result.TotalTokens += model.TotalTokens
+			result.TotalCostUSD += model.CostUSD
+			if math.IsNaN(result.TotalCostUSD) || math.IsInf(result.TotalCostUSD, 0) {
+				return ProjectSummary{}, errors.New("project accounting cost overflows")
+			}
 		}
 	}
 	for model, value := range byModel {
@@ -155,6 +161,106 @@ func Aggregate(sessions []*SessionAccounting) (ProjectSummary, error) {
 	}
 	sort.Slice(result.Models, func(i, j int) bool { return result.Models[i].Model < result.Models[j].Model })
 	return result, nil
+}
+
+// validateAggregateSession accepts older sparse model records whose detailed
+// input/output pricing fields were not persisted, while still deriving every
+// project total from the model rows and rejecting unsafe scalar values.
+func validateAggregateSession(session *SessionAccounting) error {
+	if session == nil || session.DurationMS < 0 || session.TotalTokens < 0 || !finiteNonnegativeNumber(session.TotalCostUSD) {
+		return errors.New("session totals must be finite and nonnegative")
+	}
+	seen := make(map[string]struct{}, len(session.Models))
+	var tokens int64
+	var cost float64
+	for _, model := range session.Models {
+		if strings.TrimSpace(model.Model) == "" {
+			return errors.New("session accounting model is required")
+		}
+		if _, duplicate := seen[model.Model]; duplicate {
+			return fmt.Errorf("duplicate session accounting model %q", model.Model)
+		}
+		seen[model.Model] = struct{}{}
+		for _, value := range []int64{model.InputTokens, model.CachedInputTokens, model.CacheWriteInputTokens, model.OutputTokens, model.ReasoningOutputTokens, model.TotalTokens} {
+			if value < 0 || value > maxSafeInteger {
+				return fmt.Errorf("model %q token count is negative or exceeds the safe integer range", model.Model)
+			}
+		}
+		if !finiteNonnegativeNumber(model.CostUSD) {
+			return fmt.Errorf("model %q cost must be finite and nonnegative", model.Model)
+		}
+		if model.TotalTokens > math.MaxInt64-tokens {
+			return errors.New("session model token total overflows")
+		}
+		tokens += model.TotalTokens
+		cost += model.CostUSD
+		if math.IsNaN(cost) || math.IsInf(cost, 0) {
+			return errors.New("session model cost total overflows")
+		}
+	}
+	if tokens != session.TotalTokens || !withinAbsoluteTolerance(cost, session.TotalCostUSD, 1e-9) {
+		return errors.New("session totals do not equal model totals")
+	}
+	return nil
+}
+
+// ValidateProjectSummary recomputes project and per-model totals from the
+// stored sessions. Costs use an absolute 1e-9 USD tolerance and percentages
+// use an absolute 1e-6 percentage-point tolerance.
+func ValidateProjectSummary(summary ProjectSummary, sessions []*SessionAccounting) error {
+	if summary.TotalDurationMS < 0 || summary.TotalTokens < 0 || !finiteNonnegativeNumber(summary.TotalCostUSD) {
+		return errors.New("project accounting totals must be finite and nonnegative")
+	}
+	expected, err := Aggregate(sessions)
+	if err != nil {
+		return err
+	}
+	if summary.TotalDurationMS != expected.TotalDurationMS || summary.TotalTokens != expected.TotalTokens {
+		return errors.New("project accounting totals do not match stored sessions")
+	}
+	if !withinAbsoluteTolerance(summary.TotalCostUSD, expected.TotalCostUSD, 1e-9) {
+		return errors.New("project accounting cost does not match stored sessions")
+	}
+	if len(summary.Models) != len(expected.Models) {
+		return errors.New("project accounting models do not match stored sessions")
+	}
+	byModel := make(map[string]ProjectModelSummary, len(summary.Models))
+	for _, model := range summary.Models {
+		if strings.TrimSpace(model.Model) == "" {
+			return errors.New("project accounting model is required")
+		}
+		if _, duplicate := byModel[model.Model]; duplicate {
+			return fmt.Errorf("duplicate project accounting model %q", model.Model)
+		}
+		if model.TotalTokens < 0 || !finiteNonnegativeNumber(model.TotalCostUSD) || !finiteNonnegativeNumber(model.TokenSharePct) || !finiteNonnegativeNumber(model.CostSharePct) {
+			return fmt.Errorf("project accounting model %q contains negative or non-finite values", model.Model)
+		}
+		byModel[model.Model] = model
+	}
+	for _, want := range expected.Models {
+		got, exists := byModel[want.Model]
+		if !exists || got.TotalTokens != want.TotalTokens {
+			return fmt.Errorf("project accounting model %q token total mismatch", want.Model)
+		}
+		if !withinAbsoluteTolerance(got.TotalCostUSD, want.TotalCostUSD, 1e-9) {
+			return fmt.Errorf("project accounting model %q cost mismatch", want.Model)
+		}
+		if !withinAbsoluteTolerance(got.TokenSharePct, want.TokenSharePct, 1e-6) || !withinAbsoluteTolerance(got.CostSharePct, want.CostSharePct, 1e-6) {
+			return fmt.Errorf("project accounting model %q share mismatch", want.Model)
+		}
+	}
+	return nil
+}
+
+func finiteNonnegativeNumber(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 0
+}
+
+func withinAbsoluteTolerance(left, right, tolerance float64) bool {
+	if !finiteNonnegativeNumber(left) || !finiteNonnegativeNumber(right) {
+		return false
+	}
+	return math.Abs(left-right) <= tolerance+tolerance*1e-6
 }
 
 type Accumulator struct {

@@ -82,13 +82,100 @@ func TestFormatDurationMS(t *testing.T) {
 }
 
 func TestAggregateComputesModelSharesAndRejectsOverflow(t *testing.T) {
-	first := &SessionAccounting{DurationMS: 1000, TotalTokens: 100, TotalCostUSD: 1, Models: []ModelAccounting{{ModelUsage: ModelUsage{Model: "a", TokenUsage: TokenUsage{TotalTokens: 100}}, CostUSD: 1}}}
-	second := &SessionAccounting{DurationMS: 2000, TotalTokens: 300, TotalCostUSD: 3, Models: []ModelAccounting{{ModelUsage: ModelUsage{Model: "b", TokenUsage: TokenUsage{TotalTokens: 300}}, CostUSD: 3}}}
+	first := validAggregateSession("a", "2026-08-25T00:00:00Z", "2026-08-25T00:00:01Z", 100, 1)
+	second := validAggregateSession("b", "2026-08-25T00:00:00Z", "2026-08-25T00:00:02Z", 300, 3)
 	summary, err := Aggregate([]*SessionAccounting{first, second})
 	if err != nil || summary.TotalDurationMS != 3000 || summary.TotalTokens != 400 || summary.TotalCostUSD != 4 || len(summary.Models) != 2 || summary.Models[0].TokenSharePct != 25 || summary.Models[1].CostSharePct != 75 {
 		t.Fatalf("summary=%+v err=%v", summary, err)
 	}
 	if _, err := Aggregate([]*SessionAccounting{{DurationMS: math.MaxInt64}, {DurationMS: 1}}); err == nil {
 		t.Fatal("accepted overflowing project duration")
+	}
+}
+
+func TestValidateProjectSummaryRecomputesEveryModelWithExplicitTolerances(t *testing.T) {
+	sessions := []*SessionAccounting{
+		validAggregateSession("a", "2026-08-25T00:00:00Z", "2026-08-25T00:00:01Z", 100, 1),
+		validAggregateSession("b", "2026-08-25T00:00:00Z", "2026-08-25T00:00:02Z", 300, 3),
+	}
+	valid, err := Aggregate(sessions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateProjectSummary(valid, sessions); err != nil {
+		t.Fatalf("valid summary rejected: %v", err)
+	}
+
+	tests := map[string]func(*ProjectSummary){
+		"total tokens": func(value *ProjectSummary) { value.TotalTokens++ },
+		"total cost":   func(value *ProjectSummary) { value.TotalCostUSD += 1.0001e-9 },
+		"model tokens": func(value *ProjectSummary) { value.Models[0].TotalTokens++ },
+		"model cost":   func(value *ProjectSummary) { value.Models[0].TotalCostUSD += 1.0001e-9 },
+		"token share":  func(value *ProjectSummary) { value.Models[0].TokenSharePct += 1.0001e-6 },
+		"cost share":   func(value *ProjectSummary) { value.Models[0].CostSharePct += 1.0001e-6 },
+		"nonfinite":    func(value *ProjectSummary) { value.Models[0].TotalCostUSD = math.NaN() },
+		"negative":     func(value *ProjectSummary) { value.Models[0].TotalTokens = -1 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := valid
+			changed.Models = append([]ProjectModelSummary(nil), valid.Models...)
+			mutate(&changed)
+			if err := ValidateProjectSummary(changed, sessions); err == nil {
+				t.Fatalf("accepted mismatched summary: %+v", changed)
+			}
+		})
+	}
+
+	withinTolerance := valid
+	withinTolerance.Models = append([]ProjectModelSummary(nil), valid.Models...)
+	withinTolerance.TotalCostUSD += 1e-9
+	withinTolerance.Models[0].TokenSharePct += 1e-6
+	if err := ValidateProjectSummary(withinTolerance, sessions); err != nil {
+		t.Fatalf("values at tolerance boundary rejected: %v", err)
+	}
+}
+
+func TestAggregateRejectsStoredSessionMismatchAndInvalidNumbers(t *testing.T) {
+	valid := validAggregateSession("a", "2026-08-25T00:00:00Z", "2026-08-25T00:00:01Z", 100, 1)
+	tests := map[string]func(*SessionAccounting){
+		"session token mismatch": func(value *SessionAccounting) { value.TotalTokens++ },
+		"session cost mismatch":  func(value *SessionAccounting) { value.TotalCostUSD += .01 },
+		"negative duration":      func(value *SessionAccounting) { value.DurationMS = -1 },
+		"nonfinite model cost":   func(value *SessionAccounting) { value.Models[0].CostUSD = math.Inf(1) },
+		"negative model token":   func(value *SessionAccounting) { value.Models[0].InputTokens = -1 },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			changed := *valid
+			changed.Models = append([]ModelAccounting(nil), valid.Models...)
+			mutate(&changed)
+			if _, err := Aggregate([]*SessionAccounting{&changed}); err == nil {
+				t.Fatalf("accepted invalid stored accounting: %+v", changed)
+			}
+		})
+	}
+}
+
+func validAggregateSession(model, started, ended string, tokens int64, cost float64) *SessionAccounting {
+	start, _ := time.Parse(time.RFC3339Nano, started)
+	end, _ := time.Parse(time.RFC3339Nano, ended)
+	pricing := Pricing{
+		Currency:        "USD",
+		InputPerMillion: 10_000,
+		Source:          "https://example.com/pricing",
+		AsOf:            "2026-08-25",
+	}
+	return &SessionAccounting{
+		StartedAt:   started,
+		EndedAt:     ended,
+		DurationMS:  end.Sub(start).Milliseconds(),
+		TotalTokens: tokens,
+		Models: []ModelAccounting{{
+			ModelUsage: ModelUsage{Model: model, TokenUsage: TokenUsage{InputTokens: tokens, TotalTokens: tokens}},
+			Pricing:    pricing,
+			CostUSD:    cost,
+		}},
+		TotalCostUSD: cost,
 	}
 }

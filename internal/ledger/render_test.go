@@ -941,6 +941,63 @@ func TestRenderDoesNotMutateInputState(t *testing.T) {
 	}
 }
 
+func TestApplyChangeSetModelIsPureAndDoesNotRequireLoadedDocuments(t *testing.T) {
+	current := State{
+		ProjectID:    testProjectID,
+		CurrentState: CurrentState{ProjectID: testProjectID, Revision: 1, Goal: "before"},
+		Decisions: map[string]Decision{
+			"decision-1": {ID: "decision-1", ProjectID: testProjectID, Revision: 1, Title: "before", Status: "accepted"},
+		},
+		OpenLoops: map[string]OpenLoop{},
+		Sessions:  map[string]SessionReport{},
+	}
+	incoming := cloneDecision(current.Decisions["decision-1"])
+	incoming.Revision = 2
+	incoming.Title = "after"
+	next, err := ApplyChangeSetModel(current, ChangeSet{Decisions: []Decision{incoming}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Decisions["decision-1"].Title != "before" || next.Decisions["decision-1"].Title != "after" {
+		t.Fatalf("current=%+v next=%+v", current.Decisions["decision-1"], next.Decisions["decision-1"])
+	}
+	if next.projectRoot != "" || next.documents.current != nil || next.documents.decisions != nil {
+		t.Fatalf("pure model unexpectedly acquired loaded state: %+v", next)
+	}
+}
+
+func TestApplyAndReadAllowDedicatedV2MachineLedgerLimit(t *testing.T) {
+	root := t.TempDir()
+	body := bytes.Repeat([]byte(" "), MaxDocumentBytes+1)
+	plan := WritePlan{ProjectRoot: root, Files: []PlannedFile{{
+		RelativePath: v2MachineLedgerPath,
+		Data:         body,
+		Perm:         0o644,
+	}}}
+	if _, err := Apply(plan); err != nil {
+		t.Fatalf("machine ledger above Markdown limit rejected: %v", err)
+	}
+	directory, err := pathguard.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	loaded, _, err := readPlannedRegular(directory, v2MachineLedgerPath)
+	if err != nil || !bytes.Equal(loaded, body) {
+		t.Fatalf("machine ledger read=%d err=%v", len(loaded), err)
+	}
+
+	tooLarge := bytes.Repeat([]byte(" "), (16<<20)+1)
+	if _, err := Apply(WritePlan{ProjectRoot: root, Files: []PlannedFile{{
+		RelativePath: v2MachineLedgerPath,
+		Data:         tooLarge,
+		Perm:         0o644,
+		ExpectedData: body, ExpectedExists: true, ExpectedPerm: 0o644,
+	}}}); err == nil {
+		t.Fatal("machine ledger above 16 MiB accepted")
+	}
+}
+
 func TestRenderDeepClonesLoadedDocumentsAndIsRepeatable(t *testing.T) {
 	root := ledgerFixture(t)
 	state, _ := Load(root)
