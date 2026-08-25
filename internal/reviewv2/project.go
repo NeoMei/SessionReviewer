@@ -89,12 +89,12 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 	for index, blocker := range legacy.CurrentState.Blockers {
 		risk := currentStateRisk("blocker", "blocked", blocker, usedRiskIDs)
 		state.Review.Risks = append(state.Review.Risks, risk)
-		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: risk.ID, Kind: "blocker", SourceKey: currentRiskSourceKey("blocker", index, blocker)})
+		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: risk.ID, Kind: "blocker", SourceKey: currentRiskSourceKey(risk.ID, "blocker", index, blocker)})
 	}
 	for index, risk := range legacy.CurrentState.OpenRisks {
 		projected := currentStateRisk("risk", "open", risk, usedRiskIDs)
 		state.Review.Risks = append(state.Review.Risks, projected)
-		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: projected.ID, Kind: "open_risk", SourceKey: currentRiskSourceKey("open_risk", index, risk)})
+		state.Machine.LegacyCompatibility.CurrentRisks = append(state.Machine.LegacyCompatibility.CurrentRisks, CurrentRiskProvenance{RiskID: projected.ID, Kind: "open_risk", SourceKey: currentRiskSourceKey(projected.ID, "open_risk", index, risk)})
 	}
 	sort.Slice(state.Review.Risks, func(left, right int) bool {
 		if state.Review.Risks[left].Status != state.Review.Risks[right].Status {
@@ -486,12 +486,13 @@ func canonicalizeReviewOrder(review *Review) {
 }
 
 type currentRiskIdentityEntry struct {
-	kind       string
-	value      string
-	riskID     string
-	sourceKey  string
-	riskIndex  int
-	provenance int
+	kind        string
+	value       string
+	riskID      string
+	sourceKey   string
+	sourceIndex int
+	riskIndex   int
+	provenance  int
 }
 
 func preserveCurrentRiskIdentities(next *State, current State) error {
@@ -510,7 +511,8 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 	newMatched := make([]bool, len(newEntries))
 	type match struct{ old, next int }
 	matches := make([]match, 0, min(len(oldEntries), len(newEntries)))
-	// A source-key match is exact across kind, normalized value, and position.
+	// A source-key match is exact across visible identity, kind, normalized
+	// value, and source position.
 	for nextIndex := range newEntries {
 		for oldIndex := range oldEntries {
 			if oldMatched[oldIndex] || oldEntries[oldIndex].sourceKey != newEntries[nextIndex].sourceKey {
@@ -544,23 +546,6 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 			matches = append(matches, match{old: oldCandidate, next: nextIndex})
 		}
 	}
-	for _, kind := range []string{"blocker", "open_risk"} {
-		oldUnmatched, newUnmatched := make([]int, 0), make([]int, 0)
-		for index := range oldEntries {
-			if !oldMatched[index] && oldEntries[index].kind == kind {
-				oldUnmatched = append(oldUnmatched, index)
-			}
-		}
-		for index := range newEntries {
-			if !newMatched[index] && newEntries[index].kind == kind {
-				newUnmatched = append(newUnmatched, index)
-			}
-		}
-		if len(oldUnmatched) == 1 && len(newUnmatched) == 1 {
-			matches = append(matches, match{old: oldUnmatched[0], next: newUnmatched[0]})
-			oldMatched[oldUnmatched[0]], newMatched[newUnmatched[0]] = true, true
-		}
-	}
 	nonCurrentIDs := make(map[string]struct{}, len(next.Review.Risks))
 	currentIDs := make(map[string]struct{}, len(newEntries))
 	for _, entry := range newEntries {
@@ -584,6 +569,12 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 		assignments[pair.next] = oldID
 		used[oldID] = struct{}{}
 	}
+	// Unmatched current-state values have no explicit rename relation in the
+	// ChangeSet. Reserve every old identity so delete+insert cannot transfer an
+	// old marker ID (and therefore its accepted human fields) to a new value.
+	for _, entry := range oldEntries {
+		used[entry.riskID] = struct{}{}
+	}
 	for index, target := range newEntries {
 		id, assigned := assignments[index]
 		if !assigned {
@@ -600,6 +591,7 @@ func preserveCurrentRiskIdentities(next *State, current State) error {
 		}
 		next.Review.Risks[target.riskIndex].ID = id
 		next.Machine.LegacyCompatibility.CurrentRisks[target.provenance].RiskID = id
+		next.Machine.LegacyCompatibility.CurrentRisks[target.provenance].SourceKey = currentRiskSourceKey(id, target.kind, target.sourceIndex, target.value)
 	}
 	sort.Slice(next.Review.Risks, func(left, right int) bool {
 		if next.Review.Risks[left].Status != next.Review.Risks[right].Status {
@@ -620,18 +612,21 @@ func currentRiskIdentityEntries(state State) ([]currentRiskIdentityEntry, error)
 	blockerIndex, openRiskIndex := 0, 0
 	for provenanceIndex, provenance := range compatibility.CurrentRisks {
 		var value string
+		var sourceIndex int
 		switch provenance.Kind {
 		case "blocker":
 			if blockerIndex >= len(compatibility.CurrentState.Blockers) {
 				return nil, errors.New("current-risk blocker provenance exceeds hidden sources")
 			}
 			value = compatibility.CurrentState.Blockers[blockerIndex]
+			sourceIndex = blockerIndex
 			blockerIndex++
 		case "open_risk":
 			if openRiskIndex >= len(compatibility.CurrentState.OpenRisks) {
 				return nil, errors.New("current-risk open-risk provenance exceeds hidden sources")
 			}
 			value = compatibility.CurrentState.OpenRisks[openRiskIndex]
+			sourceIndex = openRiskIndex
 			openRiskIndex++
 		default:
 			return nil, fmt.Errorf("unknown current-risk provenance kind %q", provenance.Kind)
@@ -642,7 +637,7 @@ func currentRiskIdentityEntries(state State) ([]currentRiskIdentityEntry, error)
 		}
 		entries = append(entries, currentRiskIdentityEntry{
 			kind: provenance.Kind, value: strings.TrimSpace(normalizeMarkdownText(value)),
-			riskID: provenance.RiskID, sourceKey: provenance.SourceKey, riskIndex: riskIndex, provenance: provenanceIndex,
+			riskID: provenance.RiskID, sourceKey: provenance.SourceKey, sourceIndex: sourceIndex, riskIndex: riskIndex, provenance: provenanceIndex,
 		})
 	}
 	return entries, nil
@@ -796,9 +791,9 @@ func currentStateRisk(kind, status, title string, used map[string]struct{}) Risk
 	}
 }
 
-func currentRiskSourceKey(kind string, index int, value string) string {
+func currentRiskSourceKey(riskID, kind string, index int, value string) string {
 	normalized := strings.TrimSpace(normalizeMarkdownText(value))
-	digest := sha256.Sum256([]byte(kind + "\x00" + strconv.Itoa(index) + "\x00" + normalized))
+	digest := sha256.Sum256([]byte(riskID + "\x00" + kind + "\x00" + strconv.Itoa(index) + "\x00" + normalized))
 	return fmt.Sprintf("%x", digest)
 }
 

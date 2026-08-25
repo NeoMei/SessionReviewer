@@ -245,8 +245,7 @@ func validateLegacyCompatibility(value LegacyCompatibility, projectID string, se
 		return err
 	}
 	seenRisks := make(map[string]struct{}, len(value.CurrentRisks))
-	expectedRisks := expectedCurrentRiskProvenance(value.CurrentState)
-	if len(value.CurrentRisks) != len(expectedRisks) {
+	if len(value.CurrentRisks) != len(value.CurrentState.Blockers)+len(value.CurrentState.OpenRisks) {
 		return errors.New("current-risk provenance count does not match legacy current state")
 	}
 	for index, risk := range value.CurrentRisks {
@@ -257,22 +256,21 @@ func validateLegacyCompatibility(value LegacyCompatibility, projectID string, se
 			return fmt.Errorf("duplicate current-risk provenance %q", risk.RiskID)
 		}
 		seenRisks[risk.RiskID] = struct{}{}
-		if risk.Kind != expectedRisks[index].Kind || risk.SourceKey != expectedRisks[index].SourceKey {
+		expectedKind, sourceIndex, sourceValue := currentRiskSourceAt(value.CurrentState, index)
+		expectedSourceKey := currentRiskSourceKey(risk.RiskID, expectedKind, sourceIndex, sourceValue)
+		if risk.Kind != expectedKind || risk.SourceKey != expectedSourceKey {
 			return fmt.Errorf("current-risk provenance %q is not bound to legacy current-state source %d", risk.RiskID, index)
 		}
 	}
 	return nil
 }
 
-func expectedCurrentRiskProvenance(current ledger.CurrentState) []CurrentRiskProvenance {
-	result := make([]CurrentRiskProvenance, 0, len(current.Blockers)+len(current.OpenRisks))
-	for index, value := range current.Blockers {
-		result = append(result, CurrentRiskProvenance{Kind: "blocker", SourceKey: currentRiskSourceKey("blocker", index, value)})
+func currentRiskSourceAt(current ledger.CurrentState, index int) (kind string, sourceIndex int, value string) {
+	if index < len(current.Blockers) {
+		return "blocker", index, current.Blockers[index]
 	}
-	for index, value := range current.OpenRisks {
-		result = append(result, CurrentRiskProvenance{Kind: "open_risk", SourceKey: currentRiskSourceKey("open_risk", index, value)})
-	}
-	return result
+	sourceIndex = index - len(current.Blockers)
+	return "open_risk", sourceIndex, current.OpenRisks[sourceIndex]
 }
 
 // validateLegacyProjectionInput runs before any lossy projection so malformed

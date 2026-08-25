@@ -255,8 +255,15 @@ func TestPatchAllowlistFieldsEachRoundTripThroughTheirSemanticUnit(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := ParseReview(out); err != nil {
+			document, err := ParseReview(out)
+			if err != nil {
 				t.Fatalf("patched review cannot reparse: %v", err)
+			}
+			if test.field == "risk.title" {
+				risk, exists := riskByID(document.Model.Risks)[test.unit]
+				if !exists || risk.Title != test.value {
+					t.Fatalf("direct title patch changed risk marker identity: unit=%q risks=%+v", test.unit, document.Model.Risks)
+				}
 			}
 		})
 	}

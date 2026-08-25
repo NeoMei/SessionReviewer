@@ -408,7 +408,7 @@ func TestApplyChangeSetOverlaysUnchangedHumanStatusAndCurrentRiskFields(t *testi
 	}
 }
 
-func TestApplyChangeSetKeepsCurrentRiskIdentityAndHumanFieldsWhenTitleChanges(t *testing.T) {
+func TestApplyChangeSetAssignsFreshCurrentRiskIdentityWhenOnlyTitleChanges(t *testing.T) {
 	root, _ := writeV2Fixture(t)
 	accepted, err := Load(root)
 	if err != nil {
@@ -416,6 +416,22 @@ func TestApplyChangeSetKeepsCurrentRiskIdentityAndHumanFieldsWhenTitleChanges(t 
 	}
 	provenance := accepted.State.Machine.LegacyCompatibility.CurrentRisks[0]
 	previous := riskByID(accepted.State.Review.Risks)[provenance.RiskID]
+	reviewBody := accepted.files[ReviewRelativePath].body
+	for _, edit := range []EditUnit{
+		{Document: "review", UnitID: previous.ID, Field: "risk.status", Value: "human-status-before-title-change"},
+		{Document: "review", UnitID: previous.ID, Field: "risk.detail", Value: "human-detail-before-title-change"},
+	} {
+		edit.ExpectedSHA256 = sha256Hex(reviewBody)
+		reviewBody, err = PatchReviewUnit(reviewBody, edit)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeAcceptedDocumentsWithUpdatedHashes(t, root, reviewBody, accepted.files[HistoryRelativePath].body)
+	accepted, err = Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 	incoming := accepted.Legacy.CurrentState
 	incoming.Revision++
 	incoming.Blockers = append([]string(nil), incoming.Blockers...)
@@ -428,9 +444,18 @@ func TestApplyChangeSetKeepsCurrentRiskIdentityAndHumanFieldsWhenTitleChanges(t 
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated, exists := riskByID(next.Model.Risks)[provenance.RiskID]
-	if !exists || updated.Title != incoming.Blockers[0] || updated.Status != previous.Status {
-		t.Fatalf("current-risk identity/overlay changed unexpectedly: before=%+v after=%+v", previous, updated)
+	if _, exists := riskByID(next.Model.Risks)[provenance.RiskID]; exists {
+		t.Fatalf("unmatched current-risk title inherited old identity %q", provenance.RiskID)
+	}
+	var updated Risk
+	for _, risk := range next.Model.Risks {
+		if risk.Title == incoming.Blockers[0] {
+			updated = risk
+			break
+		}
+	}
+	if updated.ID == "" || updated.ID == provenance.RiskID || updated.Status == "human-status-before-title-change" || updated.Detail == "human-detail-before-title-change" {
+		t.Fatalf("unmatched current-risk title inherited old identity/human fields: before=%+v after=%+v", previous, updated)
 	}
 }
 
@@ -447,6 +472,8 @@ func TestApplyChangeSetCurrentRiskIdentityMatchingDoesNotTransferHumanFields(t *
 		{"front insertion", []string{"A", "B"}, []string{"X", "A", "B"}, []string{"A", "B"}, []string{"X"}},
 		{"middle insertion", []string{"A", "B"}, []string{"A", "X", "B"}, []string{"A", "B"}, []string{"X"}},
 		{"reorder", []string{"A", "B", "C"}, []string{"C", "A", "B"}, []string{"A", "B", "C"}, nil},
+		{"delete A insert X", []string{"A", "B"}, []string{"B", "X"}, []string{"B"}, []string{"X"}},
+		{"delete middle insert middle", []string{"A", "B", "C"}, []string{"B", "X", "C"}, []string{"B", "C"}, []string{"X"}},
 		{"simultaneous rename", []string{"A", "B"}, []string{"A2", "B2"}, nil, []string{"A2", "B2"}},
 	}
 	for _, test := range tests {
@@ -544,6 +571,56 @@ func TestValidateRejectsForgedCurrentRiskProvenanceSourceKey(t *testing.T) {
 	state.Machine.LegacyCompatibility.CurrentRisks[0].SourceKey = strings.Repeat("a", 64)
 	if err := Validate(state); err == nil {
 		t.Fatal("forged current-risk source key was accepted")
+	}
+}
+
+func TestValidateRejectsSwappedSameKindCurrentRiskProvenanceIDs(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	legacy.CurrentState.Blockers = []string{"blocker A", "blocker B"}
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(state); err != nil {
+		t.Fatalf("valid projected state: %v", err)
+	}
+	first, second := -1, -1
+	for index, provenance := range state.Machine.LegacyCompatibility.CurrentRisks {
+		if provenance.Kind != "blocker" {
+			continue
+		}
+		if first == -1 {
+			first = index
+		} else {
+			second = index
+			break
+		}
+	}
+	if first == -1 || second == -1 {
+		t.Fatalf("need two blocker provenance rows: %+v", state.Machine.LegacyCompatibility.CurrentRisks)
+	}
+	state.Machine.LegacyCompatibility.CurrentRisks[first].RiskID, state.Machine.LegacyCompatibility.CurrentRisks[second].RiskID =
+		state.Machine.LegacyCompatibility.CurrentRisks[second].RiskID, state.Machine.LegacyCompatibility.CurrentRisks[first].RiskID
+	if err := Validate(state); err == nil {
+		t.Fatal("same-kind current-risk provenance RiskID swap was accepted")
+	}
+}
+
+func TestValidateRejectsSwappedCrossKindCurrentRiskProvenanceIDs(t *testing.T) {
+	state, err := ProjectLegacy(legacyFixtureState(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Validate(state); err != nil {
+		t.Fatalf("valid projected state: %v", err)
+	}
+	if len(state.Machine.LegacyCompatibility.CurrentRisks) != 2 {
+		t.Fatalf("need blocker and open-risk provenance rows: %+v", state.Machine.LegacyCompatibility.CurrentRisks)
+	}
+	state.Machine.LegacyCompatibility.CurrentRisks[0].RiskID, state.Machine.LegacyCompatibility.CurrentRisks[1].RiskID =
+		state.Machine.LegacyCompatibility.CurrentRisks[1].RiskID, state.Machine.LegacyCompatibility.CurrentRisks[0].RiskID
+	if err := Validate(state); err == nil {
+		t.Fatal("cross-kind current-risk provenance RiskID swap was accepted")
 	}
 }
 
