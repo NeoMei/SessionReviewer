@@ -250,6 +250,73 @@ func TestApplyReportsDeterministicResult(t *testing.T) {
 	assertApplyOutputContract(t, out.String())
 }
 
+func TestApplyLegacyMigrationPreemptsExternalInputFailuresWithoutWrites(t *testing.T) {
+	binary := buildCLIForSubprocess(t)
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *cliApplyFixture)
+	}{
+		{name: "unavailable data and malformed proposal", mutate: func(t *testing.T, fixture *cliApplyFixture) {
+			fixture.data = filepath.Join(t.TempDir(), "missing-data")
+			if err := os.WriteFile(fixture.proposal, []byte("{"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "malformed config", mutate: func(t *testing.T, fixture *cliApplyFixture) {
+			if err := os.WriteFile(filepath.Join(fixture.data, "config.toml"), []byte("[[["), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLegacyCLIApplyFixture(t, "")
+			test.mutate(t, &fixture)
+			projectBefore := snapshotCLITree(t, fixture.project)
+			dataBefore := snapshotCLITree(t, fixture.data)
+
+			command := exec.Command(binary,
+				"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence,
+				"--project", fixture.project, "--data-dir", fixture.data,
+			)
+			var out, errOut bytes.Buffer
+			command.Stdout, command.Stderr = &out, &errOut
+			code := exitCode(command.Run())
+			diagnostic := errOut.String()
+			wantDiagnostic := "E_APPLY_MIGRATION_REQUIRED: accepted review must be migrated before applying a proposal\n" +
+				"recovery: run session-reviewer sync --dry-run, then run session-reviewer sync\n"
+			if code != 1 || out.Len() != 0 || diagnostic != wantDiagnostic {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), diagnostic)
+			}
+			if got := snapshotCLITree(t, fixture.project); got != projectBefore {
+				t.Fatalf("legacy migration preflight changed project\nbefore:\n%s\nafter:\n%s", projectBefore, got)
+			}
+			if got := snapshotCLITree(t, fixture.data); got != dataBefore {
+				t.Fatalf("legacy migration preflight changed data\nbefore:\n%s\nafter:\n%s", dataBefore, got)
+			}
+		})
+	}
+}
+
+func TestApplyV2StillReportsItsOriginalInputFailure(t *testing.T) {
+	binary := buildCLIForSubprocess(t)
+	fixture := newCLIApplyFixture(t, "")
+	if err := os.WriteFile(fixture.proposal, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(binary,
+		"apply", "--proposal", fixture.proposal, "--evidence", fixture.evidence,
+		"--project", fixture.project, "--data-dir", fixture.data,
+	)
+	var out, errOut bytes.Buffer
+	command.Stdout, command.Stderr = &out, &errOut
+	code := exitCode(command.Run())
+	if code != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "E_APPLY_FAILED") ||
+		strings.Contains(errOut.String(), "E_APPLY_MIGRATION_REQUIRED") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
 func TestLedgerCommandsResolveOnlyImplicitLogicalSymlinkWorkingDirectory(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("logical PWD subprocess coverage is a macOS acceptance test")
@@ -1134,6 +1201,14 @@ type cliApplyFixture struct {
 }
 
 func newCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
+	return newCLIApplyFixtureVersion(t, dataDir, true)
+}
+
+func newLegacyCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
+	return newCLIApplyFixtureVersion(t, dataDir, false)
+}
+
+func newCLIApplyFixtureVersion(t *testing.T, dataDir string, v2 bool) cliApplyFixture {
 	t.Helper()
 	projectRoot := t.TempDir()
 	vaultRoot := t.TempDir()
@@ -1185,9 +1260,11 @@ func newCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
 		[]byte(packetDigest),
 		1,
 	)
-	convertCLIApplyFixtureToV2(t, projectRoot)
-	proposalBody = bytes.Replace(proposalBody, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 1`), 1)
-	proposalBody = bytes.Replace(proposalBody, []byte(`"blockers": []`), []byte(`"blockers": ["Fixture risk"]`), 1)
+	if v2 {
+		convertCLIApplyFixtureToV2(t, projectRoot)
+		proposalBody = bytes.Replace(proposalBody, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 1`), 1)
+		proposalBody = bytes.Replace(proposalBody, []byte(`"blockers": []`), []byte(`"blockers": ["Fixture risk"]`), 1)
+	}
 	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
 	if err := os.WriteFile(proposalPath, proposalBody, 0o600); err != nil {
 		t.Fatal(err)
@@ -1351,6 +1428,11 @@ func copyCLITreeForTest(source, target string) error {
 
 func snapshotCLITree(t *testing.T, root string) string {
 	t.Helper()
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return "<missing>"
+	} else if err != nil {
+		t.Fatal(err)
+	}
 	var snapshot strings.Builder
 	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {

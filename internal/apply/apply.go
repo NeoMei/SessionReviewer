@@ -269,22 +269,19 @@ func (lock *projectApplyLock) Release() error {
 }
 
 func Run(opts Options) (result Result, retErr error) {
-	ctx, roots, err := openInputs(opts)
+	roots, err := openApplyProject(opts)
 	if err != nil {
 		return Result{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, roots.Close()) }()
-	result = baseResult(ctx)
-	version, err := reviewv2.DetectVersionExpected(opts.ProjectRoot, roots.project.Info())
+	if err := preflightLegacyMigration(opts.ProjectRoot, roots.project.Info()); err != nil {
+		return Result{}, err
+	}
+	ctx, err := openInputs(opts, roots)
 	if err != nil {
 		return Result{}, err
 	}
-	if version == reviewv2.VersionLegacy {
-		if _, err := reviewv2.LoadExpected(opts.ProjectRoot, roots.project.Info()); err != nil {
-			return Result{}, err
-		}
-		return Result{}, fmt.Errorf("legacy review ledger unexpectedly loaded without a migration requirement")
-	}
+	result = baseResult(ctx)
 	current, err := cursor.LoadReadOnlyRoot(roots.data.Root, ctx.Packet.ProjectID, ctx.Packet.SessionID)
 	if err != nil {
 		return Result{}, err
@@ -450,89 +447,103 @@ func rejectOutstandingProjectReceipts(store cursor.Store, receipts []applyReceip
 	return nil
 }
 
-func openInputs(opts Options) (_ inputContext, roots *applyRoots, retErr error) {
-	if opts.Now == nil {
-		opts.Now = time.Now
-	}
-	for label, value := range map[string]string{
-		"proposal path": opts.ProposalPath, "evidence path": opts.EvidencePath,
-		"project root": opts.ProjectRoot, "data directory": opts.DataDir,
-	} {
-		if strings.TrimSpace(value) == "" {
-			return inputContext{}, nil, fmt.Errorf("%s is required", label)
-		}
+func openApplyProject(opts Options) (*applyRoots, error) {
+	if strings.TrimSpace(opts.ProjectRoot) == "" {
+		return nil, errors.New("project root is required")
 	}
 	projectRoot, err := pathguard.Open(opts.ProjectRoot)
 	if err != nil {
-		return inputContext{}, nil, fmt.Errorf("invalid project root: %w", err)
+		return nil, fmt.Errorf("invalid project root: %w", err)
 	}
 	if opts.ExpectedProjectRoot != nil && !os.SameFile(opts.ExpectedProjectRoot, projectRoot.Info()) {
 		_ = projectRoot.Close()
-		return inputContext{}, nil, errors.New("project root does not match expected identity")
+		return nil, errors.New("project root does not match expected identity")
+	}
+	return &applyRoots{project: projectRoot}, nil
+}
+
+func preflightLegacyMigration(projectRoot string, expectedRoot os.FileInfo) error {
+	version, err := reviewv2.DetectVersionExpected(projectRoot, expectedRoot)
+	if err != nil {
+		return err
+	}
+	if version != reviewv2.VersionLegacy {
+		return nil
+	}
+	if _, err := reviewv2.LoadExpected(projectRoot, expectedRoot); err != nil {
+		return err
+	}
+	return errors.New("legacy review ledger unexpectedly loaded without a migration requirement")
+}
+
+func openInputs(opts Options, roots *applyRoots) (inputContext, error) {
+	for label, value := range map[string]string{
+		"proposal path": opts.ProposalPath, "evidence path": opts.EvidencePath,
+		"data directory": opts.DataDir,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return inputContext{}, fmt.Errorf("%s is required", label)
+		}
+	}
+	if roots == nil || roots.project == nil {
+		return inputContext{}, errors.New("pinned project root is required")
 	}
 	dataRoot, err := pathguard.Open(opts.DataDir)
 	if err != nil {
-		_ = projectRoot.Close()
-		return inputContext{}, nil, fmt.Errorf("invalid data directory: %w", err)
+		return inputContext{}, fmt.Errorf("invalid data directory: %w", err)
 	}
-	roots = &applyRoots{project: projectRoot, data: dataRoot}
-	defer func() {
-		if retErr != nil {
-			retErr = errors.Join(retErr, roots.Close())
-			roots = nil
-		}
-	}()
+	roots.data = dataRoot
 
 	proposalBody, proposalDigest, err := readBoundedRegular(opts.ProposalPath, maxInputBytes, "proposal", opts.hooks.duringInputRead)
 	if err != nil {
-		return inputContext{}, nil, err
+		return inputContext{}, err
 	}
 	if opts.hooks.afterInputRead != nil {
 		if err := opts.hooks.afterInputRead("proposal"); err != nil {
-			return inputContext{}, nil, err
+			return inputContext{}, err
 		}
 	}
 	p, err := proposal.Decode(bytes.NewReader(proposalBody))
 	if err != nil {
-		return inputContext{}, nil, err
+		return inputContext{}, err
 	}
 	evidenceBody, evidenceFileDigest, err := readBoundedRegular(opts.EvidencePath, maxInputBytes, "evidence", opts.hooks.duringInputRead)
 	if err != nil {
-		return inputContext{}, nil, err
+		return inputContext{}, err
 	}
 	if opts.hooks.afterInputRead != nil {
 		if err := opts.hooks.afterInputRead("evidence"); err != nil {
-			return inputContext{}, nil, err
+			return inputContext{}, err
 		}
 	}
 	if err := inspectJSONObject(evidenceBody); err != nil {
-		return inputContext{}, nil, fmt.Errorf("invalid evidence JSON: %w", err)
+		return inputContext{}, fmt.Errorf("invalid evidence JSON: %w", err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(evidenceBody))
 	dec.DisallowUnknownFields()
 	var packet evidence.Packet
 	if err := dec.Decode(&packet); err != nil {
-		return inputContext{}, nil, fmt.Errorf("decode evidence packet: %w", err)
+		return inputContext{}, fmt.Errorf("decode evidence packet: %w", err)
 	}
 	if err := requireJSONEOF(dec); err != nil {
-		return inputContext{}, nil, err
+		return inputContext{}, err
 	}
 	packetDigest, err := evidence.Digest(packet)
 	if err != nil {
-		return inputContext{}, nil, err
+		return inputContext{}, err
 	}
 	if p.EvidencePacketSHA256 != packetDigest {
-		return inputContext{}, nil, fmt.Errorf("proposal evidence digest does not match input packet")
+		return inputContext{}, fmt.Errorf("proposal evidence digest does not match input packet")
 	}
 	if !safeIdentifier(packet.ProjectID) || !safeIdentifier(packet.SessionID) {
-		return inputContext{}, nil, fmt.Errorf("invalid packet identity")
+		return inputContext{}, fmt.Errorf("invalid packet identity")
 	}
 	if packet.ProjectID != p.ProjectID || packet.SessionID != p.SessionID {
-		return inputContext{}, nil, fmt.Errorf("proposal and evidence identities differ")
+		return inputContext{}, fmt.Errorf("proposal and evidence identities differ")
 	}
 	cfg, err := config.LoadRoot(dataRoot.Root, "config.toml")
 	if err != nil {
-		return inputContext{}, nil, fmt.Errorf("load initialized project mapping: %w", err)
+		return inputContext{}, fmt.Errorf("load initialized project mapping: %w", err)
 	}
 	matches := 0
 	for _, mapping := range cfg.Projects {
@@ -541,22 +552,22 @@ func openInputs(opts Options) (_ inputContext, roots *applyRoots, retErr error) 
 		}
 		mappedRoot, mapErr := pathguard.Open(mapping.Root)
 		if mapErr != nil {
-			return inputContext{}, nil, fmt.Errorf("initialized project mapping does not match requested root")
+			return inputContext{}, fmt.Errorf("initialized project mapping does not match requested root")
 		}
-		mapped := os.SameFile(projectRoot.Info(), mappedRoot.Info())
+		mapped := os.SameFile(roots.project.Info(), mappedRoot.Info())
 		closeErr := mappedRoot.Close()
 		if closeErr != nil || !mapped {
-			return inputContext{}, nil, fmt.Errorf("initialized project mapping does not match requested root")
+			return inputContext{}, fmt.Errorf("initialized project mapping does not match requested root")
 		}
 		matches++
 	}
 	if matches != 1 {
-		return inputContext{}, nil, fmt.Errorf("project is not uniquely initialized")
+		return inputContext{}, fmt.Errorf("project is not uniquely initialized")
 	}
 	return inputContext{
 		Packet: packet, Proposal: p, ProposalDigest: proposalDigest,
 		EvidenceFileDigest: evidenceFileDigest, EvidencePacketDigest: packetDigest,
-	}, roots, nil
+	}, nil
 }
 
 func readBoundedRegular(path string, limit int64, label string, duringRead func(string) error) ([]byte, string, error) {

@@ -184,6 +184,35 @@ func TestRunLegacyMigrationRequiredBeforeAnyStateWrite(t *testing.T) {
 	}
 }
 
+func TestRunMalformedLegacyFailsAsCorruptionBeforeExternalInputs(t *testing.T) {
+	f := newLegacyApplyTestFixture(t)
+	overview := filepath.Join(f.projectRoot, "docs", "session-review", "project-overview.md")
+	if err := os.WriteFile(overview, []byte("malformed legacy review\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missingData := filepath.Join(t.TempDir(), "missing-data")
+	malformedProposal := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(malformedProposal, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := f.options()
+	opts.DataDir = missingData
+	opts.ProposalPath = malformedProposal
+	projectBefore := snapshotTree(t, f.projectRoot)
+
+	_, err := Run(opts)
+	var migration *reviewv2.ErrMigrationRequired
+	if err == nil || errors.As(err, &migration) || strings.Contains(err.Error(), "data directory") || strings.Contains(err.Error(), "proposal") {
+		t.Fatalf("malformed legacy error was masked: %v", err)
+	}
+	if after := snapshotTree(t, f.projectRoot); after != projectBefore {
+		t.Fatalf("malformed legacy preflight changed project\nbefore:\n%s\nafter:\n%s", projectBefore, after)
+	}
+	if _, statErr := os.Lstat(missingData); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("malformed legacy preflight touched missing data directory: %v", statErr)
+	}
+}
+
 func TestRunRepeatIsIdempotent(t *testing.T) {
 	f := newApplyTestFixture(t)
 	if _, err := Run(f.options()); err != nil {
