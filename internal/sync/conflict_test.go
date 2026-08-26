@@ -315,6 +315,125 @@ func TestParseConflictRecordAcceptsPairedSurrogateCandidateEscape(t *testing.T) 
 	}
 }
 
+func TestParseConflictRecordRequiresEveryUnconditionalWireField(t *testing.T) {
+	t.Parallel()
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		"version", "id", "entity_id", "project_id", "kind", "relative_path",
+		"base_hash", "project_hash", "vault_hash", "base", "project", "vault", "suggested",
+		"created_at", "resolution_status",
+	} {
+		t.Run(field, func(t *testing.T) {
+			omitted := conflictWireWithMutation(t, artifact.Notes.Project.Content, func(wire map[string]any) { delete(wire, field) })
+			if _, err := ParseConflictRecord(omitted); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("missing required field %q accepted: err=%v\n%s", field, err, omitted)
+			}
+		})
+	}
+	parsed, err := ParseConflictRecord(artifact.Notes.Project.Content)
+	if err != nil || len(parsed.Base) != 0 || len(parsed.Project) != 0 || len(parsed.Vault) != 0 || len(parsed.Suggested) != 0 {
+		t.Fatalf("required empty candidate fields were not preserved: parsed=%+v err=%v", parsed, err)
+	}
+}
+
+func TestParseConflictRecordRequiresResolvedWireFieldsConditionally(t *testing.T) {
+	t.Parallel()
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := MarkConflictResolved(*artifact.Record, AcceptProject, artifact.Record.ProjectHash, conflictTime.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := RenderConflict(resolved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"resolution_action", "resolved_hash", "resolved_at"} {
+		t.Run(field, func(t *testing.T) {
+			omitted := conflictWireWithMutation(t, body, func(wire map[string]any) { delete(wire, field) })
+			if _, err := ParseConflictRecord(omitted); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("resolved record missing %q was accepted: err=%v", field, err)
+			}
+		})
+	}
+	for _, field := range []string{"resolution_action", "resolved_hash", "resolved_at"} {
+		t.Run("open-empty-"+field, func(t *testing.T) {
+			presentEmpty := conflictWireWithMutation(t, artifact.Notes.Project.Content, func(wire map[string]any) { wire[field] = "" })
+			if _, err := ParseConflictRecord(presentEmpty); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("open record with empty optional %q was accepted: err=%v", field, err)
+			}
+		})
+	}
+}
+
+func TestParseConflictRecordDistinguishesOptionalPathsFromEmptyOrNull(t *testing.T) {
+	t.Parallel()
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", BasePath: "decisions/base.md",
+		ProjectPath: "decisions/project.md", VaultPath: "decisions/vault.md", CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseConflictRecord(artifact.Notes.Project.Content); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"base_path", "project_path", "vault_path"} {
+		t.Run(field+"/absent", func(t *testing.T) {
+			omitted := conflictWireWithMutation(t, artifact.Notes.Project.Content, func(wire map[string]any) { delete(wire, field) })
+			if _, err := ParseConflictRecord(omitted); err != nil {
+				t.Fatalf("optional path %q omission rejected: %v", field, err)
+			}
+		})
+		for _, value := range []any{"", nil} {
+			name := "empty"
+			if value == nil {
+				name = "null"
+			}
+			t.Run(field+"/"+name, func(t *testing.T) {
+				mutated := conflictWireWithMutation(t, artifact.Notes.Project.Content, func(wire map[string]any) { wire[field] = value })
+				if _, err := ParseConflictRecord(mutated); !errors.Is(err, ErrInvalidConflict) {
+					t.Fatalf("optional path %q with %s accepted: err=%v", field, name, err)
+				}
+			})
+		}
+	}
+	for _, field := range []string{"base", "project", "vault", "suggested"} {
+		t.Run("required-null-"+field, func(t *testing.T) {
+			mutated := conflictWireWithMutation(t, artifact.Notes.Project.Content, func(wire map[string]any) { wire[field] = nil })
+			if _, err := ParseConflictRecord(mutated); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("required field %q accepted null: err=%v", field, err)
+			}
+		})
+	}
+}
+
+func conflictWireWithMutation(t *testing.T, body []byte, mutate func(map[string]any)) []byte {
+	t.Helper()
+	var wire map[string]any
+	if err := json.Unmarshal(body, &wire); err != nil {
+		t.Fatal(err)
+	}
+	mutate(wire)
+	mutated, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mutated
+}
+
 func TestConflictDuplicateKeyScannerRecurses(t *testing.T) {
 	t.Parallel()
 	for _, body := range [][]byte{

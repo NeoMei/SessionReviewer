@@ -380,19 +380,21 @@ const (
 )
 
 type conflictJSONSchema struct {
-	kind   conflictJSONKind
-	fields map[string]conflictJSONSchema
+	kind     conflictJSONKind
+	required bool
+	fields   map[string]conflictJSONSchema
 }
 
 func validateExactConflictJSONWire(body []byte) error {
 	stringField := conflictJSONSchema{kind: conflictJSONString}
+	requiredString := conflictJSONSchema{kind: conflictJSONString, required: true}
 	schema := conflictJSONSchema{kind: conflictJSONObject, fields: map[string]conflictJSONSchema{
-		"version": {kind: conflictJSONNumber},
-		"id":      stringField, "entity_id": stringField, "project_id": stringField, "kind": stringField,
-		"relative_path": stringField, "base_path": stringField, "project_path": stringField, "vault_path": stringField,
-		"base_hash": stringField, "project_hash": stringField, "vault_hash": stringField,
-		"base": stringField, "project": stringField, "vault": stringField, "suggested": stringField,
-		"created_at": stringField, "resolution_status": stringField, "resolution_action": stringField,
+		"version": {kind: conflictJSONNumber, required: true},
+		"id":      requiredString, "entity_id": requiredString, "project_id": requiredString, "kind": requiredString,
+		"relative_path": requiredString, "base_path": stringField, "project_path": stringField, "vault_path": stringField,
+		"base_hash": requiredString, "project_hash": requiredString, "vault_hash": requiredString,
+		"base": requiredString, "project": requiredString, "vault": requiredString, "suggested": requiredString,
+		"created_at": requiredString, "resolution_status": requiredString, "resolution_action": stringField,
 		"resolved_hash": stringField, "resolved_at": stringField,
 	}}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -402,6 +404,43 @@ func validateExactConflictJSONWire(body []byte) error {
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
 		return ErrInvalidConflict
+	}
+	return validateConflictOptionalFieldPresence(body)
+}
+
+func validateConflictOptionalFieldPresence(body []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return ErrInvalidConflict
+	}
+	for _, name := range []string{"base_path", "project_path", "vault_path"} {
+		raw, present := fields[name]
+		if !present {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+			return ErrInvalidConflict
+		}
+	}
+	var status ResolutionStatus
+	if err := json.Unmarshal(fields["resolution_status"], &status); err != nil {
+		return ErrInvalidConflict
+	}
+	resolutionFields := []string{"resolution_action", "resolved_hash", "resolved_at"}
+	switch status {
+	case ResolutionOpen:
+		for _, name := range resolutionFields {
+			if _, present := fields[name]; present {
+				return ErrInvalidConflict
+			}
+		}
+	case ResolutionResolved:
+		for _, name := range resolutionFields {
+			if _, present := fields[name]; !present {
+				return ErrInvalidConflict
+			}
+		}
 	}
 	return nil
 }
@@ -448,6 +487,11 @@ func scanExactConflictJSONValue(decoder *json.Decoder, schema conflictJSONSchema
 		end, err := decoder.Token()
 		if err != nil || end != json.Delim('}') {
 			return ErrInvalidConflict
+		}
+		for name, field := range schema.fields {
+			if _, present := seen[name]; field.required && !present {
+				return ErrInvalidConflict
+			}
 		}
 		return nil
 	default:
