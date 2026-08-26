@@ -99,9 +99,14 @@ type Document struct {
 	frontmatter  *yaml.Node
 	body         Body
 	dirty        bool
+	v2           *v2DocumentState
 }
 
 func Parse(relativePath string, content []byte) (Document, error) {
+	return parseDocument(relativePath, content, true)
+}
+
+func parseDocument(relativePath string, content []byte, buildV2State bool) (Document, error) {
 	if err := validateRelativePath(relativePath); err != nil {
 		return Document{}, err
 	}
@@ -132,14 +137,33 @@ func Parse(relativePath string, content []byte) (Document, error) {
 	if err := validateFrontmatter(mapping, legacyOverview); err != nil {
 		return Document{}, err
 	}
-	if err := validatedV2Source(mapping, content); err != nil {
+	normalized, spans, entityType, err := validatedV2Source(mapping, content)
+	if err != nil {
 		return Document{}, err
+	}
+	if entityType != "" && !bytes.Equal(normalized, content) {
+		content = normalized
+		frontmatterSource, bodySource, err = splitFrontmatter(content)
+		if err != nil {
+			return Document{}, err
+		}
+		mapping, err = decodeFrontmatter(frontmatterSource)
+		if err != nil {
+			return Document{}, err
+		}
 	}
 	body, err := parseBody(bodySource)
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{relativePath: relativePath, raw: bytes.Clone(content), frontmatter: mapping, body: body}, nil
+	document := Document{relativePath: relativePath, raw: bytes.Clone(content), frontmatter: mapping, body: body}
+	if entityType != "" && buildV2State {
+		document.v2, err = buildV2DocumentState(document, normalized, spans, entityType)
+		if err != nil {
+			return Document{}, err
+		}
+	}
+	return document, nil
 }
 
 func (d Document) Render() ([]byte, error) {
@@ -222,11 +246,10 @@ func (d Document) Units() UnitSet {
 // therefore never participate in revision or conflict decisions.
 func (d Document) SemanticUnits() UnitSet {
 	if _, v2 := d.v2EntityType(); v2 {
-		units, err := d.v2SemanticUnits()
-		if err != nil {
-			return UnitSet{}
+		if d.v2 == nil {
+			panic("syncdoc: compact review document missing validated semantic state")
 		}
-		return cloneUnitSet(units)
+		return cloneUnitSet(d.v2.semantic)
 	}
 	return d.genericSemanticUnits()
 }
@@ -370,6 +393,13 @@ func (d Document) WithUnits(units UnitSet) (Document, error) {
 	result.dirty = result.dirty || changed || bodyChanged
 	if err := validateFrontmatter(result.frontmatter, isLegacyOverviewPath(result.relativePath)); err != nil {
 		return Document{}, err
+	}
+	if d.v2 != nil {
+		rendered, err := result.Render()
+		if err != nil {
+			return Document{}, err
+		}
+		return Parse(result.relativePath, rendered)
 	}
 	return result, nil
 }
@@ -845,7 +875,7 @@ func validateGeneratedOwnership(document Document) error {
 }
 
 func cloneDocument(document Document) Document {
-	return Document{relativePath: document.relativePath, raw: bytes.Clone(document.raw), frontmatter: cloneNode(document.frontmatter), body: cloneBody(document.body), dirty: document.dirty}
+	return Document{relativePath: document.relativePath, raw: bytes.Clone(document.raw), frontmatter: cloneNode(document.frontmatter), body: cloneBody(document.body), dirty: document.dirty, v2: cloneV2DocumentState(document.v2)}
 }
 
 func cloneBody(body Body) Body {

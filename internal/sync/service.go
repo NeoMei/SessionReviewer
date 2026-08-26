@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -317,18 +318,22 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		}
 	}
 	if len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 && !dryRunDerivedStale {
-		plan, err := engine.planDerived()
-		if err != nil {
-			report.Derived.State = DerivedFailed
-			return report, errors.New("derived navigation planning failed")
-		}
-		report.Derived = plan.report()
-		if !request.DryRun && plan.changed() {
-			if err := engine.publishDerived(ctx, plan); err != nil {
+		if compactV2Inventory(projectInventory) || compactV2Inventory(vaultInventory) {
+			report.Derived = DerivedReport{State: DerivedCurrent, Operations: []Operation{}}
+		} else {
+			plan, err := engine.planDerived()
+			if err != nil {
 				report.Derived.State = DerivedFailed
-				return report, fmt.Errorf("derived navigation publication failed: %w", err)
+				return report, errors.New("derived navigation planning failed")
 			}
-			report.Derived.State = DerivedCurrent
+			report.Derived = plan.report()
+			if !request.DryRun && plan.changed() {
+				if err := engine.publishDerived(ctx, plan); err != nil {
+					report.Derived.State = DerivedFailed
+					return report, fmt.Errorf("derived navigation publication failed: %w", err)
+				}
+				report.Derived.State = DerivedCurrent
+			}
 		}
 	}
 	sort.Strings(report.Conflicts)
@@ -339,6 +344,15 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		return report.Operations[i].Kind < report.Operations[j].Kind
 	})
 	return report, nil
+}
+
+func compactV2Inventory(inventory syncdoc.Inventory) bool {
+	for _, entry := range inventory.ByID {
+		if entry.Identity.EntityType == "project_review" || entry.Identity.EntityType == "project_history" {
+			return true
+		}
+	}
+	return false
 }
 
 func scanIssuePaths(issues []syncdoc.ScanIssue) map[string]struct{} {
@@ -479,12 +493,11 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 	if err := selected.ValidateHumanChanges(base); err != nil {
 		return report, err
 	}
-	selected, err = selected.FinalizeHumanMerge(base, true)
+	selected, err = finalizeAcceptedDocument(selected, &base, true)
 	if err != nil {
 		return report, err
 	}
-	selected, err = selected.WithSyncStatus("synced")
-	if err != nil || candidateSensitive(Candidate{Present: true, RelativePath: baseRecord.RelativePath, Document: selected, Hash: documentHash(selected)}) {
+	if candidateSensitive(Candidate{Present: true, RelativePath: baseRecord.RelativePath, Document: selected, Hash: documentHash(selected)}) {
 		return report, ErrSensitiveContent
 	}
 	rendered, err := selected.Render()
@@ -535,7 +548,10 @@ func inventoryCandidate(inventory syncdoc.Inventory, id, prefix string) Candidat
 		return Candidate{}
 	}
 	relative := strings.TrimPrefix(entry.RelativePath, strings.TrimSuffix(prefix, "/")+"/")
-	return Candidate{Present: true, RelativePath: relative, Document: entry.Document, Hash: entry.ContentHash}
+	return Candidate{
+		Present: true, RelativePath: relative, Document: entry.Document,
+		Hash: documentHash(entry.Document), Source: bytes.Clone(entry.Content), SourceHash: entry.ContentHash,
+	}
 }
 
 func occupiedEntityPaths(projectInventory, vaultInventory syncdoc.Inventory, options Options) map[string]string {
@@ -586,7 +602,7 @@ func operationForMerge(id, relative string, kind MergeKind, projectCandidate, va
 		if !projectCandidate.Present {
 			op.Kind = OperationAddProject
 		} else {
-			op.BeforeHash = projectCandidate.Hash
+			op.BeforeHash = candidateSourceHash(projectCandidate)
 		}
 		result = append(result, op)
 	}
@@ -595,7 +611,7 @@ func operationForMerge(id, relative string, kind MergeKind, projectCandidate, va
 		if !vaultCandidate.Present {
 			op.Kind = OperationAddVault
 		} else {
-			op.BeforeHash = vaultCandidate.Hash
+			op.BeforeHash = candidateSourceHash(vaultCandidate)
 		}
 		result = append(result, op)
 	}
@@ -612,7 +628,7 @@ func (engine *Engine) applyAccepted(ctx context.Context, id, relative string, co
 	}
 	transaction := Transaction{
 		Version: 1, Kind: TxnEntitySync, EntityID: id, DesiredHash: hash, ExpectedBaseHash: expected,
-		ExpectedProjectHash: projectCandidate.Hash, ExpectedVaultHash: vaultCandidate.Hash,
+		ExpectedProjectHash: candidateSourceHash(projectCandidate), ExpectedVaultHash: candidateSourceHash(vaultCandidate),
 		Stage: TxnPlanned, UpdatedAt: engine.options.Now().UTC(),
 	}
 	if err := engine.transactions.Save(transaction); err != nil {
@@ -649,10 +665,14 @@ func (engine *Engine) applyAccepted(ctx context.Context, id, relative string, co
 			expectedExists := target.candidate.Present && target.candidate.RelativePath == relative
 			var expectedContent []byte
 			if expectedExists {
-				var renderErr error
-				expectedContent, renderErr = target.candidate.Document.Render()
-				if renderErr != nil {
-					return errors.New("sync target preimage cannot be rendered")
+				if target.candidate.Source != nil {
+					expectedContent = bytes.Clone(target.candidate.Source)
+				} else {
+					var renderErr error
+					expectedContent, renderErr = target.candidate.Document.Render()
+					if renderErr != nil {
+						return errors.New("sync target preimage cannot be rendered")
+					}
 				}
 			}
 			if err := engine.writer.WriteIfUnchanged(ctx, target.side, target.relative, content, 0o644, expectedContent, expectedExists); err != nil {
@@ -821,6 +841,13 @@ func candidateEntryHash(entry syncdoc.Entry, found bool) string {
 		return ""
 	}
 	return entry.ContentHash
+}
+
+func candidateSourceHash(candidate Candidate) string {
+	if candidate.SourceHash != "" {
+		return candidate.SourceHash
+	}
+	return candidate.Hash
 }
 
 func readManualResolution(filename, relative string) (syncdoc.Document, error) {

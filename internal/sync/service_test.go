@@ -98,6 +98,122 @@ func TestEngineResolvesLiveUnitConflictByAcceptingProject(t *testing.T) {
 	}
 }
 
+func TestV2EngineResolveUsesCompactFinalizationForEveryAction(t *testing.T) {
+	for _, tc := range []struct {
+		name, title string
+		action      ResolutionAction
+	}{
+		{name: "project", title: "project 标题", action: AcceptProject},
+		{name: "vault", title: "vault 标题", action: AcceptObsidian},
+		{name: "manual", title: "manual 标题", action: ManualMerge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			writeV2EngineFixture(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			if report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil || len(report.Errors) != 0 {
+				t.Fatalf("initial report=%+v err=%v", report, err)
+			}
+			projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+			vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+			projectBody, _ := os.ReadFile(projectPath)
+			vaultBody, _ := os.ReadFile(vaultPath)
+			projectBody = bytes.Replace(projectBody, []byte("信任链与 dry-run 边界修复"), []byte("project 标题"), 1)
+			vaultBody = bytes.Replace(vaultBody, []byte("信任链与 dry-run 边界修复"), []byte("vault 标题"), 1)
+			if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(vaultPath, vaultBody, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+			if err != nil || len(conflicted.Conflicts) != 1 {
+				t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+			}
+			resolution := Resolution{ConflictID: conflicted.Conflicts[0], Action: tc.action}
+			if tc.action == ManualMerge {
+				manual := bytes.Replace(renderDocument(t, v2HistoryWithTwoEvents(t)), []byte("project-0123456789abcdef"), []byte(fixture.projectID), 1)
+				manual = bytes.Replace(manual, []byte("信任链与 dry-run 边界修复"), []byte("manual 标题"), 1)
+				manualPath := filepath.Join(fixture.root, "manual.md")
+				if err := os.WriteFile(manualPath, manual, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				resolution.ManualFile = manualPath
+			}
+			resolved, err := engine.Resolve(context.Background(), resolution)
+			if err != nil || len(resolved.Conflicts) != 0 {
+				t.Fatalf("resolved=%+v err=%v", resolved, err)
+			}
+			accepted, _ := os.ReadFile(projectPath)
+			if !bytes.Contains(accepted, []byte(tc.title)) {
+				t.Fatalf("wrong accepted content:\n%s", accepted)
+			}
+			assertV2VisibleFrontmatter(t, accepted, 2)
+			for _, forbidden := range []string{"sync_status:", "sync_hash:", "base_hash:", "project_hash:", "vault_hash:"} {
+				if bytes.Contains(accepted, []byte(forbidden)) {
+					t.Fatalf("leaked %q:\n%s", forbidden, accepted)
+				}
+			}
+			followup, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+			if err != nil || len(followup.Operations) != 0 || len(followup.Conflicts) != 0 {
+				t.Fatalf("resolution did not converge: report=%+v err=%v", followup, err)
+			}
+		})
+	}
+}
+
+func TestV2EngineNormalizesCRLFInventoryAndThenConverges(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	directory := filepath.Join(fixture.project, "docs", "session-review")
+	for _, name := range []string{"项目回顾.md", "项目历史.md"} {
+		filename := filepath.Join(directory, name)
+		body, err := os.ReadFile(filename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filename, bytes.ReplaceAll(body, []byte("\n"), []byte("\r\n")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	first, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(first.Errors) != 0 || len(first.Conflicts) != 0 {
+		t.Fatalf("CRLF first sync report=%+v err=%v", first, err)
+	}
+	for _, operation := range first.Operations {
+		if operation.Kind == OperationConflict || operation.RelativePath == "invalid_hash" {
+			t.Fatalf("CRLF inventory rejected: %+v", first)
+		}
+	}
+	projectHistory := filepath.Join(directory, "项目历史.md")
+	projectBody, _ := os.ReadFile(projectHistory)
+	if bytes.Contains(projectBody, []byte("\r")) {
+		t.Fatal("accepted project side was not normalized")
+	}
+	projectBody = bytes.Replace(projectBody, []byte("信任链与 dry-run 边界修复"), []byte("CRLF 同步编辑"), 1)
+	projectBody = bytes.ReplaceAll(projectBody, []byte("\n"), []byte("\r\n"))
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(second.Errors) != 0 || len(second.Conflicts) != 0 {
+		t.Fatalf("CRLF edited sync report=%+v err=%v", second, err)
+	}
+	third, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(third.Operations) != 0 || len(third.Conflicts) != 0 {
+		t.Fatalf("CRLF edited sync did not converge: report=%+v err=%v", third, err)
+	}
+}
+
 func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T) {
 	fixture := newEngineFixture(t)
 	engine, err := NewEngine(fixture.options())
@@ -437,6 +553,24 @@ func writeFixtureDecision(t *testing.T, fixture engineFixture, relative string) 
 	}
 	if err := os.WriteFile(filename, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeV2EngineFixture(t *testing.T, fixture engineFixture) {
+	t.Helper()
+	directory := filepath.Join(fixture.project, "docs", "session-review")
+	if err := os.Remove(filepath.Join(directory, "project-overview.md")); err != nil {
+		t.Fatal(err)
+	}
+	for name, document := range map[string]syncdoc.Document{
+		"项目回顾.md": v2ReviewWithTwoDecisions(t),
+		"项目历史.md": v2HistoryWithTwoEvents(t),
+	} {
+		body := renderDocument(t, document)
+		body = bytes.Replace(body, []byte("project-0123456789abcdef"), []byte(fixture.projectID), 1)
+		if err := os.WriteFile(filepath.Join(directory, name), body, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

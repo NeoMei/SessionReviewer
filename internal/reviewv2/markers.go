@@ -47,29 +47,70 @@ type MarkerSpan struct {
 // ValidatedMarkerSpans parses the complete v2 document with the authoritative
 // marker grammar and returns its bounded semantic blocks in source order.
 func ValidatedMarkerSpans(source []byte, entityType string) ([]MarkerSpan, error) {
+	normalized, spans, err := ValidatedMarkerDocument(source, entityType)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.Equal(source, normalized) {
+		return spans, nil
+	}
+	offsets := normalizedToOriginalOffsets(source)
+	for index := range spans {
+		if spans[index].Start < 0 || spans[index].End >= len(offsets) {
+			return nil, errors.New("validated marker span is out of bounds")
+		}
+		spans[index].Start = offsets[spans[index].Start]
+		spans[index].End = offsets[spans[index].End]
+	}
+	return spans, nil
+}
+
+// ValidatedMarkerDocument returns the authoritative LF-normalized document and
+// marker spans in that same coordinate space. Consumers that retain spans
+// should use the returned source rather than slicing their original input.
+func ValidatedMarkerDocument(source []byte, entityType string) ([]byte, []MarkerSpan, error) {
 	blocks := map[string]markerBlock(nil)
+	var normalized []byte
 	switch entityType {
 	case "project_review":
 		document, err := ParseReview(source)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		blocks = document.blocks
+		normalized = document.source
 	case "project_history":
 		document, err := ParseHistory(source)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		blocks = document.blocks
+		normalized = document.source
 	default:
-		return nil, fmt.Errorf("unsupported v2 entity type %q", entityType)
+		return nil, nil, fmt.Errorf("unsupported v2 entity type %q", entityType)
 	}
 	result := make([]MarkerSpan, 0, len(blocks))
 	for _, block := range blocks {
 		result = append(result, MarkerSpan{Kind: block.kind, ID: block.id, Start: block.whole.start, End: block.whole.end})
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Start < result[j].Start })
-	return result, nil
+	return bytes.Clone(normalized), result, nil
+}
+
+func normalizedToOriginalOffsets(source []byte) []int {
+	normalizedLength := len(normalizeMarkdownSource(source))
+	offsets := make([]int, normalizedLength+1)
+	original, normalized := 0, 0
+	for original < len(source) {
+		if source[original] == '\r' && original+1 < len(source) && source[original+1] == '\n' {
+			original += 2
+		} else {
+			original++
+		}
+		normalized++
+		offsets[normalized] = original
+	}
+	return offsets
 }
 
 type frontmatterIdentity struct {

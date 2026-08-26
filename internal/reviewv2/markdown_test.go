@@ -37,6 +37,37 @@ func TestTwoDocumentRoundTripPreservesUnknownContentAndStableIDs(t *testing.T) {
 	}
 }
 
+func TestValidatedMarkerSpansUseCallerSourceCoordinatesAndNormalizedExport(t *testing.T) {
+	source := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
+	crlf := bytes.ReplaceAll(source, []byte("\n"), []byte("\r\n"))
+
+	spans, err := ValidatedMarkerSpans(crlf, "project_history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("spans=%+v", spans)
+	}
+	block := crlf[spans[0].Start:spans[0].End]
+	if !bytes.HasPrefix(block, []byte("<!-- session-reviewer:event")) ||
+		!bytes.HasSuffix(block, []byte("<!-- /session-reviewer:event -->\r\n")) {
+		t.Fatalf("caller-coordinate span sliced wrong bytes: %q", block)
+	}
+
+	normalized, normalizedSpans, err := ValidatedMarkerDocument(crlf, "project_history")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(normalized, []byte("\r")) || !bytes.Equal(normalized, source) {
+		t.Fatalf("normalized source mismatch")
+	}
+	normalizedBlock := normalized[normalizedSpans[0].Start:normalizedSpans[0].End]
+	if !bytes.HasPrefix(normalizedBlock, []byte("<!-- session-reviewer:event")) ||
+		!bytes.HasSuffix(normalizedBlock, []byte("<!-- /session-reviewer:event -->\n")) {
+		t.Fatalf("normalized-coordinate span sliced wrong bytes: %q", normalizedBlock)
+	}
+}
+
 func TestMarkerScannerRejectsHostileStructuresAndIgnoresFencedMarkers(t *testing.T) {
 	valid := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
 	document, err := ParseHistory(valid)

@@ -19,6 +19,10 @@ type Candidate struct {
 	RelativePath string
 	Document     syncdoc.Document
 	Hash         string
+	// Source and SourceHash retain the exact on-disk preimage when Document
+	// rendering canonicalizes representation such as compact-v2 CRLF input.
+	Source     []byte
+	SourceHash string
 }
 
 type MergeInput struct {
@@ -135,15 +139,9 @@ func mergeFromBase(input MergeInput) MergeResult {
 		return conflictResult("invalid_path", nil)
 	}
 	changed := !unitSetsEqual(baseUnits, merged) || targetPath != input.BasePath
-	accepted, err := candidate.FinalizeHumanMerge(*input.Base, changed)
+	accepted, err := finalizeAcceptedDocument(candidate, input.Base, changed)
 	if err != nil {
 		return conflictResult(reasonForHumanValidation(err), nil)
-	}
-	if !isCompactV2Document(accepted) {
-		accepted, err = accepted.WithSyncStatus("synced")
-		if err != nil {
-			return conflictResult("invalid_document", nil)
-		}
 	}
 	if !validDocumentShape(accepted) {
 		return conflictResult("invalid_document", nil)
@@ -334,11 +332,9 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	if err != nil {
 		return conflictResult("invalid_document", nil)
 	}
-	if !isCompactV2Document(accepted) {
-		accepted, err = accepted.WithSyncStatus("synced")
-		if err != nil {
-			return conflictResult("invalid_document", nil)
-		}
+	accepted, err = finalizeAcceptedDocument(accepted, nil, false)
+	if err != nil {
+		return conflictResult("invalid_document", nil)
 	}
 	rendered, err := accepted.Render()
 	if err != nil {
@@ -349,6 +345,20 @@ func mergeFirstSync(input MergeInput) MergeResult {
 		return conflictResult("invalid_path", nil)
 	}
 	return acceptedResult(input, target, accepted)
+}
+
+func finalizeAcceptedDocument(selected syncdoc.Document, base *syncdoc.Document, changed bool) (syncdoc.Document, error) {
+	var err error
+	if base != nil {
+		selected, err = selected.FinalizeHumanMerge(*base, changed)
+		if err != nil {
+			return syncdoc.Document{}, err
+		}
+	}
+	if isCompactV2Document(selected) {
+		return selected, nil
+	}
+	return selected.WithSyncStatus("synced")
 }
 
 func pathUnit(relative string) syncdoc.Unit {
@@ -379,6 +389,15 @@ func validateCandidateClaim(candidate Candidate) error {
 	computed := syncdoc.ContentHash(rendered)
 	if !lowerSHA256.MatchString(candidate.Hash) || candidate.Hash != computed {
 		return errCandidateHash
+	}
+	if candidate.Source != nil || candidate.SourceHash != "" {
+		if candidate.Source == nil || !lowerSHA256.MatchString(candidate.SourceHash) || syncdoc.ContentHash(candidate.Source) != candidate.SourceHash {
+			return errCandidateHash
+		}
+		sourceDocument, sourceErr := syncdoc.Parse(candidate.RelativePath, candidate.Source)
+		if sourceErr != nil || documentHash(sourceDocument) != candidate.Hash {
+			return errCandidateHash
+		}
 	}
 	_, err = syncdoc.Parse(candidate.RelativePath, rendered)
 	return err
@@ -926,7 +945,13 @@ func candidateEquals(input MergeInput, candidate Candidate, target string, accep
 	if !candidate.Present || !candidatePathEquals(input, candidate.RelativePath, target) {
 		return false
 	}
-	return candidate.Document.SemanticEqual(accepted)
+	if !candidate.Document.SemanticEqual(accepted) {
+		return false
+	}
+	if candidate.SourceHash == "" || !isCompactV2Document(accepted) {
+		return true
+	}
+	return candidate.SourceHash == documentHash(accepted)
 }
 
 func candidatePathEquals(input MergeInput, candidatePath, target string) bool {

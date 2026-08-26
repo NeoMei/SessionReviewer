@@ -927,6 +927,42 @@ func TestV2MergeConflictAndConvergenceRules(t *testing.T) {
 	})
 }
 
+func TestV2CRLFMergeUsesNormalizedSemanticUnits(t *testing.T) {
+	toCRLF := func(t *testing.T, document syncdoc.Document) syncdoc.Document {
+		t.Helper()
+		source := bytes.ReplaceAll(renderDocument(t, document), []byte("\n"), []byte("\r\n"))
+		parsed, err := syncdoc.Parse("项目历史.md", source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return parsed
+	}
+	base := toCRLF(t, v2HistoryWithTwoEvents(t))
+	t.Run("different-events-merge", func(t *testing.T) {
+		project := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "CRLF project 标题")
+		vault := replaceV2Source(t, "项目历史.md", base, "继续验证发布链。", "CRLF vault 下一步")
+		got := Merge(v2MergeInput("project-history", "项目历史.md", base, project, vault))
+		if got.Kind != MergeWriteBoth || got.Accepted == nil {
+			t.Fatalf("merge=%+v", got)
+		}
+		rendered := renderDocument(t, *got.Accepted)
+		if !bytes.Contains(rendered, []byte("CRLF project 标题")) || !bytes.Contains(rendered, []byte("CRLF vault 下一步")) || !bytes.Contains(rendered, []byte("timeline-in-fence")) {
+			t.Fatalf("merged content lost:\n%s", rendered)
+		}
+		if _, err := syncdoc.Parse("项目历史.md", rendered); err != nil {
+			t.Fatalf("accepted document did not reparse: %v", err)
+		}
+	})
+	t.Run("same-event-conflicts", func(t *testing.T) {
+		project := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "CRLF project")
+		vault := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "CRLF vault")
+		got := Merge(v2MergeInput("project-history", "项目历史.md", base, project, vault))
+		if got.Kind != MergeConflict || got.Reason != "unit_conflict" {
+			t.Fatalf("merge=%+v", got)
+		}
+	})
+}
+
 func TestV2MergeRejectsRenameAwayFromStableFilename(t *testing.T) {
 	base := v2HistoryWithTwoEvents(t)
 	input := v2MergeInput("project-history", "项目历史.md", base, base, base)

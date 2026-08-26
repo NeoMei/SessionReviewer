@@ -411,6 +411,45 @@ func TestSelectResolutionExistingNoSemanticChangeDoesNotIncrementRevision(t *tes
 	}
 }
 
+func TestV2SelectResolutionUsesCompactFinalizationAndConverges(t *testing.T) {
+	base := v2HistoryWithTwoEvents(t)
+	project := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "project 标题")
+	vault := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "vault 标题")
+	manual := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "manual 标题")
+	record := v2ConflictRecordForDocuments(t, &base, &project, &vault)
+
+	for _, tc := range []struct {
+		name, title string
+		resolution  Resolution
+		manual      *syncdoc.Document
+	}{
+		{name: "project", title: "project 标题", resolution: Resolution{ConflictID: record.ID, Action: AcceptProject}},
+		{name: "vault", title: "vault 标题", resolution: Resolution{ConflictID: record.ID, Action: AcceptObsidian}},
+		{name: "manual", title: "manual 标题", resolution: Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/validated/manual.md"}, manual: &manual},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := SelectResolution(record, tc.resolution, candidate("项目历史.md", project), candidate("项目历史.md", vault), tc.manual)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rendered := renderDocument(t, selected)
+			if !bytes.Contains(rendered, []byte(tc.title)) {
+				t.Fatalf("selected wrong revision:\n%s", rendered)
+			}
+			assertV2VisibleFrontmatter(t, rendered, 2)
+			for _, forbidden := range []string{"sync_status:", "sync_hash:", "base_hash:", "project_hash:", "vault_hash:"} {
+				if bytes.Contains(rendered, []byte(forbidden)) {
+					t.Fatalf("compact selection leaked %q:\n%s", forbidden, rendered)
+				}
+			}
+			followup := Merge(v2MergeInput("project-history", "项目历史.md", selected, selected, selected))
+			if followup.Kind != MergeNoop {
+				t.Fatalf("selected resolution did not converge: %+v", followup)
+			}
+		})
+	}
+}
+
 func TestSelectResolutionRejectsMalformedDuplicateAndMissingCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -765,6 +804,28 @@ func conflictRecordForDocuments(t *testing.T, relative string, base, project, va
 	artifact, err := BuildConflict(ConflictRecord{
 		Version: 1, EntityID: "decision-sync", ProjectID: "project-1111111111111111", Kind: ConflictUnits,
 		RelativePath: relative, BasePath: relative, ProjectPath: relative, VaultPath: relative,
+		Base: render(base), Project: render(project), Vault: render(vault), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Record == nil {
+		t.Fatalf("unexpected repair: %+v", artifact.Repair)
+	}
+	return *artifact.Record
+}
+
+func v2ConflictRecordForDocuments(t *testing.T, base, project, vault *syncdoc.Document) ConflictRecord {
+	t.Helper()
+	render := func(document *syncdoc.Document) []byte {
+		if document == nil {
+			return nil
+		}
+		return renderDocument(t, *document)
+	}
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "project-history", ProjectID: "project-0123456789abcdef", Kind: ConflictUnits,
+		RelativePath: "项目历史.md", BasePath: "项目历史.md", ProjectPath: "项目历史.md", VaultPath: "项目历史.md",
 		Base: render(base), Project: render(project), Vault: render(vault), CreatedAt: conflictTime,
 	})
 	if err != nil {

@@ -2,6 +2,7 @@ package syncdoc
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,15 @@ import (
 )
 
 const v2UnitPrefix = "session-reviewer/"
+
+type v2DocumentState struct {
+	entityType string
+	spans      []reviewv2.MarkerSpan
+	shell      Document
+	semantic   UnitSet
+	physical   map[UnitKey][]byte
+	logical    map[UnitKey][]byte
+}
 
 func v2UnitKey(kind, id string) UnitKey {
 	return UnitKey{Kind: UnitSection, Name: v2UnitPrefix + kind + "/" + id}
@@ -34,75 +44,59 @@ func (d Document) v2EntityType() (string, bool) {
 	return entityType, true
 }
 
-func validatedV2Source(mappingNode *yaml.Node, source []byte) error {
+func validatedV2Source(mappingNode *yaml.Node, source []byte) ([]byte, []reviewv2.MarkerSpan, string, error) {
 	document := Document{frontmatter: mappingNode}
 	entityType, v2 := document.v2EntityType()
 	if !v2 {
 		if schema, ok := mappingValue(mappingNode, "schema_version"); ok {
 			version, err := positiveInt(schema)
 			if err == nil && version == reviewv2.SchemaVersion {
-				return invalidDocument("schema v2 requires a compact review entity type")
+				return nil, nil, "", invalidDocument("schema v2 requires a compact review entity type")
 			}
 		}
-		return nil
+		return source, nil, "", nil
 	}
-	if _, err := reviewv2.ValidatedMarkerSpans(source, entityType); err != nil {
-		return invalidDocument("invalid compact review document")
+	normalized, spans, err := reviewv2.ValidatedMarkerDocument(source, entityType)
+	if err != nil {
+		return nil, nil, "", invalidDocument("invalid compact review document")
 	}
-	return nil
+	return normalized, spans, entityType, nil
 }
 
-func (d Document) v2SemanticUnits() (UnitSet, error) {
-	entityType, ok := d.v2EntityType()
-	if !ok {
-		return nil, invalidDocument("not a compact review document")
+func buildV2DocumentState(document Document, source []byte, spans []reviewv2.MarkerSpan, entityType string) (*v2DocumentState, error) {
+	state := &v2DocumentState{
+		entityType: entityType,
+		spans:      append([]reviewv2.MarkerSpan(nil), spans...),
+		physical:   make(map[UnitKey][]byte, len(spans)),
+		logical:    make(map[UnitKey][]byte, len(spans)),
 	}
-	source, err := d.Render()
+	shellSource, err := v2ShellSource(source, spans, state.physical, state.logical)
 	if err != nil {
 		return nil, err
 	}
-	spans, err := reviewv2.ValidatedMarkerSpans(source, entityType)
-	if err != nil {
-		return nil, invalidDocument("invalid compact review marker blocks")
-	}
-	shell, err := v2ShellSource(source, spans)
-	if err != nil {
-		return nil, err
-	}
-	shellDocument, err := Parse(d.relativePath, shell)
+	state.shell, err = parseDocument(document.relativePath, shellSource, false)
 	if err != nil {
 		return nil, invalidDocument("compact review shell cannot be parsed")
 	}
-	units := shellDocument.genericSemanticUnits()
+	state.semantic = state.shell.genericSemanticUnits()
 	for _, span := range spans {
-		units[v2UnitKey(span.Kind, span.ID)] = Unit{Present: true, Value: bytes.Clone(source[span.Start:span.End])}
+		key := v2UnitKey(span.Kind, span.ID)
+		count := replaceUnitBytes(state.semantic, state.physical[key], state.logical[key])
+		if count != 1 {
+			return nil, invalidDocument("compact review marker position cannot be represented")
+		}
+		state.semantic[key] = Unit{Present: true, Value: bytes.Clone(source[span.Start:span.End])}
 	}
-	return units, nil
+	return state, nil
 }
 
 func (d Document) withV2SemanticUnits(units UnitSet) (Document, error) {
 	entityType, ok := d.v2EntityType()
-	if !ok {
-		return Document{}, invalidDocument("not a compact review document")
-	}
-	source, err := d.Render()
-	if err != nil {
-		return Document{}, err
-	}
-	spans, err := reviewv2.ValidatedMarkerSpans(source, entityType)
-	if err != nil {
-		return Document{}, invalidDocument("invalid compact review marker blocks")
-	}
-	shellSource, err := v2ShellSource(source, spans)
-	if err != nil {
-		return Document{}, err
-	}
-	shellDocument, err := Parse(d.relativePath, shellSource)
-	if err != nil {
-		return Document{}, invalidDocument("compact review shell cannot be parsed")
+	if !ok || d.v2 == nil || d.v2.entityType != entityType {
+		return Document{}, invalidDocument("compact review semantic state is unavailable")
 	}
 	generic := make(UnitSet, len(units))
-	markers := make(map[UnitKey]Unit, len(spans))
+	markers := make(map[UnitKey]Unit, len(d.v2.spans))
 	for key, unit := range units {
 		if isV2MarkerUnitKey(key) {
 			markers[key] = cloneUnit(unit)
@@ -110,17 +104,20 @@ func (d Document) withV2SemanticUnits(units UnitSet) (Document, error) {
 		}
 		generic[key] = cloneUnit(unit)
 	}
-	if len(markers) != len(spans) {
+	if len(markers) != len(d.v2.spans) {
 		return Document{}, invalidDocument("compact review marker units cannot be added or deleted")
 	}
-	for _, span := range spans {
+	for _, span := range d.v2.spans {
 		key := v2UnitKey(span.Kind, span.ID)
 		unit, found := markers[key]
 		if !found || !unit.Present || len(unit.KeyPresentation) != 0 || len(unit.HeadingPresentation) != 0 {
 			return Document{}, invalidDocument("invalid compact review marker unit")
 		}
+		if count := replaceUnitBytes(generic, d.v2.logical[key], d.v2.physical[key]); count != 1 {
+			return Document{}, invalidDocument("compact review marker position was changed")
+		}
 	}
-	rebuiltShell, err := shellDocument.WithUnits(generic)
+	rebuiltShell, err := d.v2.shell.WithUnits(generic)
 	if err != nil {
 		return Document{}, err
 	}
@@ -128,44 +125,83 @@ func (d Document) withV2SemanticUnits(units UnitSet) (Document, error) {
 	if err != nil {
 		return Document{}, err
 	}
-	for _, span := range spans {
-		placeholder := v2Placeholder(span)
-		if bytes.Count(rebuilt, placeholder) != 1 {
+	for _, span := range d.v2.spans {
+		key := v2UnitKey(span.Kind, span.ID)
+		physical := d.v2.physical[key]
+		if bytes.Count(rebuilt, physical) != 1 {
 			return Document{}, invalidDocument("compact review marker position was changed")
 		}
-		rebuilt = bytes.Replace(rebuilt, placeholder, markers[v2UnitKey(span.Kind, span.ID)].Value, 1)
+		rebuilt = bytes.Replace(rebuilt, physical, markers[key].Value, 1)
 	}
 	result, err := Parse(d.relativePath, rebuilt)
 	if err != nil {
 		return Document{}, invalidDocument("rebuilt compact review document cannot be reparsed")
 	}
-	if _, err := reviewv2.ValidatedMarkerSpans(rebuilt, entityType); err != nil {
-		return Document{}, invalidDocument("rebuilt compact review markers are invalid")
-	}
 	return result, nil
 }
 
-func v2ShellSource(source []byte, spans []reviewv2.MarkerSpan) ([]byte, error) {
+func v2ShellSource(source []byte, spans []reviewv2.MarkerSpan, physical, logical map[UnitKey][]byte) ([]byte, error) {
 	var out bytes.Buffer
 	previous := 0
 	for _, span := range spans {
 		if span.Start < previous || span.Start < 0 || span.End <= span.Start || span.End > len(source) {
 			return nil, invalidDocument("invalid compact review marker span")
 		}
-		placeholder := v2Placeholder(span)
-		if bytes.Contains(source, placeholder) {
-			return nil, invalidDocument("compact review contains a reserved merge placeholder")
+		key := v2UnitKey(span.Kind, span.ID)
+		var anchor []byte
+		for {
+			nonce := make([]byte, 32)
+			if _, err := rand.Read(nonce); err != nil {
+				return nil, invalidDocument("compact review shell anchor cannot be generated")
+			}
+			anchor = []byte(fmt.Sprintf("<!-- sr-v2-anchor:%x -->\n", nonce))
+			if !bytes.Contains(source, anchor) && !bytes.Contains(out.Bytes(), anchor) {
+				break
+			}
 		}
+		physical[key] = anchor
+		logical[key] = []byte("\x00sr-v2-unit:" + span.Kind + ":" + span.ID + "\x00\n")
 		out.Write(source[previous:span.Start])
-		out.Write(placeholder)
+		out.Write(anchor)
 		previous = span.End
 	}
 	out.Write(source[previous:])
 	return out.Bytes(), nil
 }
 
-func v2Placeholder(span reviewv2.MarkerSpan) []byte {
-	return []byte(fmt.Sprintf("<!-- sr-v2-unit:%s:%s -->\n", span.Kind, span.ID))
+func replaceUnitBytes(units UnitSet, old, replacement []byte) int {
+	count := 0
+	for key, unit := range units {
+		hits := bytes.Count(unit.Value, old)
+		if hits == 0 {
+			continue
+		}
+		count += hits
+		unit.Value = bytes.ReplaceAll(unit.Value, old, replacement)
+		units[key] = unit
+	}
+	return count
+}
+
+func cloneV2DocumentState(state *v2DocumentState) *v2DocumentState {
+	if state == nil {
+		return nil
+	}
+	result := &v2DocumentState{
+		entityType: state.entityType,
+		spans:      append([]reviewv2.MarkerSpan(nil), state.spans...),
+		shell:      cloneDocument(state.shell),
+		semantic:   cloneUnitSet(state.semantic),
+		physical:   make(map[UnitKey][]byte, len(state.physical)),
+		logical:    make(map[UnitKey][]byte, len(state.logical)),
+	}
+	for key, value := range state.physical {
+		result.physical[key] = bytes.Clone(value)
+	}
+	for key, value := range state.logical {
+		result.logical[key] = bytes.Clone(value)
+	}
+	return result
 }
 
 func isV2MarkerUnitKey(key UnitKey) bool {

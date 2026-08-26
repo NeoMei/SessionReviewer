@@ -456,15 +456,9 @@ func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, exp
 	if result := redact.Default().Text(string(rendered)); len(result.Findings) != 0 {
 		return syncdoc.Document{}, ErrSensitiveContent
 	}
-	if base != nil {
-		selected, err = selected.FinalizeHumanMerge(*base, true)
-		if err != nil {
-			return syncdoc.Document{}, err
-		}
-	}
-	selected, err = selected.WithSyncStatus("synced")
+	selected, err = finalizeAcceptedDocument(selected, base, true)
 	if err != nil {
-		return syncdoc.Document{}, syncdoc.ErrInvalidDocument
+		return syncdoc.Document{}, err
 	}
 	if base == nil {
 		if !validNewCandidate(selected, record.EntityID, record.ProjectID) {
