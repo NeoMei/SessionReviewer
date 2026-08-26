@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
@@ -270,10 +271,13 @@ type conflictRecordWire struct {
 }
 
 func ParseConflictRecord(body []byte) (ConflictRecord, error) {
-	if len(body) == 0 || len(body) > MaxConflictRecordBytes {
+	if len(body) == 0 || len(body) > MaxConflictRecordBytes || !utf8.Valid(body) || !validConflictUnicodeEscapes(body) {
 		return ConflictRecord{}, ErrInvalidConflict
 	}
 	if err := rejectDuplicateConflictJSONKeys(body); err != nil {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
+	if err := validateExactConflictJSONWire(body); err != nil {
 		return ConflictRecord{}, ErrInvalidConflict
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -314,6 +318,47 @@ func ParseConflictRecord(body []byte) (ConflictRecord, error) {
 	return record, nil
 }
 
+func validConflictUnicodeEscapes(body []byte) bool {
+	inString := false
+	for index := 0; index < len(body); index++ {
+		switch body[index] {
+		case '"':
+			inString = !inString
+		case '\\':
+			if !inString || index+1 >= len(body) {
+				continue
+			}
+			if body[index+1] != 'u' {
+				index++
+				continue
+			}
+			if index+6 > len(body) {
+				return false
+			}
+			value, err := strconv.ParseUint(string(body[index+2:index+6]), 16, 16)
+			if err != nil {
+				return false
+			}
+			switch {
+			case value >= 0xd800 && value <= 0xdbff:
+				if index+12 > len(body) || body[index+6] != '\\' || body[index+7] != 'u' {
+					return false
+				}
+				low, err := strconv.ParseUint(string(body[index+8:index+12]), 16, 16)
+				if err != nil || low < 0xdc00 || low > 0xdfff {
+					return false
+				}
+				index += 11
+			case value >= 0xdc00 && value <= 0xdfff:
+				return false
+			default:
+				index += 5
+			}
+		}
+	}
+	return true
+}
+
 func rejectDuplicateConflictJSONKeys(body []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.UseNumber()
@@ -324,6 +369,90 @@ func rejectDuplicateConflictJSONKeys(body []byte) error {
 		return ErrInvalidConflict
 	}
 	return nil
+}
+
+type conflictJSONKind uint8
+
+const (
+	conflictJSONObject conflictJSONKind = iota + 1
+	conflictJSONString
+	conflictJSONNumber
+)
+
+type conflictJSONSchema struct {
+	kind   conflictJSONKind
+	fields map[string]conflictJSONSchema
+}
+
+func validateExactConflictJSONWire(body []byte) error {
+	stringField := conflictJSONSchema{kind: conflictJSONString}
+	schema := conflictJSONSchema{kind: conflictJSONObject, fields: map[string]conflictJSONSchema{
+		"version": {kind: conflictJSONNumber},
+		"id":      stringField, "entity_id": stringField, "project_id": stringField, "kind": stringField,
+		"relative_path": stringField, "base_path": stringField, "project_path": stringField, "vault_path": stringField,
+		"base_hash": stringField, "project_hash": stringField, "vault_hash": stringField,
+		"base": stringField, "project": stringField, "vault": stringField, "suggested": stringField,
+		"created_at": stringField, "resolution_status": stringField, "resolution_action": stringField,
+		"resolved_hash": stringField, "resolved_at": stringField,
+	}}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := scanExactConflictJSONValue(decoder, schema); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return ErrInvalidConflict
+	}
+	return nil
+}
+
+func scanExactConflictJSONValue(decoder *json.Decoder, schema conflictJSONSchema) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	switch schema.kind {
+	case conflictJSONString:
+		if _, ok := token.(string); !ok {
+			return ErrInvalidConflict
+		}
+		return nil
+	case conflictJSONNumber:
+		if _, ok := token.(json.Number); !ok {
+			return ErrInvalidConflict
+		}
+		return nil
+	case conflictJSONObject:
+		if token != json.Delim('{') {
+			return ErrInvalidConflict
+		}
+		seen := make(map[string]struct{}, len(schema.fields))
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			name, ok := nameToken.(string)
+			if err != nil || !ok {
+				return ErrInvalidConflict
+			}
+			field, allowed := schema.fields[name]
+			if !allowed {
+				return ErrInvalidConflict
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return ErrInvalidConflict
+			}
+			seen[name] = struct{}{}
+			if err := scanExactConflictJSONValue(decoder, field); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return ErrInvalidConflict
+		}
+		return nil
+	default:
+		return ErrInvalidConflict
+	}
 }
 
 func scanConflictJSONValue(decoder *json.Decoder) error {

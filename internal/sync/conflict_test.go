@@ -170,6 +170,151 @@ func TestParseConflictRecordRejectsDuplicateSecurityFields(t *testing.T) {
 	}
 }
 
+func TestParseConflictRecordRejectsCaseAliasesBeforeTypedDecode(t *testing.T) {
+	t.Parallel()
+
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := artifact.Notes.Project.Content
+	for _, tc := range []struct {
+		name, field, alias, shadow string
+	}{
+		{name: "id", field: "id", alias: "ID", shadow: `"shadow-id"`},
+		{name: "path", field: "relative_path", alias: "RELATIVE_PATH", shadow: `"shadow/path.md"`},
+		{name: "hash", field: "project_hash", alias: "PROJECT_HASH", shadow: `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`},
+		{name: "candidate", field: "project", alias: "PROJECT", shadow: `"SHADOW-CANDIDATE"`},
+		{name: "resolution", field: "resolution_status", alias: "RESOLUTION_STATUS", shadow: `"resolved"`},
+	} {
+		t.Run(tc.name+"/alias-only", func(t *testing.T) {
+			aliasOnly := bytes.Replace(canonical, []byte(`"`+tc.field+`"`), []byte(`"`+tc.alias+`"`), 1)
+			if bytes.Equal(aliasOnly, canonical) {
+				t.Fatalf("canonical conflict lacks %q", tc.field)
+			}
+			if _, err := ParseConflictRecord(aliasOnly); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("alias-only %s accepted: err=%v\n%s", tc.alias, err, aliasOnly)
+			}
+		})
+		t.Run(tc.name+"/canonical-and-alias", func(t *testing.T) {
+			needle := []byte(`"` + tc.field + `": `)
+			index := bytes.Index(canonical, needle)
+			if index < 0 {
+				t.Fatalf("canonical conflict lacks %q", tc.field)
+			}
+			both := append(bytes.Clone(canonical[:index]), []byte(`"`+tc.alias+`": `+tc.shadow+",\n  ")...)
+			both = append(both, canonical[index:]...)
+			if _, err := ParseConflictRecord(both); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("canonical+alias %s accepted: err=%v\n%s", tc.alias, err, both)
+			}
+		})
+	}
+}
+
+func TestParseConflictRecordRejectsObjectValuesOutsideExactWireTree(t *testing.T) {
+	t.Parallel()
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, replacement := range [][]byte{
+		[]byte(`"project": {"content":"first","Content":"second"}`),
+		[]byte(`"resolution_status": {"status":"open","Status":"resolved"}`),
+	} {
+		body := bytes.Replace(artifact.Notes.Project.Content, []byte(`"project": "PROJECT"`), replacement, 1)
+		if bytes.Equal(body, artifact.Notes.Project.Content) && bytes.Contains(replacement, []byte("resolution_status")) {
+			body = bytes.Replace(artifact.Notes.Project.Content, []byte(`"resolution_status": "open"`), replacement, 1)
+		}
+		if _, err := ParseConflictRecord(body); !errors.Is(err, ErrInvalidConflict) {
+			t.Fatalf("nested object accepted: err=%v\n%s", err, body)
+		}
+	}
+}
+
+func TestParseConflictRecordAcceptsLegalNonCanonicalFormatting(t *testing.T) {
+	t.Parallel()
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(artifact.Notes.Project.Content, &wire); err != nil {
+		t.Fatal(err)
+	}
+	compact, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseConflictRecord(compact)
+	if err != nil || parsed.ID != artifact.Record.ID || !bytes.Equal(parsed.Project, artifact.Record.Project) {
+		t.Fatalf("parsed=%+v err=%v", parsed, err)
+	}
+}
+
+func TestParseConflictRecordRejectsInvalidUTF8BeforeCandidateAuthentication(t *testing.T) {
+	t.Parallel()
+	replacementCandidate := []byte("PRO\xef\xbf\xbdJECT")
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: replacementCandidate, CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalid := bytes.Replace(artifact.Notes.Project.Content, replacementCandidate, []byte("PRO\xffJECT"), 1)
+	if bytes.Equal(invalid, artifact.Notes.Project.Content) {
+		t.Fatal("replacement candidate was not present in rendered conflict")
+	}
+	if _, err := ParseConflictRecord(invalid); !errors.Is(err, ErrInvalidConflict) {
+		t.Fatalf("invalid UTF-8 candidate wire was accepted: err=%v", err)
+	}
+}
+
+func TestParseConflictRecordRejectsUnpairedSurrogateCandidateEscape(t *testing.T) {
+	t.Parallel()
+	replacementCandidate := []byte("PRO\xef\xbf\xbdJECT")
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: replacementCandidate, CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpaired := bytes.Replace(artifact.Notes.Project.Content, replacementCandidate, []byte(`PRO\ud800JECT`), 1)
+	if bytes.Equal(unpaired, artifact.Notes.Project.Content) {
+		t.Fatal("replacement candidate was not present in rendered conflict")
+	}
+	if _, err := ParseConflictRecord(unpaired); !errors.Is(err, ErrInvalidConflict) {
+		t.Fatalf("unpaired surrogate candidate wire was accepted: err=%v", err)
+	}
+}
+
+func TestParseConflictRecordAcceptsPairedSurrogateCandidateEscape(t *testing.T) {
+	t.Parallel()
+	candidate := []byte("A😀B")
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: candidate, CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	escaped := bytes.Replace(artifact.Notes.Project.Content, []byte("😀"), []byte(`\ud83d\ude00`), 1)
+	parsed, err := ParseConflictRecord(escaped)
+	if err != nil || !bytes.Equal(parsed.Project, candidate) {
+		t.Fatalf("paired surrogate parsed=%q err=%v", parsed.Project, err)
+	}
+}
+
 func TestConflictDuplicateKeyScannerRecurses(t *testing.T) {
 	t.Parallel()
 	for _, body := range [][]byte{
