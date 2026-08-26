@@ -9,6 +9,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 type Diagnostic struct {
@@ -20,6 +21,12 @@ type Diagnostic struct {
 func writeDiagnostic(w io.Writer, action string, err error) int {
 	diagnostic := fallbackDiagnostic(action)
 	switch {
+	case errors.As(err, new(*reviewv2.ErrMigrationRequired)) && action == "apply":
+		diagnostic = Diagnostic{
+			Code:    "E_APPLY_MIGRATION_REQUIRED",
+			Message: "accepted review must be migrated before applying a proposal",
+			Hint:    "run session-reviewer sync --dry-run, then run session-reviewer sync",
+		}
 	case errors.Is(err, cursor.ErrStale) && action == "apply":
 		diagnostic = Diagnostic{
 			Code:    "E_APPLY_CURSOR_STALE",

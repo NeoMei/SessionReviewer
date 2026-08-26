@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 const (
@@ -36,18 +37,18 @@ type ResumeCard struct {
 }
 
 // ResumeLedgerOnly derives a recovery card exclusively from accepted ledger
-// Markdown. ledger.Load is the sole project-state input boundary.
+// Markdown. reviewv2.Load is the sole project-state input boundary.
 func ResumeLedgerOnly(projectRoot string) (ResumeCard, error) {
-	state, err := ledger.Load(projectRoot)
-	return resumeLedgerOnly(state, err)
+	accepted, err := reviewv2.Load(projectRoot)
+	return resumeLedgerOnly(accepted.Legacy, err)
 }
 
 // ResumeLedgerOnlyExpected derives the same accepted-only recovery card while
-// requiring the project root opened by ledger.LoadExpected to retain a caller-
+// requiring the project root opened by reviewv2.LoadExpected to retain a caller-
 // pinned filesystem identity.
 func ResumeLedgerOnlyExpected(projectRoot string, expectedRoot os.FileInfo) (ResumeCard, error) {
-	state, err := ledger.LoadExpected(projectRoot, expectedRoot)
-	return resumeLedgerOnly(state, err)
+	accepted, err := reviewv2.LoadExpected(projectRoot, expectedRoot)
+	return resumeLedgerOnly(accepted.Legacy, err)
 }
 
 func resumeLedgerOnly(state ledger.State, err error) (ResumeCard, error) {

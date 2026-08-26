@@ -109,7 +109,7 @@ func validatePreparedReceiptBudget(plan ledger.WritePlan) error {
 	budget := uint64(4096)
 	limit := uint64(maxReceiptBytes)
 	for _, file := range plan.Files {
-		if len(file.Data) > ledger.MaxDocumentBytes {
+		if int64(len(file.Data)) > maxApplyTargetBytes(file.RelativePath) {
 			return fmt.Errorf("invalid target metadata for %s", file.RelativePath)
 		}
 		encoded := uint64(base64.StdEncoding.EncodedLen(len(file.Data)))
@@ -168,7 +168,7 @@ func (receipt applyReceipt) validate() error {
 			return fmt.Errorf("case-colliding receipt paths %q and %q", prior, file.RelativePath)
 		}
 		caseSeen[folded] = file.RelativePath
-		if !validApplyMode(file.TargetMode) || file.TargetSHA256 != digestBytes(file.TargetData) || len(file.TargetData) > ledger.MaxDocumentBytes {
+		if !validApplyMode(file.TargetMode) || file.TargetSHA256 != digestBytes(file.TargetData) || int64(len(file.TargetData)) > maxApplyTargetBytes(file.RelativePath) {
 			return fmt.Errorf("invalid target metadata for %s", file.RelativePath)
 		}
 		if file.PreimageExists {

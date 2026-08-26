@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -16,11 +17,30 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 )
 
 const recoveryProjectID = "project-0123456789abcdef"
+
+func TestResumeAndHistoryLoadV2WithoutMachineFieldsInHumanOutput(t *testing.T) {
+	root := recoveryFixture(t)
+	resume, err := ResumeLedgerOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := HistoryLedgerOnly(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := resume.Markdown() + history.Markdown()
+	for _, forbidden := range []string{"source_hash", "cursor", "revision", "evidence_id"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("human recovery output leaked %q:\n%s", forbidden, output)
+		}
+	}
+}
 
 func TestResumeIgnoresPendingEvidenceAndUsesLatestAcceptedSession(t *testing.T) {
 	root := recoveryFixture(t)
@@ -162,7 +182,9 @@ func pinnedRecoveryDirectoryInfo(t *testing.T, path string) os.FileInfo {
 func TestHistoryRejectsMissingAndCyclicSupersedes(t *testing.T) {
 	t.Run("missing predecessor", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "decisions/decision-new.md", "supersedes:\n  - decision-old", "supersedes:\n  - decision-missing")
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			decisionJSON(t, machine, "decision-new")["supersedes"] = []any{"decision-missing"}
+		})
 		if _, err := HistoryLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("err=%v", err)
 		}
@@ -170,7 +192,9 @@ func TestHistoryRejectsMissingAndCyclicSupersedes(t *testing.T) {
 
 	t.Run("cycle", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "decisions/decision-old.md", "supersedes: []", "supersedes:\n  - decision-new")
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			decisionJSON(t, machine, "decision-old")["supersedes"] = []any{"decision-new"}
+		})
 		if _, err := HistoryLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "cycle") {
 			t.Fatalf("err=%v", err)
 		}
@@ -178,7 +202,9 @@ func TestHistoryRejectsMissingAndCyclicSupersedes(t *testing.T) {
 
 	t.Run("self reference", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "decisions/decision-old.md", "supersedes: []", "supersedes:\n  - decision-old")
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			decisionJSON(t, machine, "decision-old")["supersedes"] = []any{"decision-old"}
+		})
 		if _, err := HistoryLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "itself") {
 			t.Fatalf("err=%v", err)
 		}
@@ -216,7 +242,9 @@ func TestHistoryOrdersCompleteSupersedesDAGReverseTopologically(t *testing.T) {
 
 func TestRecoveryFailsClosedOnMalformedAcceptedState(t *testing.T) {
 	root := recoveryFixture(t)
-	replaceRecoveryFile(t, root, "decisions/decision-old.md", "tags:\n  - ' Durability '", "tags:\n  - '   '")
+	mutateV2MachineJSON(t, root, func(machine map[string]any) {
+		decisionJSON(t, machine, "decision-old")["project_id"] = "project-fedcba9876543210"
+	})
 	if _, err := ResumeLedgerOnly(root); err == nil {
 		t.Fatal("resume accepted malformed ledger")
 	}
@@ -231,7 +259,7 @@ func TestRecoveryHandlesEmptyAcceptedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if card.ProjectID != recoveryProjectID || card.Goal != "" || card.StopPoint != "" || len(card.Drift) != 0 || len(card.OpenQuestions) != 0 {
+	if card.ProjectID != recoveryProjectID || card.Goal != "Recovery fixture" || card.StopPoint != "" || len(card.Drift) != 0 || len(card.OpenQuestions) != 0 {
 		t.Fatalf("card=%+v", card)
 	}
 	view, err := HistoryLedgerOnly(root)
@@ -249,7 +277,9 @@ func TestRecoveryHandlesEmptyAcceptedState(t *testing.T) {
 func TestResumeRejectsMissingCyclicAndDisconnectedSessionChains(t *testing.T) {
 	t.Run("missing next session", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "sessions/report-z.md", "next_session_id: a-latest", "next_session_id: missing-session")
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			sessionJSON(t, machine, "report-z")["next_session_id"] = "missing-session"
+		})
 		if _, err := ResumeLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "missing") {
 			t.Fatalf("err=%v", err)
 		}
@@ -257,18 +287,22 @@ func TestResumeRejectsMissingCyclicAndDisconnectedSessionChains(t *testing.T) {
 
 	t.Run("cycle", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "sessions/report-z.md", "previous_session_id: \"\"", "previous_session_id: a-latest")
-		replaceRecoveryFile(t, root, "sessions/report-a.md", "next_session_id: \"\"", "next_session_id: z-earlier")
-		if _, err := ResumeLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "cycle") {
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			sessionJSON(t, machine, "report-z")["previous_session_id"] = "a-latest"
+			sessionJSON(t, machine, "report-a")["next_session_id"] = "z-earlier"
+		})
+		if _, err := ResumeLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "chain") {
 			t.Fatalf("err=%v", err)
 		}
 	})
 
 	t.Run("disconnected", func(t *testing.T) {
 		root := recoveryFixture(t)
-		replaceRecoveryFile(t, root, "sessions/report-z.md", "next_session_id: a-latest", "next_session_id: \"\"")
-		replaceRecoveryFile(t, root, "sessions/report-a.md", "previous_session_id: z-earlier", "previous_session_id: \"\"")
-		if _, err := ResumeLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "disconnected") {
+		mutateV2MachineJSON(t, root, func(machine map[string]any) {
+			sessionJSON(t, machine, "report-z")["next_session_id"] = ""
+			sessionJSON(t, machine, "report-a")["previous_session_id"] = ""
+		})
+		if _, err := ResumeLedgerOnly(root); err == nil || !strings.Contains(err.Error(), "chain") {
 			t.Fatalf("err=%v", err)
 		}
 	})
@@ -542,7 +576,7 @@ func TestRecoveryBudgetCountsNestedEvidenceAndHasOverflowSafeBoundary(t *testing
 
 func recoveryFixture(t *testing.T) string {
 	t.Helper()
-	root := emptyRecoveryFixture(t)
+	root := emptyLegacyRecoveryFixture(t)
 	state, err := ledger.Load(root)
 	if err != nil {
 		t.Fatal(err)
@@ -578,10 +612,83 @@ func recoveryFixture(t *testing.T) string {
 	if _, err := ledger.Apply(plan); err != nil {
 		t.Fatal(err)
 	}
+	convertRecoveryFixtureToV2(t, root)
 	return root
 }
 
+func convertRecoveryFixtureToV2(t *testing.T, root string) {
+	t.Helper()
+	legacy, err := ledger.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.CurrentState.ProjectID = legacy.ProjectID
+	if legacy.CurrentState.Revision == 0 {
+		legacy.CurrentState.Revision = 1
+		legacy.CurrentState.Goal = "Recovery fixture"
+		legacy.CurrentState.Branch = "fixture"
+		legacy.CurrentState.NextAction = "Review accepted state"
+		legacy.CurrentState.LastVerified = "Fixture initialized"
+	}
+	for id, loop := range legacy.OpenLoops {
+		if strings.TrimSpace(loop.Question) == "" {
+			loop.Question = loop.Title
+			legacy.OpenLoops[id] = loop
+		}
+	}
+	for id, decision := range legacy.Decisions {
+		if strings.TrimSpace(decision.Rationale) == "" {
+			decision.Rationale = decision.Title
+		}
+		if strings.TrimSpace(decision.Consequences) == "" {
+			decision.Consequences = decision.Title
+		}
+		legacy.Decisions[id] = decision
+	}
+	for index := range legacy.Timeline {
+		legacy.Timeline[index].Evidence = []ledger.EvidenceRef{{
+			EvidenceID: fmt.Sprintf("fixture-event-%d", index),
+			SessionID:  "a-latest",
+			JSONLLine:  index + 1,
+			SourceHash: strings.Repeat("a", 64),
+			Summary:    "fixture verification",
+		}}
+	}
+	state, err := reviewv2.ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(root, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files {
+		full := filepath.Join(root, filepath.FromSlash(file.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, file.Data, file.Perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, relative := range []string{
+		"project-overview.md", "current-state.md", "evolution-timeline.md",
+		"decisions", "open-loops", "sessions",
+	} {
+		if err := os.RemoveAll(filepath.Join(root, "docs", "session-review", filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func emptyRecoveryFixture(t *testing.T) string {
+	t.Helper()
+	root := emptyLegacyRecoveryFixture(t)
+	convertRecoveryFixtureToV2(t, root)
+	return root
+}
+
+func emptyLegacyRecoveryFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	path := filepath.Join(root, "docs", "session-review", "project-overview.md")
@@ -593,6 +700,52 @@ func emptyRecoveryFixture(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func mutateV2MachineJSON(t *testing.T, root string, mutate func(map[string]any)) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var machine map[string]any
+	if err := json.Unmarshal(body, &machine); err != nil {
+		t.Fatal(err)
+	}
+	mutate(machine)
+	body, err = json.MarshalIndent(machine, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func decisionJSON(t *testing.T, machine map[string]any, id string) map[string]any {
+	t.Helper()
+	legacy := machine["legacy_compatibility"].(map[string]any)
+	for _, raw := range legacy["decisions"].([]any) {
+		decision := raw.(map[string]any)
+		if decision["id"] == id {
+			return decision
+		}
+	}
+	t.Fatalf("missing decision %q", id)
+	return nil
+}
+
+func sessionJSON(t *testing.T, machine map[string]any, id string) map[string]any {
+	t.Helper()
+	for _, raw := range machine["sessions"].([]any) {
+		session := raw.(map[string]any)
+		if session["id"] == id {
+			return session
+		}
+	}
+	t.Fatalf("missing session %q", id)
+	return nil
 }
 
 func recoverySession(id, sessionID string, phases []ledger.SessionPhase) ledger.SessionReport {

@@ -23,6 +23,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/proposal"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 const maxInputBytes = 4 << 20
@@ -274,6 +275,16 @@ func Run(opts Options) (result Result, retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, roots.Close()) }()
 	result = baseResult(ctx)
+	version, err := reviewv2.DetectVersionExpected(opts.ProjectRoot, roots.project.Info())
+	if err != nil {
+		return Result{}, err
+	}
+	if version == reviewv2.VersionLegacy {
+		if _, err := reviewv2.LoadExpected(opts.ProjectRoot, roots.project.Info()); err != nil {
+			return Result{}, err
+		}
+		return Result{}, fmt.Errorf("legacy review ledger unexpectedly loaded without a migration requirement")
+	}
 	current, err := cursor.LoadReadOnlyRoot(roots.data.Root, ctx.Packet.ProjectID, ctx.Packet.SessionID)
 	if err != nil {
 		return Result{}, err
@@ -332,25 +343,25 @@ func Run(opts Options) (result Result, retErr error) {
 	if err := verifyIdentity(); err != nil {
 		return Result{}, err
 	}
-	state, err := ledger.LoadExpected(opts.ProjectRoot, roots.project.Info())
+	accepted, err := reviewv2.LoadExpected(opts.ProjectRoot, roots.project.Info())
 	if err != nil {
 		return Result{}, err
 	}
-	if state.ProjectID != ctx.Packet.ProjectID {
+	if accepted.Legacy.ProjectID != ctx.Packet.ProjectID {
 		return Result{}, fmt.Errorf("ledger project ID does not match evidence")
 	}
-	baselineUsage, err := ledger.SnapshotUsageExpected(opts.ProjectRoot, roots.project.Info())
+	baselineUsage, err := reviewv2.SnapshotUsageExpected(opts.ProjectRoot, roots.project.Info())
 	if err != nil {
 		return Result{}, err
 	}
-	if digestLedgerSnapshot(baselineUsage.Files) != digestLedgerSnapshot(ledger.SnapshotFiles(state)) {
+	if digestLedgerSnapshot(baselineUsage.Files) != digestLedgerSnapshot(accepted.Snapshot.Files) {
 		return Result{}, errors.New("ledger namespace changed after loading")
 	}
-	changes, err := proposal.Validate(ctx.Proposal, ctx.Packet, state)
+	changes, err := proposal.Validate(ctx.Proposal, ctx.Packet, accepted.Legacy)
 	if err != nil {
 		return Result{}, err
 	}
-	plan, err := ledger.Render(state, changes)
+	plan, err := reviewv2.ApplyChangeSet(accepted, changes)
 	if err != nil {
 		return Result{}, err
 	}
@@ -662,11 +673,12 @@ func readProjectTarget(projectRoot string, expectedRoot os.FileInfo, relative st
 		return nil, false, 0, err
 	}
 	defer file.Close()
-	if before.Size() > ledger.MaxDocumentBytes {
+	maximum := maxApplyTargetBytes(relative)
+	if before.Size() > maximum {
 		return nil, false, 0, fmt.Errorf("ledger file %s exceeds size limit", relative)
 	}
-	body, err := io.ReadAll(io.LimitReader(file, ledger.MaxDocumentBytes+1))
-	if err != nil || len(body) > ledger.MaxDocumentBytes {
+	body, err := io.ReadAll(io.LimitReader(file, maximum+1))
+	if err != nil || int64(len(body)) > maximum {
 		return nil, false, 0, fmt.Errorf("read ledger file %s", relative)
 	}
 	after, err := directory.Root.Lstat(filepath.FromSlash(relative))
@@ -838,7 +850,7 @@ func validateLedgerTargetUsage(baseline ledger.SnapshotUsage, plan ledger.WriteP
 	}
 	entries := baseline.DirectoryEntries
 	for _, planned := range plan.Files {
-		if !ledger.IsSnapshotPath(planned.RelativePath) {
+		if !isApplySnapshotPath(planned.RelativePath) {
 			continue
 		}
 		if _, exists := targets[planned.RelativePath]; !exists && ledger.IsCollectionSnapshotPath(planned.RelativePath) {
@@ -853,7 +865,19 @@ func validateLedgerTargetUsage(baseline ledger.SnapshotUsage, plan ledger.WriteP
 	}
 	files := make([]ledger.SnapshotFile, 0, len(targets))
 	for _, file := range targets {
-		files = append(files, file)
+		maximum := maxApplyTargetBytes(file.RelativePath)
+		if file.Size < 0 || file.Size > maximum {
+			return fmt.Errorf("apply target cannot be recovered within ledger limits: %s exceeds its document byte budget", file.RelativePath)
+		}
+		remaining := file.Size
+		for {
+			chunk := min(remaining, int64(ledger.MaxDocumentBytes))
+			files = append(files, ledger.SnapshotFile{RelativePath: file.RelativePath, Size: chunk})
+			remaining -= chunk
+			if remaining == 0 {
+				break
+			}
+		}
 	}
 	if err := ledger.ValidateSnapshotUsage(ledger.SnapshotUsage{Files: files, DirectoryEntries: entries}); err != nil {
 		return fmt.Errorf("apply target cannot be recovered within ledger limits: %w", err)
@@ -862,7 +886,7 @@ func validateLedgerTargetUsage(baseline ledger.SnapshotUsage, plan ledger.WriteP
 }
 
 func verifyLedgerNamespace(projectRoot string, expectedRoot os.FileInfo, receipt applyReceipt) error {
-	files, err := ledger.SnapshotExpected(projectRoot, expectedRoot)
+	files, err := snapshotApplyNamespace(projectRoot, expectedRoot)
 	if err != nil {
 		return fmt.Errorf("read ledger namespace snapshot: %w", err)
 	}
@@ -874,7 +898,7 @@ func verifyLedgerNamespace(projectRoot string, expectedRoot os.FileInfo, receipt
 		current[file.RelativePath] = file
 	}
 	for _, planned := range receipt.Files {
-		if !ledger.IsSnapshotPath(planned.RelativePath) {
+		if !isApplySnapshotPath(planned.RelativePath) {
 			continue
 		}
 		file, exists := current[planned.RelativePath]
@@ -907,6 +931,46 @@ func verifyLedgerNamespace(projectRoot string, expectedRoot os.FileInfo, receipt
 		return errors.New("ledger namespace has an intervening addition, removal, or edit")
 	}
 	return nil
+}
+
+func snapshotApplyNamespace(projectRoot string, expectedRoot os.FileInfo) ([]ledger.SnapshotFile, error) {
+	files, err := ledger.SnapshotExpected(projectRoot, expectedRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, relative := range []string{
+		reviewv2.HistoryRelativePath,
+		reviewv2.MachineLedgerRelativePath,
+		reviewv2.ReviewRelativePath,
+	} {
+		body, exists, mode, readErr := readProjectTarget(projectRoot, expectedRoot, relative)
+		if readErr != nil {
+			return nil, readErr
+		}
+		if !exists {
+			continue
+		}
+		files = append(files, ledger.SnapshotFile{
+			RelativePath: relative,
+			SHA256:       digestBytes(body),
+			Perm:         mode.Perm(),
+			Size:         int64(len(body)),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].RelativePath < files[j].RelativePath })
+	return files, nil
+}
+
+func isApplySnapshotPath(relative string) bool {
+	return ledger.IsSnapshotPath(relative) || relative == reviewv2.HistoryRelativePath ||
+		relative == reviewv2.MachineLedgerRelativePath || relative == reviewv2.ReviewRelativePath
+}
+
+func maxApplyTargetBytes(relative string) int64 {
+	if relative == reviewv2.MachineLedgerRelativePath {
+		return reviewv2.MaxMachineLedgerBytes
+	}
+	return ledger.MaxDocumentBytes
 }
 
 func syncProjectTargetPublication(projectRoot string, expectedRoot os.FileInfo, relative string, syncPublication func(*os.Root, string) error) error {
@@ -973,7 +1037,19 @@ func receiptPlannedChanges(receipt applyReceipt) []string {
 			result = append(result, file.RelativePath)
 		}
 	}
-	sort.Strings(result)
+	v2Order := map[string]int{
+		reviewv2.HistoryRelativePath:       0,
+		reviewv2.MachineLedgerRelativePath: 1,
+		reviewv2.ReviewRelativePath:        2,
+	}
+	sort.Slice(result, func(i, j int) bool {
+		left, leftV2 := v2Order[result[i]]
+		right, rightV2 := v2Order[result[j]]
+		if leftV2 && rightV2 {
+			return left < right
+		}
+		return result[i] < result[j]
+	})
 	return result
 }
 

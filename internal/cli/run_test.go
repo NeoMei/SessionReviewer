@@ -18,9 +18,11 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/session"
 )
 
@@ -446,6 +448,7 @@ func TestLedgerOperationalDiagnosticsAreStableAndPrivate(t *testing.T) {
 	}{
 		{action: "apply", err: fmt.Errorf("%s: %w", canary, cursor.ErrStale), code: "E_APPLY_CURSOR_STALE", hint: "prepare a fresh"},
 		{action: "apply", err: fmt.Errorf("%s: %w", canary, applyengine.ErrPendingReceiptConflict), code: "E_APPLY_RECEIPT_CONFLICT", hint: "same --proposal and --evidence"},
+		{action: "apply", err: fmt.Errorf("wrapped: %w", &reviewv2.ErrMigrationRequired{ProjectRoot: canary}), code: "E_APPLY_MIGRATION_REQUIRED", hint: "session-reviewer sync --dry-run, then run session-reviewer sync"},
 		{action: "apply", err: errors.New(canary), code: "E_APPLY_FAILED", hint: "original --proposal and --evidence"},
 		{action: "resume", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
 		{action: "history", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
@@ -1182,6 +1185,9 @@ func newCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
 		[]byte(packetDigest),
 		1,
 	)
+	convertCLIApplyFixtureToV2(t, projectRoot)
+	proposalBody = bytes.Replace(proposalBody, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 1`), 1)
+	proposalBody = bytes.Replace(proposalBody, []byte(`"blockers": []`), []byte(`"blockers": ["Fixture risk"]`), 1)
 	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
 	if err := os.WriteFile(proposalPath, proposalBody, 0o600); err != nil {
 		t.Fatal(err)
@@ -1195,6 +1201,45 @@ func newCLIApplyFixture(t *testing.T, dataDir string) cliApplyFixture {
 		t.Fatal(err)
 	}
 	return cliApplyFixture{project: projectRoot, data: dataDir, proposal: proposalPath, evidence: evidencePath}
+}
+
+func convertCLIApplyFixtureToV2(t *testing.T, projectRoot string) {
+	t.Helper()
+	legacy, err := ledger.Load(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.CurrentState = ledger.CurrentState{
+		ProjectID: legacy.ProjectID, Revision: 1, Goal: "Fixture seed goal",
+		LastVerified: "Fixture seed verification", Branch: "fixture-seed",
+		Blockers: []string{"Fixture risk"}, NextAction: "Apply the first proposal",
+	}
+	state, err := reviewv2.ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(projectRoot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files {
+		full := filepath.Join(projectRoot, filepath.FromSlash(file.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, file.Data, file.Perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, relative := range []string{
+		"docs/session-review/project-overview.md", "docs/session-review/current-state.md",
+		"docs/session-review/evolution-timeline.md", "docs/session-review/decisions",
+		"docs/session-review/open-loops", "docs/session-review/sessions",
+	} {
+		if err := os.RemoveAll(filepath.Join(projectRoot, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func assertApplyOutputContract(t *testing.T, output string) {

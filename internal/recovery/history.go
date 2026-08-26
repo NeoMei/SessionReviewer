@@ -9,6 +9,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 type Theme struct {
@@ -30,16 +31,16 @@ type HistoryView struct {
 // HistoryLedgerOnly renders accepted cross-session history. It never consults
 // pending evidence or any derived/cache/repository surface.
 func HistoryLedgerOnly(projectRoot string) (HistoryView, error) {
-	state, err := ledger.Load(projectRoot)
-	return historyLedgerOnly(state, err)
+	accepted, err := reviewv2.Load(projectRoot)
+	return historyLedgerOnly(accepted.Legacy, err)
 }
 
 // HistoryLedgerOnlyExpected derives the same accepted-only project history
-// while requiring the project root opened by ledger.LoadExpected to retain a
+// while requiring the project root opened by reviewv2.LoadExpected to retain a
 // caller-pinned filesystem identity.
 func HistoryLedgerOnlyExpected(projectRoot string, expectedRoot os.FileInfo) (HistoryView, error) {
-	state, err := ledger.LoadExpected(projectRoot, expectedRoot)
-	return historyLedgerOnly(state, err)
+	accepted, err := reviewv2.LoadExpected(projectRoot, expectedRoot)
+	return historyLedgerOnly(accepted.Legacy, err)
 }
 
 func historyLedgerOnly(state ledger.State, err error) (HistoryView, error) {

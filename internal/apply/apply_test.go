@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -26,6 +27,7 @@ import (
 	preparepkg "github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/proposal"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 const (
@@ -46,6 +48,14 @@ type applyTestFixture struct {
 }
 
 func newApplyTestFixture(t *testing.T) *applyTestFixture {
+	return newApplyTestFixtureVersion(t, true)
+}
+
+func newLegacyApplyTestFixture(t *testing.T) *applyTestFixture {
+	return newApplyTestFixtureVersion(t, false)
+}
+
+func newApplyTestFixtureVersion(t *testing.T, v2 bool) *applyTestFixture {
 	t.Helper()
 	projectRoot, vaultRoot, dataDir := t.TempDir(), t.TempDir(), t.TempDir()
 	_, err := project.Initialize(project.InitOptions{
@@ -91,12 +101,16 @@ func newApplyTestFixture(t *testing.T) *applyTestFixture {
 	if err := os.WriteFile(evidencePath, append(evidenceBody, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &applyTestFixture{
+	fixture := &applyTestFixture{
 		projectRoot: projectRoot, dataDir: dataDir,
 		projectData:  filepath.Join(dataDir, "projects", testProjectID),
 		proposalPath: proposalPath, evidencePath: evidencePath, packet: packet,
 		now: time.Date(2026, 8, 23, 3, 0, 0, 0, time.UTC),
 	}
+	if v2 {
+		convertApplyFixtureToV2(t, fixture)
+	}
+	return fixture
 }
 
 func (f *applyTestFixture) options() Options {
@@ -109,7 +123,7 @@ func (f *applyTestFixture) options() Options {
 
 func mustLedgerSnapshot(t *testing.T, projectRoot string) []ledger.SnapshotFile {
 	t.Helper()
-	files, err := ledger.SnapshotExpected(projectRoot, nil)
+	files, err := snapshotApplyNamespace(projectRoot, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +142,45 @@ func TestRunWritesThenAdvancesCursor(t *testing.T) {
 	}
 	if c.LastLine != f.packet.NextCursor.Line || c.LastHash != f.packet.NextCursor.SourceHash || !c.UpdatedAt.Equal(f.now) {
 		t.Fatalf("cursor=%+v", c)
+	}
+}
+
+func TestRunAppliesProposalToOnlyV2VisibleDocuments(t *testing.T) {
+	f := newApplyTestFixture(t)
+
+	result, err := Run(f.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		reviewv2.HistoryRelativePath,
+		reviewv2.MachineLedgerRelativePath,
+		reviewv2.ReviewRelativePath,
+	}
+	if !reflect.DeepEqual(result.ChangedFiles, want) {
+		t.Fatalf("changed=%v want=%v", result.ChangedFiles, want)
+	}
+	assertNoLegacyVisibleFiles(t, f.projectRoot)
+}
+
+func TestRunLegacyMigrationRequiredBeforeAnyStateWrite(t *testing.T) {
+	f := newLegacyApplyTestFixture(t)
+	if err := os.RemoveAll(f.projectData); err != nil {
+		t.Fatal(err)
+	}
+	projectBefore := snapshotTree(t, f.projectRoot)
+	dataBefore := snapshotTree(t, f.dataDir)
+
+	got, err := Run(f.options())
+	var migration *reviewv2.ErrMigrationRequired
+	if !errors.As(err, &migration) || !strings.Contains(err.Error(), "sync --dry-run followed by sync") {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	if after := snapshotTree(t, f.projectRoot); after != projectBefore {
+		t.Fatalf("migration-required apply changed project\nbefore:\n%s\nafter:\n%s", projectBefore, after)
+	}
+	if after := snapshotTree(t, f.dataDir); after != dataBefore {
+		t.Fatalf("migration-required apply changed data\nbefore:\n%s\nafter:\n%s", dataBefore, after)
 	}
 }
 
@@ -151,16 +204,17 @@ func TestTwoPacketWorkflowIsIncrementalAndIdempotent(t *testing.T) {
 		t.Fatalf("r1=%+v err=%v p1=%+v", r1, err, p1)
 	}
 
-	reportPath := filepath.Join(f.projectRoot, "docs", "session-review", "sessions", "session-report-1.md")
-	reportBody, err := os.ReadFile(reportPath)
+	reviewPath := filepath.Join(f.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	reviewBody, err := os.ReadFile(reviewPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reportBody = bytes.Replace(reportBody, []byte("---\n"), []byte("---\nuser_extension: keep-me\n"), 1)
-	reportBody = append(reportBody, []byte("\n## User Notes\n\nKeep this exact editable note.\n")...)
-	if err := os.WriteFile(reportPath, reportBody, 0o644); err != nil {
+	reviewBody = bytes.Replace(reviewBody, []byte("---\n"), []byte("---\nuser_extension: keep-me\n"), 1)
+	reviewBody = append(reviewBody, []byte("\n## User Notes\n\nKeep this exact editable note.\n")...)
+	if err := os.WriteFile(reviewPath, reviewBody, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	refreshV2MachineHashes(t, f.projectRoot)
 	f.initializeGitBaseline(t)
 	gitBefore := snapshotTree(t, filepath.Join(f.projectRoot, ".git"))
 
@@ -174,35 +228,29 @@ func TestTwoPacketWorkflowIsIncrementalAndIdempotent(t *testing.T) {
 		t.Fatalf("r2=%+v err=%v p2=%+v", r2, err, p2)
 	}
 
-	state, err := ledger.Load(f.projectRoot)
+	accepted, err := reviewv2.Load(f.projectRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
+	state := accepted.Legacy
 	loop := state.OpenLoops["loop-1"]
 	report := state.Sessions["session-report-1"]
 	if len(state.Sessions) != 1 || report.Revision != 2 || len(state.Timeline) != 2 ||
-		state.CurrentState.Revision != 2 || state.CurrentState.NextAction != "Publish the verified ledger" ||
+		state.CurrentState.Revision != 3 || state.CurrentState.NextAction != "Publish the verified ledger" ||
 		len(state.Decisions) != 1 || state.Decisions["decision-1"].Revision != 1 ||
 		len(state.OpenLoops) != 1 || loop.Revision != 2 || loop.Status != "resolved" {
 		t.Fatalf("state=%+v report=%+v loop=%+v", state, report, loop)
 	}
-	reportBody, err = os.ReadFile(reportPath)
+	reviewBody, err = os.ReadFile(reviewPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, preserved := range []string{"user_extension: keep-me", "## User Notes", "Keep this exact editable note."} {
-		if !bytes.Contains(reportBody, []byte(preserved)) {
-			t.Fatalf("updated report lost editable unknown content %q", preserved)
+		if !bytes.Contains(reviewBody, []byte(preserved)) {
+			t.Fatalf("updated review lost editable unknown content %q", preserved)
 		}
 	}
-	diagramPath := filepath.Join(f.projectRoot, "docs", "session-review", "diagrams", "project-evolution.md")
-	diagramBody, err := os.ReadFile(diagramPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Count(diagramBody, []byte("```mermaid")) != 3 {
-		t.Fatalf("derived diagram does not contain the recovery mainline and both appendices: %q", diagramBody)
-	}
+	assertNoLegacyVisibleFiles(t, f.projectRoot)
 
 	before := snapshotTree(t, f.projectRoot)
 	dataBefore := snapshotTree(t, f.dataDir)
@@ -218,10 +266,6 @@ func TestTwoPacketWorkflowIsIncrementalAndIdempotent(t *testing.T) {
 	}
 	if got := snapshotTree(t, filepath.Join(f.projectRoot, ".git")); got != gitBefore {
 		t.Fatalf("apply mutated Git metadata\nbefore:\n%s\nafter:\n%s", gitBefore, got)
-	}
-	stableDiagram, err := os.ReadFile(diagramPath)
-	if err != nil || !bytes.Equal(stableDiagram, diagramBody) {
-		t.Fatalf("derived diagram changed on reapply: err=%v", err)
 	}
 }
 
@@ -288,14 +332,9 @@ func TestRunRecoversPreparedAndPartialTransactions(t *testing.T) {
 		{name: "prepared", hook: func(opts *Options) {
 			opts.hooks.afterPreparedReceipt = func() error { return errors.New("injected crash after prepared receipt") }
 		}},
-		{name: "partial", hook: func(opts *Options) {
-			opts.hooks.afterFile = func(index int, _ string) error {
-				if index == 0 {
-					return errors.New("injected crash after first file")
-				}
-				return nil
-			}
-		}},
+		{name: "after-file-0", hook: interruptAfterV2File(0)},
+		{name: "after-file-1", hook: interruptAfterV2File(1)},
+		{name: "after-file-2", hook: interruptAfterV2File(2)},
 		{name: "applied", hook: func(opts *Options) {
 			opts.hooks.afterAppliedReceipt = func() error { return errors.New("injected crash after applied receipt") }
 		}},
@@ -305,17 +344,87 @@ func TestRunRecoversPreparedAndPartialTransactions(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newApplyTestFixture(t)
+			proposalA, err := os.ReadFile(f.proposalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 			opts := f.options()
 			tc.hook(&opts)
 			if _, err := Run(opts); err == nil {
 				t.Fatal("injected interruption did not stop apply")
 			}
+			receipt := readApplyReceiptForTest(t, f)
+			wantReceiptPaths := []string{
+				reviewv2.MachineLedgerRelativePath,
+				reviewv2.HistoryRelativePath,
+				reviewv2.ReviewRelativePath,
+			}
+			gotReceiptPaths := make([]string, len(receipt.Files))
+			for index, file := range receipt.Files {
+				gotReceiptPaths[index] = file.RelativePath
+			}
+			if !reflect.DeepEqual(gotReceiptPaths, wantReceiptPaths) {
+				t.Fatalf("receipt paths=%v want=%v", gotReceiptPaths, wantReceiptPaths)
+			}
+			projectBeforeConflict := snapshotTree(t, f.projectRoot)
+			dataBeforeConflict := snapshotTree(t, f.dataDir)
+			proposalB := bytes.Replace(proposalA, []byte("Long sessions need durable continuity."), []byte("Long sessions need auditable continuity."), 1)
+			if bytes.Equal(proposalA, proposalB) {
+				t.Fatal("proposal B did not differ from proposal A")
+			}
+			if err := os.WriteFile(f.proposalPath, proposalB, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Run(f.options()); !errors.Is(err, ErrPendingReceiptConflict) {
+				t.Fatalf("different proposal was not blocked: %v", err)
+			}
+			if after := snapshotTree(t, f.projectRoot); after != projectBeforeConflict {
+				t.Fatal("different proposal changed partial v2 state")
+			}
+			if after := snapshotTree(t, f.dataDir); after != dataBeforeConflict {
+				t.Fatal("different proposal changed receipt or cursor state")
+			}
+			if err := os.WriteFile(f.proposalPath, proposalA, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			got, err := Run(f.options())
-			if err != nil || !got.CursorAdvanced || len(got.ChangedFiles) == 0 {
+			wantChanged := []string{reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, reviewv2.ReviewRelativePath}
+			if err != nil || !got.CursorAdvanced || !reflect.DeepEqual(got.ChangedFiles, wantChanged) {
 				t.Fatalf("recovery got=%+v err=%v", got, err)
 			}
+			if _, err := reviewv2.Load(f.projectRoot); err != nil {
+				t.Fatalf("recovered v2 state is invalid: %v", err)
+			}
+			if receipt := readApplyReceiptForTest(t, f); receipt.State != receiptApplied {
+				t.Fatalf("receipt state=%q", receipt.State)
+			}
+			assertNoLegacyVisibleFiles(t, f.projectRoot)
 		})
 	}
+}
+
+func interruptAfterV2File(target int) func(*Options) {
+	return func(opts *Options) {
+		opts.hooks.afterFile = func(index int, _ string) error {
+			if index == target {
+				return fmt.Errorf("injected crash after v2 file %d", target)
+			}
+			return nil
+		}
+	}
+}
+
+func readApplyReceiptForTest(t *testing.T, f *applyTestFixture) applyReceipt {
+	t.Helper()
+	body, err := os.ReadFile(receiptPathForTest(t, f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt applyReceipt
+	if err := json.Unmarshal(body, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	return receipt
 }
 
 func TestRunRetryResyncsUncertainLedgerBeforeCAS(t *testing.T) {
@@ -959,7 +1068,7 @@ func TestRunPartialRecoveryFailsClosedOnUserEdit(t *testing.T) {
 	if err := os.WriteFile(path, []byte("user edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening user edit") {
+	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "intervening") {
 		t.Fatalf("err=%v", err)
 	}
 	c, err := (cursor.Store{Root: f.projectData}).Load(testSessionID)
@@ -1248,7 +1357,7 @@ func TestRunRechecksTargetsAfterBeforeCASHook(t *testing.T) {
 	f := newApplyTestFixture(t)
 	opts := f.options()
 	opts.hooks.beforeCAS = func() error {
-		return os.WriteFile(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md"), []byte("user edit\n"), 0o644)
+		return os.WriteFile(filepath.Join(f.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)), []byte("user edit\n"), 0o644)
 	}
 	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "does not match applied receipt") {
 		t.Fatalf("err=%v", err)
@@ -1263,7 +1372,7 @@ func TestRunRechecksTargetsAfterCallerNow(t *testing.T) {
 	f := newApplyTestFixture(t)
 	opts := f.options()
 	opts.Now = func() time.Time {
-		if err := os.WriteFile(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md"), []byte("user edit from Now\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(f.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)), []byte("user edit from Now\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		return f.now
@@ -1458,6 +1567,17 @@ func TestValidateLedgerTargetUsageRejectsUnrecoverableNewDocument(t *testing.T) 
 	}
 }
 
+func TestValidateLedgerTargetUsageHonorsV2MachineLedgerBudget(t *testing.T) {
+	plan := ledger.WritePlan{Files: []ledger.PlannedFile{{
+		RelativePath: reviewv2.MachineLedgerRelativePath,
+		Data:         make([]byte, ledger.MaxDocumentBytes+1),
+		Perm:         0o600,
+	}}}
+	if err := validateLedgerTargetUsage(ledger.SnapshotUsage{}, plan); err != nil {
+		t.Fatalf("v2 machine ledger within its dedicated budget was rejected: %v", err)
+	}
+}
+
 func TestReceiptValidateRejectsTraversalPathsDirectly(t *testing.T) {
 	ctx := inputContext{Packet: evidence.Packet{
 		ProjectID: testProjectID, SessionID: testSessionID, FromCursor: 1, ToCursor: 1,
@@ -1605,7 +1725,7 @@ func TestRunAcceptsLaterCursorOnlyWhileReceiptTargetsMatch(t *testing.T) {
 	if err != nil || !got.AlreadyApplied {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
-	if err := os.WriteFile(filepath.Join(f.projectRoot, "docs", "session-review", "current-state.md"), []byte("user edit\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(f.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)), []byte("user edit\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Run(f.options()); err == nil || !strings.Contains(err.Error(), "does not match applied receipt") {
@@ -1924,6 +2044,7 @@ func newMultiPacketFixture(t *testing.T) *multiPacketFixture {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	convertLegacyApplyRootToV2(t, f.projectRoot)
 	sessionPath := filepath.Join(f.sessions, "rollout.jsonl")
 	records := []any{
 		map[string]any{"timestamp": "2026-08-23T01:00:00Z", "type": "session_meta", "payload": map[string]any{"id": testSessionID, "cwd": f.projectRoot, "source": "test"}},
@@ -1998,6 +2119,9 @@ func (f *multiPacketFixture) applyOptions(t *testing.T, packet evidence.Packet, 
 	}
 	p.ProjectID, p.SessionID = packet.ProjectID, packet.SessionID
 	p.FromCursor, p.ToCursor = packet.FromCursor, packet.ToCursor
+	p.CurrentStatePatch.ExpectedRevision++
+	blockers := []string{"Fixture risk"}
+	p.CurrentStatePatch.Blockers = &blockers
 	p.EvidencePacketSHA256, err = evidence.Digest(packet)
 	if err != nil {
 		t.Fatal(err)
@@ -2173,6 +2297,112 @@ func assertCursorNotAdvanced(t *testing.T, f *applyTestFixture) {
 	c, err := (cursor.Store{Root: f.projectData}).Load(testSessionID)
 	if err != nil || c != (cursor.Cursor{}) {
 		t.Fatalf("cursor=%+v err=%v", c, err)
+	}
+}
+
+func convertApplyFixtureToV2(t *testing.T, fixture *applyTestFixture) {
+	t.Helper()
+	projectRoot := fixture.projectRoot
+	convertLegacyApplyRootToV2(t, projectRoot)
+	proposalBody, err := os.ReadFile(fixture.proposalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposalBody = bytes.Replace(proposalBody, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 1`), 1)
+	proposalBody = bytes.Replace(proposalBody, []byte(`"blockers": []`), []byte(`"blockers": ["Fixture risk"]`), 1)
+	if err := os.WriteFile(fixture.proposalPath, proposalBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func convertLegacyApplyRootToV2(t *testing.T, projectRoot string) {
+	t.Helper()
+	legacy, err := ledger.Load(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.CurrentState.ProjectID = legacy.ProjectID
+	legacy.CurrentState.Revision = 1
+	legacy.CurrentState.Goal = "Fixture seed goal"
+	legacy.CurrentState.LastVerified = "Fixture seed verification"
+	legacy.CurrentState.Branch = "fixture-seed"
+	legacy.CurrentState.NextAction = "Apply the first proposal"
+	legacy.CurrentState.Blockers = []string{"Fixture risk"}
+	state, err := reviewv2.ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(projectRoot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files {
+		full := filepath.Join(projectRoot, filepath.FromSlash(file.RelativePath))
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, file.Data, file.Perm); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, relative := range []string{
+		"docs/session-review/project-overview.md",
+		"docs/session-review/current-state.md",
+		"docs/session-review/evolution-timeline.md",
+		"docs/session-review/decisions",
+		"docs/session-review/open-loops",
+		"docs/session-review/sessions",
+	} {
+		if err := os.RemoveAll(filepath.Join(projectRoot, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertNoLegacyVisibleFiles(t *testing.T, projectRoot string) {
+	t.Helper()
+	for _, relative := range []string{
+		"docs/session-review/project-overview.md",
+		"docs/session-review/current-state.md",
+		"docs/session-review/evolution-timeline.md",
+		"docs/session-review/decisions",
+		"docs/session-review/open-loops",
+		"docs/session-review/sessions",
+	} {
+		if _, err := os.Lstat(filepath.Join(projectRoot, filepath.FromSlash(relative))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy path %s remains visible: %v", relative, err)
+		}
+	}
+}
+
+func refreshV2MachineHashes(t *testing.T, projectRoot string) {
+	t.Helper()
+	reviewBody, err := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBody, err := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(reviewv2.HistoryRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machinePath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+	machineBody, err := os.ReadFile(machinePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := reviewv2.ParseMachineLedger(machineBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDigest, historyDigest := sha256.Sum256(reviewBody), sha256.Sum256(historyBody)
+	machine.ReviewSHA256 = hex.EncodeToString(reviewDigest[:])
+	machine.HistorySHA256 = hex.EncodeToString(historyDigest[:])
+	machineBody, err = reviewv2.RenderMachineLedger(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(machinePath, machineBody, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
