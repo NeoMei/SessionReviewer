@@ -1,6 +1,7 @@
 package syncdoc
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -343,5 +344,83 @@ func TestScanIsolatesUnreadableMarkdownAndKeepsUnrelatedEntities(t *testing.T) {
 	}
 	if len(got.Issues) != 1 || got.Issues[0].Kind != IssueMalformed || got.Issues[0].RelativePath != "decisions/oversized.md" {
 		t.Fatalf("isolated issue=%+v", got.Issues)
+	}
+}
+
+func TestV2ScanIncludesOnlyStableDocumentsAndRejectsMixedInventory(t *testing.T) {
+	review := v2FixtureBytes(t, "项目回顾.valid.md")
+	history := v2FixtureBytes(t, "项目历史.valid.md")
+	legacy := entity("decision-legacy", "project-0123456789abcdef", "legacy")
+
+	valid := BuildInventory([]SourceDocument{
+		{RelativePath: "项目历史.md", Content: history},
+		{RelativePath: "项目回顾.md", Content: review},
+	}, "darwin", platform.CaseSensitive)
+	if len(valid.Issues) != 0 || len(valid.ByID) != 2 ||
+		valid.ByID["project-overview"].RelativePath != "项目回顾.md" ||
+		valid.ByID["project-history"].RelativePath != "项目历史.md" {
+		t.Fatalf("v2 inventory=%+v", valid)
+	}
+
+	for name, sources := range map[string][]SourceDocument{
+		"mixed-legacy": {
+			{RelativePath: "项目回顾.md", Content: review},
+			{RelativePath: "项目历史.md", Content: history},
+			{RelativePath: "decisions/legacy.md", Content: legacy},
+		},
+		"mixed-malformed-v2": {
+			{RelativePath: "项目回顾.md", Content: bytes.Replace(review, []byte("<!-- /session-reviewer:risk -->"), []byte("<!-- broken-risk-close -->"), 1)},
+			{RelativePath: "decisions/legacy.md", Content: legacy},
+		},
+		"wrong-review-filename": {
+			{RelativePath: "回顾-改名.md", Content: review},
+			{RelativePath: "项目历史.md", Content: history},
+		},
+		"missing-history": {
+			{RelativePath: "项目回顾.md", Content: review},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := BuildInventory(sources, "darwin", platform.CaseSensitive)
+			if len(got.ByID) != 0 || len(got.Issues) == 0 {
+				t.Fatalf("inventory=%+v", got)
+			}
+			for _, issue := range got.Issues {
+				if issue.Kind != IssueMalformed {
+					t.Fatalf("issue=%+v", issue)
+				}
+			}
+		})
+	}
+}
+
+func TestV2ScanPrunesEntireMachineSubtreeBeforeUnsafeEntries(t *testing.T) {
+	rootPath := t.TempDir()
+	for relative, content := range map[string][]byte{
+		"项目回顾.md": v2FixtureBytes(t, "项目回顾.valid.md"),
+		"项目历史.md": v2FixtureBytes(t, "项目历史.valid.md"),
+	} {
+		if err := os.WriteFile(filepath.Join(rootPath, relative), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	machine := filepath.Join(rootPath, ".session-reviewer")
+	if err := os.Mkdir(machine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machine, "malformed.md"), []byte("not frontmatter"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(t.TempDir(), "outside.md"), filepath.Join(machine, "redirect.md")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	directory, err := pathguard.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	got := Scan(directory, ".", "darwin", platform.CaseSensitive)
+	if len(got.Issues) != 0 || len(got.ByID) != 2 {
+		t.Fatalf("inventory=%+v", got)
 	}
 }

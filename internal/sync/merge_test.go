@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -856,6 +857,203 @@ func presentedUnit(value, key, heading string) syncdoc.Unit {
 }
 
 func absentUnit() syncdoc.Unit { return syncdoc.Unit{} }
+
+func TestV2HistoryUnitsSurviveTitleEditAndMergeDifferentEvents(t *testing.T) {
+	base := v2HistoryWithTwoEvents(t)
+	project := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "新的标题")
+	vault := replaceV2Source(t, "项目历史.md", base, "继续验证发布链。", "新的下一步")
+	result := Merge(v2MergeInput("project-history", "项目历史.md", base, project, vault))
+	if result.Kind != MergeWriteBoth || result.Accepted == nil {
+		t.Fatalf("result=%+v", result)
+	}
+	rendered := renderDocument(t, *result.Accepted)
+	for _, want := range []string{"新的标题", "新的下一步"} {
+		if !bytes.Contains(rendered, []byte(want)) {
+			t.Fatalf("accepted history missing %q:\n%s", want, rendered)
+		}
+	}
+	assertV2VisibleFrontmatter(t, rendered, 2)
+}
+
+func TestV2ReviewUnitsMergeDifferentDecisions(t *testing.T) {
+	base := v2ReviewWithTwoDecisions(t)
+	project := replaceV2Source(t, "项目回顾.md", base, "Skill + 本地 CLI", "新的决策标题")
+	vault := replaceV2Source(t, "项目回顾.md", base, "兼容实现边界。", "新的决策原因")
+	result := Merge(v2MergeInput("project-overview", "项目回顾.md", base, project, vault))
+	if result.Kind != MergeWriteBoth || result.Accepted == nil {
+		t.Fatalf("result=%+v", result)
+	}
+	rendered := renderDocument(t, *result.Accepted)
+	for _, want := range []string{"新的决策标题", "新的决策原因"} {
+		if !bytes.Contains(rendered, []byte(want)) {
+			t.Fatalf("accepted review missing %q:\n%s", want, rendered)
+		}
+	}
+	assertV2VisibleFrontmatter(t, rendered, 2)
+}
+
+func TestV2MergeConflictAndConvergenceRules(t *testing.T) {
+	history := v2HistoryWithTwoEvents(t)
+	review := v2ReviewWithTwoDecisions(t)
+	t.Run("same-event-concurrent-edit", func(t *testing.T) {
+		project := replaceV2Source(t, "项目历史.md", history, "信任链与 dry-run 边界修复", "project 标题")
+		vault := replaceV2Source(t, "项目历史.md", history, "信任链与 dry-run 边界修复", "vault 标题")
+		got := Merge(v2MergeInput("project-history", "项目历史.md", history, project, vault))
+		if got.Kind != MergeConflict || got.Reason != "unit_conflict" {
+			t.Fatalf("merge=%+v", got)
+		}
+	})
+	t.Run("reserved-frontmatter-edit", func(t *testing.T) {
+		project := replaceV2Source(t, "项目回顾.md", review, "project-0123456789abcdef", "project-fedcba9876543210")
+		got := Merge(v2MergeInput("project-overview", "项目回顾.md", review, project, review))
+		if got.Kind != MergeConflict || got.Reason != "reserved_field" {
+			t.Fatalf("merge=%+v", got)
+		}
+	})
+	t.Run("marker-deletion", func(t *testing.T) {
+		project := removeV2MarkerBlock(t, "项目历史.md", history, "timeline-release")
+		got := Merge(v2MergeInput("project-history", "项目历史.md", history, project, history))
+		if got.Kind != MergeConflict || got.Reason != "unit_conflict" {
+			t.Fatalf("merge=%+v", got)
+		}
+	})
+	t.Run("same-title-edit-converges", func(t *testing.T) {
+		project := replaceV2Source(t, "项目历史.md", history, "信任链与 dry-run 边界修复", "两端相同标题")
+		got := Merge(v2MergeInput("project-history", "项目历史.md", history, project, project))
+		if got.Kind != MergeWriteBoth || got.Reason != "" || got.Accepted == nil {
+			t.Fatalf("merge=%+v", got)
+		}
+		assertV2VisibleFrontmatter(t, renderDocument(t, *got.Accepted), 2)
+	})
+}
+
+func TestV2MergeRejectsRenameAwayFromStableFilename(t *testing.T) {
+	base := v2HistoryWithTwoEvents(t)
+	input := v2MergeInput("project-history", "项目历史.md", base, base, base)
+	input.Project = candidateAtPath(t, "改名后历史.md", base)
+	result := Merge(input)
+	if result.Kind != MergeConflict || result.Reason != "invalid_path" || result.Accepted != nil {
+		t.Fatalf("result=%+v", result)
+	}
+}
+
+func v2MergeInput(entityID, relative string, base, project, vault syncdoc.Document) MergeInput {
+	return MergeInput{
+		EntityID: entityID, ProjectID: "project-0123456789abcdef", BasePath: relative,
+		Base: &base, Project: candidate(relative, project), Vault: candidate(relative, vault),
+		GOOS: "darwin", CaseMode: platform.CaseSensitive, OccupiedPathKeys: map[string]string{},
+	}
+}
+
+func v2HistoryWithTwoEvents(t *testing.T) syncdoc.Document {
+	t.Helper()
+	source := readV2Fixture(t, "项目历史.valid.md")
+	second := `
+<!-- session-reviewer:event id="timeline-release" -->
+## 2026-08-24 · 发布验证
+### 事件类别
+里程碑
+### 节点意义
+完成发布前收敛。
+### 摘要
+验证发布链。
+### 为什么会走到这里
+需要证明真实运行。
+### 发生了什么
+- 执行全量测试
+### 结果与验证
+- 所有门禁通过
+### 留下的问题或下一步
+继续验证发布链。
+<!-- /session-reviewer:event -->
+`
+	source = append(bytes.TrimSuffix(source, []byte("\n")), []byte(second)...)
+	return parseInlineDocument(t, "项目历史.md", string(source))
+}
+
+func v2ReviewWithTwoDecisions(t *testing.T) syncdoc.Document {
+	t.Helper()
+	source := readV2Fixture(t, "项目回顾.valid.md")
+	second := `<!-- session-reviewer:decision id="decision-compatibility" -->
+### 兼容性决策
+#### 日期
+2026-08-24
+#### 原因
+兼容实现边界。
+#### 影响
+保留双向合并。
+#### 状态
+已采用
+<!-- /session-reviewer:decision -->
+
+`
+	source = bytes.Replace(source, []byte("## 最近验证\n"), append([]byte(second), []byte("## 最近验证\n")...), 1)
+	return parseInlineDocument(t, "项目回顾.md", string(source))
+}
+
+func readV2Fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "review-v2", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func replaceV2Source(t *testing.T, relative string, document syncdoc.Document, old, replacement string) syncdoc.Document {
+	t.Helper()
+	source := renderDocument(t, document)
+	patched := bytes.Replace(source, []byte(old), []byte(replacement), 1)
+	if bytes.Equal(source, patched) {
+		t.Fatalf("source does not contain %q", old)
+	}
+	return parseInlineDocument(t, relative, string(patched))
+}
+
+func removeV2MarkerBlock(t *testing.T, relative string, document syncdoc.Document, id string) syncdoc.Document {
+	t.Helper()
+	source := renderDocument(t, document)
+	start := bytes.Index(source, []byte("<!-- session-reviewer:event id=\""+id+"\" -->"))
+	if start < 0 {
+		t.Fatalf("missing marker %q", id)
+	}
+	endRelative := bytes.Index(source[start:], []byte("<!-- /session-reviewer:event -->"))
+	if endRelative < 0 {
+		t.Fatalf("missing closing marker %q", id)
+	}
+	end := start + endRelative + len("<!-- /session-reviewer:event -->")
+	for end < len(source) && source[end] == '\n' {
+		end++
+	}
+	patched := append(bytes.Clone(source[:start]), source[end:]...)
+	return parseInlineDocument(t, relative, string(patched))
+}
+
+func renderDocument(t *testing.T, document syncdoc.Document) []byte {
+	t.Helper()
+	rendered, err := document.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rendered
+}
+
+func assertV2VisibleFrontmatter(t *testing.T, rendered []byte, revision int) {
+	t.Helper()
+	frontmatterEnd := bytes.Index(rendered[len("---\n"):], []byte("---\n"))
+	if frontmatterEnd < 0 {
+		t.Fatal("missing frontmatter close")
+	}
+	frontmatter := rendered[:len("---\n")+frontmatterEnd]
+	if !bytes.Contains(frontmatter, []byte("revision: "+strconv.Itoa(revision))) {
+		t.Fatalf("frontmatter revision mismatch: %s", frontmatter)
+	}
+	for _, forbidden := range []string{"sync_status:", "sync_hash:", "base_hash:", "project_hash:", "vault_hash:"} {
+		if bytes.Contains(frontmatter, []byte(forbidden)) {
+			t.Fatalf("visible v2 frontmatter contains %q: %s", forbidden, frontmatter)
+		}
+	}
+}
 
 func fixtureDocument(t *testing.T, name, relative string) syncdoc.Document {
 	t.Helper()

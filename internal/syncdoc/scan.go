@@ -56,6 +56,12 @@ type SourceDocument struct {
 	Content      []byte
 }
 
+type analyzedSource struct {
+	source  SourceDocument
+	pathKey string
+	entry   *Entry
+}
+
 // Scan walks a pinned tree, removes synchronization metadata from the source
 // set, and returns an inventory whose parse diagnostics never include content.
 func Scan(root *pathguard.Directory, rootRelative, goos string, caseMode platform.CaseMode) Inventory {
@@ -129,11 +135,6 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 		return ordered[first].RelativePath < ordered[second].RelativePath
 	})
 
-	type analyzedSource struct {
-		source  SourceDocument
-		pathKey string
-		entry   *Entry
-	}
 	analyzed := make([]analyzedSource, 0, len(ordered))
 	issues := make([]ScanIssue, 0)
 	byPath := make(map[string][]int, len(ordered))
@@ -170,6 +171,11 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 			ContentHash:  ContentHash(content),
 		}
 		analyzed[index].entry = &entry
+	}
+	if inventory, v2 := compactV2Inventory(ordered, analyzed); v2 {
+		if inventory != nil {
+			return *inventory
+		}
 	}
 
 	byID := make(map[string][]int, len(analyzed))
@@ -215,6 +221,97 @@ func BuildInventory(sources []SourceDocument, goos string, caseMode platform.Cas
 		}
 	}
 	return inventory
+}
+
+func compactV2Inventory(ordered []SourceDocument, analyzed []analyzedSource) (*Inventory, bool) {
+	v2 := false
+	for _, source := range ordered {
+		if sourceDeclaresV2(source.Content) {
+			v2 = true
+			break
+		}
+	}
+	for _, source := range analyzed {
+		if source.entry == nil {
+			continue
+		}
+		if _, ok := source.entry.Document.v2EntityType(); ok {
+			v2 = true
+		}
+	}
+	if !v2 {
+		return nil, false
+	}
+	valid := len(ordered) == 2 && len(analyzed) == 2
+	seen := make(map[string]Entry, 2)
+	parent := ""
+	projectID := ""
+	for _, source := range analyzed {
+		if source.entry == nil {
+			valid = false
+			continue
+		}
+		entry := *source.entry
+		entityType, ok := entry.Document.v2EntityType()
+		if !ok {
+			valid = false
+			continue
+		}
+		wantName, wantType := "", ""
+		switch entry.Identity.ID {
+		case "project-overview":
+			wantName, wantType = "项目回顾.md", "project_review"
+		case "project-history":
+			wantName, wantType = "项目历史.md", "project_history"
+		default:
+			valid = false
+		}
+		if entityType != wantType || path.Base(entry.RelativePath) != wantName {
+			valid = false
+		}
+		currentParent := path.Dir(entry.RelativePath)
+		if parent == "" {
+			parent = currentParent
+		} else if parent != currentParent {
+			valid = false
+		}
+		if projectID == "" {
+			projectID = entry.Identity.ProjectID
+		} else if projectID != entry.Identity.ProjectID {
+			valid = false
+		}
+		if _, duplicate := seen[entry.Identity.ID]; duplicate {
+			valid = false
+		}
+		seen[entry.Identity.ID] = entry
+	}
+	valid = valid && len(seen) == 2 && seen["project-overview"].Identity.ID != "" && seen["project-history"].Identity.ID != ""
+	if valid {
+		return nil, true
+	}
+	issues := make([]ScanIssue, 0, len(ordered))
+	for _, source := range ordered {
+		issues = append(issues, malformedScanIssue(source.RelativePath))
+	}
+	sortScanIssues(issues)
+	return &Inventory{ByID: map[string]Entry{}, Issues: issues}, true
+}
+
+func sourceDeclaresV2(content []byte) bool {
+	frontmatter, _, err := splitFrontmatter(content)
+	if err != nil {
+		return false
+	}
+	mapping, err := decodeFrontmatter(frontmatter)
+	if err != nil {
+		return false
+	}
+	schema, ok := mappingValue(mapping, "schema_version")
+	if !ok {
+		return false
+	}
+	version, err := positiveInt(schema)
+	return err == nil && version == 2
 }
 
 func sortScanIssues(issues []ScanIssue) {

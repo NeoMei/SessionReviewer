@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -33,6 +34,42 @@ type markerBlock struct {
 	body  sourceSpan
 	close sourceSpan
 	whole sourceSpan
+}
+
+// MarkerSpan is an exact source slice from a fully validated v2 Markdown
+// document. Callers must use ValidatedMarkerSpans rather than interpreting
+// marker-looking comments themselves.
+type MarkerSpan struct {
+	Kind, ID   string
+	Start, End int
+}
+
+// ValidatedMarkerSpans parses the complete v2 document with the authoritative
+// marker grammar and returns its bounded semantic blocks in source order.
+func ValidatedMarkerSpans(source []byte, entityType string) ([]MarkerSpan, error) {
+	blocks := map[string]markerBlock(nil)
+	switch entityType {
+	case "project_review":
+		document, err := ParseReview(source)
+		if err != nil {
+			return nil, err
+		}
+		blocks = document.blocks
+	case "project_history":
+		document, err := ParseHistory(source)
+		if err != nil {
+			return nil, err
+		}
+		blocks = document.blocks
+	default:
+		return nil, fmt.Errorf("unsupported v2 entity type %q", entityType)
+	}
+	result := make([]MarkerSpan, 0, len(blocks))
+	for _, block := range blocks {
+		result = append(result, MarkerSpan{Kind: block.kind, ID: block.id, Start: block.whole.start, End: block.whole.end})
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Start < result[j].Start })
+	return result, nil
 }
 
 type frontmatterIdentity struct {

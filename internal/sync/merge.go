@@ -115,6 +115,9 @@ func mergeFromBase(input MergeInput) MergeResult {
 	if input.Vault.Present {
 		vaultUnits = input.Vault.Document.SemanticUnits()
 	}
+	if conflicts := compactV2MarkerPresenceConflicts(*input.Base, baseUnits, projectUnits, vaultUnits); len(conflicts) != 0 {
+		return conflictResult("unit_conflict", conflicts)
+	}
 	merged, conflicts := mergeUnitSets(baseUnits, projectUnits, vaultUnits)
 	if len(conflicts) != 0 {
 		return conflictResult("unit_conflict", conflicts)
@@ -136,9 +139,11 @@ func mergeFromBase(input MergeInput) MergeResult {
 	if err != nil {
 		return conflictResult(reasonForHumanValidation(err), nil)
 	}
-	accepted, err = accepted.WithSyncStatus("synced")
-	if err != nil {
-		return conflictResult("invalid_document", nil)
+	if !isCompactV2Document(accepted) {
+		accepted, err = accepted.WithSyncStatus("synced")
+		if err != nil {
+			return conflictResult("invalid_document", nil)
+		}
 	}
 	if !validDocumentShape(accepted) {
 		return conflictResult("invalid_document", nil)
@@ -150,6 +155,19 @@ func mergePathFromBase(input MergeInput) (string, *MergeResult) {
 	if err := validateMergePath(input.BasePath); err != nil {
 		failure := conflictResult("invalid_path", nil)
 		return "", &failure
+	}
+	if expected, compact := compactV2Filename(*input.Base); compact {
+		if input.BasePath != expected {
+			failure := conflictResult("invalid_path", nil)
+			return "", &failure
+		}
+		for _, candidate := range []Candidate{input.Project, input.Vault} {
+			if candidate.Present && candidate.RelativePath != expected {
+				failure := conflictResult("invalid_path", nil)
+				return "", &failure
+			}
+		}
+		return expected, nil
 	}
 	rename := false
 	for _, candidate := range []Candidate{input.Project, input.Vault} {
@@ -294,6 +312,9 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	if err := validateMergePath(target); err != nil {
 		return conflictResult("invalid_path", nil)
 	}
+	if expected, compact := compactV2Filename(skeleton); compact && target != expected {
+		return conflictResult("invalid_path", nil)
+	}
 	targetKey, _ := platform.PathKey(input.GOOS, input.CaseMode, target)
 	if owner, occupied := input.OccupiedPathKeys[targetKey]; occupied && owner != input.EntityID {
 		return conflictResult("path_collision", nil)
@@ -313,9 +334,11 @@ func mergeFirstSync(input MergeInput) MergeResult {
 	if err != nil {
 		return conflictResult("invalid_document", nil)
 	}
-	accepted, err = accepted.WithSyncStatus("synced")
-	if err != nil {
-		return conflictResult("invalid_document", nil)
+	if !isCompactV2Document(accepted) {
+		accepted, err = accepted.WithSyncStatus("synced")
+		if err != nil {
+			return conflictResult("invalid_document", nil)
+		}
 	}
 	rendered, err := accepted.Render()
 	if err != nil {
@@ -389,6 +412,9 @@ func validNewCandidate(document syncdoc.Document, entityID, projectID string) bo
 		return false
 	}
 	units := document.Units()
+	if isCompactV2Identity(identity) {
+		return validCompactV2Candidate(identity, units)
+	}
 	revision := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
 	status := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}]
 	if !revision.Present || string(revision.Value) != "1\n" || !status.Present || string(status.Value) != "synced\n" || hasReservedHashUnit(units) {
@@ -406,6 +432,9 @@ func validImportedProjectCandidate(document syncdoc.Document, entityID, projectI
 		return false
 	}
 	units := document.Units()
+	if isCompactV2Identity(identity) {
+		return validCompactV2Candidate(identity, units)
+	}
 	statusUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}]
 	status, statusValid := decodeStringUnit(units, "sync_status")
 	if (statusUnit.Present && (!statusValid || status != "synced")) || hasReservedHashUnit(units) {
@@ -429,6 +458,9 @@ func validDocumentShapeWithStatus(document syncdoc.Document, requireStatus bool)
 		return false
 	}
 	units := document.Units()
+	if isCompactV2Identity(identity) {
+		return validCompactV2Candidate(identity, units)
+	}
 	var revision int
 	revisionUnit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
 	status, statusOK := decodeStringUnit(units, "sync_status")
@@ -450,6 +482,66 @@ func validDocumentShapeWithStatus(document syncdoc.Document, requireStatus bool)
 		return false
 	}
 	return validLedgerCandidateDocument(identity, ledgerDocument, units)
+}
+
+func isCompactV2Identity(identity syncdoc.Identity) bool {
+	return (identity.ID == "project-overview" && identity.EntityType == "project_review") ||
+		(identity.ID == "project-history" && identity.EntityType == "project_history")
+}
+
+func isCompactV2Document(document syncdoc.Document) bool {
+	identity, err := document.Identity()
+	return err == nil && isCompactV2Identity(identity)
+}
+
+func compactV2Filename(document syncdoc.Document) (string, bool) {
+	identity, err := document.Identity()
+	if err != nil {
+		return "", false
+	}
+	switch {
+	case identity.ID == "project-overview" && identity.EntityType == "project_review":
+		return "项目回顾.md", true
+	case identity.ID == "project-history" && identity.EntityType == "project_history":
+		return "项目历史.md", true
+	default:
+		return "", false
+	}
+}
+
+func validCompactV2Candidate(identity syncdoc.Identity, units syncdoc.UnitSet) bool {
+	if !isCompactV2Identity(identity) || hasReservedHashUnit(units) ||
+		units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "sync_status"}].Present {
+		return false
+	}
+	var schema, revision int
+	if unit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "schema_version"}]; !unit.Present || yaml.Unmarshal(unit.Value, &schema) != nil || schema != 2 {
+		return false
+	}
+	if unit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]; !unit.Present || yaml.Unmarshal(unit.Value, &revision) != nil || revision < 1 || revision > 1<<53-1 {
+		return false
+	}
+	return true
+}
+
+func compactV2MarkerPresenceConflicts(document syncdoc.Document, base, project, vault syncdoc.UnitSet) []UnitConflict {
+	if !isCompactV2Document(document) {
+		return nil
+	}
+	conflicts := make([]UnitConflict, 0)
+	for _, key := range sortedUnitKeys(base, project, vault) {
+		if key.Kind != syncdoc.UnitSection || !strings.HasPrefix(key.Name, "session-reviewer/") {
+			continue
+		}
+		baseUnit, projectUnit, vaultUnit := base[key], project[key], vault[key]
+		if baseUnit.Present == projectUnit.Present && baseUnit.Present == vaultUnit.Present {
+			continue
+		}
+		conflicts = append(conflicts, UnitConflict{
+			Key: key, Base: cloneUnit(baseUnit), Project: cloneUnit(projectUnit), Vault: cloneUnit(vaultUnit),
+		})
+	}
+	return conflicts
 }
 
 func hasReservedHashUnit(units syncdoc.UnitSet) bool {

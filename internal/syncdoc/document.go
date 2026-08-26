@@ -36,7 +36,7 @@ var (
 // catalog. Authorization uses immutable package-local predicates, so callers
 // cannot weaken validation by mutating the returned map.
 func MachineReservedFields() map[string]struct{} {
-	return map[string]struct{}{"id": {}, "entity_type": {}, "project_id": {}, "sync_status": {}, "sync_hash": {}, "base_hash": {}, "project_hash": {}, "vault_hash": {}}
+	return map[string]struct{}{"id": {}, "entity_type": {}, "project_id": {}, "schema_version": {}, "sync_status": {}, "sync_hash": {}, "base_hash": {}, "project_hash": {}, "vault_hash": {}}
 }
 
 // ProposalOwnedFields returns a caller-owned snapshot of the provenance field
@@ -47,7 +47,7 @@ func ProposalOwnedFields() map[string]struct{} {
 
 func isMachineReservedField(name string) bool {
 	switch name {
-	case "id", "entity_type", "project_id", "sync_status", "sync_hash", "base_hash", "project_hash", "vault_hash":
+	case "id", "entity_type", "project_id", "schema_version", "sync_status", "sync_hash", "base_hash", "project_hash", "vault_hash":
 		return true
 	default:
 		return false
@@ -130,6 +130,9 @@ func Parse(relativePath string, content []byte) (Document, error) {
 	}
 	legacyOverview := isLegacyOverviewPath(relativePath)
 	if err := validateFrontmatter(mapping, legacyOverview); err != nil {
+		return Document{}, err
+	}
+	if err := validatedV2Source(mapping, content); err != nil {
 		return Document{}, err
 	}
 	body, err := parseBody(bodySource)
@@ -218,6 +221,17 @@ func (d Document) Units() UnitSet {
 // navigation sections are reproducible projections of the accepted ledger and
 // therefore never participate in revision or conflict decisions.
 func (d Document) SemanticUnits() UnitSet {
+	if _, v2 := d.v2EntityType(); v2 {
+		units, err := d.v2SemanticUnits()
+		if err != nil {
+			return UnitSet{}
+		}
+		return cloneUnitSet(units)
+	}
+	return d.genericSemanticUnits()
+}
+
+func (d Document) genericSemanticUnits() UnitSet {
 	result := make(UnitSet)
 	for key, unit := range d.Units() {
 		if key.Kind == UnitSection && generatedSectionKey(key) {
@@ -232,6 +246,9 @@ func (d Document) SemanticUnits() UnitSet {
 // This avoids orphaning a generated H2 subtree when a human renames its H1
 // ancestor. The post-merge derived publication restores canonical sections.
 func (d Document) WithSemanticUnits(units UnitSet) (Document, error) {
+	if _, v2 := d.v2EntityType(); v2 {
+		return d.withV2SemanticUnits(units)
+	}
 	combined := make(UnitSet, len(units))
 	for key, unit := range units {
 		if key.Kind == UnitSection && generatedSectionKey(key) {
@@ -419,7 +436,11 @@ func (d Document) FinalizeHumanMerge(base Document, changed bool) (Document, err
 	if err != nil {
 		return Document{}, err
 	}
-	if identity.EntityType == "project_overview" {
+	if identity.EntityType == "project_review" || identity.EntityType == "project_history" {
+		if baseRevision < 1 {
+			return Document{}, invalidDocument("invalid compact review document")
+		}
+	} else if identity.EntityType == "project_overview" {
 		if identity.ID != "project-overview" || baseRevision < 1 {
 			return Document{}, invalidDocument("invalid project overview")
 		}

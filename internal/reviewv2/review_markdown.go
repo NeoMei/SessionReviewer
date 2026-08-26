@@ -21,6 +21,7 @@ type ReviewDocument struct {
 	Model  Review
 	source []byte
 	fields map[semanticField]sourceSpan
+	blocks map[string]markerBlock
 }
 
 func ParseReview(source []byte) (ReviewDocument, error) {
@@ -48,6 +49,7 @@ func ParseReview(source []byte) (ReviewDocument, error) {
 		Model:  Review{ProjectID: identity.projectID, Revision: identity.revision, Name: name},
 		source: source,
 		fields: make(map[semanticField]sourceSpan),
+		blocks: make(map[string]markerBlock),
 	}
 	if err := document.parseTopLevelFields(identity.bodyStart); err != nil {
 		return ReviewDocument{}, err
@@ -57,6 +59,7 @@ func ParseReview(source []byte) (ReviewDocument, error) {
 		return ReviewDocument{}, err
 	}
 	for _, block := range blocks {
+		document.blocks[block.id] = block
 		switch block.kind {
 		case "risk":
 			if !spanContains(containers["risk"], block.whole) {
