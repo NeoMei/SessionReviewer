@@ -352,7 +352,7 @@ func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
 			return nil, ErrInvalidConflict
 		}
 		document, err := syncdoc.Parse(relative, content)
-		if err != nil || hasDuplicateConflictSection(document) {
+		if err != nil || (!isCompactV2Document(document) && hasDuplicateConflictSection(document)) {
 			return nil, ErrInvalidConflict
 		}
 		return &document, nil

@@ -408,11 +408,13 @@ func (d Document) ValidateHumanChanges(base Document) error {
 	if err := validateComparableDocuments(d, base); err != nil {
 		return err
 	}
-	if err := validateGeneratedOwnership(d); err != nil {
-		return err
-	}
-	if err := validateGeneratedOwnership(base); err != nil {
-		return err
+	if _, compactV2 := d.v2EntityType(); !compactV2 {
+		if err := validateGeneratedOwnership(d); err != nil {
+			return err
+		}
+		if err := validateGeneratedOwnership(base); err != nil {
+			return err
+		}
 	}
 	editedUnits, baseUnits := d.SemanticUnits(), base.SemanticUnits()
 	keys := unionUnitKeys(editedUnits, baseUnits)

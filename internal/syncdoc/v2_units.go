@@ -78,7 +78,9 @@ func buildV2DocumentState(document Document, source []byte, spans []reviewv2.Mar
 	if err != nil {
 		return nil, invalidDocument("compact review shell cannot be parsed")
 	}
-	state.semantic = state.shell.genericSemanticUnits()
+	// Compact v2 owns no legacy generated-section headings. Every parser-
+	// accepted non-marker section is human content, regardless of its title.
+	state.semantic = state.shell.Units()
 	for _, span := range spans {
 		key := v2UnitKey(span.Kind, span.ID)
 		count := replaceUnitBytes(state.semantic, state.physical[key], state.logical[key])

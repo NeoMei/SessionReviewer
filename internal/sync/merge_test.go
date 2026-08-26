@@ -847,6 +847,68 @@ func TestMergeRecomputesAndRejectsUntrustedCandidateHashes(t *testing.T) {
 	}
 }
 
+func TestV2MergeFromBaseAuthenticatesCanonicalAndExactSourceClaims(t *testing.T) {
+	base := v2HistoryWithTwoEvents(t)
+	exact := func(document syncdoc.Document, source []byte) Candidate {
+		rendered := renderDocument(t, document)
+		return Candidate{
+			Present: true, RelativePath: "项目历史.md", Document: document,
+			Hash: syncdoc.ContentHash(rendered), Source: bytes.Clone(source), SourceHash: syncdoc.ContentHash(source),
+		}
+	}
+	baseSource := renderDocument(t, base)
+	honest := exact(base, baseSource)
+	different := replaceV2Source(t, "项目历史.md", base, "信任链与 dry-run 边界修复", "different source")
+	differentSource := renderDocument(t, different)
+	for _, mutation := range []struct {
+		name   string
+		mutate func(*Candidate)
+	}{
+		{name: "forged-canonical-hash", mutate: func(value *Candidate) { value.Hash = strings.Repeat("c", 64) }},
+		{name: "forged-source-hash", mutate: func(value *Candidate) { value.SourceHash = strings.Repeat("d", 64) }},
+		{name: "source-preimage-for-different-document", mutate: func(value *Candidate) {
+			value.Source = bytes.Clone(differentSource)
+			value.SourceHash = syncdoc.ContentHash(differentSource)
+		}},
+		{name: "source-without-source-hash", mutate: func(value *Candidate) { value.SourceHash = "" }},
+		{name: "source-hash-without-source", mutate: func(value *Candidate) { value.Source = nil }},
+	} {
+		for _, side := range []string{"project", "vault"} {
+			t.Run(side+"/"+mutation.name, func(t *testing.T) {
+				bad := honest
+				bad.Source = bytes.Clone(honest.Source)
+				mutation.mutate(&bad)
+				input := v2MergeInput("project-history", "项目历史.md", base, base, base)
+				input.Project, input.Vault = honest, honest
+				if side == "project" {
+					input.Project = bad
+				} else {
+					input.Vault = bad
+				}
+				got := Merge(input)
+				if got.Kind != MergeConflict || got.Reason != "invalid_hash" || got.Accepted != nil {
+					t.Fatalf("merge trusted forged %s claim: %+v", side, got)
+				}
+			})
+		}
+	}
+
+	t.Run("valid-crlf-exact-source", func(t *testing.T) {
+		crlf := bytes.ReplaceAll(baseSource, []byte("\n"), []byte("\r\n"))
+		parsed, err := syncdoc.Parse("项目历史.md", crlf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := v2MergeInput("project-history", "项目历史.md", base, base, base)
+		input.Project = exact(parsed, crlf)
+		input.Vault = honest
+		got := Merge(input)
+		if got.Kind != MergeWriteProject || got.Accepted == nil || got.Reason != "" {
+			t.Fatalf("valid CRLF source rejected or not normalized: %+v", got)
+		}
+	})
+}
+
 func presentedUnit(value, key, heading string) syncdoc.Unit {
 	return syncdoc.Unit{
 		Present:             true,

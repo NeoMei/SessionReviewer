@@ -83,6 +83,9 @@ func mergeFromBase(input MergeInput) MergeResult {
 		if !candidate.Present {
 			continue
 		}
+		if integrityErr := validateCandidateIntegrity(candidate); integrityErr != nil {
+			return conflictResult(candidateClaimReason(integrityErr), nil)
+		}
 		identity, identityErr := candidate.Document.Identity()
 		if identityErr != nil || identity != baseIdentity {
 			return conflictResult("reserved_field", nil)
@@ -171,10 +174,6 @@ func mergePathFromBase(input MergeInput) (string, *MergeResult) {
 	for _, candidate := range []Candidate{input.Project, input.Vault} {
 		if !candidate.Present {
 			continue
-		}
-		if err := validateCandidateClaim(candidate); err != nil {
-			failure := conflictResult(candidateClaimReason(err), nil)
-			return "", &failure
 		}
 		rename = rename || candidate.RelativePath != input.BasePath
 	}
@@ -266,7 +265,7 @@ func mergeFirstSync(input MergeInput) MergeResult {
 		if !candidate.Present {
 			continue
 		}
-		if err := validateCandidateClaim(candidate); err != nil {
+		if err := validateCandidateIntegrity(candidate); err != nil {
 			return conflictResult(candidateClaimReason(err), nil)
 		}
 		valid := validNewCandidate(candidate.Document, input.EntityID, input.ProjectID)
@@ -375,7 +374,7 @@ func validPathContext(input MergeInput) bool {
 	return input.OccupiedPathKeys != nil
 }
 
-func validateCandidateClaim(candidate Candidate) error {
+func validateCandidateIntegrity(candidate Candidate) error {
 	if !candidate.Present || candidate.RelativePath == "" {
 		return syncdoc.ErrInvalidPath
 	}
@@ -943,6 +942,9 @@ func acceptedResult(input MergeInput, target string, accepted syncdoc.Document) 
 
 func candidateEquals(input MergeInput, candidate Candidate, target string, accepted syncdoc.Document) bool {
 	if !candidate.Present || !candidatePathEquals(input, candidate.RelativePath, target) {
+		return false
+	}
+	if validateCandidateIntegrity(candidate) != nil {
 		return false
 	}
 	if !candidate.Document.SemanticEqual(accepted) {

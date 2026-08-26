@@ -450,6 +450,50 @@ func TestV2SelectResolutionUsesCompactFinalizationAndConverges(t *testing.T) {
 	}
 }
 
+func TestV2SelectResolutionAllowsDistinctStableIDsWithSameVisibleTitle(t *testing.T) {
+	sameTitlesSource := bytes.Replace(renderDocument(t, v2ReviewWithTwoDecisions(t)), []byte("兼容性决策"), []byte("Skill + 本地 CLI"), 1)
+	base, err := syncdoc.Parse("项目回顾.md", sameTitlesSource)
+	if err != nil {
+		t.Fatalf("authoritative parser rejected distinct IDs with same title: %v", err)
+	}
+	project := replaceV2Source(t, "项目回顾.md", base, "原始会话不上传。", "project reason")
+	vault := replaceV2Source(t, "项目回顾.md", base, "原始会话不上传。", "vault reason")
+	manual := replaceV2Source(t, "项目回顾.md", base, "原始会话不上传。", "manual reason")
+	record := v2ReviewConflictRecordForDocuments(t, &base, &project, &vault)
+	for _, tc := range []struct {
+		name, reason string
+		resolution   Resolution
+		manual       *syncdoc.Document
+	}{
+		{name: "project", reason: "project reason", resolution: Resolution{ConflictID: record.ID, Action: AcceptProject}},
+		{name: "vault", reason: "vault reason", resolution: Resolution{ConflictID: record.ID, Action: AcceptObsidian}},
+		{name: "manual", reason: "manual reason", resolution: Resolution{ConflictID: record.ID, Action: ManualMerge, ManualFile: "/validated/manual.md"}, manual: &manual},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := SelectResolution(record, tc.resolution, candidate("项目回顾.md", project), candidate("项目回顾.md", vault), tc.manual)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rendered := renderDocument(t, selected)
+			if bytes.Count(rendered, []byte("### Skill + 本地 CLI\n")) != 2 || !bytes.Contains(rendered, []byte(tc.reason)) {
+				t.Fatalf("selected wrong stable unit:\n%s", rendered)
+			}
+			assertV2VisibleFrontmatter(t, rendered, 2)
+			followup := Merge(v2MergeInput("project-overview", "项目回顾.md", selected, selected, selected))
+			if followup.Kind != MergeNoop {
+				t.Fatalf("selection did not converge: %+v", followup)
+			}
+		})
+	}
+
+	t.Run("duplicate-stable-id-still-rejected", func(t *testing.T) {
+		duplicate := bytes.Replace(sameTitlesSource, []byte("decision-compatibility"), []byte("decision-local-cli"), 1)
+		if _, err := syncdoc.Parse("项目回顾.md", duplicate); err == nil {
+			t.Fatal("duplicate stable marker ID was accepted")
+		}
+	})
+}
+
 func TestSelectResolutionRejectsMalformedDuplicateAndMissingCandidates(t *testing.T) {
 	t.Parallel()
 
@@ -826,6 +870,28 @@ func v2ConflictRecordForDocuments(t *testing.T, base, project, vault *syncdoc.Do
 	artifact, err := BuildConflict(ConflictRecord{
 		Version: 1, EntityID: "project-history", ProjectID: "project-0123456789abcdef", Kind: ConflictUnits,
 		RelativePath: "项目历史.md", BasePath: "项目历史.md", ProjectPath: "项目历史.md", VaultPath: "项目历史.md",
+		Base: render(base), Project: render(project), Vault: render(vault), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Record == nil {
+		t.Fatalf("unexpected repair: %+v", artifact.Repair)
+	}
+	return *artifact.Record
+}
+
+func v2ReviewConflictRecordForDocuments(t *testing.T, base, project, vault *syncdoc.Document) ConflictRecord {
+	t.Helper()
+	render := func(document *syncdoc.Document) []byte {
+		if document == nil {
+			return nil
+		}
+		return renderDocument(t, *document)
+	}
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "project-overview", ProjectID: "project-0123456789abcdef", Kind: ConflictUnits,
+		RelativePath: "项目回顾.md", BasePath: "项目回顾.md", ProjectPath: "项目回顾.md", VaultPath: "项目回顾.md",
 		Base: render(base), Project: render(project), Vault: render(vault), CreatedAt: conflictTime,
 	})
 	if err != nil {

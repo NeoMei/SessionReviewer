@@ -177,6 +177,77 @@ func TestV2ComputedLegacyPhysicalAnchorCannotCollideAcrossDocuments(t *testing.T
 	}
 }
 
+func TestV2TreatsEveryUnknownH2AsHumanContent(t *testing.T) {
+	base := v2HistoryWithSecondEventSource(t)
+	for _, heading := range []string{"项目导航", "快速理解", "Project accounting", "任意中文标题", "Arbitrary English heading"} {
+		for _, position := range []string{"before", "between", "after"} {
+			t.Run(heading+"/"+position, func(t *testing.T) {
+				section := []byte("## " + heading + "\n\nuser-owned-" + position + "\n\n")
+				var source []byte
+				switch position {
+				case "before":
+					source = bytes.Replace(base, []byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->"), append(section, []byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->")...), 1)
+				case "between":
+					needle := []byte("<!-- /session-reviewer:event -->\n\n<!-- session-reviewer:event id=\"timeline-release\" -->")
+					replacement := append([]byte("<!-- /session-reviewer:event -->\n\n"), section...)
+					replacement = append(replacement, []byte("<!-- session-reviewer:event id=\"timeline-release\" -->")...)
+					source = bytes.Replace(base, needle, replacement, 1)
+				case "after":
+					source = append(bytes.Clone(base), section...)
+				}
+				if bytes.Equal(source, base) {
+					t.Fatal("test did not insert section")
+				}
+				document, err := Parse("项目历史.md", source)
+				if err != nil {
+					t.Fatal(err)
+				}
+				units := document.SemanticUnits()
+				found := false
+				for key, unit := range units {
+					if key.Kind == UnitSection && bytes.Contains(unit.Value, []byte("user-owned-"+position)) {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("unknown H2 missing from semantic units: %+v", units)
+				}
+				rebuilt, err := document.WithSemanticUnits(units)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rendered, err := rebuilt.Render()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Contains(rendered, section) {
+					t.Fatalf("unknown H2 was deleted:\n%s", rendered)
+				}
+			})
+		}
+	}
+}
+
+func TestV2HumanValidationDoesNotReserveLegacyGeneratedHeadings(t *testing.T) {
+	source := v2HistoryWithSecondEventSource(t)
+	first := []byte("## 项目导航\n\nfirst user section\n\n")
+	second := []byte("## 项目导航\n\nsecond user section\n\n")
+	source = bytes.Replace(source, []byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->"), append(first, []byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->")...), 1)
+	source = bytes.Replace(source, []byte("<!-- session-reviewer:event id=\"timeline-release\" -->"), append(second, []byte("<!-- session-reviewer:event id=\"timeline-release\" -->")...), 1)
+	base, err := Parse("项目历史.md", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	editedSource := bytes.Replace(source, []byte("second user section"), []byte("edited second user section"), 1)
+	edited, err := Parse("项目历史.md", editedSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := edited.ValidateHumanChanges(base); err != nil {
+		t.Fatalf("compact v2 treated a legacy generated heading as reserved: %v", err)
+	}
+}
+
 func assertV2AnchorRoundTrip(t *testing.T, source []byte, anchor string) {
 	t.Helper()
 	document, err := Parse("项目历史.md", source)
@@ -202,6 +273,32 @@ func assertV2AnchorRoundTrip(t *testing.T, source []byte, anchor string) {
 	if _, err := Parse("项目历史.md", rendered); err != nil {
 		t.Fatalf("rebuilt document did not reparse: %v", err)
 	}
+}
+
+func v2HistoryWithSecondEventSource(t *testing.T) []byte {
+	t.Helper()
+	base := bytes.TrimSuffix(v2FixtureBytes(t, "项目历史.valid.md"), []byte("\n"))
+	second := []byte(`
+
+<!-- session-reviewer:event id="timeline-release" -->
+## 2026-08-24 · 发布
+### 事件类别
+里程碑
+### 节点意义
+发布。
+### 摘要
+发布。
+### 为什么会走到这里
+需要验证。
+### 发生了什么
+- 验证
+### 结果与验证
+- 通过
+### 留下的问题或下一步
+继续。
+<!-- /session-reviewer:event -->
+`)
+	return append(bytes.Clone(base), second...)
 }
 
 func v2FixtureDocument(t *testing.T, name, relative string) Document {
