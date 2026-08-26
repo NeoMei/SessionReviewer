@@ -135,6 +135,53 @@ func TestParseConflictRecordRejectsTrailingJSONAndGarbage(t *testing.T) {
 	}
 }
 
+func TestParseConflictRecordRejectsDuplicateSecurityFields(t *testing.T) {
+	t.Parallel()
+
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical := artifact.Notes.Project.Content
+	for _, tc := range []struct {
+		name, field, shadow string
+	}{
+		{name: "id", field: "id", shadow: `"shadow-id"`},
+		{name: "path", field: "relative_path", shadow: `"shadow/path.md"`},
+		{name: "hash", field: "project_hash", shadow: `"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"`},
+		{name: "candidate", field: "project", shadow: `"SHADOW-CANDIDATE"`},
+		{name: "resolution", field: "resolution_status", shadow: `"resolved"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			needle := []byte(`"` + tc.field + `": `)
+			index := bytes.Index(canonical, needle)
+			if index < 0 {
+				t.Fatalf("canonical conflict lacks %q", tc.field)
+			}
+			duplicate := append(bytes.Clone(canonical[:index]), []byte(`"`+tc.field+`": `+tc.shadow+",\n  ")...)
+			duplicate = append(duplicate, canonical[index:]...)
+			if _, err := ParseConflictRecord(duplicate); !errors.Is(err, ErrInvalidConflict) {
+				t.Fatalf("duplicate %s accepted: err=%v\n%s", tc.field, err, duplicate)
+			}
+		})
+	}
+}
+
+func TestConflictDuplicateKeyScannerRecurses(t *testing.T) {
+	t.Parallel()
+	for _, body := range [][]byte{
+		[]byte(`{"outer":{"candidate":"first","candidate":"second"}}`),
+		[]byte(`{"outer":[{"hash":"first","hash":"second"}]}`),
+	} {
+		if err := rejectDuplicateConflictJSONKeys(body); err == nil {
+			t.Fatalf("nested duplicate accepted: %s", body)
+		}
+	}
+}
+
 func TestBuildConflictReturnsDefensiveCopies(t *testing.T) {
 	t.Parallel()
 

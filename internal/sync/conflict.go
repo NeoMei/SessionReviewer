@@ -273,6 +273,9 @@ func ParseConflictRecord(body []byte) (ConflictRecord, error) {
 	if len(body) == 0 || len(body) > MaxConflictRecordBytes {
 		return ConflictRecord{}, ErrInvalidConflict
 	}
+	if err := rejectDuplicateConflictJSONKeys(body); err != nil {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	var wire conflictRecordWire
@@ -309,6 +312,64 @@ func ParseConflictRecord(body []byte) (ConflictRecord, error) {
 		return ConflictRecord{}, err
 	}
 	return record, nil
+}
+
+func rejectDuplicateConflictJSONKeys(body []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	if err := scanConflictJSONValue(decoder); err != nil {
+		return err
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return ErrInvalidConflict
+	}
+	return nil
+}
+
+func scanConflictJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			nameToken, err := decoder.Token()
+			name, ok := nameToken.(string)
+			if err != nil || !ok {
+				return ErrInvalidConflict
+			}
+			if _, duplicate := seen[name]; duplicate {
+				return ErrInvalidConflict
+			}
+			seen[name] = struct{}{}
+			if err := scanConflictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim('}') {
+			return ErrInvalidConflict
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanConflictJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		end, err := decoder.Token()
+		if err != nil || end != json.Delim(']') {
+			return ErrInvalidConflict
+		}
+	default:
+		return ErrInvalidConflict
+	}
+	return nil
 }
 
 func (engine *Engine) persistConflictRecord(ctx context.Context, artifact ConflictArtifact) error {

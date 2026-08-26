@@ -249,6 +249,21 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	if version == reviewv2.VersionMixed {
 		return report, errors.New("review migration recovery is required")
 	}
+	transactions, err := engine.transactions.List()
+	if err != nil {
+		return report, errors.New("sync transaction state is invalid")
+	}
+	if len(transactions) != 0 {
+		if request.DryRun {
+			return report, errors.New("sync recovery is required before dry-run")
+		}
+		if version == reviewv2.VersionLegacy {
+			return report, errors.New("legacy sync transaction blocks migration")
+		}
+		if err := engine.recoverTransactions(ctx, transactions); err != nil {
+			return report, fmt.Errorf("sync transaction recovery failed: %w", err)
+		}
+	}
 	if version == reviewv2.VersionLegacy {
 		plan, err := reviewv2.PlanMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.options.Now().UTC())
 		if err != nil {
@@ -266,18 +281,6 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		report.Migration = migrationReportFromReview(migration, false)
 		migrationCommitted = true
 		version = reviewv2.VersionV2
-	}
-	transactions, err := engine.transactions.List()
-	if err != nil {
-		return report, errors.New("sync transaction state is invalid")
-	}
-	if len(transactions) != 0 {
-		if request.DryRun {
-			return report, errors.New("sync recovery is required before dry-run")
-		}
-		if err := engine.recoverTransactions(ctx, transactions); err != nil {
-			return report, errors.New("sync transaction recovery failed")
-		}
 	}
 	var machine machineSnapshot
 	if version == reviewv2.VersionV2 {
@@ -826,13 +829,23 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 			retErr = errors.Join(retErr, lock.Release())
 		}
 	}()
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+		return report, fmt.Errorf("review migration recovery failed: %w", err)
+	}
+	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
+	if err != nil || version != reviewv2.VersionV2 {
+		return report, errors.New("conflict resolution requires review v2")
+	}
 	transactions, err := engine.transactions.List()
 	if err != nil {
 		return report, errors.New("sync transaction state is invalid")
 	}
 	if len(transactions) != 0 {
 		if err := engine.recoverTransactions(ctx, transactions); err != nil {
-			return report, errors.New("sync transaction recovery failed")
+			return report, fmt.Errorf("sync transaction recovery failed: %w", err)
 		}
 	}
 	conflictRecord, err := engine.loadMirroredConflictRecord(resolution.ConflictID)
@@ -1164,6 +1177,15 @@ func distinctRelativePath(options Options, first, second string) bool {
 }
 
 func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Transaction) error {
+	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
+	if err != nil || version == reviewv2.VersionMixed || version == reviewv2.VersionEmpty {
+		return errors.New("sync transaction recovery requires a stable review version")
+	}
+	if version == reviewv2.VersionV2 {
+		if err := engine.validateV2RecoveryTransactions(transactions); err != nil {
+			return err
+		}
+	}
 	remaining := make([]Transaction, 0, len(transactions))
 	resolutions := make([]Transaction, 0, 1)
 	for _, transaction := range transactions {
@@ -1319,6 +1341,63 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 		}
 	}
 	return nil
+}
+
+func (engine *Engine) validateV2RecoveryTransactions(transactions []Transaction) error {
+	projectInventory := syncdoc.Scan(engine.project, "docs/session-review", engine.options.GOOS, platform.CaseSensitive)
+	vaultInventory, _, err := engine.scanVault()
+	if err != nil || len(projectInventory.Issues) != 0 || len(vaultInventory.Issues) != 0 {
+		return errors.New("cannot authenticate transaction against compact review v2")
+	}
+	bases, err := engine.bases.List()
+	if err != nil {
+		return err
+	}
+	baseByID := make(map[string]BaseRecord, len(bases))
+	for _, base := range bases {
+		baseByID[base.EntityID] = base
+	}
+	for _, transaction := range transactions {
+		switch transaction.Kind {
+		case TxnMachinePublish, TxnMachineRepair, TxnConflictRecord, TxnConflictResolve:
+			continue
+		case TxnEntitySync:
+		default:
+			return errors.New("legacy sync transaction cannot be recovered into review v2")
+		}
+		var body []byte
+		relative := ""
+		if base, found := baseByID[transaction.EntityID]; found && base.ContentHash == transaction.DesiredHash {
+			body, relative = base.Content, base.RelativePath
+		} else if entry, found := projectInventory.ByID[transaction.EntityID]; found && entry.ContentHash == transaction.DesiredHash {
+			body, relative = entry.Content, strings.TrimPrefix(entry.RelativePath, "docs/session-review/")
+		} else if entry, found := vaultInventory.ByID[transaction.EntityID]; found && entry.ContentHash == transaction.DesiredHash {
+			body, relative = entry.Content, strings.TrimPrefix(entry.RelativePath, strings.TrimSuffix(engine.options.VaultReviewPath, "/")+"/")
+		}
+		if body == nil {
+			if transaction.Stage == TxnPlanned {
+				continue
+			}
+			return errors.New("interrupted desired content is unavailable")
+		}
+		if !engine.validCompactV2RecoveryBody(transaction.EntityID, relative, body) {
+			return errors.New("legacy sync transaction cannot be recovered into review v2")
+		}
+	}
+	return nil
+}
+
+func (engine *Engine) validCompactV2RecoveryBody(entityID, relative string, body []byte) bool {
+	switch entityID {
+	case "project-overview":
+		document, err := reviewv2.ParseReview(body)
+		return err == nil && relative == strings.TrimPrefix(reviewv2.ReviewRelativePath, "docs/session-review/") && document.Model.ProjectID == engine.options.ProjectID
+	case "project-history":
+		document, err := reviewv2.ParseHistory(body)
+		return err == nil && relative == strings.TrimPrefix(reviewv2.HistoryRelativePath, "docs/session-review/") && document.ProjectID == engine.options.ProjectID
+	default:
+		return false
+	}
 }
 
 func candidateEntryHash(entry syncdoc.Entry, found bool) string {

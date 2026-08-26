@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
@@ -111,6 +112,144 @@ func TestReconcileDryRunPlansMigrationAndRealSyncConvergesV2(t *testing.T) {
 	repeat, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
 	if err != nil || len(repeat.Operations) != 0 || len(repeat.Machine.Operations) != 0 {
 		t.Fatalf("repeat=%+v err=%v", repeat, err)
+	}
+}
+
+func TestReconcileFailsClosedOnEveryLegacyEntityTransactionStageBeforeNewMigration(t *testing.T) {
+	for _, stage := range []TransactionStage{TxnPlanned, TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted} {
+		t.Run(string(stage), func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			completeLegacyFixtureForMigration(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			stageLegacyOverviewTransaction(t, fixture, engine, stage)
+			beforeProject := snapshotFixtureTree(t, fixture.project)
+			beforeData := snapshotFixtureTree(t, fixture.data)
+			beforeVault := snapshotFixtureTree(t, fixture.vault)
+
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err == nil || !strings.Contains(err.Error(), "legacy sync transaction blocks migration") {
+					t.Fatalf("attempt=%d err=%v", attempt, err)
+				}
+				if version, err := reviewv2.DetectVersionExpected(fixture.project, engine.project.Info()); err != nil || version != reviewv2.VersionLegacy {
+					t.Fatalf("attempt=%d version=%s err=%v", attempt, version, err)
+				}
+				transactions, err := engine.transactions.List()
+				if err != nil || len(transactions) != 1 || transactions[0].Stage != stage {
+					t.Fatalf("attempt=%d transactions=%+v err=%v", attempt, transactions, err)
+				}
+				if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+					!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) ||
+					!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+					t.Fatalf("attempt=%d mutated state before fail-closed return", attempt)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileNeverReplaysLegacyEntityBytesAfterMigrationJournalRecovery(t *testing.T) {
+	fixture := newEngineFixture(t)
+	completeLegacyFixtureForMigration(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	stageLegacyOverviewTransaction(t, fixture, engine, TxnVaultWritten)
+	_, _ = stageRecoverableMigrationJournal(t, fixture, engine)
+
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err == nil || !strings.Contains(err.Error(), "legacy sync transaction cannot be recovered into review v2") {
+		t.Fatalf("err=%v", err)
+	}
+	if version, err := reviewv2.DetectVersionExpected(fixture.project, engine.project.Info()); err != nil || version != reviewv2.VersionV2 {
+		t.Fatalf("version=%s err=%v", version, err)
+	}
+	if _, err := os.Lstat(filepath.Join(fixture.project, "docs", "session-review", "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("legacy bytes were replayed into migrated Project: %v", err)
+	}
+	beforeRetry := snapshotFixtureTree(t, fixture.project)
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err == nil || !strings.Contains(err.Error(), "legacy sync transaction cannot be recovered into review v2") {
+		t.Fatalf("retry err=%v", err)
+	}
+	if !reflect.DeepEqual(beforeRetry, snapshotFixtureTree(t, fixture.project)) {
+		t.Fatal("retry mutated Project after fail-closed recovery")
+	}
+}
+
+func TestV2RecoveryAuthenticationRejectsNestedCompactBasenames(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	for _, tc := range []struct {
+		entityID, canonical, nested string
+	}{
+		{entityID: "project-overview", canonical: "项目回顾.md", nested: "nested/项目回顾.md"},
+		{entityID: "project-history", canonical: "项目历史.md", nested: "archive/项目历史.md"},
+	} {
+		body := readDerivedTestFile(t, filepath.Join(fixture.project, "docs", "session-review", tc.canonical))
+		if !engine.validCompactV2RecoveryBody(tc.entityID, tc.canonical, body) {
+			t.Fatalf("canonical %s was rejected", tc.canonical)
+		}
+		if engine.validCompactV2RecoveryBody(tc.entityID, tc.nested, body) {
+			t.Fatalf("nested same-basename path %s was accepted", tc.nested)
+		}
+	}
+}
+
+func stageLegacyOverviewTransaction(t *testing.T, fixture engineFixture, engine *Engine, stage TransactionStage) {
+	t.Helper()
+	relative := "project-overview.md"
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", relative)
+	body := readDerivedTestFile(t, projectPath)
+	hash := syncdoc.ContentHash(body)
+	transaction := Transaction{
+		Version: 1, Kind: TxnEntitySync, EntityID: "project-overview", DesiredHash: hash,
+		ExpectedProjectHash: hash, Stage: TxnPlanned, UpdatedAt: fixture.options().Now(),
+	}
+	if err := engine.transactions.Save(transaction); err != nil {
+		t.Fatal(err)
+	}
+	if stage == TxnPlanned {
+		return
+	}
+	transaction.Stage = TxnProjectWritten
+	if err := engine.transactions.Save(transaction); err != nil {
+		t.Fatal(err)
+	}
+	if stage == TxnProjectWritten {
+		return
+	}
+	vaultDirectory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	if err := os.MkdirAll(vaultDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(vaultDirectory, relative), body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	transaction.Stage = TxnVaultWritten
+	if err := engine.transactions.Save(transaction); err != nil {
+		t.Fatal(err)
+	}
+	if stage == TxnVaultWritten {
+		return
+	}
+	if err := engine.bases.Commit("", BaseRecord{
+		Version: 1, EntityID: "project-overview", RelativePath: relative,
+		ContentHash: hash, ProjectHash: hash, VaultHash: hash, Content: body, SyncedAt: fixture.options().Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	transaction.Stage = TxnBaseCommitted
+	if err := engine.transactions.Save(transaction); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -723,6 +862,97 @@ func TestResolvePersistsDurableClosureIntentBeforeAcceptedEntityWrite(t *testing
 	transactions, err := engine.transactions.List()
 	if err != nil || len(transactions) != 0 {
 		t.Fatalf("aborted resolution transactions=%+v err=%v", transactions, err)
+	}
+}
+
+func TestResolveRecoversMigrationBeforeConflictOrSyncTransactionWork(t *testing.T) {
+	for _, stage := range []reviewv2.Stage{reviewv2.StagePlanned, reviewv2.StageV2Written, reviewv2.StageCommitted} {
+		t.Run(string(stage), func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			completeLegacyFixtureForMigration(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			stageMigrationJournalForResolve(t, fixture, engine, stage)
+			if stage == reviewv2.StageV2Written {
+				if version, err := reviewv2.DetectVersionExpected(fixture.project, engine.project.Info()); err != nil || version != reviewv2.VersionMixed {
+					t.Fatalf("precondition version=%s err=%v", version, err)
+				}
+			}
+
+			resolution := Resolution{ConflictID: "conflict-project-overview-0123456789ab", Action: AcceptProject}
+			if _, err := engine.Resolve(context.Background(), resolution); !errors.Is(err, ErrStaleConflict) {
+				t.Fatalf("resolve err=%v", err)
+			}
+			if pending, err := reviewv2.MigrationPending(fixture.project, engine.project.Info(), fixture.data); err != nil || pending {
+				t.Fatalf("pending=%v err=%v", pending, err)
+			}
+			if version, err := reviewv2.DetectVersionExpected(fixture.project, engine.project.Info()); err != nil || version != reviewv2.VersionV2 {
+				t.Fatalf("version=%s err=%v", version, err)
+			}
+
+			beforeProject := snapshotFixtureTree(t, fixture.project)
+			beforeData := snapshotFixtureTree(t, fixture.data)
+			beforeVault := snapshotFixtureTree(t, fixture.vault)
+			if _, err := engine.Resolve(context.Background(), resolution); !errors.Is(err, ErrStaleConflict) {
+				t.Fatalf("retry err=%v", err)
+			}
+			if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+				!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) ||
+				!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+				t.Fatal("retry after migration recovery mutated filesystem metadata")
+			}
+		})
+	}
+}
+
+func stageMigrationJournalForResolve(t *testing.T, fixture engineFixture, engine *Engine, stage reviewv2.Stage) {
+	t.Helper()
+	journalPath, journalBody := stageRecoverableMigrationJournal(t, fixture, engine)
+	if stage == reviewv2.StagePlanned {
+		return
+	}
+	if err := reviewv2.RecoverMigration(fixture.project, engine.project.Info(), fixture.data); err != nil {
+		t.Fatal(err)
+	}
+	var journal map[string]any
+	if err := json.Unmarshal(journalBody, &journal); err != nil {
+		t.Fatal(err)
+	}
+	if stage == reviewv2.StageV2Written {
+		backupRelative, ok := journal["backup_relative"].(string)
+		if !ok {
+			t.Fatal("migration journal backup path is missing")
+		}
+		archive := filepath.Join(fixture.project, filepath.FromSlash(backupRelative), "archive")
+		entries, err := os.ReadDir(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active := filepath.Join(fixture.project, "docs", "session-review")
+		for _, entry := range entries {
+			if err := os.Rename(filepath.Join(archive, entry.Name()), filepath.Join(active, entry.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Remove(archive); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.RemoveAll(filepath.Join(fixture.project, filepath.FromSlash(backupRelative), "quarantine")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body := bytes.Replace(journalBody, []byte(`"stage": "planned"`), []byte(`"stage": "`+string(stage)+`"`), 1)
+	if bytes.Equal(body, journalBody) {
+		t.Fatal("migration journal stage marker was not replaced")
+	}
+	if err := os.Remove(atomicfile.BackupPath(journalPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(journalPath, body, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
