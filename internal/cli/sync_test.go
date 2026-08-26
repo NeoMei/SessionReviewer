@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -82,6 +84,149 @@ func TestRunSyncStatusJSONAndResolveGrammar(t *testing.T) {
 		if code := Run(args, &out, &errOut); code != 2 || out.Len() != 0 {
 			t.Fatalf("action=%q code=%d stdout=%q stderr=%q", action, code, out.String(), errOut.String())
 		}
+	}
+}
+
+func TestRunSyncProjectIDSelectsPinnedMappingAndRejectsCWDCombination(t *testing.T) {
+	fixture := newCLISyncFixture(t)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "--dry-run", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "migration=current") {
+		t.Fatalf("project-id code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{"sync", "--dry-run", "--project-id", fixture.projectID, "--cwd", fixture.project, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 2 || !strings.Contains(errOut.String(), "mutually exclusive") {
+		t.Fatalf("combined code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunSyncStatusJSONIncludesV2MachineMigrationAndConflictFields(t *testing.T) {
+	fixture := newCLISyncFixture(t)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "status", "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var status map[string]any
+	if err := json.Unmarshal(out.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"migration", "machine_state", "last_successful_sync", "pending_operations", "hidden_conflict_ids"} {
+		if _, exists := status[key]; !exists {
+			t.Fatalf("status missing %q: %v", key, status)
+		}
+	}
+}
+
+func TestRunSyncPlainStatusIncludesV2MigrationAndMachineState(t *testing.T) {
+	fixture := newCLISyncFixture(t)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "status", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, want := range []string{"migration=current", "machine=pending", "pending_operations=", "hidden_conflicts="} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("plain status missing %q: %q", want, out.String())
+		}
+	}
+}
+
+func TestRunSyncRepairMachineLedgerHasNoArbitraryPathAndRestoresProjectBytes(t *testing.T) {
+	fixture := newCLISyncFixture(t)
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut); code != 0 {
+		t.Fatalf("initial sync code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	projectPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+	vaultPath := filepath.Join(fixture.vault, "Projects", "CLI--11111111", "Session Review", ".session-reviewer", "ledger.json")
+	want, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultPath, []byte("tampered machine ledger"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut); code == 0 || !strings.Contains(out.String(), "machine_ledger_modified") {
+		t.Fatalf("tamper code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	out.Reset()
+	errOut.Reset()
+	code := Run([]string{"sync", "repair-machine-ledger", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "machine=current files=1") {
+		t.Fatalf("repair code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	got, err := os.ReadFile(vaultPath)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("vault machine was not repaired err=%v", err)
+	}
+	out.Reset()
+	errOut.Reset()
+	if code := Run([]string{"sync", "repair-machine-ledger", "unexpected", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut); code != 2 {
+		t.Fatalf("arbitrary path code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
+func TestRunSyncReportsMigrationAndPublishesReviewV2(t *testing.T) {
+	fixture := newCLILegacySyncFixture(t)
+	projectInfo, err := os.Stat(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewv2.PlanMigration(fixture.project, projectInfo, filepath.Join(fixture.data, "projects", fixture.projectID), time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("legacy fixture cannot be migrated: %v", err)
+	}
+	projectBefore := snapshotCLITree(t, fixture.project)
+	dataBefore := snapshotCLITree(t, fixture.data)
+	vaultBefore := snapshotCLITree(t, fixture.vault)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "--dry-run", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "migration=required") {
+		t.Fatalf("dry-run code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, want := range []string{
+		"migration_create docs/session-review/.session-reviewer/ledger.json",
+		"migration_create docs/session-review/项目历史.md",
+		"migration_create docs/session-review/项目回顾.md",
+		"migration_archive docs/session-review/current-state.md",
+		"migration_archive docs/session-review/project-overview.md",
+	} {
+		if !strings.Contains(out.String(), want+"\n") {
+			t.Fatalf("migration preview missing %q in %q", want, out.String())
+		}
+	}
+	if strings.Contains(out.String(), fixture.project) || strings.Contains(out.String(), fixture.vault) {
+		t.Fatalf("migration preview leaked absolute path: %q", out.String())
+	}
+	if snapshotCLITree(t, fixture.project) != projectBefore || snapshotCLITree(t, fixture.data) != dataBefore || snapshotCLITree(t, fixture.vault) != vaultBefore {
+		t.Fatal("migration dry-run wrote to project, data, or vault")
+	}
+	out.Reset()
+	errOut.Reset()
+	code = Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "migration=current") || !strings.Contains(out.String(), "machine=current files=1") {
+		t.Fatalf("sync code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	if _, err := reviewv2.Load(fixture.project); err != nil {
+		t.Fatalf("load migrated v2: %v", err)
+	}
+	backupRoot := filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "backups")
+	entries, err := os.ReadDir(backupRoot)
+	directories := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			directories++
+		}
+	}
+	if err != nil || directories != 1 {
+		t.Fatalf("backup entries=%v err=%v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.vault, "Projects", "Legacy--269b8cab", "Session Review", ".session-reviewer", "backups")); !os.IsNotExist(err) {
+		t.Fatalf("migration backup escaped to vault: %v", err)
 	}
 }
 
@@ -227,6 +372,59 @@ func newCLISyncFixture(t *testing.T) cliSyncFixture {
 		VaultReviewPath: "Projects/CLI--11111111/Session Review", VaultCaseMode: platform.CaseSensitive,
 	}}}
 	if err := config.Save(filepath.Join(fixture.data, "config.toml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func newCLILegacySyncFixture(t *testing.T) cliSyncFixture {
+	t.Helper()
+	root := t.TempDir()
+	fixture := cliSyncFixture{
+		project: filepath.Join(root, "project"), vault: filepath.Join(root, "vault"),
+		data: filepath.Join(root, "data"), projectID: "project-269b8cab6cbf69dd",
+	}
+	projectData := filepath.Join(fixture.data, "projects", fixture.projectID)
+	for _, directory := range []string{
+		fixture.project, fixture.vault,
+		filepath.Join(projectData, "merge-bases"), filepath.Join(projectData, "queue"),
+		filepath.Join(projectData, "transactions"), filepath.Join(projectData, "locks"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacyRoot := filepath.Join(fixture.project, "docs", "session-review")
+	if err := os.MkdirAll(legacyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: " + fixture.projectID + "\nrevision: 1\nsync_status: synced\n---\n\n# Legacy fixture\n"
+	if err := os.WriteFile(filepath.Join(legacyRoot, "project-overview.md"), []byte(overview), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ledger.Load(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := ledger.CurrentState{
+		ProjectID: fixture.projectID, Revision: 1, Goal: "Migrate a realistic accepted legacy ledger",
+		LastVerified: "legacy fixture loaded", Branch: "fixture", NextAction: "preview migration",
+		FirstInspection: "docs/session-review/project-overview.md", LastUpdated: "2026-08-26T00:00:00Z",
+	}
+	plan, err := ledger.Render(legacy, ledger.ChangeSet{Current: &current})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectData, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault,
+		VaultReviewPath: "Projects/Legacy--269b8cab/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}}}); err != nil {
 		t.Fatal(err)
 	}
 	return fixture

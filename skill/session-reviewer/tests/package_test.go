@@ -81,7 +81,7 @@ func TestSkillIsConciseDiscoverableAndRoutesToSchema(t *testing.T) {
 		"one bounded packet", "accepted ledger entities", "references/proposal-v1.schema.json",
 		"references/apply-invariants.md", "canonical project root", "--cwd", "--project",
 		"evidence_packet_sha256", "expected_cursor", "next_cursor", "has_more",
-		"Never edit ledger files directly", "Never read raw JSONL", "Never interpret hidden reasoning",
+		"Never edit the machine ledger", "Never read raw JSONL", "Never interpret hidden reasoning",
 		"Never run Git mutation commands", "Never call an API client", "apply-proposal",
 		"compare-and-swap", "Stop on any failure", "Do not claim acceptance", "entities", "cursor",
 	} {
@@ -93,6 +93,27 @@ func TestSkillIsConciseDiscoverableAndRoutesToSchema(t *testing.T) {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("SKILL.md contains unfinished or unnecessary content %q", forbidden)
 		}
+	}
+}
+
+func TestSkillDocumentsReviewV2RecoveryEditingMigrationAndWindowsFlow(t *testing.T) {
+	body, err := os.ReadFile("../SKILL.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"项目脉络浏览器", "项目回顾.md", "项目历史.md", ".session-reviewer/ledger.json",
+		"--project-id", "--cwd", "mutually exclusive", "sync --dry-run",
+		"repair-machine-ledger", "accept_project", "accept_obsidian", "manual_merge",
+		"PowerShell", "migration backup", "USD per million tokens",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("SKILL.md missing v2 workflow contract %q", required)
+		}
+	}
+	if strings.Contains(text, "Never edit ledger files directly") {
+		t.Fatal("skill still forbids the documented human Markdown editing flow")
 	}
 }
 

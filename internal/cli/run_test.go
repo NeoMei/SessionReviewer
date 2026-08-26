@@ -102,6 +102,18 @@ func TestRunHelpListsLedgerCommandsAndBoundaries(t *testing.T) {
 	}
 }
 
+func TestRunHelpListsReviewV2SyncModes(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"help"}, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	for _, text := range []string{"--project-id", "repair-machine-ledger", "resolve", "accept_project", "accept_obsidian", "manual_merge"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("help=%q missing %q", out.String(), text)
+		}
+	}
+}
+
 func TestRunRootHelpAliasesAreCompleteAndUseStdout(t *testing.T) {
 	for _, alias := range []string{"help", "-h", "--help"} {
 		t.Run(alias, func(t *testing.T) {
@@ -1264,6 +1276,8 @@ func newCLIApplyFixtureVersion(t *testing.T, dataDir string, v2 bool) cliApplyFi
 		convertCLIApplyFixtureToV2(t, projectRoot)
 		proposalBody = bytes.Replace(proposalBody, []byte(`"expected_revision": 0`), []byte(`"expected_revision": 1`), 1)
 		proposalBody = bytes.Replace(proposalBody, []byte(`"blockers": []`), []byte(`"blockers": ["Fixture risk"]`), 1)
+	} else {
+		convertCLIApplyFixtureToLegacy(t, projectRoot)
 	}
 	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
 	if err := os.WriteFile(proposalPath, proposalBody, 0o600); err != nil {
@@ -1282,14 +1296,15 @@ func newCLIApplyFixtureVersion(t *testing.T, dataDir string, v2 bool) cliApplyFi
 
 func convertCLIApplyFixtureToV2(t *testing.T, projectRoot string) {
 	t.Helper()
-	legacy, err := ledger.Load(projectRoot)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacy.CurrentState = ledger.CurrentState{
-		ProjectID: legacy.ProjectID, Revision: 1, Goal: "Fixture seed goal",
-		LastVerified: "Fixture seed verification", Branch: "fixture-seed",
-		Blockers: []string{"Fixture risk"}, NextAction: "Apply the first proposal",
+	const projectID = "project-1111111111111111"
+	legacy := ledger.State{
+		ProjectID: projectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: projectID, Revision: 1, Goal: "Fixture seed goal",
+			LastVerified: "Fixture seed verification", Branch: "fixture-seed",
+			Blockers: []string{"Fixture risk"}, NextAction: "Apply the first proposal",
+		},
+		Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
 	}
 	state, err := reviewv2.ProjectLegacy(legacy)
 	if err != nil {
@@ -1308,14 +1323,18 @@ func convertCLIApplyFixtureToV2(t *testing.T, projectRoot string) {
 			t.Fatal(err)
 		}
 	}
-	for _, relative := range []string{
-		"docs/session-review/project-overview.md", "docs/session-review/current-state.md",
-		"docs/session-review/evolution-timeline.md", "docs/session-review/decisions",
-		"docs/session-review/open-loops", "docs/session-review/sessions",
-	} {
+}
+
+func convertCLIApplyFixtureToLegacy(t *testing.T, projectRoot string) {
+	t.Helper()
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, "docs/session-review/.session-reviewer"} {
 		if err := os.RemoveAll(filepath.Join(projectRoot, filepath.FromSlash(relative))); err != nil {
 			t.Fatal(err)
 		}
+	}
+	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: project-1111111111111111\nrevision: 1\nsync_status: synced\n---\n\n# Fixture\n"
+	if err := os.WriteFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"), []byte(overview), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

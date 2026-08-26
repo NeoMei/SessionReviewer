@@ -20,6 +20,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 const (
@@ -451,26 +452,38 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dataRoot, "config.toml")
-	overviewPath := filepath.Join(projectRoot, "docs", "session-review", "project-overview.md")
 	configBefore, err := os.ReadFile(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	overviewBefore, err := os.ReadFile(overviewPath)
-	if err != nil {
-		t.Fatal(err)
+	reviewPaths := []string{
+		reviewv2.ReviewRelativePath,
+		reviewv2.HistoryRelativePath,
+		reviewv2.MachineLedgerRelativePath,
+	}
+	reviewBefore := make(map[string][]byte, len(reviewPaths))
+	for _, relative := range reviewPaths {
+		reviewBefore[relative], err = os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	second, err := project.Initialize(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
 	configAfter, _ := os.ReadFile(configPath)
-	overviewAfter, _ := os.ReadFile(overviewPath)
+	for _, relative := range reviewPaths {
+		reviewAfter, readErr := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(relative)))
+		if readErr != nil || !bytes.Equal(reviewBefore[relative], reviewAfter) {
+			t.Fatalf("initialization changed %s: %v", relative, readErr)
+		}
+	}
 	loaded, err := config.Load(configPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != second || len(loaded.Projects) != 1 || !bytes.Equal(configBefore, configAfter) || !bytes.Equal(overviewBefore, overviewAfter) {
+	if first != second || len(loaded.Projects) != 1 || !bytes.Equal(configBefore, configAfter) {
 		t.Fatalf("initialization is not idempotent: first=%+v second=%+v projects=%d", first, second, len(loaded.Projects))
 	}
 

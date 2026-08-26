@@ -20,15 +20,17 @@ import (
 const syncHelp = `Synchronize editable Session Review Markdown with the configured Obsidian vault.
 
 Usage:
-  session-reviewer sync [--dry-run] [--cwd PROJECT] [--data-dir DATA]
-  session-reviewer sync status [--json] [--cwd PROJECT] [--data-dir DATA]
-  session-reviewer sync resolve --conflict ID --action accept_project|accept_obsidian [--cwd PROJECT] [--data-dir DATA]
-  session-reviewer sync resolve --conflict ID --action manual_merge --file PATH [--cwd PROJECT] [--data-dir DATA]
+  session-reviewer sync [--dry-run] [--cwd PROJECT | --project-id ID] [--data-dir DATA]
+  session-reviewer sync status [--json] [--cwd PROJECT | --project-id ID] [--data-dir DATA]
+  session-reviewer sync resolve --conflict ID --action accept_project|accept_obsidian [--cwd PROJECT | --project-id ID] [--data-dir DATA]
+  session-reviewer sync resolve --conflict ID --action manual_merge --file PATH [--cwd PROJECT | --project-id ID] [--data-dir DATA]
+  session-reviewer sync repair-machine-ledger [--cwd PROJECT | --project-id ID] [--data-dir DATA]
 
 Options:
   --dry-run       Print the deterministic plan without changing files or state
   --json          Emit sync status as JSON
   --cwd PATH      Project root; defaults to the current directory
+  --project-id ID Select one configured project by stable ID; mutually exclusive with --cwd
   --data-dir PATH Machine-local SessionReviewer data directory
 
 Examples:
@@ -43,7 +45,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	mode := "sync"
-	if len(args) > 0 && (args[0] == "status" || args[0] == "resolve") {
+	if len(args) > 0 && (args[0] == "status" || args[0] == "resolve" || args[0] == "repair-machine-ledger") {
 		mode = args[0]
 		args = args[1:]
 	}
@@ -53,6 +55,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	dryRun := flags.Bool("dry-run", false, "plan without writes")
 	jsonOutput := flags.Bool("json", false, "emit JSON status")
 	cwd := flags.String("cwd", "", "project root")
+	projectID := flags.String("project-id", "", "configured stable project ID")
 	dataDir := flags.String("data-dir", "", "machine data directory")
 	conflictID := flags.String("conflict", "", "conflict identity")
 	action := flags.String("action", "", "resolution action")
@@ -62,6 +65,10 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	}
 	if flags.NArg() != 0 {
 		fmt.Fprintln(stderr, "sync does not accept positional arguments")
+		return 2
+	}
+	if *cwd != "" && *projectID != "" {
+		fmt.Fprintln(stderr, "--cwd and --project-id are mutually exclusive")
 		return 2
 	}
 	if mode != "sync" && *dryRun {
@@ -89,13 +96,14 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
-	root, mapping, projectData, err := resolveSyncMapping(*cwd, *dataDir)
+	root, mapping, projectData, err := resolveSyncMapping(*cwd, *projectID, *dataDir)
 	if err != nil {
 		return writeDiagnostic(stderr, "sync", err)
 	}
 	engine, err := syncengine.NewEngine(syncengine.Options{
 		ProjectRoot: root.Path, VaultRoot: mapping.VaultRoot, VaultReviewPath: mapping.VaultReviewPath,
-		DataRoot: projectData, ProjectID: mapping.ID, GOOS: runtime.GOOS, VaultCaseMode: mapping.VaultCaseMode,
+		ProjectRootExpected: root.Expected,
+		DataRoot:            projectData, ProjectID: mapping.ID, GOOS: runtime.GOOS, VaultCaseMode: mapping.VaultCaseMode,
 		Retry: syncengine.DefaultRetryPolicy(), Now: time.Now,
 	})
 	if err != nil {
@@ -129,6 +137,13 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		return 0
+	case "repair-machine-ledger":
+		report, err := engine.RepairMachineLedger(context.Background())
+		if err != nil {
+			return writeDiagnostic(stderr, "sync", err)
+		}
+		fmt.Fprintf(stdout, "machine=%s files=1\n", report.State)
+		return 0
 	default:
 		report, err := engine.Reconcile(context.Background(), syncengine.ReconcileRequest{DryRun: *dryRun, Trigger: syncengine.TriggerCLI})
 		if err != nil {
@@ -154,12 +169,9 @@ func writeSyncPartialFailure(stderr io.Writer, report syncengine.Report) bool {
 	return true
 }
 
-func resolveSyncMapping(cwd, dataDir string) (resolvedProjectRoot, config.ProjectMapping, string, error) {
-	root, err := resolveProjectRoot(cwd)
-	if err != nil {
-		return resolvedProjectRoot{}, config.ProjectMapping{}, "", err
-	}
+func resolveSyncMapping(cwd, projectID, dataDir string) (resolvedProjectRoot, config.ProjectMapping, string, error) {
 	env := currentEnv()
+	var err error
 	if dataDir == "" {
 		dataDir, err = platform.DataDir(env)
 		if err != nil {
@@ -174,13 +186,31 @@ func resolveSyncMapping(cwd, dataDir string) (resolvedProjectRoot, config.Projec
 	if err != nil {
 		return resolvedProjectRoot{}, config.ProjectMapping{}, "", err
 	}
+	var root resolvedProjectRoot
 	var mapping config.ProjectMapping
 	matches := 0
-	for _, candidate := range cfg.Projects {
-		info, statErr := os.Stat(candidate.Root)
-		if statErr == nil && os.SameFile(root.Expected, info) {
-			mapping = candidate
-			matches++
+	if projectID != "" {
+		candidate, found := cfg.ProjectByID(projectID)
+		if !found {
+			return resolvedProjectRoot{}, config.ProjectMapping{}, "", fmt.Errorf("configured project ID was not found")
+		}
+		root, err = resolveExplicitProjectRoot(candidate.Root)
+		if err != nil {
+			return resolvedProjectRoot{}, config.ProjectMapping{}, "", fmt.Errorf("configured project root is unavailable or unsafe: %w", err)
+		}
+		mapping = candidate
+		matches = 1
+	} else {
+		root, err = resolveProjectRoot(cwd)
+		if err != nil {
+			return resolvedProjectRoot{}, config.ProjectMapping{}, "", err
+		}
+		for _, candidate := range cfg.Projects {
+			info, statErr := os.Stat(candidate.Root)
+			if statErr == nil && os.SameFile(root.Expected, info) {
+				mapping = candidate
+				matches++
+			}
 		}
 	}
 	if matches != 1 || mapping.VaultRoot == "" || mapping.VaultReviewPath == "" || mapping.VaultCaseMode == "" {
@@ -231,6 +261,22 @@ func writeSyncReport(output io.Writer, report syncengine.Report) {
 	for _, kind := range issueKinds {
 		fmt.Fprintf(output, "scan_issue %s\n", kind)
 	}
-	fmt.Fprintf(output, "operations: %d\nconflicts: %d\nissues: %d\nerrors: %d\nqueue_depth: %d\n", len(operations), len(report.Conflicts), len(report.Issues), len(report.Errors), report.QueueDepth)
+	creates := append([]string(nil), report.Migration.Creates...)
+	archives := append([]string(nil), report.Migration.Archives...)
+	sort.Strings(creates)
+	sort.Strings(archives)
+	for _, relative := range creates {
+		fmt.Fprintf(output, "migration_create %s\n", filepath.ToSlash(relative))
+	}
+	for _, relative := range archives {
+		fmt.Fprintf(output, "migration_archive %s\n", filepath.ToSlash(relative))
+	}
 	fmt.Fprintf(output, "derived=%s files=%d\n", report.Derived.State, report.Derived.Files)
+	migration := "current"
+	if report.Migration.Required && report.Migration.DryRun {
+		migration = "required"
+	}
+	fmt.Fprintf(output, "migration=%s\n", migration)
+	fmt.Fprintf(output, "operations: %d\nconflicts: %d\nissues: %d\nerrors: %d\nqueue_depth: %d\n", len(operations), len(report.Conflicts), len(report.Issues), len(report.Errors), report.QueueDepth)
+	fmt.Fprintf(output, "machine=%s files=1\n", report.Machine.State)
 }

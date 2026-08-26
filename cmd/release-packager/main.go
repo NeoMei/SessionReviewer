@@ -163,8 +163,14 @@ func commonEntries(source string) ([]archiveEntry, error) {
 		}
 		entries = append(entries, archiveEntry{Name: "session-reviewer/" + name, Body: body, Mode: 0o644})
 	}
+	schemaName := "schemas/review-ledger-v2.schema.json"
+	schemaBody, err := os.ReadFile(filepath.Join(source, filepath.FromSlash(schemaName)))
+	if err != nil {
+		return nil, errors.New("review ledger v2 schema is required")
+	}
+	entries = append(entries, archiveEntry{Name: "session-reviewer/" + schemaName, Body: schemaBody, Mode: 0o644})
 	skillRoot := filepath.Join(source, "skill", "session-reviewer")
-	err := filepath.WalkDir(skillRoot, func(filename string, entry fs.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(skillRoot, func(filename string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}

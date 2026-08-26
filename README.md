@@ -9,7 +9,7 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 - 从源码构建需要 Go 1.26
 - 不需要管理员权限，也不需要单独配置 OpenAI API key
 
-仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。`v0.1.0` 标签固定在提交 `9c2397f`，main、标签和 Release 工作流均取得通过回执。这些回执证明自动化测试、竞态检查、构建和发布资产校验通过，但不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
+仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。`v0.1.0` 是已发布的 legacy schema 版本；首个包含 review schema v2 和 Obsidian 浏览器的发行版目标为 `v0.2.0`。自动回执不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
 
 ## 构建、测试与用户级安装
 
@@ -75,7 +75,7 @@ session-reviewer.exe init --project . --vault C:\Users\Me\Vault
 session-reviewer.exe init --project . --vault C:\Users\Me\Vault --write
 ```
 
-第一条 `init` 命令只预览 `action`、项目 ID、ledger 和配置路径，不写入文件；第二条相同命令增加 `--write` 后才执行写入。写入前会在事务锁下重新验证预览状态，状态变化则失败并要求重新预览。`init --write` 创建稳定的项目 ID、`docs/session-review/project-overview.md` 和本机配置映射。重复执行返回同一项目 ID，不重复映射；project 与 vault 任一方向的嵌套都会被拒绝。默认本机数据目录为：
+第一条 `init` 命令只预览 `action`、项目 ID、ledger 和配置路径，不写入文件；第二条增加 `--write` 后才执行写入。全新项目创建稳定 ID、`docs/session-review/项目回顾.md`、`docs/session-review/项目历史.md`、机器所有的 `docs/session-review/.session-reviewer/ledger.json` 和本机映射。重复执行不会换 ID 或重复映射。默认本机数据目录为：
 
 - macOS：`~/.local/share/session-reviewer/`
 - Windows：`%LOCALAPPDATA%\SessionReviewer\`
@@ -134,23 +134,33 @@ session-reviewer sync
 # 查看只读状态
 session-reviewer sync status
 session-reviewer sync status --json
+
+# 插件/多项目场景：以稳定 ID 选择配置映射
+session-reviewer sync --dry-run --project-id project-0123456789abcdef
 ```
 
-首次 `sync` 会把项目 ledger 镜像到 Vault。之后任一侧的单边编辑会同步到另一侧；不同 Markdown 单元的两边编辑会合并，accepted human merge 的 `revision` 只递增一次。删除文件不表示删除实体，缺失副本会恢复；逻辑删除必须显式写为 `status: archived`。同一单元冲突会显示稳定 conflict ID 并保持候选内容不被静默覆盖，可用 `sync resolve --action accept_project|accept_obsidian|manual_merge` 显式收敛。成功解决冲突后，同一次命令会释放冲突写锁并立即执行完整协调；没有其他阻塞时也会刷新首页、索引和演进图。如果后续协调仍发现损坏或敏感实体，命令会报告 `E_SYNC_PARTIAL` 并返回非零退出码。当前版本提供显式同步，尚不安装后台 watcher。
+`--project-id` 与 `--cwd` 互斥。它只从本机配置中选择一个稳定 ID，再固定并验证其 Project root；绝对路径不会进入 Vault Markdown 或 `ledger.json`。Windows PowerShell 使用相同参数和 `session-reviewer.exe`。
 
-### 从项目首页恢复上下文
+旧项目的首次 `sync --dry-run` 会显示 migration creates/archives，但不写入任何文件。真实 sync 在 Project 内 `.session-reviewer/backups` 保留内容寻址的 migration backup 和 manifest；它不会发布到 Vault，也不会自动删除。
+
+`项目回顾.md` 和 `项目历史.md` 可在 Project 或 Obsidian 编辑。可编辑内容包括目标、阶段、状态、下一步、风险、决策和事件叙述；ID、revision、schema、hash、evidence、用量/单价和 sync metadata 不可编辑。两边不同语义单元会自动合并；同单元冲突会生成隐藏 conflict ID，用 `accept_project`、`accept_obsidian` 或带 `--file` 的 `manual_merge` 显式收敛。
+
+Vault 中的机器账本被修改时，普通 sync 会以 `machine_ledger_modified` 停止。确认 Project 副本为权威字节后，执行 `session-reviewer sync repair-machine-ledger --project-id <id>`；该命令不接受任意目标路径。
+
+首次 `sync` 会把两份人类 Markdown 和隐藏机器账本发布到 Vault。之后任一侧的单边编辑会同步到另一侧；不同 Markdown 单元的两边编辑会合并，accepted human merge 的 `revision` 只递增一次。删除文件不表示删除实体，缺失副本会恢复；逻辑删除必须显式写为 `status: archived`。同一单元冲突会显示稳定 conflict ID 并保持候选内容不被静默覆盖，可用 `sync resolve --action accept_project|accept_obsidian|manual_merge` 显式收敛。成功解决后会立即再做一次完整协调；如果仍发现损坏或敏感内容，命令会报告 `E_SYNC_PARTIAL` 并返回非零退出码。当前版本提供显式同步，尚不安装后台 watcher。
+
+### 恢复项目上下文
 
 项目重拾时的推荐路径只有一条：
 
 1. 在项目目录运行 `session-reviewer sync`。
-2. 在代码仓库打开 `docs/session-review/project-overview.md`，或在 Obsidian 打开对应 `Session Review/project-overview.md`。
-3. 先看五节点 Mermaid 主线：项目目标 → 关键决策汇总 → 最近已验证里程碑 → 当前状态 → 下一步。
-4. 按首页链接进入决策、待办和 Session 中文目录，再打开具体记录的“快速理解”与完整正文。
-5. 在 Project 或 Obsidian 一侧修改语义 frontmatter 或普通 Markdown 章节，然后再运行 `session-reviewer sync`。
+2. 已安装 Obsidian 项目脉络浏览器时优先打开它；否则先读 `项目回顾.md`。
+3. 需要旧细节时再打开 `项目历史.md`；它按时间倒序保留事件流。
+4. 在 Project 或 Obsidian 编辑允许的人类字段，再运行 `session-reviewer sync`。
 
-首页同时显示项目总耗时、Token 总量、按每百万 Token 公开标价计算的总成本，以及各模型 Token/成本占比。`decisions/00-目录说明.md`、`open-loops/00-目录说明.md` 和 `sessions/00-目录说明.md` 是可导航索引。
+项目总耗时、Token、公开 USD/百万 Token 标价、按模型成本与占比保存在隐藏机器账本中；订阅包含量不会减少记录成本。
 
-这套导航不增加新 watcher：现有 Base/Project/Vault 三方合并先接受允许的人工编辑，只有当语义同步无冲突、无损坏文档后，派生发布阶段才会根据 accepted ledger 重建首页导航、“快速理解”、三个索引和项目演进图，并把相同字节发布到 Project、Vault 和实体 Base。这些生成内容手工修改后会被恢复，不增加实体 `revision`；需要保留的信息应写入普通章节。`sync --dry-run`和 `sync status --json` 会报告派生状态及文件数，而不打印生成摘要或本机绝对路径。已有实体存在尚未接受的语义编辑时，dry-run 会成功列出语义操作并报告 `derived=deferred files=0`，表示派生导航必须等实际同步接受语义 revision 后再计算；这不是错误。
+`sync --dry-run`、普通 `sync status` 和 `sync status --json` 都会报告 migration、machine 和 pending 状态，不打印人类文档摘要或本机绝对路径。dry-run 列出实际 sync 将做的语义、Base 和机器账本操作，但不写入 Project、Vault 或本机状态。
 
 ## 手动 prepare → Skill proposal → apply
 
@@ -165,13 +175,13 @@ session-reviewer apply \
 
 `apply` 成功时输出 `changed_files`、`cursor_advanced` 和 `already_applied`。如果 packet 为 `has_more: true`，必须等该次 apply 成功且 `cursor_advanced: true` 后才能 prepare 下一包；下一包的 `expected_cursor` 必须与上一包的 `next_cursor` 完全相等。只有显式要求从 session 开头复查时，第一包才可使用 `review --from-start`；后续包和 `already_applied: true` 后的重试都必须省略 `--from-start`。
 
-packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包含会话起止时间、耗时、每个模型的 input/cached-input/cache-write/output/reasoning-output/total tokens 和总 tokens。Skill 必须把这些计数原样写入 session report，并为每个模型记录当前公开的 USD/百万 Token 标价、来源、日期与计算成本；订阅包含量不参与计算。CLI 会校验 usage、单价结构、逐模型成本和总成本。每次 accepted session 更新都会在 session Markdown 中写入会话统计，并在 `project-overview.md` 的 `Project accounting` 章节汇总项目总耗时、总 Token、总成本，以及各模型的 Token/成本占比；`history` 也显示同一份项目级汇总。
+packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包含会话起止时间、耗时、每个模型的 input/cached-input/cache-write/output/reasoning-output/total tokens 和总 tokens。Skill 必须把这些计数原样写入 proposal，并记录当前公开的 USD/百万 Token 标价、来源、日期与计算成本；订阅包含量不参与计算。CLI 校验 usage、单价结构、逐模型成本和总成本，再把完整 session/evidence/accounting 存入隐藏 `ledger.json`。
 
-重复 apply 同一个已接受 proposal 会返回 `already_applied: true`，不重写 ledger 或派生图，也不改变字节、哈希或修改时间。如果在写入后、cursor CAS 前中断，receipt 会用于校验并恢复该次接受；任何中间用户编辑或边界不匹配都会失败关闭。
+重复 apply 同一个已接受 proposal 会返回 `already_applied: true`，不重写两份人类文档或机器账本，也不改变字节、哈希或修改时间。如果在写入后、cursor CAS 前中断，receipt 会用于校验并恢复该次接受；任何中间用户编辑或边界不匹配都会失败关闭。
 
-ledger 是可编辑 Markdown。未知 frontmatter 字段和 CLI 不拥有的自定义章节会在后续 apply 中保留；已接受的 title、status、tags 和 narrative 是后续 proposal 的当前基线，只能通过 revision/evidence 验证的显式变更更新。`docs/session-review/diagrams/project-evolution.md` 中的五节点恢复主线、因果附图和关系附图都由 accepted ledger 派生，不是独立的语义来源，不应手工编辑。
+两份人类 Markdown 保留未知普通章节和允许的字段编辑；隐藏 marker ID 使标题改名后仍能进行语义合并。proposal/apply 仍通过 revision/evidence 验证修改，不会把机器所有字段暴露为人类编辑面。
 
-session report 形成一条可恢复的双向链。首个报告的 `previous_session_id` 和 `next_session_id` 都为空；后续新报告必须把 `previous_session_id` 指向当前 accepted 终点并保持 `next_session_id` 为空。apply 会在同一事务中自动提升上一报告的 revision 并写入互惠的 `next_session_id`，因此第二个及后续 session 的 `changed_files` 会同时包含上一份 session report。已有报告的链接不能由后续 proposal 改写。
+session report 的双向链、revision、evidence 和 accounting 保存在隐藏 `ledger.json` 中，不再作为独立 Markdown 发布。apply 会在同一事务中更新这条链以及两份人类视图；已有 session 链接不能由后续 proposal 任意改写。
 
 ## accepted-ledger-only 恢复
 
@@ -210,13 +220,13 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.1.0 dist
+./scripts/build-release.sh 0.2.0 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.1.0 -Dist dist
+.\scripts\build-release.ps1 -Version 0.2.0 -Dist dist
 ```
 
 本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。已公开的 `v0.1.0` 包含三个平台归档和统一 `SHA256SUMS`。
@@ -230,6 +240,6 @@ Windows PowerShell 使用：
 - 独立于当前 live Base/Project/Vault 状态的历史 conflict-note 归档；
 - macOS 13 与 Windows 10 22H2 最低版本实体机器上的人工端到端安装验收。
 
-当前 Obsidian 混合模型以 repository 内的 ledger 为 durable source，并对每个稳定实体比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）。显式 `sync` 已可处理首次镜像、单边编辑和不同单元合并；后台 watcher 与完整的持久冲突解决工作流仍是后续工作。
+当前 Obsidian 混合模型以 repository 内的 review v2 为 durable source，并对每个稳定语义单元比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）。显式 `sync` 已可处理首次发布、单边编辑、不同单元合并，以及使用隐藏 conflict ID 的三种显式解决动作；后台 watcher 仍是后续工作。
 
 Skill/模型用于语义 session review，并生成交给引擎验证的 proposal/apply；普通的确定性 Obsidian 同步不需要模型。该模型不是无状态、逐文件互相覆盖的镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。

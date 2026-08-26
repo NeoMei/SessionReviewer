@@ -3,7 +3,9 @@ package project
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,14 +19,19 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
 )
 
-const initTransactionLockTimeout = 10 * time.Second
+const (
+	initTransactionLockTimeout = 10 * time.Second
+	initialReviewV2JournalPath = "docs/session-review/.session-reviewer/init-v2.json"
+)
 
 var (
 	ErrInvalidInitializationRoot         = errors.New("initialization root is invalid or missing")
@@ -43,6 +50,7 @@ type InitOptions struct {
 	Random              io.Reader
 	beforeOverviewWrite func() error
 	afterOverviewWrite  func() error
+	afterReviewV2File   func(string) error
 	afterStateComponent func(string) error
 	beforeConfigWrite   func() error
 	afterConfigWrite    func() error
@@ -160,12 +168,22 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
+	if err := recoverInitialReviewV2(roots.project.Root, paths.projectRoot, opts.afterReviewV2File); err != nil {
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
+	}
 	overviewPath := filepath.ToSlash(filepath.Join("docs", "session-review", "project-overview.md"))
 	overview, err := readOverview(roots.project.Root, overviewPath)
 	if err != nil {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	overviewID, overviewExists := overview.projectID, overview.exists
+	v2ID, v2Exists, err := readInitializedV2Identity(paths.projectRoot, roots.project.Info(), roots.project.Root)
+	if err != nil {
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
+	}
+	if overviewExists && v2Exists {
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("project contains both legacy and v2 review state"))
+	}
 	publishOverviewUpgrade := func() error {
 		if len(overview.publish) == 0 {
 			return nil
@@ -194,6 +212,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if overviewExists && overviewID != existing.ID {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project overview ID %q does not match mapped ID %q", overviewID, existing.ID))
 		}
+		if v2Exists && v2ID != existing.ID {
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("review v2 ID %q does not match mapped ID %q", v2ID, existing.ID))
+		}
 		updated, changed, err := completeVaultMapping(opts, roots.vault.Root, existing, filepath.Base(paths.projectRoot))
 		if err != nil {
 			return InitResult{}, err
@@ -204,13 +225,13 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err := ensureProjectSyncState(dataDir.Root, updated.ID); err != nil {
 			return InitResult{}, err
 		}
-		if !overviewExists {
+		if !overviewExists && !v2Exists {
 			if opts.beforeOverviewWrite != nil {
 				if err := opts.beforeOverviewWrite(); err != nil {
 					return InitResult{}, err
 				}
 			}
-			if err := writeOverview(roots.project.Root, overviewBody(updated.ID, opts.Now(), paths.projectRoot)); err != nil {
+			if err := writeInitialReviewV2(roots.project.Root, paths.projectRoot, updated.ID, opts.Now(), opts.afterReviewV2File); err != nil {
 				return InitResult{}, err
 			}
 		}
@@ -231,6 +252,33 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			}
 		}
 		return InitResult{ProjectID: updated.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+	}
+	if v2Exists {
+		if owner, claimed := cfg.ProjectByID(v2ID); claimed {
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project ID %q already belongs to another project root %q", v2ID, owner.Root))
+		}
+		mapping, _, err := completeVaultMapping(opts, roots.vault.Root, config.ProjectMapping{ID: v2ID, Root: paths.projectRoot, VaultRoot: paths.vaultRoot}, filepath.Base(paths.projectRoot))
+		if err != nil {
+			return InitResult{}, err
+		}
+		if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, true, opts.afterStateComponent); err != nil {
+			return InitResult{}, err
+		}
+		cfg.Projects = append(cfg.Projects, mapping)
+		if opts.beforeConfigWrite != nil {
+			if err := opts.beforeConfigWrite(); err != nil {
+				return InitResult{}, err
+			}
+		}
+		if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
+			return InitResult{}, err
+		}
+		if opts.afterConfigWrite != nil {
+			if err := opts.afterConfigWrite(); err != nil {
+				return InitResult{}, err
+			}
+		}
+		return InitResult{ProjectID: v2ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
@@ -284,7 +332,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, err
 		}
 	}
-	if err := writeOverview(roots.project.Root, overviewBody(id, opts.Now(), paths.projectRoot)); err != nil {
+	if err := writeInitialReviewV2(roots.project.Root, paths.projectRoot, id, opts.Now(), opts.afterReviewV2File); err != nil {
 		return InitResult{}, err
 	}
 	if opts.afterOverviewWrite != nil {
@@ -919,6 +967,205 @@ func overviewBody(projectID string, createdAt time.Time, root string) string {
 		createdAt.UTC().Format(time.RFC3339),
 		filepath.Base(root),
 	)
+}
+
+func readInitializedV2Identity(projectRoot string, expectedRoot os.FileInfo, root *os.Root) (string, bool, error) {
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath}
+	found := 0
+	for _, relative := range paths {
+		if _, err := root.Lstat(filepath.FromSlash(relative)); err == nil {
+			found++
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+	}
+	if found == 0 {
+		return "", false, nil
+	}
+	if found != len(paths) {
+		return "", false, errors.New("review v2 initialization is incomplete")
+	}
+	accepted, err := reviewv2.LoadExpected(projectRoot, expectedRoot)
+	if err != nil {
+		return "", false, err
+	}
+	return accepted.State.Review.ProjectID, true, nil
+}
+
+type initialReviewV2Journal struct {
+	Version     int    `json:"version"`
+	ProjectID   string `json:"project_id"`
+	ProjectName string `json:"project_name"`
+	CreatedAt   string `json:"created_at"`
+}
+
+type initialReviewV2File struct {
+	path string
+	body []byte
+	mode os.FileMode
+}
+
+func writeInitialReviewV2(root *os.Root, projectRoot, projectID string, now time.Time, afterFile func(string) error) error {
+	journal := initialReviewV2Journal{
+		Version: 1, ProjectID: projectID, ProjectName: filepath.Base(projectRoot),
+		CreatedAt: now.UTC().Format(time.RFC3339Nano),
+	}
+	if err := validateInitialReviewV2Journal(journal, projectRoot); err != nil {
+		return err
+	}
+	body, err := json.Marshal(journal)
+	if err != nil {
+		return err
+	}
+	body = append(body, '\n')
+	if err := ensureRootDirectory(root, "docs", 0o755); err != nil {
+		return err
+	}
+	if err := ensureRootDirectory(root, filepath.Join("docs", "session-review"), 0o755); err != nil {
+		return err
+	}
+	if err := ensureRootDirectory(root, filepath.Join("docs", "session-review", ".session-reviewer"), 0o700); err != nil {
+		return err
+	}
+	if err := writeInitialReviewV2FileIfAbsent(root, initialReviewV2JournalPath, body, 0o600); err != nil {
+		return err
+	}
+	return completeInitialReviewV2(root, journal, afterFile)
+}
+
+func recoverInitialReviewV2(root *os.Root, projectRoot string, afterFile func(string) error) error {
+	info, err := root.Lstat(filepath.FromSlash(initialReviewV2JournalPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("review v2 initialization journal path is redirected or invalid: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return errors.New("review v2 initialization journal is invalid")
+	}
+	body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(initialReviewV2JournalPath), info, 4096)
+	if err != nil {
+		return errors.New("review v2 initialization journal changed while reading")
+	}
+	var journal initialReviewV2Journal
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&journal); err != nil {
+		return errors.New("review v2 initialization journal is invalid")
+	}
+	canonical, err := json.Marshal(journal)
+	if err != nil || !bytes.Equal(body, append(canonical, '\n')) || validateInitialReviewV2Journal(journal, projectRoot) != nil {
+		return errors.New("review v2 initialization journal is invalid")
+	}
+	return completeInitialReviewV2(root, journal, afterFile)
+}
+
+func validateInitialReviewV2Journal(journal initialReviewV2Journal, projectRoot string) error {
+	if journal.Version != 1 || !validProjectID(journal.ProjectID) || journal.ProjectName != filepath.Base(projectRoot) {
+		return errors.New("review v2 initialization journal identity is invalid")
+	}
+	if _, err := time.Parse(time.RFC3339Nano, journal.CreatedAt); err != nil {
+		return errors.New("review v2 initialization journal timestamp is invalid")
+	}
+	return nil
+}
+
+func completeInitialReviewV2(root *os.Root, journal initialReviewV2Journal, afterFile func(string) error) error {
+	createdAt, err := time.Parse(time.RFC3339Nano, journal.CreatedAt)
+	if err != nil {
+		return err
+	}
+	files, err := renderInitialReviewV2(journal.ProjectName, journal.ProjectID, createdAt)
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		relative := filepath.FromSlash(file.path)
+		info, statErr := root.Lstat(relative)
+		if statErr == nil {
+			if !info.Mode().IsRegular() || info.Size() > int64(len(file.body))+1 {
+				return fmt.Errorf("partial review v2 file %s is invalid", file.path)
+			}
+			existing, readErr := pathguard.ReadStableRegularRootFile(root, relative, info, int64(len(file.body))+1)
+			if readErr != nil || !bytes.Equal(existing, file.body) || !initialReviewV2ModeMatches(runtime.GOOS, info.Mode(), file.mode) {
+				return fmt.Errorf("partial review v2 file %s does not match its initialization journal", file.path)
+			}
+		} else if errors.Is(statErr, os.ErrNotExist) {
+			if err := writeInitialReviewV2FileIfAbsent(root, file.path, file.body, file.mode); err != nil {
+				return err
+			}
+			if afterFile != nil {
+				if err := afterFile(file.path); err != nil {
+					return err
+				}
+			}
+		} else {
+			return statErr
+		}
+	}
+	if err := atomicfile.RemoveRoot(root, filepath.FromSlash(initialReviewV2JournalPath)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func initialReviewV2ModeMatches(goos string, got, want os.FileMode) bool {
+	if goos == "windows" {
+		// Windows exposes writable regular files as 0666 regardless of the
+		// Unix-style creation mode. The write bit still distinguishes a
+		// read-only replacement, so retain that safety boundary.
+		return got.Perm()&0o222 != 0
+	}
+	return got.Perm() == want.Perm()
+}
+
+func writeInitialReviewV2FileIfAbsent(root *os.Root, relative string, body []byte, mode os.FileMode) error {
+	clean := filepath.FromSlash(relative)
+	parent, err := root.OpenRoot(filepath.Dir(clean))
+	if err != nil {
+		return err
+	}
+	defer parent.Close()
+	return atomicfile.WriteRootFileCreateIfAbsent(parent, filepath.Base(clean), body, mode, nil)
+}
+
+func renderInitialReviewV2(projectName, projectID string, now time.Time) ([]initialReviewV2File, error) {
+	legacy := ledger.State{
+		ProjectID: projectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: projectID, Revision: 1,
+			Goal: "在这里记录项目目标。", Branch: "初始化", NextAction: "准备第一次 session review。",
+			LastVerified: now.UTC().Format(time.RFC3339), LastUpdated: now.UTC().Format(time.RFC3339),
+		},
+		Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
+	}
+	state, err := reviewv2.ProjectLegacy(legacy)
+	if err != nil {
+		return nil, err
+	}
+	state.Review.Name = projectName
+	reviewBody, err := reviewv2.RenderReview(state.Review)
+	if err != nil {
+		return nil, err
+	}
+	historyBody, err := reviewv2.RenderHistory(projectID, state.Review.Revision, state.Events)
+	if err != nil {
+		return nil, err
+	}
+	reviewHash := sha256.Sum256(reviewBody)
+	historyHash := sha256.Sum256(historyBody)
+	state.Machine.ReviewSHA256 = hex.EncodeToString(reviewHash[:])
+	state.Machine.HistorySHA256 = hex.EncodeToString(historyHash[:])
+	machineBody, err := reviewv2.RenderMachineLedger(state.Machine)
+	if err != nil {
+		return nil, err
+	}
+	return []initialReviewV2File{
+		{reviewv2.HistoryRelativePath, historyBody, 0o644},
+		{reviewv2.MachineLedgerRelativePath, machineBody, 0o600},
+		{reviewv2.ReviewRelativePath, reviewBody, 0o644},
+	}, nil
 }
 
 type overviewRead struct {

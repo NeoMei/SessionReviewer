@@ -109,6 +109,8 @@ func newApplyTestFixtureVersion(t *testing.T, v2 bool) *applyTestFixture {
 	}
 	if v2 {
 		convertApplyFixtureToV2(t, fixture)
+	} else {
+		convertApplyFixtureToLegacy(t, projectRoot)
 	}
 	return fixture
 }
@@ -2346,17 +2348,15 @@ func convertApplyFixtureToV2(t *testing.T, fixture *applyTestFixture) {
 
 func convertLegacyApplyRootToV2(t *testing.T, projectRoot string) {
 	t.Helper()
-	legacy, err := ledger.Load(projectRoot)
-	if err != nil {
-		t.Fatal(err)
+	legacy := ledger.State{
+		ProjectID: testProjectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: testProjectID, Revision: 1, Goal: "Fixture seed goal",
+			LastVerified: "Fixture seed verification", Branch: "fixture-seed",
+			NextAction: "Apply the first proposal", Blockers: []string{"Fixture risk"},
+		},
+		Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
 	}
-	legacy.CurrentState.ProjectID = legacy.ProjectID
-	legacy.CurrentState.Revision = 1
-	legacy.CurrentState.Goal = "Fixture seed goal"
-	legacy.CurrentState.LastVerified = "Fixture seed verification"
-	legacy.CurrentState.Branch = "fixture-seed"
-	legacy.CurrentState.NextAction = "Apply the first proposal"
-	legacy.CurrentState.Blockers = []string{"Fixture risk"}
 	state, err := reviewv2.ProjectLegacy(legacy)
 	if err != nil {
 		t.Fatal(err)
@@ -2385,6 +2385,23 @@ func convertLegacyApplyRootToV2(t *testing.T, projectRoot string) {
 		if err := os.RemoveAll(filepath.Join(projectRoot, filepath.FromSlash(relative))); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func convertApplyFixtureToLegacy(t *testing.T, projectRoot string) {
+	t.Helper()
+	for _, relative := range []string{
+		reviewv2.ReviewRelativePath,
+		reviewv2.HistoryRelativePath,
+		"docs/session-review/.session-reviewer",
+	} {
+		if err := os.RemoveAll(filepath.Join(projectRoot, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: " + testProjectID + "\nrevision: 1\nsync_status: synced\n---\n\n# Fixture\n"
+	if err := os.WriteFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"), []byte(overview), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

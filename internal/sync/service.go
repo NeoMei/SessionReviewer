@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,7 @@ const (
 
 type Options struct {
 	ProjectRoot, VaultRoot, VaultReviewPath, DataRoot, ProjectID, GOOS string
+	ProjectRootExpected                                                os.FileInfo
 	VaultCaseMode                                                      platform.CaseMode
 	Retry                                                              RetryPolicy
 	Debounce                                                           time.Duration
@@ -56,6 +58,7 @@ const (
 	OperationRename        OperationKind = "rename"
 	OperationConflict      OperationKind = "conflict"
 	OperationQueue         OperationKind = "queue"
+	OperationEstablishBase OperationKind = "establish_base"
 )
 
 type Operation struct {
@@ -106,16 +109,21 @@ type Report struct {
 }
 
 type Status struct {
-	ProjectID     string              `json:"project_id"`
-	InSync        int                 `json:"in_sync"`
-	Conflicted    int                 `json:"conflicted"`
-	Malformed     int                 `json:"malformed"`
-	Queued        int                 `json:"queued"`
-	Blocked       int                 `json:"blocked"`
-	OpenConflicts []string            `json:"open_conflicts"`
-	Pending       []Operation         `json:"pending"`
-	DerivedState  DerivedPublishState `json:"derived_state"`
-	DerivedFiles  int                 `json:"derived_files"`
+	ProjectID          string              `json:"project_id"`
+	InSync             int                 `json:"in_sync"`
+	Conflicted         int                 `json:"conflicted"`
+	Malformed          int                 `json:"malformed"`
+	Queued             int                 `json:"queued"`
+	Blocked            int                 `json:"blocked"`
+	OpenConflicts      []string            `json:"open_conflicts"`
+	Pending            []Operation         `json:"pending"`
+	DerivedState       DerivedPublishState `json:"derived_state"`
+	DerivedFiles       int                 `json:"derived_files"`
+	Migration          string              `json:"migration"`
+	MachineState       MachinePublishState `json:"machine_state"`
+	LastSuccessfulSync string              `json:"last_successful_sync"`
+	PendingOperations  []Operation         `json:"pending_operations"`
+	HiddenConflictIDs  []string            `json:"hidden_conflict_ids"`
 }
 
 type QueueReport struct{ Attempted, Completed, Rescheduled, Blocked int }
@@ -147,6 +155,10 @@ func NewEngine(options Options) (*Engine, error) {
 	projectRoot, err := pathguard.Open(options.ProjectRoot)
 	if err != nil {
 		return nil, errors.New("project root is unavailable or unsafe")
+	}
+	if options.ProjectRootExpected != nil && !os.SameFile(options.ProjectRootExpected, projectRoot.Info()) {
+		_ = projectRoot.Close()
+		return nil, errors.New("project root identity changed after mapping resolution")
 	}
 	vaultRoot, err := pathguard.Open(options.VaultRoot)
 	if err != nil {
@@ -396,6 +408,39 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 					report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "conflict_record_failed"})
 				}
 			}
+			continue
+		}
+		if result.Kind == MergeNoop && result.Accepted != nil && !hasBase {
+			rendered, renderErr := result.Accepted.Render()
+			if renderErr != nil {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "render_failed"})
+				continue
+			}
+			target := acceptedRelativePath(*result.Accepted, projectCandidate, vaultCandidate, baseRecord)
+			if _, blocked := projectIssuePaths[path.Join("docs/session-review", target)]; blocked {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "malformed_source"})
+				continue
+			}
+			if _, blocked := vaultIssuePaths[path.Join(engine.options.VaultReviewPath, target)]; blocked {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "malformed_source"})
+				continue
+			}
+			report.Operations = append(report.Operations, Operation{
+				EntityID: id, Kind: OperationEstablishBase, RelativePath: target,
+				AfterHash: syncdoc.ContentHash(rendered),
+			})
+			if request.DryRun {
+				dryAccepted[id] = bytes.Clone(rendered)
+				continue
+			}
+			// Byte-identical Project/Vault copies still need a machine-local Base.
+			// applyAccepted with MergeNoop verifies both exact preimages, writes no
+			// human document, and commits the authenticated common bytes as Base.
+			if err := engine.applyAccepted(ctx, id, target, rendered, MergeNoop, BaseRecord{}, false, projectCandidate, vaultCandidate); err != nil {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "write_failed"})
+				continue
+			}
+			entityCommitted = true
 			continue
 		}
 		if result.Kind == MergeNoop || result.Accepted == nil {
@@ -739,10 +784,23 @@ func (engine *Engine) Status(ctx context.Context) (Status, error) {
 	status := Status{
 		ProjectID: engine.options.ProjectID, OpenConflicts: append([]string{}, report.Conflicts...), Pending: append([]Operation{}, report.Operations...),
 		DerivedState: report.Derived.State, DerivedFiles: report.Derived.Files,
+		MachineState:      report.Machine.State,
+		PendingOperations: append(append([]Operation{}, report.Operations...), report.Machine.Operations...),
+		HiddenConflictIDs: append([]string{}, report.Conflicts...),
+	}
+	status.Migration = "current"
+	if report.Migration.Required {
+		status.Migration = "required"
+	}
+	if body, found, readErr := engine.project.ReadRegular(reviewv2.MachineLedgerRelativePath, int64(reviewv2.MaxMachineLedgerBytes)); readErr == nil && found {
+		if machine, parseErr := reviewv2.ParseMachineLedger(body); parseErr == nil && machine.ProjectID == engine.options.ProjectID {
+			status.LastSuccessfulSync = machine.LastSuccessfulSync
+		}
 	}
 	status.Conflicted = len(report.Conflicts)
 	status.Malformed = len(report.Issues)
 	status.Blocked = len(report.Errors)
+	status.Queued = report.QueueDepth
 	if err == nil {
 		bases, loadErr := engine.bases.List()
 		if loadErr != nil {
@@ -1440,5 +1498,8 @@ func documentHash(document syncdoc.Document) string {
 }
 
 func (status Status) String() string {
-	return fmt.Sprintf("in_sync=%d conflicted=%d malformed=%d queued=%d blocked=%d derived=%s files=%d", status.InSync, status.Conflicted, status.Malformed, status.Queued, status.Blocked, status.DerivedState, status.DerivedFiles)
+	return fmt.Sprintf("in_sync=%d conflicted=%d malformed=%d queued=%d blocked=%d derived=%s files=%d migration=%s machine=%s pending_operations=%d hidden_conflicts=%d",
+		status.InSync, status.Conflicted, status.Malformed, status.Queued, status.Blocked,
+		status.DerivedState, status.DerivedFiles, status.Migration, status.MachineState,
+		len(status.PendingOperations), len(status.HiddenConflictIDs))
 }

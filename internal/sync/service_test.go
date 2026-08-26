@@ -1150,6 +1150,96 @@ func TestV2DryRunPlansTheSameEntityAlignmentAndMachineWritesAsRealSync(t *testin
 	}
 }
 
+func TestFirstSyncOfIdenticalV2CopiesEstablishesResolvableMergeBases(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	vaultReview := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	if err := os.CopyFS(vaultReview, os.DirFS(filepath.Join(fixture.project, "docs", "session-review"))); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	dry, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
+	if err != nil || len(dry.Operations) != 2 || dry.Machine.State != MachinePending {
+		t.Fatalf("dry=%+v err=%v", dry, err)
+	}
+	for _, operation := range dry.Operations {
+		if operation.Kind != OperationEstablishBase {
+			t.Fatalf("dry operation=%+v", operation)
+		}
+	}
+	if bases, listErr := engine.bases.List(); listErr != nil || len(bases) != 0 {
+		t.Fatalf("dry-run established bases=%+v err=%v", bases, listErr)
+	}
+	status, err := engine.Status(context.Background())
+	if err != nil || len(status.PendingOperations) < 2 || status.MachineState != MachinePending {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	first, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(first.Operations) != 2 || len(first.Conflicts) != 0 || first.Machine.State != MachineCurrent {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	if !reflect.DeepEqual(dry.Operations, first.Operations) || !reflect.DeepEqual(dry.Machine.Operations, first.Machine.Operations) {
+		t.Fatalf("identical-copy dry-run differs from real plan\ndry=%+v\nreal=%+v", dry, first)
+	}
+	bases, err := engine.bases.List()
+	if err != nil || len(bases) != 2 {
+		t.Fatalf("identical first sync bases=%+v err=%v", bases, err)
+	}
+
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+	vaultPath := filepath.Join(vaultReview, "项目回顾.md")
+	for _, edit := range []struct {
+		path, replacement string
+	}{{projectPath, "Project candidate"}, {vaultPath, "Vault candidate"}} {
+		body, err := os.ReadFile(edit.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body = bytes.Replace(body, []byte("Skill + 本地 CLI"), []byte(edit.replacement), 1)
+		if !bytes.Contains(body, []byte(edit.replacement)) {
+			t.Fatalf("fixture title was not replaced in %s", edit.path)
+		}
+		if err := os.WriteFile(edit.path, body, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(conflicted.Conflicts) != 1 {
+		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	}
+	resolved, err := engine.Resolve(context.Background(), Resolution{ConflictID: conflicted.Conflicts[0], Action: AcceptProject})
+	if err != nil || len(resolved.Conflicts) != 0 {
+		t.Fatalf("resolved=%+v err=%v", resolved, err)
+	}
+	projectBody, projectErr := os.ReadFile(projectPath)
+	vaultBody, vaultErr := os.ReadFile(vaultPath)
+	if projectErr != nil || vaultErr != nil || !bytes.Equal(projectBody, vaultBody) || !bytes.Contains(projectBody, []byte("Project candidate")) {
+		t.Fatalf("projectErr=%v vaultErr=%v equal=%v", projectErr, vaultErr, bytes.Equal(projectBody, vaultBody))
+	}
+}
+
+func TestNewEngineRejectsProjectRootThatChangedAfterMappingResolution(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	expected, err := os.Stat(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := fixture.options()
+	options.ProjectRootExpected = expected
+	engine, err := NewEngine(options)
+	if engine != nil {
+		_ = engine.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "identity changed") {
+		t.Fatalf("engine=%v err=%v", engine, err)
+	}
+}
+
 func TestEngineDoesNotOverwriteMalformedSynchronizedPath(t *testing.T) {
 	fixture := newEngineFixture(t)
 	writeV2EngineFixture(t, fixture)

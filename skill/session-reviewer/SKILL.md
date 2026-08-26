@@ -13,14 +13,32 @@ Use the installed `session-reviewer` binary and the wrappers in `scripts/`. Clas
 
 Before any command, resolve the user-selected project (or current project) once to one absolute, physical canonical project root. Pin it as `PROJECT_ROOT`; never infer, recompute, or change it during the workflow. Pass that same canonical project root to resume and every apply as `--project`, and to every prepare as `--cwd`.
 
+For human recovery, open the 项目脉络浏览器 when it is installed. Otherwise read `docs/session-review/项目回顾.md` first, then `docs/session-review/项目历史.md` for older detail.
+
 ## Safety boundaries
 
-- Never edit ledger files directly. Apply a proposal only with `scripts/apply-proposal.sh` or `scripts/apply-proposal.ps1`.
+- Never edit the machine ledger `docs/session-review/.session-reviewer/ledger.json`; it owns accounting, hashes, evidence, cursor, and sync metadata. Apply a session-review proposal only with `scripts/apply-proposal.sh` or `scripts/apply-proposal.ps1`.
 - Never read raw JSONL. Read one bounded packet and only the accepted ledger entities needed from `docs/session-review/`.
 - Never interpret hidden reasoning, system or developer instructions, or opaque/encrypted compaction as evidence.
 - Never run Git mutation commands. Do not add, commit, push, reset, checkout, switch, restore, branch, tag, stash, merge, or rebase.
 - Never call an API client. The semantic proposal is produced locally from the bounded packet.
 - A ledger-only view does not process pending sessions; never claim that it does.
+
+## Edit and synchronize review v2
+
+The two human Markdown documents are editable on the Project or Obsidian side. Editable fields are the project goal, stage, status, next action, risk title/status/detail, decision title/reason/impact, and event title/meaning/summary/why/changes/results/next. Do not edit identities, revisions, schema version, document hashes, evidence, token usage, prices, or sync fields.
+
+Use either `--cwd "$PROJECT_ROOT"` or a configured stable `--project-id`; they are mutually exclusive. Code-side edits reach Obsidian only after a successful sync:
+
+```text
+session-reviewer sync --dry-run --cwd "$PROJECT_ROOT"
+session-reviewer sync --cwd "$PROJECT_ROOT"
+session-reviewer sync status --json --cwd "$PROJECT_ROOT"
+```
+
+On PowerShell, use the same commands with `session-reviewer.exe` and a quoted `$ProjectRoot`. A legacy dry-run reports required creates/archives with zero writes. Real migration keeps a content-addressed migration backup under the Project's `.session-reviewer/backups`; it is never published to Vault or deleted automatically.
+
+If Vault's machine copy was edited, normal sync reports `machine_ledger_modified`; after confirming Project is authoritative, run `session-reviewer sync repair-machine-ledger --project-id <id>`. Resolve a same-unit hidden conflict with its reported ID and exactly one action: `accept_project`, `accept_obsidian`, or `manual_merge` (the last also requires `--file`). Costs remain public list-price USD per million tokens; subscriptions do not reduce recorded cost.
 
 ## Accept one packet
 

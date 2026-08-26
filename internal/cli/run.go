@@ -41,7 +41,11 @@ Options:
            [--current-session-id] [--data-dir] [--from-start for review]
   apply: --proposal --evidence [--project] [--data-dir]
   resume/history: --ledger-only [--project]
-  sync: [--dry-run] [status --json] [--cwd] [--data-dir]
+  sync: [--dry-run] [--cwd | --project-id ID] [--data-dir]
+        status [--json] [--cwd | --project-id ID] [--data-dir]
+        repair-machine-ledger [--cwd | --project-id ID] [--data-dir]
+        resolve --conflict ID --action <accept_project|accept_obsidian|manual_merge>
+          [--file MERGED.md] [--cwd | --project-id ID] [--data-dir]
 
 Apply validates a Skill proposal against its exact bounded evidence packet.
 Ledger-only resume and history do not process pending sessions.
@@ -55,6 +59,8 @@ Examples:
   session-reviewer resume --ledger-only --project /path/to/project
   session-reviewer history --ledger-only --project /path/to/project
   session-reviewer sync --dry-run
+  session-reviewer sync status --json --project-id PROJECT_ID
+  session-reviewer sync repair-machine-ledger --project-id PROJECT_ID
 
 Run session-reviewer <command> --help for details.
 `
