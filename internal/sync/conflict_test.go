@@ -3,6 +3,7 @@ package sync
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -22,7 +23,7 @@ func TestBuildConflictUsesDeterministicUTCIDAndExactHashes(t *testing.T) {
 	project := []byte("PROJECT")
 	vault := []byte("VAULT")
 	wantDigest := sha256.Sum256([]byte(syncdoc.ContentHash(base) + "|" + syncdoc.ContentHash(project) + "|" + syncdoc.ContentHash(vault)))
-	wantID := fmt.Sprintf("conflict-20260822T170203Z-decision-1-%x", wantDigest[:6])
+	wantID := fmt.Sprintf("conflict-decision-1-%x", wantDigest[:6])
 
 	first, err := BuildConflict(ConflictRecord{
 		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
@@ -54,7 +55,29 @@ func TestBuildConflictUsesDeterministicUTCIDAndExactHashes(t *testing.T) {
 	}
 }
 
-func TestRenderConflictUsesDynamicFenceAndMirrorsExactBytes(t *testing.T) {
+func TestBuildConflictIdentityDoesNotChurnWhenClockAdvances(t *testing.T) {
+	t.Parallel()
+
+	input := ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Base: []byte("BASE"), Project: []byte("PROJECT"), Vault: []byte("VAULT"),
+		CreatedAt: conflictTime,
+	}
+	first, err := BuildConflict(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.CreatedAt = conflictTime.Add(24 * time.Hour)
+	second, err := BuildConflict(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Record == nil || second.Record == nil || first.Record.ID != second.Record.ID {
+		t.Fatalf("conflict identity churned with clock: first=%+v second=%+v", first.Record, second.Record)
+	}
+}
+
+func TestRenderConflictUsesBoundedJSONAndMirrorsExactBytes(t *testing.T) {
 	t.Parallel()
 
 	project := []byte("---\ntitle: candidate\n---\n\n`````\n# not a heading to the note\n`````\n")
@@ -77,30 +100,37 @@ func TestRenderConflictUsesDynamicFenceAndMirrorsExactBytes(t *testing.T) {
 	if !bytes.Equal(note, artifact.Notes.Project.Content) || !bytes.Equal(note, artifact.Notes.Vault.Content) || artifact.Notes.Project.RelativePath != artifact.Notes.Vault.RelativePath {
 		t.Fatal("conflict notes are not byte-identical mirrors")
 	}
-	if artifact.Notes.Project.RelativePath != "sync-conflicts/"+artifact.Record.ID+".md" {
+	if artifact.Notes.Project.RelativePath != ".session-reviewer/conflicts/"+artifact.Record.ID+".json" {
 		t.Fatalf("path=%q", artifact.Notes.Project.RelativePath)
 	}
-	for _, candidate := range [][]byte{project, vault, artifact.Record.Suggested} {
-		if !bytes.Contains(note, candidate) {
-			t.Fatalf("candidate bytes not preserved: %q", candidate)
+	if !json.Valid(note) || len(note) > MaxConflictRecordBytes {
+		t.Fatalf("record is not bounded JSON: bytes=%d", len(note))
+	}
+	parsed, err := ParseConflictRecord(note)
+	if err != nil || !bytes.Equal(parsed.Project, project) || !bytes.Equal(parsed.Vault, vault) || !bytes.Equal(parsed.Suggested, artifact.Record.Suggested) {
+		t.Fatalf("candidate bytes were not preserved: parsed=%+v err=%v", parsed, err)
+	}
+	for _, want := range []string{artifact.Record.BaseHash, artifact.Record.ProjectHash, artifact.Record.VaultHash, `"resolution_status": "open"`} {
+		if !strings.Contains(string(note), want) {
+			t.Fatalf("record missing %q:\n%s", want, note)
 		}
 	}
-	if !bytes.Contains(note, []byte("`````` markdown\n")) {
-		t.Fatalf("dynamic fence was not longer than candidate run:\n%s", note)
+}
+
+func TestParseConflictRecordRejectsTrailingJSONAndGarbage(t *testing.T) {
+	t.Parallel()
+
+	artifact, err := BuildConflict(ConflictRecord{
+		Version: 1, EntityID: "decision-1", ProjectID: "project-1", Kind: ConflictUnits,
+		RelativePath: "decisions/decision-1.md", Project: []byte("PROJECT"), CreatedAt: conflictTime,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	frontmatterEnd := bytes.Index(note[len("---\n"):], []byte("---\n"))
-	if frontmatterEnd < 0 {
-		t.Fatal("missing frontmatter close")
-	}
-	frontmatter := note[:len("---\n")+frontmatterEnd+len("---\n")]
-	for _, forbidden := range [][]byte{project, vault, []byte("BasePath"), []byte("ProjectPath"), []byte("VaultPath")} {
-		if bytes.Contains(frontmatter, forbidden) {
-			t.Fatalf("unsafe frontmatter contains %q", forbidden)
-		}
-	}
-	for _, want := range []string{"accept_project", "accept_obsidian", "manual_merge", artifact.Record.BaseHash, artifact.Record.ProjectHash, artifact.Record.VaultHash} {
-		if !strings.Contains(string(frontmatter), want) {
-			t.Fatalf("frontmatter missing %q:\n%s", want, frontmatter)
+	for _, suffix := range [][]byte{[]byte("{}"), []byte("not-json")} {
+		body := append(bytes.Clone(artifact.Notes.Project.Content), suffix...)
+		if _, err := ParseConflictRecord(body); !errors.Is(err, ErrInvalidConflict) {
+			t.Fatalf("suffix=%q err=%v", suffix, err)
 		}
 	}
 }
@@ -184,7 +214,7 @@ func TestBuildRepairNoteNeverPersistsRawPathOrSourceBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantSuffix := sha256.Sum256([]byte(absolute))
-	wantID := fmt.Sprintf("repair-20260822T170203Z-%x", wantSuffix[:6])
+	wantID := fmt.Sprintf("repair-20260822t170203z-%x", wantSuffix[:6])
 	if artifact.Repair == nil || artifact.Record != nil || artifact.Repair.ID != wantID || artifact.Repair.SourceHash != syncdoc.ContentHash([]byte(canary)) {
 		t.Fatalf("artifact=%+v", artifact)
 	}
@@ -192,7 +222,10 @@ func TestBuildRepairNoteNeverPersistsRawPathOrSourceBytes(t *testing.T) {
 	if strings.Contains(visible, canary) || strings.Contains(visible, absolute) || strings.Contains(visible, "/Users/") {
 		t.Fatalf("repair leaked source material: %s", visible)
 	}
-	for _, want := range []string{"malformed", "vault", syncdoc.ContentHash([]byte(canary)), "sync status", "manual_merge"} {
+	if !json.Valid(artifact.Notes.Project.Content) {
+		t.Fatalf("repair is not JSON: %s", artifact.Notes.Project.Content)
+	}
+	for _, want := range []string{"malformed", "vault", syncdoc.ContentHash([]byte(canary))} {
 		if !strings.Contains(string(artifact.Notes.Project.Content), want) {
 			t.Fatalf("repair note missing %q:\n%s", want, artifact.Notes.Project.Content)
 		}
@@ -644,7 +677,7 @@ func TestMarkConflictResolvedIsPureAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"resolution_status: \"resolved\"", "resolution_action: \"accept_project\"", resolved.ResolvedHash, resolvedAt.UTC().Format(time.RFC3339Nano)} {
+	for _, want := range []string{`"resolution_status": "resolved"`, `"resolution_action": "accept_project"`, resolved.ResolvedHash, resolvedAt.UTC().Format(time.RFC3339Nano)} {
 		if !strings.Contains(string(note), want) {
 			t.Fatalf("resolved note missing %q:\n%s", want, note)
 		}

@@ -300,6 +300,36 @@ func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot stri
 	return resumeMigration(project, data, &journal, writes, migrationHooks{})
 }
 
+// MigrationPending reports whether an authenticated journal remains for the
+// bound Project and sync-data roots. It performs no recovery writes.
+func MigrationPending(projectRoot string, projectInfo os.FileInfo, dataRoot string) (bool, error) {
+	if projectInfo == nil {
+		return false, errors.New("expected project root identity is required")
+	}
+	project, err := openReviewRoot(projectRoot, projectInfo)
+	if err != nil {
+		return false, err
+	}
+	defer project.Close()
+	data, err := pathguard.Open(dataRoot)
+	if err != nil {
+		return false, fmt.Errorf("open migration data root: %w", err)
+	}
+	defer data.Close()
+	projectKey, err := migrationProjectKey(project.Path)
+	if err != nil {
+		return false, err
+	}
+	journal, found, err := loadMigrationJournal(data, projectKey)
+	if err != nil || !found {
+		return found, err
+	}
+	if err := validateMigrationRootBindings(project, data, journal); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 func openMigrationRoots(projectRoot string, projectInfo os.FileInfo, dataRoot string, dataInfo os.FileInfo) (*pathguard.Directory, *pathguard.Directory, error) {
 	project, err := openReviewRoot(projectRoot, projectInfo)
 	if err != nil {

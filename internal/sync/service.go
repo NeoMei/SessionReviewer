@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/redact"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 )
 
@@ -70,6 +72,26 @@ type EntityError struct {
 	Code     string `json:"code"`
 }
 
+type MigrationReport struct {
+	Required bool     `json:"required"`
+	DryRun   bool     `json:"dry_run"`
+	Creates  []string `json:"creates"`
+	Archives []string `json:"archives"`
+}
+
+type MachinePublishState string
+
+const (
+	MachineCurrent MachinePublishState = "current"
+	MachinePending MachinePublishState = "pending"
+	MachineBlocked MachinePublishState = "blocked"
+)
+
+type MachineReport struct {
+	State      MachinePublishState `json:"state"`
+	Operations []Operation         `json:"operations"`
+}
+
 type Report struct {
 	ProjectID  string              `json:"project_id"`
 	DryRun     bool                `json:"dry_run"`
@@ -79,6 +101,8 @@ type Report struct {
 	Errors     []EntityError       `json:"errors"`
 	QueueDepth int                 `json:"queue_depth"`
 	Derived    DerivedReport       `json:"derived"`
+	Migration  MigrationReport     `json:"migration"`
+	Machine    MachineReport       `json:"machine"`
 }
 
 type Status struct {
@@ -171,7 +195,13 @@ func (engine *Engine) Close() error {
 }
 
 func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (report Report, retErr error) {
-	report = Report{ProjectID: engine.options.ProjectID, DryRun: request.DryRun, Operations: []Operation{}, Conflicts: []string{}, Errors: []EntityError{}, Derived: DerivedReport{State: DerivedDeferred, Operations: []Operation{}}}
+	report = Report{
+		ProjectID: engine.options.ProjectID, DryRun: request.DryRun,
+		Operations: []Operation{}, Conflicts: []string{}, Errors: []EntityError{},
+		Derived:   DerivedReport{State: DerivedDeferred, Operations: []Operation{}},
+		Migration: MigrationReport{DryRun: request.DryRun, Creates: []string{}, Archives: []string{}},
+		Machine:   MachineReport{State: MachinePending, Operations: []Operation{}},
+	}
 	if ctx == nil {
 		return report, errors.New("sync context is required")
 	}
@@ -181,6 +211,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	if request.Trigger != TriggerCLI && request.Trigger != TriggerWatcher && request.Trigger != TriggerPeriodic && request.Trigger != TriggerQueue {
 		return report, errors.New("invalid sync trigger")
 	}
+	selectedScope := len(request.EntityIDs) != 0
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
@@ -188,6 +219,53 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
 	if err := ctx.Err(); err != nil {
 		return report, err
+	}
+	migrationCommitted := false
+	if !request.DryRun && request.Trigger == TriggerCLI {
+		if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+			return report, errors.New("review migration recovery failed")
+		}
+	}
+	if request.Trigger != TriggerCLI {
+		pending, pendingErr := reviewv2.MigrationPending(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot)
+		if pendingErr != nil {
+			return report, errors.New("review migration state is invalid")
+		}
+		if pending {
+			report.Migration = MigrationReport{Required: true, DryRun: request.DryRun, Creates: []string{}, Archives: []string{}}
+			report.Machine.State = MachinePending
+			return report, nil
+		}
+	}
+	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
+	if err != nil {
+		return report, errors.New("review ledger version is invalid")
+	}
+	if request.Trigger != TriggerCLI && (version == reviewv2.VersionLegacy || version == reviewv2.VersionMixed) {
+		report.Migration = MigrationReport{Required: true, DryRun: request.DryRun, Creates: []string{}, Archives: []string{}}
+		report.Machine.State = MachinePending
+		return report, nil
+	}
+	if version == reviewv2.VersionMixed {
+		return report, errors.New("review migration recovery is required")
+	}
+	if version == reviewv2.VersionLegacy {
+		plan, err := reviewv2.PlanMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.options.Now().UTC())
+		if err != nil {
+			return report, errors.New("review migration planning failed")
+		}
+		report.Migration = migrationReportFromReview(plan.Report(), request.DryRun)
+		if request.DryRun {
+			report.Machine.State = MachinePending
+			return report, nil
+		}
+		migration, err := reviewv2.ApplyMigration(plan)
+		if err != nil {
+			return report, errors.New("review migration failed")
+		}
+		report.Migration = migrationReportFromReview(migration, false)
+		migrationCommitted = true
+		version = reviewv2.VersionV2
 	}
 	transactions, err := engine.transactions.List()
 	if err != nil {
@@ -199,6 +277,15 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		}
 		if err := engine.recoverTransactions(ctx, transactions); err != nil {
 			return report, errors.New("sync transaction recovery failed")
+		}
+	}
+	var machine machineSnapshot
+	if version == reviewv2.VersionV2 {
+		machine, report.Machine, err = engine.planMachineLedger()
+		if err != nil {
+			report.Machine.State = MachineBlocked
+			report.Errors = append(report.Errors, EntityError{EntityID: machineLedgerEntityID, Code: "machine_ledger_modified"})
+			return report, nil
 		}
 	}
 
@@ -247,7 +334,8 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	occupied := occupiedEntityPaths(projectInventory, vaultInventory, engine.options)
 	projectIssuePaths := scanIssuePaths(projectInventory.Issues)
 	vaultIssuePaths := scanIssuePaths(vaultInventory.Issues)
-	dryRunDerivedStale := false
+	entityCommitted := false
+	dryAccepted := make(map[string][]byte, 2)
 	for _, id := range ordered {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -275,9 +363,36 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 			ProjectID: engine.options.ProjectID, BasePath: baseRecord.RelativePath, GOOS: engine.options.GOOS,
 			CaseMode: engine.options.VaultCaseMode, OccupiedPathKeys: occupied})
 		if result.Kind == MergeConflict {
-			conflictID := "conflict-" + id
+			relative := baseRecord.RelativePath
+			if relative == "" {
+				relative = projectCandidate.RelativePath
+			}
+			if relative == "" {
+				relative = vaultCandidate.RelativePath
+			}
+			kind := ConflictUnits
+			if result.Reason == "archive_vs_modify" {
+				kind = ConflictArchiveEdit
+			}
+			artifact, conflictErr := BuildConflict(ConflictRecord{
+				Version: 1, EntityID: id, ProjectID: engine.options.ProjectID, Kind: kind,
+				RelativePath: relative, BasePath: baseRecord.RelativePath,
+				ProjectPath: projectCandidate.RelativePath, VaultPath: vaultCandidate.RelativePath,
+				Base: bytes.Clone(baseRecord.Content), Project: candidateConflictBytes(projectCandidate), Vault: candidateConflictBytes(vaultCandidate),
+				CreatedAt: engine.options.Now().UTC(),
+			})
+			if conflictErr != nil || artifact.Record == nil {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "conflict_record_failed"})
+				continue
+			}
+			conflictID := artifact.Record.ID
 			report.Conflicts = append(report.Conflicts, conflictID)
 			report.Operations = append(report.Operations, Operation{EntityID: id, Kind: OperationConflict, RelativePath: result.Reason})
+			if !request.DryRun {
+				if err := engine.persistConflictRecord(ctx, artifact); err != nil {
+					report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "conflict_record_failed"})
+				}
+			}
 			continue
 		}
 		if result.Kind == MergeNoop || result.Accepted == nil {
@@ -300,9 +415,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		operation := operationForMerge(id, target, result.Kind, projectCandidate, vaultCandidate, syncdoc.ContentHash(rendered))
 		report.Operations = append(report.Operations, operation...)
 		if request.DryRun {
-			if !projectCandidate.Present || projectCandidate.RelativePath != target || !result.Accepted.SemanticEqual(projectCandidate.Document) {
-				dryRunDerivedStale = true
-			}
+			dryAccepted[id] = bytes.Clone(rendered)
 			continue
 		}
 		if !vaultReady {
@@ -316,24 +429,55 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 			report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "write_failed"})
 			continue
 		}
+		entityCommitted = true
 	}
-	if len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 && !dryRunDerivedStale {
-		if compactV2Inventory(projectInventory) || compactV2Inventory(vaultInventory) {
-			report.Derived = DerivedReport{State: DerivedCurrent, Operations: []Operation{}}
+	if version == reviewv2.VersionV2 && !selectedScope && !request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+		operations, aligned, err := engine.alignCompactV2Revisions(ctx)
+		if err != nil {
+			report.Errors = append(report.Errors, EntityError{EntityID: "project-overview", Code: "revision_alignment_failed"})
 		} else {
-			plan, err := engine.planDerived()
-			if err != nil {
-				report.Derived.State = DerivedFailed
-				return report, errors.New("derived navigation planning failed")
-			}
-			report.Derived = plan.report()
-			if !request.DryRun && plan.changed() {
-				if err := engine.publishDerived(ctx, plan); err != nil {
-					report.Derived.State = DerivedFailed
-					return report, fmt.Errorf("derived navigation publication failed: %w", err)
+			report.Operations = append(report.Operations, operations...)
+			entityCommitted = entityCommitted || aligned
+		}
+	}
+	if version == reviewv2.VersionV2 && !selectedScope && request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+		alignment, finalBodies, aligned, err := engine.planCompactV2DryRun(projectInventory, vaultInventory, dryAccepted)
+		if err != nil {
+			report.Errors = append(report.Errors, EntityError{EntityID: "project-overview", Code: "revision_alignment_failed"})
+		} else {
+			report.Operations = append(report.Operations, alignment...)
+			desired, renderErr := engine.renderMachineLedgerForAccepted(machine, finalBodies["project-overview"], finalBodies["project-history"], len(dryAccepted) != 0 || aligned || machine.humanStale)
+			if renderErr != nil {
+				report.Errors = append(report.Errors, EntityError{EntityID: machineLedgerEntityID, Code: "machine_ledger_invalid"})
+			} else {
+				operations := machineLedgerOperations(machine, syncdoc.ContentHash(desired))
+				state := MachineCurrent
+				if len(operations) != 0 {
+					state = MachinePending
 				}
-				report.Derived.State = DerivedCurrent
+				report.Machine = MachineReport{State: state, Operations: operations}
 			}
+		}
+	}
+	if len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+		report.Derived = DerivedReport{State: DerivedCurrent, Operations: []Operation{}}
+	}
+	if version == reviewv2.VersionV2 && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+		if selectedScope {
+			// The compact machine ledger is a whole-review acceptance boundary. A
+			// selected reconcile cannot prove that excluded documents converged.
+			report.Machine = MachineReport{State: MachinePending, Operations: []Operation{}}
+		} else if request.DryRun {
+			// The complete in-memory dry-run plan was populated above.
+		} else if migrationCommitted || entityCommitted || machine.needsPublish() {
+			machineReport, err := engine.publishMachineLedger(ctx, machine, migrationCommitted || entityCommitted || machine.humanStale, false)
+			if err != nil {
+				report.Machine.State = MachineBlocked
+				return report, errors.New("machine ledger publication failed")
+			}
+			report.Machine = machineReport
+		} else {
+			report.Machine = machine.report()
 		}
 	}
 	sort.Strings(report.Conflicts)
@@ -346,13 +490,214 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	return report, nil
 }
 
-func compactV2Inventory(inventory syncdoc.Inventory) bool {
-	for _, entry := range inventory.ByID {
-		if entry.Identity.EntityType == "project_review" || entry.Identity.EntityType == "project_history" {
-			return true
+func candidateConflictBytes(candidate Candidate) []byte {
+	if !candidate.Present {
+		return nil
+	}
+	if candidate.Source != nil {
+		return bytes.Clone(candidate.Source)
+	}
+	rendered, err := candidate.Document.Render()
+	if err != nil {
+		return nil
+	}
+	return rendered
+}
+
+func (engine *Engine) alignCompactV2Revisions(ctx context.Context) ([]Operation, bool, error) {
+	projectInventory := syncdoc.Scan(engine.project, "docs/session-review", engine.options.GOOS, platform.CaseSensitive)
+	vaultInventory, _, err := engine.scanVault()
+	if err != nil {
+		return nil, false, err
+	}
+	if len(projectInventory.Issues) != 0 || len(vaultInventory.Issues) != 0 ||
+		!compactV2Inventory(projectInventory, "docs/session-review") || !compactV2Inventory(vaultInventory, engine.options.VaultReviewPath) {
+		return nil, false, errors.New("compact v2 revision inventory is invalid")
+	}
+	desired := 0
+	revisions := make(map[string]int, 2)
+	for _, id := range []string{"project-overview", "project-history"} {
+		entry, found := projectInventory.ByID[id]
+		if !found {
+			return nil, false, errors.New("compact v2 revision peer is missing")
+		}
+		revision, err := compactDocumentRevision(entry.Document)
+		if err != nil {
+			return nil, false, err
+		}
+		revisions[id] = revision
+		if revision > desired {
+			desired = revision
 		}
 	}
-	return false
+	operations := []Operation{}
+	changed := false
+	for _, id := range []string{"project-overview", "project-history"} {
+		if revisions[id] == desired {
+			continue
+		}
+		projectEntry := projectInventory.ByID[id]
+		units := projectEntry.Document.SemanticUnits()
+		key := syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}
+		unit, found := units[key]
+		if !found || !unit.Present {
+			return nil, false, errors.New("compact v2 revision unit is missing")
+		}
+		unit.Value = []byte(strconv.Itoa(desired) + "\n")
+		units[key] = unit
+		accepted, err := projectEntry.Document.WithSemanticUnits(units)
+		if err != nil {
+			return nil, false, err
+		}
+		rendered, err := accepted.Render()
+		if err != nil {
+			return nil, false, err
+		}
+		if len(redact.Default().Text(string(rendered)).Findings) != 0 {
+			return nil, false, ErrSensitiveContent
+		}
+		switch id {
+		case "project-overview":
+			parsed, parseErr := reviewv2.ParseReview(rendered)
+			if parseErr != nil || parsed.Model.ProjectID != engine.options.ProjectID || parsed.Model.Revision != desired {
+				return nil, false, errors.New("aligned compact review is invalid")
+			}
+		case "project-history":
+			parsed, parseErr := reviewv2.ParseHistory(rendered)
+			if parseErr != nil || parsed.ProjectID != engine.options.ProjectID || parsed.Revision != desired {
+				return nil, false, errors.New("aligned compact history is invalid")
+			}
+		}
+		base, hasBase, err := engine.bases.Load(id)
+		if err != nil || !hasBase {
+			return nil, false, errors.New("compact v2 revision base is unavailable")
+		}
+		projectCandidate := inventoryCandidate(projectInventory, id, "docs/session-review")
+		vaultCandidate := inventoryCandidate(vaultInventory, id, engine.options.VaultReviewPath)
+		operations = append(operations, operationForMerge(id, base.RelativePath, MergeWriteBoth, projectCandidate, vaultCandidate, syncdoc.ContentHash(rendered))...)
+		if err := engine.applyAccepted(ctx, id, base.RelativePath, rendered, MergeWriteBoth, base, true, projectCandidate, vaultCandidate); err != nil {
+			return nil, false, err
+		}
+		changed = true
+	}
+	return operations, changed, nil
+}
+
+func (engine *Engine) planCompactV2DryRun(projectInventory, vaultInventory syncdoc.Inventory, accepted map[string][]byte) ([]Operation, map[string][]byte, bool, error) {
+	finalBodies := make(map[string][]byte, 2)
+	revisions := make(map[string]int, 2)
+	desiredRevision := 0
+	for _, id := range []string{"project-overview", "project-history"} {
+		entry, found := projectInventory.ByID[id]
+		if !found {
+			return nil, nil, false, errors.New("compact v2 dry-run peer is missing")
+		}
+		body := bytes.Clone(entry.Content)
+		if planned, ok := accepted[id]; ok {
+			body = bytes.Clone(planned)
+		}
+		document, err := syncdoc.Parse(path.Base(entry.RelativePath), body)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		revision, err := compactDocumentRevision(document)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		finalBodies[id] = body
+		revisions[id] = revision
+		if revision > desiredRevision {
+			desiredRevision = revision
+		}
+	}
+	operations := []Operation{}
+	aligned := false
+	for _, id := range []string{"project-overview", "project-history"} {
+		if revisions[id] == desiredRevision {
+			continue
+		}
+		entry := projectInventory.ByID[id]
+		document, err := syncdoc.Parse(path.Base(entry.RelativePath), finalBodies[id])
+		if err != nil {
+			return nil, nil, false, err
+		}
+		units := document.SemanticUnits()
+		key := syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}
+		unit, found := units[key]
+		if !found || !unit.Present {
+			return nil, nil, false, errors.New("compact v2 dry-run revision is missing")
+		}
+		unit.Value = []byte(strconv.Itoa(desiredRevision) + "\n")
+		units[key] = unit
+		alignedDocument, err := document.WithSemanticUnits(units)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		body, err := alignedDocument.Render()
+		if err != nil {
+			return nil, nil, false, err
+		}
+		relative := strings.TrimPrefix(entry.RelativePath, "docs/session-review/")
+		projectCandidate := inventoryCandidate(projectInventory, id, "docs/session-review")
+		vaultCandidate := inventoryCandidate(vaultInventory, id, engine.options.VaultReviewPath)
+		if planned, ok := accepted[id]; ok {
+			projectCandidate, err = candidateFromExactBody(relative, planned)
+			if err != nil {
+				return nil, nil, false, err
+			}
+			vaultCandidate = projectCandidate
+		}
+		operations = append(operations, operationForMerge(id, relative, MergeWriteBoth, projectCandidate, vaultCandidate, syncdoc.ContentHash(body))...)
+		finalBodies[id] = body
+		aligned = true
+	}
+	return operations, finalBodies, aligned, nil
+}
+
+func candidateFromExactBody(relative string, body []byte) (Candidate, error) {
+	document, err := syncdoc.Parse(relative, body)
+	if err != nil {
+		return Candidate{}, err
+	}
+	return Candidate{
+		Present: true, RelativePath: relative, Document: document, Hash: documentHash(document),
+		Source: bytes.Clone(body), SourceHash: syncdoc.ContentHash(body),
+	}, nil
+}
+
+func compactDocumentRevision(document syncdoc.Document) (int, error) {
+	unit, found := document.SemanticUnits()[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]
+	if !found || !unit.Present {
+		return 0, errors.New("compact v2 revision is missing")
+	}
+	revision, err := strconv.Atoi(strings.TrimSpace(string(unit.Value)))
+	if err != nil || revision < 0 {
+		return 0, errors.New("compact v2 revision is invalid")
+	}
+	return revision, nil
+}
+
+func migrationReportFromReview(report reviewv2.MigrationReport, dryRun bool) MigrationReport {
+	return MigrationReport{
+		Required: report.Required, DryRun: dryRun,
+		Creates: append([]string(nil), report.Creates...), Archives: append([]string(nil), report.Archives...),
+	}
+}
+
+func compactV2Inventory(inventory syncdoc.Inventory, rootRelative string) bool {
+	if len(inventory.Issues) != 0 || len(inventory.ByID) != 2 {
+		return false
+	}
+	for id, expected := range map[string]struct{ entityType, relative string }{
+		"project-overview": {entityType: "project_review", relative: path.Join(rootRelative, path.Base(reviewv2.ReviewRelativePath))},
+		"project-history":  {entityType: "project_history", relative: path.Join(rootRelative, path.Base(reviewv2.HistoryRelativePath))},
+	} {
+		entry, found := inventory.ByID[id]
+		if !found || entry.Identity.EntityType != expected.entityType || entry.RelativePath != expected.relative {
+			return false
+		}
+	}
+	return true
 }
 
 func scanIssuePaths(issues []syncdoc.ScanIssue) map[string]struct{} {
@@ -415,13 +760,53 @@ func (engine *Engine) Status(ctx context.Context) (Status, error) {
 	return status, err
 }
 
-func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (report Report, retErr error) {
-	report = Report{ProjectID: engine.options.ProjectID, Operations: []Operation{}, Conflicts: []string{}, Errors: []EntityError{}}
-	if ctx == nil || !strings.HasPrefix(resolution.ConflictID, "conflict-") || !validResolutionAction(resolution.Action) {
-		return report, ErrInvalidResolution
+func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineReport, retErr error) {
+	report = MachineReport{State: MachineBlocked, Operations: []Operation{}}
+	if ctx == nil {
+		return report, errors.New("sync context is required")
 	}
-	entityID := strings.TrimPrefix(resolution.ConflictID, "conflict-")
-	if !stableBaseID.MatchString(entityID) {
+	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
+	if err != nil {
+		return report, errors.New("sync project is locked or unsafe")
+	}
+	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+		return report, errors.New("review migration recovery failed")
+	}
+	transactions, err := engine.transactions.List()
+	if err != nil {
+		return report, errors.New("sync transaction state is invalid")
+	}
+	if len(transactions) != 0 {
+		if err := engine.recoverTransactions(ctx, transactions); err != nil {
+			return report, errors.New("sync transaction recovery failed")
+		}
+	}
+	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
+	if err != nil || version != reviewv2.VersionV2 {
+		return report, errors.New("machine ledger repair requires review v2")
+	}
+	snapshot, _, err := engine.loadMachineLedgerSnapshot(true)
+	if err != nil {
+		return report, errors.New("project machine ledger is invalid")
+	}
+	if !snapshot.vaultFound || bytes.Equal(snapshot.projectBody, snapshot.vaultBody) {
+		return report, errors.New("machine ledger repair requires a modified vault copy")
+	}
+	return engine.publishMachineLedger(ctx, snapshot, false, true)
+}
+
+func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (report Report, retErr error) {
+	report = Report{
+		ProjectID: engine.options.ProjectID, Operations: []Operation{}, Conflicts: []string{}, Errors: []EntityError{},
+		Derived:   DerivedReport{State: DerivedDeferred, Operations: []Operation{}},
+		Migration: MigrationReport{Creates: []string{}, Archives: []string{}},
+		Machine:   MachineReport{State: MachinePending, Operations: []Operation{}},
+	}
+	if ctx == nil || !strings.HasPrefix(resolution.ConflictID, "conflict-") || !stableBaseID.MatchString(resolution.ConflictID) || !validResolutionAction(resolution.Action) {
 		return report, ErrInvalidResolution
 	}
 	if resolution.Action == ManualMerge {
@@ -450,6 +835,15 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 			return report, errors.New("sync transaction recovery failed")
 		}
 	}
+	conflictRecord, err := engine.loadMirroredConflictRecord(resolution.ConflictID)
+	if err != nil || conflictRecord.ProjectID != engine.options.ProjectID {
+		return report, ErrStaleConflict
+	}
+	machine, _, err := engine.planMachineLedger()
+	if err != nil {
+		return report, errors.New("machine ledger blocks conflict resolution")
+	}
+	entityID := conflictRecord.EntityID
 	projectInventory := syncdoc.Scan(engine.project, "docs/session-review", engine.options.GOOS, platform.CaseSensitive)
 	vaultInventory, _, err := engine.scanVault()
 	if err != nil || len(projectInventory.Issues) != 0 || len(vaultInventory.Issues) != 0 {
@@ -460,7 +854,7 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 		return report, ErrStaleConflict
 	}
 	base, err := syncdoc.Parse(baseRecord.RelativePath, baseRecord.Content)
-	if err != nil {
+	if err != nil || conflictRecord.BaseHash != syncdoc.ContentHash(baseRecord.Content) || conflictPath(conflictRecord.BasePath, conflictRecord.RelativePath) != baseRecord.RelativePath {
 		return report, ErrStaleConflict
 	}
 	projectCandidate := inventoryCandidate(projectInventory, entityID, "docs/session-review")
@@ -472,43 +866,57 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 	if merged.Kind != MergeConflict {
 		return report, ErrStaleConflict
 	}
-	var selected syncdoc.Document
-	switch resolution.Action {
-	case AcceptProject:
-		if !projectCandidate.Present {
+	var manual *syncdoc.Document
+	if resolution.Action == ManualMerge {
+		manualDocument, readErr := readManualResolution(resolution.ManualFile, baseRecord.RelativePath)
+		if readErr != nil {
 			return report, ErrInvalidResolution
 		}
-		selected = projectCandidate.Document
-	case AcceptObsidian:
-		if !vaultCandidate.Present {
-			return report, ErrInvalidResolution
-		}
-		selected = vaultCandidate.Document
-	case ManualMerge:
-		selected, err = readManualResolution(resolution.ManualFile, baseRecord.RelativePath)
-		if err != nil {
-			return report, ErrInvalidResolution
-		}
+		manual = &manualDocument
 	}
-	if err := selected.ValidateHumanChanges(base); err != nil {
-		return report, err
-	}
-	selected, err = finalizeAcceptedDocument(selected, &base, true)
+	selected, err := SelectResolution(conflictRecord, resolution, projectCandidate, vaultCandidate, manual)
 	if err != nil {
 		return report, err
 	}
-	if candidateSensitive(Candidate{Present: true, RelativePath: baseRecord.RelativePath, Document: selected, Hash: documentHash(selected)}) {
-		return report, ErrSensitiveContent
+	otherConflicts, err := engine.liveConflictIDsExcept(projectInventory, vaultInventory, entityID)
+	if err != nil {
+		return report, ErrStaleConflict
 	}
 	rendered, err := selected.Render()
 	if err != nil {
 		return report, err
 	}
+	afterHash := syncdoc.ContentHash(rendered)
+	resolvedConflict, openConflict, resolutionTxn, err := engine.planResolvedConflict(conflictRecord, resolution.Action, afterHash)
+	if err != nil {
+		return report, errors.New("hidden conflict resolution planning failed")
+	}
 	if err := engine.applyAccepted(ctx, entityID, baseRecord.RelativePath, rendered, MergeWriteBoth, baseRecord, true, projectCandidate, vaultCandidate); err != nil {
 		return report, err
 	}
-	afterHash := syncdoc.ContentHash(rendered)
 	report.Operations = operationForMerge(entityID, baseRecord.RelativePath, MergeWriteBoth, projectCandidate, vaultCandidate, afterHash)
+	if err := engine.resumeConflictResolution(ctx, conflictRecord.ID, resolvedConflict, openConflict, resolutionTxn); err != nil {
+		return report, errors.New("hidden conflict resolution publication failed")
+	}
+	if len(otherConflicts) != 0 {
+		report.Conflicts = otherConflicts
+		report.Machine = MachineReport{State: MachinePending, Operations: []Operation{}}
+		if err := lock.Release(); err != nil {
+			lockHeld = false
+			return report, err
+		}
+		lockHeld = false
+		return report, nil
+	}
+	alignment, _, err := engine.alignCompactV2Revisions(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.Operations = append(report.Operations, alignment...)
+	report.Machine, err = engine.publishMachineLedger(ctx, machine, true, false)
+	if err != nil {
+		return report, errors.New("machine ledger publication failed")
+	}
 	if err := lock.Release(); err != nil {
 		lockHeld = false
 		return report, err
@@ -523,6 +931,51 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 	report.QueueDepth = followup.QueueDepth
 	report.Derived = followup.Derived
 	return report, err
+}
+
+func (engine *Engine) liveConflictIDsExcept(projectInventory, vaultInventory syncdoc.Inventory, excludedEntityID string) ([]string, error) {
+	bases, err := engine.bases.List()
+	if err != nil {
+		return nil, err
+	}
+	occupied := occupiedEntityPaths(projectInventory, vaultInventory, engine.options)
+	result := []string{}
+	for _, baseRecord := range bases {
+		if baseRecord.EntityID == excludedEntityID {
+			continue
+		}
+		base, err := syncdoc.Parse(baseRecord.RelativePath, baseRecord.Content)
+		if err != nil {
+			return nil, err
+		}
+		projectCandidate := inventoryCandidate(projectInventory, baseRecord.EntityID, "docs/session-review")
+		vaultCandidate := inventoryCandidate(vaultInventory, baseRecord.EntityID, engine.options.VaultReviewPath)
+		merged := Merge(MergeInput{
+			EntityID: baseRecord.EntityID, Base: &base, Project: projectCandidate, Vault: vaultCandidate,
+			ProjectID: engine.options.ProjectID, BasePath: baseRecord.RelativePath, GOOS: engine.options.GOOS,
+			CaseMode: engine.options.VaultCaseMode, OccupiedPathKeys: occupied,
+		})
+		if merged.Kind != MergeConflict {
+			continue
+		}
+		kind := ConflictUnits
+		if merged.Reason == "archive_vs_modify" {
+			kind = ConflictArchiveEdit
+		}
+		artifact, err := BuildConflict(ConflictRecord{
+			Version: 1, EntityID: baseRecord.EntityID, ProjectID: engine.options.ProjectID, Kind: kind,
+			RelativePath: baseRecord.RelativePath, BasePath: baseRecord.RelativePath,
+			ProjectPath: projectCandidate.RelativePath, VaultPath: vaultCandidate.RelativePath,
+			Base: bytes.Clone(baseRecord.Content), Project: candidateConflictBytes(projectCandidate), Vault: candidateConflictBytes(vaultCandidate),
+			CreatedAt: engine.options.Now().UTC(),
+		})
+		if err != nil || artifact.Record == nil {
+			return nil, ErrInvalidConflict
+		}
+		result = append(result, artifact.Record.ID)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 
 func (engine *Engine) DrainQueue(context.Context, int) (QueueReport, error) {
@@ -711,6 +1164,36 @@ func distinctRelativePath(options Options, first, second string) bool {
 }
 
 func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Transaction) error {
+	remaining := make([]Transaction, 0, len(transactions))
+	resolutions := make([]Transaction, 0, 1)
+	for _, transaction := range transactions {
+		if transaction.Kind == TxnMachinePublish || transaction.Kind == TxnMachineRepair {
+			if err := engine.recoverMachineLedger(ctx, transaction); err != nil {
+				return err
+			}
+			continue
+		}
+		if transaction.Kind == TxnConflictRecord {
+			if err := engine.recoverConflictRecord(ctx, transaction); err != nil {
+				return err
+			}
+			continue
+		}
+		if transaction.Kind == TxnConflictResolve {
+			resolutions = append(resolutions, transaction)
+			continue
+		}
+		remaining = append(remaining, transaction)
+	}
+	if len(remaining) == 0 {
+		for _, transaction := range resolutions {
+			if err := engine.recoverConflictResolution(ctx, transaction); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	transactions = remaining
 	projectInventory := syncdoc.Scan(engine.project, "docs/session-review", engine.options.GOOS, platform.CaseSensitive)
 	vaultInventory, vaultReady, err := engine.scanVault()
 	if err != nil {
@@ -732,10 +1215,7 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 			return err
 		}
 		if transaction.Kind == TxnDerivedPublish {
-			if err := engine.recoverDerived(ctx, transaction); err != nil {
-				return err
-			}
-			continue
+			return errors.New("legacy derived navigation transaction is unsupported")
 		}
 		base, hasBase := baseByID[transaction.EntityID]
 		if hasBase && base.ContentHash == transaction.DesiredHash {
@@ -830,6 +1310,11 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 			return err
 		}
 		if err := engine.transactions.Remove(transaction.EntityID); err != nil {
+			return err
+		}
+	}
+	for _, transaction := range resolutions {
+		if err := engine.recoverConflictResolution(ctx, transaction); err != nil {
 			return err
 		}
 	}

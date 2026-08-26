@@ -28,10 +28,14 @@ const (
 type TransactionKind string
 
 const (
-	TxnEntitySync     TransactionKind = "entity_sync"
-	TxnConflictNote   TransactionKind = "conflict_note"
-	TxnResolution     TransactionKind = "resolution"
-	TxnDerivedPublish TransactionKind = "derived_publish"
+	TxnEntitySync      TransactionKind = "entity_sync"
+	TxnConflictNote    TransactionKind = "conflict_note"
+	TxnResolution      TransactionKind = "resolution"
+	TxnDerivedPublish  TransactionKind = "derived_publish"
+	TxnMachinePublish  TransactionKind = "machine_publish"
+	TxnMachineRepair   TransactionKind = "machine_repair"
+	TxnConflictRecord  TransactionKind = "conflict_record"
+	TxnConflictResolve TransactionKind = "conflict_resolve"
 )
 
 type TransactionStage string
@@ -504,7 +508,7 @@ func validateTransaction(record Transaction, expectedEntityID string) error {
 		return errors.New("invalid transaction version")
 	}
 	switch record.Kind {
-	case TxnEntitySync, TxnConflictNote, TxnResolution, TxnDerivedPublish:
+	case TxnEntitySync, TxnConflictNote, TxnResolution, TxnDerivedPublish, TxnMachinePublish, TxnMachineRepair, TxnConflictRecord, TxnConflictResolve:
 	default:
 		return errors.New("invalid transaction kind")
 	}
@@ -521,11 +525,24 @@ func validateTransaction(record Transaction, expectedEntityID string) error {
 			return errors.New("invalid transaction target hash")
 		}
 	}
-	if record.Kind != TxnEntitySync && (record.ExpectedProjectHash != "" || record.ExpectedVaultHash != "") {
+	if record.Kind != TxnEntitySync && record.Kind != TxnMachinePublish && record.Kind != TxnMachineRepair && record.Kind != TxnConflictRecord && record.Kind != TxnConflictResolve &&
+		(record.ExpectedProjectHash != "" || record.ExpectedVaultHash != "") {
 		return errors.New("invalid transaction target hash owner")
 	}
 	if record.Kind == TxnDerivedPublish && (record.EntityID != derivedTransactionID || record.ExpectedBaseHash == "" || record.FromPathKey != "" || record.ToPathKey != "") {
 		return errors.New("invalid derived transaction")
+	}
+	if record.Kind == TxnMachinePublish && (record.EntityID != machineLedgerEntityID || record.ExpectedBaseHash == "" || record.ExpectedProjectHash != record.ExpectedBaseHash || record.FromPathKey != "" || record.ToPathKey != "") {
+		return errors.New("invalid machine publication transaction")
+	}
+	if record.Kind == TxnMachineRepair && (record.EntityID != machineLedgerRepairEntityID || record.ExpectedBaseHash == "" || record.ExpectedProjectHash != record.ExpectedBaseHash || record.ExpectedVaultHash == "" || record.FromPathKey != "" || record.ToPathKey != "") {
+		return errors.New("invalid machine repair transaction")
+	}
+	if record.Kind == TxnConflictRecord && (!strings.HasPrefix(record.EntityID, "conflict-") || record.ExpectedBaseHash != record.DesiredHash || record.FromPathKey != "" || record.ToPathKey != "") {
+		return errors.New("invalid hidden conflict transaction")
+	}
+	if record.Kind == TxnConflictResolve && (!strings.HasPrefix(record.EntityID, "conflict-") || record.ExpectedProjectHash != record.ExpectedBaseHash || record.ExpectedVaultHash != record.ExpectedBaseHash || record.FromPathKey != "" || record.ToPathKey != "") {
+		return errors.New("invalid hidden conflict resolution transaction")
 	}
 	switch record.Stage {
 	case TxnPlanned, TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted:

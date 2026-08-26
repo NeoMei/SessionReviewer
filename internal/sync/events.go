@@ -126,8 +126,10 @@ func validObservedHash(value string) bool {
 
 func ignoredEventPath(pathKey string) bool {
 	components := strings.Split(pathKey, "/")
-	if len(components) > 0 && components[0] == "sync-conflicts" {
-		return true
+	for _, component := range components {
+		if component == "sync-conflicts" || component == ".session-reviewer" {
+			return true
+		}
 	}
 	leaf := path.Base(pathKey)
 	if baseTempName.MatchString(leaf) {

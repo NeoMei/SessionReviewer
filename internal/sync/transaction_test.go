@@ -96,6 +96,51 @@ func TestDerivedTransactionJournalIsContentFreeAndStageChecked(t *testing.T) {
 	}
 }
 
+func TestMachineAndHiddenConflictTransactionsAreContentFreeAndOwnershipChecked(t *testing.T) {
+	now := time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC)
+	baseHash := hash("project canonical")
+	desiredHash := hash("next canonical")
+	for _, txn := range []Transaction{
+		{Version: 1, Kind: TxnMachinePublish, EntityID: machineLedgerEntityID, DesiredHash: desiredHash, ExpectedBaseHash: baseHash, ExpectedProjectHash: baseHash, Stage: TxnPlanned, UpdatedAt: now},
+		{Version: 1, Kind: TxnMachineRepair, EntityID: machineLedgerRepairEntityID, DesiredHash: desiredHash, ExpectedBaseHash: baseHash, ExpectedProjectHash: baseHash, ExpectedVaultHash: hash("tampered vault"), Stage: TxnPlanned, UpdatedAt: now},
+		{Version: 1, Kind: TxnConflictRecord, EntityID: "conflict-project-history-0123456789ab", DesiredHash: desiredHash, ExpectedBaseHash: desiredHash, Stage: TxnPlanned, UpdatedAt: now},
+		{Version: 1, Kind: TxnConflictResolve, EntityID: "conflict-project-history-0123456789ab", DesiredHash: desiredHash, ExpectedBaseHash: baseHash, ExpectedProjectHash: baseHash, ExpectedVaultHash: baseHash, Stage: TxnPlanned, UpdatedAt: now},
+	} {
+		t.Run(string(txn.Kind), func(t *testing.T) {
+			rootPath := t.TempDir()
+			root, err := os.OpenRoot(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			if err := (TransactionStore{Root: root}).Save(txn); err != nil {
+				t.Fatal(err)
+			}
+			body, err := os.ReadFile(filepath.Join(rootPath, transactionRecordPath(txn.Kind, txn.EntityID)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{"CANDIDATE-CONTENT", "/Users/canary", `"content"`, `"relative_path"`} {
+				if bytes.Contains(body, []byte(forbidden)) {
+					t.Fatalf("journal contains %q: %s", forbidden, body)
+				}
+			}
+		})
+	}
+
+	for _, mutate := range []func(*Transaction){
+		func(txn *Transaction) { txn.FromPathKey, txn.ToPathKey = "from", "to" },
+		func(txn *Transaction) { txn.ExpectedBaseHash = hash("wrong content") },
+		func(txn *Transaction) { txn.EntityID = "project-history" },
+	} {
+		txn := Transaction{Version: 1, Kind: TxnConflictRecord, EntityID: "conflict-project-history-0123456789ab", DesiredHash: desiredHash, ExpectedBaseHash: desiredHash, Stage: TxnPlanned, UpdatedAt: now}
+		mutate(&txn)
+		if err := validateTransaction(txn, ""); err == nil {
+			t.Fatalf("invalid hidden conflict transaction accepted: %+v", txn)
+		}
+	}
+}
+
 func TestTransactionStoreAdvancesSequentiallyAndListsDeterministically(t *testing.T) {
 	root, err := os.OpenRoot(t.TempDir())
 	if err != nil {

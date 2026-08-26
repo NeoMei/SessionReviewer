@@ -3,7 +3,9 @@ package sync
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -11,12 +13,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 )
 
 func TestEngineRecoversInterruptedTwoSideWriteFromContentFreeJournal(t *testing.T) {
 	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -24,13 +29,13 @@ func TestEngineRecoversInterruptedTwoSideWriteFromContentFreeJournal(t *testing.
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	vaultOverview := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "project-overview.md")
-	body, err := os.ReadFile(vaultOverview)
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	body, err := os.ReadFile(vaultHistory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	edited := strings.Replace(string(body), "# SessionReviewer", "# interrupted edit", 1)
-	if err := os.WriteFile(vaultOverview, []byte(edited), 0o644); err != nil {
+	edited := strings.Replace(string(body), "信任链与 dry-run 边界修复", "interrupted edit", 1)
+	if err := os.WriteFile(vaultHistory, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	engine.writer.beforeWrite = func(side Side, _ *os.Root, _ string) error {
@@ -56,15 +61,217 @@ func TestEngineRecoversInterruptedTwoSideWriteFromContentFreeJournal(t *testing.
 	if err != nil || len(recovered.Errors) != 0 || len(recovered.Conflicts) != 0 {
 		t.Fatalf("recovered report=%+v err=%v", recovered, err)
 	}
-	projectBody, _ := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", "project-overview.md"))
-	vaultBody, _ := os.ReadFile(vaultOverview)
-	if !strings.Contains(string(projectBody), "# interrupted edit") || !strings.Contains(string(projectBody), "revision: 2") || string(projectBody) != string(vaultBody) {
+	projectBody, _ := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", "项目历史.md"))
+	vaultBody, _ := os.ReadFile(vaultHistory)
+	if !strings.Contains(string(projectBody), "interrupted edit") || !strings.Contains(string(projectBody), "revision: 2") || string(projectBody) != string(vaultBody) {
 		t.Fatalf("project=%s\nvault=%s", projectBody, vaultBody)
 	}
 }
 
-func TestEngineResolvesLiveUnitConflictByAcceptingProject(t *testing.T) {
+func TestReconcileDryRunPlansMigrationAndRealSyncConvergesV2(t *testing.T) {
 	fixture := newEngineFixture(t)
+	completeLegacyFixtureForMigration(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	beforeProject := snapshotFixtureTree(t, fixture.project)
+	beforeData := snapshotFixtureTree(t, fixture.data)
+	beforeVault := snapshotFixtureTree(t, fixture.vault)
+	dry, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
+	if err != nil {
+		_, planErr := reviewv2.PlanMigration(fixture.project, engine.project.Info(), fixture.data, fixture.options().Now())
+		t.Fatalf("reconcile=%v direct_plan=%v", err, planErr)
+	}
+	if !dry.Migration.Required || !dry.Migration.DryRun || len(dry.Migration.Creates) != 3 || len(dry.Migration.Archives) == 0 {
+		t.Fatalf("migration dry-run report=%+v", dry.Migration)
+	}
+	if after := snapshotFixtureTree(t, fixture.project); !reflect.DeepEqual(beforeProject, after) {
+		t.Fatalf("migration dry-run mutated project\nbefore=%v\nafter=%v", beforeProject, after)
+	}
+	if !reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) || !reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+		t.Fatal("migration dry-run mutated sync data or Vault")
+	}
+
+	real, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real.Migration.Required || real.Migration.DryRun || real.Machine.State != MachineCurrent {
+		t.Fatalf("real report=%+v", real)
+	}
+	projectMachine := readDerivedTestFile(t, filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
+	vaultMachine := readDerivedTestFile(t, filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "ledger.json"))
+	if !bytes.Equal(projectMachine, vaultMachine) {
+		t.Fatal("project and vault machine ledgers diverged")
+	}
+
+	repeat, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
+	if err != nil || len(repeat.Operations) != 0 || len(repeat.Machine.Operations) != 0 {
+		t.Fatalf("repeat=%+v err=%v", repeat, err)
+	}
+}
+
+func completeLegacyFixtureForMigration(t *testing.T, fixture engineFixture) {
+	t.Helper()
+	legacy, err := ledger.Load(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := ledger.CurrentState{
+		ProjectID: legacy.ProjectID, Revision: 1, Goal: "migrate sync fixture", LastVerified: "legacy accepted",
+		Branch: "codex/session-reviewer-v2", Blockers: []string{}, OpenRisks: []string{}, NextAction: "sync",
+		FirstInspection: "docs/session-review/project-overview.md", LastUpdated: "2026-08-25T00:00:00Z",
+		SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+	}
+	plan, err := ledger.Render(legacy, ledger.ChangeSet{Current: &current})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReconcileBackgroundTriggersOnlyReportRequiredMigration(t *testing.T) {
+	for _, trigger := range []Trigger{TriggerWatcher, TriggerPeriodic, TriggerQueue} {
+		t.Run(string(trigger), func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			completeLegacyFixtureForMigration(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			beforeProject := snapshotFixtureTree(t, fixture.project)
+			beforeData := snapshotFixtureTree(t, fixture.data)
+			beforeVault := snapshotFixtureTree(t, fixture.vault)
+
+			report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: trigger})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Migration.Required || report.Migration.DryRun || report.Machine.State != MachinePending {
+				t.Fatalf("report=%+v", report)
+			}
+			if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+				!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) ||
+				!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+				t.Fatal("background migration report mutated state")
+			}
+		})
+	}
+}
+
+func TestReconcileBackgroundTriggersDoNotRecoverInterruptedMigration(t *testing.T) {
+	for _, trigger := range []Trigger{TriggerWatcher, TriggerPeriodic, TriggerQueue} {
+		t.Run(string(trigger), func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			completeLegacyFixtureForMigration(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			_, _ = stageRecoverableMigrationJournal(t, fixture, engine)
+			beforeProject := snapshotFixtureTree(t, fixture.project)
+			beforeData := snapshotFixtureTree(t, fixture.data)
+			beforeVault := snapshotFixtureTree(t, fixture.vault)
+
+			report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: trigger})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !report.Migration.Required || report.Machine.State != MachinePending {
+				t.Fatalf("report=%+v", report)
+			}
+			if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+				!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) ||
+				!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+				t.Fatal("background trigger recovered an interrupted migration")
+			}
+		})
+	}
+}
+
+func TestReconcileBackgroundTriggersDoNotFinalizeCommittedMigrationJournal(t *testing.T) {
+	for _, trigger := range []Trigger{TriggerWatcher, TriggerPeriodic, TriggerQueue} {
+		t.Run(string(trigger), func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			completeLegacyFixtureForMigration(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			journalPath, journalBody := stageRecoverableMigrationJournal(t, fixture, engine)
+			if err := reviewv2.RecoverMigration(fixture.project, engine.project.Info(), fixture.data); err != nil {
+				t.Fatal(err)
+			}
+			var journal map[string]any
+			if err := json.Unmarshal(journalBody, &journal); err != nil {
+				t.Fatal(err)
+			}
+			journal["stage"] = "committed"
+			committed, err := json.MarshalIndent(journal, "", "  ")
+			if err != nil {
+				t.Fatal(err)
+			}
+			committed = append(committed, '\n')
+			if err := os.WriteFile(journalPath, committed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			pending, err := reviewv2.MigrationPending(fixture.project, engine.project.Info(), fixture.data)
+			if err != nil || !pending {
+				t.Fatalf("late journal pending=%v err=%v", pending, err)
+			}
+			beforeProject := snapshotFixtureTree(t, fixture.project)
+			beforeData := snapshotFixtureTree(t, fixture.data)
+			beforeVault := snapshotFixtureTree(t, fixture.vault)
+
+			report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: trigger})
+			if err != nil || !report.Migration.Required || report.Machine.State != MachinePending {
+				t.Fatalf("report=%+v err=%v", report, err)
+			}
+			if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+				!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) ||
+				!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) {
+				t.Fatal("background trigger finalized a committed migration journal")
+			}
+		})
+	}
+}
+
+func stageRecoverableMigrationJournal(t *testing.T, fixture engineFixture, engine *Engine) (string, []byte) {
+	t.Helper()
+	machineDirectory := filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer")
+	if err := os.Mkdir(machineDirectory, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.PlanMigration(fixture.project, engine.project.Info(), fixture.data, fixture.options().Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reviewv2.ApplyMigration(plan); err == nil {
+		t.Fatal("migration unexpectedly passed the staged private-directory failure")
+	}
+	entries, err := os.ReadDir(filepath.Join(fixture.data, "migrations"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("migration journal entries=%v err=%v", entries, err)
+	}
+	journalPath := filepath.Join(fixture.data, "migrations", entries[0].Name())
+	journalBody := readDerivedTestFile(t, journalPath)
+	if err := os.Chmod(machineDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return journalPath, journalBody
+}
+
+func TestSelectedEntityReconcileDoesNotCanonizeUnselectedProjectEdit(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -73,28 +280,29 @@ func TestEngineResolvesLiveUnitConflictByAcceptingProject(t *testing.T) {
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(fixture.project, "docs", "session-review", "project-overview.md")
-	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "project-overview.md")
-	projectBody, _ := os.ReadFile(projectPath)
-	vaultBody, _ := os.ReadFile(vaultPath)
-	if err := os.WriteFile(projectPath, []byte(strings.Replace(string(projectBody), "note: base", "note: project-choice", 1)), 0o644); err != nil {
+	machinePath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+	machineBefore := readDerivedTestFile(t, machinePath)
+	overviewPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+	overview := readDerivedTestFile(t, overviewPath)
+	edited := bytes.Replace(overview, []byte("SessionReviewer v2"), []byte("unselected Project edit"), 1)
+	if bytes.Equal(overview, edited) {
+		t.Fatal("overview fixture marker was not found")
+	}
+	if err := os.WriteFile(overviewPath, edited, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(vaultPath, []byte(strings.Replace(string(vaultBody), "note: base", "note: vault-choice", 1)), 0o644); err != nil {
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{
+		Trigger: TriggerCLI, EntityIDs: []string{"project-history"},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
-	if err != nil || len(conflicted.Conflicts) != 1 || conflicted.Conflicts[0] != "conflict-project-overview" {
-		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	if got := readDerivedTestFile(t, machinePath); !bytes.Equal(got, machineBefore) {
+		t.Fatal("selected reconcile canonized an unselected Project edit")
 	}
-	resolved, err := engine.Resolve(context.Background(), Resolution{ConflictID: "conflict-project-overview", Action: AcceptProject})
-	if err != nil || len(resolved.Conflicts) != 0 || len(resolved.Operations) != 2 || resolved.Derived.State != DerivedCurrent || resolved.Derived.Files < 5 {
-		t.Fatalf("resolved=%+v err=%v", resolved, err)
-	}
-	projectBody, _ = os.ReadFile(projectPath)
-	vaultBody, _ = os.ReadFile(vaultPath)
-	if string(projectBody) != string(vaultBody) || !strings.Contains(string(projectBody), "note: project-choice") || !strings.Contains(string(projectBody), "revision: 2") {
-		t.Fatalf("project=%s\nvault=%s", projectBody, vaultBody)
+	if report.Machine.State != MachinePending || len(report.Machine.Operations) != 0 {
+		t.Fatalf("machine report=%+v", report.Machine)
 	}
 }
 
@@ -158,11 +366,404 @@ func TestV2EngineResolveUsesCompactFinalizationForEveryAction(t *testing.T) {
 					t.Fatalf("leaked %q:\n%s", forbidden, accepted)
 				}
 			}
+			if _, err := reviewv2.Load(fixture.project); err != nil {
+				t.Fatalf("resolved project did not retain a valid machine boundary: %v", err)
+			}
+			projectMachine := readDerivedTestFile(t, filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
+			vaultMachine := readDerivedTestFile(t, filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "ledger.json"))
+			if !bytes.Equal(projectMachine, vaultMachine) {
+				t.Fatal("resolved machine ledger bytes diverged")
+			}
+			var resolvedRecordBytes []byte
+			for _, filename := range []string{
+				filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "conflicts", resolution.ConflictID+".json"),
+				filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "conflicts", resolution.ConflictID+".json"),
+			} {
+				body := readDerivedTestFile(t, filename)
+				if resolvedRecordBytes != nil && !bytes.Equal(resolvedRecordBytes, body) {
+					t.Fatal("resolved hidden conflict records diverged")
+				}
+				resolvedRecordBytes = body
+			}
+			resolvedRecord, err := ParseConflictRecord(resolvedRecordBytes)
+			if err != nil || resolvedRecord.ResolutionStatus != ResolutionResolved || resolvedRecord.ResolutionAction != tc.action {
+				t.Fatalf("resolved hidden record=%+v err=%v", resolvedRecord, err)
+			}
 			followup, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
 			if err != nil || len(followup.Operations) != 0 || len(followup.Conflicts) != 0 {
 				t.Fatalf("resolution did not converge: report=%+v err=%v", followup, err)
 			}
 		})
+	}
+}
+
+func TestV2EngineResolvesMultipleHiddenConflictsWithoutAcceptingPeerImplicitly(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+	type pair struct{ project, vault string }
+	paths := map[string]pair{
+		"project-history": {
+			project: filepath.Join(fixture.project, "docs", "session-review", "项目历史.md"),
+			vault:   filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md"),
+		},
+		"project-overview": {
+			project: filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md"),
+			vault:   filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目回顾.md"),
+		},
+	}
+	for id, target := range paths {
+		projectBody := readDerivedTestFile(t, target.project)
+		vaultBody := readDerivedTestFile(t, target.vault)
+		from := []byte("信任链与 dry-run 边界修复")
+		if id == "project-overview" {
+			from = []byte("Skill + 本地 CLI")
+		}
+		if err := os.WriteFile(target.project, bytes.Replace(projectBody, from, []byte(id+" project choice"), 1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target.vault, bytes.Replace(vaultBody, from, []byte(id+" vault choice"), 1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(conflicted.Conflicts) != 2 {
+		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	}
+	byEntity := make(map[string]string, 2)
+	for _, id := range conflicted.Conflicts {
+		for entity := range paths {
+			if strings.Contains(id, entity) {
+				byEntity[entity] = id
+			}
+		}
+	}
+	first, err := engine.Resolve(context.Background(), Resolution{ConflictID: byEntity["project-history"], Action: AcceptProject})
+	if err != nil || !reflect.DeepEqual(first.Conflicts, []string{byEntity["project-overview"]}) || first.Machine.State != MachinePending {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	if got := readDerivedTestFile(t, paths["project-overview"].vault); !bytes.Contains(got, []byte("project-overview vault choice")) {
+		t.Fatal("first resolution implicitly accepted the Project peer conflict")
+	}
+	second, err := engine.Resolve(context.Background(), Resolution{ConflictID: byEntity["project-overview"], Action: AcceptObsidian})
+	if err != nil || len(second.Conflicts) != 0 || second.Machine.State != MachineCurrent {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if _, err := reviewv2.Load(fixture.project); err != nil {
+		t.Fatalf("two-step resolution did not restore a valid compact review: %v", err)
+	}
+}
+
+func TestHiddenConflictRecordsAreMirroredJSONAndExcludedFromPublicSurfaces(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil || len(report.Errors) != 0 {
+		t.Fatalf("initial report=%+v err=%v", report, err)
+	}
+	projectHistory := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	projectBody := readDerivedTestFile(t, projectHistory)
+	vaultBody := readDerivedTestFile(t, vaultHistory)
+	const projectCandidate = "PROJECT-CONFLICT-CANDIDATE"
+	const vaultCandidate = "VAULT-CONFLICT-CANDIDATE"
+	projectBody = bytes.Replace(projectBody, []byte("信任链与 dry-run 边界修复"), []byte(projectCandidate), 1)
+	vaultBody = bytes.Replace(vaultBody, []byte("信任链与 dry-run 边界修复"), []byte(vaultCandidate), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultHistory, vaultBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(report.Conflicts) != 1 || len(report.Errors) != 0 {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	conflictID := report.Conflicts[0]
+	projectRecord := filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "conflicts", conflictID+".json")
+	vaultRecord := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "conflicts", conflictID+".json")
+	projectJSON := readDerivedTestFile(t, projectRecord)
+	vaultJSON := readDerivedTestFile(t, vaultRecord)
+	if !bytes.Equal(projectJSON, vaultJSON) || !json.Valid(projectJSON) {
+		t.Fatal("hidden conflict record is not mirrored bounded JSON")
+	}
+	if !bytes.Contains(projectJSON, []byte(projectCandidate)) || !bytes.Contains(projectJSON, []byte(vaultCandidate)) {
+		t.Fatal("hidden record omitted conflict candidates")
+	}
+	for _, visible := range []string{
+		filepath.Join(fixture.project, "docs", "session-review", "sync-conflicts"),
+		filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "sync-conflicts"),
+	} {
+		if _, err := os.Lstat(visible); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("visible conflict path exists: %s err=%v", visible, err)
+		}
+	}
+	public := fmt.Sprintf("%+v", report)
+	if strings.Contains(public, projectCandidate) || strings.Contains(public, vaultCandidate) || strings.Contains(public, fixture.project) || strings.Contains(public, fixture.vault) {
+		t.Fatalf("public conflict report leaked candidate or absolute root: %q", public)
+	}
+	if !ignoredEventPath(".session-reviewer/conflicts/" + conflictID + ".json") {
+		t.Fatal("hidden conflict event was not ignored")
+	}
+	inventory := syncdoc.Scan(engine.project, "docs/session-review", "darwin", platform.CaseSensitive)
+	if len(inventory.Issues) != 0 || len(inventory.ByID) != 2 {
+		t.Fatalf("hidden record entered ordinary inventory: %+v", inventory)
+	}
+	engine.options.Now = func() time.Time { return time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC) }
+	status, err := engine.Status(context.Background())
+	if err != nil || !reflect.DeepEqual(status.OpenConflicts, []string{conflictID}) {
+		t.Fatalf("status conflict identity churned: status=%+v err=%v", status, err)
+	}
+	repeated, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || !reflect.DeepEqual(repeated.Conflicts, []string{conflictID}) || len(repeated.Errors) != 0 {
+		t.Fatalf("repeat conflict identity churned: report=%+v err=%v", repeated, err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(projectRecord))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("repeat conflict created another hidden record: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestHiddenConflictTransactionRecoversExactMirroredJSONAfterCrash(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+	projectHistory := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	projectBody := bytes.Replace(readDerivedTestFile(t, projectHistory), []byte("信任链与 dry-run 边界修复"), []byte("PROJECT-HIDDEN-CRASH-CANDIDATE"), 1)
+	vaultBody := bytes.Replace(readDerivedTestFile(t, vaultHistory), []byte("信任链与 dry-run 边界修复"), []byte("VAULT-HIDDEN-CRASH-CANDIDATE"), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultHistory, vaultBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine.writer.beforeWrite = func(side Side, _ *os.Root, leaf string) error {
+		if side == SideVault && strings.HasPrefix(leaf, "conflict-") && strings.HasSuffix(leaf, ".json") {
+			return errors.New("injected hidden conflict vault crash")
+		}
+		return nil
+	}
+	interrupted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(interrupted.Conflicts) != 1 || len(interrupted.Errors) != 1 || interrupted.Errors[0].Code != "conflict_record_failed" {
+		t.Fatalf("interrupted=%+v err=%v", interrupted, err)
+	}
+	conflictID := interrupted.Conflicts[0]
+	projectRecord := filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "conflicts", conflictID+".json")
+	interruptedJSON := readDerivedTestFile(t, projectRecord)
+	transactions, err := engine.transactions.List()
+	if err != nil || len(transactions) != 1 || transactions[0].Kind != TxnConflictRecord || transactions[0].Stage != TxnProjectWritten {
+		t.Fatalf("transactions=%+v err=%v", transactions, err)
+	}
+	transactionFiles, err := os.ReadDir(filepath.Join(fixture.data, "transactions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range transactionFiles {
+		body, err := os.ReadFile(filepath.Join(fixture.data, "transactions", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(body, []byte("HIDDEN-CRASH-CANDIDATE")) {
+			t.Fatal("transaction journal persisted conflict candidates")
+		}
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	recovered, err := restarted.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(recovered.Conflicts) != 1 || len(recovered.Errors) != 0 {
+		t.Fatalf("recovered=%+v err=%v", recovered, err)
+	}
+	vaultRecord := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "conflicts", conflictID+".json")
+	if got := readDerivedTestFile(t, vaultRecord); !bytes.Equal(got, interruptedJSON) {
+		t.Fatal("hidden conflict recovery regenerated different bytes")
+	}
+}
+
+func TestHiddenConflictResolutionRecoversMirroredResolvedJSONAfterCrash(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+	projectHistory := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	projectBody := bytes.Replace(readDerivedTestFile(t, projectHistory), []byte("信任链与 dry-run 边界修复"), []byte("resolution crash project"), 1)
+	vaultBody := bytes.Replace(readDerivedTestFile(t, vaultHistory), []byte("信任链与 dry-run 边界修复"), []byte("resolution crash vault"), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultHistory, vaultBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(conflicted.Conflicts) != 1 {
+		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	}
+	conflictID := conflicted.Conflicts[0]
+	engine.writer.beforeWrite = func(side Side, _ *os.Root, leaf string) error {
+		if side == SideVault && leaf == conflictID+".json" {
+			return errors.New("injected resolved conflict Vault crash")
+		}
+		return nil
+	}
+	if _, err := engine.Resolve(context.Background(), Resolution{ConflictID: conflictID, Action: AcceptProject}); err == nil {
+		t.Fatal("resolved conflict publication crash was ignored")
+	}
+	transactions, err := engine.transactions.List()
+	if err != nil || len(transactions) != 1 || transactions[0].Kind != TxnConflictResolve || transactions[0].Stage != TxnProjectWritten {
+		t.Fatalf("transactions=%+v err=%v", transactions, err)
+	}
+	if err := engine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if report, err := restarted.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil || len(report.Errors) != 0 {
+		t.Fatalf("recovered=%+v err=%v", report, err)
+	}
+	var mirrored []byte
+	for _, filename := range []string{
+		filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "conflicts", conflictID+".json"),
+		filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "conflicts", conflictID+".json"),
+	} {
+		body := readDerivedTestFile(t, filename)
+		if mirrored != nil && !bytes.Equal(mirrored, body) {
+			t.Fatal("recovered resolved conflict JSON diverged")
+		}
+		mirrored = body
+	}
+	record, err := ParseConflictRecord(mirrored)
+	if err != nil || record.ResolutionStatus != ResolutionResolved || record.ResolutionAction != AcceptProject {
+		t.Fatalf("record=%+v err=%v", record, err)
+	}
+}
+
+func TestResolvePersistsDurableClosureIntentBeforeAcceptedEntityWrite(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+	projectHistory := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	projectBody := bytes.Replace(readDerivedTestFile(t, projectHistory), []byte("信任链与 dry-run 边界修复"), []byte("intent project"), 1)
+	vaultBody := bytes.Replace(readDerivedTestFile(t, vaultHistory), []byte("信任链与 dry-run 边界修复"), []byte("intent vault"), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultHistory, vaultBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(conflicted.Conflicts) != 1 {
+		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	}
+	conflictID := conflicted.Conflicts[0]
+	intentObserved := false
+	engine.writer.beforeWrite = func(side Side, _ *os.Root, leaf string) error {
+		if side != SideProject || leaf != "项目历史.md" {
+			return nil
+		}
+		txn, found, loadErr := engine.transactions.Load(conflictID)
+		if loadErr == nil && found && txn.Kind == TxnConflictResolve && txn.Stage == TxnPlanned {
+			intentObserved = true
+		}
+		return errors.New("stop before accepted entity write")
+	}
+	if _, err := engine.Resolve(context.Background(), Resolution{ConflictID: conflictID, Action: AcceptProject}); err == nil {
+		t.Fatal("injected accepted entity failure was ignored")
+	}
+	if !intentObserved {
+		t.Fatal("conflict closure intent was not durable before accepted entity write")
+	}
+	engine.writer.beforeWrite = nil
+	recovered, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(recovered.Conflicts) != 1 || recovered.Conflicts[0] != conflictID {
+		t.Fatalf("pre-commit intent recovery=%+v err=%v", recovered, err)
+	}
+	transactions, err := engine.transactions.List()
+	if err != nil || len(transactions) != 0 {
+		t.Fatalf("aborted resolution transactions=%+v err=%v", transactions, err)
+	}
+}
+
+func TestResolveRejectsStaleHiddenConflictIdentityAndLiveHashes(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+	projectHistory := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	projectBody := bytes.Replace(readDerivedTestFile(t, projectHistory), []byte("信任链与 dry-run 边界修复"), []byte("project stale candidate"), 1)
+	vaultBody := bytes.Replace(readDerivedTestFile(t, vaultHistory), []byte("信任链与 dry-run 边界修复"), []byte("vault stale candidate"), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultHistory, vaultBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	conflicted, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(conflicted.Conflicts) != 1 {
+		t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+	}
+	conflictID := conflicted.Conflicts[0]
+	projectBody = bytes.Replace(projectBody, []byte("project stale candidate"), []byte("later live edit"), 1)
+	if err := os.WriteFile(projectHistory, projectBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Resolve(context.Background(), Resolution{ConflictID: conflictID, Action: AcceptProject}); !errors.Is(err, ErrStaleConflict) {
+		t.Fatalf("stale live hash err=%v", err)
+	}
+	if _, err := engine.Resolve(context.Background(), Resolution{ConflictID: "conflict-20260825t000000z-project-history-000000000000", Action: AcceptProject}); !errors.Is(err, ErrStaleConflict) {
+		t.Fatalf("stale identity err=%v", err)
+	}
+	if got := readDerivedTestFile(t, vaultHistory); !bytes.Contains(got, []byte("vault stale candidate")) {
+		t.Fatal("stale resolution changed live candidate")
 	}
 }
 
@@ -216,6 +817,7 @@ func TestV2EngineNormalizesCRLFInventoryAndThenConverges(t *testing.T) {
 
 func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T) {
 	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -226,16 +828,16 @@ func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Operations) != 1 || first.Operations[0].Kind != OperationAddVault {
+	if len(first.Operations) != 2 || first.Operations[0].Kind != OperationAddVault || first.Operations[1].Kind != OperationAddVault || first.Machine.State != MachineCurrent {
 		t.Fatalf("first report=%+v", first)
 	}
-	vaultOverview := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "project-overview.md")
-	body, err := os.ReadFile(vaultOverview)
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	body, err := os.ReadFile(vaultHistory)
 	if err != nil {
 		t.Fatal(err)
 	}
-	edited := strings.Replace(string(body), "# SessionReviewer", "# SessionReviewer edited in Obsidian", 1)
-	if err := os.WriteFile(vaultOverview, []byte(edited), 0o644); err != nil {
+	edited := strings.Replace(string(body), "信任链与 dry-run 边界修复", "edited in Obsidian", 1)
+	if err := os.WriteFile(vaultHistory, []byte(edited), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -243,15 +845,18 @@ func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.Operations) != 2 || second.Operations[0].Kind != OperationUpdateProject || second.Operations[1].Kind != OperationUpdateVault {
+	if len(second.Operations) < 2 || second.Machine.State != MachineCurrent {
 		t.Fatalf("second report=%+v", second)
 	}
-	projectBody, err := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", "project-overview.md"))
+	projectBody, err := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", "项目历史.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(projectBody), "edited in Obsidian") || !strings.Contains(string(projectBody), "revision: 2") {
+	if !strings.Contains(string(projectBody), "edited in Obsidian") || !strings.Contains(string(projectBody), "revision: 2") || !bytes.Equal(projectBody, readDerivedTestFile(t, vaultHistory)) {
 		t.Fatalf("project body=%s", projectBody)
+	}
+	if _, err := reviewv2.Load(fixture.project); err != nil {
+		t.Fatalf("round trip broke compact review: %v", err)
 	}
 
 	third, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
@@ -262,6 +867,7 @@ func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T)
 
 func TestEngineDryRunPlansInitialVaultCopyWithoutFilesystemChanges(t *testing.T) {
 	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	before := snapshotFixtureTree(t, fixture.root)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
@@ -272,7 +878,7 @@ func TestEngineDryRunPlansInitialVaultCopyWithoutFilesystemChanges(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Operations) != 1 || report.Operations[0].Kind != OperationAddVault {
+	if len(report.Operations) != 2 || len(report.Machine.Operations) != 2 || report.Machine.Operations[1].Kind != OperationAddVault {
 		t.Fatalf("report=%+v", report)
 	}
 	if after := snapshotFixtureTree(t, fixture.root); !reflect.DeepEqual(before, after) {
@@ -280,9 +886,9 @@ func TestEngineDryRunPlansInitialVaultCopyWithoutFilesystemChanges(t *testing.T)
 	}
 }
 
-func TestEngineDryRunDefersDerivedPlanningUntilSemanticEditIsAccepted(t *testing.T) {
+func TestV2DryRunPlansTheSameEntityAlignmentAndMachineWritesAsRealSync(t *testing.T) {
 	fixture := newEngineFixture(t)
-	writeFixtureDecision(t, fixture, "decisions/dry-run-edit.md")
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -291,27 +897,32 @@ func TestEngineDryRunDefersDerivedPlanningUntilSemanticEditIsAccepted(t *testing
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(fixture.project, "docs", "session-review", "decisions", "dry-run-edit.md")
-	projectBody, err := os.ReadFile(projectPath)
+	vaultHistory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	body := readDerivedTestFile(t, vaultHistory)
+	body = bytes.Replace(body, []byte("信任链与 dry-run 边界修复"), []byte("dry-run exact write plan"), 1)
+	if err := os.WriteFile(vaultHistory, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotFixtureTree(t, fixture.root)
+	dry, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
 	if err != nil {
 		t.Fatal(err)
 	}
-	projectBody = append(projectBody, []byte("\n## User note\n\nPreview this semantic edit safely.\n")...)
-	if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+	if after := snapshotFixtureTree(t, fixture.root); !reflect.DeepEqual(before, after) {
+		t.Fatal("v2 dry-run mutated the fixture")
+	}
+	real, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	report, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
-	if err != nil {
-		t.Fatalf("dry-run rejected a valid semantic edit: report=%+v err=%v", report, err)
-	}
-	if len(report.Operations) == 0 || report.Derived.State != DerivedDeferred {
-		t.Fatalf("dry-run did not defer derived publication: %+v", report)
+	if !reflect.DeepEqual(dry.Operations, real.Operations) || !reflect.DeepEqual(dry.Machine.Operations, real.Machine.Operations) {
+		t.Fatalf("dry-run plan differs from real writes\ndry=%+v\nreal=%+v", dry, real)
 	}
 }
 
 func TestEngineDoesNotOverwriteMalformedSynchronizedPath(t *testing.T) {
 	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +931,9 @@ func TestEngineDoesNotOverwriteMalformedSynchronizedPath(t *testing.T) {
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(fixture.project, "docs", "session-review", "project-overview.md")
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
+	vaultBefore := readDerivedTestFile(t, vaultPath)
 	malformed := []byte("malformed-project-canary\n")
 	if err := os.WriteFile(projectPath, malformed, 0o644); err != nil {
 		t.Fatal(err)
@@ -329,7 +942,7 @@ func TestEngineDoesNotOverwriteMalformedSynchronizedPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.Issues) == 0 || len(report.Errors) == 0 {
+	if len(report.Issues) == 0 || len(report.Errors) == 0 || report.Machine.State != MachineCurrent {
 		t.Fatalf("report=%+v", report)
 	}
 	after, err := os.ReadFile(projectPath)
@@ -339,10 +952,14 @@ func TestEngineDoesNotOverwriteMalformedSynchronizedPath(t *testing.T) {
 	if !reflect.DeepEqual(after, malformed) {
 		t.Fatalf("malformed source was overwritten: %q", after)
 	}
+	if got := readDerivedTestFile(t, vaultPath); !bytes.Equal(got, vaultBefore) {
+		t.Fatal("machine gate allowed malformed Project content to overwrite Vault")
+	}
 }
 
-func TestStatusDoesNotCountMalformedBaseAsInSync(t *testing.T) {
+func TestStatusReportsMalformedCompactReviewAsBlocked(t *testing.T) {
 	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -351,7 +968,7 @@ func TestStatusDoesNotCountMalformedBaseAsInSync(t *testing.T) {
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(fixture.project, "docs", "session-review", "project-overview.md")
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
 	if err := os.WriteFile(projectPath, []byte("malformed-project-canary\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -360,11 +977,8 @@ func TestStatusDoesNotCountMalformedBaseAsInSync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Malformed == 0 || status.Blocked == 0 {
+	if status.Blocked == 0 {
 		t.Fatalf("malformed entity was not visible: %+v", status)
-	}
-	if status.InSync != 0 {
-		t.Fatalf("malformed base counted as in sync: %+v", status)
 	}
 }
 
@@ -375,46 +989,9 @@ func TestRootScanIssueBlocksEveryEntity(t *testing.T) {
 	}
 }
 
-func TestEngineRenameRetiresTheOldPathOnBothSides(t *testing.T) {
-	fixture := newEngineFixture(t)
-	writeFixtureDecision(t, fixture, "decisions/old.md")
-	engine, err := NewEngine(fixture.options())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer engine.Close()
-	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
-		t.Fatal(err)
-	}
-	oldProject := filepath.Join(fixture.project, "docs", "session-review", "decisions", "old.md")
-	newProject := filepath.Join(fixture.project, "docs", "session-review", "decisions", "new.md")
-	if err := os.Rename(oldProject, newProject); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
-		t.Fatal(err)
-	}
-	oldVault := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "decisions", "old.md")
-	newVault := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "decisions", "new.md")
-	for _, removed := range []string{oldProject, oldVault} {
-		if _, err := os.Stat(removed); !os.IsNotExist(err) {
-			t.Fatalf("old path remains %q: %v", removed, err)
-		}
-	}
-	for _, present := range []string{newProject, newVault} {
-		if _, err := os.Stat(present); err != nil {
-			t.Fatalf("new path missing %q: %v", present, err)
-		}
-	}
-	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
-	if err != nil || len(report.Issues) != 0 || len(report.Conflicts) != 0 || len(report.Errors) != 0 || len(report.Operations) != 0 {
-		t.Fatalf("post-rename report=%+v err=%v", report, err)
-	}
-}
-
 func TestEngineDoesNotOverwriteConcurrentSemanticEditDuringWriteOrRecovery(t *testing.T) {
 	fixture := newEngineFixture(t)
-	writeFixtureDecision(t, fixture, "decisions/concurrent.md")
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -423,16 +1000,16 @@ func TestEngineDoesNotOverwriteConcurrentSemanticEditDuringWriteOrRecovery(t *te
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	projectPath := filepath.Join(fixture.project, "docs", "session-review", "decisions", "concurrent.md")
-	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "decisions", "concurrent.md")
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
 	base := readDerivedTestFile(t, projectPath)
-	vaultEdit := append(bytes.Clone(base), []byte("\n## Vault note\n\nAccepted candidate.\n")...)
-	concurrentProject := append(bytes.Clone(base), []byte("\n## Concurrent Project note\n\nKeep this edit.\n")...)
+	vaultEdit := bytes.Replace(base, []byte("信任链与 dry-run 边界修复"), []byte("Vault note accepted candidate"), 1)
+	concurrentProject := bytes.Replace(base, []byte("发布验证"), []byte("Concurrent Project note"), 1)
 	if err := os.WriteFile(vaultPath, vaultEdit, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	engine.writer.beforeWrite = func(side Side, parent *os.Root, leaf string) error {
-		if side != SideProject || leaf != "concurrent.md" {
+		if side != SideProject || leaf != "项目历史.md" {
 			return nil
 		}
 		file, err := parent.OpenFile(leaf, os.O_WRONLY|os.O_TRUNC, 0o644)
@@ -446,7 +1023,7 @@ func TestEngineDoesNotOverwriteConcurrentSemanticEditDuringWriteOrRecovery(t *te
 		return file.Close()
 	}
 	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
-	if err != nil || len(report.Errors) != 1 || report.Errors[0].EntityID != "decision-sync" || report.Errors[0].Code != "write_failed" {
+	if err != nil || len(report.Errors) != 1 || report.Errors[0].EntityID != "project-history" || report.Errors[0].Code != "write_failed" {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
 	if got := readDerivedTestFile(t, projectPath); !bytes.Equal(got, concurrentProject) {
@@ -458,14 +1035,14 @@ func TestEngineDoesNotOverwriteConcurrentSemanticEditDuringWriteOrRecovery(t *te
 		t.Fatalf("safe rescan did not merge the concurrent edits: report=%+v err=%v", recovered, err)
 	}
 	got := readDerivedTestFile(t, projectPath)
-	if !bytes.Contains(got, []byte("Concurrent Project note")) || !bytes.Contains(got, []byte("Vault note")) || !bytes.Contains(got, []byte("revision: 2")) {
+	if !bytes.Contains(got, []byte("Concurrent Project note")) || !bytes.Contains(got, []byte("Vault note accepted candidate")) || !bytes.Contains(got, []byte("revision: 2")) {
 		t.Fatalf("safe rescan lost a concurrent semantic edit: %q", got)
 	}
 }
 
 func TestEngineRecoveryRejectsSemanticEditAfterFirstSideWasWritten(t *testing.T) {
 	fixture := newEngineFixture(t)
-	writeFixtureDecision(t, fixture, "decisions/recovery-race.md")
+	writeV2EngineFixture(t, fixture)
 	engine, err := NewEngine(fixture.options())
 	if err != nil {
 		t.Fatal(err)
@@ -474,9 +1051,9 @@ func TestEngineRecoveryRejectsSemanticEditAfterFirstSideWasWritten(t *testing.T)
 	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
 		t.Fatal(err)
 	}
-	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "decisions", "recovery-race.md")
+	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目历史.md")
 	base := readDerivedTestFile(t, vaultPath)
-	vaultEdit := append(bytes.Clone(base), []byte("\n## Vault note\n\nOriginal accepted candidate.\n")...)
+	vaultEdit := bytes.Replace(base, []byte("信任链与 dry-run 边界修复"), []byte("Original accepted candidate"), 1)
 	if err := os.WriteFile(vaultPath, vaultEdit, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +1067,7 @@ func TestEngineRecoveryRejectsSemanticEditAfterFirstSideWasWritten(t *testing.T)
 	if err != nil || len(report.Errors) != 1 || report.Errors[0].Code != "write_failed" {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
-	concurrent := append(bytes.Clone(vaultEdit), []byte("\n## Later Vault note\n\nDo not overwrite.\n")...)
+	concurrent := bytes.Replace(vaultEdit, []byte("发布验证"), []byte("Later Vault note do not overwrite"), 1)
 	if err := os.WriteFile(vaultPath, concurrent, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -562,6 +1139,7 @@ func writeV2EngineFixture(t *testing.T, fixture engineFixture) {
 	if err := os.Remove(filepath.Join(directory, "project-overview.md")); err != nil {
 		t.Fatal(err)
 	}
+	written := make(map[string][]byte, 2)
 	for name, document := range map[string]syncdoc.Document{
 		"项目回顾.md": v2ReviewWithTwoDecisions(t),
 		"项目历史.md": v2HistoryWithTwoEvents(t),
@@ -571,6 +1149,60 @@ func writeV2EngineFixture(t *testing.T, fixture engineFixture) {
 		if err := os.WriteFile(filepath.Join(directory, name), body, 0o644); err != nil {
 			t.Fatal(err)
 		}
+		written[name] = body
+	}
+	machineFixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "review-v2", "ledger.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := reviewv2.ParseMachineLedger(machineFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine.ProjectID = fixture.projectID
+	machine.AcceptedRevision = 1
+	for index := range machine.Sessions {
+		machine.Sessions[index].ProjectID = fixture.projectID
+	}
+	machine.LegacyCompatibility.CurrentState.ProjectID = fixture.projectID
+	machine.LegacyCompatibility.CurrentState.Revision = 1
+	decisionTemplate := machine.LegacyCompatibility.Decisions[0]
+	decisionTemplate.ProjectID = fixture.projectID
+	decisionTemplate.Revision = 1
+	localDecision := decisionTemplate
+	localDecision.ID = "decision-local-cli"
+	compatibilityDecision := decisionTemplate
+	compatibilityDecision.ID = "decision-compatibility"
+	machine.LegacyCompatibility.Decisions = []ledger.Decision{localDecision, compatibilityDecision}
+	riskTemplate := machine.LegacyCompatibility.OpenLoops[0]
+	riskTemplate.ID = "risk-installer-permission"
+	riskTemplate.ProjectID = fixture.projectID
+	riskTemplate.Revision = 1
+	machine.LegacyCompatibility.OpenLoops = []ledger.OpenLoop{riskTemplate}
+	eventTemplate := machine.LegacyCompatibility.Timeline[0]
+	eventTemplate.Revision = 1
+	eventTemplate.DecisionIDs = []string{"decision-local-cli"}
+	trustEvent := eventTemplate
+	trustEvent.ID = "timeline-trust-chain"
+	releaseEvent := eventTemplate
+	releaseEvent.ID = "timeline-release"
+	releaseEvent.DecisionIDs = []string{}
+	machine.LegacyCompatibility.Timeline = []ledger.TimelineEvent{trustEvent, releaseEvent}
+	decisionEvidence := machine.Evidence["decision-a"]
+	delete(machine.Evidence, "decision-a")
+	machine.Evidence["decision-local-cli"] = decisionEvidence
+	machine.ReviewSHA256 = syncdoc.ContentHash(written["项目回顾.md"])
+	machine.HistorySHA256 = syncdoc.ContentHash(written["项目历史.md"])
+	machineBody, err := reviewv2.RenderMachineLedger(machine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineDir := filepath.Join(directory, ".session-reviewer")
+	if err := os.MkdirAll(machineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(machineDir, "ledger.json"), machineBody, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

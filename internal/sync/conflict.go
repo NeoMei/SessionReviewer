@@ -2,9 +2,13 @@ package sync
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +16,8 @@ import (
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 )
+
+const MaxConflictRecordBytes = 16 << 20
 
 type ConflictKind string
 
@@ -149,7 +155,7 @@ func BuildConflict(input ConflictRecord) (ConflictArtifact, error) {
 	record.ProjectHash = projectHash
 	record.VaultHash = vaultHash
 	digest := sha256.Sum256([]byte(record.BaseHash + "|" + record.ProjectHash + "|" + record.VaultHash))
-	wantID := fmt.Sprintf("conflict-%s-%s-%x", record.CreatedAt.Format("20060102T150405Z"), record.EntityID, digest[:6])
+	wantID := fmt.Sprintf("conflict-%s-%x", record.EntityID, digest[:6])
 	if record.ID != "" && record.ID != wantID {
 		return ConflictArtifact{}, ErrInvalidConflict
 	}
@@ -159,7 +165,7 @@ func BuildConflict(input ConflictRecord) (ConflictArtifact, error) {
 	if err != nil {
 		return ConflictArtifact{}, err
 	}
-	relative := "sync-conflicts/" + record.ID + ".md"
+	relative := ".session-reviewer/conflicts/" + record.ID + ".json"
 	return ConflictArtifact{
 		Record: &record,
 		Notes: MirroredNotes{
@@ -190,12 +196,12 @@ func BuildRepair(input RepairInput) (ConflictArtifact, error) {
 	}
 	createdAt := input.CreatedAt.UTC()
 	record := RepairRecord{
-		Version: 1, ID: "repair-" + createdAt.Format("20060102T150405Z") + "-" + suffix,
+		Version: 1, ID: "repair-" + createdAt.Format("20060102t150405z") + "-" + suffix,
 		ProjectID: input.ProjectID, EntityID: entityID, Side: input.Side, IssueCode: input.IssueCode,
 		SourceHash: syncdoc.ContentHash(input.Source), CreatedAt: createdAt,
 	}
 	note := renderRepair(record)
-	relative := "sync-conflicts/" + record.ID + ".md"
+	relative := ".session-reviewer/conflicts/" + record.ID + ".json"
 	return ConflictArtifact{
 		Repair: &record,
 		Notes: MirroredNotes{
@@ -213,37 +219,438 @@ func RenderConflict(input ConflictRecord) ([]byte, error) {
 	if err := validateConflictRecord(record); err != nil {
 		return nil, err
 	}
-	fence := strings.Repeat("`", longestBacktickRun(record.Base, record.Project, record.Vault, record.Suggested)+1)
-	if len(fence) < 3 {
-		fence = "```"
+	if len(record.Base)+len(record.Project)+len(record.Vault)+len(record.Suggested) > MaxConflictRecordBytes {
+		return nil, ErrInvalidConflict
 	}
+	wire := conflictRecordWire{
+		Version: record.Version, ID: record.ID, EntityID: record.EntityID, ProjectID: record.ProjectID,
+		Kind: record.Kind, RelativePath: record.RelativePath, BasePath: record.BasePath,
+		ProjectPath: record.ProjectPath, VaultPath: record.VaultPath,
+		BaseHash: record.BaseHash, ProjectHash: record.ProjectHash, VaultHash: record.VaultHash,
+		Base: string(record.Base), Project: string(record.Project), Vault: string(record.Vault), Suggested: string(record.Suggested),
+		CreatedAt: record.CreatedAt.UTC().Format(time.RFC3339Nano), ResolutionStatus: record.ResolutionStatus,
+		ResolutionAction: record.ResolutionAction, ResolvedHash: record.ResolvedHash,
+	}
+	if !record.ResolvedAt.IsZero() {
+		wire.ResolvedAt = record.ResolvedAt.UTC().Format(time.RFC3339Nano)
+	}
+	body, err := json.MarshalIndent(wire, "", "  ")
+	if err != nil {
+		return nil, ErrInvalidConflict
+	}
+	body = append(body, '\n')
+	if len(body) > MaxConflictRecordBytes {
+		return nil, ErrInvalidConflict
+	}
+	return body, nil
+}
 
-	var out bytes.Buffer
-	out.WriteString("---\n")
-	writeConflictScalar(&out, "version", strconv.Itoa(record.Version))
-	writeConflictScalar(&out, "conflict_id", record.ID)
-	writeConflictScalar(&out, "entity_id", record.EntityID)
-	writeConflictScalar(&out, "project_id", record.ProjectID)
-	writeConflictScalar(&out, "kind", string(record.Kind))
-	writeConflictScalar(&out, "base_hash", record.BaseHash)
-	writeConflictScalar(&out, "project_hash", record.ProjectHash)
-	writeConflictScalar(&out, "vault_hash", record.VaultHash)
-	writeConflictScalar(&out, "resolution_status", string(record.ResolutionStatus))
-	writeConflictScalar(&out, "created_at", record.CreatedAt.UTC().Format(time.RFC3339Nano))
-	if record.ResolutionStatus == ResolutionResolved {
-		writeConflictScalar(&out, "resolution_action", string(record.ResolutionAction))
-		writeConflictScalar(&out, "resolved_hash", record.ResolvedHash)
-		writeConflictScalar(&out, "resolved_at", record.ResolvedAt.Format(time.RFC3339Nano))
+type conflictRecordWire struct {
+	Version          int              `json:"version"`
+	ID               string           `json:"id"`
+	EntityID         string           `json:"entity_id"`
+	ProjectID        string           `json:"project_id"`
+	Kind             ConflictKind     `json:"kind"`
+	RelativePath     string           `json:"relative_path"`
+	BasePath         string           `json:"base_path,omitempty"`
+	ProjectPath      string           `json:"project_path,omitempty"`
+	VaultPath        string           `json:"vault_path,omitempty"`
+	BaseHash         string           `json:"base_hash"`
+	ProjectHash      string           `json:"project_hash"`
+	VaultHash        string           `json:"vault_hash"`
+	Base             string           `json:"base"`
+	Project          string           `json:"project"`
+	Vault            string           `json:"vault"`
+	Suggested        string           `json:"suggested"`
+	CreatedAt        string           `json:"created_at"`
+	ResolutionStatus ResolutionStatus `json:"resolution_status"`
+	ResolutionAction ResolutionAction `json:"resolution_action,omitempty"`
+	ResolvedHash     string           `json:"resolved_hash,omitempty"`
+	ResolvedAt       string           `json:"resolved_at,omitempty"`
+}
+
+func ParseConflictRecord(body []byte) (ConflictRecord, error) {
+	if len(body) == 0 || len(body) > MaxConflictRecordBytes {
+		return ConflictRecord{}, ErrInvalidConflict
 	}
-	writeConflictScalar(&out, "accept_project", "session-reviewer sync resolve --conflict "+record.ID+" --action accept_project")
-	writeConflictScalar(&out, "accept_obsidian", "session-reviewer sync resolve --conflict "+record.ID+" --action accept_obsidian")
-	writeConflictScalar(&out, "manual_merge", "session-reviewer sync resolve --conflict "+record.ID+" --action manual_merge --file <path>")
-	out.WriteString("---\n\n# Synchronization conflict\n")
-	writeConflictCandidate(&out, "Base", fence, record.Base)
-	writeConflictCandidate(&out, "Project", fence, record.Project)
-	writeConflictCandidate(&out, "Obsidian", fence, record.Vault)
-	writeConflictCandidate(&out, "Suggested Merge", fence, record.Suggested)
-	return out.Bytes(), nil
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	var wire conflictRecordWire
+	if err := decoder.Decode(&wire); err != nil {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, wire.CreatedAt)
+	if err != nil {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
+	resolvedAt := time.Time{}
+	if wire.ResolvedAt != "" {
+		resolvedAt, err = time.Parse(time.RFC3339Nano, wire.ResolvedAt)
+		if err != nil {
+			return ConflictRecord{}, ErrInvalidConflict
+		}
+	}
+	record := ConflictRecord{
+		Version: wire.Version, ID: wire.ID, EntityID: wire.EntityID, ProjectID: wire.ProjectID,
+		Kind: wire.Kind, RelativePath: wire.RelativePath, BasePath: wire.BasePath, ProjectPath: wire.ProjectPath, VaultPath: wire.VaultPath,
+		BaseHash: wire.BaseHash, ProjectHash: wire.ProjectHash, VaultHash: wire.VaultHash,
+		Base: []byte(wire.Base), Project: []byte(wire.Project), Vault: []byte(wire.Vault), Suggested: []byte(wire.Suggested),
+		CreatedAt: createdAt.UTC(), ResolutionStatus: wire.ResolutionStatus, ResolutionAction: wire.ResolutionAction,
+		ResolvedHash: wire.ResolvedHash, ResolvedAt: resolvedAt.UTC(),
+	}
+	if err := validateConflictRecord(record); err != nil {
+		return ConflictRecord{}, err
+	}
+	if _, err := RenderConflict(record); err != nil {
+		return ConflictRecord{}, err
+	}
+	return record, nil
+}
+
+func (engine *Engine) persistConflictRecord(ctx context.Context, artifact ConflictArtifact) error {
+	if artifact.Record == nil || artifact.Repair != nil ||
+		!bytes.Equal(artifact.Notes.Project.Content, artifact.Notes.Vault.Content) ||
+		artifact.Notes.Project.RelativePath != artifact.Notes.Vault.RelativePath {
+		return ErrInvalidConflict
+	}
+	body := artifact.Notes.Project.Content
+	relative := artifact.Notes.Project.RelativePath
+	projectRelative := path.Join("docs/session-review", relative)
+	vaultRelative := path.Join(engine.options.VaultReviewPath, relative)
+	projectBefore, projectFound, err := engine.project.ReadRegularOptional(projectRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	vaultBefore, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	if projectFound {
+		stored, parseErr := ParseConflictRecord(projectBefore)
+		if parseErr != nil || !sameOpenConflictIdentity(stored, *artifact.Record) {
+			return errors.New("hidden conflict identity collision")
+		}
+		body = projectBefore
+	}
+	if vaultFound {
+		stored, parseErr := ParseConflictRecord(vaultBefore)
+		if parseErr != nil || !sameOpenConflictIdentity(stored, *artifact.Record) || (projectFound && !bytes.Equal(projectBefore, vaultBefore)) {
+			return errors.New("hidden conflict identity collision")
+		}
+		if !projectFound {
+			body = vaultBefore
+		}
+	}
+	if projectFound && vaultFound {
+		return nil
+	}
+	desiredHash := syncdoc.ContentHash(body)
+	txn := Transaction{
+		Version: 1, Kind: TxnConflictRecord, EntityID: artifact.Record.ID,
+		DesiredHash: desiredHash, ExpectedBaseHash: desiredHash,
+		ExpectedProjectHash: optionalConflictHash(projectBefore, projectFound),
+		ExpectedVaultHash:   optionalConflictHash(vaultBefore, vaultFound),
+		Stage:               TxnPlanned, UpdatedAt: engine.options.Now().UTC(),
+	}
+	if err := engine.transactions.Save(txn); err != nil {
+		return err
+	}
+	return engine.resumeConflictRecord(ctx, artifact.Record.ID, body, projectBefore, projectFound, vaultBefore, vaultFound, txn)
+}
+
+func (engine *Engine) planResolvedConflict(record ConflictRecord, action ResolutionAction, resolvedHash string) ([]byte, []byte, Transaction, error) {
+	resolvedAt := engine.options.Now().UTC()
+	resolved, err := MarkConflictResolved(record, action, resolvedHash, resolvedAt)
+	if err != nil {
+		return nil, nil, Transaction{}, err
+	}
+	desired, err := RenderConflict(resolved)
+	if err != nil {
+		return nil, nil, Transaction{}, err
+	}
+	expected, err := RenderConflict(record)
+	if err != nil {
+		return nil, nil, Transaction{}, err
+	}
+	if err := engine.verifyHiddenConflict(record.ID, expected); err != nil {
+		return nil, nil, Transaction{}, ErrStaleConflict
+	}
+	expectedHash := syncdoc.ContentHash(expected)
+	txn := Transaction{
+		Version: 1, Kind: TxnConflictResolve, EntityID: record.ID,
+		DesiredHash: syncdoc.ContentHash(desired), ExpectedBaseHash: expectedHash,
+		ExpectedProjectHash: expectedHash, ExpectedVaultHash: expectedHash,
+		Stage: TxnPlanned, UpdatedAt: resolvedAt,
+	}
+	if err := engine.transactions.Save(txn); err != nil {
+		return nil, nil, Transaction{}, err
+	}
+	return desired, expected, txn, nil
+}
+
+func (engine *Engine) resumeConflictResolution(ctx context.Context, conflictID string, desired, expected []byte, txn Transaction) error {
+	projectRelative := path.Join("docs/session-review/.session-reviewer/conflicts", conflictID+".json")
+	vaultRelative := path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", conflictID+".json")
+	if txn.Stage == TxnPlanned {
+		if err := engine.writeHiddenConflictSide(ctx, SideProject, projectRelative, desired, expected, true); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnProjectWritten); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnProjectWritten {
+		if err := engine.writeHiddenConflictSide(ctx, SideVault, vaultRelative, desired, expected, true); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnVaultWritten); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnVaultWritten {
+		if err := engine.verifyHiddenConflict(conflictID, desired); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnBaseCommitted); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnBaseCommitted {
+		if err := engine.verifyHiddenConflict(conflictID, desired); err != nil {
+			return err
+		}
+	}
+	return engine.transactions.Remove(conflictID)
+}
+
+func sameOpenConflictIdentity(stored, current ConflictRecord) bool {
+	return stored.ResolutionStatus == ResolutionOpen && current.ResolutionStatus == ResolutionOpen &&
+		stored.Version == current.Version && stored.ID == current.ID && stored.EntityID == current.EntityID && stored.ProjectID == current.ProjectID && stored.Kind == current.Kind &&
+		stored.RelativePath == current.RelativePath && stored.BasePath == current.BasePath && stored.ProjectPath == current.ProjectPath && stored.VaultPath == current.VaultPath &&
+		stored.BaseHash == current.BaseHash && stored.ProjectHash == current.ProjectHash && stored.VaultHash == current.VaultHash &&
+		bytes.Equal(stored.Base, current.Base) && bytes.Equal(stored.Project, current.Project) && bytes.Equal(stored.Vault, current.Vault) && bytes.Equal(stored.Suggested, current.Suggested)
+}
+
+func optionalConflictHash(body []byte, found bool) string {
+	if !found {
+		return ""
+	}
+	return syncdoc.ContentHash(body)
+}
+
+func (engine *Engine) resumeConflictRecord(ctx context.Context, conflictID string, body, projectBefore []byte, projectFound bool, vaultBefore []byte, vaultFound bool, txn Transaction) error {
+	projectRelative := path.Join("docs/session-review/.session-reviewer/conflicts", conflictID+".json")
+	vaultRelative := path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", conflictID+".json")
+	if txn.Stage == TxnPlanned {
+		if err := engine.writeHiddenConflictSide(ctx, SideProject, projectRelative, body, projectBefore, projectFound); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnProjectWritten); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnProjectWritten {
+		if err := engine.writeHiddenConflictSide(ctx, SideVault, vaultRelative, body, vaultBefore, vaultFound); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnVaultWritten); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnVaultWritten {
+		if err := engine.verifyHiddenConflict(conflictID, body); err != nil {
+			return err
+		}
+		if err := engine.advanceDerived(&txn, TxnBaseCommitted); err != nil {
+			return err
+		}
+	}
+	if txn.Stage == TxnBaseCommitted {
+		if err := engine.verifyHiddenConflict(conflictID, body); err != nil {
+			return err
+		}
+	}
+	return engine.transactions.Remove(conflictID)
+}
+
+func (engine *Engine) writeHiddenConflictSide(ctx context.Context, side Side, relative string, body, expected []byte, expectedFound bool) error {
+	directory := engine.project
+	if side == SideVault {
+		directory = engine.vault
+	}
+	current, found, err := directory.ReadRegularOptional(relative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	if found && bytes.Equal(current, body) {
+		return nil
+	}
+	if found != expectedFound || (found && !bytes.Equal(current, expected)) {
+		return errors.New("hidden conflict changed after planning")
+	}
+	if err := directory.EnsureDirectory(path.Dir(relative), 0o700); err != nil {
+		return err
+	}
+	return engine.writer.WriteIfUnchanged(ctx, side, relative, body, 0o600, expected, expectedFound)
+}
+
+func (engine *Engine) verifyHiddenConflict(conflictID string, body []byte) error {
+	for _, target := range []struct {
+		directory interface {
+			ReadRegular(string, int64) ([]byte, bool, error)
+		}
+		relative string
+	}{
+		{engine.project, path.Join("docs/session-review/.session-reviewer/conflicts", conflictID+".json")},
+		{engine.vault, path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", conflictID+".json")},
+	} {
+		current, found, err := target.directory.ReadRegular(target.relative, MaxConflictRecordBytes)
+		if err != nil || !found || !bytes.Equal(current, body) {
+			return errors.New("hidden conflict publication did not converge")
+		}
+	}
+	return nil
+}
+
+func (engine *Engine) recoverConflictRecord(ctx context.Context, txn Transaction) error {
+	projectRelative := path.Join("docs/session-review/.session-reviewer/conflicts", txn.EntityID+".json")
+	vaultRelative := path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", txn.EntityID+".json")
+	projectBody, projectFound, err := engine.project.ReadRegularOptional(projectRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	var body []byte
+	if projectFound && syncdoc.ContentHash(projectBody) == txn.DesiredHash {
+		body = projectBody
+	} else if vaultFound && syncdoc.ContentHash(vaultBody) == txn.DesiredHash {
+		body = vaultBody
+	}
+	if body == nil {
+		if txn.Stage == TxnPlanned && optionalConflictHash(projectBody, projectFound) == txn.ExpectedProjectHash && optionalConflictHash(vaultBody, vaultFound) == txn.ExpectedVaultHash {
+			return engine.transactions.Remove(txn.EntityID)
+		}
+		return errors.New("interrupted hidden conflict content is unavailable")
+	}
+	if projectFound && syncdoc.ContentHash(projectBody) != txn.DesiredHash && syncdoc.ContentHash(projectBody) != txn.ExpectedProjectHash {
+		return errors.New("interrupted project conflict changed")
+	}
+	if vaultFound && syncdoc.ContentHash(vaultBody) != txn.DesiredHash && syncdoc.ContentHash(vaultBody) != txn.ExpectedVaultHash {
+		return errors.New("interrupted vault conflict changed")
+	}
+	return engine.resumeConflictRecord(ctx, txn.EntityID, body, projectBody, projectFound, vaultBody, vaultFound, txn)
+}
+
+func (engine *Engine) recoverConflictResolution(ctx context.Context, txn Transaction) error {
+	projectRelative := path.Join("docs/session-review/.session-reviewer/conflicts", txn.EntityID+".json")
+	vaultRelative := path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", txn.EntityID+".json")
+	projectBody, projectFound, err := engine.project.ReadRegularOptional(projectRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	if err != nil {
+		return err
+	}
+	if !projectFound || !vaultFound {
+		return errors.New("interrupted hidden conflict resolution disappeared")
+	}
+	projectHash := syncdoc.ContentHash(projectBody)
+	vaultHash := syncdoc.ContentHash(vaultBody)
+	for _, currentHash := range []string{projectHash, vaultHash} {
+		if currentHash != txn.ExpectedBaseHash && currentHash != txn.DesiredHash {
+			return errors.New("interrupted hidden conflict resolution changed")
+		}
+	}
+	var desired []byte
+	if projectHash == txn.DesiredHash {
+		desired = projectBody
+	} else if vaultHash == txn.DesiredHash {
+		desired = vaultBody
+	}
+	var expected []byte
+	if projectHash == txn.ExpectedBaseHash {
+		expected = projectBody
+	} else if vaultHash == txn.ExpectedBaseHash {
+		expected = vaultBody
+	}
+	if expected == nil {
+		return errors.New("interrupted open conflict record is unavailable")
+	}
+	if desired == nil {
+		openRecord, parseErr := ParseConflictRecord(expected)
+		if parseErr != nil || openRecord.ResolutionStatus != ResolutionOpen || openRecord.ID != txn.EntityID {
+			return errors.New("interrupted open conflict record is invalid")
+		}
+		accepted, found, readErr := engine.project.ReadRegularOptional(path.Join("docs/session-review", openRecord.RelativePath), int64(syncdoc.MaxDocumentBytes))
+		if readErr != nil {
+			return readErr
+		}
+		if found {
+			resolvedHash := syncdoc.ContentHash(accepted)
+			for _, action := range []ResolutionAction{AcceptProject, AcceptObsidian, ManualMerge} {
+				resolved, markErr := MarkConflictResolved(openRecord, action, resolvedHash, txn.UpdatedAt)
+				if markErr != nil {
+					continue
+				}
+				body, renderErr := RenderConflict(resolved)
+				if renderErr == nil && syncdoc.ContentHash(body) == txn.DesiredHash {
+					desired = body
+					break
+				}
+			}
+		}
+	}
+	if desired == nil {
+		if txn.Stage == TxnPlanned && projectHash == txn.ExpectedBaseHash && vaultHash == txn.ExpectedBaseHash {
+			// The durable intent preceded the human-document transaction, which
+			// never committed. Leave the open record intact for a later retry.
+			return engine.transactions.Remove(txn.EntityID)
+		}
+		return errors.New("interrupted resolved conflict record cannot be reconstructed")
+	}
+	resolved, err := ParseConflictRecord(desired)
+	if err != nil || resolved.ResolutionStatus != ResolutionResolved {
+		return errors.New("interrupted resolved conflict record is invalid")
+	}
+	return engine.resumeConflictResolution(ctx, txn.EntityID, desired, expected, txn)
+}
+
+func (engine *Engine) loadMirroredConflictRecord(conflictID string) (ConflictRecord, error) {
+	if !stableBaseID.MatchString(conflictID) || !strings.HasPrefix(conflictID, "conflict-") {
+		return ConflictRecord{}, ErrInvalidConflict
+	}
+	var bodies [][]byte
+	for _, target := range []struct {
+		directory interface {
+			ReadRegular(string, int64) ([]byte, bool, error)
+		}
+		relative string
+	}{
+		{engine.project, path.Join("docs/session-review/.session-reviewer/conflicts", conflictID+".json")},
+		{engine.vault, path.Join(engine.options.VaultReviewPath, ".session-reviewer/conflicts", conflictID+".json")},
+	} {
+		body, found, err := target.directory.ReadRegular(target.relative, MaxConflictRecordBytes)
+		if err != nil || !found {
+			return ConflictRecord{}, ErrStaleConflict
+		}
+		bodies = append(bodies, body)
+	}
+	if !bytes.Equal(bodies[0], bodies[1]) {
+		return ConflictRecord{}, ErrStaleConflict
+	}
+	record, err := ParseConflictRecord(bodies[0])
+	if err != nil || record.ID != conflictID {
+		return ConflictRecord{}, ErrStaleConflict
+	}
+	return record, nil
 }
 
 func SelectResolution(record ConflictRecord, resolution Resolution, liveProject, liveVault Candidate, manual *syncdoc.Document) (syncdoc.Document, error) {
@@ -428,11 +835,21 @@ func validateLiveConflictCandidate(embedded []byte, embeddedHash, relative strin
 	if !live.Present || live.RelativePath != relative {
 		return ErrStaleConflict
 	}
-	rendered, err := live.Document.Render()
-	if err != nil || syncdoc.ContentHash(rendered) != embeddedHash || !bytes.Equal(rendered, embedded) {
+	liveBody := live.Source
+	if liveBody == nil {
+		var err error
+		liveBody, err = live.Document.Render()
+		if err != nil {
+			return ErrStaleConflict
+		}
+	} else if live.SourceHash == "" || syncdoc.ContentHash(liveBody) != live.SourceHash {
 		return ErrStaleConflict
 	}
-	if _, err := syncdoc.Parse(relative, rendered); err != nil {
+	if syncdoc.ContentHash(liveBody) != embeddedHash || !bytes.Equal(liveBody, embedded) {
+		return ErrStaleConflict
+	}
+	parsed, err := syncdoc.Parse(relative, liveBody)
+	if err != nil || !parsed.SemanticEqual(live.Document) {
 		return ErrStaleConflict
 	}
 	return nil
@@ -495,22 +912,25 @@ func hasDuplicateConflictSection(document syncdoc.Document) bool {
 }
 
 func renderRepair(record RepairRecord) []byte {
-	var out bytes.Buffer
-	out.WriteString("---\n")
-	writeConflictScalar(&out, "version", strconv.Itoa(record.Version))
-	writeConflictScalar(&out, "repair_id", record.ID)
-	writeConflictScalar(&out, "project_id", record.ProjectID)
-	if record.EntityID != "" {
-		writeConflictScalar(&out, "entity_id", record.EntityID)
+	wire := struct {
+		Version    int               `json:"version"`
+		ID         string            `json:"id"`
+		ProjectID  string            `json:"project_id"`
+		EntityID   string            `json:"entity_id,omitempty"`
+		SourceSide Side              `json:"source_side"`
+		SourceHash string            `json:"source_hash"`
+		IssueCode  syncdoc.IssueKind `json:"issue_code"`
+		CreatedAt  string            `json:"created_at"`
+	}{
+		Version: record.Version, ID: record.ID, ProjectID: record.ProjectID, EntityID: record.EntityID,
+		SourceSide: record.Side, SourceHash: record.SourceHash, IssueCode: record.IssueCode,
+		CreatedAt: record.CreatedAt.UTC().Format(time.RFC3339Nano),
 	}
-	writeConflictScalar(&out, "source_side", string(record.Side))
-	writeConflictScalar(&out, "source_hash", record.SourceHash)
-	writeConflictScalar(&out, "issue_code", string(record.IssueCode))
-	writeConflictScalar(&out, "created_at", record.CreatedAt.Format(time.RFC3339Nano))
-	writeConflictScalar(&out, "status_command", "session-reviewer sync status")
-	writeConflictScalar(&out, "manual_merge", "session-reviewer sync resolve --repair "+record.ID+" --action manual_merge --file <path>")
-	out.WriteString("---\n\n# Synchronization repair required\n\nThe source was isolated without copying or embedding its content.\n")
-	return out.Bytes()
+	body, err := json.MarshalIndent(wire, "", "  ")
+	if err != nil {
+		return nil
+	}
+	return append(body, '\n')
 }
 
 func validateConflictRecord(record ConflictRecord) error {
@@ -531,7 +951,7 @@ func validateConflictRecord(record ConflictRecord) error {
 		return ErrInvalidConflict
 	}
 	digest := sha256.Sum256([]byte(record.BaseHash + "|" + record.ProjectHash + "|" + record.VaultHash))
-	wantID := fmt.Sprintf("conflict-%s-%s-%x", record.CreatedAt.Format("20060102T150405Z"), record.EntityID, digest[:6])
+	wantID := fmt.Sprintf("conflict-%s-%x", record.EntityID, digest[:6])
 	if record.ID != wantID {
 		return ErrInvalidConflict
 	}
