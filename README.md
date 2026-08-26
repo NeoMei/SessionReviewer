@@ -160,7 +160,7 @@ Vault 中的机器账本被修改时，普通 sync 会以 `machine_ledger_modifi
 
 项目总耗时、Token、公开 USD/百万 Token 标价、按模型成本与占比保存在隐藏机器账本中；订阅包含量不会减少记录成本。
 
-`sync --dry-run`、普通 `sync status` 和 `sync status --json` 都会报告 migration、machine 和 pending 状态，不打印人类文档摘要或本机绝对路径。dry-run 列出实际 sync 将做的语义、Base 和机器账本操作，但不写入 Project、Vault 或本机状态。
+`sync --dry-run`、普通 `sync status` 和 `sync status --json` 都会报告 migration、machine 和 pending 状态，不打印人类文档摘要或本机绝对路径。dry-run 列出实际 sync 将做的语义、Base 和机器账本操作，但不写入 Project、Vault 或本机状态。机器账本操作是稳定的语义计划：由真实提交时间决定的账本最终哈希不会在只读计划中预测；事务内部仍会对最终字节和哈希做精确校验。
 
 ## 手动 prepare → Skill proposal → apply
 

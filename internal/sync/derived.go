@@ -92,7 +92,7 @@ func (engine *Engine) loadMachineLedgerSnapshot(allowModifiedVault bool) (machin
 	}
 	snapshot.operations = []Operation{{
 		EntityID: machineLedgerEntityID, Kind: OperationAddVault, Target: SideVault,
-		RelativePath: ".session-reviewer/ledger.json", AfterHash: snapshot.projectHash,
+		RelativePath: ".session-reviewer/ledger.json",
 	}}
 	return snapshot, snapshot.report(), nil
 }
@@ -185,7 +185,7 @@ func machineLedgerOperations(snapshot machineSnapshot, desiredHash string) []Ope
 	if snapshot.projectHash != desiredHash {
 		operations = append(operations, Operation{
 			EntityID: machineLedgerEntityID, Kind: OperationUpdateProject, Target: SideProject,
-			RelativePath: ".session-reviewer/ledger.json", BeforeHash: snapshot.projectHash, AfterHash: desiredHash,
+			RelativePath: ".session-reviewer/ledger.json", BeforeHash: snapshot.projectHash,
 		})
 	}
 	if !snapshot.vaultFound || snapshot.vaultHash != desiredHash {
@@ -195,7 +195,7 @@ func machineLedgerOperations(snapshot machineSnapshot, desiredHash string) []Ope
 		}
 		operations = append(operations, Operation{
 			EntityID: machineLedgerEntityID, Kind: kind, Target: SideVault,
-			RelativePath: ".session-reviewer/ledger.json", BeforeHash: snapshot.vaultHash, AfterHash: desiredHash,
+			RelativePath: ".session-reviewer/ledger.json", BeforeHash: snapshot.vaultHash,
 		})
 	}
 	return operations

@@ -1688,25 +1688,88 @@ func TestInitializeProjectRootReplacementCannotRedirectOverviewWrite(t *testing.
 	root = filepath.Join(base, "project")
 	moved = filepath.Join(base, "moved")
 	outside = filepath.Join(base, "outside")
+	data := t.TempDir()
 	for _, dir := range []string{root, outside} {
 		if err := os.Mkdir(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: t.TempDir(), beforeOverviewWrite: func() error {
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data, beforeOverviewWrite: func() error {
 		if err := os.Rename(root, moved); err != nil {
 			return err
 		}
 		return os.Symlink(outside, root)
 	}})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("replacement returned err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "docs")); !os.IsNotExist(err) {
 		t.Fatalf("outside write: %v", err)
+	}
+	cfg, err := config.Load(filepath.Join(data, "config.toml"))
+	if err != nil || len(cfg.Projects) != 0 {
+		t.Fatalf("replacement mapping was published: cfg=%+v err=%v", cfg, err)
+	}
+}
+
+func TestInitializeProjectRootIdentityChangeBeforeConfigPublicationFailsClosed(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	data := t.TempDir()
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
+		beforeConfigWrite: func() error {
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o755)
+		},
+	})
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("identity replacement returned err=%v", err)
+	}
+	cfg, loadErr := config.Load(filepath.Join(data, "config.toml"))
+	if loadErr != nil || len(cfg.Projects) != 0 {
+		t.Fatalf("identity replacement mapping was published: cfg=%+v err=%v", cfg, loadErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); statErr != nil {
+		t.Fatalf("pinned root did not retain recoverable v2 files: %v", statErr)
+	}
+}
+
+func TestInitializeProjectRootIdentityChangeAfterConfigPublicationRollsBackMapping(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	data := t.TempDir()
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
+		afterConfigWrite: func() error {
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o755)
+		},
+	})
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("post-publication identity replacement returned err=%v", err)
+	}
+	cfg, loadErr := config.Load(filepath.Join(data, "config.toml"))
+	if loadErr != nil || len(cfg.Projects) != 0 {
+		t.Fatalf("post-publication replacement mapping was retained: cfg=%+v err=%v", cfg, loadErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); statErr != nil {
+		t.Fatalf("pinned root did not retain recoverable v2 files: %v", statErr)
 	}
 }
 

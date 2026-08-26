@@ -1157,11 +1157,19 @@ func TestFirstSyncOfIdenticalV2CopiesEstablishesResolvableMergeBases(t *testing.
 	if err := os.CopyFS(vaultReview, os.DirFS(filepath.Join(fixture.project, "docs", "session-review"))); err != nil {
 		t.Fatal(err)
 	}
-	engine, err := NewEngine(fixture.options())
+	now := time.Date(2026, 8, 25, 1, 0, 0, 0, time.UTC)
+	options := fixture.options()
+	options.Now = func() time.Time { return now }
+	engine, err := NewEngine(options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer engine.Close()
+	status, err := engine.Status(context.Background())
+	if err != nil || len(status.PendingOperations) != 4 || status.MachineState != MachinePending {
+		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	now = now.Add(time.Minute)
 	dry, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
 	if err != nil || len(dry.Operations) != 2 || dry.Machine.State != MachinePending {
 		t.Fatalf("dry=%+v err=%v", dry, err)
@@ -1174,16 +1182,37 @@ func TestFirstSyncOfIdenticalV2CopiesEstablishesResolvableMergeBases(t *testing.
 	if bases, listErr := engine.bases.List(); listErr != nil || len(bases) != 0 {
 		t.Fatalf("dry-run established bases=%+v err=%v", bases, listErr)
 	}
-	status, err := engine.Status(context.Background())
-	if err != nil || len(status.PendingOperations) < 2 || status.MachineState != MachinePending {
-		t.Fatalf("status=%+v err=%v", status, err)
+	dryPlan := append(append([]Operation{}, dry.Operations...), dry.Machine.Operations...)
+	if !reflect.DeepEqual(status.PendingOperations, dryPlan) {
+		t.Fatalf("status plan differs from later dry-run\nstatus=%+v\ndry=%+v", status.PendingOperations, dryPlan)
 	}
+	for _, operation := range dry.Machine.Operations {
+		if operation.AfterHash != "" {
+			t.Fatalf("public machine operation claimed commit-time hash: %+v", operation)
+		}
+	}
+	now = now.Add(time.Minute)
+	commitTime := now
 	first, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
 	if err != nil || len(first.Operations) != 2 || len(first.Conflicts) != 0 || first.Machine.State != MachineCurrent {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
 	if !reflect.DeepEqual(dry.Operations, first.Operations) || !reflect.DeepEqual(dry.Machine.Operations, first.Machine.Operations) {
 		t.Fatalf("identical-copy dry-run differs from real plan\ndry=%+v\nreal=%+v", dry, first)
+	}
+	machinePath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+	machineBody := readDerivedTestFile(t, machinePath)
+	machine, err := reviewv2.ParseMachineLedger(machineBody)
+	if err != nil || machine.LastSuccessfulSync != commitTime.Format(time.RFC3339Nano) {
+		t.Fatalf("machine last_successful_sync=%q want=%q err=%v", machine.LastSuccessfulSync, commitTime.Format(time.RFC3339Nano), err)
+	}
+	now = now.Add(time.Hour)
+	repeat, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(repeat.Operations) != 0 || len(repeat.Machine.Operations) != 0 {
+		t.Fatalf("repeat=%+v err=%v", repeat, err)
+	}
+	if after := readDerivedTestFile(t, machinePath); !bytes.Equal(after, machineBody) {
+		t.Fatal("repeat sync churned commit-time machine ledger bytes")
 	}
 	bases, err := engine.bases.List()
 	if err != nil || len(bases) != 2 {

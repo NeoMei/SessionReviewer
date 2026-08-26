@@ -168,6 +168,7 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
+	originalConfig := cloneInitializationConfig(cfg)
 	if err := recoverInitialReviewV2(roots.project.Root, paths.projectRoot, opts.afterReviewV2File); err != nil {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
@@ -237,21 +238,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		}
 		if changed {
 			replaceProjectMapping(&cfg, updated)
-			if opts.beforeConfigWrite != nil {
-				if err := opts.beforeConfigWrite(); err != nil {
-					return InitResult{}, err
-				}
-			}
-			if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
+			if err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfig, cfg); err != nil {
 				return InitResult{}, err
 			}
-			if opts.afterConfigWrite != nil {
-				if err := opts.afterConfigWrite(); err != nil {
-					return InitResult{}, err
-				}
-			}
 		}
-		return InitResult{ProjectID: updated.ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+		return verifiedInitializationResult(paths, roots.project.Info(), updated.ID)
 	}
 	if v2Exists {
 		if owner, claimed := cfg.ProjectByID(v2ID); claimed {
@@ -265,20 +256,10 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, err
 		}
 		cfg.Projects = append(cfg.Projects, mapping)
-		if opts.beforeConfigWrite != nil {
-			if err := opts.beforeConfigWrite(); err != nil {
-				return InitResult{}, err
-			}
-		}
-		if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
+		if err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfig, cfg); err != nil {
 			return InitResult{}, err
 		}
-		if opts.afterConfigWrite != nil {
-			if err := opts.afterConfigWrite(); err != nil {
-				return InitResult{}, err
-			}
-		}
-		return InitResult{ProjectID: v2ID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+		return verifiedInitializationResult(paths, roots.project.Info(), v2ID)
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
@@ -295,20 +276,10 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, err
 		}
 		cfg.Projects = append(cfg.Projects, mapping)
-		if opts.beforeConfigWrite != nil {
-			if err := opts.beforeConfigWrite(); err != nil {
-				return InitResult{}, err
-			}
-		}
-		if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
+		if err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfig, cfg); err != nil {
 			return InitResult{}, err
 		}
-		if opts.afterConfigWrite != nil {
-			if err := opts.afterConfigWrite(); err != nil {
-				return InitResult{}, err
-			}
-		}
-		return InitResult{ProjectID: overviewID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+		return verifiedInitializationResult(paths, roots.project.Info(), overviewID)
 	}
 
 	raw := make([]byte, 8)
@@ -344,20 +315,67 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, err
 	}
 	cfg.Projects = append(cfg.Projects, mapping)
+	if err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfig, cfg); err != nil {
+		return InitResult{}, err
+	}
+	return verifiedInitializationResult(paths, roots.project.Info(), id)
+}
+
+func publishInitializationConfig(opts InitOptions, dataRoot *os.Root, logicalProjectPath string, pinned os.FileInfo, before, next config.Config) error {
 	if opts.beforeConfigWrite != nil {
 		if err := opts.beforeConfigWrite(); err != nil {
-			return InitResult{}, err
+			return err
 		}
 	}
-	if err := config.SaveRoot(dataDir.Root, "config.toml", cfg); err != nil {
-		return InitResult{}, err
+	if err := verifyLiveInitializationProject(logicalProjectPath, pinned); err != nil {
+		return err
+	}
+	if err := config.SaveRoot(dataRoot, "config.toml", next); err != nil {
+		return err
 	}
 	if opts.afterConfigWrite != nil {
 		if err := opts.afterConfigWrite(); err != nil {
-			return InitResult{}, err
+			return err
 		}
 	}
-	return InitResult{ProjectID: id, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+	if err := verifyLiveInitializationProject(logicalProjectPath, pinned); err != nil {
+		if rollbackErr := config.SaveRoot(dataRoot, "config.toml", before); rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("configuration rollback failed: %w", rollbackErr))
+		}
+		return err
+	}
+	return nil
+}
+
+func cloneInitializationConfig(value config.Config) config.Config {
+	clone := value
+	clone.Projects = append([]config.ProjectMapping(nil), value.Projects...)
+	for index := range clone.Projects {
+		clone.Projects[index].RemoteIdentities = append([]string(nil), value.Projects[index].RemoteIdentities...)
+		clone.Projects[index].CommonDirs = append([]string(nil), value.Projects[index].CommonDirs...)
+		clone.Projects[index].Aliases = append([]string(nil), value.Projects[index].Aliases...)
+	}
+	clone.SessionAssociations = append([]config.SessionAssociation(nil), value.SessionAssociations...)
+	return clone
+}
+
+func verifyLiveInitializationProject(logicalPath string, pinned os.FileInfo) error {
+	live, err := pathguard.Open(logicalPath)
+	if err != nil {
+		return initializationError(ErrInitializationStateChanged, errors.New("project root logical path is unavailable or unsafe"))
+	}
+	defer live.Close()
+	if !os.SameFile(pinned, live.Info()) {
+		return initializationError(ErrInitializationStateChanged, errors.New("project root identity changed during initialization"))
+	}
+	return nil
+}
+
+func verifiedInitializationResult(paths initializationPaths, pinned os.FileInfo, projectID string) (InitResult, error) {
+	if err := verifyLiveInitializationProject(paths.projectRoot, pinned); err != nil {
+		return InitResult{}, err
+	}
+	return InitResult{ProjectID: projectID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
 }
 
 func resolveInitializationPaths(opts InitOptions) (initializationPaths, error) {
