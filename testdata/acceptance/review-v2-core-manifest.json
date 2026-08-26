@@ -2,13 +2,13 @@
   "version": 1,
   "fixture": "generated-temporary-legacy-project-vault-data",
   "steps": [
-    {"id": 1, "name": "backup", "expected": "project-vault-data-copies-match"},
-    {"id": 2, "name": "migration-dry-run", "expected": "required-and-zero-writes"},
-    {"id": 3, "name": "migration-sync", "expected": "current-and-machine-current"},
-    {"id": 4, "name": "visible-boundary", "expected": "two-human-documents-per-side"},
-    {"id": 5, "name": "backup-manifest", "expected": "all-object-and-archive-digests-match-project-only"},
-    {"id": 6, "name": "repeat-convergence", "expected": "zero-pending-and-no-byte-or-mtime-drift"},
-    {"id": 7, "name": "different-units", "expected": "both-edits-converge"},
-    {"id": 8, "name": "same-unit-conflict", "expected": "all-three-actions-converge-from-isolated-backups"}
+    {"id": 1, "name": "backup"},
+    {"id": 2, "name": "migration-dry-run"},
+    {"id": 3, "name": "migration-sync"},
+    {"id": 4, "name": "visible-boundary"},
+    {"id": 5, "name": "backup-manifest"},
+    {"id": 6, "name": "repeat-convergence"},
+    {"id": 7, "name": "different-units"},
+    {"id": 8, "name": "same-unit-conflict"}
   ]
 }

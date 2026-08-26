@@ -1773,6 +1773,125 @@ func TestInitializeProjectRootIdentityChangeAfterConfigPublicationRollsBackMappi
 	}
 }
 
+func TestInitializePostPublicationRootReplacementRestoresSeededConfigBytes(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	data := t.TempDir()
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedRoot, unrelatedVault := t.TempDir(), t.TempDir()
+	seeded := []byte("# preserve this exact user formatting\nversion = 1\n\n[[projects]]\nid = \"project-1111111111111111\"\nroot = " + fmt.Sprintf("%q", unrelatedRoot) + "\nvault_root = " + fmt.Sprintf("%q", unrelatedVault) + "\n")
+	configPath := filepath.Join(data, "config.toml")
+	if err := os.WriteFile(configPath, seeded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		afterConfigWrite: func() error {
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o755)
+		},
+	})
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("post-publication root replacement err=%v", err)
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || !bytes.Equal(got, seeded) {
+		t.Fatalf("seeded config bytes changed: got=%q want=%q err=%v", got, seeded, readErr)
+	}
+}
+
+func TestInitializeRollbackConflictPreservesConcurrentConfigBytes(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	data := t.TempDir()
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedRoot, unrelatedVault := t.TempDir(), t.TempDir()
+	concurrentRoot, concurrentVault := t.TempDir(), t.TempDir()
+	seededConfig := config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: "project-1111111111111111", Root: unrelatedRoot, VaultRoot: unrelatedVault,
+	}}}
+	configPath := filepath.Join(data, "config.toml")
+	if err := config.Save(configPath, seededConfig); err != nil {
+		t.Fatal(err)
+	}
+	var concurrentBytes []byte
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		afterConfigWrite: func() error {
+			current, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			current.Projects = append(current.Projects, config.ProjectMapping{
+				ID: "project-2222222222222222", Root: concurrentRoot, VaultRoot: concurrentVault,
+			})
+			if err := config.Save(configPath, current); err != nil {
+				return err
+			}
+			concurrentBytes, err = os.ReadFile(configPath)
+			if err != nil {
+				return err
+			}
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o755)
+		},
+	})
+	if err == nil || !errors.Is(err, ErrInitializationConfigRollbackConflict) {
+		t.Fatalf("concurrent config rollback err=%v", err)
+	}
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil || !bytes.Equal(got, concurrentBytes) {
+		t.Fatalf("concurrent config bytes were overwritten: got=%q want=%q err=%v", got, concurrentBytes, readErr)
+	}
+	current, loadErr := config.Load(configPath)
+	if loadErr != nil || len(current.Projects) != 3 {
+		t.Fatalf("concurrent config mappings=%+v err=%v", current.Projects, loadErr)
+	}
+}
+
+func TestInitializeFinalRootCheckpointUsesPublicationRollbackContext(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "project")
+	moved := filepath.Join(base, "moved")
+	data := t.TempDir()
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unrelatedRoot, unrelatedVault := t.TempDir(), t.TempDir()
+	seeded := []byte("# exact final-check rollback bytes\nversion = 1\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = " + fmt.Sprintf("%q", unrelatedRoot) + "\nvault_root = " + fmt.Sprintf("%q", unrelatedVault) + "\n")
+	configPath := filepath.Join(data, "config.toml")
+	if err := os.WriteFile(configPath, seeded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+		beforeResultRootCheck: func() error {
+			if err := os.Rename(root, moved); err != nil {
+				return err
+			}
+			return os.Mkdir(root, 0o755)
+		},
+	})
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("final root checkpoint err=%v", err)
+	}
+	if got, readErr := os.ReadFile(configPath); readErr != nil || !bytes.Equal(got, seeded) {
+		t.Fatalf("final checkpoint did not restore exact config: got=%q want=%q err=%v", got, seeded, readErr)
+	}
+}
+
 func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
 	base := t.TempDir()
 	data := filepath.Join(base, "data")
