@@ -34,30 +34,28 @@ const (
 )
 
 var (
-	ErrInvalidInitializationRoot            = errors.New("initialization root is invalid or missing")
-	ErrNestedInitializationRoots            = errors.New("project and vault must not contain one another")
-	ErrCorruptInitializationConfig          = errors.New("initialization configuration is invalid")
-	ErrConflictingInitializationIdentity    = errors.New("initialization identity conflicts with existing state")
-	ErrInitializationStateChanged           = errors.New("initialization state changed")
-	ErrInitializationConfigRollbackConflict = errors.New("initialization config rollback requires manual recovery")
+	ErrInvalidInitializationRoot         = errors.New("initialization root is invalid or missing")
+	ErrNestedInitializationRoots         = errors.New("project and vault must not contain one another")
+	ErrCorruptInitializationConfig       = errors.New("initialization configuration is invalid")
+	ErrConflictingInitializationIdentity = errors.New("initialization identity conflicts with existing state")
+	ErrInitializationStateChanged        = errors.New("initialization state changed")
 )
 
 type InitOptions struct {
-	ProjectRoot           string
-	VaultRoot             string
-	DataDir               string
-	GOOS                  string
-	Now                   func() time.Time
-	Random                io.Reader
-	beforeOverviewWrite   func() error
-	afterOverviewWrite    func() error
-	afterReviewV2File     func(string) error
-	afterStateComponent   func(string) error
-	beforeConfigWrite     func() error
-	afterConfigWrite      func() error
-	beforeResultRootCheck func() error
-	afterLock             func() error
-	caseDetector          func(*os.Root) (platform.CaseMode, error)
+	ProjectRoot         string
+	VaultRoot           string
+	DataDir             string
+	GOOS                string
+	Now                 func() time.Time
+	Random              io.Reader
+	beforeOverviewWrite func() error
+	afterOverviewWrite  func() error
+	afterReviewV2File   func(string) error
+	afterStateComponent func(string) error
+	beforeConfigWrite   func() error
+	afterConfigWrite    func() error
+	afterLock           func() error
+	caseDetector        func(*os.Root) (platform.CaseMode, error)
 }
 
 type InitResult struct {
@@ -86,20 +84,6 @@ type initializationPaths struct {
 type initializationRoots struct {
 	project *pathguard.Directory
 	vault   *pathguard.Directory
-}
-
-type initializationConfigFileSnapshot struct {
-	body  []byte
-	hash  string
-	info  os.FileInfo
-	found bool
-}
-
-type initializationConfigPublication struct {
-	root     *os.Root
-	rootInfo os.FileInfo
-	before   initializationConfigFileSnapshot
-	next     initializationConfigFileSnapshot
 }
 
 func PreviewInitialization(opts InitOptions) (InitPreview, error) {
@@ -184,10 +168,6 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
 	}
-	originalConfigFile, err := captureInitializationConfigFile(dataDir.Root, "config.toml")
-	if err != nil {
-		return InitResult{}, initializationError(ErrCorruptInitializationConfig, err)
-	}
 	if err := recoverInitialReviewV2(roots.project.Root, paths.projectRoot, opts.afterReviewV2File); err != nil {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
@@ -219,7 +199,6 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	if mapped {
-		var publication *initializationConfigPublication
 		sameVault, err := samePhysicalPath(existing.VaultRoot, paths.vaultRoot)
 		if err != nil {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
@@ -257,14 +236,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			}
 		}
 		if changed {
-			replaceProjectMapping(&cfg, updated)
-			published, err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfigFile, cfg)
-			if err != nil {
+			if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), updated); err != nil {
 				return InitResult{}, err
 			}
-			publication = &published
 		}
-		return verifiedInitializationResult(opts, paths, roots.project.Info(), updated.ID, publication)
+		return initializationResult(paths, updated.ID), nil
 	}
 	if v2Exists {
 		if owner, claimed := cfg.ProjectByID(v2ID); claimed {
@@ -277,12 +253,10 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, true, opts.afterStateComponent); err != nil {
 			return InitResult{}, err
 		}
-		cfg.Projects = append(cfg.Projects, mapping)
-		publication, err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfigFile, cfg)
-		if err != nil {
+		if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), mapping); err != nil {
 			return InitResult{}, err
 		}
-		return verifiedInitializationResult(opts, paths, roots.project.Info(), v2ID, &publication)
+		return initializationResult(paths, v2ID), nil
 	}
 	if overviewExists {
 		if owner, claimed := cfg.ProjectByID(overviewID); claimed {
@@ -298,12 +272,10 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, true, opts.afterStateComponent); err != nil {
 			return InitResult{}, err
 		}
-		cfg.Projects = append(cfg.Projects, mapping)
-		publication, err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfigFile, cfg)
-		if err != nil {
+		if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), mapping); err != nil {
 			return InitResult{}, err
 		}
-		return verifiedInitializationResult(opts, paths, roots.project.Info(), overviewID, &publication)
+		return initializationResult(paths, overviewID), nil
 	}
 
 	raw := make([]byte, 8)
@@ -338,111 +310,28 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, false, opts.afterStateComponent); err != nil {
 		return InitResult{}, err
 	}
-	cfg.Projects = append(cfg.Projects, mapping)
-	publication, err := publishInitializationConfig(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), originalConfigFile, cfg)
-	if err != nil {
+	if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), mapping); err != nil {
 		return InitResult{}, err
 	}
-	return verifiedInitializationResult(opts, paths, roots.project.Info(), id, &publication)
+	return initializationResult(paths, id), nil
 }
 
-func publishInitializationConfig(opts InitOptions, dataRoot *os.Root, logicalProjectPath string, pinned os.FileInfo, before initializationConfigFileSnapshot, next config.Config) (initializationConfigPublication, error) {
-	rootInfo, err := dataRoot.Stat(".")
-	if err != nil || !rootInfo.IsDir() {
-		return initializationConfigPublication{}, errors.New("initialization config root is unavailable")
-	}
+func publishInitializationMapping(opts InitOptions, dataRoot *os.Root, logicalProjectPath string, pinned os.FileInfo, mapping config.ProjectMapping) error {
 	if opts.beforeConfigWrite != nil {
 		if err := opts.beforeConfigWrite(); err != nil {
-			return initializationConfigPublication{}, err
+			return err
 		}
 	}
-	if err := verifyLiveInitializationProject(logicalProjectPath, pinned); err != nil {
-		return initializationConfigPublication{}, err
+	_, err := config.PublishProjectFragmentRoot(dataRoot, mapping, func() error {
+		return verifyLiveInitializationProject(logicalProjectPath, pinned)
+	})
+	if err != nil {
+		return err
 	}
-	if err := config.SaveRoot(dataRoot, "config.toml", next); err != nil {
-		return initializationConfigPublication{}, err
-	}
-	nextFile, err := captureInitializationConfigFile(dataRoot, "config.toml")
-	if err != nil || !nextFile.found {
-		return initializationConfigPublication{}, errors.New("published initialization config cannot be authenticated")
-	}
-	publication := initializationConfigPublication{root: dataRoot, rootInfo: rootInfo, before: before, next: nextFile}
 	if opts.afterConfigWrite != nil {
 		if err := opts.afterConfigWrite(); err != nil {
-			return publication, err
+			return err
 		}
-	}
-	if err := verifyLiveInitializationProject(logicalProjectPath, pinned); err != nil {
-		return publication, errors.Join(err, publication.rollback())
-	}
-	return publication, nil
-}
-
-func captureInitializationConfigFile(root *os.Root, name string) (initializationConfigFileSnapshot, error) {
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return initializationConfigFileSnapshot{}, nil
-	}
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 4<<20 {
-		return initializationConfigFileSnapshot{}, errors.New("initialization config file is unavailable or unsafe")
-	}
-	body, err := pathguard.ReadStableRegularRootFile(root, name, info, 4<<20)
-	if err != nil {
-		return initializationConfigFileSnapshot{}, errors.New("initialization config changed while reading")
-	}
-	digest := sha256.Sum256(body)
-	return initializationConfigFileSnapshot{body: body, hash: hex.EncodeToString(digest[:]), info: info, found: true}, nil
-}
-
-func sameInitializationConfigFile(current, expected initializationConfigFileSnapshot) bool {
-	if current.found != expected.found {
-		return false
-	}
-	if !current.found {
-		return true
-	}
-	return current.info != nil && expected.info != nil && os.SameFile(current.info, expected.info) &&
-		current.hash == expected.hash && current.info.Size() == expected.info.Size() &&
-		current.info.Mode() == expected.info.Mode() && current.info.ModTime().Equal(expected.info.ModTime()) &&
-		bytes.Equal(current.body, expected.body)
-}
-
-func (publication initializationConfigPublication) rollback() error {
-	if publication.root == nil || publication.rootInfo == nil {
-		return ErrInitializationConfigRollbackConflict
-	}
-	currentRoot, err := publication.root.Stat(".")
-	if err != nil || !os.SameFile(publication.rootInfo, currentRoot) {
-		return ErrInitializationConfigRollbackConflict
-	}
-	current, err := captureInitializationConfigFile(publication.root, "config.toml")
-	if err != nil || !sameInitializationConfigFile(current, publication.next) {
-		return ErrInitializationConfigRollbackConflict
-	}
-	if !publication.before.found {
-		if err := atomicfile.RemoveRootFileIfHashMatches(publication.root, "config.toml", publication.next.hash); err != nil {
-			return errors.Join(ErrInitializationConfigRollbackConflict, err)
-		}
-		return nil
-	}
-	checks := 0
-	checkpoint := func() error {
-		checks++
-		if checks > 2 {
-			return nil
-		}
-		current, err := captureInitializationConfigFile(publication.root, "config.toml")
-		if err != nil || !sameInitializationConfigFile(current, publication.next) {
-			return ErrInitializationConfigRollbackConflict
-		}
-		return nil
-	}
-	if err := atomicfile.WriteRootFileChecked(publication.root, "config.toml", publication.before.body, publication.before.info.Mode().Perm(), checkpoint); err != nil {
-		return errors.Join(ErrInitializationConfigRollbackConflict, err)
-	}
-	restored, err := captureInitializationConfigFile(publication.root, "config.toml")
-	if err != nil || !restored.found || restored.hash != publication.before.hash || restored.info.Mode() != publication.before.info.Mode() || !bytes.Equal(restored.body, publication.before.body) {
-		return ErrInitializationConfigRollbackConflict
 	}
 	return nil
 }
@@ -459,21 +348,8 @@ func verifyLiveInitializationProject(logicalPath string, pinned os.FileInfo) err
 	return nil
 }
 
-func verifiedInitializationResult(opts InitOptions, paths initializationPaths, pinned os.FileInfo, projectID string, publication *initializationConfigPublication) (InitResult, error) {
-	var checkpointErr error
-	if opts.beforeResultRootCheck != nil {
-		checkpointErr = opts.beforeResultRootCheck()
-	}
-	if checkpointErr == nil {
-		checkpointErr = verifyLiveInitializationProject(paths.projectRoot, pinned)
-	}
-	if checkpointErr != nil {
-		if publication != nil {
-			checkpointErr = errors.Join(checkpointErr, publication.rollback())
-		}
-		return InitResult{}, checkpointErr
-	}
-	return InitResult{ProjectID: projectID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}, nil
+func initializationResult(paths initializationPaths, projectID string) InitResult {
+	return InitResult{ProjectID: projectID, LedgerRoot: paths.ledgerRoot, ConfigPath: paths.configPath}
 }
 
 func resolveInitializationPaths(opts InitOptions) (initializationPaths, error) {
@@ -617,15 +493,6 @@ func completeVaultMapping(opts InitOptions, vaultRoot *os.Root, mapping config.P
 	mapping.VaultReviewPath = reviewPath
 	mapping.VaultCaseMode = caseMode
 	return mapping, true, nil
-}
-
-func replaceProjectMapping(cfg *config.Config, mapping config.ProjectMapping) {
-	for index := range cfg.Projects {
-		if cfg.Projects[index].ID == mapping.ID {
-			cfg.Projects[index] = mapping
-			return
-		}
-	}
 }
 
 func detectCaseMode(root *os.Root) (mode platform.CaseMode, retErr error) {

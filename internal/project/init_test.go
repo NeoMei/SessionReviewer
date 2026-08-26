@@ -1744,7 +1744,7 @@ func TestInitializeProjectRootIdentityChangeBeforeConfigPublicationFailsClosed(t
 	}
 }
 
-func TestInitializeProjectRootIdentityChangeAfterConfigPublicationRollsBackMapping(t *testing.T) {
+func TestInitializeProjectRootIdentityChangeAfterFragmentCommitIsExternalChange(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
 	moved := filepath.Join(base, "moved")
@@ -1752,7 +1752,7 @@ func TestInitializeProjectRootIdentityChangeAfterConfigPublicationRollsBackMappi
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Initialize(InitOptions{
+	result, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
 		afterConfigWrite: func() error {
 			if err := os.Rename(root, moved); err != nil {
@@ -1761,19 +1761,19 @@ func TestInitializeProjectRootIdentityChangeAfterConfigPublicationRollsBackMappi
 			return os.Mkdir(root, 0o755)
 		},
 	})
-	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
-		t.Fatalf("post-publication identity replacement returned err=%v", err)
+	if err != nil || result.ProjectID == "" {
+		t.Fatalf("post-commit identity replacement result=%+v err=%v", result, err)
 	}
 	cfg, loadErr := config.Load(filepath.Join(data, "config.toml"))
-	if loadErr != nil || len(cfg.Projects) != 0 {
-		t.Fatalf("post-publication replacement mapping was retained: cfg=%+v err=%v", cfg, loadErr)
+	if loadErr != nil || len(cfg.Projects) != 1 || cfg.Projects[0].ID != result.ProjectID {
+		t.Fatalf("committed mapping missing: cfg=%+v err=%v", cfg, loadErr)
 	}
 	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); statErr != nil {
 		t.Fatalf("pinned root did not retain recoverable v2 files: %v", statErr)
 	}
 }
 
-func TestInitializePostPublicationRootReplacementRestoresSeededConfigBytes(t *testing.T) {
+func TestInitializePostCommitRootReplacementNeverChangesSeededConfigBytes(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
 	moved := filepath.Join(base, "moved")
@@ -1787,7 +1787,7 @@ func TestInitializePostPublicationRootReplacementRestoresSeededConfigBytes(t *te
 	if err := os.WriteFile(configPath, seeded, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Initialize(InitOptions{
+	result, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
 		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
 		afterConfigWrite: func() error {
@@ -1797,18 +1797,17 @@ func TestInitializePostPublicationRootReplacementRestoresSeededConfigBytes(t *te
 			return os.Mkdir(root, 0o755)
 		},
 	})
-	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
-		t.Fatalf("post-publication root replacement err=%v", err)
+	if err != nil || result.ProjectID == "" {
+		t.Fatalf("post-commit root replacement result=%+v err=%v", result, err)
 	}
 	if got, readErr := os.ReadFile(configPath); readErr != nil || !bytes.Equal(got, seeded) {
 		t.Fatalf("seeded config bytes changed: got=%q want=%q err=%v", got, seeded, readErr)
 	}
 }
 
-func TestInitializeRollbackConflictPreservesConcurrentConfigBytes(t *testing.T) {
+func TestInitializeConcurrentSharedConfigEditIsPreservedByteForByte(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
-	moved := filepath.Join(base, "moved")
 	data := t.TempDir()
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
@@ -1823,32 +1822,23 @@ func TestInitializeRollbackConflictPreservesConcurrentConfigBytes(t *testing.T) 
 		t.Fatal(err)
 	}
 	var concurrentBytes []byte
-	_, err := Initialize(InitOptions{
+	result, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
 		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
-		afterConfigWrite: func() error {
-			current, err := config.Load(configPath)
-			if err != nil {
-				return err
-			}
-			current.Projects = append(current.Projects, config.ProjectMapping{
+		beforeConfigWrite: func() error {
+			concurrent := config.Config{Version: 1, Projects: append(append([]config.ProjectMapping(nil), seededConfig.Projects...), config.ProjectMapping{
 				ID: "project-2222222222222222", Root: concurrentRoot, VaultRoot: concurrentVault,
-			})
-			if err := config.Save(configPath, current); err != nil {
+			})}
+			if err := config.Save(configPath, concurrent); err != nil {
 				return err
 			}
+			var err error
 			concurrentBytes, err = os.ReadFile(configPath)
-			if err != nil {
-				return err
-			}
-			if err := os.Rename(root, moved); err != nil {
-				return err
-			}
-			return os.Mkdir(root, 0o755)
+			return err
 		},
 	})
-	if err == nil || !errors.Is(err, ErrInitializationConfigRollbackConflict) {
-		t.Fatalf("concurrent config rollback err=%v", err)
+	if err != nil || result.ProjectID == "" {
+		t.Fatalf("concurrent config edit result=%+v err=%v", result, err)
 	}
 	got, readErr := os.ReadFile(configPath)
 	if readErr != nil || !bytes.Equal(got, concurrentBytes) {
@@ -1860,35 +1850,37 @@ func TestInitializeRollbackConflictPreservesConcurrentConfigBytes(t *testing.T) 
 	}
 }
 
-func TestInitializeFinalRootCheckpointUsesPublicationRollbackContext(t *testing.T) {
+func TestInitializeConflictingSharedConfigEditBeforeCommitPublishesNoFragment(t *testing.T) {
 	base := t.TempDir()
 	root := filepath.Join(base, "project")
-	moved := filepath.Join(base, "moved")
 	data := t.TempDir()
 	if err := os.Mkdir(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	unrelatedRoot, unrelatedVault := t.TempDir(), t.TempDir()
-	seeded := []byte("# exact final-check rollback bytes\nversion = 1\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = " + fmt.Sprintf("%q", unrelatedRoot) + "\nvault_root = " + fmt.Sprintf("%q", unrelatedVault) + "\n")
 	configPath := filepath.Join(data, "config.toml")
-	if err := os.WriteFile(configPath, seeded, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	id := "project-2a2a2a2a2a2a2a2a"
+	conflictingRoot, conflictingVault := t.TempDir(), t.TempDir()
+	var concurrentBytes []byte
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data,
 		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
-		beforeResultRootCheck: func() error {
-			if err := os.Rename(root, moved); err != nil {
+		beforeConfigWrite: func() error {
+			if err := config.Save(configPath, config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: id, Root: conflictingRoot, VaultRoot: conflictingVault}}}); err != nil {
 				return err
 			}
-			return os.Mkdir(root, 0o755)
+			var err error
+			concurrentBytes, err = os.ReadFile(configPath)
+			return err
 		},
 	})
-	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
-		t.Fatalf("final root checkpoint err=%v", err)
+	if err == nil || !errors.Is(err, config.ErrProjectFragmentConflict) {
+		t.Fatalf("conflicting edit err=%v", err)
 	}
-	if got, readErr := os.ReadFile(configPath); readErr != nil || !bytes.Equal(got, seeded) {
-		t.Fatalf("final checkpoint did not restore exact config: got=%q want=%q err=%v", got, seeded, readErr)
+	if got, readErr := os.ReadFile(configPath); readErr != nil || !bytes.Equal(got, concurrentBytes) {
+		t.Fatalf("concurrent config changed: got=%q want=%q err=%v", got, concurrentBytes, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(data, config.ProjectFragmentsDir, id+".toml")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("fragment was published before conflict: %v", statErr)
 	}
 }
 
@@ -1914,7 +1906,7 @@ func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
 		if err == nil {
 			t.Fatal("denied data-root replacement was accepted")
 		}
-		if _, statErr := os.Stat(filepath.Join(outside, "config.toml")); !os.IsNotExist(statErr) {
+		if _, statErr := os.Stat(filepath.Join(outside, config.ProjectFragmentsDir)); !os.IsNotExist(statErr) {
 			t.Fatalf("outside write after denied replacement: %v", statErr)
 		}
 		return
@@ -1922,10 +1914,10 @@ func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(moved, "config.toml")); err != nil {
+	if _, err := os.Stat(filepath.Join(moved, config.ProjectFragmentsDir)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(outside, "config.toml")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(outside, config.ProjectFragmentsDir)); !os.IsNotExist(err) {
 		t.Fatalf("outside write: %v", err)
 	}
 }

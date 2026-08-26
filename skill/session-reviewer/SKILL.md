@@ -23,6 +23,7 @@ For human recovery, open the 项目脉络浏览器 when it is installed. Otherwi
 - Never run Git mutation commands. Do not add, commit, push, reset, checkout, switch, restore, branch, tag, stash, merge, or rebase.
 - Never call an API client. The semantic proposal is produced locally from the bounded packet.
 - A ledger-only view does not process pending sessions; never claim that it does.
+- Treat the machine mapping as one merged read-only view of legacy `config.toml` plus `projects.d/<project-id>.toml`. Never hand-edit, merge, rename, or copy a project fragment; `init --write` alone publishes a stable-ID fragment without rewriting the shared legacy config.
 
 ## Edit and synchronize review v2
 

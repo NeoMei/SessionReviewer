@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,7 +11,171 @@ import (
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/pelletier/go-toml/v2"
 )
+
+func TestProjectFragmentPublishMergeAndSavePreserveSharedBytes(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	legacy := ProjectMapping{ID: "project-1111111111111111", Root: "/legacy", VaultRoot: "/legacy-vault"}
+	shared := []byte("# user formatting must survive init\nversion = 1\n\n[[projects]]\nid = '" + legacy.ID + "'\nroot = '" + legacy.Root + "'\nvault_root = '" + legacy.VaultRoot + "'\n")
+	if err := os.WriteFile(configPath, shared, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	fragment := ProjectMapping{
+		ID: "project-2a2a2a2a2a2a2a2a", Root: "/fragment", VaultRoot: "/fragment-vault",
+		VaultReviewPath: "Projects/fragment--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}
+	created, err := PublishProjectFragmentRoot(root, fragment, nil)
+	if err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	got, err := Load(configPath)
+	if err != nil || len(got.Projects) != 2 || !reflect.DeepEqual(got.Projects[1], fragment) {
+		t.Fatalf("got=%+v err=%v", got, err)
+	}
+	toSave := Config{Version: 1, Projects: []ProjectMapping{fragment, legacy}}
+	beforeSave := Config{Version: 1, Projects: append([]ProjectMapping(nil), toSave.Projects...)}
+	if err := Save(configPath, toSave); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(toSave, beforeSave) {
+		t.Fatalf("Save mutated caller config: got=%+v want=%+v", toSave, beforeSave)
+	}
+	if after, err := os.ReadFile(filepath.Join(dir, ProjectFragmentsDir, fragment.ID+".toml")); err != nil || len(after) == 0 {
+		t.Fatalf("fragment missing after Save: body=%q err=%v", after, err)
+	}
+	roundTrip, err := Load(configPath)
+	if err != nil || len(roundTrip.Projects) != 2 || !reflect.DeepEqual(roundTrip.Projects[1], fragment) {
+		t.Fatalf("roundTrip=%+v err=%v", roundTrip, err)
+	}
+	rawShared, err := os.ReadFile(configPath)
+	if err != nil || bytes.Contains(rawShared, []byte(fragment.ID)) {
+		t.Fatalf("Save copied fragment into shared config: %q err=%v", rawShared, err)
+	}
+}
+
+func TestProjectFragmentPublishIsIdempotentAndNeverReplaces(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	mapping := ProjectMapping{
+		ID: "project-2a2a2a2a2a2a2a2a", Root: "/one", VaultRoot: "/vault",
+		VaultReviewPath: "Projects/one--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}
+	created, err := PublishProjectFragmentRoot(root, mapping, nil)
+	if err != nil || !created {
+		t.Fatalf("first created=%v err=%v", created, err)
+	}
+	fragmentPath := filepath.Join(dir, ProjectFragmentsDir, mapping.ID+".toml")
+	before, err := os.ReadFile(fragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err = PublishProjectFragmentRoot(root, mapping, nil)
+	if err != nil || created {
+		t.Fatalf("repeat created=%v err=%v", created, err)
+	}
+	conflict := mapping
+	conflict.Root = "/different"
+	created, err = PublishProjectFragmentRoot(root, conflict, nil)
+	if err == nil || created || !errors.Is(err, ErrProjectFragmentConflict) {
+		t.Fatalf("conflict created=%v err=%v", created, err)
+	}
+	after, readErr := os.ReadFile(fragmentPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("fragment replaced: before=%q after=%q err=%v", before, after, readErr)
+	}
+}
+
+func TestProjectFragmentStrictValidationAndLegacyCompletion(t *testing.T) {
+	dir := t.TempDir()
+	id := "project-2a2a2a2a2a2a2a2a"
+	legacy := ProjectMapping{ID: id, Root: "/work", VaultRoot: "/vault"}
+	if err := Save(filepath.Join(dir, "config.toml"), Config{Version: 1, Projects: []ProjectMapping{legacy}}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	completed := legacy
+	completed.VaultReviewPath = "Projects/work--2a2a2a2a/Session Review"
+	completed.VaultCaseMode = platform.CaseSensitive
+	if _, err := PublishProjectFragmentRoot(root, completed, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(filepath.Join(dir, "config.toml"))
+	if err != nil || len(got.Projects) != 1 || !reflect.DeepEqual(got.Projects[0], completed) {
+		t.Fatalf("completed=%+v err=%v", got, err)
+	}
+
+	fragmentPath := filepath.Join(dir, ProjectFragmentsDir, id+".toml")
+	body, err := os.ReadFile(fragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fragmentPath, append(body, []byte("unknown = true\n")...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Join(dir, "config.toml")); err == nil {
+		t.Fatal("fragment with unknown field was accepted")
+	}
+}
+
+func TestProjectFragmentRejectsFilenameIdentityAndLegacyCollisions(t *testing.T) {
+	dir := t.TempDir()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	mapping := ProjectMapping{
+		ID: "project-2a2a2a2a2a2a2a2a", Root: "/work", VaultRoot: "/vault",
+		VaultReviewPath: "Projects/work--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}
+	if _, err := PublishProjectFragmentRoot(root, mapping, nil); err != nil {
+		t.Fatal(err)
+	}
+	fragmentPath := filepath.Join(dir, ProjectFragmentsDir, mapping.ID+".toml")
+	body, err := os.ReadFile(fragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := filepath.Join(dir, ProjectFragmentsDir, "project-3333333333333333.toml")
+	if err := os.WriteFile(wrong, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Join(dir, "config.toml")); err == nil {
+		t.Fatal("filename/payload identity mismatch was accepted")
+	}
+	if err := os.Remove(wrong); err != nil {
+		t.Fatal(err)
+	}
+	conflictingLegacy := Config{Version: 1, Projects: []ProjectMapping{{ID: mapping.ID, Root: "/other", VaultRoot: mapping.VaultRoot}}}
+	if err := Save(filepath.Join(t.TempDir(), "config.toml"), conflictingLegacy); err != nil {
+		t.Fatal(err)
+	}
+	shared, err := toml.Marshal(conflictingLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "config.toml"), shared, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Join(dir, "config.toml")); err == nil {
+		t.Fatal("legacy/fragment root collision was accepted")
+	}
+}
 
 func TestLoadUsesValidBackupWhenPrimaryMissing(t *testing.T) {
 	dir := t.TempDir()

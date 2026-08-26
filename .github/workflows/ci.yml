@@ -29,7 +29,7 @@ jobs:
           cache: true
       - run: go test ./...
       - name: Repeat review v2 migration and CLI contract tests
-        run: go test ./internal/reviewv2 ./internal/sync ./internal/cli ./internal/project -run 'Migration|MachineLedger|ProjectID|ReviewV2' -count=2
+        run: go test ./internal/reviewv2 ./internal/sync ./internal/cli ./internal/config ./internal/project -run 'Migration|MachineLedger|ProjectID|ProjectFragment|FragmentCommit|SharedConfig|ReviewV2' -count=2
       - name: Stress native Windows replacement
         if: runner.os == 'Windows'
         run: go test ./internal/atomicfile -run '^TestWindows' -count=20
@@ -83,6 +83,7 @@ jobs:
           go test -c -o reviewv2.test.exe ./internal/reviewv2
           go test -c -o sync.test.exe ./internal/sync
           go test -c -o cli.test.exe ./internal/cli
+          go test -c -o project.test.exe ./internal/project
       - name: Cross-build macOS Intel gate
         if: runner.os == 'Windows'
         env:
@@ -93,3 +94,4 @@ jobs:
           go test -c -o reviewv2.test ./internal/reviewv2
           go test -c -o sync.test ./internal/sync
           go test -c -o cli.test ./internal/cli
+          go test -c -o project.test ./internal/project

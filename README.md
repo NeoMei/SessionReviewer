@@ -82,6 +82,8 @@ session-reviewer.exe init --project . --vault C:\Users\Me\Vault --write
 
 可用 `--data-dir <path>` 显式覆盖。
 
+新的项目映射以只含 mapping、不含凭证的 `projects.d/<project-id>.toml` 独立片段发布；`config.toml` 中已有的旧映射仍会一起加载，`init` 不会重写该共享文件。手工恢复时不要合并、改名或复制 fragment：文件名、内部 ID、根路径或同 ID 内容发生冲突时，加载会 fail closed。
+
 ## 准备 evidence packet
 
 macOS：

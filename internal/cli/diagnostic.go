@@ -109,13 +109,13 @@ func writeDiagnostic(w io.Writer, action string, err error) int {
 		diagnostic = Diagnostic{
 			Code:    "E_INIT_CONFIG_CORRUPT",
 			Message: "initialization configuration is unreadable",
-			Hint:    "repair or restore config.toml, then rerun init preview",
+			Hint:    "repair or restore config.toml or its projects.d mapping fragment, then rerun init preview",
 		}
 	case errors.Is(err, project.ErrConflictingInitializationIdentity):
 		diagnostic = Diagnostic{
 			Code:    "E_INIT_IDENTITY_CONFLICT",
 			Message: "project identity conflicts with existing state",
-			Hint:    "use the mapped --vault, or reconcile config.toml and project-overview.md before retrying",
+			Hint:    "use the mapped --vault, or reconcile the config mapping and project review identity before retrying",
 		}
 	}
 	fmt.Fprintf(w, "%s: %s\nrecovery: %s\n", diagnostic.Code, diagnostic.Message, diagnostic.Hint)

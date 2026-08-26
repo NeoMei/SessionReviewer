@@ -452,7 +452,8 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dataRoot, "config.toml")
-	configBefore, err := os.ReadFile(configPath)
+	fragmentPath := filepath.Join(dataRoot, config.ProjectFragmentsDir, first.ProjectID+".toml")
+	configBefore, err := os.ReadFile(fragmentPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -472,7 +473,7 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	configAfter, _ := os.ReadFile(configPath)
+	configAfter, _ := os.ReadFile(fragmentPath)
 	for _, relative := range reviewPaths {
 		reviewAfter, readErr := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(relative)))
 		if readErr != nil || !bytes.Equal(reviewBefore[relative], reviewAfter) {
