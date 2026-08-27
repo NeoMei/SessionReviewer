@@ -1,6 +1,6 @@
 # Obsidian 项目演进浏览器验收
 
-> 候选版本：0.2.0
+> 候选版本：0.2.1
 > 分支：`codex/session-reviewer-v2`
 > 验收日期：2026-08-27
 
@@ -24,7 +24,7 @@
 ## macOS 真实 UI 验收
 
 - 环境：macOS，Obsidian 1.13.7，Vault 使用既有 SessionReviewer 配置映射。
-- 安装与兼容性：候选 zip 的三个文件安装到 `.obsidian/plugins/session-reviewer` 并在 Obsidian 中启用；插件显示为 SessionReviewer 0.2.0。候选 CLI 安装为 `~/.local/bin/session-reviewer-v2`，保留既有 0.1.0 `session-reviewer` 不变；插件通过 `version --json` 验证 0.2.0 和 review schema 2 后保存该稳定路径。
+- 安装与兼容性：候选 zip 的三个文件安装到 `.obsidian/plugins/session-reviewer` 并在 Obsidian 中启用；插件显示为 SessionReviewer 0.2.1。候选 CLI 安装为 `~/.local/bin/session-reviewer-v2`，保留既有 0.1.0 `session-reviewer` 不变；插件通过 `version --json` 验证 0.2.1 和 review schema 2 后保存该稳定路径。
 - 默认恢复视图：打开后只显示目标、状态、当前阶段、一个下一步、五个最近演进节点及相邻详情。逐一点击五个节点后，选中标题与右侧详情标题全部一致。
 - 决策与用量：从“只持久化脱敏且可定位的允许列表证据”成功逆跳到“截断后二次脱敏缺陷完成 TDD 修复并恢复 apply”。UI 显示总时长 3820 分 26 秒、573,135,757 tokens、$291.30、gpt-5.6-sol 100%，以及 2026-08-27 单价日期和官方来源；与隐藏账本一致。
 - 双向编辑：在 Obsidian 编辑项目目标后，页面立即显示“等待同步到代码目录”和“机器用量仍来自上次验收”；CLI 状态可从页面刷新。真实同步后 Project/Vault 均出现验收标记并恢复 `in_sync=2`；随后从 Project 侧删除标记再同步，Obsidian 页面恢复原文。

@@ -56,8 +56,8 @@ func TestCommonEntriesPackagesAuthoritativeReviewV2SchemaBytes(t *testing.T) {
 
 func TestReleaseWrappersDefaultToV020AndPassExactSourceAndDist(t *testing.T) {
 	checks := map[string][]string{
-		"../../scripts/build-release.sh":  {"version=${1:-0.2.0}", "--source .", "--dist \"$dist\""},
-		"../../scripts/build-release.ps1": {"[string]$Version = \"0.2.0\"", "--source .", "--dist $Dist"},
+		"../../scripts/build-release.sh":  {"version=${1:-0.2.1}", "--source .", "--dist \"$dist\""},
+		"../../scripts/build-release.ps1": {"[string]$Version = \"0.2.1\"", "--source .", "--dist $Dist"},
 	}
 	for name, required := range checks {
 		body, err := os.ReadFile(name)
@@ -78,16 +78,16 @@ func TestCIExecutesBothReleaseWrappersTwiceAndVerifiesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	if strings.Count(text, "./scripts/build-release.sh 0.2.0") != 2 {
+	if strings.Count(text, "./scripts/build-release.sh 0.2.1") != 2 {
 		t.Fatalf("CI must execute the shell wrapper twice:\n%s", text)
 	}
-	if strings.Count(text, `.\scripts\build-release.ps1 -Version 0.2.0`) != 2 {
+	if strings.Count(text, `.\scripts\build-release.ps1 -Version 0.2.1`) != 2 {
 		t.Fatalf("CI must execute the PowerShell wrapper twice:\n%s", text)
 	}
 	for _, required := range []string{
-		"session-reviewer_0.2.0_darwin_amd64.tar.gz",
-		"session-reviewer_0.2.0_darwin_arm64.tar.gz",
-		"session-reviewer_0.2.0_windows_amd64.zip",
+		"session-reviewer_0.2.1_darwin_amd64.tar.gz",
+		"session-reviewer_0.2.1_darwin_arm64.tar.gz",
+		"session-reviewer_0.2.1_windows_amd64.zip",
 		"shasum -a 256 -c SHA256SUMS", "Get-FileHash -Algorithm SHA256",
 		"session-reviewer/schemas/review-ledger-v2.schema.json",
 		`session-reviewer\schemas\review-ledger-v2.schema.json`,
@@ -106,7 +106,7 @@ func TestReadmeDocumentsPublicReviewV2Workflow(t *testing.T) {
 	text := string(body)
 	for _, required := range []string{
 		"docs/session-review/项目回顾.md", "docs/session-review/项目历史.md", "docs/session-review/.session-reviewer/ledger.json",
-		"sync repair-machine-ledger", "--project-id", "migration backup", "PowerShell", "v0.2.0",
+		"sync repair-machine-ledger", "--project-id", "migration backup", "PowerShell", "v0.2.1",
 	} {
 		if !strings.Contains(text, required) {
 			t.Errorf("README.md missing %q", required)
