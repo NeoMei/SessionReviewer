@@ -2,42 +2,23 @@
 id: current-state
 entity_type: current_state
 project_id: project-269b8cab6cbf69dd
-revision: 11
+revision: 16
 evidence:
-  - evidence_id: ev-00fa9ad4d9db
+  - evidence_id: ev-2e25fbe9864a
     session_id: 01a02971-61d6-7251-bdcf-f999230f961d
-    jsonl_line: 23223
-    source_hash: 702fca35e79cdedb9e058c65d93164921680c55adb7928f082b98dfdc1ab5fc4
-    summary: 第 5 包已正式接受，cursor 从 `20840` 推进到 `22960`。它闭合了三平台 GitHub CI，记录了真实 Obsidian 同步与发行工程验证，并建立了 `v0.1.0` 发行待办；现在按同一 accepted boundary 继续处理后续证据，不会从头重扫。
-  - evidence_id: ev-7b3b17599d8e
+    jsonl_line: 28765
+    source_hash: 4f1c29a5623ac5db552f11b0da38ae44663aad8e9ff5de7aa32a885f03ea08f1
+    summary: 第二个 dry-run 边界也已修复并在真实映射验证：应用前 status 能正常显示 3 个可信更新且派生状态 deferred，正式同步后恢复为 16/16、二次 dry-run 0 operations、Project/Vault diff 为 0，`resume` 已显示正确停点。现在跑最终全量、race 与 macOS/Windows 交叉编译门禁。
+  - evidence_id: ev-51e4b470746b
     session_id: 01a02971-61d6-7251-bdcf-f999230f961d
-    jsonl_line: 23199
-    source_hash: 9143c5fdbdae53b89948dbc7c7a6e71c248bda7378d54cc1f55fa571ee5f7ba4
-    summary: |
-      1. 全面审查任务是否全部完成，如果未完成，请完成所有任务，然后重复几轮任务审查，直到所有任务全部完成。
-      2. 全面审查代码，修复所有值得修复的 bug，请重复几轮代码审查，直到没有值得修复的 bug。
-      3. 全面测试系统功能（包括前后端和 UI 交互），修复所有发现的 bug，如果有 bug，请重复几轮测试，直到没有值得修复的 bug。
-  - evidence_id: ev-d92d9d464059
+    jsonl_line: 28778
+    source_hash: 5fcc08f6490f626fefb5e02570b97f275224fc7971e4b70c6374b8849f584b02
+    summary: 最终门禁全部通过：全仓测试、vet、module tidy、关键包 race，以及 Windows amd64 / macOS amd64 交叉测试构建均为绿。为避免恢复卡遗漏刚发现的 dry-run 边界修复，我再写入一个很小的最终 checkpoint；之后只做同步复验和清理，不再扩展实现范围。
+  - evidence_id: ev-a7d0b85e0b73
     session_id: 01a02971-61d6-7251-bdcf-f999230f961d
-    jsonl_line: 23193
-    source_hash: 5b3b5faf77692ff91f503926ed4feb170ac03a7dc7da8fff89c2f265511832d7
-    summary: |-
-      本轮按 `session-reviewer` skill 的失败即停规则暂停。
-
-      原因：调用 apply wrapper 时路径写错，命令未执行，台账没有发生任何修改。诊断文件已完整保留：
-
-      - Packet：`/private/tmp/session-reviewer-selfreview-next.yBREzk/packet-5.json`
-      - Proposal：`/private/tmp/session-reviewer-selfreview-next.yBREzk/proposal-5.json`
-
-      此前确认的 RFC3339 小数秒缺陷已经完成 TDD 修复。下一轮可从该 Packet 5 直接使用正确 wrapper 恢复，无需重做前四包。
-
-      <oai-mem-citation>
-      <citation_entries>
-      MEMORY.md:63-76|note=[SessionReviewer continuity accounting and publishing context]
-      </citation_entries>
-      <rollout_ids>
-      </rollout_ids>
-      </oai-mem-citation>
+    jsonl_line: 28729
+    source_hash: 2c850334ed39fd9501bd6951619a898c3933d6608e8abd6286262cd770c9a23c
+    summary: 定位到了第二个边界 bug：正式同步路径本身可收敛，但 `status/dry-run` 在 receipt-trusted 变更尚未写 Base 时，错误地提前规划派生导航，于是把“预期中的旧 Base”当成异常。修复原则是：只要 dry-run 发现 accepted 结果会改变 Project 语义或 Base 语义，就把派生规划标为 deferred；不放松任何校验。
 source_sessions:
   - 01a02971-61d6-7251-bdcf-f999230f961d
 sync_status: synced
@@ -50,7 +31,7 @@ sync_status: synced
 
 ## Last verified state
 
-`v0.1.0` 已发布为公开 GitHub Release，标签固定在 `9c2397f`；macOS Intel、Apple Silicon、Windows x64 三个归档和 `SHA256SUMS` 均可下载并已在下载后复验。main 推送 CI、Release 工作流和标签 CI 均完成；标签 CI 首次运行暴露了一个墙钟计时测试抖动，Intel 失败任务重跑全绿，随后已把该门禁改为确定性的输出等价断言。真实 Project/Obsidian 同步仍为 14/14，派生文件 16，重复 dry-run 零操作。
+`v0.1.0` 已公开发布并完成本机 Skill/CLI 安装。增量自举回顾已完整收敛：prepare 截断后二次脱敏、applied-receipt provenance 信任链及其 dry-run 派生延后边界均通过 TDD 修复。全仓测试、vet、module tidy、关键包 race、Windows amd64 与 macOS amd64 交叉测试构建均通过；真实 Project/Obsidian 为 16/16 in-sync，零冲突、零 malformed、零 blocked，重复 dry-run 与递归 diff 均为零。三项本地修复尚未发布。
 
 ## Repository
 
@@ -62,22 +43,27 @@ main
 
 ## Next action
 
-监测首批安装反馈；若发现影响运行时的缺陷，按语义化版本发布后续修复版。当前不移动已公开的 `v0.1.0` 标签。
+发布包含截断后二次脱敏、applied-receipt 同步信任链和 dry-run 派生延后修复的后续补丁版本，并解决 GitHub Skill 安装器丢失 POSIX wrapper 执行位的兼容问题；不移动已公开的 v0.1.0 标签。
 
 ## Uncommitted changes
 
 <!-- session-reviewer:list-codec=v1 -->
+- sr-string: "internal/evidence：截断后再次脱敏并覆盖新形成高熵候选的回归测试"
+- sr-string: "internal/apply 与 internal/sync：完整 applied-receipt 有向链桥、Vault 并发保护和 dry-run 派生延后"
+- sr-string: "本轮增量回顾、项目演进图、Session 报告和 Obsidian 派生导航更新"
 
 ## Open risks
 
 <!-- session-reviewer:list-codec=v1 -->
 - sr-string: "Windows x64 已交叉构建并由既有 CI 原生验证，但本轮没有 Windows 10/11 实机 UI 验收"
 - sr-string: "v0.1.0 标签包含原计时型回归测试；该测试曾在 Intel 标签 CI 偶发失败后重跑通过，确定性替代只存在于后续 main，不影响发布二进制"
+- sr-string: "已发布 v0.1.0 尚不包含本轮三项修复"
+- sr-string: "GitHub Skill 安装器会把 POSIX wrappers 从 0755 落盘为 0644，其他用户可能需要手工 chmod"
 
 ## First inspection
 
-先打开 project-overview.md，沿五节点主线和快速入口恢复上下文；处理发行问题时打开公开 `v0.1.0` Release、校验 `SHA256SUMS`，并区分标签源码与后续 main 的测试维护提交。
+先打开 project-overview.md 和 evolution-timeline.md 恢复主线；随后检查 internal/evidence/extract.go、internal/apply/trusted_transition.go、internal/sync/service.go 及对应回归测试。
 
 ## Last updated
 
-2026-08-25T02:18:50Z
+2026-08-25T04:11:09.849Z

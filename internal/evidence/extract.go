@@ -287,12 +287,14 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 	safeToolName, toolFindings := x.redact(toolName)
 	safeSummary, summaryFindings := x.redact(summary)
 	safeSummary = bound(safeSummary, x.limits.MaxSummaryRunes)
+	safeSummary, boundedSummaryFindings := x.redact(safeSummary)
 
-	findings := make([]redact.Finding, 0, len(itemFindings)+len(timestampFindings)+len(toolFindings)+len(summaryFindings))
+	findings := make([]redact.Finding, 0, len(itemFindings)+len(timestampFindings)+len(toolFindings)+len(summaryFindings)+len(boundedSummaryFindings))
 	findings = append(findings, itemFindings...)
 	findings = append(findings, timestampFindings...)
 	findings = append(findings, toolFindings...)
 	findings = append(findings, summaryFindings...)
+	findings = append(findings, boundedSummaryFindings...)
 
 	item := Item{
 		ID:         x.eventID(record.Line, safeSourceHash, kind, safeItemID),

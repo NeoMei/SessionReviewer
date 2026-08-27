@@ -357,6 +357,28 @@ func TestExtractorRedactsBeforeTruncating(t *testing.T) {
 	}
 }
 
+func TestExtractorRedactsCandidateCreatedByTruncation(t *testing.T) {
+	input := `file "$REVIEW_TMP/native/session-reviewer/session-reviewer" and-more-data`
+	if findings := redact.Default().Text(input).Findings; len(findings) != 0 {
+		t.Fatalf("fixture is unsafe before truncation: %v", findings)
+	}
+	kept := `file "$REVIEW_TMP/native/session-reviewer/session-r`
+	limit := utf8.RuneCountInString(kept) + utf8.RuneCountInString(truncationMarker)
+	x := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: limit, MaxPacketRunes: 1000})
+	if err := x.Add(messageRecord(t, 1, "u", "user", input)); err != nil {
+		t.Fatal(err)
+	}
+
+	packet := x.Packet()
+	got := packet.Events[0].Summary
+	if findings := redact.Default().Text(got).Findings; len(findings) != 0 {
+		t.Fatalf("bounded summary contains a post-truncation finding: summary=%q findings=%v", got, findings)
+	}
+	if !reflect.DeepEqual(packet.Warnings, []string{"redacted:high_entropy_token:1"}) {
+		t.Fatalf("summary=%q warnings=%v", got, packet.Warnings)
+	}
+}
+
 func TestExtractorPacketTextLimitHasExactBoundary(t *testing.T) {
 	base := newExtractor(t, "s", "/", 1, Limits{MaxEvents: 1, MaxSummaryRunes: 100, MaxPacketRunes: 1000})
 	input := messageRecord(t, 1, "u", "user", "甲乙")

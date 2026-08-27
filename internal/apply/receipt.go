@@ -155,8 +155,7 @@ func (receipt applyReceipt) validate() error {
 	seen := make(map[string]struct{}, len(receipt.Files))
 	caseSeen := make(map[string]string, len(receipt.Files))
 	for _, file := range receipt.Files {
-		fromSlash := filepath.FromSlash(file.RelativePath)
-		if file.RelativePath == "" || file.RelativePath == ".." || strings.HasPrefix(file.RelativePath, "../") || filepath.IsAbs(file.RelativePath) || strings.Contains(file.RelativePath, "\\") || filepath.Clean(fromSlash) != fromSlash {
+		if !validReceiptRelativePath(file.RelativePath) {
 			return errors.New("invalid receipt file path")
 		}
 		if _, duplicate := seen[file.RelativePath]; duplicate {
@@ -196,6 +195,12 @@ func (receipt applyReceipt) validate() error {
 		return errors.New("applied receipt changed files do not match its plan")
 	}
 	return nil
+}
+
+func validReceiptRelativePath(relativePath string) bool {
+	fromSlash := filepath.FromSlash(relativePath)
+	return relativePath != "" && relativePath != ".." && !strings.HasPrefix(relativePath, "../") &&
+		!filepath.IsAbs(relativePath) && !strings.Contains(relativePath, "\\") && filepath.Clean(fromSlash) == fromSlash
 }
 
 func validReceiptBoundary(boundary evidence.CursorBoundary) bool {
