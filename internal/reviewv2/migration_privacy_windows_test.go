@@ -57,7 +57,8 @@ func TestWindowsCreatedDirectoryHandleDoesNotHardenReplacement(t *testing.T) {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}
 	if !privateMigrationPath(away, 0) {
-		t.Fatal("identity-bound created directory was not hardened")
+		got, want, control := migrationACLDiagnostic(t, away)
+		t.Fatalf("identity-bound created directory was not hardened: got=%q want=%q control=%#x", got, want, control)
 	}
 }
 
@@ -95,7 +96,8 @@ func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T)
 	}
 	for _, path := range privatePaths {
 		if !privateMigrationPath(path, 0) {
-			t.Fatalf("private ACL missing: %s", path)
+			got, want, control := migrationACLDiagnostic(t, path)
+			t.Fatalf("private ACL missing: %s got=%q want=%q control=%#x", path, got, want, control)
 		}
 	}
 	setPermissiveMigrationDACL(t, privatePaths[len(privatePaths)-2])
@@ -110,4 +112,21 @@ func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T)
 	if err != nil || string(after) != string(before) {
 		t.Fatalf("recovery wrote after ACL broadening: %v", err)
 	}
+}
+
+func migrationACLDiagnostic(t *testing.T, path string) (got, want string, control windows.SECURITY_DESCRIPTOR_CONTROL) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return "get-error:" + err.Error(), "", 0
+	}
+	control, _, err = descriptor.Control()
+	if err != nil {
+		return descriptor.String(), "control-error:" + err.Error(), 0
+	}
+	want, err = privateMigrationSDDL()
+	if err != nil {
+		want = "want-error:" + err.Error()
+	}
+	return descriptor.String(), want, control
 }
