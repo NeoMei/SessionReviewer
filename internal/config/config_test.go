@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -174,6 +175,255 @@ func TestProjectFragmentRejectsFilenameIdentityAndLegacyCollisions(t *testing.T)
 	}
 	if _, err := Load(filepath.Join(dir, "config.toml")); err == nil {
 		t.Fatal("legacy/fragment root collision was accepted")
+	}
+}
+
+func TestConfigRejectsPortableProjectAndVaultDestinationCollisions(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  ProjectMapping
+		second ProjectMapping
+	}{
+		{
+			name: "same project root",
+			first: ProjectMapping{ID: "project-1111111111111111", Root: "/work/same", VaultRoot: "/vault/one",
+				VaultReviewPath: "Projects/one--11111111/Session Review", VaultCaseMode: platform.CaseSensitive},
+			second: ProjectMapping{ID: "project-2222222222222222", Root: "/work/same", VaultRoot: "/vault/two",
+				VaultReviewPath: "Projects/two--22222222/Session Review", VaultCaseMode: platform.CaseSensitive},
+		},
+		{
+			name: "exact vault target",
+			first: ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/vault",
+				VaultReviewPath: "Projects/shared/Session Review", VaultCaseMode: platform.CaseSensitive},
+			second: ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault",
+				VaultReviewPath: "Projects/shared/Session Review", VaultCaseMode: platform.CaseSensitive},
+		},
+		{
+			name: "case-only insensitive vault target",
+			first: ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/Vault",
+				VaultReviewPath: "Projects/Shared/Session Review", VaultCaseMode: platform.CaseInsensitive},
+			second: ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault",
+				VaultReviewPath: "Projects/shared/Session Review", VaultCaseMode: platform.CaseInsensitive},
+		},
+		{
+			name: "nfc-equivalent vault target",
+			first: ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/vault/Café",
+				VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive},
+			second: ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault/Café",
+				VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			err := Save(path, Config{Version: 1, Projects: []ProjectMapping{test.first, test.second}})
+			if err == nil || !strings.Contains(err.Error(), "mapped more than once") {
+				t.Fatalf("collision accepted: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestProjectFragmentPublishRejectsLegacyAndFragmentVaultCollision(t *testing.T) {
+	dir := t.TempDir()
+	legacy := ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/Vault",
+		VaultReviewPath: "Projects/Shared/Session Review", VaultCaseMode: platform.CaseInsensitive}
+	if err := Save(filepath.Join(dir, "config.toml"), Config{Version: 1, Projects: []ProjectMapping{legacy}}); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	fragment := ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault",
+		VaultReviewPath: "Projects/shared/Session Review", VaultCaseMode: platform.CaseInsensitive}
+	created, err := PublishProjectFragmentRoot(root, fragment, nil)
+	if err == nil || created {
+		t.Fatalf("vault collision published: created=%v err=%v", created, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ProjectFragmentsDir, fragment.ID+".toml")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("colliding fragment exists: %v", statErr)
+	}
+}
+
+func TestLoadRejectsTwoFragmentsWithNFCEquivalentVaultDestination(t *testing.T) {
+	dir := t.TempDir()
+	firstDir := t.TempDir()
+	firstRoot, err := os.OpenRoot(firstDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/vault/Café",
+		VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive}
+	if _, err := PublishProjectFragmentRoot(firstRoot, first, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	secondDir := t.TempDir()
+	secondRoot, err := os.OpenRoot(secondDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault/Café",
+		VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive}
+	if _, err := PublishProjectFragmentRoot(secondRoot, second, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, ProjectFragmentsDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{
+		filepath.Join(firstDir, ProjectFragmentsDir, first.ID+".toml"),
+		filepath.Join(secondDir, ProjectFragmentsDir, second.ID+".toml"),
+	} {
+		body, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ProjectFragmentsDir, filepath.Base(source)), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Load(filepath.Join(dir, "config.toml")); err == nil {
+		t.Fatal("NFC-equivalent fragment vault destinations were accepted")
+	}
+}
+
+func TestProjectFragmentCommitRejectsLiveRootAndDirectoryChanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, data, moved string)
+	}{
+		{name: "config root replacement", mutate: func(t *testing.T, data, moved string) {
+			if err := os.Rename(data, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(data, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "fragments directory replacement", mutate: func(t *testing.T, data, moved string) {
+			fragments := filepath.Join(data, ProjectFragmentsDir)
+			if err := os.Rename(fragments, moved); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(fragments, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "fragments directory mode broadened", mutate: func(t *testing.T, data, _ string) {
+			if runtime.GOOS == "windows" {
+				t.Skip("Windows privacy is verified by the native ACL test")
+			}
+			if err := os.Chmod(filepath.Join(data, ProjectFragmentsDir), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			parent := t.TempDir()
+			data := filepath.Join(parent, "data")
+			moved := filepath.Join(parent, "moved")
+			if err := os.Mkdir(data, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			mapping := ProjectMapping{ID: "project-2a2a2a2a2a2a2a2a", Root: "/work", VaultRoot: "/vault",
+				VaultReviewPath: "Projects/work--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive}
+			created, err := PublishProjectFragmentRoot(root, mapping, func() error {
+				test.mutate(t, data, moved)
+				return nil
+			})
+			if err == nil || created {
+				t.Fatalf("changed live directory committed: created=%v err=%v", created, err)
+			}
+			for _, base := range []string{data, moved} {
+				if _, statErr := os.Stat(filepath.Join(base, ProjectFragmentsDir, mapping.ID+".toml")); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("fragment published below %s: %v", base, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestSaveRootUsesSelectedBackupBaseWithFragments(t *testing.T) {
+	for _, invalidPrimary := range []bool{false, true} {
+		name := "backup-only"
+		if invalidPrimary {
+			name = "invalid-primary"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.toml")
+			id := "project-2a2a2a2a2a2a2a2a"
+			legacy := ProjectMapping{ID: id, Root: "/work", VaultRoot: "/vault"}
+			association := SessionAssociation{SessionID: "session-one", ProjectID: id}
+			if err := Save(path, Config{Version: 1, Projects: []ProjectMapping{legacy}, SessionAssociations: []SessionAssociation{association}}); err != nil {
+				t.Fatal(err)
+			}
+			backupPath := atomicfile.BackupPath(path)
+			if err := os.Rename(path, backupPath); err != nil {
+				t.Fatal(err)
+			}
+			if invalidPrimary {
+				if err := os.WriteFile(path, []byte("invalid = ["), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			root, err := os.OpenRoot(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			completed := legacy
+			completed.VaultReviewPath = "Projects/work--2a2a2a2a/Session Review"
+			completed.VaultCaseMode = platform.CaseSensitive
+			if _, err := PublishProjectFragmentRoot(root, completed, nil); err != nil {
+				t.Fatal(err)
+			}
+			fragmentPath := filepath.Join(dir, ProjectFragmentsDir, id+".toml")
+			fragmentBefore, err := os.ReadFile(fragmentPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			merged, err := Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			callerBefore := Config{Version: merged.Version, Projects: append([]ProjectMapping(nil), merged.Projects...), SessionAssociations: append([]SessionAssociation(nil), merged.SessionAssociations...)}
+			if err := Save(path, merged); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(merged, callerBefore) {
+				t.Fatalf("Save mutated caller: got=%+v want=%+v", merged, callerBefore)
+			}
+			fragmentAfter, err := os.ReadFile(fragmentPath)
+			if err != nil || !bytes.Equal(fragmentBefore, fragmentAfter) {
+				t.Fatalf("fragment changed: err=%v", err)
+			}
+			roundTrip, err := Load(path)
+			if err != nil || len(roundTrip.Projects) != 1 || !reflect.DeepEqual(roundTrip.Projects[0], completed) || !reflect.DeepEqual(roundTrip.SessionAssociations, []SessionAssociation{association}) {
+				t.Fatalf("roundTrip=%+v err=%v", roundTrip, err)
+			}
+			if _, err := os.Stat(backupPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("backup remains after converged save: %v", err)
+			}
+			raw, err := os.ReadFile(path)
+			if err != nil || !bytes.Contains(raw, []byte(id)) || bytes.Contains(raw, []byte("vault_review_path")) {
+				t.Fatalf("selected legacy base not preserved: %q err=%v", raw, err)
+			}
+		})
 	}
 }
 

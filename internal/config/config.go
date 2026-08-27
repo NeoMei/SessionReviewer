@@ -17,6 +17,8 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/pelletier/go-toml/v2"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const ProjectFragmentsDir = "projects.d"
@@ -79,17 +81,9 @@ func Save(path string, cfg Config) error {
 // LoadRoot reads a typed transaction snapshot. The destination is authoritative
 // when valid; otherwise a valid migration recovery backup is used.
 func LoadRoot(root *os.Root, name string) (Config, error) {
-	primary, primaryFound, primaryErr := readConfig(root, name)
-	backup, backupFound, backupErr := readConfig(root, atomicfile.BackupPath(name))
-	var base Config
-	if primaryFound && primaryErr == nil {
-		base = primary
-	} else if backupFound && backupErr == nil {
-		base = backup
-	} else if !primaryFound && !backupFound {
-		base = Config{Version: 1}
-	} else {
-		return Config{}, fmt.Errorf("configuration state and recovery backup are invalid")
+	base, err := selectedSharedConfigBase(root, name)
+	if err != nil {
+		return Config{}, err
 	}
 	fragments, err := loadProjectFragmentsRoot(root)
 	if err != nil {
@@ -110,11 +104,17 @@ func SaveRoot(root *os.Root, name string, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	if err := cleanupConvergedConfigBackup(root, name); err != nil {
+	pendingBackupHash, err := prepareConfigBackupForSave(root, name)
+	if err != nil {
 		return err
 	}
 	if err := atomicfile.WriteRoot(root, name, b, 0o600); err != nil {
 		return err
+	}
+	if pendingBackupHash != "" {
+		if err := atomicfile.RemoveRootFileIfHashMatches(root, atomicfile.BackupPath(name), pendingBackupHash); err != nil {
+			return errors.New("configuration recovery backup requires explicit resolution")
+		}
 	}
 	if _, err := root.Lstat(atomicfile.BackupPath(name)); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("configuration recovery backup appeared during save")
@@ -137,8 +137,16 @@ func PublishProjectFragmentRoot(root *os.Root, mapping ProjectMapping, beforePub
 	if err != nil {
 		return false, err
 	}
-	if err := atomicfile.EnsureRootDir(root, ProjectFragmentsDir, 0o700); err != nil {
+	if _, err := atomicfile.EnsureRootDirPrepared(root, ProjectFragmentsDir, 0o700, nil, secureProjectFragmentsDirectory); err != nil {
 		return false, fmt.Errorf("prepare project fragments directory: %w", err)
+	}
+	rootInfo, err := root.Stat(".")
+	if err != nil || !rootInfo.IsDir() {
+		return false, errors.New("configuration root is unavailable")
+	}
+	fragmentsInfo, err := root.Lstat(ProjectFragmentsDir)
+	if err != nil || !privateProjectFragmentsPath(filepath.Join(root.Name(), ProjectFragmentsDir), fragmentsInfo) {
+		return false, errors.New("project fragments directory is invalid")
 	}
 	fragmentsRoot, err := openProjectFragmentsRoot(root)
 	if err != nil {
@@ -153,7 +161,15 @@ func PublishProjectFragmentRoot(root *os.Root, mapping ProjectMapping, beforePub
 	if _, err = mergeProjectFragments(current, []ProjectMapping{mapping}); err != nil {
 		return false, err
 	}
-	err = atomicfile.WriteRootFileCreateIfAbsent(fragmentsRoot, name, body, 0o600, beforePublish)
+	commitCheck := func() error {
+		if beforePublish != nil {
+			if err := beforePublish(); err != nil {
+				return err
+			}
+		}
+		return verifyLiveProjectFragmentsRoot(root, rootInfo, fragmentsInfo)
+	}
+	err = atomicfile.WriteRootFileCreateIfAbsentPrepared(fragmentsRoot, name, body, 0o600, secureProjectFragmentFile, commitCheck)
 	if err == nil {
 		return true, nil
 	}
@@ -176,7 +192,7 @@ func loadProjectFragmentsRoot(root *os.Root) ([]ProjectMapping, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o700) {
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !privateProjectFragmentsPath(filepath.Join(root.Name(), ProjectFragmentsDir), info) {
 		return nil, errors.New("project fragments directory is invalid")
 	}
 	fragmentsRoot, err := root.OpenRoot(ProjectFragmentsDir)
@@ -217,7 +233,7 @@ func loadProjectFragmentsRoot(root *os.Root) ([]ProjectMapping, error) {
 
 func openProjectFragmentsRoot(root *os.Root) (*os.Root, error) {
 	info, err := root.Lstat(ProjectFragmentsDir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o700) {
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !privateProjectFragmentsPath(filepath.Join(root.Name(), ProjectFragmentsDir), info) {
 		return nil, errors.New("project fragments directory is invalid")
 	}
 	opened, err := root.OpenRoot(ProjectFragmentsDir)
@@ -229,7 +245,7 @@ func openProjectFragmentsRoot(root *os.Root) (*os.Root, error) {
 
 func readStableFragmentBytes(root *os.Root, name string) ([]byte, error) {
 	info, err := root.Lstat(name)
-	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) || info.Size() > 1<<20 {
+	if err != nil || !privateProjectFragmentPath(filepath.Join(root.Name(), name), info) || info.Size() > 1<<20 {
 		return nil, errors.New("project mapping fragment is invalid")
 	}
 	body, err := pathguard.ReadStableRegularRootFile(root, name, info, 1<<20)
@@ -328,12 +344,9 @@ func sharedConfigForSave(root *os.Root, name string, cfg Config) (Config, error)
 	if len(fragments) == 0 {
 		return cfg, nil
 	}
-	existing, found, readErr := readConfig(root, name)
-	if readErr != nil {
-		return Config{}, readErr
-	}
-	if !found {
-		existing = Config{Version: 1}
+	existing, err := selectedSharedConfigBase(root, name)
+	if err != nil {
+		return Config{}, err
 	}
 	fragmentByID := make(map[string]ProjectMapping, len(fragments))
 	for _, fragment := range fragments {
@@ -372,34 +385,35 @@ func sharedConfigForSave(root *os.Root, name string, cfg Config) (Config, error)
 	return next, nil
 }
 
-func cleanupConvergedConfigBackup(root *os.Root, name string) error {
+// prepareConfigBackupForSave resolves an already-converged backup before the
+// write. When the valid backup is the selected source because the primary is
+// missing or invalid, it returns the authenticated backup hash so the caller
+// can durably replace the primary first and remove only that exact backup.
+func prepareConfigBackupForSave(root *os.Root, name string) (string, error) {
 	backupName := atomicfile.BackupPath(name)
 	if _, err := root.Lstat(backupName); errors.Is(err, os.ErrNotExist) {
-		return nil
+		return "", nil
 	} else if err != nil {
-		return errors.New("cannot inspect configuration recovery backup")
+		return "", errors.New("cannot inspect configuration recovery backup")
 	}
 	if _, found, err := readConfig(root, name); err == nil && found {
 		hash, err := stableConfigHash(root, name)
 		if err != nil {
-			return err
+			return "", err
 		}
 		if err := atomicfile.RemoveRootFileIfHashMatches(root, backupName, hash); err != nil {
-			return errors.New("configuration recovery backup requires explicit resolution")
+			return "", errors.New("configuration recovery backup requires explicit resolution")
 		}
-		return nil
+		return "", nil
 	}
 	if _, found, err := readConfig(root, backupName); err != nil || !found {
-		return errors.New("configuration recovery backup does not match an authenticated primary")
+		return "", errors.New("configuration recovery backup does not match an authenticated primary")
 	}
 	hash, err := stableConfigHash(root, backupName)
 	if err != nil {
-		return err
+		return "", err
 	}
-	if err := atomicfile.RecoverRootFileRollback(root, name, hash); err != nil {
-		return errors.New("configuration recovery backup requires explicit resolution")
-	}
-	return nil
+	return hash, nil
 }
 
 func stableConfigHash(root *os.Root, name string) (string, error) {
@@ -453,7 +467,84 @@ func validate(cfg Config) error {
 			return fmt.Errorf("project %q: %w", project.ID, err)
 		}
 	}
+	if err := validateMappingDestinations(cfg.Projects); err != nil {
+		return err
+	}
 	return nil
+}
+
+func selectedSharedConfigBase(root *os.Root, name string) (Config, error) {
+	primary, primaryFound, primaryErr := readConfig(root, name)
+	backup, backupFound, backupErr := readConfig(root, atomicfile.BackupPath(name))
+	if primaryFound && primaryErr == nil {
+		return primary, nil
+	}
+	if backupFound && backupErr == nil {
+		return backup, nil
+	}
+	if !primaryFound && !backupFound {
+		return Config{Version: 1}, nil
+	}
+	return Config{}, fmt.Errorf("configuration state and recovery backup are invalid")
+}
+
+func verifyLiveProjectFragmentsRoot(root *os.Root, rootInfo, fragmentsInfo os.FileInfo) error {
+	live, err := os.OpenRoot(root.Name())
+	if err != nil {
+		return errors.New("configuration root changed before fragment publication")
+	}
+	defer live.Close()
+	liveInfo, err := live.Stat(".")
+	if err != nil || !os.SameFile(rootInfo, liveInfo) || !liveInfo.IsDir() || liveInfo.Mode() != rootInfo.Mode() {
+		return errors.New("configuration root changed before fragment publication")
+	}
+	liveFragments, err := live.Lstat(ProjectFragmentsDir)
+	if err != nil || !os.SameFile(fragmentsInfo, liveFragments) || !privateProjectFragmentsPath(filepath.Join(live.Name(), ProjectFragmentsDir), liveFragments) {
+		return errors.New("project fragments directory changed before publication")
+	}
+	return nil
+}
+
+func validateMappingDestinations(projects []ProjectMapping) error {
+	for i := range projects {
+		for j := 0; j < i; j++ {
+			if projects[i].ID == projects[j].ID {
+				continue
+			}
+			if portableAbsoluteKey(projects[i].Root, runtime.GOOS == "windows") == portableAbsoluteKey(projects[j].Root, runtime.GOOS == "windows") {
+				return fmt.Errorf("project root is mapped more than once: %q", projects[i].Root)
+			}
+			if sameVaultDestination(projects[i], projects[j]) {
+				return fmt.Errorf("vault destination is mapped more than once: %q", projects[i].VaultReviewPath)
+			}
+		}
+	}
+	return nil
+}
+
+func sameVaultDestination(left, right ProjectMapping) bool {
+	if left.VaultReviewPath == "" || right.VaultReviewPath == "" {
+		return false
+	}
+	insensitive := runtime.GOOS == "windows" || left.VaultCaseMode == platform.CaseInsensitive || right.VaultCaseMode == platform.CaseInsensitive
+	if portableAbsoluteKey(left.VaultRoot, insensitive) != portableAbsoluteKey(right.VaultRoot, insensitive) {
+		return false
+	}
+	mode := platform.CaseSensitive
+	if insensitive {
+		mode = platform.CaseInsensitive
+	}
+	leftKey, leftErr := platform.PathKey(runtime.GOOS, mode, left.VaultReviewPath)
+	rightKey, rightErr := platform.PathKey(runtime.GOOS, mode, right.VaultReviewPath)
+	return leftErr == nil && rightErr == nil && leftKey == rightKey
+}
+
+func portableAbsoluteKey(value string, insensitive bool) string {
+	key := norm.NFC.String(filepath.ToSlash(filepath.Clean(value)))
+	if insensitive {
+		key = cases.Fold().String(key)
+	}
+	return key
 }
 
 func validateVaultMapping(project ProjectMapping) error {

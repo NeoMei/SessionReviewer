@@ -848,16 +848,14 @@ func TestRunReadOnlyCursorFallbackDoesNotRepairState(t *testing.T) {
 	}
 }
 
-func TestRunRejectsAmbiguousConfiguredProject(t *testing.T) {
+func TestRunRejectsConfigurationWithDuplicateProjectRoot(t *testing.T) {
 	f := newRunFixture(t, "")
-	cfg := config.Config{Version: 1, Projects: []config.ProjectMapping{
-		{ID: "p1", Root: f.projectRoot},
-		{ID: "p2", Root: f.projectRoot},
-	}}
-	if err := config.Save(filepath.Join(f.data, "config.toml"), cfg); err != nil {
+	body := fmt.Sprintf("version = 1\n\n[[projects]]\nid = 'project-1111111111111111'\nroot = %q\nvault_root = %q\n\n[[projects]]\nid = 'project-2222222222222222'\nroot = %q\nvault_root = %q\n",
+		filepath.ToSlash(f.projectRoot), filepath.ToSlash(t.TempDir()), filepath.ToSlash(f.projectRoot), filepath.ToSlash(t.TempDir()))
+	if err := os.WriteFile(filepath.Join(f.data, "config.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "configuration") {
 		t.Fatalf("err=%v", err)
 	}
 }

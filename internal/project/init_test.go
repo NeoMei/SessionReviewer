@@ -1911,11 +1911,17 @@ func TestInitializeDataRootReplacementCannotRedirectConfigWrite(t *testing.T) {
 		}
 		return
 	}
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "configuration root changed") {
+		t.Fatalf("detached data-root publication was accepted: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(moved, config.ProjectFragmentsDir)); err != nil {
-		t.Fatal(err)
+	entries, readErr := os.ReadDir(filepath.Join(moved, config.ProjectFragmentsDir))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".toml") {
+			t.Fatalf("detached data root received mapping %q", entry.Name())
+		}
 	}
 	if _, err := os.Stat(filepath.Join(outside, config.ProjectFragmentsDir)); !os.IsNotExist(err) {
 		t.Fatalf("outside write: %v", err)
