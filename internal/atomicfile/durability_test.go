@@ -164,7 +164,12 @@ func TestEnsureRootDirPreparedDoesNotMutateFinalWindowReplacement(t *testing.T) 
 		t.Fatalf("created=%v err=%v", created, err)
 	}
 	if _, statErr := os.Lstat(replacement); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("replacement remained at public leaf: err=%v", statErr)
+		entries, _ := os.ReadDir(rootPath)
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Fatalf("replacement remained at public leaf: operation_err=%v stat_err=%v entries=%q", err, statErr, names)
 	}
 	preserved := findRootDirectoryQuarantine(t, rootPath)
 	info, statErr := os.Stat(preserved)

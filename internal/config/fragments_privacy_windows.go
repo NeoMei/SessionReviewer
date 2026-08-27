@@ -5,8 +5,8 @@ package config
 import (
 	"io/fs"
 	"os"
-	"strings"
 
+	"github.com/neomei/SessionReviewer/internal/winsecurity"
 	"golang.org/x/sys/windows"
 )
 
@@ -50,25 +50,9 @@ func privateConfigPath(path string) bool {
 	if err != nil {
 		return false
 	}
-	control, _, err := got.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-		return false
-	}
 	sddl, err := privateConfigSDDL()
 	if err != nil {
 		return false
 	}
-	want, err := windows.SecurityDescriptorFromString(sddl)
-	if err != nil {
-		return false
-	}
-	return canonicalConfigDACL(got.String()) == canonicalConfigDACL(want.String())
-}
-
-func canonicalConfigDACL(value string) string {
-	start := strings.Index(value, "D:")
-	if start < 0 {
-		return value
-	}
-	return value[start:]
+	return winsecurity.ProtectedDACLMatches(got, sddl)
 }

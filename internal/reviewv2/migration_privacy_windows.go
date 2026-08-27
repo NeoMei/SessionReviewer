@@ -5,8 +5,8 @@ package reviewv2
 import (
 	"io/fs"
 	"os"
-	"strings"
 
+	"github.com/neomei/SessionReviewer/internal/winsecurity"
 	"golang.org/x/sys/windows"
 )
 
@@ -62,24 +62,9 @@ func privateMigrationPath(path string, _ fs.FileMode) bool {
 	if err != nil {
 		return false
 	}
-	wantSD, err := windows.SecurityDescriptorFromString(want)
-	if err != nil {
-		return false
-	}
 	got, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return false
 	}
-	control, _, err := got.Control()
-	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
-		return false
-	}
-	return canonicalMigrationDACL(got.String()) == canonicalMigrationDACL(wantSD.String())
-}
-
-func canonicalMigrationDACL(s string) string {
-	if index := strings.Index(s, "D:"); index >= 0 {
-		return s[index:]
-	}
-	return s
+	return winsecurity.ProtectedDACLMatches(got, want)
 }
