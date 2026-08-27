@@ -506,6 +506,7 @@ func TestReconcileBackgroundTriggersDoNotFinalizeCommittedMigrationJournal(t *te
 			if err := os.WriteFile(journalPath, committed, 0o600); err != nil {
 				t.Fatal(err)
 			}
+			hardenMigrationTestPath(t, journalPath)
 			pending, err := reviewv2.MigrationPending(fixture.project, engine.project.Info(), fixture.data)
 			if err != nil || !pending {
 				t.Fatalf("late journal pending=%v err=%v", pending, err)
