@@ -3,7 +3,6 @@
 package atomicfile
 
 import (
-	"errors"
 	"os"
 	"unsafe"
 
@@ -50,13 +49,6 @@ func renameRootNoReplace(oldParent *os.Root, oldName string, newParent *os.Root,
 	copy(info.FileName[:], name)
 	info.FileNameLength = uint32((len(name) - 1) * 2)
 	infoSize := uint32(unsafe.Offsetof(info.FileName) + uintptr(info.FileNameLength))
-	err = windows.SetFileInformationByHandle(source, windows.FileRenameInfoEx, (*byte)(unsafe.Pointer(&info)), infoSize)
-	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
-		// FileRenameInfoEx is unavailable on some supported Windows hosts and
-		// filesystems. With zero flags this buffer is layout-compatible with
-		// FILE_RENAME_INFO (ReplaceIfExists=false), preserving no-replace
-		// behavior on the older information class.
-		return windows.SetFileInformationByHandle(source, windows.FileRenameInfo, (*byte)(unsafe.Pointer(&info)), infoSize)
-	}
-	return err
+	var status windows.IO_STATUS_BLOCK
+	return windows.NtSetInformationFile(source, &status, (*byte)(unsafe.Pointer(&info)), infoSize, windows.FileRenameInformation)
 }

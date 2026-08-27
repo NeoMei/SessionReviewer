@@ -33,7 +33,7 @@ func securePrivateMigrationDirectory(file *os.File) error {
 	return setPrivateMigrationDACLHandle(file, true)
 }
 func securePrivateMigrationFile(file *os.File) error {
-	return setPrivateMigrationDACL(file.Name(), false)
+	return setPrivateMigrationDACLHandle(file, false)
 }
 func secureArchiveSourceForPublication(path string) error {
 	return setPrivateMigrationDACL(path, false)

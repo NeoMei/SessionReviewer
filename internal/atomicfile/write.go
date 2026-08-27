@@ -1002,7 +1002,7 @@ func createRootTemp(root *os.Root) (*os.File, string, error) {
 			return nil, "", fmt.Errorf("generate temporary name: %w", err)
 		}
 		name := ".session-reviewer-" + hex.EncodeToString(random[:])
-		file, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+		file, err := createRootTempFile(root, name, 0o600)
 		if err == nil {
 			return file, name, nil
 		}
