@@ -37,4 +37,12 @@ describe("review editor", () => {
     await expect(editor.apply({ path: "项目历史.md", expectedSha256: sha256Text(before), document: "history", unitId: "timeline-trust-chain", field: "event.title", value: "   " })).rejects.toThrow(/cannot be empty/);
     expect(vault.body).toBe(before);
   });
+
+  it("normalizes Windows line endings before applying source ranges", async () => {
+    const vault = new EditVault((await fixture("项目历史.valid.md")).replaceAll("\n", "\r\n"));
+    const editor = new ReviewEditor(vault);
+    await editor.apply({ path: "项目历史.md", expectedSha256: sha256Text(vault.body), document: "history", unitId: "timeline-trust-chain", field: "event.next", value: "Windows 编辑通过" });
+    expect(parseHistory(vault.body).events[0]?.next).toBe("Windows 编辑通过");
+    expect(vault.body).not.toContain("\r");
+  });
 });

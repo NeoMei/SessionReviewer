@@ -21,14 +21,15 @@ export default class SessionReviewerPlugin extends Plugin {
     const vault = new ObsidianVaultPort(this.app);
     const repository = new ProjectRepository(vault);
     const editor = new ReviewEditor(vault);
-    const runner = this.cliPath ? new CliRunner(this.cliPath) : undefined;
-    this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, runner, this.viewState, async (viewState) => {
+    this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.configuredRunner(), this.viewState, async (viewState) => {
       this.viewState = viewState;
       await this.saveData({ viewState, cliPath: this.cliPath });
     }));
     this.addSettingTab(new CliSettingsTab(this.app, this, this.cliPath, async (cliPath) => {
       this.cliPath = cliPath;
       await this.saveData({ viewState: this.viewState, cliPath });
+      this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+      await this.activateView();
     }));
     this.addCommand({
       id: "open-project-evolution",
@@ -41,5 +42,10 @@ export default class SessionReviewerPlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  private configuredRunner(): CliRunner | undefined {
+    if (!this.cliPath) return undefined;
+    try { return new CliRunner(this.cliPath); } catch { return undefined; }
   }
 }

@@ -27,6 +27,16 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: obsidian-plugin/package-lock.json
+      - name: Verify Obsidian project browser
+        working-directory: obsidian-plugin
+        run: |
+          npm ci
+          npm run check
       - run: go test ./...
       - name: Repeat review v2 migration and CLI contract tests
         run: go test ./internal/reviewv2 ./internal/sync ./internal/cli ./internal/config ./internal/project -run 'Migration|MachineLedger|ProjectID|ProjectFragment|FragmentCommit|SharedConfig|ReviewV2' -count=2
@@ -48,6 +58,16 @@ jobs:
           mkdir "$RUNNER_TEMP/release-unpack"
           tar -xzf "$RUNNER_TEMP/release-one/session-reviewer_0.2.0_darwin_arm64.tar.gz" -C "$RUNNER_TEMP/release-unpack"
           cmp schemas/review-ledger-v2.schema.json "$RUNNER_TEMP/release-unpack/session-reviewer/schemas/review-ledger-v2.schema.json"
+      - name: Reproducible Obsidian plugin package
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ./scripts/build-obsidian-plugin.sh 0.2.0 "$RUNNER_TEMP/plugin-one"
+          ./scripts/build-obsidian-plugin.sh 0.2.0 "$RUNNER_TEMP/plugin-two"
+          cmp "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.0.zip" "$RUNNER_TEMP/plugin-two/session-reviewer-obsidian-0.2.0.zip"
+          cmp "$RUNNER_TEMP/plugin-one/SHA256SUMS" "$RUNNER_TEMP/plugin-two/SHA256SUMS"
+          (cd "$RUNNER_TEMP/plugin-one" && shasum -a 256 -c SHA256SUMS)
+          test "$(unzip -Z1 "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.0.zip" | sort | tr '\n' ' ')" = "session-reviewer/main.js session-reviewer/manifest.json session-reviewer/styles.css "
       - name: Reproducible PowerShell release wrappers and schema
         if: runner.os == 'Windows'
         shell: pwsh
@@ -72,6 +92,21 @@ jobs:
           $sourceSchema = (Get-FileHash -Algorithm SHA256 "schemas/review-ledger-v2.schema.json").Hash
           $packedSchema = (Get-FileHash -Algorithm SHA256 (Join-Path $unpack "session-reviewer\schemas\review-ledger-v2.schema.json")).Hash
           if ($sourceSchema -ne $packedSchema) { throw "packaged review v2 schema differs from source" }
+      - name: Reproducible Obsidian plugin package on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $one = Join-Path $env:RUNNER_TEMP "plugin-one"
+          $two = Join-Path $env:RUNNER_TEMP "plugin-two"
+          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.0 -Dist $one
+          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.0 -Dist $two
+          $archive = "session-reviewer-obsidian-0.2.0.zip"
+          if ((Get-FileHash (Join-Path $one $archive)).Hash -ne (Get-FileHash (Join-Path $two $archive)).Hash) { throw "plugin archive is not reproducible" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Join-Path $one $archive))
+          try { $entries = @($zip.Entries | ForEach-Object FullName | Sort-Object) } finally { $zip.Dispose() }
+          $expected = @("session-reviewer/main.js", "session-reviewer/manifest.json", "session-reviewer/styles.css")
+          if ((Compare-Object $entries $expected).Count -ne 0) { throw "unexpected plugin package entries" }
       - run: go build -o "${{ runner.temp }}/session-reviewer" ./cmd/session-reviewer
       - name: Cross-build Windows x64 gate
         if: runner.os != 'Windows'

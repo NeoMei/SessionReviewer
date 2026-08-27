@@ -16,6 +16,7 @@ type JsonObject = Record<string, unknown>;
 
 export function parseLedger(source: string): MachineLedger {
   if (Buffer.byteLength(source, "utf8") > MAX_LEDGER_BYTES) throw new Error(`machine ledger exceeds ${MAX_LEDGER_BYTES} bytes`);
+  rejectDuplicateJsonKeys(source);
   let value: unknown;
   try {
     value = JSON.parse(source);
@@ -357,4 +358,68 @@ function sum(values: number[]): number {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function rejectDuplicateJsonKeys(source: string): void {
+  let cursor = 0;
+  const whitespace = (): void => { while (/\s/.test(source[cursor] ?? "")) cursor += 1; };
+  const parseString = (): string => {
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") { cursor += 2; continue; }
+      if (source[cursor] === '"') {
+        cursor += 1;
+        try { return JSON.parse(source.slice(start, cursor)) as string; } catch { throw new Error("decode machine ledger: malformed JSON string"); }
+      }
+      cursor += 1;
+    }
+    throw new Error("decode machine ledger: unterminated JSON string");
+  };
+  const parseValue = (): void => {
+    whitespace();
+    const token = source[cursor];
+    if (token === "{") {
+      cursor += 1;
+      whitespace();
+      const keys = new Set<string>();
+      if (source[cursor] === "}") { cursor += 1; return; }
+      while (cursor < source.length) {
+        whitespace();
+        if (source[cursor] !== '"') throw new Error("decode machine ledger: object key must be a string");
+        const key = parseString();
+        if (keys.has(key)) throw new Error(`duplicate JSON object key "${key}"`);
+        keys.add(key);
+        whitespace();
+        if (source[cursor] !== ":") throw new Error("decode machine ledger: missing object colon");
+        cursor += 1;
+        parseValue();
+        whitespace();
+        if (source[cursor] === "}") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new Error("decode machine ledger: malformed object");
+        cursor += 1;
+      }
+      throw new Error("decode machine ledger: unterminated object");
+    }
+    if (token === "[") {
+      cursor += 1;
+      whitespace();
+      if (source[cursor] === "]") { cursor += 1; return; }
+      while (cursor < source.length) {
+        parseValue();
+        whitespace();
+        if (source[cursor] === "]") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new Error("decode machine ledger: malformed array");
+        cursor += 1;
+      }
+      throw new Error("decode machine ledger: unterminated array");
+    }
+    if (token === '"') { parseString(); return; }
+    const primitive = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(source.slice(cursor));
+    if (!primitive) throw new Error("decode machine ledger: malformed JSON value");
+    cursor += primitive[0].length;
+  };
+  parseValue();
+  whitespace();
+  if (cursor !== source.length) throw new Error("decode machine ledger: trailing JSON data");
 }

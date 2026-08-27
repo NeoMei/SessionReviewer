@@ -43,14 +43,15 @@ export class ReviewEditor {
 
 export function patchAllowedField(source: string, request: EditRequest): string {
   if (!ALLOWED.has(request.field)) throw new Error(`field is read-only: ${String(request.field)}`);
-  const parsed = request.document === "review" ? parseReview(source) : parseHistory(source);
+  const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const parsed = request.document === "review" ? parseReview(normalized) : parseHistory(normalized);
   const field = parsed.fields.find((candidate) => candidate.unitId === request.unitId && candidate.field === request.field);
   if (!field) {
     if (request.field === "event.summary") throw new Error("event summary cannot be inserted by this plugin version");
     throw new Error(`editable field does not exist: ${request.unitId}/${request.field}`);
   }
-  const replacement = renderReplacement(source, field, request);
-  return source.slice(0, field.range.start) + replacement + source.slice(field.range.end);
+  const replacement = renderReplacement(normalized, field, request);
+  return normalized.slice(0, field.range.start) + replacement + normalized.slice(field.range.end);
 }
 
 function validateRequest(request: EditRequest): void {

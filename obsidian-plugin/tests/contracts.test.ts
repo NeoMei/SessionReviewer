@@ -21,6 +21,7 @@ describe("review v2 machine contract", () => {
     expect(() => parseLedger(duplicate)).toThrow(/duplicate/i);
 
     const valid = JSON.parse(await fixture("ledger.valid.json")) as Record<string, unknown>;
+    expect(() => parseLedger('{"schema_version":2,"schema_version":2}')).toThrow(/duplicate JSON object key/);
     expect(() => parseLedger(JSON.stringify({ ...valid, unexpected: true }))).toThrow(/unknown/i);
 
     const unsafe = structuredClone(valid) as { accepted_revision: number };

@@ -13,7 +13,7 @@ export class EditModal extends Modal {
 
   onOpen(): void {
     this.contentEl.replaceChildren();
-    this.contentEl.addClass("session-reviewer-edit-modal");
+    this.contentEl.classList.add("session-reviewer-edit-modal");
     this.contentEl.append(element("h2", { text: `编辑${fieldLabel(this.field.field)}` }));
     const hint = element("p", { className: "sr-edit-hint", text: Array.isArray(this.field.value) ? "每行一项。保存后会标记为等待同步。" : "保存后会直接写回 Markdown，并标记为等待同步。" });
     const input = element("textarea", { attrs: { rows: "9", "aria-label": fieldLabel(this.field.field) } });

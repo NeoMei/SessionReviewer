@@ -50,7 +50,9 @@ export class ProjectRepository {
 
   async discover(): Promise<ProjectDescriptor[]> {
     const descriptors: ProjectDescriptor[] = [];
-    for (const file of this.vault.getMarkdownFiles()) {
+    const markdownFiles = this.vault.getMarkdownFiles();
+    const markdownPaths = new Set(markdownFiles.map((file) => file.path));
+    for (const file of markdownFiles) {
       if (file.basename !== "项目回顾") continue;
       const frontmatter = this.vault.getFrontmatter(file.path);
       if (frontmatter?.entity_type !== "project_review" || frontmatter.schema_version !== 2 || typeof frontmatter.project_id !== "string") continue;
@@ -58,7 +60,7 @@ export class ProjectRepository {
       if (!validProjectId(projectId)) continue;
       const root = parent(file.path);
       const historyPath = `${root}/项目历史.md`;
-      if (!this.vault.getMarkdownFiles().some((candidate) => candidate.path === historyPath)) continue;
+      if (!markdownPaths.has(historyPath)) continue;
       try {
         const review = parseReview(await this.vault.read(file.path));
         if (review.projectId !== projectId) continue;

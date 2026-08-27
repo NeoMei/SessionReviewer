@@ -145,6 +145,26 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 旧项目的首次 `sync --dry-run` 会显示 migration creates/archives，但不写入任何文件。真实 sync 在 Project 内 `.session-reviewer/backups` 保留内容寻址的 migration backup 和 manifest；它不会发布到 Vault，也不会自动删除。
 
+### 安装项目演进浏览器
+
+`v0.2.0` 发布包中的 `session-reviewer-obsidian-0.2.0.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+
+- macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
+- Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
+
+目录中应当恰好有 `main.js`、`manifest.json` 和 `styles.css`。在 Obsidian 的“设置 → 第三方插件”中启用 SessionReviewer，然后从命令面板运行“SessionReviewer: 打开项目脉络”。
+
+页面默认只呈现项目目标、阶段、一个下一步、最近五个演进节点，以及选中节点的详情。“决策”可跳回相关演进节点；“用量”显示已验收账本中的时长、Token、成本、模型占比、单价来源与日期。需要旧细节时再展开全部历史并搜索。
+
+页面可编辑目标、阶段、状态、下一步、风险、决策和事件叙述。保存后会立即显示新的人类内容，同时标记“等待同步到代码目录”；在同步成功前，页面不会把旧的机器用量冒充为当前数据。
+
+要在页面中查看状态、预览迁移、修复机器账本或解决冲突，请打开“设置 → SessionReviewer CLI”，填写绝对路径并点击“验证并保存”：
+
+- macOS 示例：`/Users/me/.local/bin/session-reviewer`
+- Windows 示例：`C:\Users\Me\AppData\Local\SessionReviewer\bin\session-reviewer.exe`
+
+插件只接受兼容 review schema v2 的语义版本 CLI，并且只会执行固定白名单动作；不会从 Markdown 读取可执行路径，也不会通过 shell 执行任意参数。看到“项目需要迁移”时先做 dry-run 预览；看到“两边修改了同一内容”时比较 Base/Project/Obsidian 三个候选再确认；看到“机器账本被改动”时，只在确认 Project 副本为权威字节后执行修复。
+
 `项目回顾.md` 和 `项目历史.md` 可在 Project 或 Obsidian 编辑。可编辑内容包括目标、阶段、状态、下一步、风险、决策和事件叙述；ID、revision、schema、hash、evidence、用量/单价和 sync metadata 不可编辑。两边不同语义单元会自动合并；同单元冲突会生成隐藏 conflict ID，用 `accept_project`、`accept_obsidian` 或带 `--file` 的 `manual_merge` 显式收敛。
 
 Vault 中的机器账本被修改时，普通 sync 会以 `machine_ledger_modified` 停止。确认 Project 副本为权威字节后，执行 `session-reviewer sync repair-machine-ledger --project-id <id>`；该命令不接受任意目标路径。
@@ -230,6 +250,18 @@ Windows PowerShell 使用：
 ```powershell
 .\scripts\build-release.ps1 -Version 0.2.0 -Dist dist
 ```
+
+Obsidian 插件包可独立构建：
+
+```bash
+./scripts/build-obsidian-plugin.sh 0.2.0 dist
+```
+
+```powershell
+.\scripts\build-obsidian-plugin.ps1 -Version 0.2.0 -Dist dist
+```
+
+两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
 本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。已公开的 `v0.1.0` 包含三个平台归档和统一 `SHA256SUMS`。
 
