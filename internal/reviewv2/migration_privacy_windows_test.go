@@ -14,7 +14,11 @@ import (
 
 func setPermissiveMigrationDACL(t *testing.T, path string) {
 	t.Helper()
-	sd, err := windows.SecurityDescriptorFromString("D:(A;OICI;FA;;;WD)")
+	flags := ""
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		flags = "OICI"
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:(A;" + flags + ";FA;;;WD)")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,6 +28,62 @@ func setPermissiveMigrationDACL(t *testing.T, path string) {
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWindowsMigrationRejectsBroadenedMachinePaths(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(legacyMigrationFixture, MigrationPlan) string
+	}{
+		{"journal", func(fixture legacyMigrationFixture, plan MigrationPlan) string {
+			return filepath.Join(fixture.data, filepath.FromSlash(migrationJournalRelative(plan.projectKey)))
+		}},
+		{"backup-directory", func(fixture legacyMigrationFixture, plan MigrationPlan) string {
+			return filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot))
+		}},
+		{"backup-object", func(fixture legacyMigrationFixture, plan MigrationPlan) string {
+			matches, err := filepath.Glob(filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot), "objects", "*"))
+			if err != nil || len(matches) == 0 {
+				t.Fatalf("backup objects=%v err=%v", matches, err)
+			}
+			return matches[0]
+		}},
+		{"v2-target", func(fixture legacyMigrationFixture, _ MigrationPlan) string {
+			return filepath.Join(fixture.project, filepath.FromSlash(MachineLedgerRelativePath))
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newLegacyMigrationFixture(t)
+			plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stop := errors.New("stop")
+			err = applyMigrationWithHook(plan, func(stage Stage) error {
+				if stage == StageLegacyMoved {
+					return stop
+				}
+				return nil
+			})
+			if !errors.Is(err, stop) {
+				t.Fatalf("interruption=%v", err)
+			}
+			journalPath := filepath.Join(fixture.data, filepath.FromSlash(migrationJournalRelative(plan.projectKey)))
+			before, err := os.ReadFile(journalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			setPermissiveMigrationDACL(t, test.path(fixture, plan))
+			if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err == nil {
+				t.Fatal("broadened machine ACL was accepted")
+			}
+			after, err := os.ReadFile(journalPath)
+			if err != nil || string(after) != string(before) {
+				t.Fatalf("recovery wrote after ACL broadening: %v", err)
+			}
+		})
 	}
 }
 

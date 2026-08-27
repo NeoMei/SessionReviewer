@@ -549,6 +549,7 @@ func stageRecoverableMigrationJournal(t *testing.T, fixture engineFixture, engin
 	if err := os.Chmod(machineDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	hardenMigrationTestPath(t, machineDirectory)
 	return journalPath, journalBody
 }
 
@@ -1098,6 +1099,7 @@ func stageMigrationJournalForResolve(t *testing.T, fixture engineFixture, engine
 	if err := os.WriteFile(journalPath, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	hardenMigrationTestPath(t, journalPath)
 }
 
 func TestResolveRejectsStaleHiddenConflictIdentityAndLiveHashes(t *testing.T) {

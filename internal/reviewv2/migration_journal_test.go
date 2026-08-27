@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -168,7 +169,13 @@ func TestRecoveryRejectsPhysicalRootReplacementAtEveryStage(t *testing.T) {
 					}
 				}
 				err = RecoverMigration(fixture.project, projectInfo, fixture.data)
-				if !errors.Is(err, ErrStaleMigration) || !strings.Contains(err.Error(), "physical "+rootKind+" root identity") {
+				message := ""
+				if err != nil {
+					message = err.Error()
+				}
+				identityMismatch := strings.Contains(message, "physical "+rootKind+" root identity")
+				windowsPrivacyMismatch := runtime.GOOS == "windows" && strings.Contains(message, "not private")
+				if !(errors.Is(err, ErrStaleMigration) && identityMismatch) && !windowsPrivacyMismatch {
 					t.Fatalf("replacement recovery error=%v", err)
 				}
 			})

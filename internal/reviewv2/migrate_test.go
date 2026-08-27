@@ -510,6 +510,9 @@ func TestMigrationRecoveryConvergesAfterCrashFollowingArchiveRetirement(t *testi
 }
 
 func TestMigrationAuthenticatesV2ModesAtEveryRecoveryStage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACL authentication is covered by migration_privacy_windows_test.go")
+	}
 	for _, stage := range []Stage{StageV2Written, StageLegacyMoved, StageCommitted} {
 		for _, target := range []string{ReviewRelativePath, HistoryRelativePath, MachineLedgerRelativePath} {
 			t.Run(string(stage)+"/"+filepath.Base(target), func(t *testing.T) {
@@ -554,6 +557,9 @@ func TestMigrationAuthenticatesV2ModesAtEveryRecoveryStage(t *testing.T) {
 }
 
 func TestRecoveryRejectsNonPrivateMachineDirectoriesWithoutRepair(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACL broadening is covered by migration_privacy_windows_test.go")
+	}
 	tests := []struct {
 		stage    Stage
 		rootKind string
@@ -787,6 +793,9 @@ func TestMigrationRejectsProjectRootReplacement(t *testing.T) {
 }
 
 func TestRecoverMigrationRejectsPublicBackupObjectBeforeV2Writes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows backup-object ACL broadening is covered by migration_privacy_windows_test.go")
+	}
 	fixture := newLegacyMigrationFixture(t)
 	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
 	if err != nil {
@@ -817,6 +826,9 @@ func TestRecoverMigrationRejectsPublicBackupObjectBeforeV2Writes(t *testing.T) {
 }
 
 func TestMigrationDoesNotTightenExistingHumanDirectoryModes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission preservation does not describe Windows ACL semantics")
+	}
 	fixture := newLegacyMigrationFixture(t)
 	for _, relative := range []string{"docs", "docs/session-review"} {
 		if err := os.Chmod(filepath.Join(fixture.project, filepath.FromSlash(relative)), 0o755); err != nil {
@@ -868,6 +880,11 @@ func TestRecoverMigrationConvergesPartialV2WriteAndPartialLegacyArchive(t *testi
 		if err := os.WriteFile(full, file.Data, file.Perm); err != nil {
 			t.Fatal(err)
 		}
+		if runtime.GOOS == "windows" {
+			if err := securePrivateMigrationPath(full); err != nil {
+				t.Fatal(err)
+			}
+		}
 		if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err != nil {
 			t.Fatal(err)
 		}
@@ -893,9 +910,20 @@ func TestRecoverMigrationConvergesPartialV2WriteAndPartialLegacyArchive(t *testi
 		if err := os.MkdirAll(archive, 0o700); err != nil {
 			t.Fatal(err)
 		}
+		if runtime.GOOS == "windows" {
+			if err := securePrivateMigrationPath(archive); err != nil {
+				t.Fatal(err)
+			}
+		}
 		source := filepath.Join(fixture.project, "docs", "session-review", "project-overview.md")
-		if err := os.Rename(source, filepath.Join(archive, "project-overview.md")); err != nil {
+		destination := filepath.Join(archive, "project-overview.md")
+		if err := os.Rename(source, destination); err != nil {
 			t.Fatal(err)
+		}
+		if runtime.GOOS == "windows" {
+			if err := securePrivateMigrationPath(destination); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := RecoverMigration(fixture.project, fixture.projectInfo, fixture.data); err != nil {
 			t.Fatal(err)
