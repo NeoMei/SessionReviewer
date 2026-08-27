@@ -1389,7 +1389,11 @@ func gitRun(t *testing.T, directory string, args ...string) string {
 
 func buildCLIForSubprocess(t *testing.T) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "session-reviewer")
+	name := "session-reviewer"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	binary := filepath.Join(t.TempDir(), name)
 	command := exec.Command("go", "build", "-o", binary, "./cmd/session-reviewer")
 	command.Dir = filepath.Clean(filepath.Join("..", ".."))
 	if body, err := command.CombinedOutput(); err != nil {

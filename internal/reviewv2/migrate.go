@@ -2,7 +2,6 @@ package reviewv2
 
 import (
 	"bytes"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1546,53 +1545,10 @@ func writeRootCreateIfAbsent(parent *os.Root, leaf string, body []byte, mode fs.
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
+	err := atomicfile.WriteRootFileCreateIfAbsentPrepared(parent, leaf, body, mode, securePrivateMigrationFile, nil)
+	if err != nil && !errors.Is(err, os.ErrExist) {
 		return err
 	}
-	temporary := ".session-reviewer-" + hex.EncodeToString(random)
-	file, err := parent.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	removeTemporary := true
-	defer func() {
-		if removeTemporary {
-			_ = parent.Remove(temporary)
-		}
-	}()
-	if err := file.Chmod(mode.Perm()); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := securePrivateMigrationFile(file); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if _, err := file.Write(body); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	if err := parent.Link(temporary, leaf); err != nil {
-		if existing, inspectErr := parent.Lstat(leaf); inspectErr == nil {
-			return verifyRootRegular(parent, leaf, existing, body, mode)
-		}
-		return err
-	}
-	if err := atomicfile.SyncRootPublication(parent, leaf); err != nil {
-		return err
-	}
-	if err := atomicfile.RemoveRoot(parent, temporary); err != nil {
-		return err
-	}
-	removeTemporary = false
 	created, err := parent.Lstat(leaf)
 	if err != nil {
 		return err

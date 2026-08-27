@@ -94,7 +94,7 @@ func TestProjectFragmentPublishIsIdempotentAndNeverReplaces(t *testing.T) {
 		t.Fatalf("repeat created=%v err=%v", created, err)
 	}
 	conflict := mapping
-	conflict.Root = "/different"
+	conflict.Root = testAbsolute("different")
 	created, err = PublishProjectFragmentRoot(root, conflict, nil)
 	if err == nil || created || !errors.Is(err, ErrProjectFragmentConflict) {
 		t.Fatalf("conflict created=%v err=%v", created, err)
@@ -336,6 +336,9 @@ func TestProjectFragmentCommitRejectsLiveRootAndDirectoryChanges(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && test.name != "fragments directory mode broadened" {
+				t.Skip("Windows does not permit renaming these open directory handles; native replacement coverage lives in atomicfile")
+			}
 			parent := t.TempDir()
 			data := filepath.Join(parent, "data")
 			moved := filepath.Join(parent, "moved")

@@ -1029,7 +1029,7 @@ func recoverInitialReviewV2(root *os.Root, projectRoot string, afterFile func(st
 	}
 	body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(initialReviewV2JournalPath), info, 4096)
 	if err != nil {
-		return errors.New("review v2 initialization journal changed while reading")
+		return fmt.Errorf("review v2 initialization journal changed while reading: %w", err)
 	}
 	var journal initialReviewV2Journal
 	decoder := json.NewDecoder(bytes.NewReader(body))

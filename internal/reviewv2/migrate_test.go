@@ -449,7 +449,7 @@ func TestArchiveInventoryDirectoryReplacementBeforeSecureIsStaleAndUntouched(t *
 		t.Fatal("replacement was not recoverably quarantined")
 	}
 	info, statErr := os.Stat(preserved)
-	if statErr != nil || info.Mode().Perm() != 0o755 {
+	if statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
 		t.Fatalf("replacement was repaired: mode=%v err=%v", info, statErr)
 	}
 	body, readErr := os.ReadFile(filepath.Join(preserved, "user.txt"))
