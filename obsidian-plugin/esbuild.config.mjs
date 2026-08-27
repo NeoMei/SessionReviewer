@@ -19,6 +19,8 @@ const context = await esbuild.context({
     "node:child_process",
     "node:crypto",
     "node:fs",
+    "node:fs/promises",
+    "node:os",
     "node:path",
     "node:util"
   ],

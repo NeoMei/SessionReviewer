@@ -1,11 +1,14 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField } from "../contracts/review-v2";
+import type { CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
-import type { ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
+import type { Diagnostic, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
+import { ConflictModal, type ConflictAction } from "./conflict-modal";
 import { element } from "./dom";
 import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
+import { renderStatusBanner } from "./status-banner";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -14,11 +17,14 @@ export class ProjectEvolutionView extends ItemView {
   private projects: ProjectDescriptor[] = [];
   private currentState: ViewState;
   private announcement = "";
+  private cliDiagnostic?: Diagnostic;
+  private hiddenConflictIds: string[] = [];
 
   constructor(
     leaf: WorkspaceLeaf,
     private readonly repository?: ProjectRepository,
     private readonly editor?: ReviewEditor,
+    private readonly runner?: CliRunner,
     private readonly initialState: ViewState = defaultViewState(),
     private readonly saveState?: SaveViewState
   ) {
@@ -67,6 +73,7 @@ export class ProjectEvolutionView extends ItemView {
     if (!this.selected) return;
     const snapshot = await this.repository!.load(this.selected, this.lastReady);
     if (snapshot.kind === "ready") this.lastReady = snapshot;
+    await this.refreshCliStatus();
     this.renderSnapshot(snapshot, projects);
   }
 
@@ -86,15 +93,77 @@ export class ProjectEvolutionView extends ItemView {
       return this.saveState?.(viewState);
     }, this.editor ? (field) => this.openEditor(field, model) : undefined);
     if (projects.length > 1) browser.prepend(this.projectPicker(projects));
-    if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") {
-      browser.prepend(element("div", {
-        className: `sr-banner sr-banner-${snapshot.kind}`,
-        text: snapshot.kind === "pending_edit" ? `等待同步：${snapshot.diagnostic.message}` : `显示上次可信内容：${snapshot.diagnostic.message}`,
-        attrs: { role: "status" }
-      }));
-    }
+    if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") browser.prepend(renderStatusBanner(snapshot.diagnostic, this.actionFor(snapshot.diagnostic)));
+    if (this.cliDiagnostic) browser.prepend(renderStatusBanner(this.cliDiagnostic, this.actionFor(this.cliDiagnostic)));
     if (this.announcement) browser.prepend(element("div", { className: "sr-sr-only", text: this.announcement, attrs: { "aria-live": "polite" } }));
     this.contentEl.append(browser);
+  }
+
+  private async refreshCliStatus(): Promise<void> {
+    this.cliDiagnostic = undefined;
+    this.hiddenConflictIds = [];
+    if (!this.selected) return;
+    if (!this.runner) {
+      this.cliDiagnostic = { code: "cli_unavailable", message: "" };
+      return;
+    }
+    try {
+      const status = await this.runner.status(this.selected.projectId);
+      this.hiddenConflictIds = Array.isArray(status.hidden_conflict_ids) ? status.hidden_conflict_ids.filter((value): value is string => typeof value === "string") : [];
+      if (this.hiddenConflictIds.length) this.cliDiagnostic = { code: "content_conflict", message: `待处理冲突 ${this.hiddenConflictIds.length} 个。` };
+      else if (status.migration === "required") this.cliDiagnostic = { code: "migration_required", message: "" };
+      else if (status.machine_state === "blocked") this.cliDiagnostic = { code: "machine_ledger_modified", message: "" };
+    } catch (error) {
+      this.cliDiagnostic = { code: "cli_unavailable", message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  private actionFor(diagnostic: Diagnostic): (() => void) | undefined {
+    if (diagnostic.code === "stale_snapshot") return () => { void this.refresh(this.projects); };
+    if ((diagnostic.code === "history_parse_failed" || diagnostic.code === "review_parse_failed") && this.selected) {
+      const file = diagnostic.code === "history_parse_failed" ? `${this.selected.root}/项目历史.md` : `${this.selected.root}/项目回顾.md`;
+      return () => { void this.app.workspace.openLinkText(file, "", false); };
+    }
+    if (!this.runner || !this.selected) return undefined;
+    if (diagnostic.code === "migration_required") return () => { void this.runCliAction(() => this.runner!.migrationDryRun(this.selected!.projectId), "迁移预览已完成。"); };
+    if (diagnostic.code === "machine_ledger_modified") return () => { void this.runCliAction(() => this.runner!.repairMachineLedger(this.selected!.projectId), "机器账本已修复。"); };
+    if (diagnostic.code === "content_conflict") return () => { void this.openConflict(); };
+    if (diagnostic.code === "sync_not_run") return () => { void this.runCliAction(() => this.runner!.status(this.selected!.projectId), "同步状态已刷新。"); };
+    return undefined;
+  }
+
+  private async runCliAction(action: () => Promise<unknown>, success: string): Promise<void> {
+    try {
+      await action();
+      this.announcement = success;
+    } catch (error) {
+      this.announcement = error instanceof Error ? error.message : String(error);
+    }
+    await this.refresh(this.projects);
+  }
+
+  private async openConflict(): Promise<void> {
+    if (!this.repository || !this.runner || !this.selected || !this.hiddenConflictIds[0]) return;
+    try {
+      const conflict = await this.repository.loadConflict(this.selected, this.hiddenConflictIds[0]);
+      const modal = new ConflictModal(this.app, conflict, (action, manual) => {
+        if (!window.confirm("确认用选定内容解决这个冲突？")) return;
+        modal.close();
+        void this.resolveConflict(conflict.id, action, manual);
+      });
+      modal.open();
+    } catch (error) {
+      this.announcement = error instanceof Error ? error.message : String(error);
+      this.renderSnapshot(this.lastReady ?? { kind: "empty", diagnostic: { code: "stale_snapshot", message: this.announcement } }, this.projects);
+    }
+  }
+
+  private async resolveConflict(conflictId: string, action: ConflictAction, manual?: string): Promise<void> {
+    if (!this.runner || !this.selected) return;
+    await this.runCliAction(
+      () => action === "manual_merge" ? this.runner!.manualMerge(this.selected!.projectId, conflictId, manual ?? "") : this.runner!.resolve(this.selected!.projectId, conflictId, action),
+      "冲突已解决。"
+    );
   }
 
   private openEditor(field: EditableField, model: BrowserModel): void {

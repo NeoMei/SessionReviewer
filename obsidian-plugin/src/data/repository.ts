@@ -3,6 +3,7 @@ import { sha256Text } from "./hash";
 import { parseLedger } from "./ledger";
 import { parseHistory, parseReview } from "./markdown";
 import type { VaultPort } from "./vault-port";
+import type { ConflictCandidate } from "../view/conflict-modal";
 
 export interface ProjectDescriptor {
   projectId: string;
@@ -129,10 +130,11 @@ export class ProjectRepository {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
     const dispose = this.vault.onChange((path) => {
-      if (closed || !targets.has(normalize(path))) return;
-      if (this.pendingWrite?.path === path) {
-        void this.vault.read(path).then((body) => {
-          if (this.pendingWrite?.path === path && this.pendingWrite.sha256 === sha256Text(body)) this.pendingWrite = undefined;
+      const normalizedPath = normalize(path);
+      if (closed || !targets.has(normalizedPath)) return;
+      if (this.pendingWrite?.path === normalizedPath) {
+        void this.vault.read(normalizedPath).then((body) => {
+          if (this.pendingWrite?.path === normalizedPath && this.pendingWrite.sha256 === sha256Text(body)) this.pendingWrite = undefined;
           else schedule();
         }).catch(schedule);
         return;
@@ -152,6 +154,19 @@ export class ProjectRepository {
 
   ignoreSelfWrite(path: string, sha256: string): void {
     this.pendingWrite = { path: normalize(path), sha256 };
+  }
+
+  async loadConflict(project: ProjectDescriptor, conflictId: string): Promise<ConflictCandidate> {
+    if (!/^conflict-[a-z0-9][a-z0-9._-]{0,191}$/.test(conflictId)) throw new Error("invalid conflict ID");
+    const body = await this.vault.read(`${project.root}/.session-reviewer/conflicts/${conflictId}.json`);
+    if (Buffer.byteLength(body, "utf8") > 16 << 20) throw new Error("conflict record exceeds size limit");
+    const value = JSON.parse(body) as Record<string, unknown>;
+    if (value.version !== 1 || value.id !== conflictId || value.project_id !== project.projectId || value.resolution_status !== "open") throw new Error("conflict record identity is invalid");
+    const base = requiredConflictText(value, "base");
+    const projectText = requiredConflictText(value, "project");
+    const obsidian = requiredConflictText(value, "vault");
+    if (value.base_hash !== sha256Text(base) || value.project_hash !== sha256Text(projectText) || value.vault_hash !== sha256Text(obsidian)) throw new Error("conflict candidate hashes do not match");
+    return { id: conflictId, unit: String(value.entity_id ?? "未知语义单元"), base, project: projectText, obsidian };
   }
 }
 
@@ -176,4 +191,10 @@ function validProjectId(value: string): boolean {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function requiredConflictText(value: Record<string, unknown>, key: string): string {
+  const candidate = value[key];
+  if (typeof candidate !== "string") throw new Error(`conflict ${key} candidate is invalid`);
+  return candidate;
 }

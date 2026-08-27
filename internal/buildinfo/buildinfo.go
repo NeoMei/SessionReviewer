@@ -14,14 +14,15 @@ var (
 )
 
 type Info struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	BuiltAt   string `json:"built_at"`
-	GoVersion string `json:"go_version"`
+	Version             string `json:"version"`
+	Commit              string `json:"commit"`
+	BuiltAt             string `json:"built_at"`
+	GoVersion           string `json:"go_version"`
+	ReviewSchemaVersion int    `json:"review_schema_version"`
 }
 
 func Current() Info {
-	return Info{Version: Version, Commit: Commit, BuiltAt: BuiltAt, GoVersion: runtime.Version()}
+	return Info{Version: Version, Commit: Commit, BuiltAt: BuiltAt, GoVersion: runtime.Version(), ReviewSchemaVersion: 2}
 }
 
 func ValidateRelease(info Info) error {
@@ -36,6 +37,9 @@ func ValidateRelease(info Info) error {
 	}
 	if info.GoVersion == "" {
 		return errors.New("release Go version is required")
+	}
+	if info.ReviewSchemaVersion != 2 {
+		return errors.New("review schema version must be 2")
 	}
 	return nil
 }

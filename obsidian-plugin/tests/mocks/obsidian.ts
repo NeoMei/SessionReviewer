@@ -41,3 +41,32 @@ export class Notice {
 }
 
 export function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }
+
+export class PluginSettingTab {
+  containerEl: HTMLElement & { empty: () => void; createEl: (tag: string, options?: { text?: string }) => HTMLElement };
+  constructor(_app?: unknown, _plugin?: unknown) {
+    const node = document.createElement("div");
+    this.containerEl = Object.assign(node, {
+      empty: () => node.replaceChildren(),
+      createEl: (tag: string, options?: { text?: string }) => { const child = document.createElement(tag); child.textContent = options?.text ?? ""; node.append(child); return child; }
+    });
+  }
+}
+
+class TextControl {
+  setPlaceholder(_value: string): this { return this; }
+  setValue(_value: string): this { return this; }
+  onChange(_callback: (value: string) => void): this { return this; }
+}
+class ButtonControl {
+  setButtonText(_value: string): this { return this; }
+  setCta(): this { return this; }
+  onClick(_callback: () => void): this { return this; }
+}
+export class Setting {
+  constructor(_container: unknown) {}
+  setName(_value: string): this { return this; }
+  setDesc(_value: string): this { return this; }
+  addText(callback: (control: TextControl) => void): this { callback(new TextControl()); return this; }
+  addButton(callback: (control: ButtonControl) => void): this { callback(new ButtonControl()); return this; }
+}
