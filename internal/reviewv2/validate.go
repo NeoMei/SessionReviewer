@@ -61,6 +61,16 @@ func Validate(state State) error {
 	if err := validateCompatibilityProjection(state, risks, decisions); err != nil {
 		return err
 	}
+	machineRisks := make(map[string]struct{}, len(risks)+len(state.Machine.LegacyCompatibility.OpenLoops))
+	for id := range risks {
+		machineRisks[id] = struct{}{}
+	}
+	for _, loop := range state.Machine.LegacyCompatibility.OpenLoops {
+		machineRisks[loop.ID] = struct{}{}
+		if _, exists := entities[loop.ID]; !exists {
+			entities[loop.ID] = "legacy risk"
+		}
+	}
 
 	for _, event := range state.Events {
 		if err := validateReferences(event.DecisionIDs, decisions, fmt.Sprintf("event %q decision", event.ID)); err != nil {
@@ -73,7 +83,7 @@ func Validate(state State) error {
 			return err
 		}
 		riskIDs := append(append([]string(nil), session.OpenLoopsCreated...), session.OpenLoopsClosed...)
-		if err := validateReferences(riskIDs, risks, fmt.Sprintf("session %q risk", session.ID)); err != nil {
+		if err := validateReferences(riskIDs, machineRisks, fmt.Sprintf("session %q risk", session.ID)); err != nil {
 			return err
 		}
 	}
@@ -118,7 +128,9 @@ func validateCompatibilityProjection(state State, risks, decisions map[string]st
 		if _, collision := provenance[value.ID]; collision {
 			return fmt.Errorf("risk %q is both an open loop and a projected current risk", value.ID)
 		}
-		compatibleRisks[value.ID] = struct{}{}
+		if legacyLoopVisible(value.Status) {
+			compatibleRisks[value.ID] = struct{}{}
+		}
 	}
 	if !reflect.DeepEqual(compatibleRisks, risks) {
 		return errors.New("visible risks and legacy compatibility risks do not match")

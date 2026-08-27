@@ -331,6 +331,22 @@ func TestWriteSyncReportReportsFailedDerivedWithoutSensitiveContent(t *testing.T
 	}
 }
 
+func TestFailedSyncReportRequiresMaterialProgress(t *testing.T) {
+	defaults := syncengine.Report{
+		Derived:   syncengine.DerivedReport{State: syncengine.DerivedDeferred, Operations: []syncengine.Operation{}},
+		Migration: syncengine.MigrationReport{Creates: []string{}, Archives: []string{}},
+		Machine:   syncengine.MachineReport{State: syncengine.MachinePending, Operations: []syncengine.Operation{}},
+	}
+	if shouldWriteFailedSyncReport(defaults) {
+		t.Fatal("default report would misleadingly claim current migration after an early failure")
+	}
+	defaults.Migration.Required = true
+	defaults.Migration.Creates = []string{"docs/session-review/项目回顾.md"}
+	if !shouldWriteFailedSyncReport(defaults) {
+		t.Fatal("material migration progress was hidden")
+	}
+}
+
 func TestRunSyncReturnsFailureForUnassociatedMalformedDocument(t *testing.T) {
 	fixture := newCLISyncFixture(t)
 	bad := filepath.Join(fixture.project, "docs", "session-review", "unparseable.md")

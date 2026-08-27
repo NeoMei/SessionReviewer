@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
@@ -281,10 +282,20 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		if err != nil {
 			return report, errors.New("review migration planning failed")
 		}
+		vaultRetirement, err := engine.planLegacyVaultRetirement(plan)
+		if err != nil {
+			return report, errors.New("legacy Vault is not a byte-identical Project mirror")
+		}
 		report.Migration = migrationReportFromReview(plan.Report(), request.DryRun)
 		if request.DryRun {
 			report.Machine.State = MachinePending
 			return report, nil
+		}
+		if err := vaultRetirement.apply(engine); err != nil {
+			return report, errors.New("legacy Vault retirement failed")
+		}
+		if err := engine.bases.ResetForMigration(); err != nil {
+			return report, errors.New("legacy merge-base retirement failed")
 		}
 		migration, err := reviewv2.ApplyMigration(plan)
 		if err != nil {
@@ -536,6 +547,128 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		return report.Operations[i].Kind < report.Operations[j].Kind
 	})
 	return report, nil
+}
+
+type legacyVaultRetirement struct {
+	files       map[string]string
+	directories []string
+}
+
+func (engine *Engine) planLegacyVaultRetirement(plan reviewv2.MigrationPlan) (legacyVaultRetirement, error) {
+	retirement := legacyVaultRetirement{files: make(map[string]string)}
+	_, ready, err := engine.scanVault()
+	if err != nil || !ready {
+		return retirement, err
+	}
+	archives := make(map[string]struct{})
+	for _, archived := range plan.Report().Archives {
+		const prefix = "docs/session-review/"
+		if !strings.HasPrefix(archived, prefix) {
+			return legacyVaultRetirement{}, errors.New("invalid legacy migration archive path")
+		}
+		archives[strings.TrimPrefix(archived, prefix)] = struct{}{}
+	}
+	directories := make(map[string]struct{})
+	err = engine.vault.WalkMarkdown(engine.options.VaultReviewPath, func(relative string, vaultBody []byte) error {
+		prefix := strings.TrimSuffix(engine.options.VaultReviewPath, "/") + "/"
+		if !strings.HasPrefix(relative, prefix) {
+			return errors.New("legacy Vault file escaped the configured review root")
+		}
+		legacyRelative := strings.TrimPrefix(relative, prefix)
+		if _, expected := archives[legacyRelative]; !expected {
+			return errors.New("legacy Vault contains a Markdown file outside the Project migration inventory")
+		}
+		projectRelative := path.Join("docs/session-review", legacyRelative)
+		projectBody, found, err := engine.project.ReadRegular(projectRelative, int64(syncdoc.MaxDocumentBytes))
+		if err != nil || !found {
+			return errors.New("legacy Vault Markdown differs from the Project source")
+		}
+		if !bytes.Equal(projectBody, vaultBody) {
+			safe := legacyGeneratedArtifact(legacyRelative, projectBody, vaultBody)
+			if !safe {
+				safe, err = engine.legacyVaultStillMatchesBase(legacyRelative, projectBody, vaultBody)
+			}
+			if err != nil || !safe {
+				return errors.New("legacy Vault Markdown differs from the Project source")
+			}
+		}
+		retirement.files[relative] = syncdoc.ContentHash(vaultBody)
+		for parent := path.Dir(legacyRelative); parent != "."; parent = path.Dir(parent) {
+			directories[path.Join(engine.options.VaultReviewPath, parent)] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		return legacyVaultRetirement{}, err
+	}
+	for directory := range directories {
+		retirement.directories = append(retirement.directories, directory)
+	}
+	sort.Slice(retirement.directories, func(left, right int) bool {
+		leftDepth := strings.Count(retirement.directories[left], "/")
+		rightDepth := strings.Count(retirement.directories[right], "/")
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return retirement.directories[left] > retirement.directories[right]
+	})
+	return retirement, nil
+}
+
+func legacyGeneratedArtifact(relative string, projectBody, vaultBody []byte) bool {
+	var marker []byte
+	switch relative {
+	case "decisions/00-目录说明.md", "open-loops/00-目录说明.md", "sessions/00-目录说明.md":
+		marker = []byte("此文件由 SessionReviewer 生成；手工修改会被覆盖。")
+	case "diagrams/project-evolution.md":
+		marker = []byte("This file is derived from the accepted project ledger. Manual edits are overwritten")
+	default:
+		return false
+	}
+	return bytes.Contains(projectBody, marker) && bytes.Contains(vaultBody, marker)
+}
+
+func (engine *Engine) legacyVaultStillMatchesBase(relative string, projectBody, vaultBody []byte) (bool, error) {
+	projectDocument, err := syncdoc.Parse(relative, projectBody)
+	if err != nil {
+		return false, nil
+	}
+	vaultDocument, err := syncdoc.Parse(relative, vaultBody)
+	if err != nil {
+		return false, nil
+	}
+	projectIdentity, err := projectDocument.Identity()
+	if err != nil {
+		return false, nil
+	}
+	vaultIdentity, err := vaultDocument.Identity()
+	if err != nil || projectIdentity != vaultIdentity || projectIdentity.ProjectID != engine.options.ProjectID {
+		return false, nil
+	}
+	base, found, err := engine.bases.Load(projectIdentity.ID)
+	if err != nil || !found {
+		return false, err
+	}
+	return base.RelativePath == relative && base.VaultHash == syncdoc.ContentHash(vaultBody), nil
+}
+
+func (retirement legacyVaultRetirement) apply(engine *Engine) error {
+	files := make([]string, 0, len(retirement.files))
+	for relative := range retirement.files {
+		files = append(files, relative)
+	}
+	sort.Strings(files)
+	for _, relative := range files {
+		if err := engine.vault.RemoveRegularIfHashMatches(relative, retirement.files[relative]); err != nil {
+			return err
+		}
+	}
+	for _, directory := range retirement.directories {
+		if err := atomicfile.RemoveRoot(engine.vault.Root, filepath.FromSlash(directory)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func candidateConflictBytes(candidate Candidate) []byte {

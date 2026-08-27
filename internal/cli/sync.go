@@ -147,7 +147,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	default:
 		report, err := engine.Reconcile(context.Background(), syncengine.ReconcileRequest{DryRun: *dryRun, Trigger: syncengine.TriggerCLI})
 		if err != nil {
-			if report.Derived.State != "" {
+			if shouldWriteFailedSyncReport(report) {
 				writeSyncReport(stdout, report)
 			}
 			return writeDiagnostic(stderr, "sync", err)
@@ -158,6 +158,13 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		}
 		return 0
 	}
+}
+
+func shouldWriteFailedSyncReport(report syncengine.Report) bool {
+	return len(report.Operations) != 0 || len(report.Conflicts) != 0 || len(report.Issues) != 0 || len(report.Errors) != 0 ||
+		report.QueueDepth != 0 || len(report.Derived.Operations) != 0 || report.Derived.State == syncengine.DerivedFailed ||
+		report.Migration.Required || len(report.Migration.Creates) != 0 || len(report.Migration.Archives) != 0 ||
+		len(report.Machine.Operations) != 0 || report.Machine.State == syncengine.MachineBlocked
 }
 
 func writeSyncPartialFailure(stderr io.Writer, report syncengine.Report) bool {

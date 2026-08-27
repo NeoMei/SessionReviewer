@@ -1,6 +1,6 @@
 # Review v2 core acceptance
 
-Date: 2026-08-26
+Date: 2026-08-27
 
 Scope: Task 8 core CLI, migration, machine-ledger publication/repair, Project ↔ Vault semantic merge, conflict resolution, and release packaging. This record intentionally uses logical target labels and counts; it contains no private absolute path, raw session text, credential, or high-entropy candidate.
 
@@ -16,9 +16,9 @@ The test creates all Project, Vault, data, manual-merge, and backup roots under 
 
 ## External mapping gate
 
-The configured real mapping was resolved read-only by stable project ID. The mapped Project was ahead of its remote and contained unrelated uncommitted code and accepted-ledger edits. Its legacy ledger also contains an older entity identity that the v2 stable-ID contract rejects. Read-only `sync status --json` failed closed and created no migration backup. No real Project or Vault write was attempted.
+The configured real mapping was resolved by stable project ID and completed after fixing three migration-compatibility defects found by its accepted v1 state: proposal-v1 stable IDs containing dots or underscores, sparse legacy timeline events, and verbose session-wide verification copied into every human event. A fourth defect appeared during the first real write: Project migration continued against the legacy Vault and replayed v1 documents into the compact Project. That attempt was isolated intact, the independently archived Project/Vault/data state was restored, and regression tests were added before retrying.
 
-The eight-step write acceptance therefore used a realistic isolated mapping created by the legacy CLI and populated through the legacy ledger renderer. Exact Project, Vault, data, and backup targets were recorded in the private acceptance workspace. Pre-write Project, Vault, and data backups remain retained and were not deleted.
+The corrected path verifies that every legacy Vault Markdown file is either byte-identical to Project or still matches its authenticated merge Base while Project contains the newer accepted value. It retires those Vault copies before Project migration, resets v1 merge Bases before the stable compact IDs are reused, and fails without writes when Vault has an unmerged edit. Project, Vault, and machine-data backups from both the initial attempt and the final retry remain retained in the private acceptance workspace.
 
 ## Eight-step result
 
@@ -37,12 +37,14 @@ The first isolated conflict repetitions exposed a recoverability defect: when Pr
 
 The fix makes a real, byte-identical first sync authenticate both preimages and commit their shared bytes as Base without rewriting either human document. In a final fresh-data repetition, status exposed two `establish_base` plus two machine-ledger operations and `machine_state=pending`; dry-run reported the same two Base operations and `machine=pending`. Complete Project/Vault/data size-and-modification-time snapshots remained identical across status and dry-run. The subsequent real sync reported the same semantic operation plan with `machine=current`, and its repeat reported zero operations. Machine-ledger operations intentionally omit the commit-time `after_hash`: status, dry-run, and real sync remain identical as the clock advances, while the transaction still writes and verifies exact ledger bytes and hashes and stamps `last_successful_sync` with the real commit time. Regression test `TestFirstSyncOfIdenticalV2CopiesEstablishesResolvableMergeBases` advances the clock between status, dry-run, real sync, and repeat; compares the complete public plans; verifies the committed timestamp; proves both Bases are committed only by real sync; and proves repeat sync does not churn machine bytes. The three action repetitions above were recreated from fresh backups after rebuilding the CLI with that fix.
 
-## Remaining external gate
+## Configured mapping completion
 
-Two read-only blockers remain on the configured mapping: the Project branch is ahead of its tracked remote and has unrelated uncommitted code/accepted-ledger edits, and one pre-v2 open-loop identity lacks the stable-ID suffix required by the migration validator. The latter currently makes `sync status --json` fail closed before a migration plan can be trusted.
+The final real dry-run exited 0 with three migration creates, 21 archived legacy Markdown files, zero entity operations, zero conflicts/issues/errors, and pending machine publication. The real sync then published `项目回顾.md` and `项目历史.md` to Vault, reported `migration=current`, `machine=current`, two entity operations, and zero conflicts/issues/errors.
 
-The safe unblock sequence is owner-directed: first preserve or finish the unrelated worktree changes and verify that `git status --short --branch` reflects the intended state; then update the invalid legacy entity through an explicit, reviewed legacy-ledger migration rather than renaming a live file ad hoc. Re-run read-only legacy loading/status after that change. Only when both checks pass, record the exact configured Project/Vault targets privately, create and retain fresh full backups of both review trees, snapshot Project/Vault/data, and repeat the eight commands and hash comparisons above. Do not reuse the copied-fixture result as proof for those real targets.
+The normal Project and Vault review directories now expose only `项目回顾.md` and `项目历史.md`; the machine ledger remains hidden. Project contains one content-addressed migration manifest with 21 unique safe paths. All 21 object copies and all 21 archive copies were independently rehashed against the manifest with zero mismatch. Vault contains no migration backup.
 
-This external gate is not release evidence for the real user data; the isolated acceptance is the core implementation gate for the later plugin task. No real Project, Vault, Git state, or invalid legacy entity was changed during this acceptance.
+Final JSON status reports `in_sync=2`, `conflicted=0`, `malformed=0`, `queued=0`, `blocked=0`, `migration=current`, `machine_state=current`, no pending operations, and no hidden conflicts. A repeated dry-run reports zero operations/conflicts/issues/errors. Project and Vault bytes match for both Markdown documents and `ledger.json`.
+
+The human view was also checked as a product boundary, not only as valid Markdown. The project title is the directory name rather than an internal ID, resolved legacy loops are omitted from the current review but retained in history and the hidden compatibility ledger, and each event carries only its own concise result instead of repeating the complete session verification list. The configured result is 150 lines for `项目回顾.md` and 164 lines for `项目历史.md`.
 
 Native PowerShell wrapper execution remains an external CI gate because `pwsh` is unavailable on this macOS host. The Windows workflow runs the wrapper twice and compares all archives, checksums, and the packaged schema; the local macOS shell wrapper gate is independently executable on this host.

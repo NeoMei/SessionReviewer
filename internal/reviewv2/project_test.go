@@ -98,11 +98,46 @@ func TestProjectLegacyKeepsVerboseEvidenceOutOfHumanHistory(t *testing.T) {
 		t.Fatalf("verbose legacy evidence broke human history migration: %v", err)
 	}
 	event := state.Events[0]
-	if !reflect.DeepEqual(event.Results, []string{"go test ./..."}) {
+	if !reflect.DeepEqual(event.Results, []string{legacy.Timeline[0].Summary}) {
 		t.Fatalf("human results copied verbose evidence: %#v", event.Results)
 	}
 	if got := state.Machine.Evidence[event.ID][0].Summary; got != legacy.Timeline[0].Evidence[0].Summary {
 		t.Fatalf("machine evidence changed: %q", got)
+	}
+}
+
+func TestProjectLegacyDoesNotRepeatSessionWideVerificationOnEveryEvent(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	report := legacy.Sessions["session-report-1"]
+	report.Verification = []string{"test one", "test two", "test three"}
+	legacy.Sessions[report.ID] = report
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Events[0].Results; !reflect.DeepEqual(got, []string{legacy.Timeline[0].Summary}) {
+		t.Fatalf("session-wide verification leaked into event history: %#v", got)
+	}
+}
+
+func TestProjectLegacyKeepsResolvedLoopsOutOfCurrentHumanRisks(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	loop := legacy.OpenLoops["risk-install"]
+	loop.Status = "resolved"
+	legacy.OpenLoops[loop.ID] = loop
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, risk := range state.Review.Risks {
+		if risk.ID == loop.ID {
+			t.Fatalf("resolved loop remained in current human review: %+v", risk)
+		}
+	}
+	if len(state.Machine.LegacyCompatibility.OpenLoops) != 1 || state.Machine.LegacyCompatibility.OpenLoops[0].ID != loop.ID {
+		t.Fatalf("resolved loop was lost from machine compatibility: %+v", state.Machine.LegacyCompatibility.OpenLoops)
 	}
 }
 

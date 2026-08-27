@@ -170,6 +170,10 @@ func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string,
 	if err != nil {
 		return MigrationPlan{}, err
 	}
+	projected.Review.Name = filepath.Base(filepath.Clean(projectRoot))
+	if err := setDocumentHashes(&projected); err != nil {
+		return MigrationPlan{}, err
+	}
 	writes, err := Render(projectRoot, projected)
 	if err != nil {
 		return MigrationPlan{}, err
@@ -535,6 +539,10 @@ func reconstructMigrationWrites(projectRoot string, projectInfo os.FileInfo, jou
 	}
 	projected, err := ProjectLegacy(legacyState)
 	if err != nil {
+		return nil, staleMigration("legacy state no longer projects to v2")
+	}
+	projected.Review.Name = filepath.Base(filepath.Clean(projectRoot))
+	if err := setDocumentHashes(&projected); err != nil {
 		return nil, staleMigration("legacy state no longer projects to v2")
 	}
 	plan, err := Render(projectRoot, projected)

@@ -78,6 +78,9 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 	for _, id := range loopIDs {
 		value := legacy.OpenLoops[id]
 		usedRiskIDs[id] = struct{}{}
+		if !legacyLoopVisible(value.Status) {
+			continue
+		}
 		state.Review.Risks = append(state.Review.Risks, Risk{
 			ID:     value.ID,
 			Title:  value.Title,
@@ -103,11 +106,9 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 		return state.Review.Risks[left].ID < state.Review.Risks[right].ID
 	})
 
-	reportsBySource := make(map[string]ledger.SessionReport, len(legacy.Sessions))
 	for _, id := range sortedMapKeys(legacy.Sessions) {
 		report := cloneLegacySession(legacy.Sessions[id])
 		state.Machine.Sessions = append(state.Machine.Sessions, report)
-		reportsBySource[report.SessionID] = report
 		appendMachineEvidence(state.Machine.Evidence, report.ID, report.Evidence)
 	}
 	sort.Slice(state.Machine.Sessions, func(left, right int) bool {
@@ -118,7 +119,7 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 	})
 
 	for _, source := range legacy.Timeline {
-		event := projectLegacyEvent(source, legacy.Decisions, legacy.OpenLoops, reportsBySource, legacy.CurrentState.NextAction)
+		event := projectLegacyEvent(source, legacy.Decisions, legacy.OpenLoops, legacy.CurrentState.NextAction)
 		state.Events = append(state.Events, event)
 		appendMachineEvidence(state.Machine.Evidence, event.ID, source.Evidence)
 	}
@@ -197,6 +198,7 @@ func LegacyState(state State) (ledger.State, error) {
 	compatibleLoops := make(map[string]ledger.OpenLoop, len(compatibility.OpenLoops))
 	for _, value := range compatibility.OpenLoops {
 		compatibleLoops[value.ID] = value
+		legacy.OpenLoops[value.ID] = value
 	}
 	for _, risk := range state.Review.Risks {
 		if _, generated := currentRisks[risk.ID]; generated {
@@ -760,6 +762,15 @@ func legacyProjectStatus(current ledger.CurrentState) string {
 	return "active"
 }
 
+func legacyLoopVisible(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "resolved", "closed", "done", "completed":
+		return false
+	default:
+		return true
+	}
+}
+
 func latestEventTime(events []Event) string {
 	latest := ""
 	for _, event := range events {
@@ -847,7 +858,7 @@ func openLoopDetail(value ledger.OpenLoop) string {
 	return strings.Join(parts, "\n")
 }
 
-func projectLegacyEvent(source ledger.TimelineEvent, decisions map[string]ledger.Decision, loops map[string]ledger.OpenLoop, reports map[string]ledger.SessionReport, fallbackNext string) Event {
+func projectLegacyEvent(source ledger.TimelineEvent, decisions map[string]ledger.Decision, loops map[string]ledger.OpenLoop, fallbackNext string) Event {
 	event := Event{
 		ID:          source.ID,
 		OccurredAt:  source.OccurredAt,
@@ -875,11 +886,6 @@ func projectLegacyEvent(source ledger.TimelineEvent, decisions map[string]ledger
 			}
 		}
 	}
-	for _, ref := range source.Evidence {
-		if report, exists := reports[ref.SessionID]; exists {
-			event.Results = append(event.Results, report.Verification...)
-		}
-	}
 	if strings.TrimSpace(event.Summary) == "" {
 		event.Summary = source.Title
 	}
@@ -901,7 +907,11 @@ func projectLegacyEvent(source ledger.TimelineEvent, decisions map[string]ledger
 		event.Changes = []string{event.Summary}
 	}
 	if len(event.Results) == 0 {
-		event.Results = []string{"旧记录未包含独立验证结果。"}
+		if strings.TrimSpace(source.Summary) == "" {
+			event.Results = []string{"旧记录未包含独立验证结果。"}
+		} else {
+			event.Results = []string{source.Summary}
+		}
 	}
 	event.DecisionIDs = uniqueNonemptySorted(event.DecisionIDs)
 	return event

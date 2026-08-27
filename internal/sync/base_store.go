@@ -89,6 +89,56 @@ func (s BaseStore) List() ([]BaseRecord, error) {
 	return s.listWithFinalVerifyHook(nil)
 }
 
+// ResetForMigration retires every authenticated v1 merge Base before compact
+// v2 entities reuse stable IDs such as project-overview. The human documents
+// remain authoritative; an interrupted reset is idempotent and a subsequent
+// compact sync establishes fresh Bases from the v2 documents.
+func (s BaseStore) ResetForMigration() (retErr error) {
+	bases, found, err := s.openBaseDirectory(false)
+	if err != nil || !found {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, bases.Close()) }()
+	lock, err := acquireBaseStoreLock(bases)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	if _, err := loadAllBaseRecords(bases); err != nil {
+		return err
+	}
+	pairs, err := inspectBaseStateNames(bases)
+	if err != nil {
+		return err
+	}
+	for _, pair := range pairs {
+		for _, name := range []string{pair.primary, pair.backup} {
+			if name == "" {
+				continue
+			}
+			info, found, err := regularBaseEntry(bases, name)
+			if err != nil || !found {
+				return errors.New("merge-base state changed during migration reset")
+			}
+			file, err := bases.Open(name)
+			if err != nil {
+				return errors.New("cannot open merge-base state during migration reset")
+			}
+			body, readErr := readBoundedBaseSnapshot(file)
+			opened, statErr := file.Stat()
+			closeErr := file.Close()
+			if readErr != nil || statErr != nil || closeErr != nil || !sameBaseFileMetadata(info, opened) {
+				return errors.New("merge-base state changed during migration reset")
+			}
+			digest := sha256.Sum256(body)
+			if err := atomicfile.RemoveRootFileIfHashMatches(bases, name, hex.EncodeToString(digest[:])); err != nil {
+				return err
+			}
+		}
+	}
+	return verifyBaseDirectoryIdentity(s.Root, bases)
+}
+
 func (s BaseStore) listWithFinalVerifyHook(beforeFinalVerify func() error) ([]BaseRecord, error) {
 	bases, found, err := s.openBaseDirectory(false)
 	if err != nil || !found {

@@ -47,6 +47,28 @@ func TestMigrationDryRunWritesNothingAndCrashRecoveryConverges(t *testing.T) {
 	}
 }
 
+func TestMigrationUsesProjectDirectoryNameForHumanReview(t *testing.T) {
+	fixture := newLegacyMigrationFixture(t)
+	plan, err := PlanMigration(fixture.project, fixture.projectInfo, fixture.data, fixture.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range plan.Writes {
+		if file.RelativePath != ReviewRelativePath {
+			continue
+		}
+		document, err := ParseReview(file.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if document.Model.Name != filepath.Base(fixture.project) {
+			t.Fatalf("human project name=%q want=%q", document.Model.Name, filepath.Base(fixture.project))
+		}
+		return
+	}
+	t.Fatal("migration review write is missing")
+}
+
 func TestMigrationRejectsChangesAfterPlanningBeforeAnyMigrationWrite(t *testing.T) {
 	tests := []struct {
 		name   string

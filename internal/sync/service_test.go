@@ -115,6 +115,120 @@ func TestReconcileDryRunPlansMigrationAndRealSyncConvergesV2(t *testing.T) {
 	}
 }
 
+func TestReconcileMigrationRetiresMirroredLegacyVaultBeforeCompactSync(t *testing.T) {
+	fixture := newEngineFixture(t)
+	completeLegacyFixtureForMigration(t, fixture)
+	copyLegacyReviewToVault(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Conflicts) != 0 || len(report.Errors) != 0 || report.Machine.State != MachineCurrent {
+		t.Fatalf("migration replayed legacy Vault state: %+v", report)
+	}
+	projectInventory := syncdoc.Scan(engine.project, "docs/session-review", "darwin", platform.CaseSensitive)
+	vaultInventory, _, err := engine.scanVault()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !compactV2Inventory(projectInventory, "docs/session-review") || !compactV2Inventory(vaultInventory, fixture.vaultReviewPath) {
+		t.Fatalf("project=%+v vault=%+v", projectInventory, vaultInventory)
+	}
+	for _, root := range []string{
+		filepath.Join(fixture.project, "docs", "session-review"),
+		filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath)),
+	} {
+		if _, err := os.Stat(filepath.Join(root, "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy overview survived compact migration at %s: %v", root, err)
+		}
+	}
+}
+
+func TestReconcileMigrationRejectsDivergedLegacyVaultBeforeAnyWrite(t *testing.T) {
+	fixture := newEngineFixture(t)
+	completeLegacyFixtureForMigration(t, fixture)
+	copyLegacyReviewToVault(t, fixture)
+	vaultOverview := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "project-overview.md")
+	body, err := os.ReadFile(vaultOverview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultOverview, append(body, []byte("\nVault-only edit\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	beforeProject := snapshotFixtureTree(t, fixture.project)
+	beforeVault := snapshotFixtureTree(t, fixture.vault)
+	beforeData := snapshotFixtureTree(t, fixture.data)
+
+	for _, request := range []ReconcileRequest{
+		{DryRun: true, Trigger: TriggerCLI},
+		{Trigger: TriggerCLI},
+	} {
+		if _, err := engine.Reconcile(context.Background(), request); err == nil {
+			t.Fatalf("diverged legacy Vault accepted for request %+v", request)
+		}
+		if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+			!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) ||
+			!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) {
+			t.Fatalf("failed migration preflight mutated state for request %+v", request)
+		}
+	}
+}
+
+func TestReconcileMigrationAcceptsProjectChangeWhenLegacyVaultStillMatchesBase(t *testing.T) {
+	fixture := newEngineFixture(t)
+	completeLegacyFixtureForMigration(t, fixture)
+	copyLegacyReviewToVault(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	overviewRelative := "project-overview.md"
+	projectOverview := filepath.Join(fixture.project, "docs", "session-review", overviewRelative)
+	baseBody, err := os.ReadFile(projectOverview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := syncdoc.ContentHash(baseBody)
+	if err := engine.bases.Commit("", BaseRecord{
+		Version: 1, EntityID: "project-overview", RelativePath: overviewRelative,
+		ContentHash: hash, ProjectHash: hash, VaultHash: hash, Content: baseBody, SyncedAt: fixture.options().Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectOverview, append(baseBody, []byte("\nProject accepted update\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	projectSessionIndex := filepath.Join(fixture.project, "docs", "session-review", "sessions", "00-目录说明.md")
+	indexBody, err := os.ReadFile(projectSessionIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(projectSessionIndex, append(indexBody, []byte("\n- regenerated entry\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil {
+		t.Fatalf("unchanged legacy Vault blocked accepted Project migration: %v", err)
+	}
+	if len(report.Conflicts) != 0 || len(report.Errors) != 0 || report.Machine.State != MachineCurrent {
+		t.Fatalf("report=%+v", report)
+	}
+}
+
 func TestReconcileFailsClosedOnEveryLegacyEntityTransactionStageBeforeNewMigration(t *testing.T) {
 	for _, stage := range []TransactionStage{TxnPlanned, TxnProjectWritten, TxnVaultWritten, TxnBaseCommitted} {
 		t.Run(string(stage), func(t *testing.T) {
@@ -270,6 +384,36 @@ func completeLegacyFixtureForMigration(t *testing.T, fixture engineFixture) {
 		t.Fatal(err)
 	}
 	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyLegacyReviewToVault(t *testing.T, fixture engineFixture) {
+	t.Helper()
+	projectReview := filepath.Join(fixture.project, "docs", "session-review")
+	vaultReview := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	err := filepath.Walk(projectReview, func(source string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(projectReview, source)
+		if err != nil || relative == "." {
+			return err
+		}
+		target := filepath.Join(vaultReview, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		body, err := os.ReadFile(source)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(target, body, info.Mode().Perm())
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 }
