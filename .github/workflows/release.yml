@@ -51,7 +51,10 @@ jobs:
             --built-at "$(git show -s --format=%cI HEAD)"
           ./scripts/build-obsidian-plugin.sh "$version" "$RUNNER_TEMP/obsidian-plugin-dist"
           cp "$RUNNER_TEMP/obsidian-plugin-dist/session-reviewer-obsidian-$version.zip" dist/
-          grep "session-reviewer-obsidian-$version.zip" "$RUNNER_TEMP/obsidian-plugin-dist/SHA256SUMS" >> dist/SHA256SUMS
+          cp "$RUNNER_TEMP/obsidian-plugin-dist/main.js" dist/
+          cp "$RUNNER_TEMP/obsidian-plugin-dist/manifest.json" dist/
+          cp "$RUNNER_TEMP/obsidian-plugin-dist/styles.css" dist/
+          cat "$RUNNER_TEMP/obsidian-plugin-dist/SHA256SUMS" >> dist/SHA256SUMS
           LC_ALL=C sort -o dist/SHA256SUMS dist/SHA256SUMS
           cd dist
           sha256sum --check SHA256SUMS

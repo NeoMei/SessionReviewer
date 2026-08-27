@@ -2,6 +2,7 @@ import type { BrowserModel, EditableField, EditableFieldName, ViewKind } from ".
 import { button, element } from "./dom";
 import { renderDecisions } from "./render-decisions";
 import { renderEvolution } from "./render-evolution";
+import { presentDateTime, presentStage, presentStatus, summarizeRisk } from "./presentation";
 import { renderUsage } from "./render-usage";
 
 export interface ViewState {
@@ -43,11 +44,12 @@ export function renderReadyView(model: BrowserModel, initial?: Partial<ViewState
 }
 
 function renderHeader(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
+  const reviewStatus = presentStatus(model.review.status);
   const header = element("header", { className: "sr-header" });
   const identity = element("div");
   identity.append(element("span", { className: "sr-eyebrow", text: "SESSIONREVIEWER · 项目回顾" }), element("h1", { text: model.review.name }), editableText(element("p", { className: "sr-goal", text: model.review.goal }), model, "project-overview", "goal", onEdit));
   const meta = element("div", { className: "sr-header-meta" });
-  meta.append(editableText(element("span", { className: "sr-status", text: model.review.status }), model, "project-overview", "status", onEdit), element("span", { text: model.lastSuccessfulSync ? `最近同步 ${formatDateTime(model.lastSuccessfulSync)}` : "尚未同步" }));
+  meta.append(editableText(element("span", { className: "sr-status", text: reviewStatus.label, attrs: { "data-tone": reviewStatus.tone } }), model, "project-overview", "status", onEdit), element("span", { text: model.lastSuccessfulSync ? `最近同步 ${presentDateTime(model.lastSuccessfulSync)}` : "尚未同步" }));
   header.append(identity, meta);
   return header;
 }
@@ -55,7 +57,7 @@ function renderHeader(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
 function renderResume(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
   const resume = element("section", { className: "sr-resume", attrs: { "aria-label": "继续工作" } });
   resume.append(
-    element("div", { attrs: { "data-role": "resume-stage" } }, [element("span", { text: "当前阶段" }), editableText(element("strong", { text: model.review.stage }), model, "project-overview", "stage", onEdit)]),
+    element("div", { attrs: { "data-role": "resume-stage" } }, [element("span", { text: "当前阶段" }), editableText(element("strong", { text: presentStage(model.review.stage) }), model, "project-overview", "stage", onEdit)]),
     element("div", { attrs: { "data-role": "resume-next" } }, [element("span", { text: "下一步" }), editableText(element("strong", { text: model.review.nextAction }), model, "project-overview", "next_action", onEdit)])
   );
   return resume;
@@ -95,12 +97,27 @@ function renderRisks(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
   const details = element("details", { className: "sr-risks" });
   details.append(element("summary", { text: `风险与待办 · ${model.review.risks.length}` }));
   for (const risk of model.review.risks) {
-    const item = element("div", { className: "sr-risk" });
-    item.append(
-      editableText(element("strong", { text: risk.title }), model, risk.id, "risk.title", onEdit),
-      editableText(element("span", { text: risk.status }), model, risk.id, "risk.status", onEdit),
-      editableText(element("p", { text: risk.detail }), model, risk.id, "risk.detail", onEdit)
+    const riskStatus = presentStatus(risk.status);
+    const item = element("details", { className: "sr-risk" });
+    const summary = element("summary", { className: "sr-risk-summary" });
+    summary.append(
+      element("strong", { text: risk.title }),
+      element("span", { className: "sr-risk-status", text: riskStatus.label, attrs: { "data-tone": riskStatus.tone } }),
+      element("span", { className: "sr-risk-preview", text: summarizeRisk(risk.detail) })
     );
+    const detail = element("div", { className: "sr-risk-detail" }, [element("p", { text: risk.detail })]);
+    if (onEdit) {
+      const actions = element("div", { className: "sr-edit-actions" });
+      for (const [fieldName, label] of [["risk.title", "标题"], ["risk.status", "状态"], ["risk.detail", "详情"]] as const) {
+        const field = model.review.fields.find((candidate) => candidate.unitId === risk.id && candidate.field === fieldName);
+        if (!field) continue;
+        const action = button(`编辑${label}`, { "data-edit-field": fieldName });
+        action.addEventListener("click", () => onEdit(field));
+        actions.append(action);
+      }
+      detail.append(actions);
+    }
+    item.append(summary, detail);
     details.append(item);
   }
   return details;
@@ -116,9 +133,4 @@ function editableText(node: HTMLElement, model: BrowserModel, unitId: string, fi
   action.addEventListener("click", () => onEdit(field));
   wrapper.append(action);
   return wrapper;
-}
-
-function formatDateTime(value: string): string {
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString("zh-CN", { hour12: false });
 }

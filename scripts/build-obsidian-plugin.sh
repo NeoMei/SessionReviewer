@@ -63,6 +63,11 @@ touch -t "$stamp" "$stage/session-reviewer/main.js" "$stage/session-reviewer/man
 archive="$dist/session-reviewer-obsidian-$version.zip"
 rm -f "$archive"
 (cd "$stage" && zip -X -D -q "$archive" session-reviewer/main.js session-reviewer/manifest.json session-reviewer/styles.css)
-hash="$(shasum -a 256 "$archive" | awk '{print $1}')"
-printf '%s  %s\n' "$hash" "$(basename "$archive")" > "$dist/SHA256SUMS"
+for file in main.js manifest.json styles.css; do
+  cp "$stage/session-reviewer/$file" "$dist/$file"
+done
+(
+  cd "$dist"
+  shasum -a 256 "$(basename "$archive")" main.js manifest.json styles.css | LC_ALL=C sort -k2
+) > "$dist/SHA256SUMS"
 echo "$archive"

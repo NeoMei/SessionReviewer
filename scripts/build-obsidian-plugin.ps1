@@ -54,6 +54,13 @@ try {
   } finally { $Zip.Dispose() }
 } finally { $Stream.Dispose() }
 
-$Hash = (Get-FileHash -Algorithm SHA256 $Archive).Hash.ToLowerInvariant()
-"$Hash  $([System.IO.Path]::GetFileName($Archive))`n" | Set-Content -NoNewline -Encoding utf8 (Join-Path $DistRoot "SHA256SUMS")
+foreach ($Name in @("main.js", "manifest.json", "styles.css")) {
+  Copy-Item -LiteralPath (Join-Path $PluginRoot $Name) -Destination (Join-Path $DistRoot $Name) -Force
+}
+$Assets = @($Archive, (Join-Path $DistRoot "main.js"), (Join-Path $DistRoot "manifest.json"), (Join-Path $DistRoot "styles.css"))
+$Checksums = $Assets | ForEach-Object {
+  $Hash = (Get-FileHash -Algorithm SHA256 $_).Hash.ToLowerInvariant()
+  "$Hash  $([System.IO.Path]::GetFileName($_))"
+} | Sort-Object { ($_ -split '  ', 2)[1] }
+(($Checksums -join "`n") + "`n") | Set-Content -NoNewline -Encoding utf8 (Join-Path $DistRoot "SHA256SUMS")
 Write-Output $Archive

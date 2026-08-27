@@ -31,6 +31,7 @@ export default class SessionReviewerPlugin extends Plugin {
       this.app.workspace.detachLeavesOfType(VIEW_TYPE);
       await this.activateView();
     }));
+    this.addRibbonIcon("history", "SessionReviewer：打开项目脉络", () => void this.activateView());
     this.addCommand({
       id: "open-project-evolution",
       name: "打开项目脉络",

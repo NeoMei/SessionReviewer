@@ -1,6 +1,7 @@
 import type { BrowserModel, EditableFieldName } from "../contracts/review-v2";
 import type { EditHandler, ViewState } from "./render-shell";
 import { button, definition, element } from "./dom";
+import { presentDateTime, presentStatus } from "./presentation";
 
 export function renderDecisions(model: BrowserModel, update: (patch: Partial<ViewState>) => void, onEdit?: EditHandler): HTMLElement {
   const panel = element("section", { className: "sr-tab-panel", attrs: { role: "tabpanel", "aria-label": "关键决策" } });
@@ -9,8 +10,9 @@ export function renderDecisions(model: BrowserModel, update: (patch: Partial<Vie
   panel.append(heading);
   const cards = element("div", { className: "sr-card-grid" });
   for (const decision of model.review.decisions) {
+    const decisionStatus = presentStatus(decision.status);
     const card = element("article", { className: "sr-card" });
-    card.append(element("span", { className: "sr-card-meta", text: [decision.occurredAt, decision.status].filter(Boolean).join(" · ") }), element("h3", { text: decision.title }));
+    card.append(element("span", { className: "sr-card-meta", text: [presentDateTime(decision.occurredAt), decisionStatus.label].filter(Boolean).join(" · ") }), element("h3", { text: decision.title }));
     const details = element("dl", { className: "sr-detail-grid" });
     details.append(definition("原因", decision.rationale), definition("影响", decision.impact));
     card.append(details);

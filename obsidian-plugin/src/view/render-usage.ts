@@ -9,37 +9,45 @@ export function renderUsage(model: BrowserModel): HTMLElement {
   const total = element("dl", { className: "sr-usage-total", attrs: { "data-role": "usage-total" } });
   total.append(
     definition("总时长", formatDuration(model.accounting.totalDurationMs)),
-    definition("总 tokens", model.accounting.totalTokens.toLocaleString()),
+    definition("总 tokens", formatTokenCount(model.accounting.totalTokens)),
     definition("总成本", formatUsd(model.accounting.totalCostUsd)),
     definition("模型数", String(model.accounting.models.length))
   );
   panel.append(total);
-  const cards = element("div", { className: "sr-card-grid" });
+  const cards = element("div", { className: "sr-card-grid sr-model-grid" });
   for (const summary of model.accounting.models) {
-    const card = element("article", { className: "sr-card" });
-    card.append(element("h3", { text: summary.model }));
-    const details = element("dl", { className: "sr-detail-grid" });
-    details.append(
-      definition("Tokens", summary.totalTokens.toLocaleString()),
+    const card = element("article", { className: "sr-card sr-model-card" });
+    const header = element("div", { className: "sr-model-header" });
+    header.append(element("h3", { text: summary.model }), element("span", { className: "sr-model-kicker", text: "模型用量与定价" }));
+    const metrics = element("dl", { className: "sr-model-metrics" });
+    metrics.append(
+      definition("Tokens", formatTokenCount(summary.totalTokens)),
       definition("费用", formatUsd(summary.totalCostUsd)),
       definition("Token 占比", `${formatNumber(summary.tokenSharePct)}%`),
       definition("费用占比", `${formatNumber(summary.costSharePct)}%`)
     );
+    card.append(header, metrics);
     const priceRows = model.sessions.flatMap((session) => session.accounting?.models ?? []).filter((entry) => entry.model === summary.model);
     const latest = priceRows.at(-1);
     if (latest) {
-      details.append(
+      const pricing = element("dl", { className: "sr-model-pricing" });
+      pricing.append(
         definition("输入价格", `$${formatNumber(latest.pricing.inputPerMillion)} / 百万 tokens`),
         definition("缓存输入", `$${formatNumber(latest.pricing.cachedInputPerMillion)} / 百万 tokens`),
-        definition("输出价格", `$${formatNumber(latest.pricing.outputPerMillion)} / 百万 tokens`),
-        definition("价格日期", latest.pricing.asOf)
+        definition("输出价格", `$${formatNumber(latest.pricing.outputPerMillion)} / 百万 tokens`)
       );
-      const source = element("a", { text: latest.pricing.source, attrs: { href: latest.pricing.source } });
-      const sourceRow = element("div", { className: "sr-definition" });
-      sourceRow.append(element("dt", { text: "价格来源" }), element("dd", {}, [source]));
-      details.append(sourceRow);
+      const meta = element("div", { className: "sr-model-meta" });
+      const source = element("span", { className: "sr-model-source-row" });
+      source.append(
+        element("span", { className: "sr-model-source-label", text: "定价来源" }),
+        element("a", { className: "sr-model-source", text: latest.pricing.source, attrs: { href: latest.pricing.source } })
+      );
+      meta.append(
+        element("span", { text: `价格日期 ${latest.pricing.asOf}` }),
+        source
+      );
+      card.append(pricing, meta);
     }
-    card.append(details);
     cards.append(card);
   }
   panel.append(cards);
@@ -47,14 +55,30 @@ export function renderUsage(model: BrowserModel): HTMLElement {
 }
 
 function formatDuration(milliseconds: number): string {
-  const seconds = Math.round(milliseconds / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return minutes ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+  let remaining = Math.round(milliseconds / 1000);
+  const units = [
+    { label: "月", seconds: 30 * 24 * 60 * 60 },
+    { label: "天", seconds: 24 * 60 * 60 },
+    { label: "时", seconds: 60 * 60 },
+    { label: "分", seconds: 60 },
+    { label: "秒", seconds: 1 }
+  ];
+  const parts: string[] = [];
+  for (const unit of units) {
+    const value = Math.floor(remaining / unit.seconds);
+    remaining %= unit.seconds;
+    if (value > 0) parts.push(`${value} ${unit.label}`);
+  }
+  return parts.join(" ") || "0 秒";
 }
 
 function formatUsd(value: number): string {
   return `$${value.toFixed(Math.max(2, value < 0.01 ? 4 : 2))}`;
+}
+
+function formatTokenCount(value: number): string {
+  const exact = value.toLocaleString();
+  return value >= 100_000_000 ? `${formatNumber(value / 100_000_000)} 亿（${exact}）` : exact;
 }
 
 function formatNumber(value: number): string {

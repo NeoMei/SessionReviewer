@@ -34,4 +34,97 @@ describe("project evolution browser", () => {
     expect(view.textContent).toContain("$4 / 百万 tokens");
     expect(view.textContent).toContain("2026-08-25");
   });
+
+  it.each([
+    [229_226_000, "2 天 15 时 40 分 26 秒"],
+    [2_682_123_000, "1 月 1 天 1 时 2 分 3 秒"]
+  ])("renders total duration %i ms in readable calendar-sized units", (totalDurationMs, expected) => {
+    const model = browserModelFixture();
+    model.accounting.totalDurationMs = totalDurationMs;
+
+    const view = renderReadyView(model);
+    click(view, '[data-view="usage"]');
+
+    expect(text(view, '[data-role="usage-total"] .sr-definition:first-child dd')).toBe(expected);
+  });
+
+  it.each([
+    [573_135_757, "5.73 亿（573,135,757）"],
+    [99_999_999, "99,999,999"]
+  ])("marks the 亿 magnitude for an aggregate token count of %i", (totalTokens, expected) => {
+    const model = browserModelFixture();
+    model.accounting.totalTokens = totalTokens;
+
+    const view = renderReadyView(model);
+    click(view, '[data-view="usage"]');
+
+    expect(text(view, '[data-role="usage-total"] .sr-definition:nth-child(2) dd')).toBe(expected);
+  });
+
+  it("groups one model into a compact horizontal usage card", () => {
+    const model = browserModelFixture();
+    model.accounting.models[0]!.totalTokens = 573_135_757;
+
+    const view = renderReadyView(model);
+    click(view, '[data-view="usage"]');
+
+    const card = view.querySelector<HTMLElement>(".sr-model-card");
+    expect(card).toBeTruthy();
+    expect([...card!.querySelectorAll(".sr-model-metrics dt")].map((node) => node.textContent)).toEqual(["Tokens", "费用", "Token 占比", "费用占比"]);
+    expect([...card!.querySelectorAll(".sr-model-pricing dt")].map((node) => node.textContent)).toEqual(["输入价格", "缓存输入", "输出价格"]);
+    expect(text(card!, ".sr-model-metrics")).toContain("5.73 亿（573,135,757）");
+    expect(text(card!, ".sr-model-meta")).toContain("价格日期 2026-08-25");
+    expect(text(card!, ".sr-model-meta")).toContain("定价来源");
+    const source = card!.querySelector<HTMLAnchorElement>(".sr-model-source");
+    expect(source?.textContent).toBe("https://example.com/pricing");
+    expect(source?.href).toBe("https://example.com/pricing");
+  });
+
+  it("translates machine-facing states and timestamps into readable Chinese", () => {
+    const model = browserModelFixture();
+    model.review.status = "at_risk";
+    model.review.stage = "main";
+    model.review.risks[0]!.status = "open";
+    model.review.decisions[0]!.status = "accepted";
+    model.review.decisions[0]!.occurredAt = "2026-08-25T03:45:44.447Z";
+    model.events[0]!.kind = "verified";
+    model.events[0]!.occurredAt = "2026-08-25T04:11:09.847Z";
+
+    const view = renderReadyView(model);
+    const status = view.querySelector<HTMLElement>(".sr-status")!;
+    expect(status.textContent).toBe("有风险");
+    expect(status.dataset.tone).toBe("warning");
+    expect(text(view, '[data-role="resume-stage"]')).toContain("主线阶段");
+    expect(text(view, ".sr-node-kind")).toBe("已验证");
+    expect(text(view, ".sr-node-date")).not.toContain("T");
+
+    click(view, '[data-view="decisions"]');
+    const decisionMeta = text(view, ".sr-card-meta");
+    expect(decisionMeta).toContain("已采纳");
+    expect(decisionMeta).not.toContain("accepted");
+    expect(decisionMeta).not.toContain("T");
+  });
+
+  it("keeps each risk concise until that individual card is expanded", () => {
+    const model = browserModelFixture();
+    model.review.risks[0]!.status = "open";
+    model.review.risks[0]!.detail = "问题：真实 Vault 尚未完成验收。下一步：重新加载插件并逐项检查。";
+
+    const view = renderReadyView(model);
+    const risk = view.querySelector<HTMLDetailsElement>("details.sr-risk")!;
+    const summary = risk.querySelector<HTMLElement>("summary.sr-risk-summary")!;
+    const status = risk.querySelector<HTMLElement>(".sr-risk-status")!;
+    const detail = risk.querySelector<HTMLElement>(".sr-risk-detail")!;
+
+    expect(risk).toBeTruthy();
+    expect(risk.open).toBe(false);
+    expect(summary.textContent).toContain("UI 验收");
+    expect(summary.textContent).toContain("待处理");
+    expect(summary.textContent).toContain("真实 Vault 尚未完成验收");
+    expect(status.dataset.tone).toBe("warning");
+    expect(detail.textContent).toContain("重新加载插件并逐项检查");
+
+    summary.click();
+    expect(risk.open).toBe(true);
+  });
 });

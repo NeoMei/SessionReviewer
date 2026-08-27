@@ -1,6 +1,7 @@
 import type { BrowserModel, EditableFieldName, HistoryEvent } from "../contracts/review-v2";
 import type { EditHandler, ViewState } from "./render-shell";
 import { button, definition, element } from "./dom";
+import { presentDateTime, presentEventKind } from "./presentation";
 import { virtualWindow } from "./virtual-list";
 
 export function renderEvolution(model: BrowserModel, state: ViewState, update: (patch: Partial<ViewState>) => void, onEdit?: EditHandler): HTMLElement {
@@ -47,7 +48,7 @@ export function renderEvolution(model: BrowserModel, state: ViewState, update: (
       "data-event-id": event.id
     });
     node.className = "sr-timeline-node";
-    node.append(element("span", { className: "sr-node-date", text: event.occurredAt }), element("strong", { text: event.title }), element("span", { className: "sr-node-kind", text: event.kind }));
+    node.append(element("span", { className: "sr-node-date", text: presentDateTime(event.occurredAt) }), element("strong", { text: event.title }), element("span", { className: "sr-node-kind", text: presentEventKind(event.kind) }));
     node.addEventListener("click", () => update({ selectedEventId: event.id }));
     node.addEventListener("keydown", (keyboard) => {
       const nodes = [...list.querySelectorAll<HTMLElement>("[data-event-id]")];
@@ -81,7 +82,7 @@ function renderDetail(model: BrowserModel, event: HistoryEvent | undefined, onEd
     return detail;
   }
   detail.append(
-    element("div", { className: "sr-detail-kicker", text: `${event.occurredAt} · ${event.kind}` }),
+    element("div", { className: "sr-detail-kicker", text: `${presentDateTime(event.occurredAt)} · ${presentEventKind(event.kind)}` }),
     element("h2", { text: event.title, attrs: { "data-role": "detail-title" } })
   );
   const definitions = element("dl", { className: "sr-detail-grid" });
