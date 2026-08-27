@@ -1,6 +1,7 @@
 import type { BrowserModel, EditableFieldName, HistoryEvent } from "../contracts/review-v2";
 import type { EditHandler, ViewState } from "./render-shell";
 import { button, definition, element } from "./dom";
+import { virtualWindow } from "./virtual-list";
 
 export function renderEvolution(model: BrowserModel, state: ViewState, update: (patch: Partial<ViewState>) => void, onEdit?: EditHandler): HTMLElement {
   const panel = element("section", { className: "sr-tab-panel", attrs: { role: "tabpanel", "aria-label": "项目演进" } });
@@ -16,19 +17,54 @@ export function renderEvolution(model: BrowserModel, state: ViewState, update: (
     search.addEventListener("input", () => update({ historyQuery: search.value }));
     rail.append(search);
   }
-  const events = visibleEvents(model.events, state);
+  const filteredEvents = visibleEvents(model.events, state);
+  const selectedIndex = filteredEvents.findIndex((event) => event.id === state.selectedEventId);
+  const window = state.fullHistory ? virtualWindow(filteredEvents, selectedIndex) : { start: 0, items: filteredEvents, total: filteredEvents.length };
+  const events = window.items;
   const list = element("div", { className: "sr-timeline", attrs: { role: "listbox", "aria-label": "项目演进节点" } });
+  if (window.total > events.length) {
+    const navigation = element("div", { className: "sr-virtual-navigation" });
+    navigation.append(element("span", { className: "sr-virtual-note", text: `已加载 ${window.start + 1}–${window.start + events.length} / ${window.total} 个节点` }));
+    if (window.start > 0) {
+      const previous = button("上一批", { "data-action": "previous-history-window" });
+      previous.addEventListener("click", () => update({ selectedEventId: filteredEvents[Math.max(0, window.start - 60)]?.id ?? null }));
+      navigation.append(previous);
+    }
+    if (window.start + events.length < window.total) {
+      const next = button("下一批", { "data-action": "next-history-window" });
+      next.addEventListener("click", () => update({ selectedEventId: filteredEvents[Math.min(window.total - 1, window.start + 60)]?.id ?? null }));
+      navigation.append(next);
+    }
+    list.append(navigation);
+  }
   for (const event of events) {
     const selected = event.id === state.selectedEventId;
     const node = button("", {
       class: "sr-timeline-node",
       role: "option",
       "aria-selected": String(selected),
+      tabindex: selected ? "0" : "-1",
       "data-event-id": event.id
     });
     node.className = "sr-timeline-node";
     node.append(element("span", { className: "sr-node-date", text: event.occurredAt }), element("strong", { text: event.title }), element("span", { className: "sr-node-kind", text: event.kind }));
     node.addEventListener("click", () => update({ selectedEventId: event.id }));
+    node.addEventListener("keydown", (keyboard) => {
+      const nodes = [...list.querySelectorAll<HTMLElement>("[data-event-id]")];
+      const index = nodes.indexOf(node);
+      let target = index;
+      if (keyboard.key === "ArrowDown") target = Math.min(nodes.length - 1, index + 1);
+      else if (keyboard.key === "ArrowUp") target = Math.max(0, index - 1);
+      else if (keyboard.key === "Home") target = 0;
+      else if (keyboard.key === "End") target = nodes.length - 1;
+      else if (keyboard.key === "Enter" || keyboard.key === " ") {
+        keyboard.preventDefault();
+        update({ selectedEventId: event.id });
+        return;
+      } else return;
+      keyboard.preventDefault();
+      nodes[target]?.focus();
+    });
     list.append(node);
   }
   if (events.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的历史节点。" }));

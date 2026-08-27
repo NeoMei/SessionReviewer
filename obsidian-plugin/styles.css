@@ -54,6 +54,10 @@
 .sr-usage-total { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 16px; padding: 6px 18px; }
 .sr-usage-total .sr-definition { display: flex; flex-direction: column; gap: 4px; padding: 12px; }
 .sr-empty { color: var(--sr-muted); }
+.sr-virtual-note { color: var(--sr-muted); font-size: 11px; margin: 0 0 6px; }
+.sr-virtual-navigation { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; justify-content: space-between; }
+.sr-virtual-navigation button { font-size: 10px; padding: 3px 6px; }
+.session-reviewer-browser pre, .session-reviewer-browser a, .session-reviewer-conflict pre { overflow-wrap: anywhere; white-space: pre-wrap; word-break: break-word; }
 .sr-banner { border: 1px solid var(--sr-border); border-radius: 10px; margin-bottom: 14px; padding: 10px 14px; }
 .sr-banner-pending_edit { background: var(--background-modifier-warning); color: var(--text-warning); }
 .sr-banner-stale { background: var(--background-modifier-error-hover); color: var(--text-error); }

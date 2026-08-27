@@ -63,9 +63,22 @@ function renderResume(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
 
 function renderTabs(state: ViewState, update: (patch: Partial<ViewState>) => void): HTMLElement {
   const tabs = element("div", { className: "sr-tabs", attrs: { role: "tablist", "aria-label": "项目视图" } });
-  for (const [view, label] of [["evolution", "演进"], ["decisions", "决策"], ["usage", "用量"]] as const) {
+  const definitions = [["evolution", "演进"], ["decisions", "决策"], ["usage", "用量"]] as const;
+  for (const [view, label] of definitions) {
     const tab = button(label, { role: "tab", "data-view": view, "aria-selected": String(state.view === view), tabindex: state.view === view ? "0" : "-1" });
     tab.addEventListener("click", () => update({ view }));
+    tab.addEventListener("keydown", (keyboard) => {
+      const current = definitions.findIndex(([candidate]) => candidate === view);
+      let next = current;
+      if (keyboard.key === "ArrowRight") next = (current + 1) % definitions.length;
+      else if (keyboard.key === "ArrowLeft") next = (current - 1 + definitions.length) % definitions.length;
+      else if (keyboard.key === "Home") next = 0;
+      else if (keyboard.key === "End") next = definitions.length - 1;
+      else return;
+      keyboard.preventDefault();
+      const nextView = definitions[next]?.[0] ?? "evolution";
+      update({ view: nextView });
+    });
     tabs.append(tab);
   }
   return tabs;
