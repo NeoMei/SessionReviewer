@@ -24,12 +24,16 @@ export class Plugin {
 
 export class ItemView {
   contentEl = document.createElement("div");
+  app = {} as never;
 
   constructor(public leaf: WorkspaceLeaf) {}
 }
 
 export class Modal {
   contentEl = document.createElement("div");
+  constructor(_app?: unknown) {}
+  open(): void { (this as { onOpen?: () => void }).onOpen?.(); }
+  close(): void { (this as { onClose?: () => void }).onClose?.(); }
 }
 
 export class Notice {

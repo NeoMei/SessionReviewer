@@ -1,8 +1,8 @@
-import type { BrowserModel, HistoryEvent } from "../contracts/review-v2";
-import type { ViewState } from "./render-shell";
+import type { BrowserModel, EditableFieldName, HistoryEvent } from "../contracts/review-v2";
+import type { EditHandler, ViewState } from "./render-shell";
 import { button, definition, element } from "./dom";
 
-export function renderEvolution(model: BrowserModel, state: ViewState, update: (patch: Partial<ViewState>) => void): HTMLElement {
+export function renderEvolution(model: BrowserModel, state: ViewState, update: (patch: Partial<ViewState>) => void, onEdit?: EditHandler): HTMLElement {
   const panel = element("section", { className: "sr-tab-panel", attrs: { role: "tabpanel", "aria-label": "项目演进" } });
   const layout = element("div", { className: "sr-evolution" });
   const rail = element("aside", { className: "sr-timeline-rail" });
@@ -33,12 +33,12 @@ export function renderEvolution(model: BrowserModel, state: ViewState, update: (
   }
   if (events.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的历史节点。" }));
   rail.append(list);
-  layout.append(rail, renderDetail(model, selectedEvent(model, state)));
+  layout.append(rail, renderDetail(model, selectedEvent(model, state), onEdit));
   panel.append(layout);
   return panel;
 }
 
-function renderDetail(model: BrowserModel, event: HistoryEvent | undefined): HTMLElement {
+function renderDetail(model: BrowserModel, event: HistoryEvent | undefined, onEdit?: EditHandler): HTMLElement {
   const detail = element("article", { className: "sr-detail", attrs: { "aria-live": "polite" } });
   if (!event) {
     detail.append(element("p", { className: "sr-empty", text: "选择一个演进节点查看详情。" }));
@@ -62,7 +62,26 @@ function renderDetail(model: BrowserModel, event: HistoryEvent | undefined): HTM
   }
   definitions.append(definition("留下的问题或下一步", event.next));
   detail.append(definitions);
+  if (onEdit) {
+    const actions = element("div", { className: "sr-edit-actions" });
+    for (const [fieldName, label] of [["event.title", "标题"], ["event.meaning", "意义"], ["event.summary", "摘要"], ["event.why", "前因"], ["event.changes", "变更"], ["event.results", "结果"], ["event.next", "下一步"]] as const) {
+      appendEdit(actions, model, event.id, fieldName, label, onEdit);
+    }
+    detail.append(actions);
+  }
   return detail;
+}
+
+function appendEdit(parent: HTMLElement, model: BrowserModel, unitId: string, fieldName: EditableFieldName, label: string, onEdit: EditHandler): void {
+  const field = model.events.length ? findHistoryField(model, unitId, fieldName) : undefined;
+  if (!field) return;
+  const action = button(`编辑${label}`, { "data-edit-field": fieldName });
+  action.addEventListener("click", () => onEdit(field));
+  parent.append(action);
+}
+
+function findHistoryField(model: BrowserModel, unitId: string, fieldName: EditableFieldName) {
+  return model.historyFields?.find((field) => field.unitId === unitId && field.field === fieldName);
 }
 
 function selectedEvent(model: BrowserModel, state: ViewState): HistoryEvent | undefined {

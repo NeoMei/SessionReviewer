@@ -1,6 +1,7 @@
 import { Plugin, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "./constants";
 import { ProjectRepository } from "./data/repository";
+import { ReviewEditor } from "./data/editor";
 import { ObsidianVaultPort } from "./data/vault-port";
 import { ProjectEvolutionView } from "./view/project-view";
 import { defaultViewState, type ViewState } from "./view/render-shell";
@@ -13,8 +14,10 @@ export default class SessionReviewerPlugin extends Plugin {
   async onload(): Promise<void> {
     const stored = await this.loadData() as { viewState?: Partial<ViewState> } | null;
     this.viewState = { ...defaultViewState(), ...(stored?.viewState ?? {}) };
-    const repository = new ProjectRepository(new ObsidianVaultPort(this.app));
-    this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, this.viewState, async (viewState) => {
+    const vault = new ObsidianVaultPort(this.app);
+    const repository = new ProjectRepository(vault);
+    const editor = new ReviewEditor(vault);
+    this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.viewState, async (viewState) => {
       this.viewState = viewState;
       await this.saveData({ viewState });
     }));

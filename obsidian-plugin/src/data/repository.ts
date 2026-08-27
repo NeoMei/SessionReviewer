@@ -111,7 +111,8 @@ export class ProjectRepository {
       accounting: machine.accounting,
       sessions: machine.sessions,
       ...(machine.lastSuccessfulSync === undefined ? {} : { lastSuccessfulSync: machine.lastSuccessfulSync }),
-      source: { reviewPath, historyPath, ledgerPath, reviewText, historyText, reviewSha256, historySha256 }
+      source: { reviewPath, historyPath, ledgerPath, reviewText, historyText, reviewSha256, historySha256 },
+      historyFields: history.fields
     };
     if (machine.reviewSha256 !== reviewSha256 || machine.historySha256 !== historySha256 || machine.acceptedRevision !== review.revision) {
       return { kind: "pending_edit", model, machine, diagnostic: { code: "sync_not_run", message: "人类可读文档已更新，等待同步到代码目录。" } };

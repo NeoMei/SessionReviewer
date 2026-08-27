@@ -168,4 +168,5 @@ export interface BrowserModel {
   sessions: SessionReport[];
   lastSuccessfulSync?: string;
   source: BrowserSource;
+  historyFields?: EditableField[];
 }

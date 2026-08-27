@@ -1,21 +1,29 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
+import type { BrowserModel, EditableField } from "../contracts/review-v2";
+import type { ReviewEditor } from "../data/editor";
 import type { ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
 import { element } from "./dom";
+import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
   private lastReady?: SnapshotReady;
   private selected?: ProjectDescriptor;
+  private projects: ProjectDescriptor[] = [];
+  private currentState: ViewState;
+  private announcement = "";
 
   constructor(
     leaf: WorkspaceLeaf,
     private readonly repository?: ProjectRepository,
+    private readonly editor?: ReviewEditor,
     private readonly initialState: ViewState = defaultViewState(),
     private readonly saveState?: SaveViewState
   ) {
     super(leaf);
+    this.currentState = initialState;
   }
 
   getViewType(): string {
@@ -42,6 +50,7 @@ export class ProjectEvolutionView extends ItemView {
   private async openProjects(): Promise<void> {
     this.contentEl.replaceChildren(element("p", { className: "sr-loading", text: "正在发现项目…" }));
     const projects = await this.repository!.discover();
+    this.projects = projects;
     if (projects.length === 0) {
       this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
         element("h1", { text: "还没有 v2 项目回顾" }),
@@ -72,7 +81,10 @@ export class ProjectEvolutionView extends ItemView {
       return;
     }
     const model = snapshot.kind === "stale" ? snapshot.lastValid.model : snapshot.model;
-    const browser = renderReadyView(model, { ...this.initialState, projectId: model.review.projectId }, this.saveState);
+    const browser = renderReadyView(model, { ...this.currentState, projectId: model.review.projectId }, (viewState) => {
+      this.currentState = viewState;
+      return this.saveState?.(viewState);
+    }, this.editor ? (field) => this.openEditor(field, model) : undefined);
     if (projects.length > 1) browser.prepend(this.projectPicker(projects));
     if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") {
       browser.prepend(element("div", {
@@ -81,7 +93,20 @@ export class ProjectEvolutionView extends ItemView {
         attrs: { role: "status" }
       }));
     }
+    if (this.announcement) browser.prepend(element("div", { className: "sr-sr-only", text: this.announcement, attrs: { "aria-live": "polite" } }));
     this.contentEl.append(browser);
+  }
+
+  private openEditor(field: EditableField, model: BrowserModel): void {
+    if (!this.editor || !this.repository) return;
+    const path = field.document === "review" ? model.source.reviewPath : model.source.historyPath;
+    const expectedSha256 = field.document === "review" ? model.source.reviewSha256 : model.source.historySha256;
+    new EditModal(this.app, field, async (value) => {
+      const result = await this.editor!.apply({ path, expectedSha256, document: field.document, unitId: field.unitId, field: field.field, value });
+      this.repository!.ignoreSelfWrite(path, result.sha256);
+      this.announcement = "已保存，等待同步到代码目录。";
+      await this.refresh(this.projects);
+    }).open();
   }
 
   private projectPicker(projects: ProjectDescriptor[]): HTMLElement {
