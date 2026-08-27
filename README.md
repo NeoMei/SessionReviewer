@@ -9,15 +9,16 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 - 从源码构建需要 Go 1.26
 - 不需要管理员权限，也不需要单独配置 OpenAI API key
 
-仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。`v0.1.0` 是已发布的 legacy schema 版本；首个包含 review schema v2 和 Obsidian 浏览器的发行版目标为 `v0.2.0`。自动回执不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
+仓库 CI 配置在 macOS Intel x64、macOS Apple Silicon arm64 和 Windows x64 上执行基础测试、race 检查、`vet` 与原生构建。`v0.2.0` 是首个包含 review schema v2 和 Obsidian 项目演进浏览器的发行版；`v0.1.0` 保留为 legacy schema 版本。自动回执不替代 Windows 10/11 与 macOS 13+ 最低版本上的人工端到端安装验收。
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [GitHub Release v0.1.0](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.1.0) 下载与平台对应的归档和 `SHA256SUMS`。解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+无需 Go 工具链时，从 [GitHub Release v0.2.0](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.2.0) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
 
-- Apple Silicon Mac：`session-reviewer_0.1.0_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.1.0_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.1.0_windows_amd64.zip`
+- Apple Silicon Mac：`session-reviewer_0.2.0_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.2.0_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.2.0_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.2.0.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -263,7 +264,7 @@ Obsidian 插件包可独立构建：
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。已公开的 `v0.1.0` 包含三个平台归档和统一 `SHA256SUMS`。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`v0.2.0` 包含三个平台 CLI 归档、Obsidian 插件 ZIP 和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 
