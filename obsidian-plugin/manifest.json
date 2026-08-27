@@ -1,0 +1,10 @@
+{
+  "id": "session-reviewer",
+  "name": "SessionReviewer",
+  "version": "0.2.0",
+  "minAppVersion": "1.8.7",
+  "description": "Browse and safely edit SessionReviewer project evolution in Obsidian.",
+  "author": "NeoMei",
+  "authorUrl": "https://github.com/NeoMei",
+  "isDesktopOnly": true
+}
