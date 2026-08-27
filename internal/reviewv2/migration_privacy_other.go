@@ -19,3 +19,5 @@ func privateMigrationPath(path string, want fs.FileMode) bool {
 	info, err := os.Lstat(path)
 	return err == nil && info.Mode().Perm() == want.Perm()
 }
+
+func migrationPrivacyDiagnostic(string) string { return "" }

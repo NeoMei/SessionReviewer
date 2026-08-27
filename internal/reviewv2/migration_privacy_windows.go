@@ -3,6 +3,7 @@
 package reviewv2
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 
@@ -89,4 +90,18 @@ func privateMigrationPath(path string, _ fs.FileMode) bool {
 		return false
 	}
 	return winsecurity.ProtectedDACLMatches(got, want)
+}
+
+func migrationPrivacyDiagnostic(path string) string {
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		return ": stat=" + statErr.Error()
+	}
+	want, wantErr := privateMigrationSDDL(info.IsDir())
+	got, gotErr := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if gotErr != nil || wantErr != nil {
+		return fmt.Sprintf(": get=%v want=%v", gotErr, wantErr)
+	}
+	control, _, _ := got.Control()
+	return fmt.Sprintf(": got=%q want=%q control=%#x", got.String(), want, control)
 }

@@ -1061,7 +1061,7 @@ func requireMigrationDirectoryMode(project *pathguard.Directory, relative string
 	after, inspectErr := root.Stat(".")
 	closeErr := root.Close()
 	if inspectErr != nil || closeErr != nil || !os.SameFile(expected, after) || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
-		return errors.New("migration directory identity or mode changed")
+		return fmt.Errorf("migration directory identity or mode changed%s", migrationPrivacyDiagnostic(filepath.Join(project.Path, filepath.FromSlash(relative))))
 	}
 	return nil
 }
@@ -1073,7 +1073,7 @@ func requireMigrationFileMode(project *pathguard.Directory, relative string, mod
 	}
 	closeErr := file.Close()
 	if closeErr != nil || !privateMigrationPath(filepath.Join(project.Path, filepath.FromSlash(relative)), mode) {
-		return errors.New("migration file mode does not match")
+		return fmt.Errorf("migration file mode does not match%s", migrationPrivacyDiagnostic(filepath.Join(project.Path, filepath.FromSlash(relative))))
 	}
 	return nil
 }

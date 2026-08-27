@@ -31,6 +31,7 @@ import (
 const (
 	initTransactionLockTimeout = 10 * time.Second
 	initialReviewV2JournalPath = "docs/session-review/.session-reviewer/init-v2.json"
+	initialReviewV2JournalMax  = 64 << 10
 )
 
 var (
@@ -1024,10 +1025,10 @@ func recoverInitialReviewV2(root *os.Root, projectRoot string, afterFile func(st
 	if err != nil {
 		return fmt.Errorf("review v2 initialization journal path is redirected or invalid: %w", err)
 	}
-	if !info.Mode().IsRegular() || info.Size() > 4096 {
+	if !info.Mode().IsRegular() || info.Size() > initialReviewV2JournalMax {
 		return errors.New("review v2 initialization journal is invalid")
 	}
-	body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(initialReviewV2JournalPath), info, 4096)
+	body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(initialReviewV2JournalPath), info, initialReviewV2JournalMax)
 	if err != nil {
 		return fmt.Errorf("review v2 initialization journal changed while reading: %w", err)
 	}
