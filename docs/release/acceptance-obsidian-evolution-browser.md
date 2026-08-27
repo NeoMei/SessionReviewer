@@ -24,8 +24,13 @@
 ## macOS 真实 UI 验收
 
 - 环境：macOS，Obsidian 1.13.7，Vault 使用既有 SessionReviewer 配置映射。
-- 安装前读取检查：Obsidian 已运行，Vault 中尚未安装 `session-reviewer` 插件。
-- 安装、启用、五节点比对、决策逆跳、用量比对、页面编辑、代码侧编辑、冲突处理、宽/窄屏与纯键盘：**待用户确认安装本地未发布候选插件后执行**。
+- 安装与兼容性：候选 zip 的三个文件安装到 `.obsidian/plugins/session-reviewer` 并在 Obsidian 中启用；插件显示为 SessionReviewer 0.2.0。候选 CLI 安装为 `~/.local/bin/session-reviewer-v2`，保留既有 0.1.0 `session-reviewer` 不变；插件通过 `version --json` 验证 0.2.0 和 review schema 2 后保存该稳定路径。
+- 默认恢复视图：打开后只显示目标、状态、当前阶段、一个下一步、五个最近演进节点及相邻详情。逐一点击五个节点后，选中标题与右侧详情标题全部一致。
+- 决策与用量：从“只持久化脱敏且可定位的允许列表证据”成功逆跳到“截断后二次脱敏缺陷完成 TDD 修复并恢复 apply”。UI 显示总时长 3820 分 26 秒、573,135,757 tokens、$291.30、gpt-5.6-sol 100%，以及 2026-08-27 单价日期和官方来源；与隐藏账本一致。
+- 双向编辑：在 Obsidian 编辑项目目标后，页面立即显示“等待同步到代码目录”和“机器用量仍来自上次验收”；CLI 状态可从页面刷新。真实同步后 Project/Vault 均出现验收标记并恢复 `in_sync=2`；随后从 Project 侧删除标记再同步，Obsidian 页面恢复原文。
+- 冲突：Project 与 Obsidian 对同一目标写入不同验收标记后，真实 sync 生成一个隐藏冲突。插件同时展示 Base、Project、Obsidian 三份候选，选择 Project 并确认后显示“冲突已解决”；最终状态 `in_sync=2`、零冲突、零 pending，重复 dry-run 为零操作。
+- 清理：临时内容标记全部移除。验收生成的两份已解决冲突记录移到可恢复备份 `/Users/neomei/.local/share/session-reviewer-v2-ui-acceptance-backups/20260827T070130Z/test-conflicts`，未留在真实 Project/Vault。
+- 布局与键盘：全宽页面和已有左右分栏下的较窄内容区均可阅读和滚动。真实 Computer Use 可访问性桥接未暴露自定义时间线按钮的可观察键盘焦点，因此不把纯键盘实机项声明为通过；Tab/方向键行为仍由 21 项 Vitest 中的交互用例覆盖。
 
 ## Windows x64 真实 UI 验收
 
