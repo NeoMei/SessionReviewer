@@ -38,6 +38,74 @@ func TestProjectLegacyProducesTwoDocumentsAndMachineLedger(t *testing.T) {
 	}
 }
 
+func TestProjectLegacyPreservesProposalV1StableIDCharacters(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	loop := legacy.OpenLoops["risk-install"]
+	delete(legacy.OpenLoops, loop.ID)
+	loop.ID = "open-loop-v0.1_0-release"
+	legacy.OpenLoops[loop.ID] = loop
+	legacy.Timeline[0].OpenLoopIDs = []string{loop.ID}
+	report := legacy.Sessions["session-report-1"]
+	report.OpenLoopsCreated = []string{loop.ID}
+	legacy.Sessions[report.ID] = report
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatalf("proposal-v1 stable ID was rejected during migration: %v", err)
+	}
+	preserved := false
+	for _, risk := range state.Review.Risks {
+		if risk.ID == loop.ID {
+			preserved = true
+			break
+		}
+	}
+	if !preserved {
+		t.Fatalf("stable ID changed during projection: risks=%+v", state.Review.Risks)
+	}
+	if _, err := Render(t.TempDir(), state); err != nil {
+		t.Fatalf("proposal-v1 stable ID could not be rendered in v2: %v", err)
+	}
+}
+
+func TestProjectLegacyFillsVisibleHistoryFieldsForSparseV1Event(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	legacy.Timeline[0].Summary = ""
+	legacy.Timeline[0].Evidence = []ledger.EvidenceRef{}
+	legacy.Timeline[0].DecisionIDs = []string{}
+	legacy.Timeline[0].OpenLoopIDs = []string{}
+	legacy.CurrentState.NextAction = ""
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatalf("valid sparse v1 event could not migrate: %v", err)
+	}
+	event := state.Events[0]
+	if event.Summary != legacy.Timeline[0].Title || event.Why != legacy.Timeline[0].Title ||
+		!reflect.DeepEqual(event.Changes, []string{legacy.Timeline[0].Title}) ||
+		!reflect.DeepEqual(event.Results, []string{"旧记录未包含独立验证结果。"}) ||
+		event.Next != "旧记录未包含下一步。" {
+		t.Fatalf("sparse v1 fallback fields=%+v", event)
+	}
+}
+
+func TestProjectLegacyKeepsVerboseEvidenceOutOfHumanHistory(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	legacy.Timeline[0].Evidence[0].Summary = "raw detail\n### injected heading\n/private/session/path"
+
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatalf("verbose legacy evidence broke human history migration: %v", err)
+	}
+	event := state.Events[0]
+	if !reflect.DeepEqual(event.Results, []string{"go test ./..."}) {
+		t.Fatalf("human results copied verbose evidence: %#v", event.Results)
+	}
+	if got := state.Machine.Evidence[event.ID][0].Summary; got != legacy.Timeline[0].Evidence[0].Summary {
+		t.Fatalf("machine evidence changed: %q", got)
+	}
+}
+
 func TestProjectLegacyAssignsStableDistinctIDsToRepeatedCurrentRisks(t *testing.T) {
 	legacy := legacyFixtureState(t)
 	legacy.CurrentState.Blockers = make([]string, 20)

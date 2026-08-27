@@ -497,24 +497,19 @@ func validMarkerKind(kind string) bool {
 }
 
 func validStableID(id string) bool {
-	if len(id) < 3 || len(id) > 160 || id[0] < 'a' || id[0] > 'z' || id[len(id)-1] == '-' {
+	if len(id) == 0 || len(id) > 128 || !isLowerAlphaNumeric(id[0]) {
 		return false
 	}
-	previousDash := false
 	for _, char := range []byte(id) {
-		if char == '-' {
-			if previousDash {
-				return false
-			}
-			previousDash = true
-			continue
-		}
-		previousDash = false
-		if (char < 'a' || char > 'z') && (char < '0' || char > '9') {
+		if !isLowerAlphaNumeric(char) && char != '.' && char != '_' && char != '-' {
 			return false
 		}
 	}
 	return true
+}
+
+func isLowerAlphaNumeric(char byte) bool {
+	return (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9')
 }
 
 func physicalLine(source []byte, start int) (end, next int) {

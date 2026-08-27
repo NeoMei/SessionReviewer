@@ -876,21 +876,33 @@ func projectLegacyEvent(source ledger.TimelineEvent, decisions map[string]ledger
 		}
 	}
 	for _, ref := range source.Evidence {
-		if strings.TrimSpace(ref.Summary) != "" {
-			event.Results = append(event.Results, ref.Summary)
-		}
 		if report, exists := reports[ref.SessionID]; exists {
 			event.Results = append(event.Results, report.Verification...)
 		}
 	}
-	if event.Why == "" {
-		event.Why = source.Summary
+	if strings.TrimSpace(event.Summary) == "" {
+		event.Summary = source.Title
 	}
-	if event.Next == "" {
+	if strings.TrimSpace(event.Why) == "" {
+		event.Why = source.Summary
+		if strings.TrimSpace(event.Why) == "" {
+			event.Why = source.Title
+		}
+	}
+	if strings.TrimSpace(event.Next) == "" {
 		event.Next = fallbackNext
+		if strings.TrimSpace(event.Next) == "" {
+			event.Next = "旧记录未包含下一步。"
+		}
 	}
 	event.Changes = uniqueNonemptySorted(event.Changes)
 	event.Results = uniqueNonemptySorted(event.Results)
+	if len(event.Changes) == 0 {
+		event.Changes = []string{event.Summary}
+	}
+	if len(event.Results) == 0 {
+		event.Results = []string{"旧记录未包含独立验证结果。"}
+	}
 	event.DecisionIDs = uniqueNonemptySorted(event.DecisionIDs)
 	return event
 }

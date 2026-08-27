@@ -328,6 +328,34 @@ func TestPatchAllowlistFieldsEachRoundTripThroughTheirSemanticUnit(t *testing.T)
 	}
 }
 
+func TestStableIDMatchesProposalV1Contract(t *testing.T) {
+	valid := []string{
+		"a",
+		"1",
+		"open-loop-v0.1_0-release",
+		"risk--release",
+		"risk-",
+		"a" + strings.Repeat("b", 127),
+	}
+	for _, id := range valid {
+		if !validStableID(id) {
+			t.Fatalf("proposal-v1 stable ID rejected: %q", id)
+		}
+	}
+	invalid := []string{
+		"",
+		"Upper",
+		"risk/release",
+		"risk release",
+		"a" + strings.Repeat("b", 128),
+	}
+	for _, id := range invalid {
+		if validStableID(id) {
+			t.Fatalf("invalid stable ID accepted: %q", id)
+		}
+	}
+}
+
 func TestTwoDocumentCanonicalRenderReparses(t *testing.T) {
 	review := Review{
 		ProjectID: "project-canonical-render", Revision: 2, Name: "项目 [v2]", Goal: "目标", Stage: "阶段", Status: "进行中",
