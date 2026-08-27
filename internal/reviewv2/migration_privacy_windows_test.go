@@ -106,6 +106,9 @@ func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T)
 	privatePaths := []string{
 		filepath.Join(fixture.data, migrationJournalDir),
 		filepath.Join(fixture.data, filepath.FromSlash(migrationJournalRelative(plan.projectKey))),
+		filepath.Join(fixture.project, filepath.FromSlash(ReviewRelativePath)),
+		filepath.Join(fixture.project, filepath.FromSlash(HistoryRelativePath)),
+		filepath.Join(fixture.project, filepath.FromSlash(MachineLedgerRelativePath)),
 		filepath.Join(fixture.project, filepath.FromSlash(migrationReviewRoot+"/.session-reviewer")),
 		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot)),
 		filepath.Join(fixture.project, filepath.FromSlash(plan.BackupRoot+"/archive")),

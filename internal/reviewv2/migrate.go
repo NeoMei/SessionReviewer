@@ -1132,12 +1132,7 @@ func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, wr
 		if err != nil {
 			return err
 		}
-		prepare := func(created *os.File) error {
-			if file.Perm.Perm() == 0o600 {
-				return securePrivateMigrationFile(created)
-			}
-			return nil
-		}
+		prepare := securePrivateMigrationFile
 		publishErr := atomicfile.WriteRootFileCreateIfAbsentPrepared(parent, path.Base(file.RelativePath), file.Data, file.Perm.Perm(), prepare, func() error {
 			if hooks.beforeV2Publish != nil {
 				return hooks.beforeV2Publish(file.RelativePath)

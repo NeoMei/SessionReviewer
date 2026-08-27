@@ -1071,7 +1071,7 @@ func completeInitialReviewV2(root *os.Root, journal initialReviewV2Journal, afte
 			if !info.Mode().IsRegular() || info.Size() > int64(len(file.body))+1 {
 				return fmt.Errorf("partial review v2 file %s is invalid", file.path)
 			}
-			existing, readErr := pathguard.ReadStableRegularRootFile(root, relative, info, int64(len(file.body))+1)
+			existing, readErr := pathguard.ReadStableRegularRootFile(root, file.path, info, int64(len(file.body))+1)
 			if readErr != nil || !bytes.Equal(existing, file.body) || !initialReviewV2ModeMatches(runtime.GOOS, info.Mode(), file.mode) {
 				return fmt.Errorf("partial review v2 file %s does not match its initialization journal", file.path)
 			}
