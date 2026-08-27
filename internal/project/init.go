@@ -1028,7 +1028,7 @@ func recoverInitialReviewV2(root *os.Root, projectRoot string, afterFile func(st
 	if !info.Mode().IsRegular() || info.Size() > initialReviewV2JournalMax {
 		return errors.New("review v2 initialization journal is invalid")
 	}
-	body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(initialReviewV2JournalPath), info, initialReviewV2JournalMax)
+	body, err := pathguard.ReadStableRegularRootFile(root, initialReviewV2JournalPath, info, initialReviewV2JournalMax)
 	if err != nil {
 		return fmt.Errorf("review v2 initialization journal changed while reading: %w", err)
 	}

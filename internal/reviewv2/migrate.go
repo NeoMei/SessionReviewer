@@ -1115,7 +1115,7 @@ func writeMigrationV2(project *pathguard.Directory, journal migrationJournal, wr
 		}
 		if exists {
 			if err := requireMigrationFileMode(project, file.RelativePath, fs.FileMode(expected.Mode)); err != nil {
-				return staleMigration("a v2 target mode changed during migration")
+				return staleMigration(fmt.Sprintf("a v2 target mode changed during migration: %v", err))
 			}
 		}
 	}
@@ -1176,7 +1176,7 @@ func validateMigrationV2(project *pathguard.Directory, journal migrationJournal)
 			return staleMigration("v2 migration target is missing or was edited")
 		}
 		if err := requireMigrationFileMode(project, expected.RelativePath, fs.FileMode(expected.Mode)); err != nil {
-			return staleMigration("v2 migration target mode changed")
+			return staleMigration(fmt.Sprintf("v2 migration target mode changed: %v", err))
 		}
 	}
 	return nil
