@@ -10,19 +10,25 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func secureProjectFragmentsDirectory(file *os.File) error { return setPrivateConfigDACLHandle(file) }
-func secureProjectFragmentFile(file *os.File) error       { return setPrivateConfigDACLHandle(file) }
+func secureProjectFragmentsDirectory(file *os.File) error {
+	return setPrivateConfigDACLHandle(file, true)
+}
+func secureProjectFragmentFile(file *os.File) error { return setPrivateConfigDACLHandle(file, false) }
 
-func privateConfigSDDL() (string, error) {
+func privateConfigSDDL(inherit bool) (string, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return "", err
 	}
-	return "D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)", nil
+	flags := ""
+	if inherit {
+		flags = "OICI"
+	}
+	return "D:P(A;" + flags + ";FA;;;" + user.User.Sid.String() + ")(A;" + flags + ";FA;;;SY)", nil
 }
 
-func setPrivateConfigDACLHandle(file *os.File) error {
-	sddl, err := privateConfigSDDL()
+func setPrivateConfigDACLHandle(file *os.File, inherit bool) error {
+	sddl, err := privateConfigSDDL(inherit)
 	if err != nil {
 		return err
 	}
@@ -38,19 +44,19 @@ func setPrivateConfigDACLHandle(file *os.File) error {
 }
 
 func privateProjectFragmentsPath(path string, info fs.FileInfo) bool {
-	return info != nil && info.IsDir() && privateConfigPath(path)
+	return info != nil && info.IsDir() && privateConfigPath(path, true)
 }
 
 func privateProjectFragmentPath(path string, info fs.FileInfo) bool {
-	return info != nil && info.Mode().IsRegular() && privateConfigPath(path)
+	return info != nil && info.Mode().IsRegular() && privateConfigPath(path, false)
 }
 
-func privateConfigPath(path string) bool {
+func privateConfigPath(path string, inherit bool) bool {
 	got, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return false
 	}
-	sddl, err := privateConfigSDDL()
+	sddl, err := privateConfigSDDL(inherit)
 	if err != nil {
 		return false
 	}

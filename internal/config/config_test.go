@@ -15,10 +15,18 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
+func testAbsolute(parts ...string) string {
+	root := string(filepath.Separator)
+	if runtime.GOOS == "windows" {
+		root = `C:\`
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
+}
+
 func TestProjectFragmentPublishMergeAndSavePreserveSharedBytes(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
-	legacy := ProjectMapping{ID: "project-1111111111111111", Root: "/legacy", VaultRoot: "/legacy-vault"}
+	legacy := ProjectMapping{ID: "project-1111111111111111", Root: testAbsolute("legacy"), VaultRoot: testAbsolute("legacy-vault")}
 	shared := []byte("# user formatting must survive init\nversion = 1\n\n[[projects]]\nid = '" + legacy.ID + "'\nroot = '" + legacy.Root + "'\nvault_root = '" + legacy.VaultRoot + "'\n")
 	if err := os.WriteFile(configPath, shared, 0o600); err != nil {
 		t.Fatal(err)
@@ -29,7 +37,7 @@ func TestProjectFragmentPublishMergeAndSavePreserveSharedBytes(t *testing.T) {
 	}
 	defer root.Close()
 	fragment := ProjectMapping{
-		ID: "project-2a2a2a2a2a2a2a2a", Root: "/fragment", VaultRoot: "/fragment-vault",
+		ID: "project-2a2a2a2a2a2a2a2a", Root: testAbsolute("fragment"), VaultRoot: testAbsolute("fragment-vault"),
 		VaultReviewPath: "Projects/fragment--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
 	}
 	created, err := PublishProjectFragmentRoot(root, fragment, nil)
@@ -69,7 +77,7 @@ func TestProjectFragmentPublishIsIdempotentAndNeverReplaces(t *testing.T) {
 	}
 	defer root.Close()
 	mapping := ProjectMapping{
-		ID: "project-2a2a2a2a2a2a2a2a", Root: "/one", VaultRoot: "/vault",
+		ID: "project-2a2a2a2a2a2a2a2a", Root: testAbsolute("one"), VaultRoot: testAbsolute("vault"),
 		VaultReviewPath: "Projects/one--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
 	}
 	created, err := PublishProjectFragmentRoot(root, mapping, nil)
@@ -100,7 +108,7 @@ func TestProjectFragmentPublishIsIdempotentAndNeverReplaces(t *testing.T) {
 func TestProjectFragmentStrictValidationAndLegacyCompletion(t *testing.T) {
 	dir := t.TempDir()
 	id := "project-2a2a2a2a2a2a2a2a"
-	legacy := ProjectMapping{ID: id, Root: "/work", VaultRoot: "/vault"}
+	legacy := ProjectMapping{ID: id, Root: testAbsolute("work"), VaultRoot: testAbsolute("vault")}
 	if err := Save(filepath.Join(dir, "config.toml"), Config{Version: 1, Projects: []ProjectMapping{legacy}}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +149,7 @@ func TestProjectFragmentRejectsFilenameIdentityAndLegacyCollisions(t *testing.T)
 	}
 	defer root.Close()
 	mapping := ProjectMapping{
-		ID: "project-2a2a2a2a2a2a2a2a", Root: "/work", VaultRoot: "/vault",
+		ID: "project-2a2a2a2a2a2a2a2a", Root: testAbsolute("work"), VaultRoot: testAbsolute("vault"),
 		VaultReviewPath: "Projects/work--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive,
 	}
 	if _, err := PublishProjectFragmentRoot(root, mapping, nil); err != nil {
@@ -162,7 +170,7 @@ func TestProjectFragmentRejectsFilenameIdentityAndLegacyCollisions(t *testing.T)
 	if err := os.Remove(wrong); err != nil {
 		t.Fatal(err)
 	}
-	conflictingLegacy := Config{Version: 1, Projects: []ProjectMapping{{ID: mapping.ID, Root: "/other", VaultRoot: mapping.VaultRoot}}}
+	conflictingLegacy := Config{Version: 1, Projects: []ProjectMapping{{ID: mapping.ID, Root: testAbsolute("other"), VaultRoot: mapping.VaultRoot}}}
 	if err := Save(filepath.Join(t.TempDir(), "config.toml"), conflictingLegacy); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +234,7 @@ func TestConfigRejectsPortableProjectAndVaultDestinationCollisions(t *testing.T)
 
 func TestProjectFragmentPublishRejectsLegacyAndFragmentVaultCollision(t *testing.T) {
 	dir := t.TempDir()
-	legacy := ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/Vault",
+	legacy := ProjectMapping{ID: "project-1111111111111111", Root: testAbsolute("work", "one"), VaultRoot: testAbsolute("Vault"),
 		VaultReviewPath: "Projects/Shared/Session Review", VaultCaseMode: platform.CaseInsensitive}
 	if err := Save(filepath.Join(dir, "config.toml"), Config{Version: 1, Projects: []ProjectMapping{legacy}}); err != nil {
 		t.Fatal(err)
@@ -236,7 +244,7 @@ func TestProjectFragmentPublishRejectsLegacyAndFragmentVaultCollision(t *testing
 		t.Fatal(err)
 	}
 	defer root.Close()
-	fragment := ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault",
+	fragment := ProjectMapping{ID: "project-2222222222222222", Root: testAbsolute("work", "two"), VaultRoot: testAbsolute("vault"),
 		VaultReviewPath: "Projects/shared/Session Review", VaultCaseMode: platform.CaseInsensitive}
 	created, err := PublishProjectFragmentRoot(root, fragment, nil)
 	if err == nil || created {
@@ -254,7 +262,7 @@ func TestLoadRejectsTwoFragmentsWithNFCEquivalentVaultDestination(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	first := ProjectMapping{ID: "project-1111111111111111", Root: "/work/one", VaultRoot: "/vault/Café",
+	first := ProjectMapping{ID: "project-1111111111111111", Root: testAbsolute("work", "one"), VaultRoot: testAbsolute("vault", "Café"),
 		VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive}
 	if _, err := PublishProjectFragmentRoot(firstRoot, first, nil); err != nil {
 		t.Fatal(err)
@@ -267,7 +275,7 @@ func TestLoadRejectsTwoFragmentsWithNFCEquivalentVaultDestination(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := ProjectMapping{ID: "project-2222222222222222", Root: "/work/two", VaultRoot: "/vault/Café",
+	second := ProjectMapping{ID: "project-2222222222222222", Root: testAbsolute("work", "two"), VaultRoot: testAbsolute("vault", "Café"),
 		VaultReviewPath: "Projects/Café/Session Review", VaultCaseMode: platform.CaseSensitive}
 	if _, err := PublishProjectFragmentRoot(secondRoot, second, nil); err != nil {
 		t.Fatal(err)
@@ -339,7 +347,7 @@ func TestProjectFragmentCommitRejectsLiveRootAndDirectoryChanges(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer root.Close()
-			mapping := ProjectMapping{ID: "project-2a2a2a2a2a2a2a2a", Root: "/work", VaultRoot: "/vault",
+			mapping := ProjectMapping{ID: "project-2a2a2a2a2a2a2a2a", Root: testAbsolute("work"), VaultRoot: testAbsolute("vault"),
 				VaultReviewPath: "Projects/work--2a2a2a2a/Session Review", VaultCaseMode: platform.CaseSensitive}
 			created, err := PublishProjectFragmentRoot(root, mapping, func() error {
 				test.mutate(t, data, moved)
@@ -367,7 +375,7 @@ func TestSaveRootUsesSelectedBackupBaseWithFragments(t *testing.T) {
 			dir := t.TempDir()
 			path := filepath.Join(dir, "config.toml")
 			id := "project-2a2a2a2a2a2a2a2a"
-			legacy := ProjectMapping{ID: id, Root: "/work", VaultRoot: "/vault"}
+			legacy := ProjectMapping{ID: id, Root: testAbsolute("work"), VaultRoot: testAbsolute("vault")}
 			association := SessionAssociation{SessionID: "session-one", ProjectID: id}
 			if err := Save(path, Config{Version: 1, Projects: []ProjectMapping{legacy}, SessionAssociations: []SessionAssociation{association}}); err != nil {
 				t.Fatal(err)

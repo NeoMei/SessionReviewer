@@ -143,7 +143,11 @@ func migrationACLDiagnostic(t *testing.T, path string) (got, want string, contro
 	if err != nil {
 		return descriptor.String(), "control-error:" + err.Error(), 0
 	}
-	want, err = privateMigrationSDDL()
+	info, statErr := os.Lstat(path)
+	if statErr != nil {
+		return descriptor.String(), "stat-error:" + statErr.Error(), control
+	}
+	want, err = privateMigrationSDDL(info.IsDir())
 	if err != nil {
 		want = "want-error:" + err.Error()
 	}
