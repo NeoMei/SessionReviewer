@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	applyledger "github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
@@ -130,13 +131,14 @@ type Status struct {
 type QueueReport struct{ Attempted, Completed, Rescheduled, Blocked int }
 
 type Engine struct {
-	options      Options
-	project      *pathguard.Directory
-	vault        *pathguard.Directory
-	data         *pathguard.Directory
-	bases        BaseStore
-	transactions TransactionStore
-	writer       RootedWriter
+	options                Options
+	project                *pathguard.Directory
+	vault                  *pathguard.Directory
+	data                   *pathguard.Directory
+	bases                  BaseStore
+	transactions           TransactionStore
+	writer                 RootedWriter
+	trustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 }
 
 func NewEngine(options Options) (*Engine, error) {
@@ -182,6 +184,9 @@ func NewEngine(options Options) (*Engine, error) {
 	engine.bases = BaseStore{Root: dataRoot.Root}
 	engine.transactions = TransactionStore{Root: dataRoot.Root}
 	engine.writer = RootedWriter{Project: projectRoot, Vault: vaultRoot, Retry: options.Retry}
+	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
+		return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
+	}
 	projectInventory := syncdoc.Scan(projectRoot, "docs/session-review", options.GOOS, platform.CaseSensitive)
 	overview, found := projectInventory.ByID["project-overview"]
 	identityMatches := found && overview.Identity.ProjectID == options.ProjectID
@@ -388,6 +393,16 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		result := Merge(MergeInput{EntityID: id, Base: base, Project: projectCandidate, Vault: vaultCandidate,
 			ProjectID: engine.options.ProjectID, BasePath: baseRecord.RelativePath, GOOS: engine.options.GOOS,
 			CaseMode: engine.options.VaultCaseMode, OccupiedPathKeys: occupied})
+		if result.Kind == MergeConflict && result.Reason == "protected_provenance" {
+			trusted, trustErr := engine.trustedAppliedProjectResult(baseRecord, hasBase, projectCandidate, vaultCandidate)
+			if trustErr != nil {
+				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "apply_receipt_invalid"})
+				continue
+			}
+			if trusted != nil {
+				result = *trusted
+			}
+		}
 		if result.Kind == MergeConflict {
 			relative := baseRecord.RelativePath
 			if relative == "" {
@@ -879,6 +894,34 @@ func compactV2Inventory(inventory syncdoc.Inventory, rootRelative string) bool {
 		}
 	}
 	return true
+}
+
+func (engine *Engine) trustedAppliedProjectResult(base BaseRecord, hasBase bool, projectCandidate, vaultCandidate Candidate) (*MergeResult, error) {
+	projectHash := candidateSourceHash(projectCandidate)
+	vaultHash := candidateSourceHash(vaultCandidate)
+	if !hasBase || !projectCandidate.Present || !vaultCandidate.Present ||
+		projectCandidate.RelativePath != base.RelativePath || vaultCandidate.RelativePath != base.RelativePath ||
+		vaultHash != base.ContentHash || projectHash == base.ContentHash {
+		return nil, nil
+	}
+	if err := validateCandidateIntegrity(projectCandidate); err != nil || !validDocumentShape(projectCandidate.Document) {
+		return nil, nil
+	}
+	baseDocument, err := syncdoc.Parse(base.RelativePath, base.Content)
+	if err != nil {
+		return nil, errors.New("invalid sync merge base")
+	}
+	baseIdentity, baseErr := baseDocument.Identity()
+	projectIdentity, projectErr := projectCandidate.Document.Identity()
+	if baseErr != nil || projectErr != nil || baseIdentity != projectIdentity {
+		return nil, nil
+	}
+	trusted, err := engine.trustAppliedTransition(path.Join("docs/session-review", projectCandidate.RelativePath), true, base.ContentHash, projectHash)
+	if err != nil || !trusted {
+		return nil, err
+	}
+	accepted := projectCandidate.Document
+	return &MergeResult{Kind: MergeWriteVault, Accepted: &accepted}, nil
 }
 
 func scanIssuePaths(issues []syncdoc.ScanIssue) map[string]struct{} {

@@ -1239,6 +1239,99 @@ func TestEngineRoundTripsProjectAndObsidianEditsAndThenBecomesNoop(t *testing.T)
 	}
 }
 
+func TestEnginePublishesReceiptTrustedProjectProvenanceWithoutWeakeningHumanValidation(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+	projectBody, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedBody := []byte(strings.Replace(string(projectBody), "revision: 1", "revision: 2", 1))
+	if err := os.WriteFile(projectPath, trustedBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
+		if relative != "docs/session-review/项目回顾.md" || !preimageExists || preimageHash != syncdoc.ContentHash(projectBody) || targetHash != syncdoc.ContentHash(trustedBody) {
+			t.Fatalf("unexpected trust query: relative=%q exists=%t preimage=%q target=%q", relative, preimageExists, preimageHash, targetHash)
+		}
+		return true, nil
+	}
+	dryRun, err := engine.Reconcile(context.Background(), ReconcileRequest{DryRun: true, Trigger: TriggerCLI})
+	if err != nil || len(dryRun.Conflicts) != 0 || len(dryRun.Errors) != 0 || !hasOperation(dryRun.Operations, "project-overview", OperationUpdateVault) || dryRun.Machine.State != MachinePending {
+		t.Fatalf("trusted dry-run=%+v err=%v", dryRun, err)
+	}
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(report.Conflicts) != 0 || len(report.Errors) != 0 || !hasOperation(report.Operations, "project-overview", OperationUpdateVault) || report.Machine.State != MachineCurrent {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	vaultBody, err := os.ReadFile(filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目回顾.md"))
+	if err != nil || !bytes.Equal(vaultBody, trustedBody) {
+		t.Fatalf("vault=%q err=%v", vaultBody, err)
+	}
+	repeat, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(repeat.Operations) != 0 || len(repeat.Conflicts) != 0 {
+		t.Fatalf("repeat=%+v err=%v", repeat, err)
+	}
+}
+
+func TestEngineDoesNotPublishTrustedProjectProvenanceOverConcurrentVaultEdit(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+
+	projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+	vaultPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目回顾.md")
+	projectBody, _ := os.ReadFile(projectPath)
+	vaultBody, _ := os.ReadFile(vaultPath)
+	if err := os.WriteFile(projectPath, []byte(strings.Replace(string(projectBody), "revision: 1", "revision: 2", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	concurrentVault := []byte(strings.Replace(string(vaultBody), "SessionReviewer v2", "concurrent vault edit", 1))
+	if err := os.WriteFile(vaultPath, concurrentVault, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	engine.trustAppliedTransition = func(string, bool, string, string) (bool, error) {
+		t.Fatal("receipt trust must not be consulted when Vault diverged from the merge base")
+		return false, nil
+	}
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI})
+	if err != nil || len(report.Conflicts) != 1 || !strings.HasPrefix(report.Conflicts[0], "conflict-project-overview-") {
+		t.Fatalf("report=%+v err=%v", report, err)
+	}
+	after, err := os.ReadFile(vaultPath)
+	if err != nil || !bytes.Equal(after, concurrentVault) {
+		t.Fatalf("vault overwritten: %q err=%v", after, err)
+	}
+}
+
+func hasOperation(operations []Operation, entityID string, kind OperationKind) bool {
+	for _, operation := range operations {
+		if operation.EntityID == entityID && operation.Kind == kind {
+			return true
+		}
+	}
+	return false
+}
+
 func TestEngineDryRunPlansInitialVaultCopyWithoutFilesystemChanges(t *testing.T) {
 	fixture := newEngineFixture(t)
 	writeV2EngineFixture(t, fixture)

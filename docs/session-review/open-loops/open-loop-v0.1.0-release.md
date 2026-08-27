@@ -2,7 +2,7 @@
 id: open-loop-v0.1.0-release
 entity_type: open_loop
 project_id: project-269b8cab6cbf69dd
-revision: 2
+revision: 3
 title: 完成 v0.1.0 可安装发行
 status: resolved
 tags:
@@ -10,11 +10,33 @@ tags:
   - github
   - release
 evidence:
-  - evidence_id: ev-d629d2d78539
+  - evidence_id: ev-2c6bfa83edca
     session_id: 01a02971-61d6-7251-bdcf-f999230f961d
-    jsonl_line: 22599
-    source_hash: fc6a4c2806ed3cb129ddf28714f1074f9d9d0334d387ca6df3d2c396f1eb526f
-    summary: 收到，我按推荐落地为 Apache-2.0，版权声明使用：`Copyright 2026 NeoMei and QUUKK`。本轮我会先加入官方许可证文本和 NOTICE，然后重新开始一条干净的 `session-reviewer` 自举接受链；该 skill 会禁止同一轮进行 Git commit/push/tag，所以本轮完成台账与成本记录，下一轮再执行 GitHub 发布。
+    jsonl_line: 27527
+    source_hash: f1122f847cd764135961a182afc91fda8a061dbcd3117fcf179335e02c2985c7
+    summary: |-
+      已完成公开发布：
+
+      - [GitHub Release v0.1.0](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.1.0)
+      - 标签提交：`9c2397f`
+      - 最新 `main`：`6f44605`
+      - macOS Intel、Apple Silicon、Windows x64 三个平台包均已上传
+      - `SHA256SUMS` 下载复验全部通过
+      - [Release 工作流](https://github.[REDACTED:HIGH_ENTROPY_TOKEN])、[标签三平台 CI](https://github.[REDACTED:HIGH_ENTROPY_TOKEN])、[最新 main CI](https://github.[REDACTED:HIGH_ENTROPY_TOKEN]) 均已全绿
+      - 公开二进制自检确认：`version=0.1.0`、commit=`9c2397f`
+      - 发布期间发现并修复了一个偶发计时测试，未影响运行时代码或已发布二进制
+      - Project/Obsidian 仍为 14/14 同步，重复 dry-run 为零操作
+      - 本地与远端 `main` 完全一致，工作树干净
+
+      README 已加入面向用户的下载、平台选择和校验说明。
+
+      <oai-mem-citation>
+      <citation_entries>
+      MEMORY.md:99-109|note=[SessionReviewer prior source release CI and final release requirements]
+      </citation_entries>
+      <rollout_ids>
+      </rollout_ids>
+      </oai-mem-citation>
 source_sessions:
   - 01a02971-61d6-7251-bdcf-f999230f961d
 sync_status: synced
@@ -36,7 +58,7 @@ sync_status: synced
 
 ## Available evidence
 
-- `ev-d629d2d78539` (01a02971-61d6-7251-bdcf-f999230f961d:22599): 收到，我按推荐落地为 Apache-2.0，版权声明使用：`Copyright 2026 NeoMei and QUUKK`。本轮我会先加入官方许可证文本和 NOTICE，然后重新开始一条干净的 `session-reviewer` 自举接受链；该 skill 会禁止同一轮进行 Git commit/push/tag，所以本轮完成台账与成本记录，下一轮再执行 GitHub 发布。
+- `ev-2c6bfa83edca` (01a02971-61d6-7251-bdcf-f999230f961d:27527): 已完成公开发布：  - [GitHub Release v0.1.0](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.1.0) - 标签提交：`9c2397f` - 最新 `main`：`6f44605` - macOS Intel、Apple Silicon、Windows x64 三个平台包均已上传 - `SHA256SUMS` 下载复验全部通过 - [Release 工作流](https://github.[REDACTED:HIGH_ENTROPY_TOKEN])、[标签三平台 CI](https://github.[REDACTED:HIGH_ENTROPY_TOKEN])、[最新 main CI](https://github.[REDACTED:HIGH_ENTROPY_TOKEN]) 均已全绿 - 公开二进制自检确认：`version=0.1.0`、commit=`9c2397f` - 发布期间发现并修复了一个偶发计时测试，未影响运行时代码或已发布二进制 - Project/Obsidian 仍为 14/14 同步，重复 dry-run 为零操作 - 本地与远端 `main` 完全一致，工作树干净  README 已加入面向用户的下载、平台选择和校验说明。  <oai-mem-citation> <citation_entries> MEMORY.md:99-109|note=[SessionReviewer prior source release CI and final release requirements] </citation_entries> <rollout_ids> </rollout_ids> </oai-mem-citation>
 
 ## Attempted paths
 
