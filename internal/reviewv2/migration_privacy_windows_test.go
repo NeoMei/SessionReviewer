@@ -49,10 +49,14 @@ func TestWindowsCreatedDirectoryHandleDoesNotHardenReplacement(t *testing.T) {
 	if !created || !errors.Is(err, atomicfile.ErrRootDirectoryIdentityChanged) {
 		t.Fatalf("created=%v err=%v", created, err)
 	}
-	if privateMigrationPath(replacement, 0) {
+	if _, statErr := os.Lstat(replacement); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("replacement remained at public leaf: %v", statErr)
+	}
+	preserved := findWindowsDirectoryQuarantine(t, rootPath)
+	if privateMigrationPath(preserved, 0) {
 		t.Fatal("replacement was silently hardened")
 	}
-	body, readErr := os.ReadFile(filepath.Join(replacement, "user.txt"))
+	body, readErr := os.ReadFile(filepath.Join(preserved, "user.txt"))
 	if readErr != nil || string(body) != "replacement" {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}
@@ -60,6 +64,21 @@ func TestWindowsCreatedDirectoryHandleDoesNotHardenReplacement(t *testing.T) {
 		got, want, control := migrationACLDiagnostic(t, away)
 		t.Fatalf("identity-bound created directory was not hardened: got=%q want=%q control=%#x", got, want, control)
 	}
+}
+
+func findWindowsDirectoryQuarantine(t *testing.T, rootPath string) string {
+	t.Helper()
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if atomicfile.IsRootDirectoryQuarantineName(entry.Name()) {
+			return filepath.Join(rootPath, entry.Name())
+		}
+	}
+	t.Fatal("directory replacement was not preserved in quarantine")
+	return ""
 }
 
 func TestWindowsMigrationPrivateACLIsProtectedAndRejectsBroadening(t *testing.T) {

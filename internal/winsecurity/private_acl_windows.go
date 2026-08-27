@@ -24,12 +24,12 @@ func ProtectedDACLMatches(descriptor *windows.SECURITY_DESCRIPTOR, expectedSDDL 
 	if err != nil {
 		return false
 	}
-	gotACL, gotPresent, err := descriptor.DACL()
-	if err != nil || !gotPresent || gotACL == nil {
+	gotACL, _, err := descriptor.DACL()
+	if err != nil || gotACL == nil {
 		return false
 	}
-	wantACL, wantPresent, err := expected.DACL()
-	if err != nil || !wantPresent || wantACL == nil || gotACL.AceCount != wantACL.AceCount {
+	wantACL, _, err := expected.DACL()
+	if err != nil || wantACL == nil || gotACL.AceCount != wantACL.AceCount {
 		return false
 	}
 	matched := make([]bool, gotACL.AceCount)

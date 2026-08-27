@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 )
 
@@ -173,14 +174,14 @@ func TestEnsureRootDirPreparedDoesNotMutateFinalWindowReplacement(t *testing.T) 
 	}
 	preserved := findRootDirectoryQuarantine(t, rootPath)
 	info, statErr := os.Stat(preserved)
-	if statErr != nil || info.Mode().Perm() != 0o755 {
+	if statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
 		t.Fatalf("replacement was silently hardened: mode=%v err=%v", info, statErr)
 	}
 	body, readErr := os.ReadFile(filepath.Join(preserved, "user.txt"))
 	if readErr != nil || string(body) != "user-owned" {
 		t.Fatalf("replacement bytes changed: body=%q err=%v", body, readErr)
 	}
-	if info, statErr := os.Stat(quarantine); statErr != nil || info.Mode().Perm() != 0o700 {
+	if info, statErr := os.Stat(quarantine); statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o700) {
 		t.Fatalf("created handle was not hardened in isolation: mode=%v err=%v", info, statErr)
 	}
 }

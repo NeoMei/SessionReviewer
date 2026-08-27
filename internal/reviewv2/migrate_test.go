@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -382,8 +383,8 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 	if err != nil || !secured {
 		t.Fatalf("new archive directory was not secured before validation: secured=%v err=%v", secured, err)
 	}
-	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "new")); statErr != nil || info.Mode().Perm() != 0o751 {
-		t.Fatalf("non-Windows archive mode changed: mode=%v err=%v", info, statErr)
+	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "new")); statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o751) {
+		t.Fatalf("new archive mode changed: mode=%v err=%v", info, statErr)
 	}
 	if err := os.Mkdir(filepath.Join(rootPath, "archive", "existing"), 0o755); err != nil {
 		t.Fatal(err)
@@ -399,7 +400,7 @@ func TestArchiveInventoryDirectorySecuresOnlyProvenNewDirectoryBeforeValidation(
 	if err == nil || secureCalls != 0 {
 		t.Fatalf("existing unsafe directory repaired: secureCalls=%d err=%v", secureCalls, err)
 	}
-	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "existing")); statErr != nil || info.Mode().Perm() != 0o755 {
+	if info, statErr := os.Stat(filepath.Join(rootPath, "archive", "existing")); statErr != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o755) {
 		t.Fatalf("existing mode was changed: mode=%v err=%v", info, statErr)
 	}
 }
