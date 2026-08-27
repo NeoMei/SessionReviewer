@@ -18,6 +18,8 @@ export class Plugin {
   addCommand(_command: unknown): void {}
   addSettingTab(_tab: unknown): void {}
   registerEvent(_event: unknown): void {}
+  async loadData(): Promise<unknown> { return null; }
+  async saveData(_data: unknown): Promise<void> {}
 }
 
 export class ItemView {
@@ -33,3 +35,5 @@ export class Modal {
 export class Notice {
   constructor(_message: string) {}
 }
+
+export function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }

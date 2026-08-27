@@ -1,8 +1,20 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
+import type { ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
+import { element } from "./dom";
+import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
 
 export class ProjectEvolutionView extends ItemView {
-  constructor(leaf: WorkspaceLeaf) {
+  private disposeWatch?: () => void;
+  private lastReady?: SnapshotReady;
+  private selected?: ProjectDescriptor;
+
+  constructor(
+    leaf: WorkspaceLeaf,
+    private readonly repository?: ProjectRepository,
+    private readonly initialState: ViewState = defaultViewState(),
+    private readonly saveState?: SaveViewState
+  ) {
     super(leaf);
   }
 
@@ -15,10 +27,80 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.contentEl.textContent = "正在加载项目…";
+    if (!this.repository) {
+      this.contentEl.textContent = "正在加载项目…";
+      return;
+    }
+    await this.openProjects();
   }
 
   async onClose(): Promise<void> {
+    this.disposeWatch?.();
     this.contentEl.replaceChildren();
+  }
+
+  private async openProjects(): Promise<void> {
+    this.contentEl.replaceChildren(element("p", { className: "sr-loading", text: "正在发现项目…" }));
+    const projects = await this.repository!.discover();
+    if (projects.length === 0) {
+      this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
+        element("h1", { text: "还没有 v2 项目回顾" }),
+        element("p", { text: "请先运行 SessionReviewer v2 迁移或同步，生成项目回顾、项目历史和机器账本。" })
+      ]));
+      return;
+    }
+    this.selected = projects.find((project) => project.projectId === this.initialState.projectId) ?? projects[0];
+    await this.refresh(projects);
+    this.disposeWatch = this.repository!.watch(this.selected, () => { void this.refresh(projects); });
+  }
+
+  private async refresh(projects: ProjectDescriptor[]): Promise<void> {
+    if (!this.selected) return;
+    const snapshot = await this.repository!.load(this.selected, this.lastReady);
+    if (snapshot.kind === "ready") this.lastReady = snapshot;
+    this.renderSnapshot(snapshot, projects);
+  }
+
+  private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
+    this.contentEl.replaceChildren();
+    if (snapshot.kind === "empty" || snapshot.kind === "migration_required") {
+      const diagnostic = snapshot.kind === "empty" ? snapshot.diagnostic : snapshot.diagnostic;
+      this.contentEl.append(element("div", { className: "session-reviewer-browser" }, [
+        element("h1", { text: "暂时无法打开项目回顾" }),
+        element("p", { text: diagnostic?.message ?? "项目还没有可用快照。" })
+      ]));
+      return;
+    }
+    const model = snapshot.kind === "stale" ? snapshot.lastValid.model : snapshot.model;
+    const browser = renderReadyView(model, { ...this.initialState, projectId: model.review.projectId }, this.saveState);
+    if (projects.length > 1) browser.prepend(this.projectPicker(projects));
+    if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") {
+      browser.prepend(element("div", {
+        className: `sr-banner sr-banner-${snapshot.kind}`,
+        text: snapshot.kind === "pending_edit" ? `等待同步：${snapshot.diagnostic.message}` : `显示上次可信内容：${snapshot.diagnostic.message}`,
+        attrs: { role: "status" }
+      }));
+    }
+    this.contentEl.append(browser);
+  }
+
+  private projectPicker(projects: ProjectDescriptor[]): HTMLElement {
+    const wrapper = element("label", { className: "sr-project-picker", text: "项目 " });
+    const select = element("select", { attrs: { "aria-label": "选择项目" } });
+    for (const project of projects) {
+      const option = element("option", { text: project.name, attrs: { value: project.projectId } });
+      option.selected = project.projectId === this.selected?.projectId;
+      select.append(option);
+    }
+    select.addEventListener("change", () => {
+      const next = projects.find((project) => project.projectId === select.value);
+      if (!next) return;
+      this.disposeWatch?.();
+      this.selected = next;
+      this.lastReady = undefined;
+      void this.refresh(projects).then(() => { this.disposeWatch = this.repository!.watch(next, () => { void this.refresh(projects); }); });
+    });
+    wrapper.append(select);
+    return wrapper;
   }
 }
