@@ -8,7 +8,7 @@ describe("CLI settings", () => {
     tab.display();
 
     const heading = tab.containerEl.querySelector(".setting-item.mod-heading .setting-item-name");
-    expect(heading?.textContent).toBe("SessionReviewer CLI");
+    expect(heading?.textContent).toBe("CLI");
     expect(tab.containerEl.querySelector("h2")).toBeNull();
   });
 });

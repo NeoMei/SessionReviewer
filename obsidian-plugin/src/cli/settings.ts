@@ -15,7 +15,7 @@ export class CliSettingsTab extends PluginSettingTab {
   display(): void {
     this.containerEl.empty();
     new Setting(this.containerEl)
-      .setName("SessionReviewer CLI")
+      .setName("CLI")
       .setHeading();
     new Setting(this.containerEl)
       .setName("CLI 可执行文件")
