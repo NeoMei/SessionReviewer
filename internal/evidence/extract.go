@@ -53,6 +53,7 @@ type Extractor struct {
 	currentCWD         string
 	warningCounts      map[string]int
 	usageWarningCounts map[string]int
+	structuralWarnings map[WarningKind]int
 	usedIDs            map[string]struct{}
 	full               bool
 	expectedSet        bool
@@ -80,6 +81,7 @@ func NewWithProjectID(projectID, sessionID, cwd string, from int, redactor redac
 		currentCWD:         cwd,
 		warningCounts:      make(map[string]int),
 		usageWarningCounts: make(map[string]int),
+		structuralWarnings: make(map[WarningKind]int),
 		usedIDs:            make(map[string]struct{}),
 	}
 
@@ -309,7 +311,7 @@ func (x *Extractor) append(record session.Record, kind, itemID, role, summary, t
 	}
 	candidate := x.Packet()
 	candidate.Events = append(candidate.Events, item)
-	candidate.Warnings = warningsWith(x.combinedWarningCounts(), findings)
+	candidate.Warnings = warningsWith(x.combinedWarningCounts(), findings, x.structuralWarnings)
 	advancePacket(&candidate, record)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
@@ -358,7 +360,7 @@ func (x *Extractor) RestoreSessionUsage(state SessionUsageState) error {
 	}
 	candidate := x.Packet()
 	candidate.SessionUsage = cloneSessionUsage(state.usage)
-	candidate.Warnings = formatWarnings(mergeWarningCounts(x.warningCounts, state.warningCounts))
+	candidate.Warnings = formatAllWarnings(mergeWarningCounts(x.warningCounts, state.warningCounts), x.structuralWarnings)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return ErrPacketFull
 	}
@@ -400,7 +402,7 @@ func (x *Extractor) SetSessionUsage(usage *accounting.SessionUsage) error {
 	}
 	candidate := x.Packet()
 	candidate.SessionUsage = &copyUsage
-	candidate.Warnings = formatWarnings(mergeWarningCounts(x.warningCounts, usageWarnings))
+	candidate.Warnings = formatAllWarnings(mergeWarningCounts(x.warningCounts, usageWarnings), x.structuralWarnings)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return ErrPacketFull
 	}
@@ -432,14 +434,26 @@ func (x *Extractor) AddWarning(warning string) error {
 	if x == nil || warning == "" {
 		return ErrInvalidLimits
 	}
-	if _, err := ParseWarning(warning); err != nil {
+	parsed, err := ParseWarning(warning)
+	if err != nil {
 		return fmt.Errorf("invalid evidence warning: %w", err)
 	}
+	redactionCounts := cloneCounts(x.warningCounts)
+	structuralCounts := cloneStructuralWarningCounts(x.structuralWarnings)
+	if parsed.Kind == WarningKindRedacted {
+		if !addCount(redactionCounts, parsed.Rule, parsed.Count) {
+			return errors.New("evidence warning count overflow")
+		}
+	} else if !addStructuralWarningCount(structuralCounts, parsed.Kind, parsed.Count) {
+		return errors.New("evidence warning count overflow")
+	}
 	candidate := x.Packet()
-	candidate.Warnings = append(candidate.Warnings, warning)
+	candidate.Warnings = formatAllWarnings(mergeWarningCounts(redactionCounts, x.usageWarningCounts), structuralCounts)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
 		return x.markFull()
 	}
+	x.warningCounts = redactionCounts
+	x.structuralWarnings = structuralCounts
 	x.packet.Warnings = candidate.Warnings
 	return nil
 }
@@ -473,7 +487,7 @@ func (x *Extractor) mergeFindings(findings []redact.Finding) {
 }
 
 func (x *Extractor) refreshWarnings() {
-	x.packet.Warnings = formatWarnings(x.combinedWarningCounts())
+	x.packet.Warnings = formatAllWarnings(x.combinedWarningCounts(), x.structuralWarnings)
 }
 
 func (x *Extractor) combinedWarningCounts() map[string]int {
@@ -491,7 +505,7 @@ func mergeWarningCounts(first, second map[string]int) map[string]int {
 	return result
 }
 
-func warningsWith(existing map[string]int, findings []redact.Finding) []string {
+func warningsWith(existing map[string]int, findings []redact.Finding, structural map[WarningKind]int) []string {
 	counts := make(map[string]int, len(existing)+len(findings))
 	for rule, count := range existing {
 		counts[rule] = count
@@ -501,7 +515,49 @@ func warningsWith(existing map[string]int, findings []redact.Finding) []string {
 			counts[finding.Rule] += finding.Count
 		}
 	}
-	return formatWarnings(counts)
+	return formatAllWarnings(counts, structural)
+}
+
+func formatAllWarnings(redactionCounts map[string]int, structuralCounts map[WarningKind]int) []string {
+	warnings := formatWarnings(redactionCounts)
+	for kind, count := range structuralCounts {
+		if count <= 0 {
+			continue
+		}
+		warning, err := FormatWarning(Warning{Kind: kind, Count: count})
+		if err != nil {
+			panic(fmt.Sprintf("invalid internal structural warning: %v", err))
+		}
+		warnings = append(warnings, warning)
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+func cloneStructuralWarningCounts(counts map[WarningKind]int) map[WarningKind]int {
+	result := make(map[WarningKind]int, len(counts))
+	for kind, count := range counts {
+		result[kind] = count
+	}
+	return result
+}
+
+func addStructuralWarningCount(counts map[WarningKind]int, kind WarningKind, count int) bool {
+	current := counts[kind]
+	if count <= 0 || current > int(^uint(0)>>1)-count {
+		return false
+	}
+	counts[kind] = current + count
+	return true
+}
+
+func addCount(counts map[string]int, key string, count int) bool {
+	current := counts[key]
+	if count <= 0 || current > int(^uint(0)>>1)-count {
+		return false
+	}
+	counts[key] = current + count
+	return true
 }
 
 func formatWarnings(counts map[string]int) []string {

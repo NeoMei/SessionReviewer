@@ -32,11 +32,19 @@
     },
     "warnings": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": { "$ref": "#/$defs/warning" },
+      "uniqueItems": true
     },
     "session_usage": { "$ref": "#/$defs/session_usage" }
   },
   "$defs": {
+    "warning": {
+      "type": "string",
+      "oneOf": [
+        { "pattern": "^redacted:(bearer|connection_url|high_entropy_token|named_secret|openai_key|private_key):[1-9][0-9]*$" },
+        { "pattern": "^malformed_jsonl_lines:[1-9][0-9]*$" }
+      ]
+    },
     "cursor_boundary": {
       "type": "object",
       "additionalProperties": false,
@@ -97,7 +105,7 @@
       "additionalProperties": false,
       "required": ["id", "timestamp", "jsonl_line", "source_hash", "kind", "summary"],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "pattern": "^ev-[0-9a-f]{12}$" },
         "item_id": { "type": "string" },
         "timestamp": { "type": "string" },
         "jsonl_line": { "type": "integer", "minimum": 1 },

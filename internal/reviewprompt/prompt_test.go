@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	packetDigest = "sha256:b776122d0df100d216b0778cc64146c0fd720e895425462e01a827f74f0fa1d0"
+	packetDigest = "sha256:26fe72546b9fe7f5db9c82c6f70c041be7aeeeac66f5995997031196193a0e25"
 	packetPath   = "/Users/private/project/canary"
 	privatePath  = "/private/session/path/canary"
 	secretCanary = "Bearer sk-secret-canary-1234567890"
@@ -230,7 +230,7 @@ func fixtureInput() reviewprompt.Input {
 			Role:       "assistant",
 			Summary:    "The accepted action was verified.",
 		}},
-		Warnings: []string{"redacted:secret:1"},
+		Warnings: []string{"redacted:openai_key:1"},
 	}
 	legacy := ledger.State{
 		ProjectID: projectID,

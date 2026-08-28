@@ -12,6 +12,39 @@ type Finding struct {
 	Count int    `json:"count"`
 }
 
+const (
+	RuleBearer        = "bearer"
+	RuleConnectionURL = "connection_url"
+	RuleHighEntropy   = "high_entropy_token"
+	RuleNamedSecret   = "named_secret"
+	RuleOpenAIKey     = "openai_key"
+	RulePrivateKey    = "private_key"
+)
+
+// KnownRuleNames returns the complete, canonical warning vocabulary emitted by
+// the built-in redactor. The returned slice is a copy and may be modified.
+func KnownRuleNames() []string {
+	return []string{
+		RuleBearer,
+		RuleConnectionURL,
+		RuleHighEntropy,
+		RuleNamedSecret,
+		RuleOpenAIKey,
+		RulePrivateKey,
+	}
+}
+
+// IsKnownRuleName reports whether name belongs to the finite built-in warning
+// vocabulary.
+func IsKnownRuleName(name string) bool {
+	for _, known := range KnownRuleNames() {
+		if name == known {
+			return true
+		}
+	}
+	return false
+}
+
 type Result struct {
 	Text     string    `json:"text"`
 	Findings []Finding `json:"findings,omitempty"`
@@ -43,9 +76,9 @@ var (
 
 func Default() Redactor {
 	return Redactor{rules: []rule{
-		{"bearer", bearerCredential},
-		{"openai_key", regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
-		{"connection_url", regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
+		{RuleBearer, bearerCredential},
+		{RuleOpenAIKey, regexp.MustCompile(`\bsk-[A-Za-z0-9_-]{20,}\b`)},
+		{RuleConnectionURL, regexp.MustCompile(`(?i)\b[A-Z][A-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@[^\s]+`)},
 	}}
 }
 
@@ -66,7 +99,7 @@ func (r Redactor) Text(input string) Result {
 			if isStableID(value) || entropy(value) < 4.0 {
 				return value
 			}
-			counts["high_entropy_token"]++
+			counts[RuleHighEntropy]++
 			return "[REDACTED:HIGH_ENTROPY_TOKEN]"
 		})
 	}
@@ -106,7 +139,7 @@ func applyPrivateKeyRule(segments []textSegment, counts map[string]int) []textSe
 			end, _, _ := privateKeyEnvelopeEnd(segment.text, start)
 			appendSegment(&result, segment.text[cursor:start], false)
 			appendSegment(&result, "[REDACTED:PRIVATE_KEY]", true)
-			counts["private_key"]++
+			counts[RulePrivateKey]++
 			cursor = end
 		}
 		appendSegment(&result, segment.text[cursor:], false)
@@ -162,7 +195,7 @@ func applyNamedSecretRule(segments []textSegment, counts map[string]int) []textS
 			}
 			appendSegment(&result, segment.text[emitted:start], false)
 			appendSegment(&result, "[REDACTED:NAMED_SECRET]", true)
-			counts["named_secret"]++
+			counts[RuleNamedSecret]++
 			emitted = end
 			search = end
 		}

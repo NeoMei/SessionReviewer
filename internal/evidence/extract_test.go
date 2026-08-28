@@ -180,6 +180,98 @@ func TestExtractorAddWarningHonorsPacketLimit(t *testing.T) {
 	}
 }
 
+func TestStructuralWarningPersistsAcrossEventAndUsageRefresh(t *testing.T) {
+	x := newExtractor(t, "s1", "/work", 1, DefaultLimits())
+	if err := x.AddWarning("malformed_jsonl_lines:2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.Add(messageRecord(t, 1, "u1", "user", canary)); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"malformed_jsonl_lines:2", "redacted:openai_key:1"}
+	if got := x.Packet().Warnings; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings after Add=%v want=%v", got, want)
+	}
+
+	usage := &accounting.SessionUsage{
+		StartedAt: testTimestamp,
+		EndedAt:   testTimestamp,
+		Models:    []accounting.ModelUsage{{Model: canary}},
+	}
+	if err := x.SetSessionUsage(usage); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"malformed_jsonl_lines:2", "redacted:openai_key:2"}
+	if got := x.Packet().Warnings; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings after SetSessionUsage=%v want=%v", got, want)
+	}
+	if err := x.SetSessionUsage(nil); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"malformed_jsonl_lines:2", "redacted:openai_key:1"}
+	if got := x.Packet().Warnings; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings after clearing usage=%v want=%v", got, want)
+	}
+}
+
+func TestStructuralWarningMergesRepeatedCountsDeterministically(t *testing.T) {
+	x := newExtractor(t, "s1", "/work", 1, DefaultLimits())
+	for _, warning := range []string{"malformed_jsonl_lines:2", "malformed_jsonl_lines:3"} {
+		if err := x.AddWarning(warning); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := x.Add(messageRecord(t, 1, "u1", "user", "Bearer abcdefghijklmnop")); err != nil {
+		t.Fatal(err)
+	}
+	x.refreshWarnings()
+	want := []string{"malformed_jsonl_lines:5", "redacted:bearer:1"}
+	if got := x.Packet().Warnings; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings=%v want merged sorted %v", got, want)
+	}
+}
+
+func TestAddWarningCountOverflowIsAtomic(t *testing.T) {
+	x := newExtractor(t, "s1", "/work", 1, DefaultLimits())
+	maxInt := int(^uint(0) >> 1)
+	if err := x.AddWarning(fmt.Sprintf("malformed_jsonl_lines:%d", maxInt)); err != nil {
+		t.Fatal(err)
+	}
+	want := x.Packet()
+	if err := x.AddWarning("malformed_jsonl_lines:1"); err == nil {
+		t.Fatal("accepted overflowing structural warning count")
+	}
+	if got := x.Packet(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("overflow mutated packet: got=%+v want=%+v", got, want)
+	}
+}
+
+func TestStructuralWarningSurvivesUsageSnapshotRestore(t *testing.T) {
+	x := newExtractor(t, "s1", "/work", 1, DefaultLimits())
+	if err := x.AddWarning("malformed_jsonl_lines:4"); err != nil {
+		t.Fatal(err)
+	}
+	usage := &accounting.SessionUsage{
+		StartedAt: testTimestamp,
+		EndedAt:   testTimestamp,
+		Models:    []accounting.ModelUsage{{Model: canary}},
+	}
+	if err := x.SetSessionUsage(usage); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := x.SnapshotSessionUsage()
+	if err := x.SetSessionUsage(nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := x.RestoreSessionUsage(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"malformed_jsonl_lines:4", "redacted:openai_key:1"}
+	if got := x.Packet().Warnings; !reflect.DeepEqual(got, want) {
+		t.Fatalf("warnings after usage restore=%v want=%v", got, want)
+	}
+}
+
 func TestExtractorIncludesOnlyAllowlistedEvidence(t *testing.T) {
 	x := newExtractor(t, "s1", "/work/project", 1, DefaultLimits())
 	inputs := []session.Record{

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/neomei/SessionReviewer/internal/redact"
 )
 
 type WarningKind string
@@ -43,7 +45,7 @@ func ParseWarning(value string) (Warning, error) {
 	}
 	warning.Count = count
 	if warning.Kind == WarningKindRedacted {
-		if !canonicalWarningRule(warning.Rule) {
+		if !redact.IsKnownRuleName(warning.Rule) {
 			return Warning{}, errors.New("invalid redaction warning rule")
 		}
 	} else if warning.Rule != "" {
@@ -78,19 +80,6 @@ func canonicalPositiveDecimal(value string) bool {
 	}
 	for index := 1; index < len(value); index++ {
 		if value[index] < '0' || value[index] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func canonicalWarningRule(value string) bool {
-	if value == "" {
-		return false
-	}
-	for index := range len(value) {
-		character := value[index]
-		if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '_' {
 			return false
 		}
 	}

@@ -1,12 +1,41 @@
 package evidence_test
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/evidence"
+	"github.com/neomei/SessionReviewer/internal/redact"
 )
 
 func TestWarningContractAcceptsOnlyCanonicalKnownVocabulary(t *testing.T) {
+	wantRules := []string{
+		"bearer",
+		"connection_url",
+		"high_entropy_token",
+		"named_secret",
+		"openai_key",
+		"private_key",
+	}
+	if got := redact.KnownRuleNames(); !reflect.DeepEqual(got, wantRules) {
+		t.Fatalf("redaction warning vocabulary=%v want=%v", got, wantRules)
+	}
+	mutated := redact.KnownRuleNames()
+	mutated[0] = "mutated"
+	if got := redact.KnownRuleNames(); !reflect.DeepEqual(got, wantRules) {
+		t.Fatalf("caller mutated shared warning vocabulary: %v", got)
+	}
+	for _, rule := range wantRules {
+		value := "redacted:" + rule + ":1"
+		warning, err := evidence.ParseWarning(value)
+		if err != nil {
+			t.Fatalf("ParseWarning(%q): %v", value, err)
+		}
+		if encoded, err := evidence.FormatWarning(warning); err != nil || encoded != value {
+			t.Fatalf("FormatWarning(%+v)=%q, %v want=%q", warning, encoded, err, value)
+		}
+	}
+
 	tests := []struct {
 		value string
 		want  evidence.Warning
@@ -38,6 +67,7 @@ func TestWarningContractAcceptsOnlyCanonicalKnownVocabulary(t *testing.T) {
 
 	for _, value := range []string{
 		"", "unknown:1", "redacted::1", "redacted:OPENAI_KEY:1", "redacted:openai-key:1",
+		"redacted:future_rule:1",
 		"redacted:openai_key:0", "redacted:openai_key:01", "redacted:openai_key:-1",
 		"malformed_jsonl_lines:0", "malformed_jsonl_lines:01", "malformed_jsonl_lines:-1",
 		"malformed_jsonl_lines:1:extra", "malformed_jsonl_lines_rule:1",

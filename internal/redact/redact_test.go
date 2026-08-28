@@ -1,9 +1,43 @@
 package redact
 
 import (
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
+
+func TestKnownRuleNamesCoverEveryBuiltInEmissionPath(t *testing.T) {
+	cases := map[string]string{
+		RuleBearer:        "Bearer abcdefghijklmnop",
+		RuleConnectionURL: "postgres://user:password@example.test/db",
+		RuleHighEntropy:   "aB3dE5fG7hI9jK1mN3pQ5rS7tU9vW1xY3zA5bC7dE9fG1hI3",
+		RuleNamedSecret:   "password=short-canary",
+		RuleOpenAIKey:     "sk-1234567890abcdefghijklmnop",
+		RulePrivateKey:    "-----BEGIN PRIVATE KEY-----\nBODY\n-----END PRIVATE KEY-----",
+	}
+	seen := make([]string, 0, len(cases))
+	for want, input := range cases {
+		result := Default().Text(input)
+		if len(result.Findings) != 1 || result.Findings[0].Rule != want || result.Findings[0].Count != 1 {
+			t.Fatalf("input for %q emitted %+v", want, result.Findings)
+		}
+		seen = append(seen, want)
+	}
+	sort.Strings(seen)
+	if got := KnownRuleNames(); !reflect.DeepEqual(got, seen) {
+		t.Fatalf("known rules=%v actual built-in emissions=%v", got, seen)
+	}
+	known := make(map[string]bool, len(seen))
+	for _, name := range seen {
+		known[name] = true
+	}
+	for _, current := range Default().rules {
+		if !known[current.name] {
+			t.Fatalf("default regexp rule %q is absent from warning vocabulary", current.name)
+		}
+	}
+}
 
 func TestDefaultRedactsCredentialCanaries(t *testing.T) {
 	canaries := []string{
