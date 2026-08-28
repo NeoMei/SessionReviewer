@@ -20,6 +20,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/proposal"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -42,6 +43,15 @@ func (state *workerAccepted) snapshot(t *testing.T) reviewv2.Accepted {
 	}
 	state.legacy = canonical
 	return reviewv2.Accepted{State: projected, Legacy: canonical}
+}
+
+func workerPrepared(t *testing.T, packet evidence.Packet, accepted reviewv2.Accepted) Prepared {
+	t.Helper()
+	canonical, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return Prepared{Packet: packet, PacketBytes: canonical, Accepted: accepted}
 }
 
 func (state *workerAccepted) apply(t *testing.T, changes ledger.ChangeSet) {
@@ -422,13 +432,13 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 			packetNumber = 2
 		}
 		sequence = append(sequence, "prepare("+request.SessionID+",p"+string(rune('0'+packetNumber))+")")
-		if request.ProjectID != fixture.job.ProjectID || request.UpperBoundary != sessions[request.SessionIndex].Upper || request.EvidencePath == "" ||
+		if request.ProjectID != fixture.job.ProjectID || request.UpperBoundary != sessions[request.SessionIndex].Upper ||
 			request.ProjectIdentity != fixture.job.ProjectIdentity || !request.DataIdentity.Valid() {
 			return Prepared{}, errors.New("worker prepare request lost frozen identity")
 		}
 		current = packet
 		currentRequest = request
-		return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		return workerPrepared(t, packet, accepted.snapshot(t)), nil
 	}
 	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
 	adapter.generate = func(request agent.Request) (agent.Result, error) {
@@ -526,10 +536,10 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 	}
 }
 
-// With neither frozen work nor a durable accepted apply, sync has no commit to
-// finish. Calling any injected seam would invent work that the Job cannot
-// authorize.
-func TestWorkerEmptyQueueWithoutAcceptedApplyCompletesWithoutSyncOrAgent(t *testing.T) {
+// Even an empty frozen snapshot gets one deterministic reconciliation sync.
+// The durable Syncing phase is the point after which cancellation cannot
+// interrupt that externally visible commit.
+func TestWorkerEmptyQueueWithoutAcceptedApplyPerformsOneSyncWithoutAgent(t *testing.T) {
 	fixture := newWorkerFixture(t, nil)
 	adapter := &verifiedWorkerAgent{
 		capability: workerCapability("fixture", "1.0.0"),
@@ -543,8 +553,12 @@ func TestWorkerEmptyQueueWithoutAcceptedApplyCompletesWithoutSyncOrAgent(t *test
 		func(context.Context, PrepareRequest) (Prepared, error) { panic("Prepare must not be called") },
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) { panic("Apply must not be called") },
-		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		func(syncCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
 			syncCalls++
+			job, _, found, err := fixture.store.Load(fixture.job.ID)
+			if err != nil || !found || job.State != Running || job.Phase != Syncing || syncCtx.Err() != nil {
+				t.Fatalf("sync durable boundary job=%#v found=%v err=%v ctx=%v", job, found, err, syncCtx.Err())
+			}
 			return workerSyncReport(fixture.job.ProjectID), nil
 		},
 		nil,
@@ -552,12 +566,51 @@ func TestWorkerEmptyQueueWithoutAcceptedApplyCompletesWithoutSyncOrAgent(t *test
 	if err := Run(t.Context(), options); err != nil {
 		t.Fatal(err)
 	}
-	if syncCalls != 0 || adapter.capabilityCalls != 0 || adapter.generateCalls != 0 {
+	if syncCalls != 1 || adapter.capabilityCalls != 0 || adapter.generateCalls != 0 {
 		t.Fatalf("sync=%d capability=%d generate=%d", syncCalls, adapter.capabilityCalls, adapter.generateCalls)
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
 	if err != nil || !found || job.State != Completed || job.AcceptedPackets != 0 || job.SessionIndex != 0 {
 		t.Fatalf("no-pending job = %#v found=%v err=%v", job, found, err)
+	}
+}
+
+func TestWorkerEmptyQueueCancellationAfterDurableSyncingStillFinishesSync(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	syncCalls := 0
+	options := workerRunOptions(fixture, nil, nil, nil, func(syncCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
+		syncCalls++
+		job, _, found, err := fixture.store.Load(fixture.job.ID)
+		if err != nil || !found || job.Phase != Syncing {
+			t.Fatalf("sync phase job=%#v found=%v err=%v", job, found, err)
+		}
+		cancel()
+		if syncCtx.Err() != nil {
+			t.Fatalf("durable sync received cancellable context: %v", syncCtx.Err())
+		}
+		return workerSyncReport(fixture.job.ProjectID), nil
+	}, nil)
+	if err := Run(ctx, options); err != nil {
+		t.Fatal(err)
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Completed || syncCalls != 1 {
+		t.Fatalf("completed job=%#v found=%v err=%v sync=%d", job, found, err, syncCalls)
+	}
+}
+
+func TestWorkerEmptyQueueRunsRealReconciliationSync(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	seedWorkerReviewV2AndSyncData(t, fixture, workerInitialAccepted(fixture.job.ProjectID))
+	options := workerRunOptions(fixture, nil, nil, nil, syncproject.Run, nil)
+	options.GOOS = "darwin"
+	if err := Run(t.Context(), options); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(fixture.vault, "Projects", "Worker--11111111", "Session Review", "项目回顾.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("empty worker did not perform real sync: %v", err)
 	}
 }
 
@@ -760,7 +813,7 @@ func TestWorkerRejectsInconsistentPreparedAcceptedState(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted}, nil
+			return workerPrepared(t, packet, accepted), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) {
@@ -801,7 +854,7 @@ func TestWorkerRejectsPreparedPacketThatSkipsDurableCursor(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) { panic("skipped cursor reached apply") },
@@ -840,7 +893,7 @@ func TestWorkerAgentFailureDoesNotAdvanceAuthoritativeCursor(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) { panic("Agent failure reached apply") },
@@ -884,7 +937,7 @@ func TestWorkerRejectedDraftStillPersistsExactReviewUsage(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) { panic("rejected draft reached apply") },
@@ -930,7 +983,7 @@ func TestWorkerCancellationAfterGenerateStopsBeforeApply(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) {
@@ -994,7 +1047,7 @@ func TestWorkerCancellationAfterFinalValidationStopsBeforeApply(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) {
@@ -1035,7 +1088,7 @@ func TestWorkerCancellationAfterDurableApplyingStillFinishesApplyAndMandatorySyn
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(commitCtx context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1083,7 +1136,7 @@ func TestWorkerIncompleteSyncDoesNotAdvanceSession(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1121,7 +1174,7 @@ func TestWorkerApplyRecoveryRetainsAuthenticatedExactPacketAndProposal(t *testin
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) {
@@ -1174,7 +1227,7 @@ func TestWorkerPayloadPublicationWALAtEveryBoundary(t *testing.T) {
 				options := workerRunOptions(
 					fixture,
 					func(context.Context, PrepareRequest) (Prepared, error) {
-						return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+						return workerPrepared(t, packet, accepted.snapshot(t)), nil
 					},
 					adapter,
 					func(context.Context, ApplyRequest) (apply.Result, error) { panic("WAL crash reached apply") },
@@ -1310,6 +1363,153 @@ func assertPayloadCheckpointBoundary(t *testing.T, fixture workerFixture, kind P
 	}
 }
 
+func TestWorkerRejectsPrepareBytesThatDoNotAuthenticatePacketBeforeIntent(t *testing.T) {
+	hash := strings.Repeat("8", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000030")
+	packet.CWD = "/repo"
+	canonical, err := json.Marshal(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet.Events[0].Summary = "packet changed after canonical prepare bytes"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	generateCalls := 0
+	adapter := &verifiedWorkerAgent{
+		capability: workerCapability("fixture", "1.0.0"),
+		generate: func(agent.Request) (agent.Result, error) {
+			generateCalls++
+			return agent.Result{}, agent.NewError(agent.CodeAuth, errors.New("mismatched packet reached Agent"))
+		},
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, PacketBytes: canonical, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) { panic("mismatched packet reached apply") },
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			panic("mismatched packet reached sync")
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted packet structure that did not match Prepare canonical bytes")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.Error.Code != ProposalRejected || job.PacketDigest != "" || len(job.PayloadPublications) != 0 || generateCalls != 0 {
+		t.Fatalf("mismatched prepare job=%#v found=%v err=%v generate=%d", job, found, err, generateCalls)
+	}
+}
+
+func TestWorkerOwnsRealPreparePayloadPublicationAcrossPreIntentCrashes(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare prepareCheckpointStage
+		payload payloadCheckpointStage
+	}{
+		{name: string(prepareAfterReturn), prepare: prepareAfterReturn},
+		{name: string(prepareAfterRootCheck), prepare: prepareAfterRootCheck},
+		{name: string(prepareAfterValidation), prepare: prepareAfterValidation},
+		{name: string(payloadBeforeIntentCAS), payload: payloadBeforeIntentCAS},
+		{name: string(payloadAfterIntentCAS), payload: payloadAfterIntentCAS},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWorkerFixture(t, nil)
+			sessionsRoot := filepath.Join(fixture.root, "sessions")
+			if err := os.MkdirAll(sessionsRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			meta := `{"timestamp":"2026-08-29T07:00:00Z","type":"session_meta","payload":{"id":"session-real","cwd":"` + filepath.ToSlash(fixture.project) + `","source":"vscode"}}`
+			record := responseRecord("2026-08-29T07:01:00Z", "one", "review this exact session")
+			if err := os.WriteFile(filepath.Join(sessionsRoot, "real.jsonl"), []byte(meta+"\n"+record+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			upper := evidence.CursorBoundary{Line: 2, SourceHash: recordHash(record)}
+			loaded, revision, found, err := fixture.store.Load(fixture.job.ID)
+			if err != nil || !found {
+				t.Fatalf("Load() found=%v err=%v", found, err)
+			}
+			loaded, _, err = fixture.store.Update(fixture.job.ID, revision, func(job *Job) error {
+				job.FrozenSessions = []FrozenSession{{SessionID: "session-real", StartedAt: fixtureTime(7), Upper: upper}}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.job = loaded
+			accepted := workerInitialAccepted(fixture.job.ProjectID)
+			seedWorkerReviewV2AndSyncData(t, fixture, accepted)
+
+			prepareCalls := 0
+			options := workerRunOptions(
+				fixture,
+				func(_ context.Context, request PrepareRequest) (Prepared, error) {
+					prepareCalls++
+					result, err := prepare.Run(prepare.Options{
+						Mode: "review", SessionsRoot: sessionsRoot, SessionID: request.SessionID,
+						CWD: request.ProjectRoot, DataDir: request.DataDir, GOOS: "test",
+						Now: fixture.now, AmbiguityWindow: time.Second, UpperBoundary: &request.UpperBoundary,
+					})
+					if err != nil {
+						return Prepared{}, err
+					}
+					return Prepared{Packet: result.Packet, PacketBytes: result.Canonical, Accepted: accepted.snapshot(t)}, nil
+				},
+				&verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0"), generate: func(agent.Request) (agent.Result, error) {
+					t.Fatal("pre-intent prepare crash reached Agent")
+					return agent.Result{}, nil
+				}},
+				func(context.Context, ApplyRequest) (apply.Result, error) {
+					t.Fatal("pre-intent prepare crash reached apply")
+					return apply.Result{}, nil
+				},
+				func(context.Context, syncproject.Options) (syncengine.Report, error) {
+					t.Fatal("pre-intent prepare crash reached sync")
+					return syncengine.Report{}, nil
+				},
+				nil,
+			)
+			crash := errors.New("simulated prepare crash")
+			observed := false
+			options.prepareCheckpoint = func(got prepareCheckpointStage) error {
+				if test.prepare == "" || got != test.prepare {
+					return nil
+				}
+				observed = true
+				return crash
+			}
+			options.payloadCheckpoint = func(kind PayloadKind, got payloadCheckpointStage) error {
+				if test.payload == "" || kind != PayloadPacket || got != test.payload {
+					return nil
+				}
+				observed = true
+				return crash
+			}
+			if err := Run(t.Context(), options); !errors.Is(err, crash) {
+				t.Fatalf("Run() err=%v want simulated prepare crash", err)
+			}
+			if !observed || prepareCalls != 1 {
+				t.Fatalf("checkpoint observed=%v prepareCalls=%d", observed, prepareCalls)
+			}
+			job, _, found, err := fixture.store.Load(fixture.job.ID)
+			wantIntent := test.payload == payloadAfterIntentCAS
+			if err != nil || !found || (job.PacketDigest != "") != wantIntent || len(job.PayloadPublications) != map[bool]int{false: 0, true: 1}[wantIntent] {
+				t.Fatalf("pre-intent job=%#v found=%v err=%v", job, found, err)
+			}
+			entries, err := os.ReadDir(filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs"))
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("prepare leaked named or temp payload entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
 func TestWorkerNextPacketPublicationIntentDropsStalePriorDigests(t *testing.T) {
 	firstHash, secondHash := strings.Repeat("8", 64), strings.Repeat("9", 64)
 	fixture := newWorkerFixture(t, []FrozenSession{{
@@ -1335,7 +1535,7 @@ func TestWorkerNextPacketPublicationIntentDropsStalePriorDigests(t *testing.T) {
 		func(context.Context, PrepareRequest) (Prepared, error) {
 			current = packets[packetIndex]
 			packetIndex++
-			return Prepared{Packet: current, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, current, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1467,7 +1667,7 @@ func TestWorkerNeverCleansPayloadBeforeDurableCleanupBoundary(t *testing.T) {
 			options := workerRunOptions(
 				fixture,
 				func(context.Context, PrepareRequest) (Prepared, error) {
-					return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+					return workerPrepared(t, packet, accepted.snapshot(t)), nil
 				},
 				adapter,
 				func(context.Context, ApplyRequest) (apply.Result, error) { panic("failed Agent reached apply") },
@@ -1544,7 +1744,7 @@ func TestWorkerRejectsDryRunAndPartialMigrationSyncReports(t *testing.T) {
 			options := workerRunOptions(
 				fixture,
 				func(context.Context, PrepareRequest) (Prepared, error) {
-					return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+					return workerPrepared(t, packet, accepted.snapshot(t)), nil
 				},
 				adapter,
 				func(_ context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1587,7 +1787,7 @@ func TestWorkerAcceptsCompletedMigrationAudit(t *testing.T) {
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1639,7 +1839,7 @@ func TestWorkerEarlierSyncedPacketDoesNotOfferSyncOnlyAfterLaterAgentFailure(t *
 		func(context.Context, PrepareRequest) (Prepared, error) {
 			current = packets[index]
 			index++
-			return Prepared{Packet: current, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, current, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
@@ -1757,7 +1957,7 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 				options := workerRunOptions(
 					fixture,
 					func(context.Context, PrepareRequest) (Prepared, error) {
-						prepared := Prepared{Packet: packet, Accepted: accepted.snapshot(t)}
+						prepared := workerPrepared(t, packet, accepted.snapshot(t))
 						mutate("prepare")
 						return prepared, nil
 					},
@@ -1841,7 +2041,7 @@ func TestWorkerRejectsModelWhenVerifiedProvenanceIsUnavailableBeforeAccounting(t
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) { applyCalls++; return apply.Result{}, nil },
@@ -1896,7 +2096,7 @@ func TestWorkerHostEnrichesSourceAccountingAndKeepsUnknownReviewModelUnpriced(t 
 	options := workerRunOptions(
 		fixture,
 		func(context.Context, PrepareRequest) (Prepared, error) {
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(_ context.Context, request ApplyRequest) (apply.Result, error) {

@@ -28,7 +28,7 @@ func TestMalformedJSONLWarningSurvivesPreparePromptAndFinalValidation(t *testing
 		}
 		return file.Close()
 	}
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -51,6 +51,46 @@ type Config struct {
 	SessionAssociations []SessionAssociation `toml:"session_associations,omitempty"`
 }
 
+// NamespaceSnapshot is an immutable-in-practice copy of the exact files that
+// formed one configuration namespace observation. Callers must capture these
+// bytes through authenticated handles before parsing them.
+type NamespaceSnapshot struct {
+	Primary          *FileSnapshot
+	Backup           *FileSnapshot
+	ProjectFragments []FileSnapshot
+}
+
+type FileSnapshot struct {
+	Name string
+	Body []byte
+}
+
+// ValidateNamespaceSnapshotEntry applies the same privacy rules as live
+// configuration loading before another package captures an entry's bytes.
+func ValidateNamespaceSnapshotEntry(dataPath, name string, info os.FileInfo) error {
+	if info == nil || filepath.IsAbs(name) || filepath.Clean(name) != name {
+		return errors.New("configuration snapshot entry is invalid")
+	}
+	full := filepath.Join(dataPath, name)
+	switch {
+	case name == "config.toml" || name == atomicfile.BackupPath("config.toml"):
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
+			return errors.New("configuration snapshot entry is not private")
+		}
+	case name == ProjectFragmentsDir:
+		if info.Mode()&os.ModeSymlink != 0 || !privateProjectFragmentsPath(full, info) {
+			return errors.New("project fragment namespace is not private")
+		}
+	case filepath.Dir(name) == ProjectFragmentsDir:
+		if info.Mode()&os.ModeSymlink != 0 || !privateProjectFragmentPath(full, info) {
+			return errors.New("project mapping fragment is not private")
+		}
+	default:
+		return errors.New("configuration snapshot entry is outside the namespace")
+	}
+	return nil
+}
+
 func Load(path string) (Config, error) {
 	root, err := os.OpenRoot(filepath.Dir(path))
 	if errors.Is(err, os.ErrNotExist) {
@@ -90,6 +130,59 @@ func LoadRoot(root *os.Root, name string) (Config, error) {
 		return Config{}, err
 	}
 	return mergeProjectFragments(base, fragments)
+}
+
+// LoadNamespaceSnapshot parses only the supplied captured bytes. It performs
+// no path lookup, so a namespace rename/restore cannot change the mapping
+// between capture and parse.
+func LoadNamespaceSnapshot(snapshot NamespaceSnapshot) (Config, error) {
+	primary, primaryFound, primaryErr := decodeSharedConfigSnapshot(snapshot.Primary, "config.toml")
+	backup, backupFound, backupErr := decodeSharedConfigSnapshot(snapshot.Backup, atomicfile.BackupPath("config.toml"))
+	base := Config{Version: 1}
+	switch {
+	case primaryFound && primaryErr == nil:
+		base = primary
+	case backupFound && backupErr == nil:
+		base = backup
+	case !primaryFound && !backupFound:
+	default:
+		return Config{}, fmt.Errorf("configuration state and recovery backup are invalid")
+	}
+	fragments := make([]FileSnapshot, len(snapshot.ProjectFragments))
+	copy(fragments, snapshot.ProjectFragments)
+	sort.Slice(fragments, func(i, j int) bool { return fragments[i].Name < fragments[j].Name })
+	mappings := make([]ProjectMapping, 0, len(fragments))
+	previous := ""
+	for _, file := range fragments {
+		if file.Name == "" || file.Name == previous || filepath.Base(file.Name) != file.Name || !strings.HasSuffix(file.Name, ".toml") {
+			return Config{}, errors.New("project mapping fragment snapshot is invalid")
+		}
+		mapping, err := decodeProjectFragmentBytes(file.Name, file.Body)
+		if err != nil {
+			return Config{}, err
+		}
+		mappings = append(mappings, mapping)
+		previous = file.Name
+	}
+	return mergeProjectFragments(base, mappings)
+}
+
+func decodeSharedConfigSnapshot(file *FileSnapshot, wantName string) (Config, bool, error) {
+	if file == nil {
+		return Config{}, false, nil
+	}
+	if file.Name != wantName || file.Body == nil || len(file.Body) > 4<<20 {
+		return Config{}, true, errors.New("invalid configuration state")
+	}
+	var cfg Config
+	decoder := toml.NewDecoder(bytes.NewReader(file.Body)).DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return Config{}, true, errors.New("invalid configuration state")
+	}
+	if err := validate(cfg); err != nil {
+		return Config{}, true, err
+	}
+	return cfg, true, nil
 }
 
 func SaveRoot(root *os.Root, name string, cfg Config) error {
@@ -260,6 +353,13 @@ func readProjectFragmentFile(root *os.Root, name string) (ProjectMapping, error)
 	if err != nil {
 		return ProjectMapping{}, err
 	}
+	return decodeProjectFragmentBytes(name, body)
+}
+
+func decodeProjectFragmentBytes(name string, body []byte) (ProjectMapping, error) {
+	if filepath.Base(name) != name || !strings.HasSuffix(name, ".toml") || len(body) > 1<<20 {
+		return ProjectMapping{}, errors.New("project mapping fragment is invalid")
+	}
 	var fragment projectFragment
 	decoder := toml.NewDecoder(bytes.NewReader(body)).DisallowUnknownFields()
 	if err := decoder.Decode(&fragment); err != nil {
@@ -267,6 +367,9 @@ func readProjectFragmentFile(root *os.Root, name string) (ProjectMapping, error)
 	}
 	if err := validateProjectFragment(fragment.Project); err != nil {
 		return ProjectMapping{}, err
+	}
+	if name != fragment.Project.ID+".toml" {
+		return ProjectMapping{}, errors.New("project mapping fragment filename does not match ID")
 	}
 	canonical, err := toml.Marshal(fragment)
 	if err != nil || !bytes.Equal(canonical, body) {

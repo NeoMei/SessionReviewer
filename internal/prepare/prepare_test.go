@@ -44,7 +44,7 @@ func TestRunPreparesCurrentCheckpointWithoutAdvancingCursor(t *testing.T) {
 		t.Fatal(err)
 	}
 	output := filepath.Join(root, "evidence.json")
-	packet, err := Run(Options{Mode: "checkpoint", SessionsRoot: sessions, CWD: projectRoot, DataDir: data, Output: output, Now: now, AmbiguityWindow: time.Second})
+	packet, err := Write(Options{Mode: "checkpoint", SessionsRoot: sessions, CWD: projectRoot, DataDir: data, Output: output, Now: now, AmbiguityWindow: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,6 +125,39 @@ func (f runFixture) options(mode string) Options {
 	return Options{Mode: mode, SessionsRoot: f.sessions, CWD: f.projectRoot, DataDir: f.data, Output: f.output, Now: f.now, AmbiguityWindow: time.Second}
 }
 
+func TestRunReturnsExactCanonicalPacketWithoutPublishingEvidence(t *testing.T) {
+	f := newRunFixture(t, "")
+	opts := f.options("review")
+	opts.SessionID = "s1"
+	// Run ignores even a legacy destination supplied by a caller; Write is the
+	// only API that may publish manual CLI evidence.
+	opts.Output = f.output
+
+	result, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := json.Marshal(result.Packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(result.Canonical, want) {
+		t.Fatalf("canonical bytes=%q want=%q", result.Canonical, want)
+	}
+	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
+		t.Fatalf("in-memory prepare published evidence: %v", err)
+	}
+	entries, err := os.ReadDir(f.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".session-reviewer-") {
+			t.Fatalf("in-memory prepare leaked atomic temporary %q", entry.Name())
+		}
+	}
+}
+
 func (f runFixture) commitCursor(t *testing.T, line int) cursor.Cursor {
 	t.Helper()
 	root := filepath.Join(f.data, "projects", "p1")
@@ -169,7 +202,7 @@ func (f runFixture) cursorBytes(t *testing.T) ([]byte, string) {
 
 func (f runFixture) requireFailurePreservesOutputAndCursor(t *testing.T, opts Options, before []byte, cursorPath string, errorParts ...string) {
 	t.Helper()
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	for _, part := range errorParts {
 		if err == nil || !strings.Contains(err.Error(), part) {
 			t.Fatalf("error %q does not contain %q", err, part)
@@ -211,7 +244,7 @@ func TestPrepareHonorsFrozenUpperBoundaryAndIgnoresActiveAppend(t *testing.T) {
 	opts := f.options("review")
 	opts.SessionID = "s1"
 	opts.UpperBoundary = &upper
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +255,7 @@ func TestPrepareHonorsFrozenUpperBoundaryAndIgnoresActiveAppend(t *testing.T) {
 	manual := f.options("review")
 	manual.SessionID = "s1"
 	manual.Output = filepath.Join(f.root, "manual.json")
-	manualPacket, err := Run(manual)
+	manualPacket, err := Write(manual)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +276,7 @@ func TestPrepareHonorsFrozenUpperBoundaryHasMoreWithinFrozenRange(t *testing.T) 
 	opts.SessionID = "s1"
 	opts.UpperBoundary = &upper
 	opts.Limits = evidence.Limits{MaxEvents: 1, MaxSummaryRunes: 1200, MaxPacketRunes: 300000}
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +304,7 @@ func TestPrepareHonorsFrozenUpperBoundaryRejectsInvalidAndDriftedSources(t *test
 			opts.SessionID = "s1"
 			opts.Output = filepath.Join(f.root, "out", test.name+".json")
 			opts.UpperBoundary = &local
-			_, err := Run(opts)
+			_, err := Write(opts)
 			if test.name == "zero" || test.name == "invalid hash" {
 				if err == nil || errors.Is(err, ErrCursorSourceDrift) {
 					t.Fatalf("Run() validation error = %v", err)
@@ -298,7 +331,7 @@ func TestPrepareHonorsFrozenUpperBoundaryRejectsInvalidAndDriftedSources(t *test
 			opts := f2.options("review")
 			opts.SessionID = "s1"
 			opts.UpperBoundary = &local
-			if _, err := Run(opts); !errors.Is(err, ErrCursorSourceDrift) {
+			if _, err := Write(opts); !errors.Is(err, ErrCursorSourceDrift) {
 				t.Fatalf("Run() error = %v, want ErrCursorSourceDrift", err)
 			}
 		})
@@ -311,7 +344,7 @@ func TestRunExplicitSessionIgnoresUnrelatedCorruptCandidate(t *testing.T) {
 	f.writeSession(t, "broken.jsonl", "{not-json-"+canary+"\n", f.now)
 	opts := f.options("review")
 	opts.SessionID = "s1"
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil || packet.SessionID != "s1" {
 		t.Fatalf("packet=%+v err=%v", packet, err)
 	}
@@ -326,7 +359,7 @@ func TestRunExplicitSessionStreamsOrderedRolloutSegmentsAsOneTimeline(t *testing
 	opts.SessionID = "s1"
 	opts.FromStart = true
 
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +439,7 @@ func TestRunPinsDataRootBeforeConfigurationLoad(t *testing.T) {
 	var moved string
 	opts := f.options("review")
 	opts.afterOpenDataDir = func() error { moved = replaceDataPath(t, f.data, decoy); return nil }
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +490,7 @@ func TestRunUsesSamePinnedDataSnapshotForConfigAndCursor(t *testing.T) {
 		}
 		return os.Rename(decoy, f.data)
 	}
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +518,7 @@ func TestRunFromStartDoesNotTouchCursorAfterDataReplacement(t *testing.T) {
 	opts := f.options("review")
 	opts.FromStart = true
 	opts.afterLoadConfig = func() error { replaceDataPath(t, f.data, decoy); return nil }
-	if _, err := Run(opts); err != nil {
+	if _, err := Write(opts); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(cursorDir)
@@ -499,7 +532,7 @@ func TestRunFromStartDoesNotTouchCursorAfterDataReplacement(t *testing.T) {
 
 func TestRunReleasesPinnedDataRoot(t *testing.T) {
 	f := newRunFixture(t, "")
-	if _, err := Run(f.options("review")); err != nil {
+	if _, err := Write(f.options("review")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Rename(f.data, f.data+"-moved"); err != nil {
@@ -512,7 +545,7 @@ func TestRunRejectsCursorSourceHashMismatch(t *testing.T) {
 	f.commitCursor(t, 2)
 	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot,
 		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"changed"}]}}`), f.now)
-	_, err := Run(f.options("checkpoint"))
+	_, err := Write(f.options("checkpoint"))
 	if !errors.Is(err, ErrCursorSourceDrift) {
 		t.Fatalf("err=%v", err)
 	}
@@ -525,7 +558,7 @@ func TestRunRejectsCursorBeyondTruncatedSession(t *testing.T) {
 	f := newRunFixture(t, "")
 	f.commitCursor(t, 2)
 	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot), f.now)
-	_, err := Run(f.options("checkpoint"))
+	_, err := Write(f.options("checkpoint"))
 	if !errors.Is(err, ErrCursorSourceDrift) {
 		t.Fatalf("err=%v", err)
 	}
@@ -547,7 +580,7 @@ func TestRunReviewFromStartBypassesCursorSourceValidation(t *testing.T) {
 		`{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"changed"}]}}`), f.now)
 	opts := f.options("review")
 	opts.FromStart = true
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil || packet.FromCursor != 1 {
 		t.Fatalf("packet=%+v err=%v", packet, err)
 	}
@@ -577,7 +610,7 @@ func TestRunCheckpointStartsAfterExistingCursorWithoutChangingIt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	packet, err := Run(f.options("checkpoint"))
+	packet, err := Write(f.options("checkpoint"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +635,7 @@ func TestRunReviewFromStartIgnoresExistingCursor(t *testing.T) {
 	f.commitCursor(t, 2)
 	opts := f.options("review")
 	opts.FromStart = true
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +655,7 @@ func TestRunReviewFromStartDoesNotReadCorruptCursor(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.FromStart = true
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +670,7 @@ func TestRunReviewFromStartDoesNotReadCorruptCursor(t *testing.T) {
 func TestRunEmptyPacketStartsAtCursorPlusOne(t *testing.T) {
 	f := newRunFixture(t, "")
 	f.commitCursor(t, 2)
-	packet, err := Run(f.options("checkpoint"))
+	packet, err := Write(f.options("checkpoint"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +695,7 @@ func TestRunPacketFullIsSuccessfulSegmentedOutput(t *testing.T) {
 	opts := f.options("review")
 	opts.Limits = evidence.DefaultLimits()
 	opts.Limits.MaxEvents = 1
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -695,7 +728,7 @@ func TestRunPacketFullPreservesAcceptedUsageRedactionWarning(t *testing.T) {
 	opts := f.options("review")
 	opts.Limits = evidence.DefaultLimits()
 	opts.Limits.MaxEvents = 1
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +758,7 @@ func TestRunRejectsMalformedCandidateWithoutLeakingItsContents(t *testing.T) {
 	if err := os.Chtimes(path, f.now, f.now); err != nil {
 		t.Fatal(err)
 	}
-	_, err := Run(f.options("review"))
+	_, err := Write(f.options("review"))
 	if err == nil || !strings.Contains(err.Error(), "current-session discovery contains corrupt candidates") {
 		t.Fatalf("err=%v", err)
 	}
@@ -751,7 +784,7 @@ func TestRunClassifiesUnsupportedSelectedSessionRecordFormat(t *testing.T) {
 	if err := os.Chtimes(path, f.now, f.now); err != nil {
 		t.Fatal(err)
 	}
-	_, err = Run(f.options("review"))
+	_, err = Write(f.options("review"))
 	if !errors.Is(err, ErrSessionFormatUnsupported) {
 		t.Fatalf("error does not preserve unsupported-format sentinel: %v", err)
 	}
@@ -776,7 +809,7 @@ func TestRunRejectsExplicitSessionFromDifferentProject(t *testing.T) {
 	f.writeSession(t, "other.jsonl", body, f.now.Add(time.Minute))
 	opts := f.options("review")
 	opts.SessionID = "other-session"
-	if _, err := Run(opts); err == nil || !strings.Contains(err.Error(), "different project") {
+	if _, err := Write(opts); err == nil || !strings.Contains(err.Error(), "different project") {
 		t.Fatalf("err=%v", err)
 	}
 	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
@@ -789,13 +822,13 @@ func TestRunRejectsNoSessionAndAmbiguousSession(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.sessions, "s1.jsonl")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "no session") {
+	if _, err := Write(f.options("review")); err == nil || !strings.Contains(err.Error(), "no session") {
 		t.Fatalf("no-session err=%v", err)
 	}
 	body := sessionBody(f.projectRoot, `{"timestamp":"2026-08-22T10:01:00Z","type":"event","payload":{}}`)
 	f.writeSession(t, "one.jsonl", strings.Replace(body, `"id":"s1"`, `"id":"one"`, 1), f.now)
 	f.writeSession(t, "two.jsonl", strings.Replace(body, `"id":"s1"`, `"id":"two"`, 1), f.now.Add(-time.Millisecond))
-	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, err := Write(f.options("review")); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("ambiguous err=%v", err)
 	} else {
 		wrapped := fmt.Errorf("outer prepare context: %w", err)
@@ -824,7 +857,7 @@ func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.MaxRecordBytes = 512
-	if _, err := Run(opts); err == nil {
+	if _, err := Write(opts); err == nil {
 		t.Fatal("expected stream error")
 	}
 	if body, err := os.ReadFile(f.output); err != nil || string(body) != "old" {
@@ -834,7 +867,7 @@ func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
 
 func TestRunWritesPrivateOutputAndBoundsFinalJSON(t *testing.T) {
 	f := newRunFixture(t, "")
-	packet, err := Run(f.options("review"))
+	packet, err := Write(f.options("review"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +936,7 @@ func TestRunRejectsSymlinkOutputAndParentBeforeCursorLock(t *testing.T) {
 					t.Skipf("symlinks unavailable: %v", err)
 				}
 			}
-			if _, err := Run(f.options("review")); err == nil {
+			if _, err := Write(f.options("review")); err == nil {
 				t.Fatal("expected unsafe output error")
 			}
 			if body, err := os.ReadFile(protected); err != nil || string(body) != "old" {
@@ -925,7 +958,7 @@ func TestRunNeverWritesInsideRawSessionsOrDataDirectory(t *testing.T) {
 			} else {
 				f.output = filepath.Join(f.data, "evidence.json")
 			}
-			if _, err := Run(f.options("review")); err == nil {
+			if _, err := Write(f.options("review")); err == nil {
 				t.Fatal("expected protected-root output error")
 			}
 			if _, err := os.Stat(f.output); !os.IsNotExist(err) {
@@ -951,7 +984,7 @@ func TestRunReadOnlyCursorFallbackDoesNotRepairState(t *testing.T) {
 	if err := os.WriteFile(backup, body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	packet, err := Run(f.options("checkpoint"))
+	packet, err := Write(f.options("checkpoint"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -973,7 +1006,7 @@ func TestRunRejectsConfigurationWithDuplicateProjectRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(f.data, "config.toml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "configuration") {
+	if _, err := Write(f.options("review")); err == nil || !strings.Contains(err.Error(), "configuration") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -995,7 +1028,7 @@ func TestRunResolvesRelativeWorkingDirectoryToConfiguredProject(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.CWD = relative
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1012,7 +1045,7 @@ func TestRunRejectsInvalidDecodeLimitBeforeCursorLock(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.MaxRecordBytes = -1
-	if _, err := Run(opts); err == nil {
+	if _, err := Write(opts); err == nil {
 		t.Fatalf("err=%v", err)
 	}
 	if _, err := os.Stat(filepath.Join(cursors, ".s1.lock")); !os.IsNotExist(err) {
@@ -1022,7 +1055,7 @@ func TestRunRejectsInvalidDecodeLimitBeforeCursorLock(t *testing.T) {
 
 func TestRunDoesNotCreateCursorStateWhenProjectDataIsAbsent(t *testing.T) {
 	f := newRunFixture(t, "")
-	if _, err := Run(f.options("review")); err != nil {
+	if _, err := Write(f.options("review")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(f.data, "projects")); !os.IsNotExist(err) {
@@ -1041,7 +1074,7 @@ func TestRunLeavesRawSessionBytesAndMetadataUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("checkpoint")); err != nil {
+	if _, err := Write(f.options("checkpoint")); err != nil {
 		t.Fatal(err)
 	}
 	afterBody, err := os.ReadFile(path)
@@ -1071,7 +1104,7 @@ func TestRunRejectsCursorIncrementOverflow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cursors, "s1.json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("checkpoint")); err == nil {
+	if _, err := Write(f.options("checkpoint")); err == nil {
 		t.Fatal("expected cursor overflow error")
 	}
 	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
@@ -1087,7 +1120,7 @@ func TestRunRejectsSessionRootWithSymlinkAncestor(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.SessionsRoot = filepath.Join(aliasRoot, "sessions")
-	if _, err := Run(opts); err == nil {
+	if _, err := Write(opts); err == nil {
 		t.Fatal("expected session-root ancestor symlink rejection")
 	}
 	if _, err := os.Stat(f.output); !os.IsNotExist(err) {
@@ -1123,7 +1156,7 @@ func TestRunRejectsSessionReplacementBeforeOpen(t *testing.T) {
 					panic("unknown replacement kind")
 				}
 			}
-			if _, err := Run(opts); err == nil {
+			if _, err := Write(opts); err == nil {
 				t.Fatal("expected changed session identity rejection")
 			}
 			if _, err := os.Stat(f.output); !os.IsNotExist(err) {
@@ -1151,7 +1184,7 @@ func TestRunStreamsPinnedSessionAfterPathReplacement(t *testing.T) {
 		}
 		return os.WriteFile(sessionPath, []byte(replacement), 0o600)
 	}
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1176,7 +1209,7 @@ func TestRunExplicitSessionAcceptsPhysicalDarwinCWDAlias(t *testing.T) {
 	opts.GOOS = "darwin"
 	opts.CWD = alias
 	opts.SessionID = "s1"
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1199,7 +1232,7 @@ func TestRunMatchesConfiguredProjectByPhysicalDarwinIdentity(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.GOOS = "darwin"
-	packet, err := Run(opts)
+	packet, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1235,7 +1268,7 @@ func TestRunReportsNotInitializedWhenAllMappingsAreMissing(t *testing.T) {
 	if err := config.Save(filepath.Join(f.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "stale", Root: stale}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(f.options("review")); err == nil || !strings.Contains(err.Error(), "not initialized") {
+	if _, err := Write(f.options("review")); err == nil || !strings.Contains(err.Error(), "not initialized") {
 		t.Fatalf("err=%v", err)
 	}
 }

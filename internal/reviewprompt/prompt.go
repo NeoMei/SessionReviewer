@@ -542,11 +542,18 @@ func normalizePathText(value, goos string) string {
 		return strings.ToLower(norm.NFC.String(value))
 	case "windows":
 		value = strings.ToLower(norm.NFC.String(strings.ReplaceAll(value, `\`, "/")))
+		value = strings.ReplaceAll(value, "//??//unc//", "//")
+		value = collapseWindowsSlashes(value)
 		// Win32 extended drive and UNC spellings are aliases of their ordinary
-		// counterparts. Do this replacement throughout the structured string
-		// because a path is commonly embedded after a prose prefix.
+		// counterparts. NT's \??\UNC namespace must be normalized before the
+		// generic NT prefix or it would become a relative "unc/..." spelling.
+		// Do this throughout the structured string because paths are commonly
+		// embedded after a prose prefix.
 		value = strings.ReplaceAll(value, "//?/unc/", "//")
+		value = strings.ReplaceAll(value, "//??/unc/", "//")
+		value = strings.ReplaceAll(value, "/??/unc/", "//")
 		value = strings.ReplaceAll(value, "//?/", "")
+		value = strings.ReplaceAll(value, "//??/", "")
 		value = strings.ReplaceAll(value, "/??/", "")
 		return collapseWindowsSlashes(value)
 	default:

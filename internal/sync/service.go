@@ -138,7 +138,14 @@ type Engine struct {
 	bases                  BaseStore
 	transactions           TransactionStore
 	writer                 RootedWriter
+	vaultTarget            vaultTargetBinding
 	trustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
+}
+
+type vaultTargetBinding struct {
+	full       string
+	anchorInfo os.FileInfo
+	targetInfo os.FileInfo
 }
 
 func NewEngine(options Options) (*Engine, error) {
@@ -202,7 +209,14 @@ func NewEngine(options Options) (*Engine, error) {
 		_ = dataRoot.Close()
 		return nil, errors.New("sync data root must be disjoint from project and vault roots")
 	}
-	engine := &Engine{options: options, project: projectRoot, vault: vaultRoot, data: dataRoot}
+	vaultTarget, err := authenticateVaultTarget(options.VaultReviewPath, projectRoot, vaultRoot)
+	if err != nil {
+		_ = projectRoot.Close()
+		_ = vaultRoot.Close()
+		_ = dataRoot.Close()
+		return nil, err
+	}
+	engine := &Engine{options: options, project: projectRoot, vault: vaultRoot, data: dataRoot, vaultTarget: vaultTarget}
 	engine.bases = BaseStore{Root: dataRoot.Root}
 	engine.transactions = TransactionStore{Root: dataRoot.Root}
 	engine.writer = RootedWriter{Project: projectRoot, Vault: vaultRoot, Retry: options.Retry}
@@ -256,6 +270,58 @@ func (engine *Engine) verifyRootBindings() error {
 		if closeErr != nil || !same {
 			return fmt.Errorf("sync %s root identity changed", expected.name)
 		}
+	}
+	return engine.vaultTarget.verify(engine.project, engine.vault)
+}
+
+func authenticateVaultTarget(reviewPath string, project, vault *pathguard.Directory) (vaultTargetBinding, error) {
+	if project == nil || vault == nil || reviewPath == "" || strings.Contains(reviewPath, `\`) ||
+		path.Clean(reviewPath) != reviewPath || path.IsAbs(reviewPath) || reviewPath == "." || reviewPath == ".." || strings.HasPrefix(reviewPath, "../") {
+		return vaultTargetBinding{}, errors.New("vault review target is invalid")
+	}
+	full := filepath.Join(vault.Path, filepath.FromSlash(reviewPath))
+	withinVault, err := filepath.Rel(vault.Path, full)
+	if err != nil || withinVault == "." || withinVault == ".." || strings.HasPrefix(withinVault, ".."+string(filepath.Separator)) {
+		return vaultTargetBinding{}, errors.New("vault review target escapes its Vault root")
+	}
+	opened, remaining, err := pathguard.OpenDeepest(full)
+	if err != nil {
+		return vaultTargetBinding{}, errors.New("vault review target is unsafe")
+	}
+	defer opened.Close()
+	if !opened.ContainsIdentity(vault.Info()) || vaultTargetInsideProject(full, project, opened) {
+		return vaultTargetBinding{}, errors.New("vault review target must be outside the authoritative Project")
+	}
+	binding := vaultTargetBinding{full: full, anchorInfo: opened.Info()}
+	if len(remaining) == 0 {
+		binding.targetInfo = opened.Info()
+	}
+	return binding, nil
+}
+
+func vaultTargetInsideProject(full string, project, deepest *pathguard.Directory) bool {
+	if project == nil || deepest == nil {
+		return true
+	}
+	relative, err := filepath.Rel(project.Path, full)
+	lexical := err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	return lexical || deepest.ContainsIdentity(project.Info())
+}
+
+func (binding vaultTargetBinding) verify(project, vault *pathguard.Directory) error {
+	if binding.full == "" || binding.anchorInfo == nil || project == nil || vault == nil {
+		return errors.New("vault review target binding is unavailable")
+	}
+	opened, remaining, err := pathguard.OpenDeepest(binding.full)
+	if err != nil {
+		return errors.New("vault review target identity changed")
+	}
+	defer opened.Close()
+	if !opened.ContainsIdentity(vault.Info()) || vaultTargetInsideProject(binding.full, project, opened) || !opened.ContainsIdentity(binding.anchorInfo) {
+		return errors.New("vault review target identity changed")
+	}
+	if binding.targetInfo != nil && (len(remaining) != 0 || !os.SameFile(binding.targetInfo, opened.Info())) {
+		return errors.New("vault review target identity changed")
 	}
 	return nil
 }

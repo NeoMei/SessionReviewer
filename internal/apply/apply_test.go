@@ -2126,7 +2126,7 @@ func (f *multiPacketFixture) prepare(t *testing.T, fromStart bool) evidence.Pack
 	if fromStart {
 		mode = "review"
 	}
-	packet, err := preparepkg.Run(preparepkg.Options{
+	packet, err := preparepkg.Write(preparepkg.Options{
 		Mode: mode, SessionsRoot: f.sessions, SessionID: testSessionID,
 		CWD: f.projectRoot, DataDir: f.dataDir, Output: f.evidence,
 		GOOS: runtime.GOOS, Now: f.now, AmbiguityWindow: time.Second, Limits: limits,

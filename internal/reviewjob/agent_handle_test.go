@@ -74,7 +74,7 @@ func TestWorkerRechecksAgentExecutableImmediatelyBeforeGenerate(t *testing.T) {
 			if err := os.WriteFile(fixture.agent, []byte("replacement fixture Agent\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
 		},
 		adapter,
 		func(context.Context, ApplyRequest) (apply.Result, error) {

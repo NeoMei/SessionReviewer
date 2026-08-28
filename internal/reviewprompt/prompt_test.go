@@ -281,6 +281,26 @@ func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
 			wantError: reviewprompt.ErrUnsafeInput,
 		},
 		{
+			name:      "windows NT UNC alias",
+			goos:      "windows",
+			root:      `\\server\share\Project`,
+			value:     `inspect \??\UNC\SERVER\SHARE\PROJECT\private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:      "windows slash NT UNC alias",
+			goos:      "windows",
+			root:      `\\server\share\Project`,
+			value:     `inspect //??//UNC//SERVER//SHARE//PROJECT/private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:  "windows NT UNC sibling is not the root",
+			goos:  "windows",
+			root:  `\\server\share\Project`,
+			value: `inspect \??\UNC\server\share\project-old\private.md`,
+		},
+		{
 			name:      "darwin unicode normalization and case",
 			goos:      "darwin",
 			root:      "/Users/Neo/Caf\u00e9",

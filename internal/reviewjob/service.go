@@ -20,7 +20,6 @@ import (
 	"github.com/neomei/SessionReviewer/internal/agent"
 	"github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
-	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -67,17 +66,36 @@ func (failure *payloadCheckpointFailure) Error() string {
 
 func (failure *payloadCheckpointFailure) Unwrap() error { return failure.err }
 
+type prepareCheckpointStage string
+
+const (
+	prepareAfterReturn     prepareCheckpointStage = "after_return"
+	prepareAfterRootCheck  prepareCheckpointStage = "after_root_check"
+	prepareAfterValidation prepareCheckpointStage = "after_validation"
+)
+
+type prepareCheckpointFailure struct {
+	stage prepareCheckpointStage
+	err   error
+}
+
+func (failure *prepareCheckpointFailure) Error() string {
+	return fmt.Sprintf("prepare checkpoint %s: %v", failure.stage, failure.err)
+}
+
+func (failure *prepareCheckpointFailure) Unwrap() error { return failure.err }
+
 // Prepared binds one bounded packet to the exact accepted context against
 // which its proposal must be generated and validated.
 type Prepared struct {
-	Packet   evidence.Packet
-	Accepted reviewv2.Accepted
+	Packet      evidence.Packet
+	PacketBytes []byte
+	Accepted    reviewv2.Accepted
 }
 
-// PrepareRequest exposes only the frozen session boundary and a private output
-// path. Implementations normally wrap prepare.Run and reviewv2.Load. Before
-// any write they must open ProjectRoot/DataDir with pathguard and require the
-// supplied physical identities; path strings alone are not authorization.
+// PrepareRequest exposes only the frozen session boundary and authenticated
+// read roots. Implementations return exact canonical bytes in memory; only the
+// worker may publish them into its private WAL.
 type PrepareRequest struct {
 	JobID           string
 	ProjectID       string
@@ -85,7 +103,6 @@ type PrepareRequest struct {
 	SessionIndex    int
 	AcceptedCursor  evidence.CursorBoundary
 	UpperBoundary   evidence.CursorBoundary
-	EvidencePath    string
 	ProjectRoot     string
 	DataDir         string
 	ProjectIdentity pathguard.IdentityToken
@@ -137,6 +154,7 @@ type RunOptions struct {
 
 	beforeCleanupBoundary func() error
 	afterCleanupBoundary  func() error
+	prepareCheckpoint     func(prepareCheckpointStage) error
 	payloadCheckpoint     func(PayloadKind, payloadCheckpointStage) error
 }
 
@@ -251,12 +269,6 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 
 	if len(runner.job.FrozenSessions) == 0 {
-		if !runner.job.AcceptedSyncPending {
-			if err := ctx.Err(); err != nil {
-				return runner.fail(AgentCancelled, err)
-			}
-			return runner.complete()
-		}
 		if err := runner.runSync(ctx); err != nil {
 			return err
 		}
@@ -350,12 +362,6 @@ func authenticateWorkerRoots(options RunOptions, job Job, leases *LeaseSet) (*wo
 		_ = data.Close()
 		return nil, errors.New("worker Store root and data root differ")
 	}
-	if err := authenticateConfiguredMapping(data, project, vault, job.ProjectID); err != nil {
-		_ = project.Close()
-		_ = vault.Close()
-		_ = data.Close()
-		return nil, err
-	}
 	if rootsOverlap(project, data) || rootsOverlap(vault, data) {
 		_ = project.Close()
 		_ = vault.Close()
@@ -372,6 +378,13 @@ func authenticateWorkerRoots(options RunOptions, job Job, leases *LeaseSet) (*wo
 		_ = data.Close()
 		return nil, fmt.Errorf("pin worker sync mapping: %w", err)
 	}
+	if err := syncPin.AuthenticateBinding(job.ProjectID, project.Info(), vault.Info(), data.Info()); err != nil {
+		_ = syncPin.Close()
+		_ = project.Close()
+		_ = vault.Close()
+		_ = data.Close()
+		return nil, err
+	}
 	vaultIdentity, vaultErr := vault.PhysicalIdentity()
 	dataIdentity, dataErr := data.PhysicalIdentity()
 	if vaultErr != nil || dataErr != nil {
@@ -386,31 +399,6 @@ func authenticateWorkerRoots(options RunOptions, job Job, leases *LeaseSet) (*wo
 		projectIdentity: job.ProjectIdentity, vaultIdentity: vaultIdentity, dataIdentity: dataIdentity,
 		syncPin: syncPin,
 	}, nil
-}
-
-func authenticateConfiguredMapping(data, project, vault *pathguard.Directory, projectID string) error {
-	cfg, err := config.LoadRoot(data.Root, "config.toml")
-	if err != nil {
-		return fmt.Errorf("load worker project mapping: %w", err)
-	}
-	mapping, found := cfg.ProjectByID(projectID)
-	if !found || mapping.VaultRoot == "" || mapping.VaultReviewPath == "" || mapping.VaultCaseMode == "" {
-		return errors.New("worker project has no complete sync mapping")
-	}
-	configuredProject, err := pathguard.Open(mapping.Root)
-	if err != nil {
-		return fmt.Errorf("open configured worker Project root: %w", err)
-	}
-	defer configuredProject.Close()
-	configuredVault, err := pathguard.Open(mapping.VaultRoot)
-	if err != nil {
-		return fmt.Errorf("open configured worker Vault root: %w", err)
-	}
-	defer configuredVault.Close()
-	if !os.SameFile(project.Info(), configuredProject.Info()) || !os.SameFile(vault.Info(), configuredVault.Info()) {
-		return errors.New("worker Project or Vault root does not match its configured mapping")
-	}
-	return nil
 }
 
 func rootsOverlap(first, second *pathguard.Directory) bool {
@@ -470,27 +458,37 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		JobID: runner.job.ID, ProjectID: runner.job.ProjectID,
 		SessionID: frozen.SessionID, SessionIndex: runner.job.SessionIndex,
 		AcceptedCursor: runner.job.CurrentPacket, UpperBoundary: frozen.Upper,
-		EvidencePath: runner.work.packetPath,
-		ProjectRoot:  runner.roots.project.Path, DataDir: runner.roots.data.Path,
+		ProjectRoot: runner.roots.project.Path, DataDir: runner.roots.data.Path,
 		ProjectIdentity: runner.roots.projectIdentity, DataIdentity: runner.roots.dataIdentity,
 	})
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
+	if len(prepared.PacketBytes) == 0 || len(prepared.PacketBytes) > maxPrivatePacketBytes {
+		return runner.fail(ProposalRejected, errors.New("prepared packet bytes are absent or oversized"))
+	}
+	packetBody := append([]byte(nil), prepared.PacketBytes...)
+	packetDigest := digestPrivate(packetBody)
+	if err := runner.runPrepareCheckpoint(prepareAfterReturn); err != nil {
+		return err
+	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
-	packet := prepared.Packet
+	if err := runner.runPrepareCheckpoint(prepareAfterRootCheck); err != nil {
+		return err
+	}
+	var packet evidence.Packet
+	decodeErr := json.Unmarshal(packetBody, &packet)
+	canonicalPacket, encodeErr := json.Marshal(packet)
+	if decodeErr != nil || encodeErr != nil || !bytes.Equal(packetBody, canonicalPacket) || !reflect.DeepEqual(packet, prepared.Packet) {
+		return runner.fail(ProposalRejected, errors.New("prepared packet bytes are absent, noncanonical, oversized, or do not authenticate the packet"))
+	}
 	if err := validatePrepared(packet, prepared.Accepted, runner.job, frozen); err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
-	packetBody, err := json.Marshal(packet)
-	if err != nil || len(packetBody) > maxPrivatePacketBytes {
-		return runner.fail(ProposalRejected, errors.New("prepared packet cannot be encoded within its private bound"))
-	}
-	packetDigest, err := evidence.Digest(packet)
-	if err != nil {
-		return runner.fail(ProposalRejected, err)
+	if err := runner.runPrepareCheckpoint(prepareAfterValidation); err != nil {
+		return err
 	}
 	if err := runner.publishPacketPayload(packetBody, packetDigest); err != nil {
 		if isPayloadCheckpointFailure(err) {
@@ -755,12 +753,23 @@ func validateApplyResult(result apply.Result, packet evidence.Packet) error {
 }
 
 func (runner *worker) runSync(ctx context.Context) error {
+	mandatory := runner.job.AcceptedSyncPending
+	if !mandatory {
+		if err := ctx.Err(); err != nil {
+			return runner.fail(AgentCancelled, err)
+		}
+	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		code := ApplyRecovery
 		if runner.job.AcceptedSyncPending {
 			code = SyncPartial
 		}
 		return runner.fail(code, err)
+	}
+	if !mandatory {
+		if err := ctx.Err(); err != nil {
+			return runner.fail(AgentCancelled, err)
+		}
 	}
 	if err := runner.setPhase(Syncing); err != nil {
 		return runner.fail(SyncPartial, err)
@@ -1072,6 +1081,16 @@ func (runner *worker) runPayloadCheckpoint(kind PayloadKind, stage payloadCheckp
 	}
 	if err := runner.options.payloadCheckpoint(kind, stage); err != nil {
 		return &payloadCheckpointFailure{kind: kind, stage: stage, err: err}
+	}
+	return nil
+}
+
+func (runner *worker) runPrepareCheckpoint(stage prepareCheckpointStage) error {
+	if runner.options.prepareCheckpoint == nil {
+		return nil
+	}
+	if err := runner.options.prepareCheckpoint(stage); err != nil {
+		return &prepareCheckpointFailure{stage: stage, err: err}
 	}
 	return nil
 }

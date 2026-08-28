@@ -28,6 +28,8 @@ type Options struct {
 	Trigger   syncengine.Trigger
 	DryRun    bool
 	Pin       *MappingPin
+
+	pinCheckpoint func(pinCheckpointStage) error
 }
 
 // Run authenticates one configured Project mapping, constructs the existing

@@ -21,6 +21,17 @@ const (
 	maxPinnedConfigBytes   = 64 << 20
 )
 
+type pinCheckpointStage string
+
+const (
+	pinAfterCapture      pinCheckpointStage = "after_capture"
+	pinAfterParse        pinCheckpointStage = "after_parse"
+	pinAfterMapping      pinCheckpointStage = "after_mapping"
+	pinBeforeVaultOpen   pinCheckpointStage = "before_vault_open"
+	pinAfterVaultOpen    pinCheckpointStage = "after_vault_open"
+	pinBeforeFinalVerify pinCheckpointStage = "before_final_verify"
+)
+
 // MappingPin is an opaque, physically authenticated configured mapping. A
 // worker can reuse it across packet syncs; callers cannot construct its
 // identity/config proof structurally.
@@ -41,6 +52,7 @@ type configEntryPin struct {
 	name   string
 	info   os.FileInfo
 	digest [sha256.Size]byte
+	body   []byte
 	dir    bool
 }
 
@@ -75,8 +87,14 @@ func PinMapping(options Options) (_ *MappingPin, retErr error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := config.LoadRoot(data.Root, "config.toml")
+	if err := runPinCheckpoint(options, pinAfterCapture); err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadNamespaceSnapshot(configPin.snapshot())
 	if err != nil {
+		return nil, err
+	}
+	if err := runPinCheckpoint(options, pinAfterParse); err != nil {
 		return nil, err
 	}
 	mapping, project, err := resolveMapping(cfg, options.ProjectID, options.CWD)
@@ -84,23 +102,42 @@ func PinMapping(options Options) (_ *MappingPin, retErr error) {
 		return nil, err
 	}
 	pin.mapping, pin.project, pin.config = mapping, project, configPin
+	if err := runPinCheckpoint(options, pinAfterMapping); err != nil {
+		return nil, err
+	}
 	if mapping.VaultRoot == "" || mapping.VaultReviewPath == "" || mapping.VaultCaseMode == "" {
 		return nil, errors.New("project has no complete Obsidian sync mapping")
+	}
+	if err := runPinCheckpoint(options, pinBeforeVaultOpen); err != nil {
+		return nil, err
 	}
 	vault, err := pathguard.Open(mapping.VaultRoot)
 	if err != nil {
 		return nil, errors.New("configured Vault root is unavailable or unsafe")
 	}
 	pin.vault = vault
+	if err := runPinCheckpoint(options, pinAfterVaultOpen); err != nil {
+		return nil, err
+	}
 	syncData, err := pathguard.Open(filepath.Join(data.Path, "projects", mapping.ID))
 	if err != nil {
 		return nil, errors.New("configured project sync data root is unavailable or unsafe")
 	}
 	pin.syncData = syncData
+	if err := runPinCheckpoint(options, pinBeforeFinalVerify); err != nil {
+		return nil, err
+	}
 	if err := pin.verify(options); err != nil {
 		return nil, err
 	}
 	return pin, nil
+}
+
+func runPinCheckpoint(options Options, stage pinCheckpointStage) error {
+	if options.pinCheckpoint == nil {
+		return nil
+	}
+	return options.pinCheckpoint(stage)
 }
 
 func (pin *MappingPin) Close() error {
@@ -114,6 +151,17 @@ func (pin *MappingPin) Close() error {
 // exposing any of its physical handles or captured configuration bytes.
 func (pin *MappingPin) Recheck(options Options) error {
 	return pin.verify(options)
+}
+
+// AuthenticateBinding proves this one captured mapping resolves to the root
+// handles the worker already authenticated for its lease lifetime.
+func (pin *MappingPin) AuthenticateBinding(projectID string, project, vault, data os.FileInfo) error {
+	if pin == nil || pin.project == nil || pin.vault == nil || pin.data == nil ||
+		projectID == "" || projectID != pin.mapping.ID || project == nil || vault == nil || data == nil ||
+		!os.SameFile(pin.project.Info(), project) || !os.SameFile(pin.vault.Info(), vault) || !os.SameFile(pin.data.Info(), data) {
+		return errors.New("sync mapping pin does not match authenticated worker roots")
+	}
+	return nil
 }
 
 func closeDirectory(directory *pathguard.Directory) error {
@@ -189,7 +237,7 @@ func captureConfigNamespace(data *pathguard.Directory) (configNamespacePin, erro
 	}
 	fragmentsInfo, err := data.Root.Lstat(config.ProjectFragmentsDir)
 	if err == nil {
-		if !fragmentsInfo.IsDir() || fragmentsInfo.Mode()&os.ModeSymlink != 0 {
+		if err := config.ValidateNamespaceSnapshotEntry(data.Path, config.ProjectFragmentsDir, fragmentsInfo); err != nil {
 			return configNamespacePin{}, errors.New("project fragment namespace is unsafe")
 		}
 		entries = append(entries, configEntryPin{name: config.ProjectFragmentsDir, info: fragmentsInfo, dir: true})
@@ -224,6 +272,27 @@ func captureConfigNamespace(data *pathguard.Directory) (configNamespacePin, erro
 	return configNamespacePin{entries: entries}, nil
 }
 
+func (pin configNamespacePin) snapshot() config.NamespaceSnapshot {
+	snapshot := config.NamespaceSnapshot{}
+	for _, entry := range pin.entries {
+		if entry.dir {
+			continue
+		}
+		file := config.FileSnapshot{Name: filepath.Base(entry.name), Body: append([]byte(nil), entry.body...)}
+		switch entry.name {
+		case "config.toml":
+			snapshot.Primary = &file
+		case atomicfile.BackupPath("config.toml"):
+			snapshot.Backup = &file
+		default:
+			if filepath.Dir(entry.name) == config.ProjectFragmentsDir {
+				snapshot.ProjectFragments = append(snapshot.ProjectFragments, file)
+			}
+		}
+	}
+	return snapshot
+}
+
 func captureConfigFile(root *os.Root, name string) (configEntryPin, bool, error) {
 	if filepath.IsAbs(name) || name == "." || strings.HasPrefix(filepath.Clean(name), "..") {
 		return configEntryPin{}, false, errors.New("configuration entry name is invalid")
@@ -232,7 +301,7 @@ func captureConfigFile(root *os.Root, name string) (configEntryPin, bool, error)
 	if errors.Is(err, os.ErrNotExist) {
 		return configEntryPin{}, false, nil
 	}
-	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || before.Size() < 0 || before.Size() > maxPinnedConfigBytes {
+	if err != nil || config.ValidateNamespaceSnapshotEntry(root.Name(), name, before) != nil || before.Size() < 0 || before.Size() > maxPinnedConfigBytes {
 		return configEntryPin{}, false, errors.New("configuration entry is unsafe or oversized")
 	}
 	file, err := root.Open(name)
@@ -247,7 +316,7 @@ func captureConfigFile(root *os.Root, name string) (configEntryPin, bool, error)
 		!os.SameFile(before, opened) || !os.SameFile(opened, after) || opened.Size() != int64(len(body)) {
 		return configEntryPin{}, false, errors.New("configuration entry changed while pinning")
 	}
-	return configEntryPin{name: name, info: opened, digest: sha256.Sum256(body)}, true, nil
+	return configEntryPin{name: name, info: opened, digest: sha256.Sum256(body), body: append([]byte(nil), body...)}, true, nil
 }
 
 func verifyConfigNamespace(data *pathguard.Directory, expected configNamespacePin) error {

@@ -141,7 +141,7 @@ func runPrepare(args []string, stdout, stderr io.Writer) int {
 		}
 		*dataRoot = resolved
 	}
-	_, err = prepare.Run(prepare.Options{
+	_, err = prepare.Write(prepare.Options{
 		Mode: mode, SessionsRoot: *sessionsRoot, SessionID: *sessionID,
 		CWD: *cwd, DataDir: *dataRoot, Output: *output, GOOS: runtime.GOOS,
 		FromStart: *fromStart, Now: time.Now(), AmbiguityWindow: 5 * time.Minute,

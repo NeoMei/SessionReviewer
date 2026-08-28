@@ -219,7 +219,7 @@ func TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB(t *te
 	var memoryBefore, memoryAfter runtime.MemStats
 	runtime.ReadMemStats(&memoryBefore)
 	started := time.Now()
-	packet, err := Run(fixture.options("checkpoint"))
+	packet, err := Write(fixture.options("checkpoint"))
 	duration := time.Since(started)
 	runtime.ReadMemStats(&memoryAfter)
 	if err != nil {
@@ -331,7 +331,7 @@ func TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree(t *testin
 	beforeCursorState := snapshotDirectory(t, cursorDir)
 	opts := fixture.options("review")
 	opts.FromStart = true
-	firstPacket, err := Run(opts)
+	firstPacket, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestFoundationPrepareFromStartIsByteStableAndCursorSideEffectFree(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondPacket, err := Run(opts)
+	secondPacket, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestFoundationPacketFullResumesAtFirstRejectedEvent(t *testing.T) {
 				t.Fatal(readErr)
 			}
 		}
-		packet, err := Run(opts)
+		packet, err := Write(opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -526,7 +526,7 @@ func TestFoundationHardeningSelectedSessionIsIndependentAndIncremental(t *testin
 	}
 
 	opts := fixture.options("review")
-	first, err := Run(opts)
+	first, err := Write(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

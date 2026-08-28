@@ -41,6 +41,14 @@ type Options struct {
 	afterLoadConfig   func() error
 }
 
+// Result is the complete in-memory prepare output. Canonical is the exact
+// bounded JSON byte sequence authenticated by evidence.Digest, without the
+// presentation newline used by the manual CLI file.
+type Result struct {
+	Packet    evidence.Packet
+	Canonical []byte
+}
+
 var (
 	ErrCursorSourceDrift        = errors.New("accepted cursor no longer matches session source")
 	ErrSessionNotFound          = errors.New("selected session was not found")
@@ -52,8 +60,29 @@ var (
 	ErrUnsafeOutput             = errors.New("evidence output path is unsafe")
 )
 
-func Run(opts Options) (evidence.Packet, error) {
-	if err := validateOptions(&opts); err != nil {
+// Run prepares one packet entirely in memory. It never opens or publishes an
+// output path, even if a caller supplied the legacy Output option.
+func Run(opts Options) (Result, error) {
+	opts.Output = ""
+	packet, err := run(opts, false)
+	if err != nil {
+		return Result{}, err
+	}
+	canonical, err := json.Marshal(packet)
+	if err != nil {
+		return Result{}, fmt.Errorf("encode evidence packet: %w", err)
+	}
+	return Result{Packet: packet, Canonical: canonical}, nil
+}
+
+// Write preserves the manual prepare contract: validate the destination
+// before session extraction, then publish the completed packet atomically.
+func Write(opts Options) (evidence.Packet, error) {
+	return run(opts, true)
+}
+
+func run(opts Options, publish bool) (evidence.Packet, error) {
+	if err := validateOptions(&opts, publish); err != nil {
 		return evidence.Packet{}, err
 	}
 	dataDir, err := pathguard.Open(opts.DataDir)
@@ -61,11 +90,14 @@ func Run(opts Options) (evidence.Packet, error) {
 		return evidence.Packet{}, fmt.Errorf("invalid data directory: %w", err)
 	}
 	defer dataDir.Close()
-	output, err := prepareOutputTarget(opts.Output, opts.SessionsRoot, dataDir)
-	if err != nil {
-		return evidence.Packet{}, fmt.Errorf("%w: %w", ErrUnsafeOutput, err)
+	var output *outputTarget
+	if publish {
+		output, err = prepareOutputTarget(opts.Output, opts.SessionsRoot, dataDir)
+		if err != nil {
+			return evidence.Packet{}, fmt.Errorf("%w: %w", ErrUnsafeOutput, err)
+		}
+		defer output.close()
 	}
-	defer output.close()
 	if opts.afterOpenDataDir != nil {
 		if err := opts.afterOpenDataDir(); err != nil {
 			return evidence.Packet{}, fmt.Errorf("prepare data root: %w", err)
@@ -274,8 +306,10 @@ func Run(opts Options) (evidence.Packet, error) {
 	if err != nil {
 		return evidence.Packet{}, fmt.Errorf("encode evidence packet: %w", err)
 	}
-	if err := output.write(append(b, '\n')); err != nil {
-		return evidence.Packet{}, fmt.Errorf("%w: write evidence packet: %w", ErrUnsafeOutput, err)
+	if publish {
+		if err := output.write(append(b, '\n')); err != nil {
+			return evidence.Packet{}, fmt.Errorf("%w: write evidence packet: %w", ErrUnsafeOutput, err)
+		}
 	}
 	return packet, nil
 }
@@ -294,7 +328,7 @@ func discoveryContainsSessionID(discovery session.Discovery, sessionID string) b
 	return false
 }
 
-func validateOptions(opts *Options) error {
+func validateOptions(opts *Options, publish bool) error {
 	if opts.Mode != "review" && opts.Mode != "checkpoint" {
 		return fmt.Errorf("invalid prepare mode %q", opts.Mode)
 	}
@@ -310,7 +344,7 @@ func validateOptions(opts *Options) error {
 	if opts.DataDir == "" {
 		return fmt.Errorf("data directory is required")
 	}
-	if opts.Output == "" {
+	if publish && opts.Output == "" {
 		return fmt.Errorf("output path is required")
 	}
 	if opts.GOOS == "" {
