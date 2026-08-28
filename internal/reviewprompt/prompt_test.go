@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	packetDigest = "sha256:12cfcf65b70016940c3dcf63d34e8ac2142d7709e5b31910096196b614cd5427"
+	packetDigest = "sha256:b776122d0df100d216b0778cc64146c0fd720e895425462e01a827f74f0fa1d0"
 	packetPath   = "/Users/private/project/canary"
 	privatePath  = "/private/session/path/canary"
 	secretCanary = "Bearer sk-secret-canary-1234567890"
@@ -222,7 +222,7 @@ func fixtureInput() reviewprompt.Input {
 			SourceHash: hash5,
 		},
 		Events: []evidence.Item{{
-			ID:         "e1",
+			ID:         "ev-111111111111",
 			Timestamp:  "2026-08-28T10:00:00Z",
 			JSONLLine:  5,
 			SourceHash: hash5,

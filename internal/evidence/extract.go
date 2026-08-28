@@ -432,6 +432,9 @@ func (x *Extractor) AddWarning(warning string) error {
 	if x == nil || warning == "" {
 		return ErrInvalidLimits
 	}
+	if _, err := ParseWarning(warning); err != nil {
+		return fmt.Errorf("invalid evidence warning: %w", err)
+	}
 	candidate := x.Packet()
 	candidate.Warnings = append(candidate.Warnings, warning)
 	if packetTextRunes(candidate) > x.limits.MaxPacketRunes {
@@ -511,7 +514,11 @@ func formatWarnings(counts map[string]int) []string {
 	sort.Strings(rules)
 	warnings := make([]string, 0, len(rules))
 	for _, rule := range rules {
-		warnings = append(warnings, fmt.Sprintf("redacted:%s:%d", rule, counts[rule]))
+		warning, err := FormatWarning(Warning{Kind: WarningKindRedacted, Rule: rule, Count: counts[rule]})
+		if err != nil {
+			panic(fmt.Sprintf("invalid internal redaction warning: %v", err))
+		}
+		warnings = append(warnings, warning)
 	}
 	return warnings
 }

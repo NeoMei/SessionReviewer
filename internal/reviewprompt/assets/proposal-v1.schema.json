@@ -61,6 +61,11 @@
       "items": { "$ref": "#/$defs/stable_id" },
       "uniqueItems": true
     },
+    "evidence_event_id": {
+      "type": "string",
+      "pattern": "^ev-[0-9a-f]{12}$",
+      "maxLength": 15
+    },
     "string_array": {
       "type": "array",
       "items": { "type": "string" },
@@ -86,7 +91,7 @@
       "additionalProperties": false,
       "required": ["evidence_id", "session_id", "jsonl_line", "source_hash", "summary"],
       "properties": {
-        "evidence_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_id": { "$ref": "#/$defs/evidence_event_id" },
         "session_id": { "$ref": "#/$defs/nonempty_string" },
         "jsonl_line": { "$ref": "#/$defs/positive_integer" },
         "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -368,7 +373,7 @@
       "required": ["entity_id", "evidence_id", "relation"],
       "properties": {
         "entity_id": { "$ref": "#/$defs/stable_id" },
-        "evidence_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_id": { "$ref": "#/$defs/evidence_event_id" },
         "relation": { "enum": ["supports", "verifies", "contradicts"] }
       }
     }

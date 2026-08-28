@@ -175,7 +175,7 @@ func TestBuildRejectsMissingDuplicateOrNonmonotonicPacketEventIdentity(t *testin
 	hash6 := strings.Repeat("6", 64)
 	second := func() evidence.Item {
 		item := fixtureInput().Packet.Events[0]
-		item.ID = "e2"
+		item.ID = "ev-222222222222"
 		item.JSONLLine = 6
 		item.SourceHash = hash6
 		item.Timestamp = "2026-08-28T10:00:01Z"

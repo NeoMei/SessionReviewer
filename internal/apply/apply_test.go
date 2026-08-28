@@ -78,8 +78,8 @@ func newApplyTestFixtureVersion(t *testing.T, v2 bool) *applyTestFixture {
 		ExpectedCursor: evidence.CursorBoundary{Line: 0},
 		NextCursor:     evidence.CursorBoundary{Line: 2, SourceHash: testHashB},
 		Events: []evidence.Item{
-			{ID: "ev-message", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: testHashA, Kind: "message", Role: "user", Summary: "Choose durable ledger"},
-			{ID: "ev-verify", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: testHashB, Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
+			{ID: "ev-111111111111", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: testHashA, Kind: "message", Role: "user", Summary: "Choose durable ledger"},
+			{ID: "ev-222222222222", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: testHashB, Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
 		},
 	}
 	packetDigest, err := evidence.Digest(packet)
@@ -87,7 +87,7 @@ func newApplyTestFixtureVersion(t *testing.T, v2 bool) *applyTestFixture {
 		t.Fatal(err)
 	}
 	proposalBody = bytes.Replace(proposalBody,
-		[]byte("sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4"),
+		[]byte("sha256:292b5bd2ffe69043059882e7f8d3f1bd9dc9d126a3ecbed54a2f9c00b111f930"),
 		[]byte(packetDigest), 1)
 	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
 	if err := os.WriteFile(proposalPath, proposalBody, 0o600); err != nil {
@@ -839,7 +839,7 @@ func TestRunRejectsDifferentProposalWhileAnyPreparedReceiptOwnsProject(t *testin
 		f.packet.ToCursor = 3
 		f.packet.NextCursor = evidence.CursorBoundary{Line: 3, SourceHash: testHashA}
 		f.packet.Events = append(f.packet.Events, evidence.Item{
-			ID: "ev-later", Timestamp: "2026-08-23T01:04:03Z", JSONLLine: 3,
+			ID: "ev-444444444444", Timestamp: "2026-08-23T01:04:03Z", JSONLLine: 3,
 			SourceHash: testHashA, Kind: "message", Role: "assistant", Summary: "Later boundary",
 		})
 		rewriteFixtureInputs(t, f)
@@ -2164,8 +2164,8 @@ func (f *multiPacketFixture) applyOptions(t *testing.T, packet evidence.Packet, 
 		t.Fatalf("packet events=%d want=2", len(packet.Events))
 	}
 	events := map[string]evidence.Item{
-		"ev-message": packet.Events[0], "ev-verify": packet.Events[1],
-		"ev-progress": packet.Events[0], "ev-native": packet.Events[1],
+		"ev-111111111111": packet.Events[0], "ev-222222222222": packet.Events[1],
+		"ev-555555555555": packet.Events[0], "ev-333333333333": packet.Events[1],
 	}
 	bindProposalEvidence(t, &p, events)
 	if fixtureName == "valid-first.json" {

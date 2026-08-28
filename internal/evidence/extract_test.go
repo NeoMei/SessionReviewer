@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"regexp"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -326,7 +325,8 @@ func TestExtractorRedactsEveryPersistenceVisibleTextField(t *testing.T) {
 		t.Fatalf("redaction warning missing: %s", b)
 	}
 	for _, warning := range x.Packet().Warnings {
-		if ok, _ := regexp.MatchString(`^redacted:[a-z0-9_]+:[1-9][0-9]*$`, warning); !ok {
+		parsed, err := ParseWarning(warning)
+		if err != nil || parsed.Kind != WarningKindRedacted {
 			t.Fatalf("warning contains more than rule/count: %q", warning)
 		}
 	}

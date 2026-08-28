@@ -27,10 +27,9 @@ const (
 )
 
 var (
-	lowercaseSHA256  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	prefixedSHA256   = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
-	stableID         = regexp.MustCompile(stableIDPattern)
-	redactionWarning = regexp.MustCompile(`^redacted:[a-z0-9_]+:[1-9][0-9]*$`)
+	lowercaseSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	prefixedSHA256  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	stableID        = regexp.MustCompile(stableIDPattern)
 )
 
 // Decode reads one closed proposal JSON value. It rejects oversized input,
@@ -834,8 +833,11 @@ func validateProtocolShape(p Proposal) error {
 		return err
 	}
 	for _, link := range p.EvidenceLinks {
-		if !validStableID(link.EntityID) || !validStableID(link.EvidenceID) {
+		if !validStableID(link.EntityID) {
 			return fmt.Errorf("invalid stable id in evidence link %+v", link)
+		}
+		if !evidence.ValidEventID(link.EvidenceID) {
+			return fmt.Errorf("invalid event id in evidence link %+v", link)
 		}
 		if !validRelation(link.Relation) {
 			return fmt.Errorf("invalid evidence link %+v", link)
@@ -952,8 +954,8 @@ func validateSessionReport(report ledger.SessionReport) error {
 func validateEvidenceRefs(refs []ledger.EvidenceRef) error {
 	seen := make(map[string]struct{}, len(refs))
 	for _, ref := range refs {
-		if !validStableID(ref.EvidenceID) {
-			return fmt.Errorf("invalid stable id for evidence reference %q", ref.EvidenceID)
+		if !evidence.ValidEventID(ref.EvidenceID) {
+			return fmt.Errorf("invalid event id for evidence reference %q", ref.EvidenceID)
 		}
 		if strings.TrimSpace(ref.SessionID) == "" || !positiveSafeInteger(ref.JSONLLine) || !lowercaseSHA256.MatchString(ref.SourceHash) {
 			return fmt.Errorf("invalid evidence reference %q", ref.EvidenceID)
@@ -1131,7 +1133,7 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 	items := make(map[string]evidence.Item, len(packet.Events))
 	lastLine := 0
 	for _, item := range packet.Events {
-		if strings.TrimSpace(item.ID) == "" || !positiveSafeInteger(item.JSONLLine) || item.JSONLLine < packet.FromCursor || item.JSONLLine > packet.ToCursor || item.JSONLLine <= lastLine || !lowercaseSHA256.MatchString(item.SourceHash) || !validTime(item.Timestamp) {
+		if !evidence.ValidEventID(item.ID) || !positiveSafeInteger(item.JSONLLine) || item.JSONLLine < packet.FromCursor || item.JSONLLine > packet.ToCursor || item.JSONLLine <= lastLine || !lowercaseSHA256.MatchString(item.SourceHash) || !validTime(item.Timestamp) {
 			return nil, fmt.Errorf("invalid evidence event %q", item.ID)
 		}
 		lastLine = item.JSONLLine
@@ -1153,8 +1155,8 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 		items[item.ID] = item
 	}
 	for _, warning := range packet.Warnings {
-		if !redactionWarning.MatchString(warning) {
-			return nil, fmt.Errorf("invalid redaction finding %q", warning)
+		if _, err := evidence.ParseWarning(warning); err != nil {
+			return nil, fmt.Errorf("invalid evidence warning %q", warning)
 		}
 	}
 	return items, nil

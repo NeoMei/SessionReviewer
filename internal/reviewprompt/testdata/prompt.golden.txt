@@ -24,15 +24,15 @@ REVIEWED SOURCES
 - Accounting requirements in those final invariants are trusted-host responsibilities, not model-authored output.
 
 PACKET BINDING
-evidence_packet_sha256: sha256:12cfcf65b70016940c3dcf63d34e8ac2142d7709e5b31910096196b614cd5427
-final_proposal_schema_sha256: sha256:95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625
+evidence_packet_sha256: sha256:b776122d0df100d216b0778cc64146c0fd720e895425462e01a827f74f0fa1d0
+final_proposal_schema_sha256: sha256:6f84e74c4c0fdc2d6ad9ffdc9ebf1e45c05200f82387af263d7e63eb31dd33ee
 apply_invariants_sha256: sha256:6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa
 
 BEGIN_UNTRUSTED_EVIDENCE_PACKET_DATA_V1
-byte_length: 577
-content_sha256: sha256:98ad324e58822f5156f61a17ebd07cf178507f36324de1b11936d687dd6779dc
+byte_length: 623
+content_sha256: sha256:ca5bad90f4130c0f7f617d3a55a4c1fb3b388e2fb5b525e711954b4ccb9ecd72
 DATA
-{"schema_version":2,"project_id":"project-1111111111111111","session_id":"s1","from_cursor":5,"to_cursor":5,"expected_cursor":{"line":4,"source_hash":"4444444444444444444444444444444444444444444444444444444444444444"},"next_cursor":{"line":5,"source_hash":"5555555555555555555555555555555555555555555555555555555555555555"},"has_more":false,"events":[{"id":"e1","timestamp":"2026-08-28T10:00:00Z","jsonl_line":5,"source_hash":"5555555555555555555555555555555555555555555555555555555555555555","kind":"message","role":"assistant","summary":"The accepted action was verified."}]}
+{"schema_version":2,"project_id":"project-1111111111111111","session_id":"s1","from_cursor":5,"to_cursor":5,"expected_cursor":{"line":4,"source_hash":"4444444444444444444444444444444444444444444444444444444444444444"},"next_cursor":{"line":5,"source_hash":"5555555555555555555555555555555555555555555555555555555555555555"},"has_more":false,"events":[{"id":"ev-111111111111","timestamp":"2026-08-28T10:00:00Z","jsonl_line":5,"source_hash":"5555555555555555555555555555555555555555555555555555555555555555","kind":"message","role":"assistant","summary":"The accepted action was verified."}],"warnings":["redacted:secret:1"]}
 END_UNTRUSTED_EVIDENCE_PACKET_DATA_V1
 
 BEGIN_UNTRUSTED_ACCEPTED_CONTEXT_DATA_V1
@@ -136,6 +136,11 @@ BEGIN_FINAL_PROPOSAL_JSON_SCHEMA_V1
       "items": { "$ref": "#/$defs/stable_id" },
       "uniqueItems": true
     },
+    "evidence_event_id": {
+      "type": "string",
+      "pattern": "^ev-[0-9a-f]{12}$",
+      "maxLength": 15
+    },
     "string_array": {
       "type": "array",
       "items": { "type": "string" },
@@ -161,7 +166,7 @@ BEGIN_FINAL_PROPOSAL_JSON_SCHEMA_V1
       "additionalProperties": false,
       "required": ["evidence_id", "session_id", "jsonl_line", "source_hash", "summary"],
       "properties": {
-        "evidence_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_id": { "$ref": "#/$defs/evidence_event_id" },
         "session_id": { "$ref": "#/$defs/nonempty_string" },
         "jsonl_line": { "$ref": "#/$defs/positive_integer" },
         "source_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
@@ -443,7 +448,7 @@ BEGIN_FINAL_PROPOSAL_JSON_SCHEMA_V1
       "required": ["entity_id", "evidence_id", "relation"],
       "properties": {
         "entity_id": { "$ref": "#/$defs/stable_id" },
-        "evidence_id": { "$ref": "#/$defs/stable_id" },
+        "evidence_id": { "$ref": "#/$defs/evidence_event_id" },
         "relation": { "enum": ["supports", "verifies", "contradicts"] }
       }
     }
@@ -756,6 +761,11 @@ BEGIN_AGENT_DRAFT_JSON_SCHEMA_V1
       "type": "array",
       "uniqueItems": true
     },
+    "evidence_event_id": {
+      "maxLength": 15,
+      "pattern": "^ev-[0-9a-f]{12}$",
+      "type": "string"
+    },
     "evidence_link": {
       "additionalProperties": false,
       "properties": {
@@ -763,7 +773,7 @@ BEGIN_AGENT_DRAFT_JSON_SCHEMA_V1
           "$ref": "#/$defs/stable_id"
         },
         "evidence_id": {
-          "$ref": "#/$defs/stable_id"
+          "$ref": "#/$defs/evidence_event_id"
         },
         "relation": {
           "enum": [
@@ -784,7 +794,7 @@ BEGIN_AGENT_DRAFT_JSON_SCHEMA_V1
       "additionalProperties": false,
       "properties": {
         "evidence_id": {
-          "$ref": "#/$defs/stable_id"
+          "$ref": "#/$defs/evidence_event_id"
         },
         "jsonl_line": {
           "$ref": "#/$defs/positive_integer"

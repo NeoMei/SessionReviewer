@@ -66,7 +66,7 @@ func TestBuildPinsActualProposalSchemaAndCompleteInvariantSource(t *testing.T) {
 	if !bytes.Equal(reviewprompt.ApplyInvariants(), canonicalInvariants) {
 		t.Fatal("embedded invariant source drifted from checked-in reviewed source")
 	}
-	if got := digestHex(canonicalSchema); got != "95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625" {
+	if got := digestHex(canonicalSchema); got != "6f84e74c4c0fdc2d6ad9ffdc9ebf1e45c05200f82387af263d7e63eb31dd33ee" {
 		t.Fatalf("proposal schema changed without prompt-v1 review/version bump: %s", got)
 	}
 	if got := digestHex(canonicalInvariants); got != "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa" {

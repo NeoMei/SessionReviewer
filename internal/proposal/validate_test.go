@@ -35,8 +35,8 @@ func fixedPacket() evidence.Packet {
 		},
 		NextCursor: evidence.CursorBoundary{Line: 2, SourceHash: hashB},
 		Events: []evidence.Item{
-			{ID: "ev-message", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: hashA, Kind: "message", Role: "user", Summary: "Choose durable ledger"},
-			{ID: "ev-verify", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: hashB, Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
+			{ID: "ev-111111111111", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: hashA, Kind: "message", Role: "user", Summary: "Choose durable ledger"},
+			{ID: "ev-222222222222", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: hashB, Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
 		},
 	}
 }
@@ -142,6 +142,23 @@ func TestValidateExactPacket(t *testing.T) {
 	}
 	if changes.Current == nil || changes.Current.Revision != 1 || len(changes.Timeline) != 1 || len(changes.Sessions) != 1 {
 		t.Fatalf("incomplete changes: %+v", changes)
+	}
+}
+
+func TestValidateRejectsNoncanonicalPacketEventIDEvenWhenProposalMatches(t *testing.T) {
+	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+	packet.Events[0].ID = "ev-notcanonical"
+	p.NewDecisions[0].Evidence[0].EvidenceID = packet.Events[0].ID
+	p.EvidenceLinks[0].EvidenceID = packet.Events[0].ID
+	digest, err := evidence.Digest(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.EvidencePacketSHA256 = digest
+
+	changes, err := Validate(p, packet, state)
+	if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+		t.Fatalf("noncanonical event ID accepted: changes=%+v err=%v", changes, err)
 	}
 }
 
@@ -660,7 +677,7 @@ func TestValidateRejectsUnsafeStableIDsAtomically(t *testing.T) {
 			p := cloneProposal(t, base)
 			p.NewDecisions[0].ID = unsafeID
 			changes, err := Validate(p, packet, state)
-			if err == nil || !strings.Contains(err.Error(), "invalid stable id") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			if err == nil || (!strings.Contains(err.Error(), "invalid stable id") && !strings.Contains(err.Error(), "invalid event id")) || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
 				t.Fatalf("unsafe decision id accepted atomically: changes=%+v err=%v", changes, err)
 			}
 		})
@@ -697,7 +714,7 @@ func TestValidateRejectsUnsafeStableIDsAtomically(t *testing.T) {
 			p := cloneProposal(t, base)
 			mutate(&p)
 			changes, err := Validate(p, packet, state)
-			if err == nil || !strings.Contains(err.Error(), "invalid stable id") || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+			if err == nil || (!strings.Contains(err.Error(), "invalid stable id") && !strings.Contains(err.Error(), "invalid event id")) || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
 				t.Fatalf("unsafe stable id accepted atomically: changes=%+v err=%v", changes, err)
 			}
 		})
@@ -1270,6 +1287,10 @@ func TestSchemaDeclaresClosedProtocolAndRequiredFields(t *testing.T) {
 	if !ok || schemaRef(t, stableIDArray, "items") != "#/$defs/stable_id" {
 		t.Fatalf("schema stable-id array does not share the stable-id grammar: %+v", stableIDArray)
 	}
+	eventID, ok := defs["evidence_event_id"].(map[string]any)
+	if !ok || eventID["pattern"] != evidence.EventIDPattern || eventID["maxLength"] != float64(15) {
+		t.Fatalf("schema evidence-event ID grammar differs from extractor contract: %+v", eventID)
+	}
 	for path, want := range map[string]string{
 		"decision.id":                       "#/$defs/stable_id",
 		"decision.supersedes":               "#/$defs/stable_id_array",
@@ -1285,9 +1306,9 @@ func TestSchemaDeclaresClosedProtocolAndRequiredFields(t *testing.T) {
 		"session_report.decisions_revised":  "#/$defs/stable_id_array",
 		"session_report.open_loops_created": "#/$defs/stable_id_array",
 		"session_report.open_loops_closed":  "#/$defs/stable_id_array",
-		"evidence_ref.evidence_id":          "#/$defs/stable_id",
+		"evidence_ref.evidence_id":          "#/$defs/evidence_event_id",
 		"evidence_link.entity_id":           "#/$defs/stable_id",
-		"evidence_link.evidence_id":         "#/$defs/stable_id",
+		"evidence_link.evidence_id":         "#/$defs/evidence_event_id",
 	} {
 		parts := strings.Split(path, ".")
 		definition, ok := defs[parts[0]].(map[string]any)

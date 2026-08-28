@@ -258,7 +258,11 @@ func Run(opts Options) (evidence.Packet, error) {
 	}
 	packet := x.Packet()
 	if summary.MalformedLines > 0 {
-		if err := x.AddWarning(fmt.Sprintf("malformed_jsonl_lines:%d", summary.MalformedLines)); err != nil {
+		warning, err := evidence.FormatWarning(evidence.Warning{Kind: evidence.WarningKindMalformedJSONLLines, Count: summary.MalformedLines})
+		if err != nil {
+			return evidence.Packet{}, fmt.Errorf("format evidence warning: %w", err)
+		}
+		if err := x.AddWarning(warning); err != nil {
 			return evidence.Packet{}, fmt.Errorf("bound evidence warnings: %w", err)
 		}
 		packet = x.Packet()

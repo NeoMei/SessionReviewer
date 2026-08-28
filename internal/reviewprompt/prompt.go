@@ -29,7 +29,7 @@ const (
 	MaxAcceptedContextBytes = 2 << 20
 	MaxOutputSchemaBytes    = 1 << 20
 
-	proposalSchemaDigest = "95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625"
+	proposalSchemaDigest = "6f84e74c4c0fdc2d6ad9ffdc9ebf1e45c05200f82387af263d7e63eb31dd33ee"
 	applyInvariantDigest = "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa"
 	agentDraftSchemaID   = "https://github.com/neomei/SessionReviewer/schemas/proposal-agent-draft-v1.schema.json"
 	maxSafeInteger       = 1<<53 - 1
@@ -37,8 +37,7 @@ const (
 )
 
 var (
-	packetSHA256  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	packetWarning = regexp.MustCompile(`^redacted:[a-z0-9_]+:[1-9][0-9]*$`)
+	packetSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 var (
@@ -97,6 +96,7 @@ type packetData struct {
 	NextCursor     evidence.CursorBoundary `json:"next_cursor"`
 	HasMore        bool                    `json:"has_more"`
 	Events         []evidence.Item         `json:"events"`
+	Warnings       []string                `json:"warnings,omitempty"`
 }
 
 type acceptedContext struct {
@@ -347,7 +347,7 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 		!validCanonicalEnvelopeText(packet.SessionID, 1024) || !validCanonicalEnvelopeText(packet.CWD, 16<<10) {
 		return false
 	}
-	for _, value := range []string{packet.ProjectID, packet.SessionID, packet.CWD, packet.ExpectedCursor.SourceHash, packet.NextCursor.SourceHash} {
+	for _, value := range []string{packet.ProjectID, packet.SessionID, packet.CWD} {
 		if hasRedactionFinding(value) {
 			return false
 		}
@@ -363,7 +363,7 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 		return false
 	}
 	for _, warning := range packet.Warnings {
-		if !packetWarning.MatchString(warning) {
+		if _, err := evidence.ParseWarning(warning); err != nil {
 			return false
 		}
 	}
@@ -415,7 +415,7 @@ func validatePacketItems(packet evidence.Packet) error {
 			len(item.ItemID) > maxExternalTextBytes || len(item.ToolName) > maxExternalTextBytes {
 			return ErrInvalidInput
 		}
-		if strings.TrimSpace(item.ID) == "" {
+		if !evidence.ValidEventID(item.ID) {
 			return ErrInvalidInput
 		}
 		if _, exists := seenIDs[item.ID]; exists {
@@ -488,6 +488,7 @@ func projectPacket(packet evidence.Packet) packetData {
 		SchemaVersion: packet.SchemaVersion, ProjectID: packet.ProjectID, SessionID: packet.SessionID,
 		FromCursor: packet.FromCursor, ToCursor: packet.ToCursor, ExpectedCursor: packet.ExpectedCursor,
 		NextCursor: packet.NextCursor, HasMore: packet.HasMore, Events: append([]evidence.Item{}, packet.Events...),
+		Warnings: append([]string{}, packet.Warnings...),
 	}
 }
 

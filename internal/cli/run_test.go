@@ -1258,8 +1258,8 @@ func newCLIApplyFixtureVersion(t *testing.T, dataDir string, v2 bool) cliApplyFi
 			SourceHash: strings.Repeat("b", 64),
 		},
 		Events: []evidence.Item{
-			{ID: "ev-message", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: strings.Repeat("a", 64), Kind: "message", Role: "user", Summary: "Choose durable ledger"},
-			{ID: "ev-verify", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: strings.Repeat("b", 64), Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
+			{ID: "ev-111111111111", Timestamp: "2026-08-23T01:02:03Z", JSONLLine: 1, SourceHash: strings.Repeat("a", 64), Kind: "message", Role: "user", Summary: "Choose durable ledger"},
+			{ID: "ev-222222222222", Timestamp: "2026-08-23T01:03:03Z", JSONLLine: 2, SourceHash: strings.Repeat("b", 64), Kind: "tool_result", ToolName: "exec_command", Summary: "go test passed"},
 		},
 	}
 	packetDigest, err := evidence.Digest(packet)
@@ -1268,7 +1268,7 @@ func newCLIApplyFixtureVersion(t *testing.T, dataDir string, v2 bool) cliApplyFi
 	}
 	proposalBody = bytes.Replace(
 		proposalBody,
-		[]byte("sha256:8bdbc9254ac37b3ea000f15910bd142068a0e991cd6ecafee482cbfd9ba9a4a4"),
+		[]byte("sha256:292b5bd2ffe69043059882e7f8d3f1bd9dc9d126a3ecbed54a2f9c00b111f930"),
 		[]byte(packetDigest),
 		1,
 	)
