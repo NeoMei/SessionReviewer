@@ -47,6 +47,11 @@ func TestAdapterContractCarriesProposalOnlyRequestAndResult(t *testing.T) {
 		result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 7 || result.Usage.TotalTokens != 18 {
 		t.Fatalf("result lost contract fields: %+v", result)
 	}
+
+	capability := agent.Capability{ModelProvenance: agent.ModelProvenanceUnavailable}
+	if capability.ModelProvenance != agent.ModelProvenanceUnavailable {
+		t.Fatalf("capability lost model provenance contract: %+v", capability)
+	}
 }
 
 func TestAgentErrorsExposeOnlyAllowedCodesAndRetainCause(t *testing.T) {

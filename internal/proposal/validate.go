@@ -1154,10 +1154,8 @@ func validatePacket(p Proposal, packet evidence.Packet) (map[string]evidence.Ite
 		}
 		items[item.ID] = item
 	}
-	for _, warning := range packet.Warnings {
-		if _, err := evidence.ParseWarning(warning); err != nil {
-			return nil, fmt.Errorf("invalid evidence warning %q", warning)
-		}
+	if err := evidence.ValidateWarnings(packet.Warnings); err != nil {
+		return nil, fmt.Errorf("invalid evidence warnings: %w", err)
 	}
 	return items, nil
 }

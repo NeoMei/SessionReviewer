@@ -74,6 +74,24 @@ func FormatWarning(warning Warning) (string, error) {
 	return value, nil
 }
 
+// ValidateWarnings validates the complete packet warning collection, including
+// the evidence-v2 uniqueItems invariant. Consumers must call this collection
+// validator instead of independently looping over ParseWarning, because a
+// duplicate canonical warning is invalid even though each element parses.
+func ValidateWarnings(values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, err := ParseWarning(value); err != nil {
+			return err
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return errors.New("duplicate evidence warning")
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
 func canonicalPositiveDecimal(value string) bool {
 	if value == "" || value[0] < '1' || value[0] > '9' {
 		return false

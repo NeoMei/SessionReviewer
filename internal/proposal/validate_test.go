@@ -162,6 +162,29 @@ func TestValidateRejectsNoncanonicalPacketEventIDEvenWhenProposalMatches(t *test
 	}
 }
 
+func TestValidateRejectsDuplicateCanonicalWarningsWithZeroChangeSet(t *testing.T) {
+	tests := map[string]string{
+		"redaction":  "redacted:openai_key:1",
+		"structural": "malformed_jsonl_lines:2",
+	}
+	for name, warning := range tests {
+		t.Run(name, func(t *testing.T) {
+			p, packet, state := fixedProposalPacketState(t, "valid-first.json")
+			packet.Warnings = []string{warning, warning}
+			digest, err := evidence.Digest(packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.EvidencePacketSHA256 = digest
+
+			changes, err := Validate(p, packet, state)
+			if err == nil || !reflect.DeepEqual(changes, ledger.ChangeSet{}) {
+				t.Fatalf("duplicate warnings accepted: changes=%+v err=%v", changes, err)
+			}
+		})
+	}
+}
+
 func TestValidateAcceptsRFC3339FractionWithTrailingZero(t *testing.T) {
 	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	packet.Events[0].Timestamp = "2026-08-23T01:02:03.310Z"

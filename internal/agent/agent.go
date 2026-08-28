@@ -26,7 +26,17 @@ type Capability struct {
 	ReadOnly           bool
 	StructuredOutput   bool
 	NativeCancellation bool
+	ModelProvenance    ModelProvenance
 }
+
+// ModelProvenance records whether the Adapter can attribute actual usage to a
+// provider-reported model. An unavailable value must never be replaced with a
+// configured alias, default, stderr string, or installation guess.
+type ModelProvenance string
+
+const (
+	ModelProvenanceUnavailable ModelProvenance = "unavailable"
+)
 
 // Request contains the complete private input for one ephemeral Agent run.
 // WorkingDirectory is process configuration and must not be embedded in Prompt.

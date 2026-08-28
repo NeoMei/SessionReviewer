@@ -93,3 +93,30 @@ func TestWarningContractRejectsInvalidTypedValues(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateWarningsRejectsDuplicateCanonicalWarnings(t *testing.T) {
+	tests := map[string][]string{
+		"duplicate redaction warning": {
+			"redacted:openai_key:1",
+			"redacted:openai_key:1",
+		},
+		"duplicate structural warning": {
+			"malformed_jsonl_lines:2",
+			"malformed_jsonl_lines:2",
+		},
+	}
+	for name, warnings := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := evidence.ValidateWarnings(warnings); err == nil {
+				t.Fatalf("accepted duplicate warnings %v", warnings)
+			}
+		})
+	}
+
+	if err := evidence.ValidateWarnings([]string{
+		"malformed_jsonl_lines:2",
+		"redacted:openai_key:1",
+	}); err != nil {
+		t.Fatalf("distinct canonical warnings rejected: %v", err)
+	}
+}

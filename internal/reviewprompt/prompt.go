@@ -250,7 +250,8 @@ func ApplyInvariants() []byte {
 // Prompt cannot accidentally be paired with the accounting-capable final
 // schema. The returned OutputSchema is always the accounting-free draft schema.
 func Build(input Input) (Bundle, error) {
-	if err := validateInput(input); err != nil {
+	accepted := projectAccepted(input.Accepted)
+	if err := validateInput(input, accepted); err != nil {
 		return Bundle{}, err
 	}
 	finalSchema := FinalProposalSchema()
@@ -270,7 +271,7 @@ func Build(input Input) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: encode packet data", ErrInvalidInput)
 	}
-	contextJSON, err := json.Marshal(projectAccepted(input.Accepted))
+	contextJSON, err := json.Marshal(accepted)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: encode accepted context", ErrInvalidInput)
 	}
@@ -318,8 +319,11 @@ func Build(input Input) (Bundle, error) {
 // BuildRequest is a descriptive alias for Build.
 func BuildRequest(input Input) (Bundle, error) { return Build(input) }
 
-func validateInput(input Input) error {
+func validateInput(input Input, accepted acceptedContext) error {
 	packet := input.Packet
+	if err := validateAcceptedContextStrings(accepted); err != nil {
+		return err
+	}
 	if !validPacketEnvelope(packet) {
 		return ErrInvalidInput
 	}
@@ -362,15 +366,93 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 	if packet.ToCursor == packet.FromCursor-1 && packet.ExpectedCursor != packet.NextCursor {
 		return false
 	}
-	for _, warning := range packet.Warnings {
-		if _, err := evidence.ParseWarning(warning); err != nil {
-			return false
-		}
+	if err := evidence.ValidateWarnings(packet.Warnings); err != nil {
+		return false
 	}
 	if packet.SessionUsage != nil && accounting.ValidateSessionUsage(packet.SessionUsage) != nil {
 		return false
 	}
 	return true
+}
+
+// validateAcceptedContextStrings scans the exact allowlisted projection before
+// JSON encoding. Scanning only the encoded JSON is insufficient: quotes in a
+// short named secret become backslash-escaped and can evade assignment-value
+// recognition. Keep this explicit traversal aligned with acceptedContext so a
+// newly allowlisted string cannot silently skip the raw boundary.
+func validateAcceptedContextStrings(context acceptedContext) error {
+	values := []string{
+		context.ProjectID,
+		context.CurrentState.ProjectID,
+		context.CurrentState.Goal,
+		context.CurrentState.LastVerified,
+		context.CurrentState.Branch,
+		context.CurrentState.ProjectStatus,
+		context.CurrentState.NextAction,
+		context.CurrentState.FirstInspection,
+		context.CurrentState.LastUpdated,
+	}
+	values = append(values, context.CurrentState.Blockers...)
+	values = append(values, context.CurrentState.OpenRisks...)
+	values = append(values, context.CurrentState.SourceSessions...)
+	for _, risk := range context.Risks {
+		values = append(values, risk.ID, risk.Title, risk.Status, risk.Detail)
+	}
+	for _, decision := range context.Decisions {
+		values = append(values,
+			decision.ID, decision.ProjectID, decision.OccurredAt, decision.Title, decision.Status,
+			decision.Context, decision.Rationale, decision.Consequences, decision.ReevaluateWhen,
+		)
+		values = append(values, decision.Tags...)
+		values = append(values, decision.Supersedes...)
+		values = append(values, decision.SourceSessions...)
+		values = append(values, decision.Alternatives...)
+		values = append(values, decision.RejectedPaths...)
+	}
+	for _, loop := range context.OpenLoops {
+		values = append(values,
+			loop.ID, loop.ProjectID, loop.Title, loop.Status, loop.AcceptedDetail,
+			loop.Question, loop.Blocker, loop.NextExperiment, loop.CompletionCriterion,
+		)
+		values = append(values, loop.Tags...)
+		values = append(values, loop.SourceSessions...)
+		values = append(values, loop.Attempts...)
+	}
+	for _, event := range context.Timeline {
+		values = append(values,
+			event.ID, event.OccurredAt, string(event.Class), event.Title, event.Meaning,
+			event.Summary, event.Why, event.Next,
+		)
+		values = append(values, event.Changes...)
+		values = append(values, event.Results...)
+		values = append(values, event.DecisionIDs...)
+		values = append(values, event.OpenLoopIDs...)
+	}
+	for _, report := range context.Sessions {
+		values = append(values,
+			report.ID, report.ProjectID, report.SessionID, report.InitialGoal,
+			report.PreviousSessionID, report.NextSessionID,
+		)
+		values = append(values, report.GoalChanges...)
+		for _, phase := range report.Phases {
+			values = append(values, phase.Title, phase.Summary)
+		}
+		values = append(values, report.Commits...)
+		values = append(values, report.Verification...)
+		values = append(values, report.DecisionsAdded...)
+		values = append(values, report.DecisionsRevised...)
+		values = append(values, report.OpenLoopsCreated...)
+		values = append(values, report.OpenLoopsClosed...)
+	}
+	for _, value := range values {
+		if !utf8.ValidString(value) {
+			return ErrInvalidInput
+		}
+		if hasRedactionFinding(value) {
+			return ErrUnsafeInput
+		}
+	}
+	return nil
 }
 
 func validCursorBoundary(boundary evidence.CursorBoundary) bool {
