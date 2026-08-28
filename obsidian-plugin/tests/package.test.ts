@@ -20,7 +20,9 @@ describe("Obsidian plugin package", () => {
     expect(existsSync(rootManifest)).toBe(true);
     expect(existsSync(rootVersions)).toBe(true);
     if (!existsSync(rootManifest) || !existsSync(rootVersions)) return;
-    expect(JSON.parse(await readFile(rootManifest, "utf8"))).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/manifest.json"), "utf8")));
+    const manifest = JSON.parse(await readFile(rootManifest, "utf8")) as { description: string };
+    expect(manifest).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/manifest.json"), "utf8")));
+    expect(manifest.description).not.toMatch(/\bObsidian\b/i);
     expect(JSON.parse(await readFile(rootVersions, "utf8"))).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/versions.json"), "utf8")));
   });
 
@@ -29,7 +31,7 @@ describe("Obsidian plugin package", () => {
     const second = await mkdtemp(join(tmpdir(), "sr-plugin-two-"));
     roots.push(first, second);
     const build = (dist: string): void => {
-      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", "0.2.2", dist], {
+      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", "0.2.3", dist], {
         cwd: repository,
         env: { ...process.env, SESSION_REVIEWER_PACKAGE_SKIP_CHECK: "1", SOURCE_DATE_EPOCH: "315532800" },
         stdio: "pipe"
@@ -37,13 +39,13 @@ describe("Obsidian plugin package", () => {
     };
     build(first);
     build(second);
-    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", "session-reviewer-obsidian-0.2.2.zip", "styles.css"]);
-    const archiveName = "session-reviewer-obsidian-0.2.2.zip";
+    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", "session-reviewer-obsidian-0.2.3.zip", "styles.css"]);
+    const archiveName = "session-reviewer-obsidian-0.2.3.zip";
     const firstArchive = join(first, archiveName);
     const entries = execFileSync("unzip", ["-Z1", firstArchive], { encoding: "utf8" }).trim().split("\n").sort();
     expect(entries).toEqual(["session-reviewer/main.js", "session-reviewer/manifest.json", "session-reviewer/styles.css"]);
     const manifest = JSON.parse(execFileSync("unzip", ["-p", firstArchive, "session-reviewer/manifest.json"], { encoding: "utf8" })) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.2.2" });
+    expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.2.3" });
     const mainJs = execFileSync("unzip", ["-p", firstArchive, "session-reviewer/main.js"], { encoding: "utf8" });
     expect(mainJs).not.toContain("sourceMappingURL=data:");
     expect(await readFile(firstArchive)).toEqual(await readFile(join(second, archiveName)));

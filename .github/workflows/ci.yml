@@ -49,38 +49,38 @@ jobs:
       - name: Reproducible shell release wrappers and schema
         if: runner.os == 'macOS'
         run: |
-          ./scripts/build-release.sh 0.2.2 "$RUNNER_TEMP/release-one"
-          ./scripts/build-release.sh 0.2.2 "$RUNNER_TEMP/release-two"
-          for artifact in SHA256SUMS session-reviewer_0.2.2_darwin_amd64.tar.gz session-reviewer_0.2.2_darwin_arm64.tar.gz session-reviewer_0.2.2_windows_amd64.zip; do
+          ./scripts/build-release.sh 0.2.3 "$RUNNER_TEMP/release-one"
+          ./scripts/build-release.sh 0.2.3 "$RUNNER_TEMP/release-two"
+          for artifact in SHA256SUMS session-reviewer_0.2.3_darwin_amd64.tar.gz session-reviewer_0.2.3_darwin_arm64.tar.gz session-reviewer_0.2.3_windows_amd64.zip; do
             cmp "$RUNNER_TEMP/release-one/$artifact" "$RUNNER_TEMP/release-two/$artifact"
           done
           (cd "$RUNNER_TEMP/release-one" && shasum -a 256 -c SHA256SUMS)
           mkdir "$RUNNER_TEMP/release-unpack"
-          tar -xzf "$RUNNER_TEMP/release-one/session-reviewer_0.2.2_darwin_arm64.tar.gz" -C "$RUNNER_TEMP/release-unpack"
+          tar -xzf "$RUNNER_TEMP/release-one/session-reviewer_0.2.3_darwin_arm64.tar.gz" -C "$RUNNER_TEMP/release-unpack"
           cmp schemas/review-ledger-v2.schema.json "$RUNNER_TEMP/release-unpack/session-reviewer/schemas/review-ledger-v2.schema.json"
       - name: Reproducible Obsidian plugin package
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          ./scripts/build-obsidian-plugin.sh 0.2.2 "$RUNNER_TEMP/plugin-one"
-          ./scripts/build-obsidian-plugin.sh 0.2.2 "$RUNNER_TEMP/plugin-two"
-          cmp "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.2.zip" "$RUNNER_TEMP/plugin-two/session-reviewer-obsidian-0.2.2.zip"
+          ./scripts/build-obsidian-plugin.sh 0.2.3 "$RUNNER_TEMP/plugin-one"
+          ./scripts/build-obsidian-plugin.sh 0.2.3 "$RUNNER_TEMP/plugin-two"
+          cmp "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.3.zip" "$RUNNER_TEMP/plugin-two/session-reviewer-obsidian-0.2.3.zip"
           cmp "$RUNNER_TEMP/plugin-one/SHA256SUMS" "$RUNNER_TEMP/plugin-two/SHA256SUMS"
           (cd "$RUNNER_TEMP/plugin-one" && shasum -a 256 -c SHA256SUMS)
           for artifact in main.js manifest.json styles.css; do
             test -f "$RUNNER_TEMP/plugin-one/$artifact"
             cmp "$RUNNER_TEMP/plugin-one/$artifact" "$RUNNER_TEMP/plugin-two/$artifact"
           done
-          test "$(unzip -Z1 "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.2.zip" | sort | tr '\n' ' ')" = "session-reviewer/main.js session-reviewer/manifest.json session-reviewer/styles.css "
+          test "$(unzip -Z1 "$RUNNER_TEMP/plugin-one/session-reviewer-obsidian-0.2.3.zip" | sort | tr '\n' ' ')" = "session-reviewer/main.js session-reviewer/manifest.json session-reviewer/styles.css "
       - name: Reproducible PowerShell release wrappers and schema
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $one = Join-Path $env:RUNNER_TEMP "release-one"
           $two = Join-Path $env:RUNNER_TEMP "release-two"
-          .\scripts\build-release.ps1 -Version 0.2.2 -Dist $one
-          .\scripts\build-release.ps1 -Version 0.2.2 -Dist $two
-          $artifacts = @("SHA256SUMS", "session-reviewer_0.2.2_darwin_amd64.tar.gz", "session-reviewer_0.2.2_darwin_arm64.tar.gz", "session-reviewer_0.2.2_windows_amd64.zip")
+          .\scripts\build-release.ps1 -Version 0.2.3 -Dist $one
+          .\scripts\build-release.ps1 -Version 0.2.3 -Dist $two
+          $artifacts = @("SHA256SUMS", "session-reviewer_0.2.3_darwin_amd64.tar.gz", "session-reviewer_0.2.3_darwin_arm64.tar.gz", "session-reviewer_0.2.3_windows_amd64.zip")
           foreach ($artifact in $artifacts) {
             $first = (Get-FileHash -Algorithm SHA256 (Join-Path $one $artifact)).Hash
             $second = (Get-FileHash -Algorithm SHA256 (Join-Path $two $artifact)).Hash
@@ -92,7 +92,7 @@ jobs:
             if ($actual -ne $Matches[1]) { throw "checksum mismatch: $($Matches[2])" }
           }
           $unpack = Join-Path $env:RUNNER_TEMP "release-unpack"
-          Expand-Archive -LiteralPath (Join-Path $one "session-reviewer_0.2.2_windows_amd64.zip") -DestinationPath $unpack
+          Expand-Archive -LiteralPath (Join-Path $one "session-reviewer_0.2.3_windows_amd64.zip") -DestinationPath $unpack
           $sourceSchema = (Get-FileHash -Algorithm SHA256 "schemas/review-ledger-v2.schema.json").Hash
           $packedSchema = (Get-FileHash -Algorithm SHA256 (Join-Path $unpack "session-reviewer\schemas\review-ledger-v2.schema.json")).Hash
           if ($sourceSchema -ne $packedSchema) { throw "packaged review v2 schema differs from source" }
@@ -102,9 +102,9 @@ jobs:
         run: |
           $one = Join-Path $env:RUNNER_TEMP "plugin-one"
           $two = Join-Path $env:RUNNER_TEMP "plugin-two"
-          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.2 -Dist $one
-          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.2 -Dist $two
-          $archive = "session-reviewer-obsidian-0.2.2.zip"
+          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.3 -Dist $one
+          .\scripts\build-obsidian-plugin.ps1 -Version 0.2.3 -Dist $two
+          $archive = "session-reviewer-obsidian-0.2.3.zip"
           if ((Get-FileHash (Join-Path $one $archive)).Hash -ne (Get-FileHash (Join-Path $two $archive)).Hash) { throw "plugin archive is not reproducible" }
           foreach ($asset in @("main.js", "manifest.json", "styles.css")) {
             if (-not (Test-Path (Join-Path $one $asset))) { throw "missing marketplace asset: $asset" }
