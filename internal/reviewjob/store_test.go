@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/agent"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
 
@@ -164,6 +167,54 @@ func TestStoreConcurrentUpdateHasExactlyOneCASWinner(t *testing.T) {
 	}
 	if wins != 1 || stale != 1 {
 		t.Fatalf("wins=%d stale=%d", wins, stale)
+	}
+}
+
+func TestStoreUpdateCannotChangePinnedReviewPricingSnapshot(t *testing.T) {
+	root := newStoreRoot(t)
+	store := Store{Root: root}
+	job := validJobFixture()
+	job.ReviewAccounting = validReviewAccountingFixture()
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := store.Update(job.ID, 1, func(next *Job) error {
+		next.ReviewAccounting.SnapshotAt = next.ReviewAccounting.SnapshotAt.Add(time.Nanosecond)
+		return nil
+	}); err == nil {
+		t.Fatal("Store.Update accepted a changed review pricing snapshot")
+	}
+	loaded, revision, found, err := store.Load(job.ID)
+	if err != nil || !found || revision != 1 || !reflect.DeepEqual(loaded.ReviewAccounting, job.ReviewAccounting) {
+		t.Fatalf("rejected snapshot update changed durable state: revision=%d found=%v err=%v accounting=%+v", revision, found, err, loaded.ReviewAccounting)
+	}
+
+	updated, revision, err := store.Update(job.ID, 1, func(next *Job) error {
+		value, addErr := AddReviewResult(next.ReviewAccounting, agent.Result{Model: "fixture-model", Usage: accounting.TokenUsage{InputTokens: 1, TotalTokens: 1}}, next.ReviewAccounting.SnapshotAt, fixturePricingResolver{"fixture-model": fixturePricing(1, 0, 0, 1)})
+		if addErr != nil {
+			return addErr
+		}
+		next.ReviewAccounting = value
+		return nil
+	})
+	if err != nil || revision != 2 || updated.ReviewAccounting.TotalTokens != 3 {
+		t.Fatalf("append at pinned snapshot = revision %d accounting=%+v err=%v", revision, updated.ReviewAccounting, err)
+	}
+
+	if _, _, err := store.Update(job.ID, 2, func(next *Job) error {
+		pricing := next.ReviewAccounting.Models[0].Pricing
+		pricing.InputPerMillion = 2
+		next.ReviewAccounting.Models[0].Pricing = pricing
+		cost, priceErr := accounting.PriceUsage(next.ReviewAccounting.Models[0].TokenUsage, pricing)
+		if priceErr != nil {
+			return priceErr
+		}
+		next.ReviewAccounting.Models[0].CostUSD = cost
+		next.ReviewAccounting.TotalCostUSD = &cost
+		return nil
+	}); err == nil {
+		t.Fatal("Store.Update accepted repricing an existing model at the pinned snapshot")
 	}
 }
 

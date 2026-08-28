@@ -20,6 +20,75 @@ func (resolver fixturePricingResolver) Resolve(model string, _ time.Time) (accou
 	return pricing, ok
 }
 
+type recordingPricingResolver struct {
+	prices map[string]accounting.Pricing
+	calls  []time.Time
+}
+
+func (resolver *recordingPricingResolver) Resolve(model string, at time.Time) (accounting.Pricing, bool) {
+	resolver.calls = append(resolver.calls, at)
+	pricing, ok := resolver.prices[model]
+	return pricing, ok
+}
+
+func TestReviewAccountingPinsOneCanonicalSnapshotAcrossRetry(t *testing.T) {
+	snapshot := time.Date(2026, 8, 29, 12, 0, 0, 123, time.UTC)
+	resolver := &recordingPricingResolver{prices: map[string]accounting.Pricing{"model": fixturePricing(1, 0, 0, 1)}}
+	first, err := AddReviewResult(ReviewAccounting{}, agent.Result{Model: "model", Usage: accounting.TokenUsage{InputTokens: 10, TotalTokens: 10}}, snapshot, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !first.SnapshotAt.Equal(snapshot) || first.SnapshotAt.Location() != time.UTC {
+		t.Fatalf("snapshot=%v want canonical %v", first.SnapshotAt, snapshot)
+	}
+	body, err := json.Marshal(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var retried ReviewAccounting
+	if err := json.Unmarshal(body, &retried); err != nil {
+		t.Fatal(err)
+	}
+	second, err := AddReviewResult(retried, agent.Result{Model: "model", Usage: accounting.TokenUsage{OutputTokens: 5, TotalTokens: 5}}, snapshot, resolver)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Models[0].TokenUsage != (accounting.TokenUsage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}) {
+		t.Fatalf("retry usage=%+v", second.Models[0].TokenUsage)
+	}
+	if len(resolver.calls) != 2 || !resolver.calls[0].Equal(snapshot) || !resolver.calls[1].Equal(snapshot) {
+		t.Fatalf("resolver calls=%v want pinned snapshot twice", resolver.calls)
+	}
+
+	before, _ := json.Marshal(second)
+	if _, err := AddReviewResult(second, agent.Result{Model: "model", Usage: accounting.TokenUsage{InputTokens: 1, TotalTokens: 1}}, snapshot.Add(time.Nanosecond), resolver); err == nil {
+		t.Fatal("accepted a different pricing snapshot inside one review job")
+	}
+	after, _ := json.Marshal(second)
+	if !bytes.Equal(before, after) || len(resolver.calls) != 2 {
+		t.Fatalf("snapshot mismatch mutated state or called resolver\nbefore=%s\nafter=%s calls=%v", before, after, resolver.calls)
+	}
+	if _, err := AddReviewResult(ReviewAccounting{}, agent.Result{Model: "model", Usage: accounting.TokenUsage{InputTokens: 1, TotalTokens: 1}}, snapshot.In(time.FixedZone("UTC-alias", 0)), resolver); err == nil {
+		t.Fatal("accepted a non-canonical UTC snapshot")
+	}
+}
+
+func TestReviewAccountingRejectsNondeterministicResolverAtPinnedSnapshot(t *testing.T) {
+	snapshot := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
+	first, err := AddReviewResult(ReviewAccounting{}, agent.Result{Model: "model", Usage: accounting.TokenUsage{InputTokens: 10, TotalTokens: 10}}, snapshot, fixturePricingResolver{"model": fixturePricing(1, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := json.Marshal(first)
+	if _, err := AddReviewResult(first, agent.Result{Model: "model", Usage: accounting.TokenUsage{InputTokens: 1, TotalTokens: 1}}, snapshot, fixturePricingResolver{}); err == nil {
+		t.Fatal("accepted priced-to-unknown resolver drift at one snapshot")
+	}
+	after, _ := json.Marshal(first)
+	if !bytes.Equal(before, after) {
+		t.Fatal("resolver drift mutated input accounting")
+	}
+}
+
 func TestReviewAccountingAggregatesPacketsByModelInStableOrder(t *testing.T) {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	resolver := fixturePricingResolver{
@@ -91,6 +160,7 @@ func TestReviewAccountingUnknownAndEmptyModelsRetainExactTokensWithoutCost(t *te
 	emptyPrice := fixturePricing(1, 0, 0, 1)
 	emptyCost := .00001
 	if err := ValidateReviewAccounting(ReviewAccounting{
+		SnapshotAt: snapshotAt(t),
 		Models: []accounting.ModelAccounting{{
 			ModelUsage: accounting.ModelUsage{TokenUsage: accounting.TokenUsage{InputTokens: 10, TotalTokens: 10}},
 			Pricing:    emptyPrice,
@@ -107,6 +177,7 @@ func TestReviewAccountingUnknownAndEmptyModelsRetainExactTokensWithoutCost(t *te
 func TestReviewAccountingRejectsOverflowAndNonFinitePricingWithoutMutatingInput(t *testing.T) {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	current := ReviewAccounting{
+		SnapshotAt:      at,
 		Models:          make([]accounting.ModelAccounting, 1, 2),
 		TotalTokens:     1<<53 - 1,
 		PricingComplete: false,
@@ -138,6 +209,7 @@ func TestReviewAccountingDoesNotAliasInputsOrMutateMachineLedgerAccounting(t *te
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	zero := 0.0
 	current := ReviewAccounting{
+		SnapshotAt: at,
 		Models: []accounting.ModelAccounting{{
 			ModelUsage: accounting.ModelUsage{Model: "a-model", TokenUsage: accounting.TokenUsage{InputTokens: 10, TotalTokens: 10}},
 			Pricing:    fixturePricing(1, 0, 0, 1),
@@ -187,4 +259,9 @@ func fixturePricing(input, cached, cacheWrite, output float64) accounting.Pricin
 		Source:                    "https://example.com/pricing",
 		AsOf:                      "2026-08-29",
 	}
+}
+
+func snapshotAt(t *testing.T) time.Time {
+	t.Helper()
+	return time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 }

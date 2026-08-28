@@ -212,6 +212,7 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 		return Job{}, currentRevision, err
 	}
 	next := current
+	next.ReviewAccounting = cloneReviewAccounting(current.ReviewAccounting)
 	if err := mutate(&next); err != nil {
 		return Job{}, currentRevision, err
 	}
@@ -220,6 +221,9 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 	}
 	if err := Validate(next); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("invalid updated review job: %w", err)
+	}
+	if err := validateReviewAccountingTransition(current.ReviewAccounting, next.ReviewAccounting); err != nil {
+		return Job{}, currentRevision, fmt.Errorf("invalid review accounting update: %w", err)
 	}
 	if err := s.writer()(layout.jobs, jobID+".json.bak", currentEncoded, 0o600); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("persist review job recovery backup: %w", err)

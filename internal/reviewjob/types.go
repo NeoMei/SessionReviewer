@@ -5,12 +5,10 @@ package reviewjob
 import (
 	"errors"
 	"fmt"
-	"math"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
@@ -86,13 +84,6 @@ type SafeError struct {
 	Code ErrorCode `json:"code"`
 }
 
-// ReviewUsage is private durable accounting for the review run itself, not
-// source-session accounting shown in the existing project usage cards.
-type ReviewUsage struct {
-	TokenUsage accounting.TokenUsage `json:"token_usage"`
-	CostUSD    float64               `json:"cost_usd"`
-}
-
 // Job is the private persisted job record. Fields that could reveal source
 // paths, source content, prompts, output, or diagnostics must be projected
 // through ProjectStatus instead of serialized as a CLI response.
@@ -119,12 +110,12 @@ type Job struct {
 	CancellationRequested time.Time `json:"cancellation_requested_at,omitempty"`
 	Owner                 Owner     `json:"owner,omitempty"`
 
-	PacketDigest      string      `json:"packet_digest,omitempty"`
-	ResultDigest      string      `json:"result_digest,omitempty"`
-	ReviewUsage       ReviewUsage `json:"review_usage"`
-	Error             SafeError   `json:"error,omitempty"`
-	SyncOnlyAvailable bool        `json:"sync_only_available"`
-	PrivateError      string      `json:"private_error,omitempty"`
+	PacketDigest      string           `json:"packet_digest,omitempty"`
+	ResultDigest      string           `json:"result_digest,omitempty"`
+	ReviewAccounting  ReviewAccounting `json:"review_usage"`
+	Error             SafeError        `json:"error,omitempty"`
+	SyncOnlyAvailable bool             `json:"sync_only_available"`
+	PrivateError      string           `json:"private_error,omitempty"`
 }
 
 type PublicState string
@@ -132,8 +123,9 @@ type PublicState string
 const Idle PublicState = "idle"
 
 type PublicReviewUsage struct {
-	TokenUsage accounting.TokenUsage `json:"token_usage"`
-	CostUSD    float64               `json:"cost_usd"`
+	TotalTokens     int64    `json:"total_tokens"`
+	TotalCostUSD    *float64 `json:"total_cost_usd,omitempty"`
+	PricingComplete bool     `json:"pricing_complete"`
 }
 
 // PublicStatus is the complete JSON response allowed to cross the CLI/plugin
@@ -187,8 +179,9 @@ func ProjectStatus(job *Job, projectID string) (PublicStatus, error) {
 		CanCancel:        active(job.State),
 		CanSyncOnly:      job.SyncOnlyAvailable,
 	}
-	if job.ReviewUsage.TokenUsage != (accounting.TokenUsage{}) || job.ReviewUsage.CostUSD != 0 {
-		status.ReviewUsage = &PublicReviewUsage{TokenUsage: job.ReviewUsage.TokenUsage, CostUSD: job.ReviewUsage.CostUSD}
+	if hasReviewAccounting(job.ReviewAccounting) {
+		tokens, cost, complete := reviewAccountingPublicTotals(job.ReviewAccounting)
+		status.ReviewUsage = &PublicReviewUsage{TotalTokens: tokens, TotalCostUSD: cost, PricingComplete: complete}
 	}
 	return status, nil
 }
@@ -247,11 +240,8 @@ func Validate(job Job) error {
 			return errors.New("job digest must be prefixed lowercase SHA-256")
 		}
 	}
-	if err := accounting.ValidateTokenUsage(job.ReviewUsage.TokenUsage); err != nil {
-		return fmt.Errorf("review usage: %w", err)
-	}
-	if math.IsNaN(job.ReviewUsage.CostUSD) || math.IsInf(job.ReviewUsage.CostUSD, 0) || job.ReviewUsage.CostUSD < 0 {
-		return errors.New("review usage cost must be finite and nonnegative")
+	if err := ValidateReviewAccounting(job.ReviewAccounting); err != nil {
+		return fmt.Errorf("review accounting: %w", err)
 	}
 	if job.Error.Code != "" && !validErrorCode(job.Error.Code) {
 		return errors.New("safe error code is invalid")

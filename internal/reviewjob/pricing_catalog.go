@@ -12,9 +12,10 @@ import (
 // public USD list prices. Its metadata describes the catalog convention; only
 // entries claim prices for models.
 type PricingCatalog struct {
-	asOf    string
-	source  string
-	entries map[string]accounting.Pricing
+	asOf      string
+	source    string
+	effective time.Time
+	entries   map[string]accounting.Pricing
 }
 
 // NewPricingCatalog validates metadata and every entry, and copies entries so
@@ -25,7 +26,11 @@ func NewPricingCatalog(asOf, source string, entries map[string]accounting.Pricin
 		return nil, fmt.Errorf("pricing catalog metadata: %w", err)
 	}
 
-	catalog := &PricingCatalog{asOf: asOf, source: source, entries: make(map[string]accounting.Pricing, len(entries))}
+	effective, err := time.Parse("2006-01-02", asOf)
+	if err != nil {
+		return nil, fmt.Errorf("pricing catalog as_of: %w", err)
+	}
+	catalog := &PricingCatalog{asOf: asOf, source: source, effective: effective, entries: make(map[string]accounting.Pricing, len(entries))}
 	for model, pricing := range entries {
 		if strings.TrimSpace(model) == "" || strings.TrimSpace(model) != model {
 			return nil, fmt.Errorf("pricing catalog model %q is invalid", model)
@@ -41,8 +46,11 @@ func NewPricingCatalog(asOf, source string, entries map[string]accounting.Pricin
 	return catalog, nil
 }
 
-func (catalog *PricingCatalog) Resolve(model string, _ time.Time) (accounting.Pricing, bool) {
-	if catalog == nil {
+// Resolve implements one immutable catalog snapshot: entries become effective
+// at 00:00:00 UTC on AsOf and are never exposed to an earlier job snapshot.
+// A future multi-version catalog must select the latest effective entry <= at.
+func (catalog *PricingCatalog) Resolve(model string, at time.Time) (accounting.Pricing, bool) {
+	if catalog == nil || !canonicalReviewSnapshot(at) || at.Before(catalog.effective) {
 		return accounting.Pricing{}, false
 	}
 	pricing, ok := catalog.entries[model]

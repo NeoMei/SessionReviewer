@@ -37,6 +37,20 @@ func TestReviewAccountingPricingCatalogValidatesAndCopiesInjectedEntries(t *test
 	if _, ok := catalog.Resolve("unknown", time.Now()); ok {
 		t.Fatal("catalog resolved an unknown model")
 	}
+	before := time.Date(2026, 8, 28, 23, 59, 59, 999_999_999, time.UTC)
+	on := time.Date(2026, 8, 29, 0, 0, 0, 0, time.UTC)
+	after := time.Date(2026, 8, 30, 0, 0, 0, 0, time.UTC)
+	if _, ok := catalog.Resolve("fixture-model", before); ok {
+		t.Fatal("catalog exposed a future entry before its as_of instant")
+	}
+	for name, at := range map[string]time.Time{"on": on, "after": after} {
+		if resolved, ok := catalog.Resolve("fixture-model", at); !ok || resolved != entry {
+			t.Fatalf("%s as_of resolution=%+v ok=%v", name, resolved, ok)
+		}
+	}
+	if _, ok := catalog.Resolve("fixture-model", on.In(time.FixedZone("UTC-alias", 0))); ok {
+		t.Fatal("catalog accepted a non-canonical snapshot time")
+	}
 
 	tests := []struct {
 		name    string

@@ -1,6 +1,7 @@
 package reviewjob
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -25,18 +26,103 @@ type PricingResolver interface {
 // deliberately separate from source-session accounting in the machine ledger.
 // TotalCostUSD is absent whenever any actual run lacks authoritative pricing.
 type ReviewAccounting struct {
+	SnapshotAt      time.Time                    `json:"-"`
+	Models          []accounting.ModelAccounting `json:"models"`
+	TotalTokens     int64                        `json:"total_tokens"`
+	TotalCostUSD    *float64                     `json:"total_cost_usd,omitempty"`
+	PricingComplete bool                         `json:"pricing_complete"`
+
+	legacy *legacyReviewUsage
+}
+
+type legacyReviewUsage struct {
+	TokenUsage accounting.TokenUsage `json:"token_usage"`
+	CostUSD    float64               `json:"cost_usd"`
+}
+
+type reviewAccountingWire struct {
+	SnapshotAt      *time.Time                   `json:"snapshot_at,omitempty"`
 	Models          []accounting.ModelAccounting `json:"models"`
 	TotalTokens     int64                        `json:"total_tokens"`
 	TotalCostUSD    *float64                     `json:"total_cost_usd,omitempty"`
 	PricingComplete bool                         `json:"pricing_complete"`
 }
 
+func (value ReviewAccounting) MarshalJSON() ([]byte, error) {
+	if value.legacy != nil {
+		return json.Marshal(*value.legacy)
+	}
+	var snapshot *time.Time
+	if !value.SnapshotAt.IsZero() {
+		copy := value.SnapshotAt
+		snapshot = &copy
+	}
+	return json.Marshal(reviewAccountingWire{
+		SnapshotAt:      snapshot,
+		Models:          value.Models,
+		TotalTokens:     value.TotalTokens,
+		TotalCostUSD:    value.TotalCostUSD,
+		PricingComplete: value.PricingComplete,
+	})
+}
+
+func (value *ReviewAccounting) UnmarshalJSON(body []byte) error {
+	if value == nil {
+		return errors.New("review accounting destination is required")
+	}
+	if err := rejectDuplicateJSONFields(body); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return err
+	}
+	_, hasLegacyUsage := fields["token_usage"]
+	_, hasLegacyCost := fields["cost_usd"]
+	if hasLegacyUsage || hasLegacyCost {
+		if len(fields) != 2 || !hasLegacyUsage || !hasLegacyCost {
+			return errors.New("legacy review accounting shape is incomplete or mixed")
+		}
+		var legacy legacyReviewUsage
+		if err := json.Unmarshal(body, &legacy); err != nil {
+			return err
+		}
+		*value = ReviewAccounting{legacy: &legacy}
+		return nil
+	}
+	allowed := map[string]bool{"snapshot_at": true, "models": true, "total_tokens": true, "total_cost_usd": true, "pricing_complete": true}
+	for name := range fields {
+		if !allowed[name] {
+			return fmt.Errorf("unknown review accounting field %q", name)
+		}
+	}
+	for _, required := range []string{"models", "total_tokens", "pricing_complete"} {
+		if _, ok := fields[required]; !ok {
+			return fmt.Errorf("review accounting field %q is required", required)
+		}
+	}
+	var wire reviewAccountingWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	*value = ReviewAccounting{
+		Models:          wire.Models,
+		TotalTokens:     wire.TotalTokens,
+		TotalCostUSD:    wire.TotalCostUSD,
+		PricingComplete: wire.PricingComplete,
+	}
+	if wire.SnapshotAt != nil {
+		value.SnapshotAt = *wire.SnapshotAt
+	}
+	return nil
+}
+
 // AddReviewResult returns a new aggregate containing one actual Agent result.
 // It never aliases or mutates current. Model is used exactly as reported; an
 // empty or unresolved model retains usage and makes the aggregate unpriced.
 func AddReviewResult(current ReviewAccounting, result agent.Result, at time.Time, resolver PricingResolver) (ReviewAccounting, error) {
-	if at.IsZero() {
-		return ReviewAccounting{}, errors.New("review accounting time is required")
+	if !canonicalReviewSnapshot(at) {
+		return ReviewAccounting{}, errors.New("review accounting time must be canonical UTC")
 	}
 	if err := ValidateReviewAccounting(current); err != nil {
 		return ReviewAccounting{}, fmt.Errorf("invalid current review accounting: %w", err)
@@ -46,10 +132,18 @@ func AddReviewResult(current ReviewAccounting, result agent.Result, at time.Time
 	}
 
 	next := cloneReviewAccounting(current)
+	if next.legacy != nil {
+		next = migrateLegacyReviewAccounting(next, at)
+	}
+	if next.SnapshotAt.IsZero() {
+		next.SnapshotAt = at
+	} else if !next.SnapshotAt.Equal(at) {
+		return ReviewAccounting{}, errors.New("review accounting snapshot cannot change within a job")
+	}
 	pricing, priced := accounting.Pricing{}, false
 	var cost float64
 	if strings.TrimSpace(result.Model) != "" && resolver != nil {
-		pricing, priced = resolver.Resolve(result.Model, at)
+		pricing, priced = resolver.Resolve(result.Model, next.SnapshotAt)
 		if priced {
 			var err error
 			cost, err = accounting.PriceUsage(result.Usage, pricing)
@@ -106,14 +200,29 @@ func AddReviewResult(current ReviewAccounting, result agent.Result, at time.Time
 // pricing is represented only by a zero Pricing row, zero row cost, an absent
 // aggregate cost, and PricingComplete=false.
 func ValidateReviewAccounting(value ReviewAccounting) error {
+	if value.legacy != nil {
+		if !value.SnapshotAt.IsZero() || value.Models != nil || value.TotalTokens != 0 || value.TotalCostUSD != nil || value.PricingComplete {
+			return errors.New("legacy review accounting cannot mix with snapshot accounting")
+		}
+		if err := accounting.ValidateTokenUsage(value.legacy.TokenUsage); err != nil {
+			return fmt.Errorf("legacy review usage: %w", err)
+		}
+		if math.IsNaN(value.legacy.CostUSD) || math.IsInf(value.legacy.CostUSD, 0) || value.legacy.CostUSD < 0 {
+			return errors.New("legacy review usage cost must be finite and nonnegative")
+		}
+		return nil
+	}
 	if value.TotalTokens < 0 || value.TotalTokens > reviewAccountingMaxSafeInteger {
 		return errors.New("review accounting token total is outside the safe integer range")
 	}
 	if len(value.Models) == 0 {
-		if value.TotalTokens != 0 || value.TotalCostUSD != nil || value.PricingComplete {
+		if !value.SnapshotAt.IsZero() || value.TotalTokens != 0 || value.TotalCostUSD != nil || value.PricingComplete {
 			return errors.New("empty review accounting has nonempty totals")
 		}
 		return nil
+	}
+	if !canonicalReviewSnapshot(value.SnapshotAt) {
+		return errors.New("nonempty review accounting requires a canonical UTC snapshot")
 	}
 
 	var totalTokens int64
@@ -179,7 +288,94 @@ func cloneReviewAccounting(value ReviewAccounting) ReviewAccounting {
 		cost := *value.TotalCostUSD
 		clone.TotalCostUSD = &cost
 	}
+	if value.legacy != nil {
+		legacy := *value.legacy
+		clone.legacy = &legacy
+	}
 	return clone
+}
+
+func migrateLegacyReviewAccounting(value ReviewAccounting, at time.Time) ReviewAccounting {
+	if value.legacy == nil || value.legacy.TokenUsage == (accounting.TokenUsage{}) {
+		return ReviewAccounting{}
+	}
+	return ReviewAccounting{
+		SnapshotAt: at,
+		Models: []accounting.ModelAccounting{{
+			ModelUsage: accounting.ModelUsage{Model: "", TokenUsage: value.legacy.TokenUsage},
+		}},
+		TotalTokens: value.legacy.TokenUsage.TotalTokens,
+	}
+}
+
+func reviewAccountingPublicTotals(value ReviewAccounting) (int64, *float64, bool) {
+	if value.legacy != nil {
+		return value.legacy.TokenUsage.TotalTokens, nil, false
+	}
+	if value.TotalCostUSD == nil {
+		return value.TotalTokens, nil, value.PricingComplete
+	}
+	cost := *value.TotalCostUSD
+	return value.TotalTokens, &cost, value.PricingComplete
+}
+
+func hasReviewAccounting(value ReviewAccounting) bool {
+	if value.legacy != nil {
+		return value.legacy.TokenUsage != (accounting.TokenUsage{})
+	}
+	return len(value.Models) != 0
+}
+
+func canonicalReviewSnapshot(value time.Time) bool {
+	return !value.IsZero() && value.Location() == time.UTC && value.Equal(value.UTC())
+}
+
+func validateReviewAccountingTransition(before, after ReviewAccounting) error {
+	if before.legacy != nil {
+		if after.legacy != nil {
+			if *before.legacy != *after.legacy {
+				return errors.New("legacy review accounting is immutable until migration")
+			}
+			return nil
+		}
+		if before.legacy.TokenUsage == (accounting.TokenUsage{}) {
+			return nil
+		}
+		index := sort.Search(len(after.Models), func(index int) bool { return after.Models[index].Model >= "" })
+		if index >= len(after.Models) || after.Models[index].Model != "" || !reviewUsageContains(after.Models[index].TokenUsage, before.legacy.TokenUsage) {
+			return errors.New("legacy review usage tokens were not preserved during migration")
+		}
+		return nil
+	}
+	if len(before.Models) == 0 {
+		return nil
+	}
+	if after.legacy != nil || !after.SnapshotAt.Equal(before.SnapshotAt) {
+		return errors.New("pinned review pricing snapshot cannot change")
+	}
+	for _, previous := range before.Models {
+		index := sort.Search(len(after.Models), func(index int) bool { return after.Models[index].Model >= previous.Model })
+		if index >= len(after.Models) || after.Models[index].Model != previous.Model {
+			return fmt.Errorf("review accounting model %q cannot be removed", previous.Model)
+		}
+		next := after.Models[index]
+		if next.Pricing != previous.Pricing {
+			return fmt.Errorf("review accounting model %q pricing snapshot cannot change", previous.Model)
+		}
+		if !reviewUsageContains(next.TokenUsage, previous.TokenUsage) {
+			return fmt.Errorf("review accounting model %q usage cannot decrease", previous.Model)
+		}
+	}
+	return nil
+}
+
+func reviewUsageContains(total, previous accounting.TokenUsage) bool {
+	return total.InputTokens >= previous.InputTokens &&
+		total.CachedInputTokens >= previous.CachedInputTokens &&
+		total.CacheWriteInputTokens >= previous.CacheWriteInputTokens &&
+		total.OutputTokens >= previous.OutputTokens &&
+		total.ReasoningOutputTokens >= previous.ReasoningOutputTokens &&
+		total.TotalTokens >= previous.TotalTokens
 }
 
 func addReviewTokenUsage(left, right accounting.TokenUsage) (accounting.TokenUsage, error) {

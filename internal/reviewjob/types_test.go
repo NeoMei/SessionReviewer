@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -157,8 +158,14 @@ func TestJobValidationRejectsInvalidProgressInvariants(t *testing.T) {
 
 func TestJobValidationRejectsNonFiniteCostAndUnsafePublicCounts(t *testing.T) {
 	for name, mutate := range map[string]func(*Job){
-		"NaN cost":                 func(job *Job) { job.ReviewUsage.CostUSD = math.NaN() },
-		"infinite cost":            func(job *Job) { job.ReviewUsage.CostUSD = math.Inf(1) },
+		"NaN cost": func(job *Job) {
+			job.ReviewAccounting = validReviewAccountingFixture()
+			*job.ReviewAccounting.TotalCostUSD = math.NaN()
+		},
+		"infinite cost": func(job *Job) {
+			job.ReviewAccounting = validReviewAccountingFixture()
+			*job.ReviewAccounting.TotalCostUSD = math.Inf(1)
+		},
 		"unsafe attempt":           func(job *Job) { job.Attempt = jsSafeInteger + 1 },
 		"unsafe session index":     func(job *Job) { job.SessionIndex = jsSafeInteger + 1 },
 		"unsafe accepted packets":  func(job *Job) { job.AcceptedPackets = jsSafeInteger + 1 },
@@ -225,9 +232,21 @@ func validJobFixture() Job {
 		CreatedAt:        created,
 		UpdatedAt:        created,
 		Owner:            Owner{ID: "owner-1", AcquiredAt: created},
-		ReviewUsage: ReviewUsage{TokenUsage: accounting.TokenUsage{
-			InputTokens: 1, OutputTokens: 1, TotalTokens: 2,
+	}
+}
+
+func validReviewAccountingFixture() ReviewAccounting {
+	cost := .000002
+	return ReviewAccounting{
+		SnapshotAt: time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC),
+		Models: []accounting.ModelAccounting{{
+			ModelUsage: accounting.ModelUsage{Model: "fixture-model", TokenUsage: accounting.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}},
+			Pricing:    fixturePricing(1, 0, 0, 1),
+			CostUSD:    cost,
 		}},
+		TotalTokens:     2,
+		TotalCostUSD:    &cost,
+		PricingComplete: true,
 	}
 }
 
@@ -279,6 +298,28 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("status schema properties missing")
+	}
+	definitions, ok := schema["$defs"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("status schema definitions missing")
+	}
+	reviewDefinition, ok := definitions["review_usage"].(map[string]any)
+	if !ok || reviewDefinition["additionalProperties"] != false {
+		return fmt.Errorf("review_usage schema is missing or open")
+	}
+	reviewProperties, ok := reviewDefinition["properties"].(map[string]any)
+	if !ok || len(reviewProperties) != 3 || reviewProperties["total_tokens"] == nil || reviewProperties["total_cost_usd"] == nil || reviewProperties["pricing_complete"] == nil {
+		return fmt.Errorf("review_usage schema fields do not match public totals contract")
+	}
+	totalTokensSchema, _ := reviewProperties["total_tokens"].(map[string]any)
+	pricingCompleteSchema, _ := reviewProperties["pricing_complete"].(map[string]any)
+	totalCostSchema, _ := reviewProperties["total_cost_usd"].(map[string]any)
+	if totalTokensSchema["$ref"] != "#/$defs/nonnegative_integer" || pricingCompleteSchema["type"] != "boolean" || !reflect.DeepEqual(totalCostSchema["type"], []any{"number", "null"}) || totalCostSchema["minimum"] != float64(0) {
+		return fmt.Errorf("review_usage schema scalar constraints are invalid")
+	}
+	requiredReview, ok := reviewDefinition["required"].([]any)
+	if !ok || !reflect.DeepEqual(requiredReview, []any{"total_tokens", "pricing_complete"}) {
+		return fmt.Errorf("review_usage schema required fields are invalid")
 	}
 	for name := range status {
 		if _, ok := properties[name]; !ok {
@@ -332,25 +373,59 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 	}
 	if usage, exists := status["review_usage"]; exists {
 		usageMap, ok := usage.(map[string]any)
-		if !ok || len(usageMap) != 2 {
+		if !ok || (len(usageMap) != 2 && len(usageMap) != 3) {
 			return fmt.Errorf("review_usage is not a closed object")
 		}
-		cost, ok := usageMap["cost_usd"].(float64)
-		if !ok || math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
-			return fmt.Errorf("review_usage cost_usd is invalid")
+		for name := range usageMap {
+			if name != "total_tokens" && name != "total_cost_usd" && name != "pricing_complete" {
+				return fmt.Errorf("review_usage field %q is unknown", name)
+			}
 		}
-		tokens, ok := usageMap["token_usage"].(map[string]any)
-		if !ok || len(tokens) != 6 {
-			return fmt.Errorf("review_usage token_usage is not a closed object")
+		tokens, ok := usageMap["total_tokens"].(float64)
+		if !ok || math.Trunc(tokens) != tokens || tokens < 0 || tokens > float64(jsSafeInteger) {
+			return fmt.Errorf("review_usage total_tokens is invalid")
 		}
-		for _, name := range []string{"input_tokens", "cached_input_tokens", "cache_write_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"} {
-			value, ok := tokens[name].(float64)
-			if !ok || math.Trunc(value) != value || value < 0 || value > float64(jsSafeInteger) {
-				return fmt.Errorf("review usage token field %q is invalid", name)
+		complete, ok := usageMap["pricing_complete"].(bool)
+		if !ok {
+			return fmt.Errorf("review_usage pricing_complete is invalid")
+		}
+		costValue, hasCost := usageMap["total_cost_usd"]
+		nonNullCost := hasCost && costValue != nil
+		if complete != nonNullCost {
+			return fmt.Errorf("review_usage cost presence disagrees with pricing_complete")
+		}
+		if nonNullCost {
+			cost, ok := costValue.(float64)
+			if !ok || math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
+				return fmt.Errorf("review_usage total_cost_usd is invalid")
 			}
 		}
 	}
 	return nil
+}
+
+func TestPublicStatusSchemaAllowsOmittedOrNullCostOnlyWhenPricingIsIncomplete(t *testing.T) {
+	base := mustJSON(t, PublicStatus{
+		SchemaVersion: PublicStatusSchemaVersion,
+		ProjectID:     "project-1",
+		State:         Idle,
+		ReviewUsage:   &PublicReviewUsage{TotalTokens: 7, PricingComplete: false},
+	})
+	if err := validateStatusAgainstSchema("../../schemas/review-job-status-v1.schema.json", base); err != nil {
+		t.Fatalf("omitted incomplete cost rejected: %v", err)
+	}
+	var withNull map[string]any
+	if err := json.Unmarshal(base, &withNull); err != nil {
+		t.Fatal(err)
+	}
+	withNull["review_usage"].(map[string]any)["total_cost_usd"] = nil
+	nullBody, err := json.Marshal(withNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateStatusAgainstSchema("../../schemas/review-job-status-v1.schema.json", nullBody); err != nil {
+		t.Fatalf("null incomplete cost rejected: %v", err)
+	}
 }
 
 func TestPublicStatusSchemaRejectsWrongTypesUnsafeNumbersAndUnknownFields(t *testing.T) {
@@ -369,7 +444,13 @@ func TestPublicStatusSchemaRejectsWrongTypesUnsafeNumbersAndUnknownFields(t *tes
 		"invalid error code":    func(status map[string]any) { status["error_code"] = "E_UNKNOWN" },
 		"wrong error code type": func(status map[string]any) { status["error_code"] = float64(1) },
 		"negative cost": func(status map[string]any) {
-			status["review_usage"] = map[string]any{"token_usage": map[string]any{"input_tokens": float64(0), "cached_input_tokens": float64(0), "cache_write_input_tokens": float64(0), "output_tokens": float64(0), "reasoning_output_tokens": float64(0), "total_tokens": float64(0)}, "cost_usd": float64(-1)}
+			status["review_usage"] = map[string]any{"total_tokens": float64(1), "total_cost_usd": float64(-1), "pricing_complete": true}
+		},
+		"unsafe review total": func(status map[string]any) {
+			status["review_usage"] = map[string]any{"total_tokens": float64(jsSafeInteger + 1), "pricing_complete": false}
+		},
+		"fake incomplete zero cost": func(status map[string]any) {
+			status["review_usage"] = map[string]any{"total_tokens": float64(1), "total_cost_usd": float64(0), "pricing_complete": false}
 		},
 	}
 	for name, mutate := range tests {
