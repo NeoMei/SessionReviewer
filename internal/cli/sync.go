@@ -15,7 +15,10 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
+
+var syncProject = syncproject.Run
 
 const syncHelp = `Synchronize editable Session Review Markdown with the configured Obsidian vault.
 
@@ -96,6 +99,33 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 
+	if mode == "sync" {
+		absoluteData, err := resolveSyncDataDir(*dataDir)
+		if err != nil {
+			return writeDiagnostic(stderr, "sync", err)
+		}
+		report, err := syncProject(context.Background(), syncproject.Options{
+			ProjectID: *projectID,
+			CWD:       *cwd,
+			DataDir:   absoluteData,
+			GOOS:      runtime.GOOS,
+			Now:       time.Now,
+			Trigger:   syncengine.TriggerCLI,
+			DryRun:    *dryRun,
+		})
+		if err != nil {
+			if shouldWriteFailedSyncReport(report) {
+				writeSyncReport(stdout, report)
+			}
+			return writeDiagnostic(stderr, "sync", err)
+		}
+		writeSyncReport(stdout, report)
+		if writeSyncPartialFailure(stderr, report) {
+			return 1
+		}
+		return 0
+	}
+
 	root, mapping, projectData, err := resolveSyncMapping(*cwd, *projectID, *dataDir)
 	if err != nil {
 		return writeDiagnostic(stderr, "sync", err)
@@ -145,19 +175,19 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "machine=%s files=1\n", report.State)
 		return 0
 	default:
-		report, err := engine.Reconcile(context.Background(), syncengine.ReconcileRequest{DryRun: *dryRun, Trigger: syncengine.TriggerCLI})
-		if err != nil {
-			if shouldWriteFailedSyncReport(report) {
-				writeSyncReport(stdout, report)
-			}
-			return writeDiagnostic(stderr, "sync", err)
-		}
-		writeSyncReport(stdout, report)
-		if writeSyncPartialFailure(stderr, report) {
-			return 1
-		}
-		return 0
+		panic("unreachable sync mode")
 	}
+}
+
+func resolveSyncDataDir(dataDir string) (string, error) {
+	if dataDir == "" {
+		resolved, err := platform.DataDir(currentEnv())
+		if err != nil {
+			return "", err
+		}
+		dataDir = resolved
+	}
+	return filepath.Abs(dataDir)
 }
 
 func shouldWriteFailedSyncReport(report syncengine.Report) bool {

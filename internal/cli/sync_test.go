@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +18,69 @@ import (
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
+
+// Reconstructing the engine in the command, resolving the platform data root
+// inside the service, or moving report formatting out of the CLI breaks this
+// boundary test even when the underlying engine still works.
+func TestSyncProjectServiceCLIDelegationPreservesFormatting(t *testing.T) {
+	original := syncProject
+	t.Cleanup(func() { syncProject = original })
+	dataRoot := t.TempDir()
+	wantReport := syncengine.Report{
+		ProjectID: "project-1111111111111111",
+		DryRun:    true,
+		Operations: []syncengine.Operation{{
+			EntityID: "project-overview", Kind: syncengine.OperationAddVault, RelativePath: "项目回顾.md",
+		}},
+		Derived:   syncengine.DerivedReport{State: syncengine.DerivedCurrent, Operations: []syncengine.Operation{}},
+		Migration: syncengine.MigrationReport{DryRun: true, Creates: []string{}, Archives: []string{}},
+		Machine:   syncengine.MachineReport{State: syncengine.MachineCurrent, Operations: []syncengine.Operation{}},
+	}
+	var got syncproject.Options
+	syncProject = func(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
+		if ctx == nil {
+			t.Fatal("CLI passed a nil sync context")
+		}
+		got = options
+		return wantReport, nil
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--dry-run", "--project-id", wantReport.ProjectID, "--data-dir", dataRoot}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got.ProjectID != wantReport.ProjectID || got.CWD != "" || got.DataDir != dataRoot || got.GOOS != runtime.GOOS || got.Now == nil || got.Trigger != syncengine.TriggerCLI || !got.DryRun {
+		t.Fatalf("delegated options = %#v", got)
+	}
+	var expected bytes.Buffer
+	writeSyncReport(&expected, wantReport)
+	if stdout.String() != expected.String() {
+		t.Fatalf("stdout=%q want=%q", stdout.String(), expected.String())
+	}
+}
+
+// Mapping and CWD authentication belong to the extracted service. Resolving
+// CWD in the CLI first would change legacy error ordering and bypass the seam.
+func TestSyncProjectServiceCLILeavesCWDResolutionToService(t *testing.T) {
+	original := syncProject
+	t.Cleanup(func() { syncProject = original })
+	dataRoot := t.TempDir()
+	cwd := filepath.Join(t.TempDir(), "missing")
+	calls := 0
+	var got syncproject.Options
+	syncProject = func(_ context.Context, options syncproject.Options) (syncengine.Report, error) {
+		calls++
+		got = options
+		return syncengine.Report{}, errors.New("fixture service failure")
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--cwd", cwd, "--data-dir", dataRoot}, &stdout, &stderr)
+	if code == 0 || calls != 1 || got.CWD != cwd || got.DataDir != dataRoot || stdout.Len() != 0 || !strings.Contains(stderr.String(), "E_SYNC_FAILED") {
+		t.Fatalf("code=%d calls=%d options=%#v stdout=%q stderr=%q", code, calls, got, stdout.String(), stderr.String())
+	}
+}
 
 func TestRunSyncDryRunAndApplyExposeEditableVaultCopy(t *testing.T) {
 	fixture := newCLISyncFixture(t)
