@@ -1,15 +1,20 @@
 package reviewjob
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strings"
+	"sync"
 	"time"
 )
 
 const storeLockPollInterval = 10 * time.Millisecond
 
 type storeFileLock struct {
+	mu   sync.Mutex
 	root *os.Root
 	name string
 	file *os.File
@@ -23,8 +28,23 @@ func acquireStoreFileLock(root *os.Root, name string, timeout time.Duration) (*s
 	if root == nil || name != "store.lock" || timeout < 0 {
 		return nil, errors.New("invalid review job store lock request")
 	}
+	return acquirePrivateFileLock(root, name, timeout)
+}
+
+var errPrivateFileLocked = errors.New("private advisory lock remains held by a live owner")
+
+// acquirePrivateFileLock owns only one already-rooted stable leaf. It does not
+// lock directory ancestors, so independently named long-lived worker leases
+// can coexist with the short store CAS lock.
+func acquirePrivateFileLock(root *os.Root, name string, timeout time.Duration) (*storeFileLock, error) {
+	if root == nil || !validPrivateLockLeaf(name) || timeout < 0 {
+		return nil, errors.New("invalid private advisory lock request")
+	}
 	deadline := time.Now().Add(timeout)
 	for {
+		if err := rejectCaseCollision(root, name); err != nil {
+			return nil, err
+		}
 		file, info, err := openStableStoreLockFile(root, name)
 		if err != nil {
 			return nil, err
@@ -40,14 +60,21 @@ func acquireStoreFileLock(root *os.Root, name string, timeout time.Duration) (*s
 			if inspectErr != nil || statErr != nil || !sameStoreLockEntry(info, after) || !sameStoreLockEntry(info, opened) {
 				return nil, errors.Join(errors.New("review job store lock identity changed after acquisition"), unlockStorePlatformLock(file), file.Close())
 			}
+			if err := rejectCaseCollision(root, name); err != nil {
+				return nil, errors.Join(err, unlockStorePlatformLock(file), file.Close())
+			}
 			return &storeFileLock{root: root, name: name, file: file, info: info}, nil
 		}
 		_ = file.Close()
 		if !time.Now().Before(deadline) {
-			return nil, errors.New("review job store remains locked by a live owner")
+			return nil, errPrivateFileLocked
 		}
 		time.Sleep(storeLockPollInterval)
 	}
+}
+
+func validPrivateLockLeaf(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`) && len(name) <= 255
 }
 
 func openStableStoreLockFile(root *os.Root, name string) (*os.File, os.FileInfo, error) {
@@ -104,7 +131,12 @@ func sameStoreLockEntry(first, second os.FileInfo) bool {
 }
 
 func (lock *storeFileLock) release() error {
-	if lock == nil || lock.file == nil {
+	if lock == nil {
+		return nil
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.file == nil {
 		return nil
 	}
 	after, err := lock.root.Lstat(lock.name)
@@ -115,4 +147,46 @@ func (lock *storeFileLock) release() error {
 	file := lock.file
 	lock.file = nil
 	return errors.Join(identityErr, unlockStorePlatformLock(file), file.Close())
+}
+
+func (lock *storeFileLock) replaceContent(body []byte, maxBytes int) error {
+	if lock == nil || len(body) == 0 || len(body) > maxBytes {
+		return errors.New("invalid private advisory lock metadata")
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if lock.file == nil {
+		return errors.New("private advisory lock is not held")
+	}
+	if err := rejectCaseCollision(lock.root, lock.name); err != nil {
+		return err
+	}
+	before, err := lock.root.Lstat(lock.name)
+	opened, statErr := lock.file.Stat()
+	if err != nil || statErr != nil || !sameStoreLockEntry(lock.info, before) || !sameStoreLockEntry(lock.info, opened) {
+		return errors.New("private advisory lock identity changed before metadata write")
+	}
+	if err := lock.file.Truncate(0); err != nil {
+		return errors.New("cannot truncate private advisory lock metadata")
+	}
+	if _, err := lock.file.Seek(0, io.SeekStart); err != nil {
+		return errors.New("cannot seek private advisory lock metadata")
+	}
+	if _, err := lock.file.Write(body); err != nil {
+		return errors.New("cannot write private advisory lock metadata")
+	}
+	if err := lock.file.Sync(); err != nil {
+		return errors.New("cannot persist private advisory lock metadata")
+	}
+	written := make([]byte, len(body)+1)
+	count, readErr := lock.file.ReadAt(written, 0)
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return errors.New("cannot verify private advisory lock metadata")
+	}
+	after, inspectErr := lock.root.Lstat(lock.name)
+	caseErr := rejectCaseCollision(lock.root, lock.name)
+	if inspectErr != nil || caseErr != nil || !sameStoreLockEntry(lock.info, after) || count != len(body) || !bytes.Equal(written[:count], body) {
+		return errors.New("private advisory lock metadata failed verification")
+	}
+	return nil
 }

@@ -1,0 +1,196 @@
+package reviewjob
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+)
+
+const maxLeaseOwnerBytes = 16 << 10
+
+var ErrAgentBusy = errors.New(string(AgentBusy))
+
+var currentProcessStartToken = newProcessStartToken()
+
+type leaseOwner struct {
+	SchemaVersion     int       `json:"schema_version"`
+	JobID             string    `json:"job_id"`
+	PID               int       `json:"pid"`
+	ProcessStartToken string    `json:"process_start_token"`
+	AcquiredAt        time.Time `json:"acquired_at"`
+}
+
+// LeaseSet owns the per-project lease followed by the global Codex worker
+// lease. Release always drops them in reverse acquisition order and is safe to
+// call on nil, repeatedly, or concurrently.
+type LeaseSet struct {
+	mu      sync.Mutex
+	project *storeFileLock
+	global  *storeFileLock
+	layout  *storeLayout
+}
+
+// AcquireLeases acquires the exact per-project leaf first and the global leaf
+// second. Kernel advisory ownership is authoritative; persisted owner bytes
+// are authenticated diagnostics written only after each kernel lock is held.
+func (s Store) AcquireLeases(projectID, jobID string, timeout time.Duration) (_ *LeaseSet, retErr error) {
+	if err := validateStoreID(projectID, "project"); err != nil {
+		return nil, err
+	}
+	if err := validateStoreID(jobID, "job"); err != nil {
+		return nil, err
+	}
+	if timeout < 0 {
+		return nil, errors.New("review job lease timeout must not be negative")
+	}
+	layout, err := s.openLayout(true)
+	if err != nil {
+		return nil, err
+	}
+	leases := &LeaseSet{layout: layout}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, leases.Release())
+		}
+	}()
+
+	deadline := time.Now().Add(timeout)
+	projectLease, err := acquirePrivateFileLock(layout.projectLocks, projectID+".lock", timeout)
+	if err != nil {
+		return nil, leaseAcquireError("project", err)
+	}
+	leases.project = projectLease
+
+	owner := leaseOwner{
+		SchemaVersion:     PublicStatusSchemaVersion,
+		JobID:             jobID,
+		PID:               os.Getpid(),
+		ProcessStartToken: currentProcessStartToken,
+		AcquiredAt:        time.Now().UTC(),
+	}
+	body, err := marshalCanonical(owner, maxLeaseOwnerBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err := leases.project.replaceContent(body, maxLeaseOwnerBytes); err != nil {
+		return nil, fmt.Errorf("persist project lease owner: %w", err)
+	}
+
+	remaining := time.Duration(0)
+	if timeout > 0 && time.Now().Before(deadline) {
+		remaining = time.Until(deadline)
+	}
+	globalLease, err := acquirePrivateFileLock(layout.locks, "global.lock", remaining)
+	if err != nil {
+		return nil, leaseAcquireError("global", err)
+	}
+	leases.global = globalLease
+	if err := leases.global.replaceContent(body, maxLeaseOwnerBytes); err != nil {
+		return nil, fmt.Errorf("persist global lease owner: %w", err)
+	}
+	return leases, nil
+}
+
+func leaseAcquireError(kind string, err error) error {
+	if errors.Is(err, errPrivateFileLocked) {
+		return fmt.Errorf("%w: %s review worker lease is owned by a live process", ErrAgentBusy, kind)
+	}
+	return fmt.Errorf("acquire %s review worker lease: %w", kind, err)
+}
+
+func (leases *LeaseSet) Release() error {
+	if leases == nil {
+		return nil
+	}
+	leases.mu.Lock()
+	defer leases.mu.Unlock()
+	global, project, layout := leases.global, leases.project, leases.layout
+	leases.global, leases.project, leases.layout = nil, nil, nil
+	return errors.Join(global.release(), project.release(), layout.finish())
+}
+
+// RecoverInterrupted conservatively classifies an active job only after its
+// project kernel lease is proven free. It never decides whether an in-flight
+// apply was accepted: E_APPLY_RECOVERY requires the authoritative apply receipt
+// inspection performed by the retry worker before any resume or new evidence.
+func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ bool, retErr error) {
+	job, revision, found, err := s.Load(jobID)
+	if err != nil {
+		return Job{}, 0, false, err
+	}
+	if !found {
+		return Job{}, 0, false, os.ErrNotExist
+	}
+	if !active(job.State) {
+		return job, revision, false, nil
+	}
+
+	layout, err := s.openLayout(false)
+	if err != nil {
+		return Job{}, 0, false, err
+	}
+	if layout == nil || layout.missing {
+		if layout != nil {
+			_ = layout.close()
+		}
+		return Job{}, 0, false, os.ErrNotExist
+	}
+	defer func() { retErr = errors.Join(retErr, layout.finish()) }()
+	projectLease, err := acquirePrivateFileLock(layout.projectLocks, job.ProjectID+".lock", 0)
+	if errors.Is(err, errPrivateFileLocked) {
+		return job, revision, false, nil
+	}
+	if err != nil {
+		return Job{}, 0, false, fmt.Errorf("inspect interrupted review worker lease: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, projectLease.release()) }()
+
+	// Reload after owning the project lease. Another recovery/start may have
+	// completed between the optimistic read and this authoritative boundary.
+	current, currentRevision, found, err := s.Load(jobID)
+	if err != nil || !found {
+		if err != nil {
+			return Job{}, 0, false, err
+		}
+		return Job{}, 0, false, os.ErrNotExist
+	}
+	if !active(current.State) {
+		return current, currentRevision, false, nil
+	}
+	completedAt := time.Now().UTC()
+	if completedAt.Before(current.UpdatedAt) {
+		completedAt = current.UpdatedAt
+	}
+	updated, nextRevision, err := s.Update(jobID, currentRevision, func(job *Job) error {
+		if !active(job.State) {
+			return ErrStaleRevision
+		}
+		job.State = Failed
+		job.Phase = ""
+		job.UpdatedAt = completedAt
+		job.CompletedAt = completedAt
+		job.Owner = Owner{}
+		job.Error = SafeError{Code: ApplyRecovery}
+		job.PrivateError = "worker lease ended before a terminal state; apply receipt inspection is required"
+		return nil
+	})
+	if err != nil {
+		return Job{}, currentRevision, false, err
+	}
+	return updated, nextRevision, true, nil
+}
+
+func newProcessStartToken() string {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err == nil {
+		return hex.EncodeToString(random)
+	}
+	fallback := sha256.Sum256([]byte(strconv.Itoa(os.Getpid()) + ":" + time.Now().UTC().Format(time.RFC3339Nano)))
+	return hex.EncodeToString(fallback[:16])
+}
