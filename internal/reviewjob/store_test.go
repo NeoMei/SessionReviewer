@@ -218,6 +218,68 @@ func TestStoreUpdateCannotChangePinnedReviewPricingSnapshot(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateRejectsReviewUsageReclassificationAndCostTampering(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ReviewAccounting) error
+	}{
+		{
+			name: "uncached input reclassified as cached",
+			mutate: func(value *ReviewAccounting) error {
+				value.Models[0].CachedInputTokens++
+				cost, err := accounting.PriceUsage(value.Models[0].TokenUsage, value.Models[0].Pricing)
+				if err != nil {
+					return err
+				}
+				value.Models[0].CostUSD = cost
+				value.TotalCostUSD = &cost
+				return nil
+			},
+		},
+		{
+			name: "output reclassified as reasoning",
+			mutate: func(value *ReviewAccounting) error {
+				value.Models[0].ReasoningOutputTokens++
+				return nil
+			},
+		},
+		{
+			name: "row cost changed within former tolerance",
+			mutate: func(value *ReviewAccounting) error {
+				value.Models[0].CostUSD += 5e-10
+				return nil
+			},
+		},
+		{
+			name: "aggregate cost changed within former tolerance",
+			mutate: func(value *ReviewAccounting) error {
+				*value.TotalCostUSD += 5e-10
+				return nil
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := newStoreRoot(t)
+			store := Store{Root: root}
+			job := validJobFixture()
+			job.ReviewAccounting = validReviewAccountingFixture()
+			if _, err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := store.Update(job.ID, 1, func(next *Job) error {
+				return test.mutate(&next.ReviewAccounting)
+			}); err == nil {
+				t.Fatal("Store.Update accepted non-additive or noncanonical review accounting")
+			}
+			loaded, revision, found, err := store.Load(job.ID)
+			if err != nil || !found || revision != 1 || !reflect.DeepEqual(loaded.ReviewAccounting, job.ReviewAccounting) {
+				t.Fatalf("rejected update changed durable state: revision=%d found=%v err=%v accounting=%+v", revision, found, err, loaded.ReviewAccounting)
+			}
+		})
+	}
+}
+
 func TestStoreCrossProcessCASHasExactlyOneWinner(t *testing.T) {
 	root := newStoreWithJob(t)
 	gate := filepath.Join(t.TempDir(), "start")

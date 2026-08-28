@@ -89,6 +89,47 @@ func TestReviewAccountingRejectsNondeterministicResolverAtPinnedSnapshot(t *test
 	}
 }
 
+func TestReviewAccountingTransitionValidatesExactDeltasIncludingLegacyMigration(t *testing.T) {
+	snapshot := snapshotAt(t)
+	before := validReviewAccountingFixture()
+	validAfter, err := AddReviewResult(before, agent.Result{Model: "fixture-model", Usage: accounting.TokenUsage{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1, ReasoningOutputTokens: 1, TotalTokens: 3}}, snapshot, fixturePricingResolver{"fixture-model": fixturePricing(1, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReviewAccountingTransition(before, validAfter); err != nil {
+		t.Fatalf("valid additive delta rejected: %v", err)
+	}
+
+	legacyBody := []byte(`{"token_usage":{"input_tokens":10,"cached_input_tokens":2,"cache_write_input_tokens":1,"output_tokens":3,"reasoning_output_tokens":1,"total_tokens":13},"cost_usd":99}`)
+	var legacy ReviewAccounting
+	if err := json.Unmarshal(legacyBody, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	validMigration, err := AddReviewResult(legacy, agent.Result{Model: "", Usage: accounting.TokenUsage{InputTokens: 2, CachedInputTokens: 1, OutputTokens: 1, ReasoningOutputTokens: 1, TotalTokens: 3}}, snapshot, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReviewAccountingTransition(legacy, validMigration); err != nil {
+		t.Fatalf("valid legacy additive migration rejected: %v", err)
+	}
+
+	reclassified := legacy.legacy.TokenUsage
+	reclassified.CachedInputTokens++
+	invalidMigration := ReviewAccounting{
+		SnapshotAt: snapshot,
+		Models: []accounting.ModelAccounting{{
+			ModelUsage: accounting.ModelUsage{Model: "", TokenUsage: reclassified},
+		}},
+		TotalTokens: legacy.legacy.TokenUsage.TotalTokens,
+	}
+	if err := ValidateReviewAccounting(invalidMigration); err != nil {
+		t.Fatalf("candidate must be valid in isolation to exercise transition: %v", err)
+	}
+	if err := validateReviewAccountingTransition(legacy, invalidMigration); err == nil {
+		t.Fatal("legacy migration accepted cached-token reclassification with no additive input delta")
+	}
+}
+
 func TestReviewAccountingAggregatesPacketsByModelInStableOrder(t *testing.T) {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	resolver := fixturePricingResolver{

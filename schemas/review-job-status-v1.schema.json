@@ -46,7 +46,22 @@
         "total_tokens": { "$ref": "#/$defs/nonnegative_integer" },
         "total_cost_usd": { "type": ["number", "null"], "minimum": 0 },
         "pricing_complete": { "type": "boolean" }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "pricing_complete": { "const": true } },
+            "required": ["pricing_complete"]
+          },
+          "then": {
+            "properties": { "total_cost_usd": { "type": "number", "minimum": 0 } },
+            "required": ["total_cost_usd"]
+          },
+          "else": {
+            "properties": { "total_cost_usd": { "type": "null" } }
+          }
+        }
+      ]
     }
   }
 }

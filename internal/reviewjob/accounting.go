@@ -245,7 +245,7 @@ func ValidateReviewAccounting(value ReviewAccounting) error {
 		}
 		if model.Pricing == (accounting.Pricing{}) {
 			complete = false
-			if model.CostUSD != 0 {
+			if math.Float64bits(model.CostUSD) != math.Float64bits(0) {
 				return fmt.Errorf("unpriced model %q has a cost", model.Model)
 			}
 		} else {
@@ -253,7 +253,7 @@ func ValidateReviewAccounting(value ReviewAccounting) error {
 			if err != nil {
 				return fmt.Errorf("model %q pricing: %w", model.Model, err)
 			}
-			if !reviewCostsEqual(cost, model.CostUSD) {
+			if !reviewCostsCanonical(cost, model.CostUSD) {
 				return fmt.Errorf("model %q cost does not match usage", model.Model)
 			}
 			totalCost += cost
@@ -275,7 +275,7 @@ func ValidateReviewAccounting(value ReviewAccounting) error {
 		}
 		return nil
 	}
-	if value.TotalCostUSD == nil || !reviewCostsEqual(totalCost, *value.TotalCostUSD) {
+	if value.TotalCostUSD == nil || !reviewCostsCanonical(totalCost, *value.TotalCostUSD) {
 		return errors.New("review accounting total cost does not equal model costs")
 	}
 	return nil
@@ -342,8 +342,11 @@ func validateReviewAccountingTransition(before, after ReviewAccounting) error {
 			return nil
 		}
 		index := sort.Search(len(after.Models), func(index int) bool { return after.Models[index].Model >= "" })
-		if index >= len(after.Models) || after.Models[index].Model != "" || !reviewUsageContains(after.Models[index].TokenUsage, before.legacy.TokenUsage) {
+		if index >= len(after.Models) || after.Models[index].Model != "" {
 			return errors.New("legacy review usage tokens were not preserved during migration")
+		}
+		if _, err := reviewUsageDelta(after.Models[index].TokenUsage, before.legacy.TokenUsage); err != nil {
+			return fmt.Errorf("legacy review usage migration is not additive: %w", err)
 		}
 		return nil
 	}
@@ -362,20 +365,35 @@ func validateReviewAccountingTransition(before, after ReviewAccounting) error {
 		if next.Pricing != previous.Pricing {
 			return fmt.Errorf("review accounting model %q pricing snapshot cannot change", previous.Model)
 		}
-		if !reviewUsageContains(next.TokenUsage, previous.TokenUsage) {
-			return fmt.Errorf("review accounting model %q usage cannot decrease", previous.Model)
+		if _, err := reviewUsageDelta(next.TokenUsage, previous.TokenUsage); err != nil {
+			return fmt.Errorf("review accounting model %q usage is not additive: %w", previous.Model, err)
 		}
 	}
 	return nil
 }
 
-func reviewUsageContains(total, previous accounting.TokenUsage) bool {
-	return total.InputTokens >= previous.InputTokens &&
-		total.CachedInputTokens >= previous.CachedInputTokens &&
-		total.CacheWriteInputTokens >= previous.CacheWriteInputTokens &&
-		total.OutputTokens >= previous.OutputTokens &&
-		total.ReasoningOutputTokens >= previous.ReasoningOutputTokens &&
-		total.TotalTokens >= previous.TotalTokens
+func reviewUsageDelta(total, previous accounting.TokenUsage) (accounting.TokenUsage, error) {
+	totalFields := []int64{total.InputTokens, total.CachedInputTokens, total.CacheWriteInputTokens, total.OutputTokens, total.ReasoningOutputTokens, total.TotalTokens}
+	previousFields := []int64{previous.InputTokens, previous.CachedInputTokens, previous.CacheWriteInputTokens, previous.OutputTokens, previous.ReasoningOutputTokens, previous.TotalTokens}
+	deltaFields := make([]int64, len(totalFields))
+	for index := range totalFields {
+		if totalFields[index] < previousFields[index] {
+			return accounting.TokenUsage{}, errors.New("cumulative token count decreased")
+		}
+		deltaFields[index] = totalFields[index] - previousFields[index]
+	}
+	delta := accounting.TokenUsage{
+		InputTokens:           deltaFields[0],
+		CachedInputTokens:     deltaFields[1],
+		CacheWriteInputTokens: deltaFields[2],
+		OutputTokens:          deltaFields[3],
+		ReasoningOutputTokens: deltaFields[4],
+		TotalTokens:           deltaFields[5],
+	}
+	if err := accounting.ValidateTokenUsage(delta); err != nil {
+		return accounting.TokenUsage{}, err
+	}
+	return delta, nil
 }
 
 func addReviewTokenUsage(left, right accounting.TokenUsage) (accounting.TokenUsage, error) {
@@ -419,6 +437,7 @@ func recomputeReviewTotals(value *ReviewAccounting) error {
 		}
 		value.TotalTokens += model.TotalTokens
 		if model.Pricing == (accounting.Pricing{}) {
+			value.Models[index].CostUSD = 0
 			value.PricingComplete = false
 			continue
 		}
@@ -441,9 +460,9 @@ func recomputeReviewTotals(value *ReviewAccounting) error {
 	return nil
 }
 
-func reviewCostsEqual(left, right float64) bool {
+func reviewCostsCanonical(left, right float64) bool {
 	if math.IsNaN(left) || math.IsNaN(right) || math.IsInf(left, 0) || math.IsInf(right, 0) || left < 0 || right < 0 {
 		return false
 	}
-	return math.Abs(left-right) <= 1e-9*math.Max(1, math.Max(math.Abs(left), math.Abs(right)))
+	return math.Float64bits(left) == math.Float64bits(right)
 }

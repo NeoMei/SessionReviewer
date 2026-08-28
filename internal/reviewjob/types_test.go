@@ -321,6 +321,26 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 	if !ok || !reflect.DeepEqual(requiredReview, []any{"total_tokens", "pricing_complete"}) {
 		return fmt.Errorf("review_usage schema required fields are invalid")
 	}
+	conditions, ok := reviewDefinition["allOf"].([]any)
+	if !ok || len(conditions) != 1 {
+		return fmt.Errorf("review_usage schema pricing condition is missing")
+	}
+	condition, ok := conditions[0].(map[string]any)
+	if !ok || condition["if"] == nil || condition["then"] == nil || condition["else"] == nil {
+		return fmt.Errorf("review_usage schema must use if/then/else pricing semantics")
+	}
+	ifBranch, _ := condition["if"].(map[string]any)
+	thenBranch, _ := condition["then"].(map[string]any)
+	elseBranch, _ := condition["else"].(map[string]any)
+	ifProperties, _ := ifBranch["properties"].(map[string]any)
+	ifComplete, _ := ifProperties["pricing_complete"].(map[string]any)
+	thenProperties, _ := thenBranch["properties"].(map[string]any)
+	thenCost, _ := thenProperties["total_cost_usd"].(map[string]any)
+	elseProperties, _ := elseBranch["properties"].(map[string]any)
+	elseCost, _ := elseProperties["total_cost_usd"].(map[string]any)
+	if ifComplete["const"] != true || !reflect.DeepEqual(ifBranch["required"], []any{"pricing_complete"}) || !reflect.DeepEqual(thenBranch["required"], []any{"total_cost_usd"}) || thenCost["type"] != "number" || thenCost["minimum"] != float64(0) || elseCost["type"] != "null" {
+		return fmt.Errorf("review_usage schema pricing condition is incomplete")
+	}
 	for name := range status {
 		if _, ok := properties[name]; !ok {
 			return fmt.Errorf("public JSON field %q is absent from schema", name)
@@ -425,6 +445,39 @@ func TestPublicStatusSchemaAllowsOmittedOrNullCostOnlyWhenPricingIsIncomplete(t 
 	}
 	if err := validateStatusAgainstSchema("../../schemas/review-job-status-v1.schema.json", nullBody); err != nil {
 		t.Fatalf("null incomplete cost rejected: %v", err)
+	}
+}
+
+func TestPublicStatusSchemaPricingCompletenessStates(t *testing.T) {
+	base := mustJSON(t, PublicStatus{SchemaVersion: PublicStatusSchemaVersion, ProjectID: "project-1", State: Idle})
+	tests := []struct {
+		name  string
+		usage map[string]any
+		valid bool
+	}{
+		{name: "complete numeric", usage: map[string]any{"total_tokens": float64(1), "total_cost_usd": float64(.25), "pricing_complete": true}, valid: true},
+		{name: "incomplete omitted", usage: map[string]any{"total_tokens": float64(1), "pricing_complete": false}, valid: true},
+		{name: "incomplete null", usage: map[string]any{"total_tokens": float64(1), "total_cost_usd": nil, "pricing_complete": false}, valid: true},
+		{name: "complete omitted", usage: map[string]any{"total_tokens": float64(1), "pricing_complete": true}, valid: false},
+		{name: "complete null", usage: map[string]any{"total_tokens": float64(1), "total_cost_usd": nil, "pricing_complete": true}, valid: false},
+		{name: "incomplete numeric", usage: map[string]any{"total_tokens": float64(1), "total_cost_usd": float64(0), "pricing_complete": false}, valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var status map[string]any
+			if err := json.Unmarshal(base, &status); err != nil {
+				t.Fatal(err)
+			}
+			status["review_usage"] = test.usage
+			body, err := json.Marshal(status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validateStatusAgainstSchema("../../schemas/review-job-status-v1.schema.json", body)
+			if (err == nil) != test.valid {
+				t.Fatalf("schema validity=%v want=%v err=%v body=%s", err == nil, test.valid, err, body)
+			}
+		})
 	}
 }
 
