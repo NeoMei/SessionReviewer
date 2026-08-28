@@ -1,12 +1,14 @@
 package reviewjob
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -88,9 +90,9 @@ func TestLeaseStaleMetadataNeverOverridesLiveKernelLock(t *testing.T) {
 	if _, err := (Store{Root: root}).AcquireLeases("project-1", "job-parent", 0); !errors.Is(err, ErrAgentBusy) {
 		t.Fatalf("AcquireLeases() trusted stale metadata over live lock: %v", err)
 	}
-	job, revision, changed, err := (Store{Root: root}).RecoverInterrupted("job-1")
-	if err != nil || changed || revision != 1 || job.State != Running {
-		t.Fatalf("RecoverInterrupted() trusted stale metadata over live lock = %#v, %d, %t, %v", job, revision, changed, err)
+	job, revision, disposition, err := (Store{Root: root}).RecoverInterrupted("job-1")
+	if err != nil || disposition != RecoveryNotInterrupted || revision != 1 || job.State != Running {
+		t.Fatalf("RecoverInterrupted() trusted stale metadata over live lock = %#v, %d, %q, %v", job, revision, disposition, err)
 	}
 
 	if err := os.WriteFile(exitGate, []byte("exit"), 0o600); err != nil {
@@ -266,40 +268,163 @@ func TestLeaseRejectsRedirectsCaseCollisionsAndWeakModes(t *testing.T) {
 	})
 }
 
-func TestInterruptedRunningJobBecomesApplyRecoveryWithoutInferringReceiptState(t *testing.T) {
+func TestInterruptedLeaseBackedJobBecomesApplyRecoveryWithoutInferringReceiptState(t *testing.T) {
+	for _, state := range []State{Running, CancelRequested} {
+		t.Run(string(state), func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			if _, _, err := store.Update("job-1", 1, func(job *Job) error {
+				job.State = state
+				job.Phase = Applying
+				job.PacketDigest = "sha256:" + strings.Repeat("b", 64)
+				if state == CancelRequested {
+					job.CancellationRequested = job.UpdatedAt
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			recovered, revision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || disposition != RecoveryApplyInspectionNeeded || revision != 3 {
+				t.Fatalf("RecoverInterrupted() = %#v, %d, %q, %v", recovered, revision, disposition, err)
+			}
+			if recovered.State != Failed || recovered.Phase != "" || recovered.Error.Code != ApplyRecovery || recovered.Owner.ID != "" || recovered.CompletedAt.IsZero() {
+				t.Fatalf("recovered job classification = %#v", recovered)
+			}
+			if recovered.PacketDigest == "" || recovered.AcceptedPackets != 0 || recovered.AcceptedSessions != 0 {
+				t.Fatalf("recovery inferred or discarded apply-boundary evidence: %#v", recovered)
+			}
+		})
+	}
+}
+
+func TestInterruptedRecoveryLeavesUnleasedQueuedAndRetryingJobsByteExact(t *testing.T) {
+	for _, state := range []State{Queued, Retrying} {
+		t.Run(string(state), func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			updated, wantedRevision, err := store.Update("job-1", 1, func(job *Job) error {
+				job.State = state
+				job.Phase = Preflight
+				job.Owner = Owner{}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, "review-jobs/jobs/job-1.json")
+			backupPath := path + ".bak"
+			before := readFile(t, path)
+			beforeBackup := readFile(t, backupPath)
+
+			job, revision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || disposition != RecoveryNotRecoverable || revision != wantedRevision || !reflect.DeepEqual(job, updated) {
+				t.Fatalf("RecoverInterrupted(%s) = %#v, %d, %q, %v", state, job, revision, disposition, err)
+			}
+			if after := readFile(t, path); !bytes.Equal(after, before) {
+				t.Fatalf("RecoverInterrupted(%s) mutated persisted bytes", state)
+			}
+			if after := readFile(t, backupPath); !bytes.Equal(after, beforeBackup) {
+				t.Fatalf("RecoverInterrupted(%s) mutated recovery-backup bytes", state)
+			}
+		})
+	}
+}
+
+func TestInterruptedRecoveryReturnsTypedDisposition(t *testing.T) {
 	root := newStoreWithJob(t)
 	store := Store{Root: root}
 	if _, _, err := store.Update("job-1", 1, func(job *Job) error {
-		job.Phase = Applying
-		job.PacketDigest = "sha256:" + strings.Repeat("b", 64)
+		job.State = Queued
+		job.Phase = Preflight
+		job.Owner = Owner{}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-
-	recovered, revision, changed, err := store.RecoverInterrupted("job-1")
-	if err != nil || !changed || revision != 3 {
-		t.Fatalf("RecoverInterrupted() = %#v, %d, %t, %v", recovered, revision, changed, err)
+	_, _, disposition, err := store.RecoverInterrupted("job-1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if recovered.State != Failed || recovered.Phase != "" || recovered.Error.Code != ApplyRecovery || recovered.Owner.ID != "" || recovered.CompletedAt.IsZero() {
-		t.Fatalf("recovered job classification = %#v", recovered)
-	}
-	if recovered.PacketDigest == "" || recovered.AcceptedPackets != 0 || recovered.AcceptedSessions != 0 {
-		t.Fatalf("recovery inferred or discarded apply-boundary evidence: %#v", recovered)
+	if got := reflect.TypeOf(disposition).Name(); got != "RecoveryDisposition" {
+		t.Fatalf("RecoverInterrupted() disposition type = %q, want RecoveryDisposition", got)
 	}
 }
 
 func TestInterruptedRecoveryLeavesLiveAndTerminalJobsUnchanged(t *testing.T) {
-	t.Run("live", func(t *testing.T) {
+	for _, state := range []State{Queued, Running, CancelRequested, Retrying} {
+		t.Run("live_"+string(state), func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			wantedRevision := 1
+			if state != Running {
+				var updateErr error
+				_, wantedRevision, updateErr = store.Update("job-1", 1, func(job *Job) error {
+					job.State = state
+					job.Phase = Preflight
+					job.Owner = Owner{}
+					if state == CancelRequested {
+						job.CancellationRequested = job.UpdatedAt
+					}
+					return nil
+				})
+				if updateErr != nil {
+					t.Fatal(updateErr)
+				}
+			}
+			path := filepath.Join(root, "review-jobs/jobs/job-1.json")
+			before := readFile(t, path)
+			leases, err := store.AcquireLeases("project-1", "job-1", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer leases.Release()
+			job, revision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || disposition != RecoveryNotInterrupted || revision != wantedRevision || job.State != state {
+				t.Fatalf("RecoverInterrupted(live %s) = %#v, %d, %q, %v", state, job, revision, disposition, err)
+			}
+			if after := readFile(t, path); !bytes.Equal(after, before) {
+				t.Fatalf("RecoverInterrupted(live %s) mutated persisted bytes", state)
+			}
+		})
+	}
+
+	t.Run("live_terminal", func(t *testing.T) {
 		root := newStoreWithJob(t)
-		leases, err := (Store{Root: root}).AcquireLeases("project-1", "job-1", 0)
+		store := Store{Root: root}
+		terminalAt := time.Now().UTC()
+		if _, _, err := store.Update("job-1", 1, func(job *Job) error {
+			job.State = Completed
+			job.Phase = ""
+			job.Owner = Owner{}
+			job.SessionIndex = 1
+			job.AcceptedPackets = 1
+			job.AcceptedSessions = 1
+			job.CompletedAt = terminalAt
+			job.UpdatedAt = terminalAt
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(root, "review-jobs/jobs/job-1.json")
+		backupPath := path + ".bak"
+		before := readFile(t, path)
+		beforeBackup := readFile(t, backupPath)
+		leases, err := store.AcquireLeases("project-1", "job-1", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer leases.Release()
-		job, revision, changed, err := (Store{Root: root}).RecoverInterrupted("job-1")
-		if err != nil || changed || revision != 1 || job.State != Running {
-			t.Fatalf("RecoverInterrupted(live) = %#v, %d, %t, %v", job, revision, changed, err)
+		job, revision, disposition, err := store.RecoverInterrupted("job-1")
+		if err != nil || disposition != RecoveryNotInterrupted || revision != 2 || job.State != Completed {
+			t.Fatalf("RecoverInterrupted(live terminal) = %#v, %d, %q, %v", job, revision, disposition, err)
+		}
+		if after := readFile(t, path); !bytes.Equal(after, before) {
+			t.Fatal("RecoverInterrupted(live terminal) mutated persisted bytes")
+		}
+		if after := readFile(t, backupPath); !bytes.Equal(after, beforeBackup) {
+			t.Fatal("RecoverInterrupted(live terminal) mutated recovery-backup bytes")
 		}
 	})
 
@@ -320,9 +445,19 @@ func TestInterruptedRecoveryLeavesLiveAndTerminalJobsUnchanged(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		job, revision, changed, err := store.RecoverInterrupted("job-1")
-		if err != nil || changed || revision != 2 || job.State != Completed {
-			t.Fatalf("RecoverInterrupted(terminal) = %#v, %d, %t, %v", job, revision, changed, err)
+		path := filepath.Join(root, "review-jobs/jobs/job-1.json")
+		backupPath := path + ".bak"
+		before := readFile(t, path)
+		beforeBackup := readFile(t, backupPath)
+		job, revision, disposition, err := store.RecoverInterrupted("job-1")
+		if err != nil || disposition != RecoveryNotRecoverable || revision != 2 || job.State != Completed {
+			t.Fatalf("RecoverInterrupted(terminal) = %#v, %d, %q, %v", job, revision, disposition, err)
+		}
+		if after := readFile(t, path); !bytes.Equal(after, before) {
+			t.Fatal("RecoverInterrupted(terminal) mutated persisted bytes")
+		}
+		if after := readFile(t, backupPath); !bytes.Equal(after, beforeBackup) {
+			t.Fatal("RecoverInterrupted(terminal) mutated recovery-backup bytes")
 		}
 	})
 }

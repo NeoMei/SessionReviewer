@@ -26,6 +26,16 @@ type leaseOwner struct {
 	AcquiredAt        time.Time `json:"acquired_at"`
 }
 
+// RecoveryDisposition makes every no-op reason explicit so callers cannot
+// mistake a never-started queued/retrying job for interrupted execution.
+type RecoveryDisposition string
+
+const (
+	RecoveryNotInterrupted        RecoveryDisposition = "not_interrupted"
+	RecoveryNotRecoverable        RecoveryDisposition = "not_recoverable"
+	RecoveryApplyInspectionNeeded RecoveryDisposition = "apply_inspection_required"
+)
+
 // LeaseSet owns the per-project lease followed by the global Codex worker
 // lease. Release always drops them in reverse acquisition order and is safe to
 // call on nil, repeatedly, or concurrently.
@@ -115,39 +125,35 @@ func (leases *LeaseSet) Release() error {
 	return errors.Join(global.release(), project.release(), layout.finish())
 }
 
-// RecoverInterrupted conservatively classifies an active job only after its
-// project kernel lease is proven free. It never decides whether an in-flight
-// apply was accepted: E_APPLY_RECOVERY requires the authoritative apply receipt
-// inspection performed by the retry worker before any resume or new evidence.
-func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ bool, retErr error) {
+// RecoverInterrupted checks project kernel ownership before classifying any
+// persisted state. Only running and cancel_requested prove prior lease-backed
+// execution. It never decides whether an in-flight apply was accepted:
+// E_APPLY_RECOVERY requires authoritative receipt inspection before resume.
+func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposition, retErr error) {
 	job, revision, found, err := s.Load(jobID)
 	if err != nil {
-		return Job{}, 0, false, err
+		return Job{}, 0, "", err
 	}
 	if !found {
-		return Job{}, 0, false, os.ErrNotExist
+		return Job{}, 0, "", os.ErrNotExist
 	}
-	if !active(job.State) {
-		return job, revision, false, nil
-	}
-
 	layout, err := s.openLayout(false)
 	if err != nil {
-		return Job{}, 0, false, err
+		return Job{}, 0, "", err
 	}
 	if layout == nil || layout.missing {
 		if layout != nil {
 			_ = layout.close()
 		}
-		return Job{}, 0, false, os.ErrNotExist
+		return Job{}, 0, "", os.ErrNotExist
 	}
 	defer func() { retErr = errors.Join(retErr, layout.finish()) }()
 	projectLease, err := acquirePrivateFileLock(layout.projectLocks, job.ProjectID+".lock", 0)
 	if errors.Is(err, errPrivateFileLocked) {
-		return job, revision, false, nil
+		return job, revision, RecoveryNotInterrupted, nil
 	}
 	if err != nil {
-		return Job{}, 0, false, fmt.Errorf("inspect interrupted review worker lease: %w", err)
+		return Job{}, 0, "", fmt.Errorf("inspect interrupted review worker lease: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, projectLease.release()) }()
 
@@ -156,19 +162,22 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ bool, retErr er
 	current, currentRevision, found, err := s.Load(jobID)
 	if err != nil || !found {
 		if err != nil {
-			return Job{}, 0, false, err
+			return Job{}, 0, "", err
 		}
-		return Job{}, 0, false, os.ErrNotExist
+		return Job{}, 0, "", os.ErrNotExist
 	}
 	if !active(current.State) {
-		return current, currentRevision, false, nil
+		return current, currentRevision, RecoveryNotRecoverable, nil
+	}
+	if !leaseBackedRecoveryState(current.State) {
+		return current, currentRevision, RecoveryNotRecoverable, nil
 	}
 	completedAt := time.Now().UTC()
 	if completedAt.Before(current.UpdatedAt) {
 		completedAt = current.UpdatedAt
 	}
 	updated, nextRevision, err := s.Update(jobID, currentRevision, func(job *Job) error {
-		if !active(job.State) {
+		if !leaseBackedRecoveryState(job.State) {
 			return ErrStaleRevision
 		}
 		job.State = Failed
@@ -181,9 +190,13 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ bool, retErr er
 		return nil
 	})
 	if err != nil {
-		return Job{}, currentRevision, false, err
+		return Job{}, currentRevision, "", err
 	}
-	return updated, nextRevision, true, nil
+	return updated, nextRevision, RecoveryApplyInspectionNeeded, nil
+}
+
+func leaseBackedRecoveryState(state State) bool {
+	return state == Running || state == CancelRequested
 }
 
 func newProcessStartToken() string {
