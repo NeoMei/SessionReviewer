@@ -13,7 +13,7 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [GitHub Release v0.2.2](https://github.com/NeoMei/SessionReviewer/releases/tag/v0.2.2) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+无需 Go 工具链时，从 [GitHub Release 0.2.2](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.2) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
 
 - Apple Silicon Mac：`session-reviewer_0.2.2_darwin_arm64.tar.gz`
 - Intel Mac：`session-reviewer_0.2.2_darwin_amd64.tar.gz`
@@ -148,7 +148,7 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-`v0.2.2` 发布包中的 `session-reviewer-obsidian-0.2.2.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+`0.2.2` 发布包中的 `session-reviewer-obsidian-0.2.2.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
@@ -264,7 +264,7 @@ Obsidian 插件包可独立构建：
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`v0.2.2` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.2` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 
