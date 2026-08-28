@@ -218,8 +218,8 @@ func Validate(job Job) error {
 	if !validState(job.State) || !validPhase(job.Phase) {
 		return errors.New("job state or phase is unknown")
 	}
-	if job.Attempt < 1 || job.Attempt > maxSafeInteger || job.SessionIndex < 0 || job.SessionIndex > len(job.FrozenSessions) || job.AcceptedPackets < 0 || job.AcceptedPackets > maxSafeInteger || job.AcceptedSessions < 0 || job.AcceptedSessions > len(job.FrozenSessions) || job.AcceptedSessions > job.SessionIndex || job.AcceptedSessions > job.AcceptedPackets {
-		return errors.New("job session index or accepted progress is impossible")
+	if err := validatePublicCounts(job.Attempt, job.SessionIndex, len(job.FrozenSessions), job.AcceptedPackets, job.AcceptedSessions); err != nil {
+		return err
 	}
 	if active(job.State) && job.Phase == "" {
 		return errors.New("active job phase is required")
@@ -337,6 +337,13 @@ func canonicalTime(value time.Time) bool {
 
 func validID(value string) bool { return safeID.MatchString(value) }
 
+func validatePublicCounts(attempt, sessionIndex, sessionCount, acceptedPackets, acceptedSessions int) error {
+	if attempt < 1 || attempt > maxSafeInteger || sessionIndex < 0 || sessionIndex > maxSafeInteger || sessionCount < 0 || sessionCount > maxSafeInteger || acceptedPackets < 0 || acceptedPackets > maxSafeInteger || acceptedSessions < 0 || acceptedSessions > maxSafeInteger || sessionIndex > sessionCount || acceptedSessions > sessionCount || acceptedSessions > sessionIndex || acceptedSessions > acceptedPackets {
+		return errors.New("job session index or accepted progress is impossible")
+	}
+	return nil
+}
+
 func validateProjectID(value string) error {
 	if !validID(value) {
 		return errors.New("project ID must be a safe stable ID")
@@ -351,6 +358,10 @@ func validState(value State) bool {
 	default:
 		return false
 	}
+}
+
+func validPublicState(value string) bool {
+	return value == string(Idle) || validState(State(value))
 }
 
 func validPhase(value Phase) bool {

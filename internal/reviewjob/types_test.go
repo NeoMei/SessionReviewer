@@ -157,10 +157,12 @@ func TestJobValidationRejectsInvalidProgressInvariants(t *testing.T) {
 
 func TestJobValidationRejectsNonFiniteCostAndUnsafePublicCounts(t *testing.T) {
 	for name, mutate := range map[string]func(*Job){
-		"NaN cost":       func(job *Job) { job.ReviewUsage.CostUSD = math.NaN() },
-		"infinite cost":  func(job *Job) { job.ReviewUsage.CostUSD = math.Inf(1) },
-		"unsafe attempt": func(job *Job) { job.Attempt = jsSafeInteger + 1 },
-		"unsafe packets": func(job *Job) { job.AcceptedPackets = jsSafeInteger + 1 },
+		"NaN cost":                 func(job *Job) { job.ReviewUsage.CostUSD = math.NaN() },
+		"infinite cost":            func(job *Job) { job.ReviewUsage.CostUSD = math.Inf(1) },
+		"unsafe attempt":           func(job *Job) { job.Attempt = jsSafeInteger + 1 },
+		"unsafe session index":     func(job *Job) { job.SessionIndex = jsSafeInteger + 1 },
+		"unsafe accepted packets":  func(job *Job) { job.AcceptedPackets = jsSafeInteger + 1 },
+		"unsafe accepted sessions": func(job *Job) { job.AcceptedSessions = jsSafeInteger + 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			job := validJobFixture()
@@ -169,6 +171,12 @@ func TestJobValidationRejectsNonFiniteCostAndUnsafePublicCounts(t *testing.T) {
 				t.Fatal("Validate() accepted non-finite cost or unsafe public count")
 			}
 		})
+	}
+}
+
+func TestPublicCountValidationRejectsUnsafeSessionCount(t *testing.T) {
+	if err := validatePublicCounts(1, 0, jsSafeInteger+1, 0, 0); err == nil {
+		t.Fatal("public count validation accepted an unsafe session count")
 	}
 }
 
@@ -288,6 +296,9 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 			return fmt.Errorf("public numeric field %q is not a JS-safe nonnegative integer", name)
 		}
 	}
+	if status["schema_version"] != float64(PublicStatusSchemaVersion) {
+		return fmt.Errorf("public schema_version is invalid")
+	}
 	for _, name := range []string{"can_retry", "can_cancel", "can_sync_only"} {
 		if _, ok := status[name].(bool); !ok {
 			return fmt.Errorf("public boolean field %q has wrong type", name)
@@ -296,6 +307,27 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 	for _, name := range []string{"project_id", "state"} {
 		if _, ok := status[name].(string); !ok {
 			return fmt.Errorf("public string field %q has wrong type", name)
+		}
+	}
+	if !safeID.MatchString(status["project_id"].(string)) || !validPublicState(status["state"].(string)) {
+		return fmt.Errorf("public project ID or state is invalid")
+	}
+	if value, exists := status["job_id"]; exists {
+		jobID, ok := value.(string)
+		if !ok || !safeID.MatchString(jobID) {
+			return fmt.Errorf("public job_id is invalid")
+		}
+	}
+	if value, exists := status["phase"]; exists {
+		phase, ok := value.(string)
+		if !ok || phase == "" || !validPhase(Phase(phase)) {
+			return fmt.Errorf("public phase is invalid")
+		}
+	}
+	if value, exists := status["error_code"]; exists {
+		code, ok := value.(string)
+		if !ok || !validErrorCode(ErrorCode(code)) {
+			return fmt.Errorf("public error_code is invalid")
 		}
 	}
 	if usage, exists := status["review_usage"]; exists {
@@ -324,10 +356,18 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 func TestPublicStatusSchemaRejectsWrongTypesUnsafeNumbersAndUnknownFields(t *testing.T) {
 	valid := mustJSON(t, PublicStatus{SchemaVersion: 1, ProjectID: "project-1", State: Idle})
 	tests := map[string]func(map[string]any){
-		"unsafe attempt":   func(status map[string]any) { status["attempt"] = float64(jsSafeInteger + 1) },
-		"fractional count": func(status map[string]any) { status["session_count"] = 0.5 },
-		"wrong boolean":    func(status map[string]any) { status["can_cancel"] = "false" },
-		"unknown field":    func(status map[string]any) { status["private_error"] = "secret" },
+		"wrong schema version":  func(status map[string]any) { status["schema_version"] = float64(2) },
+		"unknown state":         func(status map[string]any) { status["state"] = "unexpected" },
+		"unsafe attempt":        func(status map[string]any) { status["attempt"] = float64(jsSafeInteger + 1) },
+		"fractional count":      func(status map[string]any) { status["session_count"] = 0.5 },
+		"wrong boolean":         func(status map[string]any) { status["can_cancel"] = "false" },
+		"unknown field":         func(status map[string]any) { status["private_error"] = "secret" },
+		"invalid job ID":        func(status map[string]any) { status["job_id"] = "../job" },
+		"wrong job ID type":     func(status map[string]any) { status["job_id"] = float64(1) },
+		"invalid phase":         func(status map[string]any) { status["phase"] = "invalid" },
+		"wrong phase type":      func(status map[string]any) { status["phase"] = float64(1) },
+		"invalid error code":    func(status map[string]any) { status["error_code"] = "E_UNKNOWN" },
+		"wrong error code type": func(status map[string]any) { status["error_code"] = float64(1) },
 		"negative cost": func(status map[string]any) {
 			status["review_usage"] = map[string]any{"token_usage": map[string]any{"input_tokens": float64(0), "cached_input_tokens": float64(0), "cache_write_input_tokens": float64(0), "output_tokens": float64(0), "reasoning_output_tokens": float64(0), "total_tokens": float64(0)}, "cost_usd": float64(-1)}
 		},
