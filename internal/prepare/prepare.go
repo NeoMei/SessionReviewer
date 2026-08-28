@@ -34,6 +34,7 @@ type Options struct {
 	AmbiguityWindow   time.Duration
 	Limits            evidence.Limits
 	MaxRecordBytes    int
+	UpperBoundary     *evidence.CursorBoundary
 	beforeOpenSession func() error
 	afterOpenSession  func() error
 	afterOpenDataDir  func() error
@@ -164,6 +165,9 @@ func Run(opts Options) (evidence.Packet, error) {
 		}
 		from = stored.LastLine + 1
 	}
+	if opts.UpperBoundary != nil && !opts.FromStart && (stored.LastLine > opts.UpperBoundary.Line || (stored.LastLine == opts.UpperBoundary.Line && stored.LastHash != opts.UpperBoundary.SourceHash)) {
+		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor exceeds the frozen source boundary", ErrCursorSourceDrift)
+	}
 	x, err := evidence.NewWithProjectID(mapping.ID, chosen.ID, chosen.CWD, from, redact.Default(), opts.Limits)
 	if err != nil {
 		return evidence.Packet{}, err
@@ -172,8 +176,36 @@ func Run(opts Options) (evidence.Packet, error) {
 		return evidence.Packet{}, fmt.Errorf("bind evidence packet to accepted cursor: %w", err)
 	}
 	cursorValidated := stored.LastLine == 0
+	upperValidated := opts.UpperBoundary == nil
+	packetFull := false
 	usage := accounting.NewAccumulator(chosen.StartedAt)
 	visit := func(record session.Record) error {
+		atUpper := false
+		if opts.UpperBoundary != nil {
+			if record.Line > opts.UpperBoundary.Line {
+				return ErrCursorSourceDrift
+			}
+			if record.Line == opts.UpperBoundary.Line {
+				if record.SourceHash != opts.UpperBoundary.SourceHash {
+					return ErrCursorSourceDrift
+				}
+				upperValidated = true
+				atUpper = true
+			}
+		}
+		finish := func(err error) error {
+			if errors.Is(err, evidence.ErrPacketFull) && opts.UpperBoundary != nil {
+				packetFull = true
+				err = nil
+			}
+			if err != nil {
+				return err
+			}
+			if atUpper {
+				return session.ErrStop
+			}
+			return nil
+		}
 		previousUsage := x.SnapshotSessionUsage()
 		observe := func() error {
 			if err := usage.Observe(record); err != nil {
@@ -182,35 +214,47 @@ func Run(opts Options) (evidence.Packet, error) {
 			return x.SetSessionUsage(usage.Snapshot())
 		}
 		if !opts.FromStart && record.Line < stored.LastLine {
-			return observe()
+			if packetFull {
+				return finish(nil)
+			}
+			return finish(observe())
 		}
 		if !opts.FromStart && record.Line == stored.LastLine {
 			if record.SourceHash != stored.LastHash {
 				return ErrCursorSourceDrift
 			}
 			cursorValidated = true
-			return observe()
+			if packetFull {
+				return finish(nil)
+			}
+			return finish(observe())
+		}
+		if packetFull {
+			return finish(nil)
 		}
 		if err := observe(); err != nil {
-			return err
+			return finish(err)
 		}
 		if err := x.Add(record); err != nil {
 			if restoreErr := x.RestoreSessionUsage(previousUsage); restoreErr != nil {
 				return fmt.Errorf("restore accepted session usage after rejected record: %w", restoreErr)
 			}
-			return err
+			return finish(err)
 		}
-		return nil
+		return finish(nil)
 	}
 	summary, streamErr := session.StreamFiles(sessionFiles, session.DecodeOptions{FromLine: 1, MaxRecordBytes: opts.MaxRecordBytes}, visit)
 	if errors.Is(streamErr, ErrCursorSourceDrift) {
-		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor hash does not match the selected source", ErrCursorSourceDrift)
+		return evidence.Packet{}, fmt.Errorf("%w: cursor or frozen boundary hash does not match the selected source", ErrCursorSourceDrift)
 	}
-	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) {
+	if streamErr != nil && !errors.Is(streamErr, evidence.ErrPacketFull) && !(opts.UpperBoundary != nil && errors.Is(streamErr, session.ErrStop)) {
 		return evidence.Packet{}, fmt.Errorf("%w: extract selected session evidence: %w", ErrSessionFormatUnsupported, streamErr)
 	}
 	if !cursorValidated {
 		return evidence.Packet{}, fmt.Errorf("%w: accepted cursor line is absent from the selected source", ErrCursorSourceDrift)
+	}
+	if !upperValidated {
+		return evidence.Packet{}, fmt.Errorf("%w: frozen upper boundary is absent from the selected source", ErrCursorSourceDrift)
 	}
 	packet := x.Packet()
 	if summary.MalformedLines > 0 {
@@ -218,6 +262,9 @@ func Run(opts Options) (evidence.Packet, error) {
 			return evidence.Packet{}, fmt.Errorf("bound evidence warnings: %w", err)
 		}
 		packet = x.Packet()
+	}
+	if packetFull {
+		packet.HasMore = true
 	}
 	b, err := json.Marshal(packet)
 	if err != nil {
@@ -276,6 +323,13 @@ func validateOptions(opts *Options) error {
 	}
 	if opts.MaxRecordBytes < 0 {
 		return fmt.Errorf("max record bytes must not be negative")
+	}
+	if opts.UpperBoundary != nil && (opts.UpperBoundary.Line <= 0 || !frozenSourceHash.MatchString(opts.UpperBoundary.SourceHash)) {
+		return fmt.Errorf("invalid frozen upper boundary")
+	}
+	if opts.UpperBoundary != nil {
+		upper := *opts.UpperBoundary
+		opts.UpperBoundary = &upper
 	}
 	if opts.AmbiguityWindow < 0 {
 		return fmt.Errorf("ambiguity window must not be negative")
@@ -365,6 +419,7 @@ func sameProjectDirectory(goos, first, second string) (bool, error) {
 }
 
 var safeIdentifier = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+var frozenSourceHash = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validateIdentifier(value, label string) error {
 	if value == "" || value == "." || value == ".." || !safeIdentifier.MatchString(value) {

@@ -187,6 +187,124 @@ func (f runFixture) requireFailurePreservesOutputAndCursor(t *testing.T, opts Op
 	}
 }
 
+// This catches reading records appended after the click-time boundary or
+// reporting live-EOF HasMore instead of bounded HasMore.
+func TestPrepareHonorsFrozenUpperBoundaryAndIgnoresActiveAppend(t *testing.T) {
+	first := `{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"frozen"}]}}`
+	f := newRunFixture(t, "")
+	body := sessionBody(f.projectRoot, first)
+	path := f.writeSession(t, "s1.jsonl", body, f.now)
+	upper := evidence.CursorBoundary{Line: 2, SourceHash: f.sourceHash(t, 2)}
+	appended := `{"timestamp":"2026-08-22T10:02:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"append-canary"}]}}` + "\n"
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(appended); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := f.options("review")
+	opts.SessionID = "s1"
+	opts.UpperBoundary = &upper
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.NextCursor != upper || packet.ToCursor != upper.Line || packet.HasMore || len(packet.Events) != 1 || strings.Contains(packet.Events[0].Summary, "append-canary") {
+		t.Fatalf("bounded packet = %#v", packet)
+	}
+
+	manual := f.options("review")
+	manual.SessionID = "s1"
+	manual.Output = filepath.Join(f.root, "manual.json")
+	manualPacket, err := Run(manual)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manualPacket.ToCursor != 3 || len(manualPacket.Events) != 2 || manualPacket.HasMore {
+		t.Fatalf("manual unbounded packet changed semantics: %#v", manualPacket)
+	}
+}
+
+// This catches stopping because a packet filled before the upper boundary but
+// forgetting that more frozen evidence remains.
+func TestPrepareHonorsFrozenUpperBoundaryHasMoreWithinFrozenRange(t *testing.T) {
+	first := `{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"first"}]}}`
+	second := `{"timestamp":"2026-08-22T10:02:00Z","type":"response_item","payload":{"type":"message","id":"u2","role":"user","content":[{"type":"input_text","text":"second"}]}}`
+	f := newRunFixture(t, "")
+	f.writeSession(t, "s1.jsonl", sessionBody(f.projectRoot, first, second), f.now)
+	upper := evidence.CursorBoundary{Line: 3, SourceHash: f.sourceHash(t, 3)}
+	opts := f.options("review")
+	opts.SessionID = "s1"
+	opts.UpperBoundary = &upper
+	opts.Limits = evidence.Limits{MaxEvents: 1, MaxSummaryRunes: 1200, MaxPacketRunes: 300000}
+	packet, err := Run(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !packet.HasMore || packet.NextCursor.Line != 2 || len(packet.Events) != 1 {
+		t.Fatalf("bounded full packet = %#v", packet)
+	}
+}
+
+// These cases catch trusting an invalid/missing/changed frozen record or an
+// accepted cursor that has already crossed the frozen interval.
+func TestPrepareHonorsFrozenUpperBoundaryRejectsInvalidAndDriftedSources(t *testing.T) {
+	f := newRunFixture(t, "")
+	for _, test := range []struct {
+		name  string
+		upper evidence.CursorBoundary
+	}{
+		{name: "zero", upper: evidence.CursorBoundary{}},
+		{name: "invalid hash", upper: evidence.CursorBoundary{Line: 2, SourceHash: "bad"}},
+		{name: "missing line", upper: evidence.CursorBoundary{Line: 3, SourceHash: strings.Repeat("a", 64)}},
+		{name: "changed hash", upper: evidence.CursorBoundary{Line: 2, SourceHash: strings.Repeat("b", 64)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			local := test.upper
+			opts := f.options("review")
+			opts.SessionID = "s1"
+			opts.Output = filepath.Join(f.root, "out", test.name+".json")
+			opts.UpperBoundary = &local
+			_, err := Run(opts)
+			if test.name == "zero" || test.name == "invalid hash" {
+				if err == nil || errors.Is(err, ErrCursorSourceDrift) {
+					t.Fatalf("Run() validation error = %v", err)
+				}
+			} else if !errors.Is(err, ErrCursorSourceDrift) {
+				t.Fatalf("Run() error = %v, want ErrCursorSourceDrift", err)
+			}
+			if _, statErr := os.Stat(opts.Output); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("drift wrote usable packet: %v", statErr)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name  string
+		upper evidence.CursorBoundary
+	}{
+		{name: "cursor beyond", upper: evidence.CursorBoundary{Line: 1, SourceHash: strings.Repeat("a", 64)}},
+		{name: "cursor equal different hash", upper: evidence.CursorBoundary{Line: 2, SourceHash: strings.Repeat("b", 64)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f2 := newRunFixture(t, "")
+			f2.commitCursor(t, 2)
+			local := test.upper
+			opts := f2.options("review")
+			opts.SessionID = "s1"
+			opts.UpperBoundary = &local
+			if _, err := Run(opts); !errors.Is(err, ErrCursorSourceDrift) {
+				t.Fatalf("Run() error = %v, want ErrCursorSourceDrift", err)
+			}
+		})
+	}
+}
+
 func TestRunExplicitSessionIgnoresUnrelatedCorruptCandidate(t *testing.T) {
 	f := newRunFixture(t, "")
 	const canary = "UNRELATED-CORRUPTION-CANARY"
