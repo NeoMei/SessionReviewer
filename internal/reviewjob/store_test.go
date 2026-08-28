@@ -34,7 +34,7 @@ func TestStoreCreatePublishesCanonicalPrivateLayout(t *testing.T) {
 		assertMode(t, filepath.Join(root, relative), 0o700)
 	}
 	for _, relative := range []string{
-		"review-jobs/jobs/job-1.json", "review-jobs/projects/project-1.json", "review-jobs/locks/store.lock",
+		"review-jobs/jobs/job-1.identity.json", "review-jobs/jobs/job-1.json", "review-jobs/projects/project-1.json", "review-jobs/locks/store.lock",
 	} {
 		assertMode(t, filepath.Join(root, relative), 0o600)
 	}
@@ -304,6 +304,173 @@ func TestStoreRejectsCrossProjectBackupWithSameJobID(t *testing.T) {
 	}
 }
 
+func TestStoreRecoversHistoricalJobAfterLatestPointerAdvances(t *testing.T) {
+	root := newStoreWithJob(t)
+	store := Store{Root: root}
+	if _, _, err := store.Update("job-1", 1, func(job *Job) error {
+		job.AcceptedPackets = 1
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	job2 := validJobFixture()
+	job2.ID = "job-2"
+	if _, err := store.Create(job2); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "review-jobs/jobs/job-1.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, found, err := store.Load("job-1")
+	if err != nil || !found || revision != 1 || loaded.ID != "job-1" || loaded.AcceptedPackets != 0 {
+		t.Fatalf("historical Load() = %#v, revision=%d found=%v err=%v", loaded, revision, found, err)
+	}
+}
+
+func TestStoreIdentityFirstInterruptionLeavesSafeRecoverableOrphan(t *testing.T) {
+	root := newStoreRoot(t)
+	store := Store{Root: root, afterIdentityWrite: func() error { return errors.New("injected after identity") }}
+	if _, err := store.Create(validJobFixture()); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("Create() error = %v", err)
+	}
+	identity := filepath.Join(root, "review-jobs/jobs/job-1.identity.json")
+	assertMode(t, identity, 0o600)
+	if _, err := os.Stat(filepath.Join(root, "review-jobs/jobs/job-1.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("job unexpectedly published after identity interruption: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "review-jobs/projects/project-1.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pointer unexpectedly published after identity interruption: %v", err)
+	}
+	if _, _, found, err := (Store{Root: root}).LatestForProject("project-1"); err != nil || found {
+		t.Fatalf("orphan identity LatestForProject() found=%v err=%v", found, err)
+	}
+	if _, err := (Store{Root: root}).Create(validJobFixture()); err != nil {
+		t.Fatalf("Create() did not safely resume matching orphan identity: %v", err)
+	}
+}
+
+func TestStoreRejectsHostileImmutableIdentityAuthority(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode and symlink assertions")
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, path string)
+	}{
+		{
+			name: "duplicate field",
+			mutate: func(t *testing.T, path string) {
+				body := readFile(t, path)
+				body = bytes.Replace(body, []byte(`"job_id": "job-1"`), []byte(`"job_id": "job-1", "job_id": "job-1"`), 1)
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			mutate: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, bytes.Repeat([]byte("x"), 20<<10), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "weak mode",
+			mutate: func(t *testing.T, path string) {
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			mutate: func(t *testing.T, path string) {
+				outside := filepath.Join(t.TempDir(), "identity.json")
+				if err := os.WriteFile(outside, readFile(t, path), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := newStoreWithJob(t)
+			identity := filepath.Join(root, "review-jobs/jobs/job-1.identity.json")
+			test.mutate(t, identity)
+			if _, _, _, err := (Store{Root: root}).Load("job-1"); err == nil {
+				t.Fatal("Load() accepted hostile immutable identity authority")
+			}
+		})
+	}
+	t.Run("case collision", func(t *testing.T) {
+		root := newStoreWithJob(t)
+		lower := filepath.Join(root, "review-jobs/jobs/job-1.identity.json")
+		upper := filepath.Join(root, "review-jobs/jobs/Job-1.identity.json")
+		body := readFile(t, lower)
+		if err := os.WriteFile(upper, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		lowerInfo, lowerErr := os.Lstat(lower)
+		upperInfo, upperErr := os.Lstat(upper)
+		if lowerErr == nil && upperErr == nil && os.SameFile(lowerInfo, upperInfo) {
+			t.Skip("filesystem is case-insensitive")
+		}
+		if _, _, _, err := (Store{Root: root}).Load("job-1"); err == nil {
+			t.Fatal("Load() accepted identity filename case collision")
+		}
+	})
+}
+
+func TestStoreBackupRepairIgnoresUnrelatedCorruptPointerInventory(t *testing.T) {
+	root := newStoreRoot(t)
+	for index := 1; index <= 8; index++ {
+		job := validJobFixture()
+		job.ID = fmt.Sprintf("job-%02d", index)
+		job.ProjectID = fmt.Sprintf("project-%02d", index)
+		job.ProjectIdentity.File = fmt.Sprintf("%d", 100+index)
+		store := Store{Root: root}
+		if _, err := store.Create(job); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := store.Update(job.ID, 1, func(job *Job) error {
+			job.AcceptedPackets = 1
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "review-jobs/jobs", job.ID+".json"), []byte("{corrupt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(filepath.Join(root, "review-jobs/projects/project-01.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "review-jobs/projects/project-08.json"), []byte("{unrelated corrupt pointer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	identityReads := 0
+	store := Store{
+		Root: root,
+		afterJobIdentityRead: func() error {
+			identityReads++
+			return nil
+		},
+	}
+	job, revision, found, err := store.LatestForProject("project-01")
+	if err != nil || !found || revision != 1 || job.ID != "job-01" {
+		t.Fatalf("LatestForProject() = %#v, %d, %v, %v", job, revision, found, err)
+	}
+	if identityReads != 8 {
+		t.Fatalf("identity reads=%d, want one per candidate", identityReads)
+	}
+}
+
 func TestStoreRejectsExhaustedRevisionWithoutMutation(t *testing.T) {
 	root := newStoreWithJob(t)
 	primary := filepath.Join(root, "review-jobs/jobs/job-1.json")
@@ -520,9 +687,14 @@ func TestStoreMissingPointerRepairScansAndReadsEachCandidateOnce(t *testing.T) {
 func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
 	root := newStoreRoot(t)
 	store := Store{Root: root}
-	for _, id := range []string{"../escape", "Job-1", "CON", strings.Repeat("a", 129)} {
+	for _, id := range []string{"../escape", "Job-1", "CON", "job.identity", strings.Repeat("a", 129)} {
 		if _, _, _, err := store.Load(id); err == nil {
 			t.Fatalf("Load(%q) accepted unsafe ID", id)
+		}
+		job := validJobFixture()
+		job.ID = id
+		if _, err := store.Create(job); err == nil {
+			t.Fatalf("Create(%q) accepted unsafe ID", id)
 		}
 	}
 	if _, err := store.Create(validJobFixture()); err != nil {

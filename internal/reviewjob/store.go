@@ -26,6 +26,7 @@ var (
 
 const (
 	maxJobRecordBytes        = 4 << 20
+	maxJobIdentityBytes      = 16 << 10
 	maxJobRepairBytes        = 8 << 20
 	maxProjectPointerBytes   = 16 << 10
 	maxJobDirectoryEntries   = 4_096
@@ -37,7 +38,9 @@ type Store struct {
 	Root string
 
 	beforePointerWrite    func() error
+	afterIdentityWrite    func() error
 	afterJobRead          func() error
+	afterJobIdentityRead  func() error
 	afterJobDirectoryScan func() error
 	writeRoot             func(*os.Root, string, []byte, fs.FileMode) error
 }
@@ -54,12 +57,21 @@ type projectPointer struct {
 	JobID           string                  `json:"job_id"`
 }
 
+type jobIdentity struct {
+	SchemaVersion   int                     `json:"schema_version"`
+	JobID           string                  `json:"job_id"`
+	ProjectID       string                  `json:"project_id"`
+	ProjectIdentity pathguard.IdentityToken `json:"project_identity"`
+}
+
 type jobStatePair struct {
-	id          string
-	primaryName string
-	primaryInfo os.FileInfo
-	backupName  string
-	backupInfo  os.FileInfo
+	id           string
+	identityName string
+	identityInfo os.FileInfo
+	primaryName  string
+	primaryInfo  os.FileInfo
+	backupName   string
+	backupInfo   os.FileInfo
 }
 
 type storeLayout struct {
@@ -94,10 +106,19 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 
-	if err := rejectCaseCollision(layout.jobs, job.ID+".json", job.ID+".json.bak"); err != nil {
+	if err := rejectCaseCollision(layout.jobs, jobIdentityName(job.ID), job.ID+".json", job.ID+".json.bak"); err != nil {
 		return 0, err
 	}
-	if _, _, found, err := s.loadFromJobs(layout.jobs, layout.projects, job.ID); err != nil {
+	createdIdentity, err := s.ensureJobIdentity(layout.jobs, job)
+	if err != nil {
+		return 0, err
+	}
+	if createdIdentity && s.afterIdentityWrite != nil {
+		if err := s.afterIdentityWrite(); err != nil {
+			return 0, fmt.Errorf("publish review job identity: %w", err)
+		}
+	}
+	if _, _, found, err := s.loadFromJobs(layout.jobs, job.ID); err != nil {
 		return 0, err
 	} else if found {
 		return 0, errors.New("review job already exists")
@@ -118,7 +139,7 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	if err := s.writer()(layout.jobs, job.ID+".json", encoded, 0o600); err != nil {
 		return 0, fmt.Errorf("persist review job: %w", err)
 	}
-	written, writtenRevision, found, err := s.loadFromJobs(layout.jobs, layout.projects, job.ID)
+	written, writtenRevision, found, err := s.loadFromJobs(layout.jobs, job.ID)
 	if err != nil || !found || writtenRevision != 1 || !reflect.DeepEqual(written, job) {
 		return 0, errors.New("review job failed canonical post-write verification")
 	}
@@ -146,7 +167,7 @@ func (s Store) Load(jobID string) (job Job, revision int, found bool, retErr err
 	if layout.missing {
 		return Job{}, 0, false, nil
 	}
-	return s.loadFromJobs(layout.jobs, layout.projects, jobID)
+	return s.loadFromJobs(layout.jobs, jobID)
 }
 
 func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) error) (job Job, revision int, retErr error) {
@@ -173,7 +194,7 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 
-	current, currentRevision, found, err := s.loadFromJobs(layout.jobs, layout.projects, jobID)
+	current, currentRevision, found, err := s.loadFromJobs(layout.jobs, jobID)
 	if err != nil {
 		return Job{}, 0, err
 	}
@@ -211,7 +232,7 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 	if err := s.writer()(layout.jobs, jobID+".json", encoded, 0o600); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("persist review job update: %w", err)
 	}
-	written, writtenRevision, found, err := s.loadFromJobs(layout.jobs, layout.projects, jobID)
+	written, writtenRevision, found, err := s.loadFromJobs(layout.jobs, jobID)
 	if err != nil || !found || writtenRevision != nextRevision || !reflect.DeepEqual(written, next) {
 		return Job{}, currentRevision, errors.New("review job update failed canonical post-write verification")
 	}
@@ -238,7 +259,7 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 		return Job{}, 0, false, err
 	}
 	if pointerFound {
-		return s.loadAuthenticatedPointer(layout.jobs, layout.projects, pointer, projectID)
+		return s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
 	}
 
 	lock, err := acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
@@ -251,9 +272,9 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 		return Job{}, 0, false, err
 	}
 	if pointerFound {
-		return s.loadAuthenticatedPointer(layout.jobs, layout.projects, pointer, projectID)
+		return s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
 	}
-	job, revision, found, err = s.latestJobByEnumeration(layout.jobs, layout.projects, projectID)
+	job, revision, found, err = s.latestJobByEnumeration(layout.jobs, projectID)
 	if err != nil || !found {
 		return job, revision, found, err
 	}
@@ -263,11 +284,11 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 	return job, revision, true, nil
 }
 
-func (s Store) loadAuthenticatedPointer(jobs, projects *os.Root, pointer projectPointer, projectID string) (Job, int, bool, error) {
+func (s Store) loadAuthenticatedPointer(jobs *os.Root, pointer projectPointer, projectID string) (Job, int, bool, error) {
 	if pointer.ProjectID != projectID {
 		return Job{}, 0, false, errors.New("project pointer names another project")
 	}
-	job, revision, found, err := s.loadFromJobs(jobs, projects, pointer.JobID)
+	job, revision, found, err := s.loadFromJobs(jobs, pointer.JobID)
 	if err != nil || !found {
 		if err != nil {
 			return Job{}, 0, false, err
@@ -280,7 +301,7 @@ func (s Store) loadAuthenticatedPointer(jobs, projects *os.Root, pointer project
 	return job, revision, true, nil
 }
 
-func (s Store) latestJobByEnumeration(jobs, projects *os.Root, projectID string) (Job, int, bool, error) {
+func (s Store) latestJobByEnumeration(jobs *os.Root, projectID string) (Job, int, bool, error) {
 	pairs, err := s.snapshotJobDirectory(jobs)
 	if err != nil {
 		return Job{}, 0, false, fmt.Errorf("enumerate review jobs: %w", err)
@@ -288,10 +309,23 @@ func (s Store) latestJobByEnumeration(jobs, projects *os.Root, projectID string)
 	var selected Job
 	selectedRevision := 0
 	for _, pair := range pairs {
+		if pair.identityInfo == nil {
+			return Job{}, 0, false, errors.New("review job state lacks immutable identity authority")
+		}
+		authority, err := s.readJobIdentityInfo(jobs, pair.identityName, pair.id, pair.identityInfo)
+		if err != nil {
+			return Job{}, 0, false, err
+		}
+		if pair.primaryInfo == nil && pair.backupInfo == nil {
+			continue
+		}
 		var record storedJob
 		var primaryErr error
 		if pair.primaryInfo != nil {
 			record, primaryErr = s.readStoredJobInfo(jobs, pair.primaryName, pair.id, pair.primaryInfo)
+			if primaryErr == nil {
+				primaryErr = authenticateStoredJob(record, authority)
+			}
 		}
 		if pair.primaryInfo == nil || primaryErr != nil {
 			if pair.backupInfo == nil {
@@ -301,7 +335,7 @@ func (s Store) latestJobByEnumeration(jobs, projects *os.Root, projectID string)
 			if err != nil {
 				return Job{}, 0, false, errors.New("review job and recovery backup are corrupt")
 			}
-			if err := authenticateBackupRecovery(projects, record); err != nil {
+			if err := authenticateStoredJob(record, authority); err != nil {
 				return Job{}, 0, false, err
 			}
 		}
@@ -340,10 +374,13 @@ func (s Store) snapshotJobDirectory(jobs *os.Root) ([]jobStatePair, error) {
 		}
 		seenNames[folded] = name
 		base := name
-		backup := false
-		if strings.HasSuffix(base, ".json.bak") {
+		kind := "primary"
+		if strings.HasSuffix(base, ".identity.json") {
+			base = strings.TrimSuffix(base, ".identity.json") + ".json"
+			kind = "identity"
+		} else if strings.HasSuffix(base, ".json.bak") {
 			base = strings.TrimSuffix(base, ".bak")
-			backup = true
+			kind = "backup"
 		}
 		if !strings.HasSuffix(base, ".json") {
 			return nil, errors.New("invalid review job filename")
@@ -353,7 +390,11 @@ func (s Store) snapshotJobDirectory(jobs *os.Root) ([]jobStatePair, error) {
 			return nil, errors.New("invalid review job filename")
 		}
 		info, found, err := regularPrivateEntry(jobs, name)
-		if err != nil || !found || info.Size() > maxJobRecordBytes {
+		maxBytes := int64(maxJobRecordBytes)
+		if kind == "identity" {
+			maxBytes = maxJobIdentityBytes
+		}
+		if err != nil || !found || info.Size() > maxBytes {
 			return nil, errors.New("review job repair entry is invalid, redirected, or oversized")
 		}
 		if info.Size() > maxJobRepairBytes-aggregate {
@@ -362,9 +403,12 @@ func (s Store) snapshotJobDirectory(jobs *os.Root) ([]jobStatePair, error) {
 		aggregate += info.Size()
 		pair := pairsByID[id]
 		pair.id = id
-		if backup {
+		switch kind {
+		case "identity":
+			pair.identityName, pair.identityInfo = name, info
+		case "backup":
 			pair.backupName, pair.backupInfo = name, info
-		} else {
+		default:
 			pair.primaryName, pair.primaryInfo = name, info
 		}
 		pairsByID[id] = pair
@@ -377,21 +421,35 @@ func (s Store) snapshotJobDirectory(jobs *os.Root) ([]jobStatePair, error) {
 	return result, nil
 }
 
-func (s Store) loadFromJobs(jobs, projects *os.Root, jobID string) (Job, int, bool, error) {
-	if err := rejectCaseCollision(jobs, jobID+".json", jobID+".json.bak"); err != nil {
+func (s Store) loadFromJobs(jobs *os.Root, jobID string) (Job, int, bool, error) {
+	if err := rejectCaseCollision(jobs, jobIdentityName(jobID), jobID+".json", jobID+".json.bak"); err != nil {
 		return Job{}, 0, false, err
 	}
 	primaryName, backupName := jobID+".json", jobID+".json.bak"
+	authority, authorityFound, authorityErr := s.readJobIdentity(jobs, jobID)
+	if authorityErr != nil {
+		return Job{}, 0, false, authorityErr
+	}
 	if _, _, err := regularPrivateEntry(jobs, backupName); err != nil {
 		return Job{}, 0, false, err
 	}
 	primary, primaryFound, primaryErr := s.readStoredJob(jobs, primaryName, jobID)
 	if primaryFound && primaryErr == nil {
+		if !authorityFound {
+			primaryErr = errors.New("review job state lacks immutable identity authority")
+		} else {
+			primaryErr = authenticateStoredJob(primary, authority)
+		}
+	}
+	if primaryFound && primaryErr == nil {
 		return primary.Job, primary.Revision, true, nil
 	}
 	backup, backupFound, backupErr := s.readStoredJob(jobs, backupName, jobID)
 	if backupFound && backupErr == nil {
-		if err := authenticateBackupRecovery(projects, backup); err != nil {
+		if !authorityFound {
+			return Job{}, 0, false, errors.New("review job recovery backup lacks immutable identity authority")
+		}
+		if err := authenticateStoredJob(backup, authority); err != nil {
 			return Job{}, 0, false, err
 		}
 		return backup.Job, backup.Revision, true, nil
@@ -402,42 +460,79 @@ func (s Store) loadFromJobs(jobs, projects *os.Root, jobID string) (Job, int, bo
 	return Job{}, 0, false, errors.New("review job and recovery backup are corrupt")
 }
 
-func authenticateBackupRecovery(projects *os.Root, backup storedJob) error {
-	entries, err := readBoundedEntries(projects, maxProjectPointerEntries)
+func (s Store) ensureJobIdentity(jobs *os.Root, job Job) (bool, error) {
+	expected := jobIdentityFor(job)
+	current, found, err := s.readJobIdentity(jobs, job.ID)
 	if err != nil {
-		return errors.New("cannot authenticate review job recovery backup")
+		return false, err
 	}
-	seenNames := make(map[string]string, len(entries))
-	var authority projectPointer
-	matches := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		folded := strings.ToLower(name)
-		if previous, found := seenNames[folded]; found && previous != name {
-			return errors.New("project review pointer names collide case-insensitively")
+	if found {
+		if current != expected {
+			return false, errors.New("immutable review job identity does not match create request")
 		}
-		seenNames[folded] = name
-		if !strings.HasSuffix(name, ".json") {
-			return errors.New("invalid project review pointer filename")
-		}
-		projectID := strings.TrimSuffix(name, ".json")
-		if err := validateStoreID(projectID, "project"); err != nil {
-			return errors.New("invalid project review pointer filename")
-		}
-		pointer, found, err := readProjectPointer(projects, projectID)
-		if err != nil || !found {
-			return errors.New("cannot authenticate review job recovery backup")
-		}
-		if pointer.JobID == backup.Job.ID {
-			authority = pointer
-			matches++
+		return false, nil
+	}
+	for _, name := range []string{job.ID + ".json", job.ID + ".json.bak"} {
+		if _, mutableFound, err := regularPrivateEntry(jobs, name); err != nil {
+			return false, err
+		} else if mutableFound {
+			return false, errors.New("review job state exists without immutable identity authority")
 		}
 	}
-	if matches != 1 || authority.ProjectID != backup.Job.ProjectID || authority.ProjectIdentity != backup.Job.ProjectIdentity {
-		return errors.New("review job recovery backup has no unique authenticated project pointer")
+	body, err := marshalCanonical(expected, maxJobIdentityBytes)
+	if err != nil {
+		return false, err
+	}
+	name := jobIdentityName(job.ID)
+	err = atomicfile.WriteRootFileCreateIfAbsent(jobs, name, body, 0o600, nil)
+	created := err == nil
+	if err != nil && !errors.Is(err, os.ErrExist) {
+		return false, fmt.Errorf("persist immutable review job identity: %w", err)
+	}
+	written, found, readErr := s.readJobIdentity(jobs, job.ID)
+	if readErr != nil || !found || written != expected {
+		return false, errors.New("immutable review job identity failed canonical post-write verification")
+	}
+	return created, nil
+}
+
+func (s Store) readJobIdentity(root *os.Root, jobID string) (jobIdentity, bool, error) {
+	name := jobIdentityName(jobID)
+	info, found, err := regularPrivateEntry(root, name)
+	if err != nil || !found {
+		return jobIdentity{}, found, err
+	}
+	authority, err := s.readJobIdentityInfo(root, name, jobID, info)
+	return authority, true, err
+}
+
+func (s Store) readJobIdentityInfo(root *os.Root, name, jobID string, info os.FileInfo) (jobIdentity, error) {
+	body, err := readStableCanonical(root, name, info, maxJobIdentityBytes, s.afterJobIdentityRead)
+	if err != nil {
+		return jobIdentity{}, err
+	}
+	var authority jobIdentity
+	if err := decodeStrictCanonical(body, &authority); err != nil {
+		return jobIdentity{}, errors.New("immutable review job identity is corrupt")
+	}
+	if authority.SchemaVersion != PublicStatusSchemaVersion || authority.JobID != jobID || validateStoreID(authority.JobID, "job") != nil || validateStoreID(authority.ProjectID, "project") != nil || !authority.ProjectIdentity.Valid() {
+		return jobIdentity{}, errors.New("immutable review job identity is invalid")
+	}
+	return authority, nil
+}
+
+func authenticateStoredJob(record storedJob, authority jobIdentity) error {
+	if record.Job.ID != authority.JobID || record.Job.ProjectID != authority.ProjectID || record.Job.ProjectIdentity != authority.ProjectIdentity {
+		return errors.New("review job state does not match immutable identity authority")
 	}
 	return nil
 }
+
+func jobIdentityFor(job Job) jobIdentity {
+	return jobIdentity{SchemaVersion: PublicStatusSchemaVersion, JobID: job.ID, ProjectID: job.ProjectID, ProjectIdentity: job.ProjectIdentity}
+}
+
+func jobIdentityName(jobID string) string { return jobID + ".identity.json" }
 
 func (s Store) readStoredJob(root *os.Root, name, jobID string) (storedJob, bool, error) {
 	info, found, err := regularPrivateEntry(root, name)
@@ -837,7 +932,7 @@ func readBoundedEntries(root *os.Root, limit int) ([]fs.DirEntry, error) {
 }
 
 func validateStoreID(value, label string) error {
-	if !validID(value) || windowsReservedName(value) {
+	if !validID(value) || windowsReservedName(value) || (label == "job" && strings.HasSuffix(value, ".identity")) {
 		return fmt.Errorf("invalid %s ID", label)
 	}
 	return nil
