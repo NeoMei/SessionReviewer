@@ -31,13 +31,15 @@ type Capability struct {
 // Request contains the complete private input for one ephemeral Agent run.
 // WorkingDirectory is process configuration and must not be embedded in Prompt.
 type Request struct {
-	Prompt           []byte
-	OutputSchema     []byte
+	Prompt           []byte // Proposal-only prompt with bounded untrusted data.
+	OutputSchema     []byte // Agent-draft schema; host-owned accounting is forbidden.
 	WorkingDirectory string
 	Deadline         time.Time
 }
 
-// Result contains untrusted proposal bytes plus private review-run accounting.
+// Result contains untrusted Agent-draft bytes plus private review-run
+// accounting. Source-session accounting is inserted later by the trusted host;
+// Proposal must not be treated as final or apply-valid before that enrichment.
 type Result struct {
 	Proposal []byte
 	Model    string
