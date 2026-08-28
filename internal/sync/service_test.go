@@ -1765,6 +1765,147 @@ func TestNewEngineRejectsUnsafeRootContainmentDirections(t *testing.T) {
 	}
 }
 
+// Removing either containment direction from the Vault review-target guard
+// lets scanVault and Vault writes treat the authoritative Project as editable
+// Vault content.
+func TestNewEngineRejectsVaultReviewTargetContainingOrEqualProject(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		projectRelative string
+	}{
+		{name: "target contains project", projectRelative: "project"},
+		{name: "target equals project"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			projectRoot := target
+			if test.projectRelative != "" {
+				projectRoot = filepath.Join(target, test.projectRelative)
+			}
+			if err := os.MkdirAll(filepath.Dir(projectRoot), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(fixture.project, projectRoot); err != nil {
+				t.Fatal(err)
+			}
+			fixture.project = projectRoot
+
+			engine, err := NewEngine(fixture.options())
+			if engine != nil {
+				_ = engine.Close()
+				t.Fatal("NewEngine returned an engine for an overlapping Vault review target")
+			}
+			if err == nil || err.Error() != "vault review target must be disjoint from the authoritative Project" {
+				t.Fatalf("NewEngine error=%v", err)
+			}
+		})
+	}
+}
+
+func TestNewEngineRejectsCaseAliasReviewTargetContainingProject(t *testing.T) {
+	fixture := newEngineFixture(t)
+	fixture.vaultReviewPath = "Projects/CaseAlias--11111111/Session Review"
+	physicalTarget := filepath.Join(fixture.vault, "projects", "casealias--11111111", "session review")
+	projectRoot := filepath.Join(physicalTarget, "project")
+	if err := os.MkdirAll(filepath.Dir(projectRoot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(fixture.project, projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	fixture.project = projectRoot
+	options := fixture.options()
+	options.VaultCaseMode = platform.CaseInsensitive
+
+	engine, err := NewEngine(options)
+	if engine != nil {
+		_ = engine.Close()
+		t.Fatal("NewEngine accepted a case-alias review target containing the Project")
+	}
+	if err == nil || err.Error() != "vault review target must be disjoint from the authoritative Project" {
+		t.Fatalf("NewEngine error=%v", err)
+	}
+}
+
+func TestNewEngineRejectsSymlinkOrReparseReviewTargetAliasContainingProject(t *testing.T) {
+	fixture := newEngineFixture(t)
+	realParent := filepath.Join(fixture.vault, "real-review-parent")
+	projectRoot := filepath.Join(realParent, "Session Review", "project")
+	if err := os.MkdirAll(filepath.Dir(projectRoot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(fixture.project, projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	fixture.project = projectRoot
+	aliasParent := filepath.Join(fixture.vault, "Projects")
+	if err := os.MkdirAll(aliasParent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(aliasParent, "Alias--11111111")
+	if err := os.Symlink(realParent, alias); err != nil {
+		t.Skipf("symlink/reparse-point creation is unavailable: %v", err)
+	}
+	fixture.vaultReviewPath = "Projects/Alias--11111111/Session Review"
+
+	engine, err := NewEngine(fixture.options())
+	if engine != nil {
+		_ = engine.Close()
+		t.Fatal("NewEngine followed a review-target symlink/reparse alias containing the Project")
+	}
+	if err == nil {
+		t.Fatal("NewEngine accepted a redirected Vault review target")
+	}
+}
+
+func TestMutatingEntrypointsAuthenticateReviewTargetBeforeMigrationOrRecovery(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*Engine) error
+	}{
+		{
+			name: "machine ledger repair",
+			run: func(engine *Engine) error {
+				_, err := engine.RepairMachineLedger(t.Context())
+				return err
+			},
+		},
+		{
+			name: "conflict resolution",
+			run: func(engine *Engine) error {
+				_, err := engine.Resolve(t.Context(), Resolution{
+					ConflictID: "conflict-project-overview-0123456789ab",
+					Action:     AcceptProject,
+				})
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+
+			aliasParent := filepath.Join(fixture.vault, "Projects")
+			if err := os.MkdirAll(aliasParent, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			alias := filepath.Join(aliasParent, "SessionReviewer--11111111")
+			if err := os.Symlink(fixture.project, alias); err != nil {
+				t.Skipf("symlink/reparse-point creation is unavailable: %v", err)
+			}
+
+			if err := test.run(engine); err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+				t.Fatalf("entrypoint error=%v, want review-target identity failure before recovery", err)
+			}
+		})
+	}
+}
+
 func writeFixtureDecision(t *testing.T, fixture engineFixture, relative string) {
 	t.Helper()
 	body := "---\nid: decision-sync\nentity_type: decision\nproject_id: " + fixture.projectID + "\nrevision: 1\nsync_status: synced\ntitle: Sync decision\nstatus: accepted\ntags: [sync]\nsupersedes: []\nsource_sessions: [session-1]\nevidence:\n  - evidence_id: evidence-1\n    session_id: session-1\n    jsonl_line: 1\n    source_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    summary: accepted\n---\n\n# Sync decision\n\n## Alternatives\n\n## Rejected paths\n"

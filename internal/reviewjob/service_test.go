@@ -689,6 +689,72 @@ func TestWorkerRunsRealSyncForNestedProjectAfterDurableAcceptedApply(t *testing.
 	}
 }
 
+func TestWorkerRejectsReviewTargetContainingProjectBeforePrepareApplyOrSync(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	reviewPath := "Projects/Worker--11111111/Session Review"
+	target := filepath.Join(fixture.vault, filepath.FromSlash(reviewPath))
+	projectRoot := filepath.Join(target, "project")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(fixture.project, projectRoot); err != nil {
+		t.Fatal(err)
+	}
+	fixture.project = projectRoot
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{
+		Version: 1,
+		Projects: []config.ProjectMapping{{
+			ID: fixture.job.ProjectID, Root: fixture.project, VaultRoot: fixture.vault,
+			VaultReviewPath: reviewPath, VaultCaseMode: platform.CaseSensitive,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	prepareCalls, applyCalls, syncCalls := 0, 0, 0
+	adapter := &verifiedWorkerAgent{
+		capability: workerCapability("fixture", "1.0.0"),
+		generate: func(agent.Request) (agent.Result, error) {
+			t.Fatal("unsafe mapping reached Agent generation")
+			return agent.Result{}, nil
+		},
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			prepareCalls++
+			return Prepared{}, errors.New("unsafe mapping reached Prepare")
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) {
+			applyCalls++
+			return apply.Result{}, errors.New("unsafe mapping reached Apply")
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			syncCalls++
+			return syncengine.Report{}, errors.New("unsafe mapping reached Sync")
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted a review target containing the authoritative Project")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Failed || job.Error.Code != ApplyRecovery {
+		t.Fatalf("unsafe mapping job=%#v found=%v err=%v", job, found, err)
+	}
+	if prepareCalls != 0 || adapter.generateCalls != 0 || applyCalls != 0 || syncCalls != 0 {
+		t.Fatalf("unsafe mapping crossed preflight: prepare=%d generate=%d apply=%d sync=%d", prepareCalls, adapter.generateCalls, applyCalls, syncCalls)
+	}
+	if entries, err := os.ReadDir(target); err != nil || len(entries) != 1 || entries[0].Name() != "project" {
+		t.Fatalf("unsafe target was mutated: entries=%v err=%v", entries, err)
+	}
+}
+
 func TestWorkerAcceptsRealCompletedLegacyMigrationAudit(t *testing.T) {
 	fixture := newWorkerFixture(t, nil)
 	seedWorkerLegacyReviewAndSyncData(t, fixture)

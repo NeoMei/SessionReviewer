@@ -139,6 +139,98 @@ func TestSyncProjectServiceReconcilesProjectNestedInsideVault(t *testing.T) {
 	}
 }
 
+func TestPinMappingRejectsReviewTargetContainingOrEqualProject(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		projectRelative string
+	}{
+		{name: "target contains project", projectRelative: "project"},
+		{name: "target equals project"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			vaultRoot := filepath.Join(root, "vault")
+			dataRoot := filepath.Join(root, "data")
+			projectID := "project-1111111111111111"
+			reviewPath := "Projects/Unsafe--11111111/Session Review"
+			target := filepath.Join(vaultRoot, filepath.FromSlash(reviewPath))
+			projectRoot := target
+			if test.projectRelative != "" {
+				projectRoot = filepath.Join(target, test.projectRelative)
+			}
+			for _, directory := range []string{projectRoot, filepath.Join(dataRoot, "projects", projectID)} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{
+				Version: 1,
+				Projects: []config.ProjectMapping{{
+					ID: projectID, Root: projectRoot, VaultRoot: vaultRoot,
+					VaultReviewPath: reviewPath, VaultCaseMode: platform.CaseSensitive,
+				}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			pin, err := PinMapping(Options{
+				ProjectID: projectID, CWD: projectRoot, DataDir: dataRoot,
+				GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI,
+			})
+			if pin != nil {
+				_ = pin.Close()
+				t.Fatal("PinMapping returned a pin for an overlapping review target")
+			}
+			if err == nil {
+				t.Fatal("PinMapping accepted an overlapping review target")
+			}
+		})
+	}
+}
+
+func TestPinMappingRecheckRejectsReviewTargetRedirectedToContainProject(t *testing.T) {
+	root := t.TempDir()
+	vaultRoot := filepath.Join(root, "vault")
+	dataRoot := filepath.Join(root, "data")
+	projectID := "project-1111111111111111"
+	projectRoot := filepath.Join(vaultRoot, "Session Review", "project")
+	reviewPath := "Projects/Alias--11111111/Session Review"
+	for _, directory := range []string{
+		projectRoot,
+		filepath.Join(vaultRoot, "Projects"),
+		filepath.Join(dataRoot, "projects", projectID),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{
+		Version: 1,
+		Projects: []config.ProjectMapping{{
+			ID: projectID, Root: projectRoot, VaultRoot: vaultRoot,
+			VaultReviewPath: reviewPath, VaultCaseMode: platform.CaseSensitive,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		ProjectID: projectID, CWD: projectRoot, DataDir: dataRoot,
+		GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI,
+	}
+	pin, err := PinMapping(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	alias := filepath.Join(vaultRoot, "Projects", "Alias--11111111")
+	if err := os.Symlink(vaultRoot, alias); err != nil {
+		t.Skipf("symlink/reparse-point creation is unavailable: %v", err)
+	}
+	if err := pin.Recheck(options); err == nil {
+		t.Fatal("MappingPin accepted a review-target redirect to an ancestor of Project")
+	}
+}
+
 func TestSyncProjectRejectsReviewTargetInsideNestedProjectWithoutWrites(t *testing.T) {
 	root := t.TempDir()
 	vaultRoot := filepath.Join(root, "vault")

@@ -14,6 +14,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
 const (
@@ -42,6 +43,7 @@ type MappingPin struct {
 	syncData *pathguard.Directory
 	mapping  config.ProjectMapping
 	config   configNamespacePin
+	target   syncengine.ReviewTargetPin
 }
 
 type configNamespacePin struct {
@@ -119,6 +121,11 @@ func PinMapping(options Options) (_ *MappingPin, retErr error) {
 	if err := runPinCheckpoint(options, pinAfterVaultOpen); err != nil {
 		return nil, err
 	}
+	target, err := syncengine.PinReviewTarget(mapping.VaultReviewPath, mapping.VaultCaseMode, project, vault)
+	if err != nil {
+		return nil, err
+	}
+	pin.target = target
 	syncData, err := pathguard.Open(filepath.Join(data.Path, "projects", mapping.ID))
 	if err != nil {
 		return nil, errors.New("configured project sync data root is unavailable or unsafe")
@@ -218,7 +225,10 @@ func (pin *MappingPin) verify(options Options) error {
 	if closeErr != nil || !sameData {
 		return errors.New("requested Data root identity changed")
 	}
-	return verifyConfigNamespace(pin.data, pin.config)
+	if err := verifyConfigNamespace(pin.data, pin.config); err != nil {
+		return err
+	}
+	return pin.target.Recheck(pin.project, pin.vault)
 }
 
 func captureConfigNamespace(data *pathguard.Directory) (configNamespacePin, error) {

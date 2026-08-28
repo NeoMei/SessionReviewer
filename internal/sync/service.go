@@ -22,6 +22,8 @@ import (
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 type Trigger string
@@ -138,14 +140,18 @@ type Engine struct {
 	bases                  BaseStore
 	transactions           TransactionStore
 	writer                 RootedWriter
-	vaultTarget            vaultTargetBinding
+	vaultTarget            ReviewTargetPin
 	trustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 }
 
-type vaultTargetBinding struct {
+// ReviewTargetPin authenticates the configured Vault review subtree without
+// exposing its physical identities. It is reusable by mapping and worker
+// preflight checks so sync cannot be the first component to discover overlap.
+type ReviewTargetPin struct {
 	full       string
 	anchorInfo os.FileInfo
 	targetInfo os.FileInfo
+	caseMode   platform.CaseMode
 }
 
 func NewEngine(options Options) (*Engine, error) {
@@ -209,7 +215,7 @@ func NewEngine(options Options) (*Engine, error) {
 		_ = dataRoot.Close()
 		return nil, errors.New("sync data root must be disjoint from project and vault roots")
 	}
-	vaultTarget, err := authenticateVaultTarget(options.VaultReviewPath, projectRoot, vaultRoot)
+	vaultTarget, err := PinReviewTarget(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
 	if err != nil {
 		_ = projectRoot.Close()
 		_ = vaultRoot.Close()
@@ -271,45 +277,76 @@ func (engine *Engine) verifyRootBindings() error {
 			return fmt.Errorf("sync %s root identity changed", expected.name)
 		}
 	}
-	return engine.vaultTarget.verify(engine.project, engine.vault)
+	return engine.vaultTarget.Recheck(engine.project, engine.vault)
 }
 
-func authenticateVaultTarget(reviewPath string, project, vault *pathguard.Directory) (vaultTargetBinding, error) {
+// PinReviewTarget requires Project and the editable Vault review subtree to be
+// disjoint in both containment directions. Existing components are also
+// authenticated by physical ancestry, catching aliases beyond path spelling.
+func PinReviewTarget(reviewPath string, caseMode platform.CaseMode, project, vault *pathguard.Directory) (ReviewTargetPin, error) {
 	if project == nil || vault == nil || reviewPath == "" || strings.Contains(reviewPath, `\`) ||
-		path.Clean(reviewPath) != reviewPath || path.IsAbs(reviewPath) || reviewPath == "." || reviewPath == ".." || strings.HasPrefix(reviewPath, "../") {
-		return vaultTargetBinding{}, errors.New("vault review target is invalid")
+		path.Clean(reviewPath) != reviewPath || path.IsAbs(reviewPath) || reviewPath == "." || reviewPath == ".." || strings.HasPrefix(reviewPath, "../") ||
+		(caseMode != platform.CaseSensitive && caseMode != platform.CaseInsensitive) {
+		return ReviewTargetPin{}, errors.New("vault review target is invalid")
 	}
 	full := filepath.Join(vault.Path, filepath.FromSlash(reviewPath))
 	withinVault, err := filepath.Rel(vault.Path, full)
 	if err != nil || withinVault == "." || withinVault == ".." || strings.HasPrefix(withinVault, ".."+string(filepath.Separator)) {
-		return vaultTargetBinding{}, errors.New("vault review target escapes its Vault root")
+		return ReviewTargetPin{}, errors.New("vault review target escapes its Vault root")
 	}
 	opened, remaining, err := pathguard.OpenDeepest(full)
 	if err != nil {
-		return vaultTargetBinding{}, errors.New("vault review target is unsafe")
+		return ReviewTargetPin{}, errors.New("vault review target is unsafe")
 	}
 	defer opened.Close()
-	if !opened.ContainsIdentity(vault.Info()) || vaultTargetInsideProject(full, project, opened) {
-		return vaultTargetBinding{}, errors.New("vault review target must be outside the authoritative Project")
+	if !opened.ContainsIdentity(vault.Info()) || vaultTargetOverlapsProject(full, project, opened, len(remaining) == 0, caseMode) {
+		return ReviewTargetPin{}, errors.New("vault review target must be disjoint from the authoritative Project")
 	}
-	binding := vaultTargetBinding{full: full, anchorInfo: opened.Info()}
+	binding := ReviewTargetPin{full: full, anchorInfo: opened.Info(), caseMode: caseMode}
 	if len(remaining) == 0 {
 		binding.targetInfo = opened.Info()
 	}
 	return binding, nil
 }
 
-func vaultTargetInsideProject(full string, project, deepest *pathguard.Directory) bool {
+func vaultTargetOverlapsProject(full string, project, deepest *pathguard.Directory, targetExists bool, caseMode platform.CaseMode) bool {
 	if project == nil || deepest == nil {
 		return true
 	}
-	relative, err := filepath.Rel(project.Path, full)
-	lexical := err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-	return lexical || deepest.ContainsIdentity(project.Info())
+	if lexicalPathContains(project.Path, full, caseMode) || lexicalPathContains(full, project.Path, caseMode) {
+		return true
+	}
+	if deepest.ContainsIdentity(project.Info()) {
+		return true
+	}
+	return targetExists && project.ContainsIdentity(deepest.Info())
 }
 
-func (binding vaultTargetBinding) verify(project, vault *pathguard.Directory) error {
-	if binding.full == "" || binding.anchorInfo == nil || project == nil || vault == nil {
+func lexicalPathContains(parent, child string, caseMode platform.CaseMode) bool {
+	parent = norm.NFC.String(filepath.ToSlash(filepath.Clean(parent)))
+	child = norm.NFC.String(filepath.ToSlash(filepath.Clean(child)))
+	if runtime.GOOS == "windows" || caseMode == platform.CaseInsensitive {
+		folder := cases.Fold()
+		parent = folder.String(parent)
+		child = folder.String(child)
+	}
+	if parent == "" || child == "" {
+		return false
+	}
+	if parent == child {
+		return true
+	}
+	if strings.HasSuffix(parent, "/") {
+		return strings.HasPrefix(child, parent)
+	}
+	return strings.HasPrefix(child, parent+"/")
+}
+
+// Recheck proves the current target still has the pinned ancestry and remains
+// disjoint from the authoritative Project.
+func (binding ReviewTargetPin) Recheck(project, vault *pathguard.Directory) error {
+	if binding.full == "" || binding.anchorInfo == nil || project == nil || vault == nil ||
+		(binding.caseMode != platform.CaseSensitive && binding.caseMode != platform.CaseInsensitive) {
 		return errors.New("vault review target binding is unavailable")
 	}
 	opened, remaining, err := pathguard.OpenDeepest(binding.full)
@@ -317,7 +354,9 @@ func (binding vaultTargetBinding) verify(project, vault *pathguard.Directory) er
 		return errors.New("vault review target identity changed")
 	}
 	defer opened.Close()
-	if !opened.ContainsIdentity(vault.Info()) || vaultTargetInsideProject(binding.full, project, opened) || !opened.ContainsIdentity(binding.anchorInfo) {
+	if !opened.ContainsIdentity(vault.Info()) ||
+		vaultTargetOverlapsProject(binding.full, project, opened, len(remaining) == 0, binding.caseMode) ||
+		!opened.ContainsIdentity(binding.anchorInfo) {
 		return errors.New("vault review target identity changed")
 	}
 	if binding.targetInfo != nil && (len(remaining) != 0 || !os.SameFile(binding.targetInfo, opened.Info())) {
@@ -1120,6 +1159,10 @@ func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineRe
 	if ctx == nil {
 		return report, errors.New("sync context is required")
 	}
+	if err := engine.verifyRootBindings(); err != nil {
+		return report, err
+	}
+	defer func() { retErr = errors.Join(retErr, engine.verifyRootBindings()) }()
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
@@ -1171,6 +1214,10 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 	} else if resolution.ManualFile != "" {
 		return report, ErrInvalidResolution
 	}
+	if err := engine.verifyRootBindings(); err != nil {
+		return report, err
+	}
+	defer func() { retErr = errors.Join(retErr, engine.verifyRootBindings()) }()
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
