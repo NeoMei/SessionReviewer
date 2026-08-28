@@ -64,9 +64,24 @@ class ButtonControl {
   onClick(_callback: () => void): this { return this; }
 }
 export class Setting {
-  constructor(_container: unknown) {}
-  setName(_value: string): this { return this; }
-  setDesc(_value: string): this { return this; }
+  private readonly settingEl: HTMLElement;
+  private readonly nameEl: HTMLElement;
+  private readonly descEl: HTMLElement;
+
+  constructor(container: HTMLElement) {
+    this.settingEl = document.createElement("div");
+    this.settingEl.className = "setting-item";
+    this.nameEl = document.createElement("div");
+    this.nameEl.className = "setting-item-name";
+    this.descEl = document.createElement("div");
+    this.descEl.className = "setting-item-description";
+    this.settingEl.append(this.nameEl, this.descEl);
+    container.append(this.settingEl);
+  }
+
+  setName(value: string): this { this.nameEl.textContent = value; return this; }
+  setDesc(value: string): this { this.descEl.textContent = value; return this; }
+  setHeading(): this { this.settingEl.classList.add("mod-heading"); return this; }
   addText(callback: (control: TextControl) => void): this { callback(new TextControl()); return this; }
   addButton(callback: (control: ButtonControl) => void): this { callback(new ButtonControl()); return this; }
 }

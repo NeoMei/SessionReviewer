@@ -14,7 +14,9 @@ export class CliSettingsTab extends PluginSettingTab {
 
   display(): void {
     this.containerEl.empty();
-    this.containerEl.createEl("h2", { text: "SessionReviewer CLI" });
+    new Setting(this.containerEl)
+      .setName("SessionReviewer CLI")
+      .setHeading();
     new Setting(this.containerEl)
       .setName("CLI 可执行文件")
       .setDesc("仅保存在 Obsidian 插件设置中。不会写入 Markdown 或机器账本。")
