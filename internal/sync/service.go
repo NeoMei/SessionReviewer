@@ -35,7 +35,7 @@ const (
 
 type Options struct {
 	ProjectRoot, VaultRoot, VaultReviewPath, DataRoot, ProjectID, GOOS string
-	ProjectRootExpected                                                os.FileInfo
+	ProjectRootExpected, VaultRootExpected, DataRootExpected           os.FileInfo
 	VaultCaseMode                                                      platform.CaseMode
 	Retry                                                              RetryPolicy
 	Debounce                                                           time.Duration
@@ -168,11 +168,22 @@ func NewEngine(options Options) (*Engine, error) {
 		_ = projectRoot.Close()
 		return nil, errors.New("vault root is unavailable or unsafe")
 	}
+	if options.VaultRootExpected != nil && !os.SameFile(options.VaultRootExpected, vaultRoot.Info()) {
+		_ = projectRoot.Close()
+		_ = vaultRoot.Close()
+		return nil, errors.New("vault root identity changed after mapping resolution")
+	}
 	dataRoot, err := pathguard.Open(options.DataRoot)
 	if err != nil {
 		_ = projectRoot.Close()
 		_ = vaultRoot.Close()
 		return nil, errors.New("sync data root is unavailable or unsafe")
+	}
+	if options.DataRootExpected != nil && !os.SameFile(options.DataRootExpected, dataRoot.Info()) {
+		_ = projectRoot.Close()
+		_ = vaultRoot.Close()
+		_ = dataRoot.Close()
+		return nil, errors.New("sync data root identity changed after mapping resolution")
 	}
 	if projectRoot.ContainsIdentity(vaultRoot.Info()) || vaultRoot.ContainsIdentity(projectRoot.Info()) {
 		_ = projectRoot.Close()
@@ -212,6 +223,32 @@ func (engine *Engine) Close() error {
 	return errors.Join(engine.project.Close(), engine.vault.Close(), engine.data.Close())
 }
 
+func (engine *Engine) verifyRootBindings() error {
+	if engine == nil || engine.project == nil || engine.vault == nil || engine.data == nil {
+		return errors.New("sync root bindings are unavailable")
+	}
+	for _, expected := range []struct {
+		name string
+		path string
+		info os.FileInfo
+	}{
+		{name: "project", path: engine.project.Path, info: engine.project.Info()},
+		{name: "vault", path: engine.vault.Path, info: engine.vault.Info()},
+		{name: "data", path: engine.data.Path, info: engine.data.Info()},
+	} {
+		reopened, err := pathguard.Open(expected.path)
+		if err != nil {
+			return fmt.Errorf("sync %s root identity changed", expected.name)
+		}
+		same := os.SameFile(expected.info, reopened.Info())
+		closeErr := reopened.Close()
+		if closeErr != nil || !same {
+			return fmt.Errorf("sync %s root identity changed", expected.name)
+		}
+	}
+	return nil
+}
+
 func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (report Report, retErr error) {
 	report = Report{
 		ProjectID: engine.options.ProjectID, DryRun: request.DryRun,
@@ -223,6 +260,10 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	if ctx == nil {
 		return report, errors.New("sync context is required")
 	}
+	if err := engine.verifyRootBindings(); err != nil {
+		return report, err
+	}
+	defer func() { retErr = errors.Join(retErr, engine.verifyRootBindings()) }()
 	if request.Trigger == "" {
 		request.Trigger = TriggerCLI
 	}
@@ -240,12 +281,12 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	}
 	migrationCommitted := false
 	if !request.DryRun && request.Trigger == TriggerCLI {
-		if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+		if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info()); err != nil {
 			return report, errors.New("review migration recovery failed")
 		}
 	}
 	if request.Trigger != TriggerCLI {
-		pending, pendingErr := reviewv2.MigrationPending(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot)
+		pending, pendingErr := reviewv2.MigrationPending(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info())
 		if pendingErr != nil {
 			return report, errors.New("review migration state is invalid")
 		}
@@ -283,7 +324,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		}
 	}
 	if version == reviewv2.VersionLegacy {
-		plan, err := reviewv2.PlanMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.options.Now().UTC())
+		plan, err := reviewv2.PlanMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.options.Now().UTC(), engine.data.Info())
 		if err != nil {
 			return report, errors.New("review migration planning failed")
 		}
@@ -1010,7 +1051,7 @@ func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineRe
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info()); err != nil {
 		return report, errors.New("review migration recovery failed")
 	}
 	transactions, err := engine.transactions.List()
@@ -1066,7 +1107,7 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot); err != nil {
+	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info()); err != nil {
 		return report, fmt.Errorf("review migration recovery failed: %w", err)
 	}
 	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())

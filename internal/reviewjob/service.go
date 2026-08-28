@@ -48,47 +48,44 @@ type Prepared struct {
 }
 
 // PrepareRequest exposes only the frozen session boundary and a private output
-// path. Implementations normally wrap prepare.Run and reviewv2.Load.
+// path. Implementations normally wrap prepare.Run and reviewv2.Load. Before
+// any write they must open ProjectRoot/DataDir with pathguard and require the
+// supplied physical identities; path strings alone are not authorization.
 type PrepareRequest struct {
-	JobID          string
-	ProjectID      string
-	SessionID      string
-	SessionIndex   int
-	AcceptedCursor evidence.CursorBoundary
-	UpperBoundary  evidence.CursorBoundary
-	EvidencePath   string
-	ProjectRoot    string
-	DataDir        string
+	JobID           string
+	ProjectID       string
+	SessionID       string
+	SessionIndex    int
+	AcceptedCursor  evidence.CursorBoundary
+	UpperBoundary   evidence.CursorBoundary
+	EvidencePath    string
+	ProjectRoot     string
+	DataDir         string
+	ProjectIdentity pathguard.IdentityToken
+	DataIdentity    pathguard.IdentityToken
 }
 
 type PrepareFunc func(context.Context, PrepareRequest) (Prepared, error)
 
 // ApplyRequest contains a proposal that has already received trusted source
 // accounting and passed proposal.Validate. Paths name authenticated private
-// worker files and never enter Job or public status.
+// worker files and never enter Job or public status. Apply implementations
+// must authenticate ProjectIdentity/DataIdentity immediately before mutation.
 type ApplyRequest struct {
-	JobID        string
-	ProjectRoot  string
-	DataDir      string
-	EvidencePath string
-	ProposalPath string
-	Packet       evidence.Packet
-	Proposal     proposal.Proposal
-	Changes      ledger.ChangeSet
+	JobID           string
+	ProjectRoot     string
+	DataDir         string
+	ProjectIdentity pathguard.IdentityToken
+	DataIdentity    pathguard.IdentityToken
+	EvidencePath    string
+	ProposalPath    string
+	Packet          evidence.Packet
+	Proposal        proposal.Proposal
+	Changes         ledger.ChangeSet
 }
 
 type ApplyFunc func(context.Context, ApplyRequest) (apply.Result, error)
 type SyncFunc func(context.Context, syncproject.Options) (syncengine.Report, error)
-
-// VerifiedAgentAdapter is deliberately a post-verification control-plane
-// seam. Run never calls Verify, accepts a caller-constructed Capability field,
-// or manufactures a capability from a version string. A production provider
-// can reach generation only through a wrapper that owns successful verification.
-type VerifiedAgentAdapter interface {
-	VerifiedCapability() agent.Capability
-	GenerateProposal(context.Context, agent.Request) (agent.Result, error)
-	Cancel(context.Context) error
-}
 
 // RunOptions contains the trusted one-shot worker dependencies. Frozen
 // sessions and all public progress are loaded from Store, never supplied here.
@@ -106,35 +103,69 @@ type RunOptions struct {
 	Now          func() time.Time
 
 	Prepare PrepareFunc
-	Agent   VerifiedAgentAdapter
+	Agent   *AgentHandle
 	Apply   ApplyFunc
 	Sync    SyncFunc
 	Pricing PricingResolver
+
+	beforeCleanupBoundary func() error
+	afterCleanupBoundary  func() error
 }
 
 type worker struct {
 	options  RunOptions
 	job      Job
 	revision int
+	leases   *LeaseSet
 	roots    *workerRoots
 	work     *jobWork
 }
 
 type workerRoots struct {
-	project *pathguard.Directory
-	vault   *pathguard.Directory
-	data    *pathguard.Directory
+	project         *pathguard.Directory
+	vault           *pathguard.Directory
+	data            *pathguard.Directory
+	projectIdentity pathguard.IdentityToken
+	vaultIdentity   pathguard.IdentityToken
+	dataIdentity    pathguard.IdentityToken
+	syncPin         *syncproject.MappingPin
 }
 
 func (roots *workerRoots) close() error {
 	if roots == nil {
 		return nil
 	}
-	return errors.Join(roots.project.Close(), roots.vault.Close(), roots.data.Close())
+	return errors.Join(roots.syncPin.Close(), roots.project.Close(), roots.vault.Close(), roots.data.Close())
+}
+
+func (roots *workerRoots) verify() error {
+	if roots == nil {
+		return errors.New("worker roots are unavailable")
+	}
+	for _, expected := range []struct {
+		name      string
+		directory *pathguard.Directory
+		identity  pathguard.IdentityToken
+	}{
+		{name: "Project", directory: roots.project, identity: roots.projectIdentity},
+		{name: "Vault", directory: roots.vault, identity: roots.vaultIdentity},
+		{name: "Data", directory: roots.data, identity: roots.dataIdentity},
+	} {
+		reopened, err := pathguard.Open(expected.directory.Path)
+		if err != nil {
+			return fmt.Errorf("worker %s root changed", expected.name)
+		}
+		identity, identityErr := reopened.PhysicalIdentity()
+		same := os.SameFile(expected.directory.Info(), reopened.Info())
+		closeErr := reopened.Close()
+		if identityErr != nil || closeErr != nil || !same || identity != expected.identity {
+			return fmt.Errorf("worker %s root changed", expected.name)
+		}
+	}
+	return nil
 }
 
 type jobWork struct {
-	layout       *storeLayout
 	jobRoot      *os.Root
 	inputs       *os.Root
 	agent        *os.Root
@@ -148,7 +179,7 @@ func (work *jobWork) close() error {
 	if work == nil {
 		return nil
 	}
-	return errors.Join(closeRoot(work.inputs), closeRoot(work.agent), closeRoot(work.jobRoot), work.layout.finish())
+	return errors.Join(closeRoot(work.inputs), closeRoot(work.agent), closeRoot(work.jobRoot))
 }
 
 func closeRoot(root *os.Root) error {
@@ -168,13 +199,11 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	if err := validateRunOptions(options); err != nil {
 		return err
 	}
-	job, revision, found, err := options.Store.Load(options.JobID)
+	job, revision, leases, err := options.Store.acquireJobLeases(options.JobID, options.LeaseTimeout)
 	if err != nil {
 		return err
 	}
-	if !found {
-		return os.ErrNotExist
-	}
+	defer func() { retErr = errors.Join(retErr, leases.Release()) }()
 	if job.State != Queued && job.State != Retrying {
 		return errors.New("review job is not ready for one-shot execution")
 	}
@@ -182,17 +211,11 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 		return errors.New("review job does not begin at preflight")
 	}
 
-	leases, err := options.Store.AcquireLeases(job.ProjectID, job.ID, options.LeaseTimeout)
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, leases.Release()) }()
-
-	runner := &worker{options: options, job: job, revision: revision}
+	runner := &worker{options: options, job: job, revision: revision, leases: leases}
 	if err := runner.start(); err != nil {
 		return err
 	}
-	roots, err := authenticateWorkerRoots(options, runner.job)
+	roots, err := authenticateWorkerRoots(options, runner.job, leases)
 	if err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
@@ -208,11 +231,10 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	if options.Prepare == nil || options.Agent == nil || options.Apply == nil {
 		return runner.fail(AgentUnconfigured, errors.New("pending review job lacks a worker dependency"))
 	}
-	capability := options.Agent.VerifiedCapability()
-	if err := validateVerifiedCapability(capability, runner.job); err != nil {
+	if err := options.Agent.validateFor(runner.job); err != nil {
 		return runner.fail(AgentIncompatible, err)
 	}
-	work, err := openJobWork(options.Store, runner.job.ID)
+	work, err := openJobWork(leases, runner.job.ID)
 	if err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
@@ -262,12 +284,11 @@ func (runner *worker) start() error {
 		job.Owner = Owner{ID: runner.options.OwnerID, AcquiredAt: started}
 		job.Error = SafeError{}
 		job.PrivateError = ""
-		job.SyncOnlyAvailable = false
 		return nil
 	})
 }
 
-func authenticateWorkerRoots(options RunOptions, job Job) (*workerRoots, error) {
+func authenticateWorkerRoots(options RunOptions, job Job, leases *LeaseSet) (*workerRoots, error) {
 	project, err := pathguard.Open(options.ProjectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("open worker Project root: %w", err)
@@ -288,16 +309,8 @@ func authenticateWorkerRoots(options RunOptions, job Job) (*workerRoots, error) 
 		_ = vault.Close()
 		return nil, fmt.Errorf("open worker data root: %w", err)
 	}
-	storeRoot, err := pathguard.Open(options.Store.Root)
-	if err != nil {
-		_ = project.Close()
-		_ = vault.Close()
-		_ = data.Close()
-		return nil, err
-	}
-	sameData := os.SameFile(data.Info(), storeRoot.Info())
-	storeCloseErr := storeRoot.Close()
-	if storeCloseErr != nil || !sameData {
+	if leases == nil || leases.layout == nil || leases.layout.data == nil ||
+		!os.SameFile(data.Info(), leases.layout.data.Info()) || data.Path != leases.layout.data.Path {
 		_ = project.Close()
 		_ = vault.Close()
 		_ = data.Close()
@@ -315,7 +328,30 @@ func authenticateWorkerRoots(options RunOptions, job Job) (*workerRoots, error) 
 		_ = data.Close()
 		return nil, errors.New("worker private data root must be physically disjoint from Project and Vault")
 	}
-	return &workerRoots{project: project, vault: vault, data: data}, nil
+	syncPin, err := syncproject.PinMapping(syncproject.Options{
+		ProjectID: job.ProjectID, CWD: project.Path, DataDir: data.Path,
+		GOOS: options.GOOS, Now: options.Now, Trigger: syncengine.TriggerCLI,
+	})
+	if err != nil {
+		_ = project.Close()
+		_ = vault.Close()
+		_ = data.Close()
+		return nil, fmt.Errorf("pin worker sync mapping: %w", err)
+	}
+	vaultIdentity, vaultErr := vault.PhysicalIdentity()
+	dataIdentity, dataErr := data.PhysicalIdentity()
+	if vaultErr != nil || dataErr != nil {
+		_ = syncPin.Close()
+		_ = project.Close()
+		_ = vault.Close()
+		_ = data.Close()
+		return nil, errors.New("worker root identity is unavailable")
+	}
+	return &workerRoots{
+		project: project, vault: vault, data: data,
+		projectIdentity: job.ProjectIdentity, vaultIdentity: vaultIdentity, dataIdentity: dataIdentity,
+		syncPin: syncPin,
+	}, nil
 }
 
 func authenticateConfiguredMapping(data, project, vault *pathguard.Directory, projectID string) error {
@@ -347,29 +383,15 @@ func rootsOverlap(first, second *pathguard.Directory) bool {
 	return first.ContainsIdentity(second.Info()) || second.ContainsIdentity(first.Info())
 }
 
-func validateVerifiedCapability(capability agent.Capability, job Job) error {
-	if capability.Provider != job.Agent.Kind || capability.Version != job.Agent.Version ||
-		!capability.ProposalOnly || !capability.NoTools || !capability.ReadOnly ||
-		capability.Containment != agent.ContainmentRestrictedReadOnly ||
-		!capability.StructuredOutput || !capability.NativeCancellation ||
-		capability.ModelProvenance != agent.ModelProvenanceUnavailable {
-		return errors.New("verified Agent capability does not satisfy the proposal-only no-tools contract")
-	}
-	return nil
-}
-
-func openJobWork(store Store, jobID string) (_ *jobWork, retErr error) {
-	layout, err := store.openLayout(false)
-	if err != nil {
-		return nil, err
-	}
-	if layout == nil || layout.missing {
-		if layout != nil {
-			_ = layout.close()
-		}
+func openJobWork(leases *LeaseSet, jobID string) (_ *jobWork, retErr error) {
+	if leases == nil || leases.layout == nil || leases.layout.missing {
 		return nil, os.ErrNotExist
 	}
-	work := &jobWork{layout: layout}
+	if err := leases.verify(); err != nil {
+		return nil, err
+	}
+	layout := leases.layout
+	work := &jobWork{}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, work.close())
@@ -407,15 +429,22 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err := runner.setPhase(Preparing); err != nil {
 		return err
 	}
+	if err := runner.verifyMutationRoots(); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	}
 	prepared, err := runner.options.Prepare(ctx, PrepareRequest{
 		JobID: runner.job.ID, ProjectID: runner.job.ProjectID,
 		SessionID: frozen.SessionID, SessionIndex: runner.job.SessionIndex,
 		AcceptedCursor: runner.job.CurrentPacket, UpperBoundary: frozen.Upper,
 		EvidencePath: runner.work.packetPath,
 		ProjectRoot:  runner.roots.project.Path, DataDir: runner.roots.data.Path,
+		ProjectIdentity: runner.roots.projectIdentity, DataIdentity: runner.roots.dataIdentity,
 	})
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
+	}
+	if err := runner.verifyMutationRoots(); err != nil {
+		return runner.fail(ApplyRecovery, err)
 	}
 	packet := prepared.Packet
 	if err := validatePrepared(packet, prepared.Accepted, runner.job, frozen); err != nil {
@@ -435,6 +464,8 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err := runner.update(func(job *Job) error {
 		job.Phase = Reviewing
 		job.PacketDigest = packetDigest
+		job.PayloadState = PayloadRetained
+		job.PayloadRetainedFor = ""
 		job.UpdatedAt = runner.timestamp()
 		return nil
 	}); err != nil {
@@ -443,14 +474,19 @@ func (runner *worker) runPacket(ctx context.Context) error {
 
 	bundle, err := reviewprompt.Build(reviewprompt.Input{
 		Packet: packet, Accepted: prepared.Accepted.State, OutputSchema: reviewprompt.FinalProposalSchema(),
+		GOOS: runner.options.GOOS,
+		ForbiddenRoots: []reviewprompt.ForbiddenRoot{
+			{CanonicalPath: runner.roots.project.Path, Aliases: distinctAliases(runner.roots.project.Path, runner.options.ProjectRoot)},
+			{CanonicalPath: runner.roots.vault.Path, Aliases: distinctAliases(runner.roots.vault.Path, runner.options.VaultRoot)},
+			{CanonicalPath: runner.roots.data.Path, Aliases: distinctAliases(runner.roots.data.Path, runner.options.DataDir, runner.options.Store.Root)},
+			{CanonicalPath: runner.work.inputsPath},
+			{CanonicalPath: runner.work.agentPath},
+		},
 	})
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
-	if err := rejectRequestPathLeak(bundle, runner.roots, runner.work); err != nil {
-		return runner.fail(ProposalRejected, err)
-	}
-	result, err := runner.options.Agent.GenerateProposal(ctx, agent.Request{
+	result, err := runner.options.Agent.generate(ctx, agent.Request{
 		Prompt:           bundle.Prompt,
 		OutputSchema:     bundle.OutputSchema,
 		WorkingDirectory: runner.work.agentPath,
@@ -463,6 +499,18 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err != nil {
 		return runner.fail(mapAgentError(err), err)
 	}
+	if err := ctx.Err(); err != nil {
+		return runner.fail(AgentCancelled, err)
+	}
+	if err := runner.verifyMutationRoots(); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	}
+	// The accepted capability cannot attest provider model provenance. Treat a
+	// nonempty model as a contradictory result and reject it before persisting
+	// either model metadata or token usage.
+	if result.Model != "" {
+		return runner.fail(AgentIncompatible, errors.New("Agent returned model provenance that its verified capability cannot attest"))
+	}
 	reviewAccounting, err := AddReviewResult(runner.job.ReviewAccounting, result, runner.job.StartedAt, runner.options.Pricing)
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
@@ -473,6 +521,9 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return runner.fail(AgentCancelled, err)
 	}
 	draft, err := proposal.Decode(bytes.NewReader(result.Proposal))
 	if err != nil {
@@ -491,6 +542,9 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return runner.fail(AgentCancelled, err)
+	}
 	proposalBody, err := json.Marshal(draft)
 	if err != nil || len(proposalBody) > maxPrivateProposalBytes {
 		return runner.fail(ProposalRejected, errors.New("final proposal cannot be encoded within its private bound"))
@@ -506,15 +560,28 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return runner.fail(AgentCancelled, err)
+	}
+	if err := runner.verifyMutationRoots(); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return runner.fail(AgentCancelled, err)
+	}
 	if err := runner.setPhase(Applying); err != nil {
-		return err
+		return runner.fail(ProposalRejected, err)
 	}
 	applyResult, err := runner.options.Apply(context.WithoutCancel(ctx), ApplyRequest{
 		JobID: runner.job.ID, ProjectRoot: runner.roots.project.Path, DataDir: runner.roots.data.Path,
+		ProjectIdentity: runner.roots.projectIdentity, DataIdentity: runner.roots.dataIdentity,
 		EvidencePath: runner.work.packetPath, ProposalPath: runner.work.proposalPath,
 		Packet: packet, Proposal: draft, Changes: changes,
 	})
 	if err != nil {
+		return runner.fail(ApplyRecovery, err)
+	}
+	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
 	if err := validateApplyResult(applyResult, packet); err != nil {
@@ -526,15 +593,34 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		}
 		job.AcceptedPackets++
 		job.CurrentPacket = packet.NextCursor
+		job.AcceptedSyncPending = true
 		job.UpdatedAt = runner.timestamp()
 		return nil
 	}); err != nil {
-		return err
+		return runner.fail(ApplyRecovery, err)
 	}
 	if err := runner.runSync(ctx); err != nil {
 		return err
 	}
-	if err := removePrivatePayloads(runner.work.inputs); err != nil {
+	if runner.options.beforeCleanupBoundary != nil {
+		if err := runner.options.beforeCleanupBoundary(); err != nil {
+			return err
+		}
+	}
+	if err := runner.update(func(job *Job) error {
+		job.PayloadState = PayloadCleanupPending
+		job.PayloadRetainedFor = ""
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	}); err != nil {
+		return runner.fail(SyncPartial, err)
+	}
+	if runner.options.afterCleanupBoundary != nil {
+		if err := runner.options.afterCleanupBoundary(); err != nil {
+			return err
+		}
+	}
+	if err := cleanupPrivatePayloads(runner.work.inputs, runner.job); err != nil {
 		return runner.fail(SyncPartial, err)
 	}
 	if err := runner.update(func(job *Job) error {
@@ -546,10 +632,12 @@ func (runner *worker) runPacket(ctx context.Context) error {
 			job.AcceptedSessions++
 			job.CurrentPacket = evidence.CursorBoundary{}
 		}
+		job.PayloadState = PayloadCleanupComplete
+		job.PayloadRetainedFor = ""
 		job.UpdatedAt = runner.timestamp()
 		return nil
 	}); err != nil {
-		return err
+		return runner.fail(SyncPartial, err)
 	}
 	return nil
 }
@@ -584,13 +672,17 @@ func validatePrepared(packet evidence.Packet, accepted reviewv2.Accepted, job Jo
 	return nil
 }
 
-func rejectRequestPathLeak(bundle reviewprompt.Bundle, roots *workerRoots, work *jobWork) error {
-	for _, path := range []string{roots.project.Path, roots.vault.Path, roots.data.Path, work.inputsPath, work.agentPath, work.packetPath, work.proposalPath} {
-		if path != "" && (bytes.Contains(bundle.Prompt, []byte(path)) || bytes.Contains(bundle.OutputSchema, []byte(path))) {
-			return errors.New("Agent request bytes contain a host-owned path")
+func distinctAliases(canonical string, candidates ...string) []string {
+	aliases := make([]string, 0, len(candidates))
+	seen := map[string]bool{canonical: true}
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate != "" && !seen[candidate] {
+			seen[candidate] = true
+			aliases = append(aliases, candidate)
 		}
 	}
-	return nil
+	return aliases
 }
 
 func enrichSourceAccounting(draft *proposal.Proposal, usage *accounting.SessionUsage, at time.Time, resolver PricingResolver) error {
@@ -640,15 +732,26 @@ func validateApplyResult(result apply.Result, packet evidence.Packet) error {
 }
 
 func (runner *worker) runSync(ctx context.Context) error {
+	if err := runner.verifyMutationRoots(); err != nil {
+		code := ApplyRecovery
+		if runner.job.AcceptedSyncPending {
+			code = SyncPartial
+		}
+		return runner.fail(code, err)
+	}
 	if err := runner.setPhase(Syncing); err != nil {
-		return err
+		return runner.fail(SyncPartial, err)
 	}
 	report, err := runner.options.Sync(context.WithoutCancel(ctx), syncproject.Options{
 		ProjectID: runner.job.ProjectID, CWD: runner.roots.project.Path,
 		DataDir: runner.roots.data.Path, GOOS: runner.options.GOOS,
 		Now: runner.options.Now, Trigger: syncengine.TriggerCLI,
+		Pin: runner.roots.syncPin,
 	})
 	if err != nil {
+		return runner.fail(SyncPartial, err)
+	}
+	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(SyncPartial, err)
 	}
 	if report.ProjectID != runner.job.ProjectID {
@@ -658,9 +761,18 @@ func (runner *worker) runSync(ctx context.Context) error {
 		return runner.fail(SyncConflict, errors.New("sync reported a conflict"))
 	}
 	if len(report.Issues) != 0 || len(report.Errors) != 0 || report.QueueDepth != 0 ||
-		report.Migration.Required || report.Derived.State != syncengine.DerivedCurrent ||
+		report.DryRun || report.Migration.DryRun || report.Migration.Required || len(report.Migration.Creates) != 0 || len(report.Migration.Archives) != 0 ||
+		report.Derived.State != syncengine.DerivedCurrent ||
 		report.Machine.State != syncengine.MachineCurrent {
 		return runner.fail(SyncPartial, errors.New("sync reported partial or blocked work"))
+	}
+	err = runner.update(func(job *Job) error {
+		job.AcceptedSyncPending = false
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	})
+	if err != nil {
+		return runner.fail(SyncPartial, err)
 	}
 	return nil
 }
@@ -680,7 +792,10 @@ func (runner *worker) complete() error {
 		job.Owner = Owner{}
 		job.Error = SafeError{}
 		job.PrivateError = ""
-		job.SyncOnlyAvailable = false
+		job.AcceptedSyncPending = false
+		if job.PayloadState == PayloadCleanupPending || job.PayloadState == PayloadRetained || job.PayloadState == PayloadApplyRecovery {
+			return errors.New("review worker cannot complete with private payload cleanup pending")
+		}
 		return nil
 	})
 }
@@ -697,12 +812,35 @@ func (runner *worker) setPhase(phase Phase) error {
 }
 
 func (runner *worker) update(mutate func(*Job) error) error {
-	job, revision, err := runner.options.Store.Update(runner.job.ID, runner.revision, mutate)
+	job, revision, err := runner.leases.update(runner.options.Store, runner.job.ID, runner.revision, mutate)
 	if err != nil {
 		return err
 	}
 	runner.job, runner.revision = job, revision
 	return nil
+}
+
+func (runner *worker) updateTerminal(mutate func(*Job) error) error {
+	job, revision, err := runner.leases.updateTerminal(runner.options.Store, runner.job.ID, runner.revision, mutate)
+	if err != nil {
+		return err
+	}
+	runner.job, runner.revision = job, revision
+	return nil
+}
+
+func (runner *worker) verifyMutationRoots() error {
+	if err := runner.leases.verify(); err != nil {
+		return err
+	}
+	if err := runner.roots.verify(); err != nil {
+		return err
+	}
+	return runner.roots.syncPin.Recheck(syncproject.Options{
+		ProjectID: runner.job.ProjectID, CWD: runner.roots.project.Path, DataDir: runner.roots.data.Path,
+		GOOS: runner.options.GOOS, Now: runner.options.Now, Trigger: syncengine.TriggerCLI,
+		Pin: runner.roots.syncPin,
+	})
 }
 
 func (runner *worker) timestamp() time.Time {
@@ -720,11 +858,15 @@ func (runner *worker) timestamp() time.Time {
 }
 
 func (runner *worker) fail(code ErrorCode, cause error) error {
-	if runner.work != nil {
-		cause = errors.Join(cause, removePrivatePayloads(runner.work.inputs))
-	}
+	retainForRecovery := code == ApplyRecovery && runner.work != nil && runner.job.Phase == Applying &&
+		runner.job.PacketDigest != "" && runner.job.ResultDigest != ""
 	completed := runner.timestamp()
-	persistErr := runner.update(func(job *Job) error {
+	if !retainForRecovery && runner.work != nil && runner.options.beforeCleanupBoundary != nil {
+		if err := runner.options.beforeCleanupBoundary(); err != nil {
+			return errors.Join(cause, err)
+		}
+	}
+	persistErr := runner.updateTerminal(func(job *Job) error {
 		job.State = Failed
 		job.Phase = ""
 		job.UpdatedAt = completed
@@ -732,10 +874,36 @@ func (runner *worker) fail(code ErrorCode, cause error) error {
 		job.Owner = Owner{}
 		job.Error = SafeError{Code: code}
 		job.PrivateError = boundedPrivateError(cause)
-		job.SyncOnlyAvailable = job.AcceptedPackets != 0
+		if retainForRecovery {
+			job.PayloadState = PayloadApplyRecovery
+			job.PayloadRetainedFor = ApplyRecovery
+		} else if runner.work != nil {
+			job.PayloadState = PayloadCleanupPending
+			job.PayloadRetainedFor = ""
+		}
 		return nil
 	})
-	return errors.Join(cause, persistErr)
+	if persistErr != nil || retainForRecovery || runner.work == nil {
+		return errors.Join(cause, persistErr)
+	}
+	if runner.options.afterCleanupBoundary != nil {
+		if err := runner.options.afterCleanupBoundary(); err != nil {
+			return errors.Join(cause, err)
+		}
+	}
+	cleanupErr := cleanupPrivatePayloads(runner.work.inputs, runner.job)
+	if cleanupErr != nil {
+		return errors.Join(cause, cleanupErr)
+	}
+	completeErr := runner.updateTerminal(func(job *Job) error {
+		if job.State != Failed || job.PayloadState != PayloadCleanupPending {
+			return ErrStaleRevision
+		}
+		job.PayloadState = PayloadCleanupComplete
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	})
+	return errors.Join(cause, completeErr)
 }
 
 func boundedPrivateError(err error) string {
@@ -826,13 +994,19 @@ func readStablePrivatePayload(root *os.Root, name string, before os.FileInfo, li
 	return body, nil
 }
 
-func removePrivatePayloads(root *os.Root) error {
+func cleanupPrivatePayloads(root *os.Root, job Job) error {
 	if root == nil {
 		return nil
 	}
 	var result error
-	for _, name := range []string{packetWorkName, proposalWorkName} {
-		_, found, err := regularPrivateEntry(root, name)
+	for _, payload := range []struct {
+		name   string
+		digest string
+	}{
+		{name: packetWorkName, digest: job.PacketDigest},
+		{name: proposalWorkName, digest: job.ResultDigest},
+	} {
+		_, found, err := regularPrivateEntry(root, payload.name)
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -840,9 +1014,70 @@ func removePrivatePayloads(root *os.Root) error {
 		if !found {
 			continue
 		}
-		if err := atomicfile.RemoveRoot(root, name); err != nil {
+		digest := strings.TrimPrefix(payload.digest, "sha256:")
+		if payload.digest == "" || digest == payload.digest || !lowercaseSHA256.MatchString(digest) {
+			result = errors.Join(result, errors.New("private worker payload lacks an authenticated cleanup digest"))
+			continue
+		}
+		if err := atomicfile.RemoveRootFileIfHashMatches(root, payload.name, digest); err != nil {
+			result = errors.Join(result, err)
+		}
+	}
+	entries, err := readBoundedEntries(root, maxWorkEntries)
+	if err != nil {
+		return errors.Join(result, err)
+	}
+	parentInfo, err := root.Stat(".")
+	if err != nil {
+		return errors.Join(result, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !privateAtomicTempName(name) {
+			continue
+		}
+		info, found, err := regularPrivateEntry(root, name)
+		if err != nil || !found || !sameFileOwner(parentInfo, info) {
+			result = errors.Join(result, errors.New("private atomic temporary file is not safely owned"), err)
+			continue
+		}
+		digest, err := stablePrivateFileDigest(root, name, info, maxPrivateProposalBytes)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if err := atomicfile.RemoveRootFileIfHashMatches(root, name, digest); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
 	return result
+}
+
+func privateAtomicTempName(name string) bool {
+	const prefix = ".session-reviewer-"
+	if len(name) != len(prefix)+32 || !strings.HasPrefix(name, prefix) {
+		return false
+	}
+	decoded, err := hex.DecodeString(name[len(prefix):])
+	return err == nil && len(decoded) == 16 && hex.EncodeToString(decoded) == name[len(prefix):]
+}
+
+func stablePrivateFileDigest(root *os.Root, name string, before os.FileInfo, limit int64) (string, error) {
+	if before == nil || before.Size() < 0 || before.Size() > limit {
+		return "", errors.New("private atomic temporary file exceeds cleanup bound")
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return "", err
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, limit+1))
+	opened, statErr := file.Stat()
+	closeErr := file.Close()
+	after, nameErr := root.Lstat(name)
+	if readErr != nil || statErr != nil || closeErr != nil || nameErr != nil || int64(len(body)) > limit ||
+		!sameFileMetadata(before, opened) || !sameFileMetadata(opened, after) || isRedirect(after) {
+		return "", errors.New("private atomic temporary file changed while authenticating cleanup")
+	}
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:]), nil
 }

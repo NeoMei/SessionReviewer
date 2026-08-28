@@ -38,6 +38,15 @@ const (
 	Syncing   Phase = "syncing"
 )
 
+type PayloadState string
+
+const (
+	PayloadRetained        PayloadState = "retained"
+	PayloadApplyRecovery   PayloadState = "apply_recovery"
+	PayloadCleanupPending  PayloadState = "cleanup_pending"
+	PayloadCleanupComplete PayloadState = "cleanup_complete"
+)
+
 // FrozenSession is the click-time bounded source interval for one session.
 // It remains private because Upper contains source provenance.
 type FrozenSession struct {
@@ -110,12 +119,14 @@ type Job struct {
 	CancellationRequested time.Time `json:"cancellation_requested_at,omitempty"`
 	Owner                 Owner     `json:"owner,omitempty"`
 
-	PacketDigest      string           `json:"packet_digest,omitempty"`
-	ResultDigest      string           `json:"result_digest,omitempty"`
-	ReviewAccounting  ReviewAccounting `json:"review_usage"`
-	Error             SafeError        `json:"error,omitempty"`
-	SyncOnlyAvailable bool             `json:"sync_only_available"`
-	PrivateError      string           `json:"private_error,omitempty"`
+	PacketDigest        string           `json:"packet_digest,omitempty"`
+	ResultDigest        string           `json:"result_digest,omitempty"`
+	ReviewAccounting    ReviewAccounting `json:"review_usage"`
+	Error               SafeError        `json:"error,omitempty"`
+	AcceptedSyncPending bool             `json:"accepted_sync_pending"`
+	PayloadState        PayloadState     `json:"payload_state,omitempty"`
+	PayloadRetainedFor  ErrorCode        `json:"payload_retained_for,omitempty"`
+	PrivateError        string           `json:"private_error,omitempty"`
 }
 
 type PublicState string
@@ -177,7 +188,7 @@ func ProjectStatus(job *Job, projectID string) (PublicStatus, error) {
 		ErrorCode:        string(job.Error.Code),
 		CanRetry:         job.State == Failed,
 		CanCancel:        active(job.State),
-		CanSyncOnly:      job.SyncOnlyAvailable,
+		CanSyncOnly:      job.State == Failed && job.AcceptedSyncPending,
 	}
 	if hasReviewAccounting(job.ReviewAccounting) {
 		tokens, cost, complete := reviewAccountingPublicTotals(job.ReviewAccounting)
@@ -246,14 +257,40 @@ func Validate(job Job) error {
 	if job.Error.Code != "" && !validErrorCode(job.Error.Code) {
 		return errors.New("safe error code is invalid")
 	}
-	if job.SyncOnlyAvailable && (job.State != Failed || job.AcceptedPackets == 0) {
-		return errors.New("sync-only availability requires a failed job with accepted packets")
+	if err := validatePayloadState(job); err != nil {
+		return err
+	}
+	if job.AcceptedSyncPending && (job.AcceptedPackets == 0 || job.State == Completed || job.State == Cancelled) {
+		return errors.New("accepted-but-unsynced state requires accepted packets and an unfinished or failed job")
 	}
 	if terminal(job.State) && job.Owner.ID != "" {
 		return errors.New("terminal job must not retain live ownership")
 	}
 	if !terminal(job.State) && job.Owner.ID != "" && (!validID(job.Owner.ID) || !canonicalTime(job.Owner.AcquiredAt)) {
 		return errors.New("job owner is invalid")
+	}
+	return nil
+}
+
+func validatePayloadState(job Job) error {
+	switch job.PayloadState {
+	case "", PayloadRetained, PayloadApplyRecovery, PayloadCleanupPending, PayloadCleanupComplete:
+	default:
+		return errors.New("private payload state is invalid")
+	}
+	if job.PayloadRetainedFor != "" && job.PayloadRetainedFor != ApplyRecovery {
+		return errors.New("private payload retention reason is invalid")
+	}
+	if job.PayloadState == PayloadApplyRecovery {
+		if job.State != Failed || job.Error.Code != ApplyRecovery || job.PayloadRetainedFor != ApplyRecovery ||
+			job.PacketDigest == "" || job.ResultDigest == "" {
+			return errors.New("apply-recovery payload retention is incomplete")
+		}
+	} else if job.PayloadRetainedFor != "" {
+		return errors.New("private payload retention reason requires apply recovery")
+	}
+	if job.PayloadState == PayloadRetained && !active(job.State) {
+		return errors.New("retained active payload requires an active job")
 	}
 	return nil
 }

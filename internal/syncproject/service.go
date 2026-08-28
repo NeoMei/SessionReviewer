@@ -27,6 +27,7 @@ type Options struct {
 	Now       func() time.Time
 	Trigger   syncengine.Trigger
 	DryRun    bool
+	Pin       *MappingPin
 }
 
 // Run authenticates one configured Project mapping, constructs the existing
@@ -41,28 +42,34 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 	if strings.TrimSpace(options.GOOS) == "" || options.Now == nil || options.Trigger == "" {
 		return syncengine.Report{}, errors.New("sync service requires GOOS, time source, and trigger")
 	}
-	cfg, err := config.Load(filepath.Join(options.DataDir, "config.toml"))
-	if err != nil {
-		return syncengine.Report{}, err
+	pin := options.Pin
+	ownedPin := false
+	if pin == nil {
+		var err error
+		pin, err = PinMapping(options)
+		if err != nil {
+			return syncengine.Report{}, err
+		}
+		ownedPin = true
 	}
-	mapping, project, err := resolveMapping(cfg, options.ProjectID, options.CWD)
-	if err != nil {
-		return syncengine.Report{}, err
+	if ownedPin {
+		defer pin.Close()
 	}
-	defer project.Close()
-	if mapping.VaultRoot == "" || mapping.VaultReviewPath == "" || mapping.VaultCaseMode == "" {
-		return syncengine.Report{}, errors.New("project has no complete Obsidian sync mapping")
+	if err := pin.verify(options); err != nil {
+		return syncengine.Report{}, err
 	}
 
 	engine, err := syncengine.NewEngine(syncengine.Options{
-		ProjectRoot:         project.Path,
-		ProjectRootExpected: project.Info(),
-		VaultRoot:           mapping.VaultRoot,
-		VaultReviewPath:     mapping.VaultReviewPath,
-		DataRoot:            filepath.Join(options.DataDir, "projects", mapping.ID),
-		ProjectID:           mapping.ID,
+		ProjectRoot:         pin.project.Path,
+		ProjectRootExpected: pin.project.Info(),
+		VaultRoot:           pin.vault.Path,
+		VaultRootExpected:   pin.vault.Info(),
+		VaultReviewPath:     pin.mapping.VaultReviewPath,
+		DataRoot:            pin.syncData.Path,
+		DataRootExpected:    pin.syncData.Info(),
+		ProjectID:           pin.mapping.ID,
 		GOOS:                options.GOOS,
-		VaultCaseMode:       mapping.VaultCaseMode,
+		VaultCaseMode:       pin.mapping.VaultCaseMode,
 		Retry:               syncengine.DefaultRetryPolicy(),
 		Now:                 options.Now,
 	})
@@ -70,7 +77,14 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 		return syncengine.Report{}, err
 	}
 	defer engine.Close()
-	return engine.Reconcile(ctx, syncengine.ReconcileRequest{DryRun: options.DryRun, Trigger: options.Trigger})
+	report, err := engine.Reconcile(ctx, syncengine.ReconcileRequest{DryRun: options.DryRun, Trigger: options.Trigger})
+	if err != nil {
+		return report, err
+	}
+	if err := pin.verify(options); err != nil {
+		return syncengine.Report{}, err
+	}
+	return report, nil
 }
 
 func resolveMapping(cfg config.Config, projectID, cwd string) (config.ProjectMapping, *pathguard.Directory, error) {

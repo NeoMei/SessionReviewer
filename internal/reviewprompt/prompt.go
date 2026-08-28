@@ -71,9 +71,19 @@ const (
 // OutputSchema must be the exact checked-in final proposal schema pinned by
 // Version. The Agent receives a derived schema that forbids host accounting.
 type Input struct {
-	Packet       evidence.Packet
-	Accepted     reviewv2.State
-	OutputSchema []byte
+	Packet         evidence.Packet
+	Accepted       reviewv2.State
+	OutputSchema   []byte
+	GOOS           string
+	ForbiddenRoots []ForbiddenRoot
+}
+
+// ForbiddenRoot describes one host-owned physical root and any canonical
+// aliases by which untrusted structured text could name it. These values are
+// validation-only and are never serialized into Agent request bytes.
+type ForbiddenRoot struct {
+	CanonicalPath string
+	Aliases       []string
 }
 
 // Bundle is the provider-neutral prompt request material. OutputSchema is the
@@ -324,6 +334,9 @@ func validateInput(input Input, accepted acceptedContext) error {
 	if err := validateAcceptedContextStrings(accepted); err != nil {
 		return err
 	}
+	if err := validateForbiddenRootStrings(input, accepted); err != nil {
+		return err
+	}
 	if !validPacketEnvelope(packet) {
 		return ErrInvalidInput
 	}
@@ -381,6 +394,18 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 // recognition. Keep this explicit traversal aligned with acceptedContext so a
 // newly allowlisted string cannot silently skip the raw boundary.
 func validateAcceptedContextStrings(context acceptedContext) error {
+	for _, value := range acceptedContextStrings(context) {
+		if !utf8.ValidString(value) {
+			return ErrInvalidInput
+		}
+		if hasRedactionFinding(value) {
+			return ErrUnsafeInput
+		}
+	}
+	return nil
+}
+
+func acceptedContextStrings(context acceptedContext) []string {
 	values := []string{
 		context.ProjectID,
 		context.CurrentState.ProjectID,
@@ -444,15 +469,81 @@ func validateAcceptedContextStrings(context acceptedContext) error {
 		values = append(values, report.OpenLoopsCreated...)
 		values = append(values, report.OpenLoopsClosed...)
 	}
-	for _, value := range values {
-		if !utf8.ValidString(value) {
-			return ErrInvalidInput
+	return values
+}
+
+// validateForbiddenRootStrings walks the exact structured projections before
+// JSON escaping can transform separators or casing. Forbidden roots are
+// process-only metadata and never enter either returned Bundle field.
+func validateForbiddenRootStrings(input Input, accepted acceptedContext) error {
+	if len(input.ForbiddenRoots) == 0 {
+		return nil
+	}
+	goos := strings.ToLower(strings.TrimSpace(input.GOOS))
+	if goos == "" {
+		return ErrInvalidInput
+	}
+	forbidden := make([]string, 0, len(input.ForbiddenRoots)*2)
+	for _, root := range input.ForbiddenRoots {
+		paths := append([]string{root.CanonicalPath}, root.Aliases...)
+		for _, candidate := range paths {
+			normalized, ok := normalizeForbiddenPath(candidate, goos)
+			if !ok {
+				return ErrInvalidInput
+			}
+			forbidden = append(forbidden, normalized)
 		}
-		if hasRedactionFinding(value) {
-			return ErrUnsafeInput
+	}
+	values := acceptedContextStrings(accepted)
+	values = append(values, input.Packet.ProjectID, input.Packet.SessionID)
+	values = append(values, input.Packet.Warnings...)
+	for _, item := range input.Packet.Events {
+		values = append(values, item.ID, item.ItemID, item.Timestamp, item.Kind, item.Role, item.ToolName, item.Summary)
+	}
+	for _, value := range values {
+		normalized := normalizePathText(value, goos)
+		for _, root := range forbidden {
+			if strings.Contains(normalized, root) {
+				return ErrUnsafeInput
+			}
 		}
 	}
 	return nil
+}
+
+func normalizeForbiddenPath(value, goos string) (string, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" || !utf8.ValidString(value) {
+		return "", false
+	}
+	normalized := normalizePathText(value, goos)
+	if goos == "windows" {
+		if len(normalized) < 3 || ((normalized[1] != ':' || normalized[2] != '/') && !strings.HasPrefix(normalized, "//")) {
+			return "", false
+		}
+	} else if !strings.HasPrefix(normalized, "/") {
+		return "", false
+	}
+	normalized = strings.TrimRight(normalized, "/")
+	if normalized == "" || normalized == "/" || (goos == "windows" && len(normalized) == 2 && normalized[1] == ':') {
+		return "", false
+	}
+	return normalized, true
+}
+
+func normalizePathText(value, goos string) string {
+	if goos != "windows" {
+		return value
+	}
+	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
+	unc := strings.HasPrefix(value, "//")
+	for strings.Contains(value, "//") {
+		value = strings.ReplaceAll(value, "//", "/")
+	}
+	if unc {
+		value = "/" + value
+	}
+	return value
 }
 
 func validCursorBoundary(boundary evidence.CursorBoundary) bool {

@@ -106,7 +106,14 @@ func migrationBackupRelative(manifestSHA256 string) string {
 	return migrationBackupRoot + "/" + manifestSHA256
 }
 
-func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string, now time.Time) (MigrationPlan, error) {
+func verifyOptionalMigrationDataIdentity(data *pathguard.Directory, expected []os.FileInfo) error {
+	if len(expected) > 1 || (len(expected) == 1 && (expected[0] == nil || !os.SameFile(expected[0], data.Info()))) {
+		return errors.New("migration data root identity changed after mapping resolution")
+	}
+	return nil
+}
+
+func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string, now time.Time, dataExpected ...os.FileInfo) (MigrationPlan, error) {
 	if projectInfo == nil || strings.TrimSpace(projectRoot) == "" || strings.TrimSpace(dataRoot) == "" || now.IsZero() {
 		return MigrationPlan{}, errors.New("migration project, data root, identity, and time are required")
 	}
@@ -120,6 +127,9 @@ func PlanMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string,
 		return MigrationPlan{}, fmt.Errorf("open migration data root: %w", err)
 	}
 	defer data.Close()
+	if err := verifyOptionalMigrationDataIdentity(data, dataExpected); err != nil {
+		return MigrationPlan{}, err
+	}
 	projectIdentity, err := captureMigrationRoot(project)
 	if err != nil {
 		return MigrationPlan{}, err
@@ -264,7 +274,7 @@ func applyMigrationWithHooks(plan MigrationPlan, hooks migrationHooks) error {
 	return resumeMigration(project, data, &journal, clonePlannedFiles(plan.Writes), hooks)
 }
 
-func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string) error {
+func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot string, dataExpected ...os.FileInfo) error {
 	if projectInfo == nil {
 		return errors.New("expected project root identity is required")
 	}
@@ -278,6 +288,9 @@ func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot stri
 		return fmt.Errorf("open migration data root: %w", err)
 	}
 	defer data.Close()
+	if err := verifyOptionalMigrationDataIdentity(data, dataExpected); err != nil {
+		return err
+	}
 	projectKey, err := migrationProjectKey(project.Path)
 	if err != nil {
 		return err
@@ -305,7 +318,7 @@ func RecoverMigration(projectRoot string, projectInfo os.FileInfo, dataRoot stri
 
 // MigrationPending reports whether an authenticated journal remains for the
 // bound Project and sync-data roots. It performs no recovery writes.
-func MigrationPending(projectRoot string, projectInfo os.FileInfo, dataRoot string) (bool, error) {
+func MigrationPending(projectRoot string, projectInfo os.FileInfo, dataRoot string, dataExpected ...os.FileInfo) (bool, error) {
 	if projectInfo == nil {
 		return false, errors.New("expected project root identity is required")
 	}
@@ -319,6 +332,9 @@ func MigrationPending(projectRoot string, projectInfo os.FileInfo, dataRoot stri
 		return false, fmt.Errorf("open migration data root: %w", err)
 	}
 	defer data.Close()
+	if err := verifyOptionalMigrationDataIdentity(data, dataExpected); err != nil {
+		return false, err
+	}
 	projectKey, err := migrationProjectKey(project.Path)
 	if err != nil {
 		return false, err

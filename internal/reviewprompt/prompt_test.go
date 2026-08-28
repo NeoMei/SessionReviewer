@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -198,6 +200,46 @@ func TestBuildRejectsOversizedOrUnsafeIncludedData(t *testing.T) {
 		input.OutputSchema = []byte(`{"type":"object","description":"Bearer sk-secret-canary-1234567890"}`)
 		if bundle, err := reviewprompt.Build(input); bundle.Prompt != nil || !errors.Is(err, reviewprompt.ErrSchemaMismatch) {
 			t.Fatalf("prompt=%q err=%v", bundle.Prompt, err)
+		}
+	})
+}
+
+func TestBuildRejectsForbiddenRootAliasesBeforeMarshalling(t *testing.T) {
+	t.Run("windows case and backslash alias", func(t *testing.T) {
+		input := fixtureInput()
+		input.GOOS = "windows"
+		input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{
+			CanonicalPath: `C:\Users\Neo\Project`,
+			Aliases:       []string{`c:/users/neo/project`},
+		}}
+		input.Packet.Events[0].Summary = `inspect C:\USERS\NEO\PROJECT\private.md`
+		bundle, err := reviewprompt.Build(input)
+		if err != reviewprompt.ErrUnsafeInput || !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
+			t.Fatalf("bundle=%+v err=%v want zero bundle and exact ErrUnsafeInput", bundle, err)
+		}
+	})
+
+	t.Run("posix canonical and symlink alias", func(t *testing.T) {
+		parent := t.TempDir()
+		canonical := filepath.Join(parent, "physical-project")
+		alias := filepath.Join(parent, "project-alias")
+		if err := os.Mkdir(canonical, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(canonical, alias); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := filepath.EvalSymlinks(alias)
+		if err != nil {
+			t.Fatal(err)
+		}
+		input := fixtureInput()
+		input.GOOS = "darwin"
+		input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: resolved, Aliases: []string{alias}}}
+		input.Accepted.Review.Goal = "read " + alias + "/private.md"
+		bundle, err := reviewprompt.Build(input)
+		if err != reviewprompt.ErrUnsafeInput || !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
+			t.Fatalf("bundle=%+v err=%v want zero bundle and exact ErrUnsafeInput", bundle, err)
 		}
 	})
 }

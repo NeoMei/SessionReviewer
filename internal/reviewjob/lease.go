@@ -63,6 +63,20 @@ func (s Store) AcquireLeases(projectID, jobID string, timeout time.Duration) (_ 
 	if err != nil {
 		return nil, err
 	}
+	return s.acquireLeasesOnLayout(layout, projectID, jobID, timeout)
+}
+
+func (s Store) acquireLeasesOnLayout(layout *storeLayout, projectID, jobID string, timeout time.Duration) (_ *LeaseSet, retErr error) {
+	if layout == nil || layout.missing {
+		if layout != nil {
+			_ = layout.close()
+		}
+		return nil, os.ErrNotExist
+	}
+	if err := layout.verify(); err != nil {
+		_ = layout.close()
+		return nil, err
+	}
 	leases := &LeaseSet{layout: layout}
 	defer func() {
 		if retErr != nil {
@@ -104,7 +118,102 @@ func (s Store) AcquireLeases(projectID, jobID string, timeout time.Duration) (_ 
 	if err := leases.global.replaceContent(body, maxLeaseOwnerBytes); err != nil {
 		return nil, fmt.Errorf("persist global lease owner: %w", err)
 	}
+	if err := layout.verify(); err != nil {
+		return nil, err
+	}
 	return leases, nil
+}
+
+// acquireJobLeases binds the optimistic job load, both worker leases, and the
+// authoritative reload to one physical Store/Data layout.
+func (s Store) acquireJobLeases(jobID string, timeout time.Duration) (_ Job, _ int, _ *LeaseSet, retErr error) {
+	if err := validateStoreID(jobID, "job"); err != nil {
+		return Job{}, 0, nil, err
+	}
+	if timeout < 0 {
+		return Job{}, 0, nil, errors.New("review job lease timeout must not be negative")
+	}
+	layout, err := s.openLayout(false)
+	if err != nil {
+		return Job{}, 0, nil, err
+	}
+	if layout == nil || layout.missing {
+		if layout != nil {
+			_ = layout.close()
+		}
+		return Job{}, 0, nil, os.ErrNotExist
+	}
+	job, _, found, err := s.loadFromJobs(layout.jobs, jobID)
+	if err != nil || !found {
+		_ = layout.close()
+		if err != nil {
+			return Job{}, 0, nil, err
+		}
+		return Job{}, 0, nil, os.ErrNotExist
+	}
+	leases, err := s.acquireLeasesOnLayout(layout, job.ProjectID, job.ID, timeout)
+	if err != nil {
+		return Job{}, 0, nil, err
+	}
+	defer func() {
+		if retErr != nil {
+			retErr = errors.Join(retErr, leases.Release())
+		}
+	}()
+	if err := leases.verify(); err != nil {
+		return Job{}, 0, nil, err
+	}
+	current, revision, found, err := s.loadFromJobs(leases.layout.jobs, jobID)
+	if err != nil || !found {
+		if err != nil {
+			return Job{}, 0, nil, err
+		}
+		return Job{}, 0, nil, os.ErrNotExist
+	}
+	if current.ProjectID != job.ProjectID {
+		return Job{}, 0, nil, errors.New("review job project changed while acquiring leases")
+	}
+	return current, revision, leases, nil
+}
+
+func (leases *LeaseSet) verify() error {
+	if leases == nil {
+		return errors.New("review worker leases are unavailable")
+	}
+	leases.mu.Lock()
+	layout := leases.layout
+	leases.mu.Unlock()
+	if layout == nil {
+		return errors.New("review worker leases are released")
+	}
+	return layout.verify()
+}
+
+func (leases *LeaseSet) update(store Store, jobID string, expectedRevision int, mutate func(*Job) error) (Job, int, error) {
+	return leases.updateMode(store, jobID, expectedRevision, mutate, false)
+}
+
+func (leases *LeaseSet) updateTerminal(store Store, jobID string, expectedRevision int, mutate func(*Job) error) (Job, int, error) {
+	return leases.updateMode(store, jobID, expectedRevision, mutate, true)
+}
+
+func (leases *LeaseSet) updateMode(store Store, jobID string, expectedRevision int, mutate func(*Job) error, allowDetached bool) (Job, int, error) {
+	if err := validateStoreID(jobID, "job"); err != nil {
+		return Job{}, 0, err
+	}
+	if expectedRevision < 1 || expectedRevision > maxSafeInteger || mutate == nil {
+		return Job{}, 0, errors.New("valid expected revision and mutation are required")
+	}
+	leases.mu.Lock()
+	layout := leases.layout
+	leases.mu.Unlock()
+	if layout == nil {
+		return Job{}, 0, errors.New("review worker leases are released")
+	}
+	if allowDetached {
+		return store.updatePinnedLayout(layout, jobID, expectedRevision, mutate)
+	}
+	return store.updateLayout(layout, jobID, expectedRevision, mutate)
 }
 
 func leaseAcquireError(kind string, err error) error {
@@ -187,6 +296,16 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		job.Owner = Owner{}
 		job.Error = SafeError{Code: ApplyRecovery}
 		job.PrivateError = "worker lease ended before a terminal state; apply receipt inspection is required"
+		if current.Phase == Applying && current.PacketDigest != "" && current.ResultDigest != "" {
+			job.PayloadState = PayloadApplyRecovery
+			job.PayloadRetainedFor = ApplyRecovery
+		} else if current.PayloadState == PayloadRetained {
+			// No apply boundary was durably entered. Keep the authenticated bytes
+			// behind a terminal cleanup boundary so recovery can remove them by
+			// digest and then persist cleanup-complete.
+			job.PayloadState = PayloadCleanupPending
+			job.PayloadRetainedFor = ""
+		}
 		return nil
 	})
 	if err != nil {

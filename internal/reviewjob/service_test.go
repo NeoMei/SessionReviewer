@@ -65,6 +65,10 @@ func (adapter *verifiedWorkerAgent) VerifiedCapability() agent.Capability {
 	return adapter.capability
 }
 
+func (adapter *verifiedWorkerAgent) Verify(context.Context, string) (agent.Capability, error) {
+	panic("worker must not invoke verification")
+}
+
 func (adapter *verifiedWorkerAgent) GenerateProposal(_ context.Context, request agent.Request) (agent.Result, error) {
 	adapter.generateCalls++
 	return adapter.generate(request)
@@ -73,10 +77,10 @@ func (adapter *verifiedWorkerAgent) GenerateProposal(_ context.Context, request 
 func (adapter *verifiedWorkerAgent) Cancel(context.Context) error { return nil }
 
 type workerFixture struct {
-	root, project, vault, data string
-	store                      Store
-	job                        Job
-	now                        time.Time
+	root, project, vault, data, agent string
+	store                             Store
+	job                               Job
+	now                               time.Time
 }
 
 func newWorkerFixture(t *testing.T, sessions []FrozenSession) workerFixture {
@@ -87,6 +91,7 @@ func newWorkerFixture(t *testing.T, sessions []FrozenSession) workerFixture {
 		vault:   filepath.Join(root, "vault"),
 		project: filepath.Join(root, "vault", "project"),
 		data:    filepath.Join(root, "data"),
+		agent:   filepath.Join(root, "fixture-agent"),
 		now:     time.Date(2026, 8, 29, 9, 0, 0, 0, time.UTC),
 	}
 	for _, path := range []string{fixture.project, fixture.vault, fixture.data} {
@@ -94,6 +99,14 @@ func newWorkerFixture(t *testing.T, sessions []FrozenSession) workerFixture {
 			t.Fatal(err)
 		}
 	}
+	if err := os.WriteFile(fixture.agent, []byte("provider-neutral fixture Agent\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	agentPath, _, agentIdentity, _, err := inspectAgentExecutable(fixture.agent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.agent = agentPath
 	for _, target := range []*string{&fixture.project, &fixture.vault, &fixture.data} {
 		directory, err := pathguard.Open(*target)
 		if err != nil {
@@ -123,9 +136,9 @@ func newWorkerFixture(t *testing.T, sessions []FrozenSession) workerFixture {
 		ProjectIdentity: projectIdentity,
 		Agent: VerifiedAgent{
 			Kind:       "fixture",
-			Identity:   projectIdentity,
+			Identity:   agentIdentity,
 			Version:    "1.0.0",
-			Executable: "/fixture/agent",
+			Executable: fixture.agent,
 		},
 		State:          Queued,
 		Phase:          Preflight,
@@ -133,6 +146,9 @@ func newWorkerFixture(t *testing.T, sessions []FrozenSession) workerFixture {
 		FrozenSessions: append([]FrozenSession(nil), sessions...),
 		CreatedAt:      fixture.now,
 		UpdatedAt:      fixture.now,
+	}
+	if err := os.MkdirAll(filepath.Join(fixture.data, "projects", fixture.job.ProjectID), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{
 		Version: 1,
@@ -275,13 +291,24 @@ func workerDraft(t *testing.T, packet evidence.Packet, state ledger.State) []byt
 	return body
 }
 
-func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter VerifiedAgentAdapter, applyFn ApplyFunc, syncFn SyncFunc, pricing PricingResolver) RunOptions {
+func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter *verifiedWorkerAgent, applyFn ApplyFunc, syncFn SyncFunc, pricing PricingResolver) RunOptions {
+	var handle *AgentHandle
+	if adapter != nil {
+		physical, info, identity, digest, err := inspectAgentExecutable(fixture.agent)
+		if err != nil {
+			panic(err)
+		}
+		handle = &AgentHandle{
+			adapter: adapter, capability: adapter.capability, executable: physical,
+			executableInfo: info, executableIdentity: identity, executableDigest: digest,
+		}
+	}
 	return RunOptions{
 		Store: fixture.store, JobID: fixture.job.ID, OwnerID: "worker-owner-1",
 		LeaseTimeout: 0, ProjectRoot: fixture.project, VaultRoot: fixture.vault,
 		DataDir: fixture.data, GOOS: "test", AgentTimeout: time.Minute,
 		Now:     func() time.Time { return fixture.now },
-		Prepare: prepare, Agent: adapter, Apply: applyFn, Sync: syncFn, Pricing: pricing,
+		Prepare: prepare, Agent: handle, Apply: applyFn, Sync: syncFn, Pricing: pricing,
 	}
 }
 
@@ -332,7 +359,8 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 			packetNumber = 2
 		}
 		sequence = append(sequence, "prepare("+request.SessionID+",p"+string(rune('0'+packetNumber))+")")
-		if request.ProjectID != fixture.job.ProjectID || request.UpperBoundary != sessions[request.SessionIndex].Upper || request.EvidencePath == "" {
+		if request.ProjectID != fixture.job.ProjectID || request.UpperBoundary != sessions[request.SessionIndex].Upper || request.EvidencePath == "" ||
+			request.ProjectIdentity != fixture.job.ProjectIdentity || !request.DataIdentity.Valid() {
 			return Prepared{}, errors.New("worker prepare request lost frozen identity")
 		}
 		current = packet
@@ -371,6 +399,9 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 		if request.Proposal.SessionReport.Accounting != nil {
 			return apply.Result{}, errors.New("unexpected host accounting")
 		}
+		if request.ProjectIdentity != fixture.job.ProjectIdentity || !request.DataIdentity.Valid() {
+			return apply.Result{}, errors.New("apply request lost pinned root identities")
+		}
 		accepted.apply(t, request.Changes)
 		return apply.Result{
 			ProjectID: request.Packet.ProjectID, SessionID: request.Packet.SessionID,
@@ -385,7 +416,7 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 			job.CurrentPacket != current.NextCursor {
 			t.Fatalf("sync durable boundary = %#v", job)
 		}
-		if options.ProjectID != fixture.job.ProjectID || options.CWD != fixture.project || options.DataDir != fixture.data || options.Trigger != syncengine.TriggerCLI {
+		if options.ProjectID != fixture.job.ProjectID || options.CWD != fixture.project || options.DataDir != fixture.data || options.Trigger != syncengine.TriggerCLI || options.Pin == nil {
 			return syncengine.Report{}, errors.New("worker sync request lost project identity")
 		}
 		return workerSyncReport(fixture.job.ProjectID), nil
@@ -698,9 +729,9 @@ func TestWorkerRejectedDraftStillPersistsExactReviewUsage(t *testing.T) {
 	}
 }
 
-// Once generation hands off a valid proposal, cancellation must not interrupt
-// the trusted apply/sync commit window.
-func TestWorkerApplyAndSyncIgnoreCancellationAfterProposal(t *testing.T) {
+// Generate returning successfully is not the commit handoff: cancellation
+// observed after Generate must stop before the durable Applying transition.
+func TestWorkerCancellationAfterGenerateStopsBeforeApply(t *testing.T) {
 	hash := strings.Repeat("7", 64)
 	fixture := newWorkerFixture(t, []FrozenSession{{
 		SessionID: "session-s1", StartedAt: fixtureTime(7),
@@ -714,7 +745,75 @@ func TestWorkerApplyAndSyncIgnoreCancellationAfterProposal(t *testing.T) {
 	adapter.generate = func(agent.Request) (agent.Result, error) {
 		body := workerDraft(t, packet, accepted.legacy)
 		cancel()
-		return agent.Result{Proposal: body}, nil
+		return agent.Result{
+			Proposal: body,
+			Usage:    accounting.TokenUsage{InputTokens: 5, OutputTokens: 2, TotalTokens: 7},
+		}, nil
+	}
+	applyCalls, syncCalls := 0, 0
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) {
+			applyCalls++
+			return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			syncCalls++
+			return workerSyncReport(packet.ProjectID), nil
+		},
+		nil,
+	)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() ignored cancellation after Generate")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 0 || job.AcceptedSessions != 0 || hasReviewAccounting(job.ReviewAccounting) ||
+		applyCalls != 0 || syncCalls != 0 {
+		t.Fatalf("cancelled job = %#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+	}
+}
+
+type cancellingWorkerPrices struct {
+	cancel context.CancelFunc
+	price  accounting.Pricing
+}
+
+func (prices cancellingWorkerPrices) Resolve(string, time.Time) (accounting.Pricing, bool) {
+	prices.cancel()
+	return prices.price, true
+}
+
+// Cancellation may arrive while the host enriches and validates a draft. The
+// second handoff check must still stop before Applying becomes durable.
+func TestWorkerCancellationAfterFinalValidationStopsBeforeApply(t *testing.T) {
+	hash := strings.Repeat("4", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000014")
+	packet.CWD = "/repo"
+	packet.SessionUsage = &accounting.SessionUsage{
+		StartedAt: "2026-08-29T07:00:00Z", EndedAt: "2026-08-29T07:00:01Z", DurationMS: 1000,
+		Models: []accounting.ModelUsage{{Model: "source-model", TokenUsage: accounting.TokenUsage{
+			InputTokens: 1, TotalTokens: 1,
+		}}},
+		TotalTokens: 1,
+	}
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	ctx, cancel := context.WithCancel(t.Context())
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	applyCalls, syncCalls := 0, 0
+	price := accounting.Pricing{
+		Currency: "USD", InputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "2026-08-29",
 	}
 	options := workerRunOptions(
 		fixture,
@@ -722,16 +821,60 @@ func TestWorkerApplyAndSyncIgnoreCancellationAfterProposal(t *testing.T) {
 			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
 		},
 		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) {
+			applyCalls++
+			return apply.Result{}, errors.New("cancelled draft reached apply")
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			syncCalls++
+			return workerSyncReport(packet.ProjectID), nil
+		},
+		cancellingWorkerPrices{cancel: cancel, price: price},
+	)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() ignored cancellation after final validation")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 0 || applyCalls != 0 || syncCalls != 0 {
+		t.Fatalf("cancelled validation job=%#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+	}
+}
+
+func TestWorkerCancellationAfterDurableApplyingStillFinishesApplyAndMandatorySync(t *testing.T) {
+	hash := strings.Repeat("c", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000021")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	ctx, cancel := context.WithCancel(t.Context())
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	applyCalls, syncCalls := 0, 0
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
 		func(commitCtx context.Context, request ApplyRequest) (apply.Result, error) {
-			if err := commitCtx.Err(); err != nil {
-				return apply.Result{}, errors.New("apply observed caller cancellation")
+			applyCalls++
+			cancel()
+			if commitCtx.Err() != nil {
+				t.Fatalf("Apply received cancellable commit context: %v", commitCtx.Err())
 			}
 			accepted.apply(t, request.Changes)
 			return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
 		},
 		func(commitCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
-			if err := commitCtx.Err(); err != nil {
-				return syncengine.Report{}, errors.New("sync observed caller cancellation")
+			syncCalls++
+			if commitCtx.Err() != nil {
+				t.Fatalf("Sync received cancellable commit context: %v", commitCtx.Err())
 			}
 			return workerSyncReport(packet.ProjectID), nil
 		},
@@ -741,8 +884,8 @@ func TestWorkerApplyAndSyncIgnoreCancellationAfterProposal(t *testing.T) {
 		t.Fatal(err)
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Completed || job.AcceptedPackets != 1 || job.AcceptedSessions != 1 {
-		t.Fatalf("commit-window job = %#v found=%v err=%v", job, found, err)
+	if err != nil || !found || job.State != Completed || applyCalls != 1 || syncCalls != 1 {
+		t.Fatalf("post-Applying cancellation job=%#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
 	}
 }
 
@@ -780,8 +923,226 @@ func TestWorkerIncompleteSyncDoesNotAdvanceSession(t *testing.T) {
 		t.Fatal("Run() accepted an incomplete sync report")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Failed || job.Error.Code != SyncPartial || job.AcceptedPackets != 1 || job.AcceptedSessions != 0 || job.SessionIndex != 0 || job.CurrentPacket != packet.NextCursor || !job.SyncOnlyAvailable {
+	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	if err != nil || statusErr != nil || !found || job.State != Failed || job.Error.Code != SyncPartial || job.AcceptedPackets != 1 || job.AcceptedSessions != 0 || job.SessionIndex != 0 || job.CurrentPacket != packet.NextCursor || !job.AcceptedSyncPending || !status.CanSyncOnly {
 		t.Fatalf("incomplete-sync job=%#v found=%v err=%v", job, found, err)
+	}
+}
+
+func TestWorkerApplyRecoveryRetainsAuthenticatedExactPacketAndProposal(t *testing.T) {
+	hash := strings.Repeat("6", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000019")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) {
+			return apply.Result{}, errors.New("apply receipt is uncertain")
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			panic("uncertain apply reached sync")
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted uncertain apply")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	if err != nil || statusErr != nil || !found || job.Error.Code != ApplyRecovery ||
+		job.PayloadState != PayloadApplyRecovery || job.PayloadRetainedFor != ApplyRecovery ||
+		job.AcceptedSyncPending || status.CanSyncOnly {
+		t.Fatalf("apply-recovery job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
+	}
+	inputs := filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs")
+	packetBody, packetErr := os.ReadFile(filepath.Join(inputs, packetWorkName))
+	proposalBody, proposalErr := os.ReadFile(filepath.Join(inputs, proposalWorkName))
+	if packetErr != nil || proposalErr != nil || digestPrivate(packetBody) != job.PacketDigest || digestPrivate(proposalBody) != job.ResultDigest {
+		t.Fatalf("retained packet=%v proposal=%v packetDigest=%q/%q proposalDigest=%q/%q", packetErr, proposalErr, digestPrivate(packetBody), job.PacketDigest, digestPrivate(proposalBody), job.ResultDigest)
+	}
+}
+
+func TestWorkerNeverCleansPayloadBeforeDurableCleanupBoundary(t *testing.T) {
+	for _, boundary := range []string{"before", "after"} {
+		t.Run(boundary+" cleanup CAS crash", func(t *testing.T) {
+			hash := strings.Repeat("b", 64)
+			fixture := newWorkerFixture(t, []FrozenSession{{
+				SessionID: "session-s1", StartedAt: fixtureTime(7),
+				Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+			}})
+			packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000022")
+			packet.CWD = "/repo"
+			accepted := workerInitialAccepted(fixture.job.ProjectID)
+			adapter := &verifiedWorkerAgent{
+				capability: workerCapability("fixture", "1.0.0"),
+				generate: func(agent.Request) (agent.Result, error) {
+					return agent.Result{}, agent.NewError(agent.CodeAuth, errors.New("fixture auth failure"))
+				},
+			}
+			options := workerRunOptions(
+				fixture,
+				func(context.Context, PrepareRequest) (Prepared, error) {
+					return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+				},
+				adapter,
+				func(context.Context, ApplyRequest) (apply.Result, error) { panic("failed Agent reached apply") },
+				func(context.Context, syncproject.Options) (syncengine.Report, error) {
+					panic("failed Agent reached sync")
+				},
+				nil,
+			)
+			crash := errors.New("simulated process crash at cleanup boundary")
+			if boundary == "before" {
+				options.beforeCleanupBoundary = func() error { return crash }
+			} else {
+				options.afterCleanupBoundary = func() error { return crash }
+			}
+			if err := Run(t.Context(), options); !errors.Is(err, crash) {
+				t.Fatalf("Run() err=%v want simulated crash", err)
+			}
+			job, _, found, err := fixture.store.Load(fixture.job.ID)
+			if err != nil || !found {
+				t.Fatalf("Load() found=%v err=%v", found, err)
+			}
+			if boundary == "before" {
+				if job.State != Running || job.PayloadState != PayloadRetained {
+					t.Fatalf("pre-CAS crash mutated cleanup state: %#v", job)
+				}
+			} else if job.State != Failed || job.Error.Code != AgentAuth || job.PayloadState != PayloadCleanupPending {
+				t.Fatalf("post-CAS crash did not retain cleanup-pending state: %#v", job)
+			}
+			body, err := os.ReadFile(filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs", packetWorkName))
+			if err != nil || digestPrivate(body) != job.PacketDigest {
+				t.Fatalf("crash lost authenticated packet: err=%v digest=%q want=%q", err, digestPrivate(body), job.PacketDigest)
+			}
+			if boundary == "before" {
+				recovered, _, disposition, err := fixture.store.RecoverInterrupted(fixture.job.ID)
+				if err != nil || disposition != RecoveryApplyInspectionNeeded || recovered.State != Failed ||
+					recovered.Error.Code != ApplyRecovery || recovered.PayloadState != PayloadCleanupPending {
+					t.Fatalf("RecoverInterrupted() after pre-CAS crash = %#v, %q, %v", recovered, disposition, err)
+				}
+				retained, readErr := os.ReadFile(filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs", packetWorkName))
+				if readErr != nil || !bytes.Equal(retained, body) || digestPrivate(retained) != recovered.PacketDigest {
+					t.Fatalf("interrupted recovery changed retained packet: err=%v digest=%q want=%q", readErr, digestPrivate(retained), recovered.PacketDigest)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkerRejectsDryRunAndPartialMigrationSyncReports(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*syncengine.Report)
+	}{
+		{name: "report dry run", mutate: func(report *syncengine.Report) { report.DryRun = true }},
+		{name: "migration dry run", mutate: func(report *syncengine.Report) { report.Migration.DryRun = true }},
+		{name: "partial migration plan", mutate: func(report *syncengine.Report) { report.Migration.Creates = []string{"review-v2.json"} }},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			hash := strings.Repeat(string(rune('a'+index)), 64)
+			fixture := newWorkerFixture(t, []FrozenSession{{
+				SessionID: "session-s1", StartedAt: fixtureTime(7),
+				Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+			}})
+			packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000015")
+			packet.CWD = "/repo"
+			accepted := workerInitialAccepted(fixture.job.ProjectID)
+			adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+			adapter.generate = func(agent.Request) (agent.Result, error) {
+				return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+			}
+			options := workerRunOptions(
+				fixture,
+				func(context.Context, PrepareRequest) (Prepared, error) {
+					return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+				},
+				adapter,
+				func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+					accepted.apply(t, request.Changes)
+					return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+				},
+				func(context.Context, syncproject.Options) (syncengine.Report, error) {
+					report := workerSyncReport(packet.ProjectID)
+					test.mutate(&report)
+					return report, nil
+				},
+				nil,
+			)
+			if err := Run(t.Context(), options); err == nil {
+				t.Fatal("Run() accepted a non-real or partial sync report")
+			}
+			job, _, found, err := fixture.store.Load(fixture.job.ID)
+			status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+			if err != nil || statusErr != nil || !found || job.Error.Code != SyncPartial ||
+				!job.AcceptedSyncPending || !status.CanSyncOnly || job.CurrentPacket != packet.NextCursor {
+				t.Fatalf("rejected sync job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
+			}
+		})
+	}
+}
+
+func TestWorkerEarlierSyncedPacketDoesNotOfferSyncOnlyAfterLaterAgentFailure(t *testing.T) {
+	firstHash, secondHash := strings.Repeat("1", 64), strings.Repeat("2", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 2, SourceHash: secondHash},
+	}})
+	packets := []evidence.Packet{
+		workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", firstHash, true, "ev-000000000016"),
+		workerPacket(fixture.job.ProjectID, "session-s1", 2, 2, firstHash, secondHash, false, "ev-000000000017"),
+	}
+	for index := range packets {
+		packets[index].CWD = "/repo"
+	}
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	index := 0
+	current := packets[0]
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		if current.FromCursor == 2 {
+			return agent.Result{}, agent.NewError(agent.CodeAuth, errors.New("later auth failure"))
+		}
+		return agent.Result{Proposal: workerDraft(t, current, accepted.legacy)}, nil
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			current = packets[index]
+			index++
+			return Prepared{Packet: current, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+			accepted.apply(t, request.Changes)
+			return apply.Result{ProjectID: current.ProjectID, SessionID: current.SessionID, FromCursor: current.FromCursor, ToCursor: current.ToCursor, CursorAdvanced: true}, nil
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			return workerSyncReport(fixture.job.ProjectID), nil
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted later Agent failure")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	if err != nil || statusErr != nil || !found || job.Error.Code != AgentAuth || job.AcceptedPackets != 1 ||
+		job.AcceptedSyncPending || status.CanSyncOnly {
+		t.Fatalf("later failure job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
 	}
 }
 
@@ -824,6 +1185,112 @@ func TestWorkerPrivateWorkSetupFailureIsDurableAndPanicFree(t *testing.T) {
 	}
 }
 
+func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithoutDecoyWrites(t *testing.T) {
+	for _, rootKind := range []string{"project", "data", "vault", "config"} {
+		for _, phase := range []string{"prepare", "generate", "apply", "sync"} {
+			t.Run(rootKind+"_during_"+phase, func(t *testing.T) {
+				hash := strings.Repeat("d", 64)
+				fixture := newWorkerFixture(t, []FrozenSession{{
+					SessionID: "session-s1", StartedAt: fixtureTime(7),
+					Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+				}})
+				packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000020")
+				packet.CWD = "/repo"
+				accepted := workerInitialAccepted(fixture.job.ProjectID)
+				target := fixture.project
+				if rootKind == "data" {
+					target = fixture.data
+				} else if rootKind == "vault" {
+					target = fixture.vault
+				} else if rootKind == "config" {
+					target = filepath.Join(fixture.data, "config.toml")
+				}
+				pinnedTarget := target + ".pinned-" + phase
+				var configReplacement []byte
+				mutated := false
+				mutate := func(at string) {
+					if mutated || at != phase {
+						return
+					}
+					mutated = true
+					if rootKind == "config" {
+						body, err := os.ReadFile(target)
+						if err != nil {
+							t.Fatal(err)
+						}
+						configReplacement = append([]byte(nil), body...)
+					}
+					if err := os.Rename(target, pinnedTarget); err != nil {
+						t.Fatal(err)
+					}
+					if rootKind == "config" {
+						if err := os.WriteFile(target, configReplacement, 0o600); err != nil {
+							t.Fatal(err)
+						}
+					} else {
+						if err := os.Mkdir(target, 0o700); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+				adapter.generate = func(agent.Request) (agent.Result, error) {
+					mutate("generate")
+					return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+				}
+				options := workerRunOptions(
+					fixture,
+					func(context.Context, PrepareRequest) (Prepared, error) {
+						prepared := Prepared{Packet: packet, Accepted: accepted.snapshot(t)}
+						mutate("prepare")
+						return prepared, nil
+					},
+					adapter,
+					func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+						accepted.apply(t, request.Changes)
+						mutate("apply")
+						return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+					},
+					func(context.Context, syncproject.Options) (syncengine.Report, error) {
+						mutate("sync")
+						return workerSyncReport(packet.ProjectID), nil
+					},
+					nil,
+				)
+				if err := Run(t.Context(), options); err == nil || !mutated {
+					t.Fatalf("Run() err=%v mutated=%v", err, mutated)
+				}
+				authoritativeStore := fixture.store
+				if rootKind == "data" {
+					authoritativeStore.Root = pinnedTarget
+				}
+				job, _, found, err := authoritativeStore.Load(fixture.job.ID)
+				if err != nil || !found || job.State != Failed {
+					t.Fatalf("authoritative job=%#v found=%v err=%v", job, found, err)
+				}
+				if phase == "sync" {
+					if job.AcceptedPackets != 1 || job.CurrentPacket != packet.NextCursor || !job.AcceptedSyncPending {
+						t.Fatalf("sync-boundary cursor was lost: %#v", job)
+					}
+				} else if job.AcceptedPackets != 0 || job.CurrentPacket != (evidence.CursorBoundary{}) {
+					t.Fatalf("pre-sync replacement advanced authoritative cursor: %#v", job)
+				}
+				if rootKind == "config" {
+					body, err := os.ReadFile(target)
+					if err != nil || !bytes.Equal(body, configReplacement) {
+						t.Fatalf("replacement config was mutated: bytes=%q err=%v", body, err)
+					}
+				} else {
+					entries, err := os.ReadDir(target)
+					if err != nil || len(entries) != 0 {
+						t.Fatalf("replacement %s received writes: entries=%v err=%v", rootKind, entries, err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func fixtureTime(hour int) time.Time {
 	return time.Date(2026, 8, 29, hour, 0, 0, 0, time.UTC)
 }
@@ -833,6 +1300,48 @@ type workerPrices map[string]accounting.Pricing
 func (prices workerPrices) Resolve(model string, _ time.Time) (accounting.Pricing, bool) {
 	price, found := prices[model]
 	return price, found
+}
+
+func TestWorkerRejectsModelWhenVerifiedProvenanceIsUnavailableBeforeAccounting(t *testing.T) {
+	hash := strings.Repeat("7", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000007")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	adapter := &verifiedWorkerAgent{
+		capability: workerCapability("fixture", "1.0.0"),
+		generate: func(agent.Request) (agent.Result, error) {
+			return agent.Result{
+				Proposal: workerDraft(t, packet, accepted.legacy),
+				Model:    " \t",
+				Usage:    accounting.TokenUsage{InputTokens: 8, OutputTokens: 2, TotalTokens: 10},
+			}, nil
+		},
+	}
+	applyCalls := 0
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) { applyCalls++; return apply.Result{}, nil },
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			panic("hostile model reached sync")
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted model provenance denied by the verified capability")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Failed || job.Error.Code != AgentIncompatible ||
+		hasReviewAccounting(job.ReviewAccounting) || applyCalls != 0 {
+		t.Fatalf("hostile model job=%#v found=%v err=%v apply=%d", job, found, err, applyCalls)
+	}
 }
 
 // Guessing an Agent model, dropping exact usage, letting the Agent author source

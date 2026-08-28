@@ -2,6 +2,7 @@ package pathguard
 
 import (
 	"errors"
+	"os"
 	"strconv"
 )
 
@@ -31,5 +32,15 @@ func (directory *Directory) PhysicalIdentity() (IdentityToken, error) {
 		return IdentityToken{}, err
 	}
 	defer file.Close()
+	return physicalIdentityFromFile(file)
+}
+
+// PhysicalFileIdentity returns the restart-stable identity pinned by an open
+// file handle. Callers remain responsible for authenticating the file's type,
+// path, and contents before treating the token as trusted metadata.
+func PhysicalFileIdentity(file *os.File) (IdentityToken, error) {
+	if file == nil {
+		return IdentityToken{}, errors.New("file is required")
+	}
 	return physicalIdentityFromFile(file)
 }

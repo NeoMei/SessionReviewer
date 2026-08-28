@@ -188,11 +188,39 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 		return Job{}, 0, os.ErrNotExist
 	}
 	defer func() { retErr = errors.Join(retErr, layout.finish()) }()
+	return s.updateLayout(layout, jobID, expectedRevision, mutate)
+}
+
+// updateLayout performs one CAS against an already physically pinned store
+// layout. Review workers use this path for their full leased lifetime so a
+// replacement Data directory can never receive an authoritative mutation.
+func (s Store) updateLayout(layout *storeLayout, jobID string, expectedRevision int, mutate func(*Job) error) (job Job, revision int, retErr error) {
+	return s.updateLayoutMode(layout, jobID, expectedRevision, mutate, true)
+}
+
+func (s Store) updatePinnedLayout(layout *storeLayout, jobID string, expectedRevision int, mutate func(*Job) error) (job Job, revision int, retErr error) {
+	return s.updateLayoutMode(layout, jobID, expectedRevision, mutate, false)
+}
+
+func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevision int, mutate func(*Job) error, requireNamespace bool) (job Job, revision int, retErr error) {
+	if layout == nil || layout.missing {
+		return Job{}, 0, os.ErrNotExist
+	}
+	verify := layout.verifyPinned
+	if requireNamespace {
+		verify = layout.verify
+	}
+	if err := verify(); err != nil {
+		return Job{}, 0, err
+	}
 	lock, err := acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
 	if err != nil {
 		return Job{}, 0, fmt.Errorf("lock review job store: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	if err := verify(); err != nil {
+		return Job{}, 0, err
+	}
 
 	current, currentRevision, found, err := s.loadFromJobs(layout.jobs, jobID)
 	if err != nil {
@@ -225,6 +253,9 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 	if err := validateReviewAccountingTransition(current.ReviewAccounting, next.ReviewAccounting); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("invalid review accounting update: %w", err)
 	}
+	if err := verify(); err != nil {
+		return Job{}, currentRevision, err
+	}
 	if err := s.writer()(layout.jobs, jobID+".json.bak", currentEncoded, 0o600); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("persist review job recovery backup: %w", err)
 	}
@@ -235,6 +266,9 @@ func (s Store) Update(jobID string, expectedRevision int, mutate func(*Job) erro
 	}
 	if err := s.writer()(layout.jobs, jobID+".json", encoded, 0o600); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("persist review job update: %w", err)
+	}
+	if err := verify(); err != nil {
+		return Job{}, currentRevision, err
 	}
 	written, writtenRevision, found, err := s.loadFromJobs(layout.jobs, jobID)
 	if err != nil || !found || writtenRevision != nextRevision || !reflect.DeepEqual(written, next) {
@@ -715,6 +749,17 @@ func (layout *storeLayout) verify() error {
 	closeErr := reopened.Close()
 	if closeErr != nil || reopenedInfo == nil || !os.SameFile(layout.data.Info(), reopenedInfo) {
 		return errors.New("review job data root changed during operation")
+	}
+	return layout.verifyPinned()
+}
+
+func (layout *storeLayout) verifyPinned() error {
+	if layout == nil || layout.data == nil || layout.data.Root == nil {
+		return errors.New("review job store layout is not pinned")
+	}
+	pinnedData, err := layout.data.Root.Stat(".")
+	if err != nil || pinnedData == nil || !os.SameFile(layout.data.Info(), pinnedData) {
+		return errors.New("review job pinned data root changed during operation")
 	}
 	if layout.missing {
 		return nil

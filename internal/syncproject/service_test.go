@@ -100,3 +100,69 @@ func TestSyncProjectServicePreservesMissingConfigLookupError(t *testing.T) {
 		t.Fatalf("Run() error = %v, want configured mapping lookup diagnostic", err)
 	}
 }
+
+func TestPinnedSyncRejectsConfigOrVaultReplacementWithoutDecoyWrites(t *testing.T) {
+	for _, target := range []string{"config", "vault"} {
+		t.Run(target, func(t *testing.T) {
+			root := t.TempDir()
+			projectRoot := filepath.Join(root, "project")
+			vaultRoot := filepath.Join(root, "vault")
+			dataRoot := filepath.Join(root, "data")
+			for _, path := range []string{projectRoot, vaultRoot} {
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+			initialized, err := project.Initialize(project.InitOptions{
+				ProjectRoot: projectRoot, VaultRoot: vaultRoot, DataDir: dataRoot,
+				GOOS: runtime.GOOS, Now: func() time.Time { return now },
+				Random: bytes.NewReader(bytes.Repeat([]byte{0x22}, 8)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			options := Options{
+				ProjectID: initialized.ProjectID, CWD: projectRoot, DataDir: dataRoot,
+				GOOS: runtime.GOOS, Now: func() time.Time { return now }, Trigger: syncengine.TriggerCLI,
+			}
+			pin, err := PinMapping(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			if target == "config" {
+				fragments, err := os.ReadDir(filepath.Join(dataRoot, "projects.d"))
+				if err != nil || len(fragments) != 1 {
+					t.Fatalf("project fragments=%v err=%v", fragments, err)
+				}
+				configPath := filepath.Join(dataRoot, "projects.d", fragments[0].Name())
+				body, err := os.ReadFile(configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(configPath, configPath+".pinned"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(configPath, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Rename(vaultRoot, vaultRoot+".pinned"); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(vaultRoot, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			options.Pin = pin
+			if _, err := Run(t.Context(), options); err == nil {
+				t.Fatalf("Run() accepted %s replacement after mapping pin", target)
+			}
+			entries, err := os.ReadDir(vaultRoot)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("replacement Vault received writes: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}

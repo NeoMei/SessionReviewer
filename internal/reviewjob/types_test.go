@@ -192,14 +192,14 @@ func TestJobValidationAllowsSyncOnlyFailureRecoveryOnly(t *testing.T) {
 		job := terminalJobFixture(state)
 		job.AcceptedPackets = 1
 		job.AcceptedSessions = 1
-		job.SyncOnlyAvailable = true
+		job.AcceptedSyncPending = true
 		if err := Validate(job); err == nil {
 			t.Fatalf("Validate() accepted sync-only %s job", state)
 		}
 	}
 	job := terminalJobFixture(Failed)
 	job.AcceptedPackets = 1
-	job.SyncOnlyAvailable = true
+	job.AcceptedSyncPending = true
 	if err := Validate(job); err != nil {
 		t.Fatalf("Validate() rejected failed sync-only recovery: %v", err)
 	}
