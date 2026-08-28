@@ -2,15 +2,20 @@ package reviewjob
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/neomei/SessionReviewer/internal/project"
 )
 
 func TestStoreCreatePublishesCanonicalPrivateLayout(t *testing.T) {
@@ -162,6 +167,177 @@ func TestStoreConcurrentUpdateHasExactlyOneCASWinner(t *testing.T) {
 	}
 }
 
+func TestStoreCrossProcessCASHasExactlyOneWinner(t *testing.T) {
+	root := newStoreWithJob(t)
+	gate := filepath.Join(t.TempDir(), "start")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	commands := make([]*exec.Cmd, 2)
+	outputs := make([]bytes.Buffer, 2)
+	for index := range commands {
+		command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestStoreCrossProcessCASHelper$")
+		command.Env = append(os.Environ(), "SESSION_REVIEWER_STORE_HELPER_ROOT="+root, "SESSION_REVIEWER_STORE_HELPER_GATE="+gate)
+		command.Stdout = &outputs[index]
+		command.Stderr = &outputs[index]
+		if err := command.Start(); err != nil {
+			t.Fatal(err)
+		}
+		commands[index] = command
+	}
+	if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wins, stale := 0, 0
+	for index := range commands {
+		if err := commands[index].Wait(); err != nil {
+			t.Fatalf("helper %d: %v\n%s", index, err, outputs[index].String())
+		}
+		switch strings.TrimSpace(outputs[index].String()) {
+		case "win":
+			wins++
+		case "stale":
+			stale++
+		default:
+			t.Fatalf("helper %d output = %q", index, outputs[index].String())
+		}
+	}
+	if wins != 1 || stale != 1 {
+		t.Fatalf("cross-process wins=%d stale=%d", wins, stale)
+	}
+}
+
+func TestStoreCrossProcessCASHelper(t *testing.T) {
+	root := os.Getenv("SESSION_REVIEWER_STORE_HELPER_ROOT")
+	if root == "" {
+		return
+	}
+	gate := os.Getenv("SESSION_REVIEWER_STORE_HELPER_GATE")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatal("timed out waiting for cross-process gate")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	_, _, err := (Store{Root: root}).Update("job-1", 1, func(job *Job) error {
+		job.AcceptedPackets++
+		return nil
+	})
+	switch {
+	case err == nil:
+		fmt.Print("win")
+		os.Exit(0)
+	case errors.Is(err, ErrStaleRevision):
+		fmt.Print("stale")
+		os.Exit(0)
+	default:
+		t.Fatal(err)
+	}
+}
+
+func TestStoreCASCoexistsWithLongLivedWorkerLease(t *testing.T) {
+	root := newStoreWithJob(t)
+	data, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer data.Close()
+	workerLease, err := project.AcquireProjectLock(data, "review-jobs/locks/projects/project-1.lock", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer workerLease.Release()
+
+	updated, revision, err := (Store{Root: root}).Update("job-1", 1, func(job *Job) error {
+		job.AcceptedPackets = 1
+		return nil
+	})
+	if err != nil || revision != 2 || updated.AcceptedPackets != 1 {
+		t.Fatalf("Update() while worker lease held = %#v, %d, %v", updated, revision, err)
+	}
+}
+
+func TestStoreBackupCapturesImmutablePreMutationJob(t *testing.T) {
+	root := newStoreWithJob(t)
+	store := Store{Root: root}
+	if _, _, err := store.Update("job-1", 1, func(job *Job) error {
+		job.FrozenSessions[0].SessionID = "session-2"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "review-jobs/jobs/job-1.json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, revision, found, err := store.Load("job-1")
+	if err != nil || !found || revision != 1 || len(loaded.FrozenSessions) != 1 || loaded.FrozenSessions[0].SessionID != "session-1" {
+		t.Fatalf("recovered backup = %#v, revision=%d found=%v err=%v", loaded.FrozenSessions, revision, found, err)
+	}
+}
+
+func TestStoreRejectsCrossProjectBackupWithSameJobID(t *testing.T) {
+	root := newStoreWithJob(t)
+	primary := filepath.Join(root, "review-jobs/jobs/job-1.json")
+	var foreign storedJob
+	if err := json.Unmarshal(readFile(t, primary), &foreign); err != nil {
+		t.Fatal(err)
+	}
+	foreign.Job.ProjectID = "project-2"
+	foreign.Job.ProjectIdentity.File = "22"
+	foreignBody, err := marshalCanonical(foreign, maxJobRecordBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(primary+".bak", foreignBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(primary, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := (Store{Root: root}).Load("job-1"); err == nil {
+		t.Fatal("Load() trusted a same-ID backup belonging to another project")
+	}
+}
+
+func TestStoreRejectsExhaustedRevisionWithoutMutation(t *testing.T) {
+	root := newStoreWithJob(t)
+	primary := filepath.Join(root, "review-jobs/jobs/job-1.json")
+	var record storedJob
+	if err := json.Unmarshal(readFile(t, primary), &record); err != nil {
+		t.Fatal(err)
+	}
+	record.Revision = maxSafeInteger
+	before, err := marshalCanonical(record, maxJobRecordBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(primary, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	callbackCalled := false
+	if _, _, err := (Store{Root: root}).Update("job-1", maxSafeInteger, func(job *Job) error {
+		callbackCalled = true
+		job.AcceptedPackets = 1
+		return nil
+	}); !errors.Is(err, ErrRevisionExhausted) {
+		t.Fatalf("Update() error = %v, want ErrRevisionExhausted", err)
+	}
+	if callbackCalled {
+		t.Fatal("exhausted revision invoked mutation callback")
+	}
+	if after := readFile(t, primary); !bytes.Equal(after, before) {
+		t.Fatal("exhausted revision changed primary bytes")
+	}
+	if _, err := os.Stat(primary + ".bak"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exhausted revision published a backup: %v", err)
+	}
+}
+
 func TestStoreRejectsRedirectsCaseCollisionsAndPermissionWeakening(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX symlink and mode assertions")
@@ -283,6 +459,62 @@ func TestStoreBoundsEnumerationAndAuthenticatesProjectPointer(t *testing.T) {
 			t.Fatal("LatestForProject() followed another project's pointer")
 		}
 	})
+}
+
+func TestStoreMissingPointerRepairRejectsAggregateRecordBudget(t *testing.T) {
+	root := newStoreWithJob(t)
+	jobs := filepath.Join(root, "review-jobs/jobs")
+	if err := os.Remove(filepath.Join(root, "review-jobs/projects/project-1.json")); err != nil {
+		t.Fatal(err)
+	}
+	for index := 2; index <= 4; index++ {
+		job := validJobFixture()
+		job.ID = fmt.Sprintf("job-%d", index)
+		job.PrivateError = strings.Repeat("x", 3<<20)
+		body, err := marshalCanonical(storedJob{Revision: 1, Job: job}, maxJobRecordBytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(jobs, job.ID+".json"), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, _, err := (Store{Root: root}).LatestForProject("project-1"); err == nil || !strings.Contains(err.Error(), "aggregate") {
+		t.Fatalf("LatestForProject() error = %v, want aggregate budget rejection", err)
+	}
+}
+
+func TestStoreMissingPointerRepairScansAndReadsEachCandidateOnce(t *testing.T) {
+	root := newStoreRoot(t)
+	for index := 1; index <= 3; index++ {
+		job := validJobFixture()
+		job.ID = fmt.Sprintf("job-%d", index)
+		if _, err := (Store{Root: root}).Create(job); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(filepath.Join(root, "review-jobs/projects/project-1.json")); err != nil {
+		t.Fatal(err)
+	}
+	scans, reads := 0, 0
+	store := Store{
+		Root: root,
+		afterJobDirectoryScan: func() error {
+			scans++
+			return nil
+		},
+		afterJobRead: func() error {
+			reads++
+			return nil
+		},
+	}
+	job, revision, found, err := store.LatestForProject("project-1")
+	if err != nil || !found || revision != 1 || job.ID != "job-3" {
+		t.Fatalf("LatestForProject() = %#v, %d, %v, %v", job, revision, found, err)
+	}
+	if scans != 1 || reads != 3 {
+		t.Fatalf("repair scans=%d reads=%d, want one scan and one read per candidate", scans, reads)
+	}
 }
 
 func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
