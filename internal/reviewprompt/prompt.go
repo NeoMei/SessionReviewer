@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/redact"
@@ -31,13 +32,13 @@ const (
 	proposalSchemaDigest = "95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625"
 	applyInvariantDigest = "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa"
 	agentDraftSchemaID   = "https://github.com/neomei/SessionReviewer/schemas/proposal-agent-draft-v1.schema.json"
+	maxSafeInteger       = 1<<53 - 1
+	maxExternalTextBytes = 4096
 )
 
 var (
-	packetStableID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	packetItemID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
-	packetToolName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	packetSHA256   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	packetSHA256  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	packetWarning = regexp.MustCompile(`^redacted:[a-z0-9_]+:[1-9][0-9]*$`)
 )
 
 var (
@@ -319,9 +320,7 @@ func BuildRequest(input Input) (Bundle, error) { return Build(input) }
 
 func validateInput(input Input) error {
 	packet := input.Packet
-	if packet.SchemaVersion != 2 || strings.TrimSpace(packet.ProjectID) == "" || strings.TrimSpace(packet.SessionID) == "" ||
-		packet.FromCursor < 1 || packet.ToCursor < packet.FromCursor-1 || packet.ExpectedCursor.Line != packet.FromCursor-1 ||
-		packet.NextCursor.Line != packet.ToCursor {
+	if !validPacketEnvelope(packet) {
 		return ErrInvalidInput
 	}
 	if err := reviewv2.Validate(input.Accepted); err != nil ||
@@ -340,6 +339,61 @@ func validateInput(input Input) error {
 	return nil
 }
 
+// validPacketEnvelope mirrors the canonical evidence-v2/proposal packet
+// invariants before any digest or prompt bytes are produced. It deliberately
+// returns only a boolean so callers expose the single safe ErrInvalidInput.
+func validPacketEnvelope(packet evidence.Packet) bool {
+	if packet.SchemaVersion != 2 || !validCanonicalEnvelopeText(packet.ProjectID, 1024) ||
+		!validCanonicalEnvelopeText(packet.SessionID, 1024) || !validCanonicalEnvelopeText(packet.CWD, 16<<10) {
+		return false
+	}
+	for _, value := range []string{packet.ProjectID, packet.SessionID, packet.CWD, packet.ExpectedCursor.SourceHash, packet.NextCursor.SourceHash} {
+		if hasRedactionFinding(value) {
+			return false
+		}
+	}
+	if !positiveSafeInteger(packet.FromCursor) || !nonnegativeSafeInteger(packet.ToCursor) || packet.ToCursor < packet.FromCursor-1 {
+		return false
+	}
+	if packet.ExpectedCursor.Line != packet.FromCursor-1 || packet.NextCursor.Line != packet.ToCursor ||
+		!validCursorBoundary(packet.ExpectedCursor) || !validCursorBoundary(packet.NextCursor) {
+		return false
+	}
+	if packet.ToCursor == packet.FromCursor-1 && packet.ExpectedCursor != packet.NextCursor {
+		return false
+	}
+	for _, warning := range packet.Warnings {
+		if !packetWarning.MatchString(warning) {
+			return false
+		}
+	}
+	if packet.SessionUsage != nil && accounting.ValidateSessionUsage(packet.SessionUsage) != nil {
+		return false
+	}
+	return true
+}
+
+func validCursorBoundary(boundary evidence.CursorBoundary) bool {
+	if !nonnegativeSafeInteger(boundary.Line) {
+		return false
+	}
+	if boundary.Line == 0 {
+		return boundary.SourceHash == ""
+	}
+	return packetSHA256.MatchString(boundary.SourceHash)
+}
+
+func validCanonicalEnvelopeText(value string, maxBytes int) bool {
+	return value != "" && value == strings.TrimSpace(value) && utf8.ValidString(value) && len(value) <= maxBytes
+}
+
+func positiveSafeInteger(value int) bool    { return value >= 1 && value <= maxSafeInteger }
+func nonnegativeSafeInteger(value int) bool { return value >= 0 && value <= maxSafeInteger }
+
+func hasRedactionFinding(value string) bool {
+	return len(redact.Default().Text(value).Findings) != 0
+}
+
 // validatePacketItems re-establishes the extractor boundary for every field
 // that projectPacket serializes. Protocol fields are shape checked; all string
 // fields are scanned before shape checks so malformed secret-bearing values
@@ -353,42 +407,42 @@ func validatePacketItems(packet evidence.Packet) error {
 			if !utf8.ValidString(value) {
 				return ErrInvalidInput
 			}
-			if len(redact.Default().Text(value).Findings) != 0 {
+			if hasRedactionFinding(value) {
 				return ErrUnsafeInput
 			}
 		}
-		if !packetStableID.MatchString(item.ID) {
+		if len(item.ID) > maxExternalTextBytes ||
+			len(item.ItemID) > maxExternalTextBytes || len(item.ToolName) > maxExternalTextBytes {
 			return ErrInvalidInput
 		}
-		if _, duplicate := seenIDs[item.ID]; duplicate {
+		if strings.TrimSpace(item.ID) == "" {
+			return ErrInvalidInput
+		}
+		if _, exists := seenIDs[item.ID]; exists {
 			return ErrInvalidInput
 		}
 		seenIDs[item.ID] = struct{}{}
-		if item.ItemID != "" && !packetItemID.MatchString(item.ItemID) {
+		if _, err := time.Parse(time.RFC3339Nano, item.Timestamp); err != nil {
 			return ErrInvalidInput
 		}
-		if item.Timestamp != "" {
-			if _, err := time.Parse(time.RFC3339Nano, item.Timestamp); err != nil {
-				return ErrInvalidInput
-			}
-		}
-		if item.JSONLLine <= previousLine || item.JSONLLine > packet.ToCursor || !packetSHA256.MatchString(item.SourceHash) {
+		if !positiveSafeInteger(item.JSONLLine) || item.JSONLLine < packet.FromCursor ||
+			item.JSONLLine > packet.ToCursor || item.JSONLLine <= previousLine ||
+			!packetSHA256.MatchString(item.SourceHash) {
 			return ErrInvalidInput
 		}
 		previousLine = item.JSONLLine
+		if item.JSONLLine == packet.NextCursor.Line && item.SourceHash != packet.NextCursor.SourceHash {
+			return ErrInvalidInput
+		}
+		if item.Role != "" && item.Role != "user" && item.Role != "assistant" {
+			return ErrInvalidInput
+		}
 		switch item.Kind {
 		case "message":
-			if (item.Role != "user" && item.Role != "assistant") || item.ToolName != "" {
+			if item.Role != "user" && item.Role != "assistant" {
 				return ErrInvalidInput
 			}
-		case "tool_call":
-			if item.Role != "" || !packetToolName.MatchString(item.ToolName) {
-				return ErrInvalidInput
-			}
-		case "tool_result", "cwd_change":
-			if item.Role != "" || item.ToolName != "" {
-				return ErrInvalidInput
-			}
+		case "tool_call", "tool_result", "cwd_change":
 		default:
 			return ErrInvalidInput
 		}

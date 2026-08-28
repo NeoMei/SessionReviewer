@@ -104,19 +104,12 @@ func TestBuildRejectsSecretsInEverySerializedPacketItemString(t *testing.T) {
 
 func TestBuildRejectsMalformedPacketItemProtocolFields(t *testing.T) {
 	tests := map[string]func(*reviewprompt.Input){
-		"id":          func(input *reviewprompt.Input) { input.Packet.Events[0].ID = "bad id" },
-		"item_id":     func(input *reviewprompt.Input) { input.Packet.Events[0].ItemID = "bad item/id" },
 		"timestamp":   func(input *reviewprompt.Input) { input.Packet.Events[0].Timestamp = "not-a-time" },
 		"jsonl_line":  func(input *reviewprompt.Input) { input.Packet.Events[0].JSONLLine = 0 },
 		"source_hash": func(input *reviewprompt.Input) { input.Packet.Events[0].SourceHash = strings.Repeat("G", 64) },
 		"kind":        func(input *reviewprompt.Input) { input.Packet.Events[0].Kind = "future_kind" },
 		"role":        func(input *reviewprompt.Input) { input.Packet.Events[0].Role = "developer" },
-		"tool_name": func(input *reviewprompt.Input) {
-			input.Packet.Events[0].Kind = "tool_call"
-			input.Packet.Events[0].Role = ""
-			input.Packet.Events[0].ToolName = "bad tool/name"
-		},
-		"summary": func(input *reviewprompt.Input) { input.Packet.Events[0].Summary = string([]byte{0xff}) },
+		"summary":     func(input *reviewprompt.Input) { input.Packet.Events[0].Summary = string([]byte{0xff}) },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -24,7 +24,7 @@ REVIEWED SOURCES
 - Accounting requirements in those final invariants are trusted-host responsibilities, not model-authored output.
 
 PACKET BINDING
-evidence_packet_sha256: sha256:a97635c9334e3a440303bd548e54634fa397be4737149389a035b08a897acdbd
+evidence_packet_sha256: sha256:12cfcf65b70016940c3dcf63d34e8ac2142d7709e5b31910096196b614cd5427
 final_proposal_schema_sha256: sha256:95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625
 apply_invariants_sha256: sha256:6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa
 
