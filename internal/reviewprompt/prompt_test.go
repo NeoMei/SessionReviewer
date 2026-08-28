@@ -244,6 +244,81 @@ func TestBuildRejectsForbiddenRootAliasesBeforeMarshalling(t *testing.T) {
 	})
 }
 
+func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		goos      string
+		root      string
+		value     string
+		wantError error
+	}{
+		{
+			name:      "windows drive case and separators",
+			goos:      "windows",
+			root:      `C:\Users\Neo\Project`,
+			value:     `inspect c:/USERS/NEO/PROJECT/private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:      "windows extended drive alias",
+			goos:      "windows",
+			root:      `C:\Users\Neo\Project`,
+			value:     `inspect \\?\C:\USERS\NEO\PROJECT\private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:      "windows UNC case and separators",
+			goos:      "windows",
+			root:      `\\server\share\Project`,
+			value:     `inspect //SERVER/SHARE/PROJECT/private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:      "windows extended UNC alias",
+			goos:      "windows",
+			root:      `\\server\share\Project`,
+			value:     `inspect \\?\UNC\SERVER\SHARE\PROJECT\private.md`,
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:      "darwin unicode normalization and case",
+			goos:      "darwin",
+			root:      "/Users/Neo/Caf\u00e9",
+			value:     "inspect /users/neo/cafe\u0301/private.md",
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+		{
+			name:  "posix sibling prefix is not the root",
+			goos:  "linux",
+			root:  "/srv/project",
+			value: "ordinary prose about /srv/project-old and project history",
+		},
+		{
+			name:      "posix child is the root",
+			goos:      "linux",
+			root:      "/srv/project",
+			value:     "inspect /srv/project/private.md",
+			wantError: reviewprompt.ErrUnsafeInput,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fixtureInput()
+			input.GOOS = test.goos
+			input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: test.root}}
+			input.Packet.Events[0].Summary = test.value
+			bundle, err := reviewprompt.Build(input)
+			if !errors.Is(err, test.wantError) {
+				t.Fatalf("Build error=%v want %v", err, test.wantError)
+			}
+			if test.wantError != nil && !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
+				t.Fatalf("unsafe input returned nonzero bundle: %+v", bundle)
+			}
+		})
+	}
+}
+
 func fixtureInput() reviewprompt.Input {
 	const projectID = "project-1111111111111111"
 	hash4 := strings.Repeat("4", 64)

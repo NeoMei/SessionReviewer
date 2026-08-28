@@ -205,6 +205,37 @@ func TestJobValidationAllowsSyncOnlyFailureRecoveryOnly(t *testing.T) {
 	}
 }
 
+func TestJobValidationRejectsMultipleSimultaneousPayloadPublicationIntents(t *testing.T) {
+	packetDigest := "sha256:" + strings.Repeat("a", 64)
+	proposalDigest := "sha256:" + strings.Repeat("b", 64)
+	job := validJobFixture()
+	job.PacketDigest = packetDigest
+	job.ResultDigest = proposalDigest
+	job.PayloadState = PayloadPublishing
+	job.PayloadPublications = []PayloadPublication{
+		{
+			Kind: PayloadPacket, Name: packetWorkName, Digest: packetDigest,
+			State: PayloadPublishing, CleanupAuthority: PayloadCleanupNotAuthorized,
+		},
+		{
+			Kind: PayloadProposal, Name: proposalWorkName, Digest: proposalDigest,
+			State: PayloadPublishing, CleanupAuthority: PayloadCleanupNotAuthorized,
+		},
+	}
+	if err := Validate(job); err == nil {
+		t.Fatal("Validate() accepted multiple simultaneous payload publication intents")
+	}
+}
+
+func TestJobValidationRejectsPublicationIntentWithoutExactPayload(t *testing.T) {
+	job := validJobFixture()
+	job.PacketDigest = "sha256:" + strings.Repeat("a", 64)
+	job.PayloadState = PayloadPublishing
+	if err := Validate(job); err == nil {
+		t.Fatal("Validate() accepted publication intent without an exact payload record")
+	}
+}
+
 func validJobFixture() Job {
 	created := time.Date(2026, 8, 28, 4, 0, 0, 0, time.UTC)
 	return Job{

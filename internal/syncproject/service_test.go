@@ -9,7 +9,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
@@ -67,6 +71,71 @@ func TestSyncProjectServiceAuthenticatesMappingAndReconciles(t *testing.T) {
 		DryRun:    true,
 	}); err == nil {
 		t.Fatal("Run() accepted a CWD that does not authenticate the configured project")
+	}
+}
+
+func TestSyncProjectServiceReconcilesProjectNestedInsideVault(t *testing.T) {
+	root := t.TempDir()
+	vaultRoot := filepath.Join(root, "vault")
+	projectRoot := filepath.Join(vaultRoot, "project")
+	dataRoot := filepath.Join(root, "data")
+	projectID := "project-1111111111111111"
+	for _, path := range []string{projectRoot, dataRoot} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := ledger.State{
+		ProjectID: projectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: projectID, Revision: 1, Goal: "Nested project sync", Branch: "main",
+			NextAction: "Sync", LastVerified: "2026-08-29T08:00:00Z", LastUpdated: "2026-08-29T08:00:00Z",
+		},
+		Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
+	}
+	state, err := reviewv2.ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(projectRoot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	syncData := filepath.Join(dataRoot, "projects", projectID)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := os.MkdirAll(filepath.Join(syncData, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(syncData, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{
+		Version: 1,
+		Projects: []config.ProjectMapping{{
+			ID: projectID, Root: projectRoot, VaultRoot: vaultRoot,
+			VaultReviewPath: "Projects/Nested--11111111/Session Review", VaultCaseMode: platform.CaseSensitive,
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := Run(t.Context(), Options{
+		ProjectID: projectID, CWD: projectRoot, DataDir: dataRoot,
+		GOOS: runtime.GOOS, Now: func() time.Time { return time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC) },
+		Trigger: syncengine.TriggerCLI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.ProjectID != projectID || report.DryRun || len(report.Conflicts) != 0 || len(report.Errors) != 0 {
+		t.Fatalf("Run() report = %#v", report)
+	}
+	if _, err := os.Stat(filepath.Join(vaultRoot, "Projects", "Nested--11111111", "Session Review", "项目回顾.md")); err != nil {
+		t.Fatalf("real nested sync did not publish into Vault: %v", err)
 	}
 }
 

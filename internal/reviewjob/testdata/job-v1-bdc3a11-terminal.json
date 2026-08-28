@@ -1,0 +1,63 @@
+{
+  "revision": 12,
+  "job": {
+    "schema_version": 1,
+    "id": "job-1",
+    "project_id": "project-1",
+    "project_identity": {
+      "kind": "posix-dev-inode",
+      "volume": "1",
+      "file": "2"
+    },
+    "agent": {
+      "kind": "codex",
+      "identity": {
+        "kind": "posix-dev-inode",
+        "volume": "1",
+        "file": "3"
+      },
+      "version": "1.2.3",
+      "executable": "/usr/local/bin/codex"
+    },
+    "state": "failed",
+    "attempt": 1,
+    "frozen_sessions": [
+      {
+        "session_id": "session-1",
+        "started_at": "2026-08-28T04:00:00Z",
+        "upper": {
+          "line": 1,
+          "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    ],
+    "session_index": 0,
+    "current_packet": {
+      "line": 1,
+      "source_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "accepted_packets": 1,
+    "accepted_sessions": 0,
+    "created_at": "2026-08-28T04:00:00Z",
+    "started_at": "2026-08-28T04:00:00Z",
+    "updated_at": "2026-08-28T04:00:00Z",
+    "completed_at": "2026-08-28T04:00:00Z",
+    "cancellation_requested_at": "0001-01-01T00:00:00Z",
+    "owner": {
+      "id": "",
+      "acquired_at": "0001-01-01T00:00:00Z"
+    },
+    "packet_digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "result_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "review_usage": {
+      "models": null,
+      "total_tokens": 0,
+      "pricing_complete": false
+    },
+    "error": {
+      "code": "E_SYNC_CONFLICT"
+    },
+    "sync_only_available": true,
+    "private_error": "sync conflict"
+  }
+}

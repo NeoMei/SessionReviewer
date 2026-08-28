@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
@@ -20,6 +21,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -503,7 +505,7 @@ func validateForbiddenRootStrings(input Input, accepted acceptedContext) error {
 	for _, value := range values {
 		normalized := normalizePathText(value, goos)
 		for _, root := range forbidden {
-			if strings.Contains(normalized, root) {
+			if containsForbiddenPathSpan(normalized, root) {
 				return ErrUnsafeInput
 			}
 		}
@@ -532,18 +534,86 @@ func normalizeForbiddenPath(value, goos string) (string, bool) {
 }
 
 func normalizePathText(value, goos string) string {
-	if goos != "windows" {
+	switch goos {
+	case "darwin":
+		// The default Darwin filesystem is case-insensitive and stores Unicode
+		// in a decomposed form. NFC plus case folding makes the validation
+		// conservative across both default and case-sensitive volumes.
+		return strings.ToLower(norm.NFC.String(value))
+	case "windows":
+		value = strings.ToLower(norm.NFC.String(strings.ReplaceAll(value, `\`, "/")))
+		// Win32 extended drive and UNC spellings are aliases of their ordinary
+		// counterparts. Do this replacement throughout the structured string
+		// because a path is commonly embedded after a prose prefix.
+		value = strings.ReplaceAll(value, "//?/unc/", "//")
+		value = strings.ReplaceAll(value, "//?/", "")
+		value = strings.ReplaceAll(value, "/??/", "")
+		return collapseWindowsSlashes(value)
+	default:
 		return value
 	}
-	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
-	unc := strings.HasPrefix(value, "//")
-	for strings.Contains(value, "//") {
-		value = strings.ReplaceAll(value, "//", "/")
+}
+
+func collapseWindowsSlashes(value string) string {
+	var result strings.Builder
+	result.Grow(len(value))
+	for index := 0; index < len(value); {
+		if value[index] != '/' {
+			result.WriteByte(value[index])
+			index++
+			continue
+		}
+		end := index + 1
+		for end < len(value) && value[end] == '/' {
+			end++
+		}
+		unc := end-index >= 2 && (index == 0 || isPathSpanDelimiterBefore(value[:index]))
+		if unc {
+			result.WriteString("//")
+		} else {
+			result.WriteByte('/')
+		}
+		index = end
 	}
-	if unc {
-		value = "/" + value
+	return result.String()
+}
+
+func containsForbiddenPathSpan(value, root string) bool {
+	for searchFrom := 0; searchFrom <= len(value)-len(root); {
+		relative := strings.Index(value[searchFrom:], root)
+		if relative < 0 {
+			return false
+		}
+		start := searchFrom + relative
+		end := start + len(root)
+		leftOK := start == 0 || isPathSpanDelimiterBefore(value[:start])
+		rightOK := end == len(value) || value[end] == '/' || isPathSpanTerminator(value[end:])
+		if leftOK && rightOK {
+			return true
+		}
+		searchFrom = start + 1
 	}
-	return value
+	return false
+}
+
+func isPathSpanDelimiterBefore(prefix string) bool {
+	r, _ := utf8.DecodeLastRuneInString(prefix)
+	if unicode.IsSpace(r) || unicode.IsControl(r) {
+		return true
+	}
+	// A slash permits POSIX's double-leading-slash spelling. Other accepted
+	// characters delimit a path in prose, JSON-like text, or a URI.
+	return strings.ContainsRune(`/\"'()[]{}<>=,;:!?&#`, r)
+}
+
+func isPathSpanTerminator(suffix string) bool {
+	r, _ := utf8.DecodeRuneInString(suffix)
+	if unicode.IsSpace(r) || unicode.IsControl(r) {
+		return true
+	}
+	// Dot, dash, underscore, percent and tilde intentionally are not
+	// terminators: they commonly extend the final sibling path component.
+	return strings.ContainsRune(`\"'()[]{}<>=,;:!?&#`, r)
 }
 
 func validCursorBoundary(boundary evidence.CursorBoundary) bool {

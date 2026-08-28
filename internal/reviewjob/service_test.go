@@ -183,6 +183,69 @@ func workerInitialAccepted(projectID string) workerAccepted {
 	}}
 }
 
+func seedWorkerReviewV2AndSyncData(t *testing.T, fixture workerFixture, accepted workerAccepted) {
+	t.Helper()
+	projected, err := reviewv2.ProjectLegacy(accepted.legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(fixture.project, projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	syncData := filepath.Join(fixture.data, "projects", fixture.job.ProjectID)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := os.MkdirAll(filepath.Join(syncData, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(syncData, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedWorkerLegacyReviewAndSyncData(t *testing.T, fixture workerFixture) {
+	t.Helper()
+	directory := filepath.Join(fixture.project, "docs", "session-review")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: " + fixture.job.ProjectID +
+		"\nrevision: 1\nsync_status: synced\ncreated_at: 2026-08-24T00:00:00Z\nnote: base\n---\n\n# Worker legacy review\n"
+	if err := os.WriteFile(filepath.Join(directory, "project-overview.md"), []byte(overview), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := ledger.Load(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := ledger.CurrentState{
+		ProjectID: legacy.ProjectID, Revision: 1, Goal: "migrate worker fixture", LastVerified: "legacy accepted",
+		Branch: "codex/legacy", Blockers: []string{}, OpenRisks: []string{}, NextAction: "sync",
+		FirstInspection: "docs/session-review/project-overview.md", LastUpdated: "2026-08-29T08:00:00Z",
+		SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+	}
+	plan, err := ledger.Render(legacy, ledger.ChangeSet{Current: &current})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
+	}
+	syncData := filepath.Join(fixture.data, "projects", fixture.job.ProjectID)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := os.MkdirAll(filepath.Join(syncData, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(syncData, "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func workerCapability(provider, version string) agent.Capability {
 	return agent.Capability{
 		Provider: provider, Version: version, ProposalOnly: true, NoTools: true,
@@ -463,9 +526,10 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 	}
 }
 
-// Calling capability verification or generation when the frozen queue is empty
-// would violate the deterministic sync-only fast path.
-func TestWorkerNoPendingSyncsExactlyOnceWithoutAgent(t *testing.T) {
+// With neither frozen work nor a durable accepted apply, sync has no commit to
+// finish. Calling any injected seam would invent work that the Job cannot
+// authorize.
+func TestWorkerEmptyQueueWithoutAcceptedApplyCompletesWithoutSyncOrAgent(t *testing.T) {
 	fixture := newWorkerFixture(t, nil)
 	adapter := &verifiedWorkerAgent{
 		capability: workerCapability("fixture", "1.0.0"),
@@ -488,12 +552,124 @@ func TestWorkerNoPendingSyncsExactlyOnceWithoutAgent(t *testing.T) {
 	if err := Run(t.Context(), options); err != nil {
 		t.Fatal(err)
 	}
-	if syncCalls != 1 || adapter.capabilityCalls != 0 || adapter.generateCalls != 0 {
+	if syncCalls != 0 || adapter.capabilityCalls != 0 || adapter.generateCalls != 0 {
 		t.Fatalf("sync=%d capability=%d generate=%d", syncCalls, adapter.capabilityCalls, adapter.generateCalls)
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
 	if err != nil || !found || job.State != Completed || job.AcceptedPackets != 0 || job.SessionIndex != 0 {
 		t.Fatalf("no-pending job = %#v found=%v err=%v", job, found, err)
+	}
+}
+
+func TestWorkerEmptyQueueHonorsCancellationWithoutSync(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	syncCalls := 0
+	options := workerRunOptions(fixture, nil, nil, nil, func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		syncCalls++
+		return workerSyncReport(fixture.job.ProjectID), nil
+	}, nil)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() ignored cancellation with no mandatory commit")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled || syncCalls != 0 {
+		t.Fatalf("cancelled empty job=%#v found=%v err=%v sync=%d", job, found, err, syncCalls)
+	}
+}
+
+func TestWorkerEmptyQueueFinishesDurableAcceptedApplyDespiteCancellation(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	job, _, err := fixture.store.Update(fixture.job.ID, 1, func(job *Job) error {
+		job.AcceptedPackets = 1
+		job.AcceptedSyncPending = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.job = job
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	syncCalls := 0
+	options := workerRunOptions(fixture, nil, nil, nil, func(commitCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
+		syncCalls++
+		if commitCtx.Err() != nil {
+			t.Fatalf("mandatory sync received cancellable context: %v", commitCtx.Err())
+		}
+		return workerSyncReport(fixture.job.ProjectID), nil
+	}, nil)
+	if err := Run(ctx, options); err != nil {
+		t.Fatal(err)
+	}
+	completed, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || completed.State != Completed || completed.AcceptedSyncPending || syncCalls != 1 {
+		t.Fatalf("mandatory-sync job=%#v found=%v err=%v sync=%d", completed, found, err, syncCalls)
+	}
+}
+
+func TestWorkerRunsRealSyncForNestedProjectAfterDurableAcceptedApply(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	seedWorkerReviewV2AndSyncData(t, fixture, workerInitialAccepted(fixture.job.ProjectID))
+	job, _, err := fixture.store.Update(fixture.job.ID, 1, func(job *Job) error {
+		job.AcceptedPackets = 1
+		job.AcceptedSyncPending = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.job = job
+	options := workerRunOptions(fixture, nil, nil, nil, syncproject.Run, nil)
+	options.GOOS = "darwin"
+	if err := Run(t.Context(), options); err != nil {
+		t.Fatal(err)
+	}
+	completed, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || completed.State != Completed || completed.AcceptedSyncPending {
+		t.Fatalf("real-sync job=%#v found=%v err=%v", completed, found, err)
+	}
+	path := filepath.Join(fixture.vault, "Projects", "Worker--11111111", "Session Review", "项目回顾.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("worker real sync did not publish nested Project: %v", err)
+	}
+}
+
+func TestWorkerAcceptsRealCompletedLegacyMigrationAudit(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	seedWorkerLegacyReviewAndSyncData(t, fixture)
+	job, _, err := fixture.store.Update(fixture.job.ID, 1, func(job *Job) error {
+		job.AcceptedPackets = 1
+		job.AcceptedSyncPending = true
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.job = job
+	var migration syncengine.MigrationReport
+	syncReal := func(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
+		report, err := syncproject.Run(ctx, options)
+		migration = report.Migration
+		return report, err
+	}
+	options := workerRunOptions(fixture, nil, nil, nil, syncReal, nil)
+	options.GOOS = "darwin"
+	if err := Run(t.Context(), options); err != nil {
+		t.Fatal(err)
+	}
+	completed, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || completed.State != Completed || completed.AcceptedSyncPending {
+		t.Fatalf("legacy migration job=%#v found=%v err=%v", completed, found, err)
+	}
+	if migration.Required || migration.DryRun || len(migration.Creates) == 0 || len(migration.Archives) == 0 {
+		t.Fatalf("real migration audit was not complete: %#v", migration)
+	}
+	for _, name := range []string{"项目回顾.md", "项目历史.md", filepath.Join(".session-reviewer", "ledger.json")} {
+		if _, err := os.Stat(filepath.Join(fixture.project, "docs", "session-review", name)); err != nil {
+			t.Fatalf("legacy migration did not publish %s: %v", name, err)
+		}
 	}
 }
 
@@ -974,6 +1150,303 @@ func TestWorkerApplyRecoveryRetainsAuthenticatedExactPacketAndProposal(t *testin
 	}
 }
 
+func TestWorkerPayloadPublicationWALAtEveryBoundary(t *testing.T) {
+	stages := []payloadCheckpointStage{
+		payloadBeforeIntentCAS, payloadAfterIntentCAS, payloadBeforeWrite, payloadAfterWrite,
+		payloadBeforeRename, payloadAfterRename, payloadBeforeVerify, payloadAfterVerify,
+		payloadBeforeRetainedCAS, payloadAfterRetainedCAS,
+	}
+	for _, kind := range []PayloadKind{PayloadPacket, PayloadProposal} {
+		for _, stage := range stages {
+			t.Run(string(kind)+"_"+string(stage), func(t *testing.T) {
+				hash := strings.Repeat("7", 64)
+				fixture := newWorkerFixture(t, []FrozenSession{{
+					SessionID: "session-s1", StartedAt: fixtureTime(7),
+					Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+				}})
+				packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000029")
+				packet.CWD = "/repo"
+				accepted := workerInitialAccepted(fixture.job.ProjectID)
+				adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+				adapter.generate = func(agent.Request) (agent.Result, error) {
+					return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+				}
+				options := workerRunOptions(
+					fixture,
+					func(context.Context, PrepareRequest) (Prepared, error) {
+						return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+					},
+					adapter,
+					func(context.Context, ApplyRequest) (apply.Result, error) { panic("WAL crash reached apply") },
+					func(context.Context, syncproject.Options) (syncengine.Report, error) { panic("WAL crash reached sync") },
+					nil,
+				)
+				crash := errors.New("simulated payload publication crash")
+				observed := false
+				options.payloadCheckpoint = func(gotKind PayloadKind, gotStage payloadCheckpointStage) error {
+					if gotKind != kind || gotStage != stage {
+						return nil
+					}
+					observed = true
+					assertPayloadCheckpointBoundary(t, fixture, kind, stage)
+					return crash
+				}
+				if err := Run(t.Context(), options); !errors.Is(err, crash) {
+					t.Fatalf("Run() err=%v want simulated crash", err)
+				}
+				if !observed {
+					t.Fatal("target payload checkpoint was not reached")
+				}
+
+				recovered, revision, disposition, err := fixture.store.RecoverInterrupted(fixture.job.ID)
+				if err != nil || disposition != RecoveryApplyInspectionNeeded || recovered.State != Failed || recovered.Error.Code != ApplyRecovery {
+					t.Fatalf("RecoverInterrupted()=%#v revision=%d disposition=%q err=%v", recovered, revision, disposition, err)
+				}
+				if !(kind == PayloadPacket && stage == payloadBeforeIntentCAS) && recovered.PayloadState != PayloadCleanupPending {
+					t.Fatalf("recovery did not authorize bounded cleanup: %#v", recovered)
+				}
+				inputsPath := filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs")
+				if recovered.PayloadState == "" {
+					entries, readErr := os.ReadDir(inputsPath)
+					if readErr != nil || len(entries) != 0 {
+						t.Fatalf("pre-intent crash left private payloads: entries=%v err=%v", entries, readErr)
+					}
+					return
+				}
+				inputs, err := os.OpenRoot(inputsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cleanupErr := cleanupPrivatePayloads(inputs, recovered)
+				closeErr := inputs.Close()
+				if cleanupErr != nil || closeErr != nil {
+					t.Fatalf("cleanup=%v close=%v", cleanupErr, closeErr)
+				}
+				completed, _, err := fixture.store.Update(fixture.job.ID, revision, func(job *Job) error {
+					setPayloadLifecycle(job, PayloadCleanupComplete, PayloadCleanupByDigest)
+					return nil
+				})
+				if err != nil || completed.PayloadState != PayloadCleanupComplete {
+					t.Fatalf("persist cleanup-complete job=%#v err=%v", completed, err)
+				}
+				entries, err := os.ReadDir(inputsPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if entry.Name() == packetWorkName || entry.Name() == proposalWorkName || privateAtomicTempName(entry.Name()) {
+						t.Fatalf("recovery cleanup retained private publication %q", entry.Name())
+					}
+				}
+			})
+		}
+	}
+}
+
+func assertPayloadCheckpointBoundary(t *testing.T, fixture workerFixture, kind PayloadKind, stage payloadCheckpointStage) {
+	t.Helper()
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("checkpoint Load() found=%v err=%v", found, err)
+	}
+	wantCount := 0
+	wantGlobal := PayloadState("")
+	wantTarget := PayloadState("")
+	if kind == PayloadProposal || stage != payloadBeforeIntentCAS {
+		wantCount = 1
+		wantGlobal = PayloadRetained
+		wantTarget = PayloadRetained
+	}
+	if stage != payloadBeforeIntentCAS {
+		wantCount = 1
+		if kind == PayloadProposal {
+			wantCount = 2
+		}
+		wantGlobal = PayloadPublishing
+		wantTarget = PayloadPublishing
+	}
+	if stage == payloadAfterRetainedCAS {
+		wantGlobal = PayloadRetained
+		wantTarget = PayloadRetained
+	}
+	if len(job.PayloadPublications) != wantCount || job.PayloadState != wantGlobal {
+		t.Fatalf("checkpoint job publications=%#v global=%q want count=%d global=%q", job.PayloadPublications, job.PayloadState, wantCount, wantGlobal)
+	}
+	if wantCount != 0 && !(kind == PayloadProposal && stage == payloadBeforeIntentCAS) {
+		target := job.PayloadPublications[wantCount-1]
+		if target.Kind != kind || target.State != wantTarget || target.CleanupAuthority != PayloadCleanupNotAuthorized ||
+			(kind == PayloadPacket && target.Name != packetWorkName) || (kind == PayloadProposal && target.Name != proposalWorkName) {
+			t.Fatalf("checkpoint target publication=%#v want kind=%q state=%q", target, kind, wantTarget)
+		}
+	} else if kind == PayloadProposal && stage == payloadBeforeIntentCAS {
+		packet := job.PayloadPublications[0]
+		if packet.Kind != PayloadPacket || packet.State != PayloadRetained || packet.CleanupAuthority != PayloadCleanupNotAuthorized {
+			t.Fatalf("proposal pre-intent lost retained packet authority: %#v", packet)
+		}
+	}
+	inputs := filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs")
+	entries, err := os.ReadDir(inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetName := packetWorkName
+	if kind == PayloadProposal {
+		targetName = proposalWorkName
+	}
+	named, temps := false, 0
+	for _, entry := range entries {
+		if entry.Name() == targetName {
+			named = true
+		}
+		if privateAtomicTempName(entry.Name()) {
+			temps++
+		}
+	}
+	wantNamed := stage == payloadAfterRename || stage == payloadBeforeVerify || stage == payloadAfterVerify ||
+		stage == payloadBeforeRetainedCAS || stage == payloadAfterRetainedCAS
+	wantTemp := stage == payloadAfterWrite || stage == payloadBeforeRename
+	if named != wantNamed || (temps != 0) != wantTemp {
+		t.Fatalf("checkpoint files named=%v temps=%d want named=%v temp=%v entries=%v", named, temps, wantNamed, wantTemp, entries)
+	}
+}
+
+func TestWorkerNextPacketPublicationIntentDropsStalePriorDigests(t *testing.T) {
+	firstHash, secondHash := strings.Repeat("8", 64), strings.Repeat("9", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 2, SourceHash: secondHash},
+	}})
+	packets := []evidence.Packet{
+		workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", firstHash, true, "ev-000000000030"),
+		workerPacket(fixture.job.ProjectID, "session-s1", 2, 2, firstHash, secondHash, false, "ev-000000000031"),
+	}
+	for index := range packets {
+		packets[index].CWD = "/repo"
+	}
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	packetIndex := 0
+	current := packets[0]
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, current, accepted.legacy)}, nil
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			current = packets[packetIndex]
+			packetIndex++
+			return Prepared{Packet: current, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+			accepted.apply(t, request.Changes)
+			return apply.Result{ProjectID: current.ProjectID, SessionID: current.SessionID, FromCursor: current.FromCursor, ToCursor: current.ToCursor, CursorAdvanced: true}, nil
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			return workerSyncReport(fixture.job.ProjectID), nil
+		},
+		nil,
+	)
+	var priorPacket, priorProposal string
+	crash := errors.New("stop after second packet intent")
+	options.payloadCheckpoint = func(kind PayloadKind, stage payloadCheckpointStage) error {
+		job, _, found, err := fixture.store.Load(fixture.job.ID)
+		if err != nil || !found {
+			return errors.New("cannot inspect publication job")
+		}
+		if kind == PayloadProposal && stage == payloadAfterRetainedCAS && job.AcceptedPackets == 0 {
+			priorPacket, priorProposal = job.PacketDigest, job.ResultDigest
+		}
+		if kind == PayloadPacket && stage == payloadAfterIntentCAS && job.AcceptedPackets == 1 {
+			if len(job.PayloadPublications) != 1 || job.ResultDigest != "" || job.PacketDigest == priorPacket ||
+				job.PayloadPublications[0].Digest != job.PacketDigest || job.PayloadPublications[0].Digest == priorProposal {
+				return errors.New("new packet intent retained stale digest authority")
+			}
+			entries, readErr := os.ReadDir(filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs"))
+			if readErr != nil || len(entries) != 0 {
+				return errors.New("new packet intent inherited stale private files")
+			}
+			return crash
+		}
+		return nil
+	}
+	if err := Run(t.Context(), options); !errors.Is(err, crash) {
+		t.Fatalf("Run() err=%v want second intent crash", err)
+	}
+	if priorPacket == "" || priorProposal == "" {
+		t.Fatal("first packet never established retained digest evidence")
+	}
+}
+
+func TestRecoverInterruptedPayloadIntentHandlesMissingNamedAndAtomicTemp(t *testing.T) {
+	for _, shape := range []string{"missing", "named", "atomic_temp"} {
+		t.Run(shape, func(t *testing.T) {
+			hash := strings.Repeat("a", 64)
+			fixture := newWorkerFixture(t, []FrozenSession{{
+				SessionID: "session-s1", StartedAt: fixtureTime(7),
+				Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+			}})
+			body := []byte(`{"packet":"durable intent"}`)
+			digest := digestPrivate(body)
+			if _, _, err := fixture.store.Update(fixture.job.ID, 1, func(job *Job) error {
+				job.State = Running
+				job.Phase = Reviewing
+				job.StartedAt = fixture.now
+				job.Owner = Owner{ID: "worker-owner-1", AcquiredAt: fixture.now}
+				job.PacketDigest = digest
+				job.PayloadState = PayloadPublishing
+				job.PayloadPublications = []PayloadPublication{{
+					Kind: PayloadPacket, Name: packetWorkName, Digest: digest,
+					State: PayloadPublishing, CleanupAuthority: PayloadCleanupNotAuthorized,
+				}}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			inputsPath := filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs")
+			if err := os.MkdirAll(inputsPath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			switch shape {
+			case "named":
+				if err := os.WriteFile(filepath.Join(inputsPath, packetWorkName), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "atomic_temp":
+				if err := os.WriteFile(filepath.Join(inputsPath, ".session-reviewer-"+strings.Repeat("a", 32)), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			recovered, revision, disposition, err := fixture.store.RecoverInterrupted(fixture.job.ID)
+			if err != nil || disposition != RecoveryApplyInspectionNeeded || recovered.PayloadState != PayloadCleanupPending ||
+				len(recovered.PayloadPublications) != 1 || recovered.PayloadPublications[0].CleanupAuthority != PayloadCleanupByDigest {
+				t.Fatalf("RecoverInterrupted()=%#v revision=%d disposition=%q err=%v", recovered, revision, disposition, err)
+			}
+			inputs, err := os.OpenRoot(inputsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cleanupErr := cleanupPrivatePayloads(inputs, recovered)
+			closeErr := inputs.Close()
+			if cleanupErr != nil || closeErr != nil {
+				t.Fatalf("cleanup=%v close=%v", cleanupErr, closeErr)
+			}
+			completed, _, err := fixture.store.Update(fixture.job.ID, revision, func(job *Job) error {
+				setPayloadLifecycle(job, PayloadCleanupComplete, PayloadCleanupByDigest)
+				return nil
+			})
+			if err != nil || completed.PayloadState != PayloadCleanupComplete {
+				t.Fatalf("cleanup completion=%#v err=%v", completed, err)
+			}
+			entries, err := os.ReadDir(inputsPath)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("cleanup entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
 func TestWorkerNeverCleansPayloadBeforeDurableCleanupBoundary(t *testing.T) {
 	for _, boundary := range []string{"before", "after"} {
 		t.Run(boundary+" cleanup CAS crash", func(t *testing.T) {
@@ -1049,7 +1522,10 @@ func TestWorkerRejectsDryRunAndPartialMigrationSyncReports(t *testing.T) {
 	}{
 		{name: "report dry run", mutate: func(report *syncengine.Report) { report.DryRun = true }},
 		{name: "migration dry run", mutate: func(report *syncengine.Report) { report.Migration.DryRun = true }},
-		{name: "partial migration plan", mutate: func(report *syncengine.Report) { report.Migration.Creates = []string{"review-v2.json"} }},
+		{name: "partial migration plan", mutate: func(report *syncengine.Report) {
+			report.Migration.Required = true
+			report.Migration.Creates = []string{"review-v2.json"}
+		}},
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1092,6 +1568,46 @@ func TestWorkerRejectsDryRunAndPartialMigrationSyncReports(t *testing.T) {
 				t.Fatalf("rejected sync job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
 			}
 		})
+	}
+}
+
+func TestWorkerAcceptsCompletedMigrationAudit(t *testing.T) {
+	hash := strings.Repeat("8", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000028")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return Prepared{Packet: packet, Accepted: accepted.snapshot(t)}, nil
+		},
+		adapter,
+		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+			accepted.apply(t, request.Changes)
+			return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			report := workerSyncReport(packet.ProjectID)
+			report.Migration.Creates = []string{"docs/session-review/项目回顾.md", "docs/session-review/项目历史.md"}
+			report.Migration.Archives = []string{"docs/session-review/project-overview.md"}
+			return report, nil
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err != nil {
+		t.Fatalf("Run() rejected completed migration audit: %v", err)
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Completed || job.AcceptedSessions != 1 {
+		t.Fatalf("completed-migration job=%#v found=%v err=%v", job, found, err)
 	}
 }
 

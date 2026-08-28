@@ -239,12 +239,8 @@ func (leases *LeaseSet) Release() error {
 // execution. It never decides whether an in-flight apply was accepted:
 // E_APPLY_RECOVERY requires authoritative receipt inspection before resume.
 func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposition, retErr error) {
-	job, revision, found, err := s.Load(jobID)
-	if err != nil {
+	if err := validateStoreID(jobID, "job"); err != nil {
 		return Job{}, 0, "", err
-	}
-	if !found {
-		return Job{}, 0, "", os.ErrNotExist
 	}
 	layout, err := s.openLayout(false)
 	if err != nil {
@@ -256,7 +252,24 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		}
 		return Job{}, 0, "", os.ErrNotExist
 	}
-	defer func() { retErr = errors.Join(retErr, layout.finish()) }()
+	// Recovery is deliberately allowed to finish against the exact pinned Data
+	// identity even if its external pathname is detached. Requiring a pathname
+	// reopen here would either redirect the CAS to a replacement Store or turn a
+	// safely pinned recovery into an ambiguous partial operation.
+	defer func() { retErr = errors.Join(retErr, layout.close()) }()
+	if err := layout.verifyPinned(); err != nil {
+		return Job{}, 0, "", err
+	}
+	job, revision, found, err := s.loadFromJobs(layout.jobs, jobID)
+	if err != nil || !found {
+		if err != nil {
+			return Job{}, 0, "", err
+		}
+		return Job{}, 0, "", os.ErrNotExist
+	}
+	if err := layout.verifyPinned(); err != nil {
+		return Job{}, 0, "", err
+	}
 	projectLease, err := acquirePrivateFileLock(layout.projectLocks, job.ProjectID+".lock", 0)
 	if errors.Is(err, errPrivateFileLocked) {
 		return job, revision, RecoveryNotInterrupted, nil
@@ -265,15 +278,24 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		return Job{}, 0, "", fmt.Errorf("inspect interrupted review worker lease: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, projectLease.release()) }()
+	if err := layout.verifyPinned(); err != nil {
+		return Job{}, 0, "", err
+	}
 
 	// Reload after owning the project lease. Another recovery/start may have
 	// completed between the optimistic read and this authoritative boundary.
-	current, currentRevision, found, err := s.Load(jobID)
+	current, currentRevision, found, err := s.loadFromJobs(layout.jobs, jobID)
 	if err != nil || !found {
 		if err != nil {
 			return Job{}, 0, "", err
 		}
 		return Job{}, 0, "", os.ErrNotExist
+	}
+	if current.ID != job.ID || current.ProjectID != job.ProjectID || current.ProjectIdentity != job.ProjectIdentity || currentRevision < revision {
+		return Job{}, 0, "", errors.New("review job identity or revision changed while acquiring recovery lease")
+	}
+	if err := layout.verifyPinned(); err != nil {
+		return Job{}, 0, "", err
 	}
 	if !active(current.State) {
 		return current, currentRevision, RecoveryNotRecoverable, nil
@@ -285,10 +307,11 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 	if completedAt.Before(current.UpdatedAt) {
 		completedAt = current.UpdatedAt
 	}
-	updated, nextRevision, err := s.Update(jobID, currentRevision, func(job *Job) error {
+	updated, nextRevision, err := s.updatePinnedLayout(layout, jobID, currentRevision, func(job *Job) error {
 		if !leaseBackedRecoveryState(job.State) {
 			return ErrStaleRevision
 		}
+		phase := job.Phase
 		job.State = Failed
 		job.Phase = ""
 		job.UpdatedAt = completedAt
@@ -296,14 +319,14 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		job.Owner = Owner{}
 		job.Error = SafeError{Code: ApplyRecovery}
 		job.PrivateError = "worker lease ended before a terminal state; apply receipt inspection is required"
-		if current.Phase == Applying && current.PacketDigest != "" && current.ResultDigest != "" {
-			job.PayloadState = PayloadApplyRecovery
+		if phase == Applying && hasExactRetainedApplyPayloads(*job) {
+			setPayloadLifecycle(job, PayloadApplyRecovery, PayloadCleanupAfterReceipt)
 			job.PayloadRetainedFor = ApplyRecovery
-		} else if current.PayloadState == PayloadRetained {
+		} else if job.PayloadState == PayloadPublishing || job.PayloadState == PayloadRetained || len(job.PayloadPublications) != 0 {
 			// No apply boundary was durably entered. Keep the authenticated bytes
 			// behind a terminal cleanup boundary so recovery can remove them by
 			// digest and then persist cleanup-complete.
-			job.PayloadState = PayloadCleanupPending
+			setPayloadLifecycle(job, PayloadCleanupPending, PayloadCleanupByDigest)
 			job.PayloadRetainedFor = ""
 		}
 		return nil

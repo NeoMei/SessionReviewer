@@ -1710,6 +1710,61 @@ func (fixture engineFixture) options() Options {
 	}
 }
 
+func TestNewEngineRejectsUnsafeRootContainmentDirections(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*testing.T, *engineFixture)
+		message string
+	}{
+		{
+			name: "vault below project",
+			mutate: func(t *testing.T, fixture *engineFixture) {
+				t.Helper()
+				nested := filepath.Join(fixture.project, "vault")
+				if err := os.Rename(fixture.vault, nested); err != nil {
+					t.Fatal(err)
+				}
+				fixture.vault = nested
+			},
+			message: "vault root must not be nested in project root",
+		},
+		{
+			name: "data below project",
+			mutate: func(t *testing.T, fixture *engineFixture) {
+				t.Helper()
+				nested := filepath.Join(fixture.project, "sync-data")
+				if err := os.Rename(fixture.data, nested); err != nil {
+					t.Fatal(err)
+				}
+				fixture.data = nested
+			},
+			message: "sync data root must be disjoint from project and vault roots",
+		},
+		{
+			name: "data above project and vault",
+			mutate: func(t *testing.T, fixture *engineFixture) {
+				t.Helper()
+				fixture.data = fixture.root
+			},
+			message: "sync data root must be disjoint from project and vault roots",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			test.mutate(t, &fixture)
+			engine, err := NewEngine(fixture.options())
+			if engine != nil {
+				_ = engine.Close()
+				t.Fatal("NewEngine returned an engine for unsafe roots")
+			}
+			if err == nil || err.Error() != test.message {
+				t.Fatalf("NewEngine error=%v want %q", err, test.message)
+			}
+		})
+	}
+}
+
 func writeFixtureDecision(t *testing.T, fixture engineFixture, relative string) {
 	t.Helper()
 	body := "---\nid: decision-sync\nentity_type: decision\nproject_id: " + fixture.projectID + "\nrevision: 1\nsync_status: synced\ntitle: Sync decision\nstatus: accepted\ntags: [sync]\nsupersedes: []\nsource_sessions: [session-1]\nevidence:\n  - evidence_id: evidence-1\n    session_id: session-1\n    jsonl_line: 1\n    source_hash: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    summary: accepted\n---\n\n# Sync decision\n\n## Alternatives\n\n## Rejected paths\n"

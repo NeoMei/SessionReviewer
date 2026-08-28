@@ -185,11 +185,22 @@ func NewEngine(options Options) (*Engine, error) {
 		_ = dataRoot.Close()
 		return nil, errors.New("sync data root identity changed after mapping resolution")
 	}
-	if projectRoot.ContainsIdentity(vaultRoot.Info()) || vaultRoot.ContainsIdentity(projectRoot.Info()) {
+	// A common Obsidian layout keeps the reviewed Project beneath its Vault.
+	// That direction is safe because all Vault writes remain restricted to the
+	// configured review subtree. The inverse would place arbitrary Vault output
+	// beneath the authoritative Project and is rejected.
+	if vaultRoot.ContainsIdentity(projectRoot.Info()) {
 		_ = projectRoot.Close()
 		_ = vaultRoot.Close()
 		_ = dataRoot.Close()
-		return nil, errors.New("project and vault roots overlap")
+		return nil, errors.New("vault root must not be nested in project root")
+	}
+	if projectRoot.ContainsIdentity(dataRoot.Info()) || dataRoot.ContainsIdentity(projectRoot.Info()) ||
+		vaultRoot.ContainsIdentity(dataRoot.Info()) || dataRoot.ContainsIdentity(vaultRoot.Info()) {
+		_ = projectRoot.Close()
+		_ = vaultRoot.Close()
+		_ = dataRoot.Close()
+		return nil, errors.New("sync data root must be disjoint from project and vault roots")
 	}
 	engine := &Engine{options: options, project: projectRoot, vault: vaultRoot, data: dataRoot}
 	engine.bases = BaseStore{Root: dataRoot.Root}

@@ -241,6 +241,7 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	}
 	next := current
 	next.ReviewAccounting = cloneReviewAccounting(current.ReviewAccounting)
+	next.PayloadPublications = append([]PayloadPublication(nil), current.PayloadPublications...)
 	if err := mutate(&next); err != nil {
 		return Job{}, currentRevision, err
 	}
@@ -587,8 +588,15 @@ func (s Store) readStoredJobInfo(root *os.Root, name, jobID string, info os.File
 		return storedJob{}, err
 	}
 	var record storedJob
-	if err := decodeStrictCanonical(body, &record); err != nil {
-		return storedJob{}, errors.New("review job state is corrupt")
+	if currentErr := decodeStrictCanonical(body, &record); currentErr != nil {
+		var legacy legacyStoredJobV1
+		if legacyErr := decodeStrictCanonical(body, &legacy); legacyErr != nil {
+			return storedJob{}, errors.New("review job state is corrupt")
+		}
+		record, err = migrateLegacyStoredJobV1(legacy)
+		if err != nil {
+			return storedJob{}, fmt.Errorf("legacy review job state is invalid: %w", err)
+		}
 	}
 	if record.Revision < 1 || record.Revision > maxSafeInteger || record.Job.ID != jobID {
 		return storedJob{}, errors.New("review job state identity or revision is invalid")

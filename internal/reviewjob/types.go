@@ -41,11 +41,39 @@ const (
 type PayloadState string
 
 const (
+	PayloadPublishing      PayloadState = "publish_intent"
 	PayloadRetained        PayloadState = "retained"
 	PayloadApplyRecovery   PayloadState = "apply_recovery"
 	PayloadCleanupPending  PayloadState = "cleanup_pending"
 	PayloadCleanupComplete PayloadState = "cleanup_complete"
 )
+
+type PayloadKind string
+
+const (
+	PayloadPacket   PayloadKind = "packet"
+	PayloadProposal PayloadKind = "proposal"
+)
+
+type PayloadCleanupAuthority string
+
+const (
+	PayloadCleanupNotAuthorized PayloadCleanupAuthority = "not_authorized"
+	PayloadCleanupByDigest      PayloadCleanupAuthority = "digest_authenticated"
+	PayloadCleanupAfterReceipt  PayloadCleanupAuthority = "receipt_required"
+)
+
+// PayloadPublication is the private write-ahead authority for one exact
+// worker filename. Digest and intent become durable before any private bytes
+// are published, so restart recovery never has to infer which packet a stale
+// packet.json or proposal.json belongs to.
+type PayloadPublication struct {
+	Kind             PayloadKind             `json:"kind"`
+	Name             string                  `json:"name"`
+	Digest           string                  `json:"digest"`
+	State            PayloadState            `json:"state"`
+	CleanupAuthority PayloadCleanupAuthority `json:"cleanup_authority"`
+}
 
 // FrozenSession is the click-time bounded source interval for one session.
 // It remains private because Upper contains source provenance.
@@ -119,14 +147,15 @@ type Job struct {
 	CancellationRequested time.Time `json:"cancellation_requested_at,omitempty"`
 	Owner                 Owner     `json:"owner,omitempty"`
 
-	PacketDigest        string           `json:"packet_digest,omitempty"`
-	ResultDigest        string           `json:"result_digest,omitempty"`
-	ReviewAccounting    ReviewAccounting `json:"review_usage"`
-	Error               SafeError        `json:"error,omitempty"`
-	AcceptedSyncPending bool             `json:"accepted_sync_pending"`
-	PayloadState        PayloadState     `json:"payload_state,omitempty"`
-	PayloadRetainedFor  ErrorCode        `json:"payload_retained_for,omitempty"`
-	PrivateError        string           `json:"private_error,omitempty"`
+	PacketDigest        string               `json:"packet_digest,omitempty"`
+	ResultDigest        string               `json:"result_digest,omitempty"`
+	ReviewAccounting    ReviewAccounting     `json:"review_usage"`
+	Error               SafeError            `json:"error,omitempty"`
+	AcceptedSyncPending bool                 `json:"accepted_sync_pending"`
+	PayloadState        PayloadState         `json:"payload_state,omitempty"`
+	PayloadRetainedFor  ErrorCode            `json:"payload_retained_for,omitempty"`
+	PayloadPublications []PayloadPublication `json:"payload_publications,omitempty"`
+	PrivateError        string               `json:"private_error,omitempty"`
 }
 
 type PublicState string
@@ -274,9 +303,12 @@ func Validate(job Job) error {
 
 func validatePayloadState(job Job) error {
 	switch job.PayloadState {
-	case "", PayloadRetained, PayloadApplyRecovery, PayloadCleanupPending, PayloadCleanupComplete:
+	case "", PayloadPublishing, PayloadRetained, PayloadApplyRecovery, PayloadCleanupPending, PayloadCleanupComplete:
 	default:
 		return errors.New("private payload state is invalid")
+	}
+	if err := validatePayloadPublications(job); err != nil {
+		return err
 	}
 	if job.PayloadRetainedFor != "" && job.PayloadRetainedFor != ApplyRecovery {
 		return errors.New("private payload retention reason is invalid")
@@ -291,6 +323,72 @@ func validatePayloadState(job Job) error {
 	}
 	if job.PayloadState == PayloadRetained && !active(job.State) {
 		return errors.New("retained active payload requires an active job")
+	}
+	if job.PayloadState == PayloadPublishing && !active(job.State) {
+		return errors.New("payload publication intent requires an active job")
+	}
+	return nil
+}
+
+func validatePayloadPublications(job Job) error {
+	if len(job.PayloadPublications) == 0 {
+		if job.PayloadState == PayloadPublishing {
+			return errors.New("payload publication intent lacks an exact payload record")
+		}
+		return nil // compatibility for already-written current and strict v1 records
+	}
+	if len(job.PayloadPublications) > 2 {
+		return errors.New("private payload publication count is invalid")
+	}
+	expected := []struct {
+		kind   PayloadKind
+		name   string
+		digest string
+	}{{PayloadPacket, packetWorkName, job.PacketDigest}, {PayloadProposal, proposalWorkName, job.ResultDigest}}
+	for index, publication := range job.PayloadPublications {
+		want := expected[index]
+		if publication.Kind != want.kind || publication.Name != want.name || publication.Digest != want.digest ||
+			!prefixedSHA256.MatchString(publication.Digest) {
+			return errors.New("private payload publication identity is invalid")
+		}
+		switch publication.State {
+		case PayloadPublishing:
+			if publication.CleanupAuthority != PayloadCleanupNotAuthorized {
+				return errors.New("publication intent cannot authorize cleanup")
+			}
+		case PayloadRetained:
+			if publication.CleanupAuthority != PayloadCleanupNotAuthorized {
+				return errors.New("retained payload cannot authorize cleanup")
+			}
+		case PayloadApplyRecovery:
+			if publication.CleanupAuthority != PayloadCleanupAfterReceipt {
+				return errors.New("apply-recovery payload requires receipt authority")
+			}
+		case PayloadCleanupPending, PayloadCleanupComplete:
+			if publication.CleanupAuthority != PayloadCleanupByDigest {
+				return errors.New("payload cleanup requires digest authority")
+			}
+		default:
+			return errors.New("private payload publication state is invalid")
+		}
+	}
+	if len(job.PayloadPublications) == 1 && job.ResultDigest != "" {
+		return errors.New("proposal digest has no exact payload publication")
+	}
+	switch job.PayloadState {
+	case PayloadPublishing:
+		if (len(job.PayloadPublications) == 1 && job.PayloadPublications[0].State != PayloadPublishing) ||
+			(len(job.PayloadPublications) == 2 && (job.PayloadPublications[0].State != PayloadRetained || job.PayloadPublications[1].State != PayloadPublishing)) {
+			return errors.New("global publication intent does not identify exactly one next payload")
+		}
+	case PayloadRetained, PayloadApplyRecovery, PayloadCleanupPending, PayloadCleanupComplete:
+		for _, publication := range job.PayloadPublications {
+			if publication.State != job.PayloadState {
+				return errors.New("private payload publication states are inconsistent")
+			}
+		}
+	default:
+		return errors.New("private payload publications require a global state")
 	}
 	return nil
 }

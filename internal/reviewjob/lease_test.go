@@ -299,6 +299,57 @@ func TestInterruptedLeaseBackedJobBecomesApplyRecoveryWithoutInferringReceiptSta
 	}
 }
 
+func TestInterruptedRecoveryUsesOnePinnedStoreAcrossDataReplacement(t *testing.T) {
+	for _, replaceAtRead := range []int{1, 2} {
+		name := "before_lease"
+		if replaceAtRead == 2 {
+			name = "after_lease"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := newStoreWithJob(t)
+			decoy := newStoreWithJob(t)
+			decoyStore := Store{Root: decoy}
+			if _, _, err := decoyStore.Update("job-1", 1, func(job *Job) error {
+				job.PrivateError = "decoy must remain byte exact"
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			decoyPrimary := readFile(t, filepath.Join(decoy, "review-jobs/jobs/job-1.json"))
+			decoyBackup := readFile(t, filepath.Join(decoy, "review-jobs/jobs/job-1.json.bak"))
+			pinnedRoot := root + ".pinned"
+			reads := 0
+			replaced := false
+			store := Store{Root: root, afterJobRead: func() error {
+				reads++
+				if reads != replaceAtRead || replaced {
+					return nil
+				}
+				replaced = true
+				if err := os.Rename(root, pinnedRoot); err != nil {
+					return err
+				}
+				return os.Rename(decoy, root)
+			}}
+
+			recovered, revision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || !replaced || disposition != RecoveryApplyInspectionNeeded || revision != 2 || recovered.State != Failed {
+				t.Fatalf("RecoverInterrupted() = %#v, %d, %q, %v; replaced=%v reads=%d", recovered, revision, disposition, err, replaced, reads)
+			}
+			if got := readFile(t, filepath.Join(root, "review-jobs/jobs/job-1.json")); !bytes.Equal(got, decoyPrimary) {
+				t.Fatal("replacement Data received an authoritative recovery write")
+			}
+			if got := readFile(t, filepath.Join(root, "review-jobs/jobs/job-1.json.bak")); !bytes.Equal(got, decoyBackup) {
+				t.Fatal("replacement Data received an authoritative recovery backup write")
+			}
+			persisted, persistedRevision, found, err := (Store{Root: pinnedRoot}).Load("job-1")
+			if err != nil || !found || persistedRevision != 2 || persisted.State != Failed || persisted.Error.Code != ApplyRecovery {
+				t.Fatalf("pinned recovery state=%#v revision=%d found=%v err=%v", persisted, persistedRevision, found, err)
+			}
+		})
+	}
+}
+
 func TestInterruptedRecoveryLeavesUnleasedQueuedAndRetryingJobsByteExact(t *testing.T) {
 	for _, state := range []State{Queued, Retrying} {
 		t.Run(string(state), func(t *testing.T) {

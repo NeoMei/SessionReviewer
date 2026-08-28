@@ -40,6 +40,33 @@ const (
 	proposalWorkName        = "proposal.json"
 )
 
+type payloadCheckpointStage string
+
+const (
+	payloadBeforeIntentCAS   payloadCheckpointStage = "before_intent_cas"
+	payloadAfterIntentCAS    payloadCheckpointStage = "after_intent_cas"
+	payloadBeforeWrite       payloadCheckpointStage = "before_write"
+	payloadAfterWrite        payloadCheckpointStage = "after_write"
+	payloadBeforeRename      payloadCheckpointStage = "before_rename"
+	payloadAfterRename       payloadCheckpointStage = "after_rename"
+	payloadBeforeVerify      payloadCheckpointStage = "before_verify"
+	payloadAfterVerify       payloadCheckpointStage = "after_verify"
+	payloadBeforeRetainedCAS payloadCheckpointStage = "before_retained_cas"
+	payloadAfterRetainedCAS  payloadCheckpointStage = "after_retained_cas"
+)
+
+type payloadCheckpointFailure struct {
+	kind  PayloadKind
+	stage payloadCheckpointStage
+	err   error
+}
+
+func (failure *payloadCheckpointFailure) Error() string {
+	return fmt.Sprintf("private %s payload checkpoint %s: %v", failure.kind, failure.stage, failure.err)
+}
+
+func (failure *payloadCheckpointFailure) Unwrap() error { return failure.err }
+
 // Prepared binds one bounded packet to the exact accepted context against
 // which its proposal must be generated and validated.
 type Prepared struct {
@@ -110,6 +137,7 @@ type RunOptions struct {
 
 	beforeCleanupBoundary func() error
 	afterCleanupBoundary  func() error
+	payloadCheckpoint     func(PayloadKind, payloadCheckpointStage) error
 }
 
 type worker struct {
@@ -223,6 +251,12 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 
 	if len(runner.job.FrozenSessions) == 0 {
+		if !runner.job.AcceptedSyncPending {
+			if err := ctx.Err(); err != nil {
+				return runner.fail(AgentCancelled, err)
+			}
+			return runner.complete()
+		}
 		if err := runner.runSync(ctx); err != nil {
 			return err
 		}
@@ -458,18 +492,11 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
-	if err := writePrivatePayload(runner.work.inputs, packetWorkName, packetBody, maxPrivatePacketBytes, packetDigest); err != nil {
+	if err := runner.publishPacketPayload(packetBody, packetDigest); err != nil {
+		if isPayloadCheckpointFailure(err) {
+			return err
+		}
 		return runner.fail(ProposalRejected, err)
-	}
-	if err := runner.update(func(job *Job) error {
-		job.Phase = Reviewing
-		job.PacketDigest = packetDigest
-		job.PayloadState = PayloadRetained
-		job.PayloadRetainedFor = ""
-		job.UpdatedAt = runner.timestamp()
-		return nil
-	}); err != nil {
-		return err
 	}
 
 	bundle, err := reviewprompt.Build(reviewprompt.Input{
@@ -550,15 +577,11 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		return runner.fail(ProposalRejected, errors.New("final proposal cannot be encoded within its private bound"))
 	}
 	resultDigest := digestPrivate(proposalBody)
-	if err := writePrivatePayload(runner.work.inputs, proposalWorkName, proposalBody, maxPrivateProposalBytes, resultDigest); err != nil {
+	if err := runner.publishProposalPayload(proposalBody, resultDigest); err != nil {
+		if isPayloadCheckpointFailure(err) {
+			return err
+		}
 		return runner.fail(ProposalRejected, err)
-	}
-	if err := runner.update(func(job *Job) error {
-		job.ResultDigest = resultDigest
-		job.UpdatedAt = runner.timestamp()
-		return nil
-	}); err != nil {
-		return err
 	}
 	if err := ctx.Err(); err != nil {
 		return runner.fail(AgentCancelled, err)
@@ -608,7 +631,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		}
 	}
 	if err := runner.update(func(job *Job) error {
-		job.PayloadState = PayloadCleanupPending
+		setPayloadLifecycle(job, PayloadCleanupPending, PayloadCleanupByDigest)
 		job.PayloadRetainedFor = ""
 		job.UpdatedAt = runner.timestamp()
 		return nil
@@ -632,7 +655,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 			job.AcceptedSessions++
 			job.CurrentPacket = evidence.CursorBoundary{}
 		}
-		job.PayloadState = PayloadCleanupComplete
+		setPayloadLifecycle(job, PayloadCleanupComplete, PayloadCleanupByDigest)
 		job.PayloadRetainedFor = ""
 		job.UpdatedAt = runner.timestamp()
 		return nil
@@ -761,7 +784,7 @@ func (runner *worker) runSync(ctx context.Context) error {
 		return runner.fail(SyncConflict, errors.New("sync reported a conflict"))
 	}
 	if len(report.Issues) != 0 || len(report.Errors) != 0 || report.QueueDepth != 0 ||
-		report.DryRun || report.Migration.DryRun || report.Migration.Required || len(report.Migration.Creates) != 0 || len(report.Migration.Archives) != 0 ||
+		report.DryRun || report.Migration.DryRun || report.Migration.Required ||
 		report.Derived.State != syncengine.DerivedCurrent ||
 		report.Machine.State != syncengine.MachineCurrent {
 		return runner.fail(SyncPartial, errors.New("sync reported partial or blocked work"))
@@ -793,7 +816,7 @@ func (runner *worker) complete() error {
 		job.Error = SafeError{}
 		job.PrivateError = ""
 		job.AcceptedSyncPending = false
-		if job.PayloadState == PayloadCleanupPending || job.PayloadState == PayloadRetained || job.PayloadState == PayloadApplyRecovery {
+		if job.PayloadState == PayloadPublishing || job.PayloadState == PayloadCleanupPending || job.PayloadState == PayloadRetained || job.PayloadState == PayloadApplyRecovery {
 			return errors.New("review worker cannot complete with private payload cleanup pending")
 		}
 		return nil
@@ -859,7 +882,7 @@ func (runner *worker) timestamp() time.Time {
 
 func (runner *worker) fail(code ErrorCode, cause error) error {
 	retainForRecovery := code == ApplyRecovery && runner.work != nil && runner.job.Phase == Applying &&
-		runner.job.PacketDigest != "" && runner.job.ResultDigest != ""
+		hasExactRetainedApplyPayloads(runner.job)
 	completed := runner.timestamp()
 	if !retainForRecovery && runner.work != nil && runner.options.beforeCleanupBoundary != nil {
 		if err := runner.options.beforeCleanupBoundary(); err != nil {
@@ -875,10 +898,10 @@ func (runner *worker) fail(code ErrorCode, cause error) error {
 		job.Error = SafeError{Code: code}
 		job.PrivateError = boundedPrivateError(cause)
 		if retainForRecovery {
-			job.PayloadState = PayloadApplyRecovery
+			setPayloadLifecycle(job, PayloadApplyRecovery, PayloadCleanupAfterReceipt)
 			job.PayloadRetainedFor = ApplyRecovery
 		} else if runner.work != nil {
-			job.PayloadState = PayloadCleanupPending
+			setPayloadLifecycle(job, PayloadCleanupPending, PayloadCleanupByDigest)
 			job.PayloadRetainedFor = ""
 		}
 		return nil
@@ -899,7 +922,7 @@ func (runner *worker) fail(code ErrorCode, cause error) error {
 		if job.State != Failed || job.PayloadState != PayloadCleanupPending {
 			return ErrStaleRevision
 		}
-		job.PayloadState = PayloadCleanupComplete
+		setPayloadLifecycle(job, PayloadCleanupComplete, PayloadCleanupByDigest)
 		job.UpdatedAt = runner.timestamp()
 		return nil
 	})
@@ -948,16 +971,148 @@ func mapAgentError(err error) ErrorCode {
 	}
 }
 
+func (runner *worker) publishPacketPayload(body []byte, digest string) error {
+	if err := runner.runPayloadCheckpoint(PayloadPacket, payloadBeforeIntentCAS); err != nil {
+		return err
+	}
+	if err := runner.update(func(job *Job) error {
+		job.PacketDigest = digest
+		job.ResultDigest = ""
+		job.PayloadState = PayloadPublishing
+		job.PayloadRetainedFor = ""
+		job.PayloadPublications = []PayloadPublication{{
+			Kind: PayloadPacket, Name: packetWorkName, Digest: digest,
+			State: PayloadPublishing, CleanupAuthority: PayloadCleanupNotAuthorized,
+		}}
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := runner.runPayloadCheckpoint(PayloadPacket, payloadAfterIntentCAS); err != nil {
+		return err
+	}
+	if err := writePrivatePayload(runner.work.inputs, packetWorkName, body, maxPrivatePacketBytes, digest, func(stage payloadCheckpointStage) error {
+		return runner.runPayloadCheckpoint(PayloadPacket, stage)
+	}); err != nil {
+		return err
+	}
+	if err := runner.runPayloadCheckpoint(PayloadPacket, payloadBeforeRetainedCAS); err != nil {
+		return err
+	}
+	if err := runner.update(func(job *Job) error {
+		if len(job.PayloadPublications) != 1 || job.PayloadPublications[0].Kind != PayloadPacket ||
+			job.PayloadPublications[0].Digest != digest || job.PayloadPublications[0].State != PayloadPublishing {
+			return errors.New("packet publication intent changed before retention")
+		}
+		job.PayloadPublications[0].State = PayloadRetained
+		job.PayloadPublications[0].CleanupAuthority = PayloadCleanupNotAuthorized
+		job.PayloadState = PayloadRetained
+		job.Phase = Reviewing
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	}); err != nil {
+		return err
+	}
+	return runner.runPayloadCheckpoint(PayloadPacket, payloadAfterRetainedCAS)
+}
+
+func (runner *worker) publishProposalPayload(body []byte, digest string) error {
+	if err := runner.runPayloadCheckpoint(PayloadProposal, payloadBeforeIntentCAS); err != nil {
+		return err
+	}
+	if err := runner.update(func(job *Job) error {
+		if len(job.PayloadPublications) != 1 || job.PayloadPublications[0].Kind != PayloadPacket ||
+			job.PayloadPublications[0].State != PayloadRetained || job.PayloadState != PayloadRetained {
+			return errors.New("proposal publication requires one retained packet")
+		}
+		job.ResultDigest = digest
+		job.PayloadPublications = append(job.PayloadPublications, PayloadPublication{
+			Kind: PayloadProposal, Name: proposalWorkName, Digest: digest,
+			State: PayloadPublishing, CleanupAuthority: PayloadCleanupNotAuthorized,
+		})
+		job.PayloadState = PayloadPublishing
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	}); err != nil {
+		return err
+	}
+	if err := runner.runPayloadCheckpoint(PayloadProposal, payloadAfterIntentCAS); err != nil {
+		return err
+	}
+	if err := writePrivatePayload(runner.work.inputs, proposalWorkName, body, maxPrivateProposalBytes, digest, func(stage payloadCheckpointStage) error {
+		return runner.runPayloadCheckpoint(PayloadProposal, stage)
+	}); err != nil {
+		return err
+	}
+	if err := runner.runPayloadCheckpoint(PayloadProposal, payloadBeforeRetainedCAS); err != nil {
+		return err
+	}
+	if err := runner.update(func(job *Job) error {
+		if len(job.PayloadPublications) != 2 || job.PayloadPublications[1].Kind != PayloadProposal ||
+			job.PayloadPublications[1].Digest != digest || job.PayloadPublications[1].State != PayloadPublishing {
+			return errors.New("proposal publication intent changed before retention")
+		}
+		for index := range job.PayloadPublications {
+			job.PayloadPublications[index].State = PayloadRetained
+			job.PayloadPublications[index].CleanupAuthority = PayloadCleanupNotAuthorized
+		}
+		job.PayloadState = PayloadRetained
+		job.UpdatedAt = runner.timestamp()
+		return nil
+	}); err != nil {
+		return err
+	}
+	return runner.runPayloadCheckpoint(PayloadProposal, payloadAfterRetainedCAS)
+}
+
+func (runner *worker) runPayloadCheckpoint(kind PayloadKind, stage payloadCheckpointStage) error {
+	if runner.options.payloadCheckpoint == nil {
+		return nil
+	}
+	if err := runner.options.payloadCheckpoint(kind, stage); err != nil {
+		return &payloadCheckpointFailure{kind: kind, stage: stage, err: err}
+	}
+	return nil
+}
+
+func isPayloadCheckpointFailure(err error) bool {
+	var failure *payloadCheckpointFailure
+	return errors.As(err, &failure)
+}
+
 func digestPrivate(body []byte) string {
 	sum := sha256.Sum256(body)
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func writePrivatePayload(root *os.Root, name string, body []byte, limit int64, expectedDigest string) error {
+func writePrivatePayload(root *os.Root, name string, body []byte, limit int64, expectedDigest string, checkpoint func(payloadCheckpointStage) error) error {
 	if root == nil || len(body) == 0 || int64(len(body)) > limit || !utf8.Valid(body) || digestPrivate(body) != expectedDigest {
 		return errors.New("private worker payload is invalid, oversized, or unauthenticated")
 	}
-	if err := atomicfile.WriteRootFile(root, name, body, 0o600); err != nil {
+	checkpointCalls := 0
+	if err := atomicfile.WriteRootFileChecked(root, name, body, 0o600, func() error {
+		checkpointCalls++
+		switch checkpointCalls {
+		case 1:
+			return checkpoint(payloadBeforeWrite)
+		case 2:
+			if err := checkpoint(payloadAfterWrite); err != nil {
+				return err
+			}
+			return checkpoint(payloadBeforeRename)
+		case 3:
+			return checkpoint(payloadAfterRename)
+		default:
+			return errors.New("private payload writer exceeded checkpoint contract")
+		}
+	}); err != nil {
+		return err
+	}
+	if checkpointCalls != 3 {
+		return errors.New("private payload writer did not reach every durable checkpoint")
+	}
+	if err := checkpoint(payloadBeforeVerify); err != nil {
 		return err
 	}
 	info, found, err := regularPrivateEntry(root, name)
@@ -968,7 +1123,7 @@ func writePrivatePayload(root *os.Root, name string, body []byte, limit int64, e
 	if err != nil || !bytes.Equal(written, body) || digestPrivate(written) != expectedDigest {
 		return errors.Join(errors.New("private worker payload failed authenticated post-write verification"), err)
 	}
-	return nil
+	return checkpoint(payloadAfterVerify)
 }
 
 func readStablePrivatePayload(root *os.Root, name string, before os.FileInfo, limit int64) ([]byte, error) {
@@ -994,19 +1149,59 @@ func readStablePrivatePayload(root *os.Root, name string, before os.FileInfo, li
 	return body, nil
 }
 
+func setPayloadLifecycle(job *Job, state PayloadState, authority PayloadCleanupAuthority) {
+	if job == nil {
+		return
+	}
+	job.PayloadState = state
+	for index := range job.PayloadPublications {
+		job.PayloadPublications[index].State = state
+		job.PayloadPublications[index].CleanupAuthority = authority
+	}
+}
+
+func hasExactRetainedApplyPayloads(job Job) bool {
+	if job.PacketDigest == "" || job.ResultDigest == "" {
+		return false
+	}
+	if len(job.PayloadPublications) == 0 {
+		return job.PayloadState == PayloadRetained // compatibility for a pre-WAL current record
+	}
+	return len(job.PayloadPublications) == 2 &&
+		job.PayloadPublications[0].Kind == PayloadPacket && job.PayloadPublications[0].Name == packetWorkName &&
+		job.PayloadPublications[0].Digest == job.PacketDigest && job.PayloadPublications[0].State == PayloadRetained &&
+		job.PayloadPublications[1].Kind == PayloadProposal && job.PayloadPublications[1].Name == proposalWorkName &&
+		job.PayloadPublications[1].Digest == job.ResultDigest && job.PayloadPublications[1].State == PayloadRetained
+}
+
 func cleanupPrivatePayloads(root *os.Root, job Job) error {
 	if root == nil {
 		return nil
 	}
+	if job.PayloadState != PayloadCleanupPending && job.PayloadState != PayloadCleanupComplete {
+		return errors.New("private worker payload cleanup lacks durable cleanup authority")
+	}
 	var result error
-	for _, payload := range []struct {
-		name   string
-		digest string
-	}{
-		{name: packetWorkName, digest: job.PacketDigest},
-		{name: proposalWorkName, digest: job.ResultDigest},
-	} {
-		_, found, err := regularPrivateEntry(root, payload.name)
+	payloads := append([]PayloadPublication(nil), job.PayloadPublications...)
+	for _, payload := range payloads {
+		if payload.State != job.PayloadState || payload.CleanupAuthority != PayloadCleanupByDigest {
+			return errors.New("private worker payload publication lacks durable digest cleanup authority")
+		}
+	}
+	if len(payloads) == 0 {
+		// Compatibility for jobs durably written before exact publication WAL.
+		payloads = []PayloadPublication{
+			{Kind: PayloadPacket, Name: packetWorkName, Digest: job.PacketDigest},
+			{Kind: PayloadProposal, Name: proposalWorkName, Digest: job.ResultDigest},
+		}
+	}
+	for _, payload := range payloads {
+		if (payload.Kind != PayloadPacket || payload.Name != packetWorkName) &&
+			(payload.Kind != PayloadProposal || payload.Name != proposalWorkName) {
+			result = errors.Join(result, errors.New("private worker payload cleanup target is invalid"))
+			continue
+		}
+		_, found, err := regularPrivateEntry(root, payload.Name)
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
@@ -1014,12 +1209,12 @@ func cleanupPrivatePayloads(root *os.Root, job Job) error {
 		if !found {
 			continue
 		}
-		digest := strings.TrimPrefix(payload.digest, "sha256:")
-		if payload.digest == "" || digest == payload.digest || !lowercaseSHA256.MatchString(digest) {
+		digest := strings.TrimPrefix(payload.Digest, "sha256:")
+		if payload.Digest == "" || digest == payload.Digest || !lowercaseSHA256.MatchString(digest) {
 			result = errors.Join(result, errors.New("private worker payload lacks an authenticated cleanup digest"))
 			continue
 		}
-		if err := atomicfile.RemoveRootFileIfHashMatches(root, payload.name, digest); err != nil {
+		if err := atomicfile.RemoveRootFileIfHashMatches(root, payload.Name, digest); err != nil {
 			result = errors.Join(result, err)
 		}
 	}
