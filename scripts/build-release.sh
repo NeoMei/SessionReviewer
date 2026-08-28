@@ -19,5 +19,10 @@ go run ./cmd/release-packager \
   --commit "$commit" \
   --built-at "$built_at"
 
+for artifact in "$dist"/session-reviewer_"$version"_darwin_amd64.tar.gz "$dist"/session-reviewer_"$version"_darwin_arm64.tar.gz; do
+  tar -tzf "$artifact" | grep -qx 'session-reviewer/schemas/review-job-status-v1.schema.json'
+done
+unzip -Z1 "$dist"/session-reviewer_"$version"_windows_amd64.zip | grep -qx 'session-reviewer/schemas/review-job-status-v1.schema.json'
+
 echo "release candidate: $version $commit"
 echo "artifacts: $dist"

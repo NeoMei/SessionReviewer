@@ -14,6 +14,7 @@ func TestCommonEntriesRequireLicenseAndNotice(t *testing.T) {
 	mustWriteReleaseFile(t, source, "LICENSE", "license")
 	mustWriteReleaseFile(t, source, "NOTICE", "notice")
 	mustWriteReleaseFile(t, source, "schemas/review-ledger-v2.schema.json", "{\"schema_version\":2}\n")
+	mustWriteReleaseFile(t, source, "schemas/review-job-status-v1.schema.json", "{\"schema_version\":1}\n")
 	mustWriteReleaseFile(t, source, "skill/session-reviewer/SKILL.md", "skill")
 
 	entries, err := commonEntries(source)
@@ -24,7 +25,7 @@ func TestCommonEntriesRequireLicenseAndNotice(t *testing.T) {
 	for _, entry := range entries {
 		names[entry.Name] = true
 	}
-	for _, name := range []string{"session-reviewer/README.md", "session-reviewer/LICENSE", "session-reviewer/NOTICE", "session-reviewer/schemas/review-ledger-v2.schema.json", "session-reviewer/skill/session-reviewer/SKILL.md"} {
+	for _, name := range []string{"session-reviewer/README.md", "session-reviewer/LICENSE", "session-reviewer/NOTICE", "session-reviewer/schemas/review-ledger-v2.schema.json", "session-reviewer/schemas/review-job-status-v1.schema.json", "session-reviewer/skill/session-reviewer/SKILL.md"} {
 		if !names[name] {
 			t.Fatalf("commonEntries() missing %q: %#v", name, names)
 		}
@@ -39,6 +40,8 @@ func TestCommonEntriesPackagesAuthoritativeReviewV2SchemaBytes(t *testing.T) {
 	mustWriteReleaseFile(t, source, "skill/session-reviewer/SKILL.md", "skill")
 	want := []byte("{\n  \"title\": \"Review Ledger v2\"\n}\n")
 	mustWriteReleaseFile(t, source, "schemas/review-ledger-v2.schema.json", string(want))
+	statusWant := []byte("{\n  \"title\": \"Review Job Status v1\"\n}\n")
+	mustWriteReleaseFile(t, source, "schemas/review-job-status-v1.schema.json", string(statusWant))
 	entries, err := commonEntries(source)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +54,15 @@ func TestCommonEntriesPackagesAuthoritativeReviewV2SchemaBytes(t *testing.T) {
 			return
 		}
 	}
-	t.Fatal("release archive omitted review-ledger-v2.schema.json")
+	for _, entry := range entries {
+		if entry.Name == "session-reviewer/schemas/review-job-status-v1.schema.json" {
+			if !bytes.Equal(entry.Body, statusWant) || entry.Mode != 0o644 {
+				t.Fatalf("status schema entry mode=%o body=%q", entry.Mode, entry.Body)
+			}
+			return
+		}
+	}
+	t.Fatal("release archive omitted a public review schema")
 }
 
 func TestReleaseWrappersDefaultToV023AndPassExactSourceAndDist(t *testing.T) {
@@ -119,6 +130,8 @@ func TestCommonEntriesRejectMissingNotice(t *testing.T) {
 	mustWriteReleaseFile(t, source, "README.md", "readme")
 	mustWriteReleaseFile(t, source, "LICENSE", "license")
 	mustWriteReleaseFile(t, source, "skill/session-reviewer/SKILL.md", "skill")
+	mustWriteReleaseFile(t, source, "schemas/review-ledger-v2.schema.json", "{}")
+	mustWriteReleaseFile(t, source, "schemas/review-job-status-v1.schema.json", "{}")
 
 	if _, err := commonEntries(source); err == nil || err.Error() != "LICENSE and NOTICE are required" {
 		t.Fatalf("commonEntries() error = %v, want LICENSE and NOTICE are required", err)
