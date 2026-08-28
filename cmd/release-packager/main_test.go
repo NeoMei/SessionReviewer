@@ -46,23 +46,24 @@ func TestCommonEntriesPackagesAuthoritativeReviewV2SchemaBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	foundLedger, foundStatus := false, false
 	for _, entry := range entries {
 		if entry.Name == "session-reviewer/schemas/review-ledger-v2.schema.json" {
 			if !bytes.Equal(entry.Body, want) || entry.Mode != 0o644 {
 				t.Fatalf("schema entry mode=%o body=%q", entry.Mode, entry.Body)
 			}
-			return
+			foundLedger = true
 		}
-	}
-	for _, entry := range entries {
 		if entry.Name == "session-reviewer/schemas/review-job-status-v1.schema.json" {
 			if !bytes.Equal(entry.Body, statusWant) || entry.Mode != 0o644 {
 				t.Fatalf("status schema entry mode=%o body=%q", entry.Mode, entry.Body)
 			}
-			return
+			foundStatus = true
 		}
 	}
-	t.Fatal("release archive omitted a public review schema")
+	if !foundLedger || !foundStatus {
+		t.Fatalf("release archive omitted public schemas: ledger=%t status=%t", foundLedger, foundStatus)
+	}
 }
 
 func TestReleaseWrappersDefaultToV023AndPassExactSourceAndDist(t *testing.T) {

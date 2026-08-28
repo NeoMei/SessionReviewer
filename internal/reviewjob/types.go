@@ -5,6 +5,7 @@ package reviewjob
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -194,6 +195,9 @@ func ProjectStatus(job *Job, projectID string) (PublicStatus, error) {
 
 var safeID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 var lowercaseSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var prefixedSHA256 = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+const maxSafeInteger = 1<<53 - 1
 
 // Validate rejects malformed private records before they are persisted or
 // projected. It intentionally validates private fields that are absent from
@@ -214,7 +218,7 @@ func Validate(job Job) error {
 	if !validState(job.State) || !validPhase(job.Phase) {
 		return errors.New("job state or phase is unknown")
 	}
-	if job.Attempt < 1 || job.SessionIndex < 0 || job.SessionIndex > len(job.FrozenSessions) || job.AcceptedPackets < 0 || job.AcceptedSessions < 0 || job.AcceptedSessions > len(job.FrozenSessions) || job.AcceptedSessions > job.SessionIndex {
+	if job.Attempt < 1 || job.Attempt > maxSafeInteger || job.SessionIndex < 0 || job.SessionIndex > len(job.FrozenSessions) || job.AcceptedPackets < 0 || job.AcceptedPackets > maxSafeInteger || job.AcceptedSessions < 0 || job.AcceptedSessions > len(job.FrozenSessions) || job.AcceptedSessions > job.SessionIndex || job.AcceptedSessions > job.AcceptedPackets {
 		return errors.New("job session index or accepted progress is impossible")
 	}
 	if active(job.State) && job.Phase == "" {
@@ -232,22 +236,28 @@ func Validate(job Job) error {
 	if err := validateBoundary(job.CurrentPacket); err != nil {
 		return fmt.Errorf("current packet: %w", err)
 	}
+	if err := validateCurrentPacket(job.CurrentPacket, job.FrozenSessions, job.SessionIndex); err != nil {
+		return err
+	}
+	if job.State == Completed && (job.SessionIndex != len(job.FrozenSessions) || job.AcceptedSessions != len(job.FrozenSessions)) {
+		return errors.New("completed job must accept every frozen session")
+	}
 	for _, digest := range []string{job.PacketDigest, job.ResultDigest} {
-		if digest != "" && !lowercaseSHA256.MatchString(digest) {
-			return errors.New("job digest must be lowercase SHA-256")
+		if digest != "" && !prefixedSHA256.MatchString(digest) {
+			return errors.New("job digest must be prefixed lowercase SHA-256")
 		}
 	}
 	if err := accounting.ValidateTokenUsage(job.ReviewUsage.TokenUsage); err != nil {
 		return fmt.Errorf("review usage: %w", err)
 	}
-	if job.ReviewUsage.CostUSD < 0 {
-		return errors.New("review usage cost must be nonnegative")
+	if math.IsNaN(job.ReviewUsage.CostUSD) || math.IsInf(job.ReviewUsage.CostUSD, 0) || job.ReviewUsage.CostUSD < 0 {
+		return errors.New("review usage cost must be finite and nonnegative")
 	}
 	if job.Error.Code != "" && !validErrorCode(job.Error.Code) {
 		return errors.New("safe error code is invalid")
 	}
-	if job.SyncOnlyAvailable && (!terminal(job.State) || job.AcceptedPackets == 0) {
-		return errors.New("sync-only availability requires a terminal job with accepted packets")
+	if job.SyncOnlyAvailable && (job.State != Failed || job.AcceptedPackets == 0) {
+		return errors.New("sync-only availability requires a failed job with accepted packets")
 	}
 	if terminal(job.State) && job.Owner.ID != "" {
 		return errors.New("terminal job must not retain live ownership")
@@ -303,6 +313,20 @@ func validateFrozenSessions(sessions []FrozenSession) error {
 func validateBoundary(boundary evidence.CursorBoundary) error {
 	if boundary.Line < 0 || (boundary.Line == 0 && boundary.SourceHash != "") || (boundary.Line > 0 && !lowercaseSHA256.MatchString(boundary.SourceHash)) {
 		return errors.New("cursor boundary is invalid")
+	}
+	return nil
+}
+
+func validateCurrentPacket(current evidence.CursorBoundary, sessions []FrozenSession, sessionIndex int) error {
+	if current.Line == 0 {
+		return nil
+	}
+	if sessionIndex >= len(sessions) {
+		return errors.New("current packet requires a frozen session")
+	}
+	upper := sessions[sessionIndex].Upper
+	if current.Line > upper.Line || (current.Line == upper.Line && current.SourceHash != upper.SourceHash) {
+		return errors.New("current packet exceeds frozen session upper boundary")
 	}
 	return nil
 }
