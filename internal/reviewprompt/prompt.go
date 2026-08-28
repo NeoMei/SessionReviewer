@@ -9,8 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
+	"time"
+	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
@@ -27,6 +30,14 @@ const (
 
 	proposalSchemaDigest = "95de7d485ff0b3725724d505f4ed3aa0df698feff3e985c4067128794cb7b625"
 	applyInvariantDigest = "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa"
+	agentDraftSchemaID   = "https://github.com/neomei/SessionReviewer/schemas/proposal-agent-draft-v1.schema.json"
+)
+
+var (
+	packetStableID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	packetItemID   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
+	packetToolName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	packetSHA256   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 var (
@@ -98,19 +109,18 @@ type acceptedContext struct {
 }
 
 type acceptedCurrentState struct {
-	ProjectID       string               `json:"project_id"`
-	Revision        int                  `json:"revision"`
-	Goal            string               `json:"goal"`
-	LastVerified    string               `json:"last_verified"`
-	Branch          string               `json:"branch"`
-	ProjectStatus   string               `json:"project_status"`
-	Blockers        []string             `json:"blockers"`
-	OpenRisks       []string             `json:"open_risks"`
-	NextAction      string               `json:"next_action"`
-	FirstInspection string               `json:"first_inspection"`
-	LastUpdated     string               `json:"last_updated"`
-	SourceSessions  []string             `json:"source_sessions"`
-	Evidence        []ledger.EvidenceRef `json:"evidence"`
+	ProjectID       string   `json:"project_id"`
+	Revision        int      `json:"revision"`
+	Goal            string   `json:"goal"`
+	LastVerified    string   `json:"last_verified"`
+	Branch          string   `json:"branch"`
+	ProjectStatus   string   `json:"project_status"`
+	Blockers        []string `json:"blockers"`
+	OpenRisks       []string `json:"open_risks"`
+	NextAction      string   `json:"next_action"`
+	FirstInspection string   `json:"first_inspection"`
+	LastUpdated     string   `json:"last_updated"`
+	SourceSessions  []string `json:"source_sessions"`
 }
 
 type acceptedRisk struct {
@@ -121,75 +131,76 @@ type acceptedRisk struct {
 }
 
 type acceptedDecision struct {
-	ID             string               `json:"id"`
-	ProjectID      string               `json:"project_id"`
-	OccurredAt     string               `json:"occurred_at"`
-	Title          string               `json:"title"`
-	Status         string               `json:"status"`
-	Revision       int                  `json:"revision"`
-	Tags           []string             `json:"tags"`
-	Supersedes     []string             `json:"supersedes"`
-	SourceSessions []string             `json:"source_sessions"`
-	Evidence       []ledger.EvidenceRef `json:"evidence"`
-	Context        string               `json:"context"`
-	Rationale      string               `json:"rationale"`
-	Consequences   string               `json:"consequences"`
-	ReevaluateWhen string               `json:"reevaluate_when"`
-	Alternatives   []string             `json:"alternatives"`
-	RejectedPaths  []string             `json:"rejected_paths"`
+	ID             string   `json:"id"`
+	ProjectID      string   `json:"project_id"`
+	OccurredAt     string   `json:"occurred_at"`
+	Title          string   `json:"title"`
+	Status         string   `json:"status"`
+	Revision       int      `json:"revision"`
+	Tags           []string `json:"tags"`
+	Supersedes     []string `json:"supersedes"`
+	SourceSessions []string `json:"source_sessions"`
+	Context        string   `json:"context"`
+	Rationale      string   `json:"rationale"`
+	Consequences   string   `json:"consequences"`
+	ReevaluateWhen string   `json:"reevaluate_when"`
+	Alternatives   []string `json:"alternatives"`
+	RejectedPaths  []string `json:"rejected_paths"`
 }
 
 type acceptedOpenLoop struct {
-	ID                  string               `json:"id"`
-	ProjectID           string               `json:"project_id"`
-	Title               string               `json:"title"`
-	Status              string               `json:"status"`
-	AcceptedDetail      string               `json:"accepted_detail"`
-	Revision            int                  `json:"revision"`
-	Tags                []string             `json:"tags"`
-	SourceSessions      []string             `json:"source_sessions"`
-	Evidence            []ledger.EvidenceRef `json:"evidence"`
-	Question            string               `json:"question"`
-	Attempts            []string             `json:"attempts"`
-	Blocker             string               `json:"blocker"`
-	NextExperiment      string               `json:"next_experiment"`
-	CompletionCriterion string               `json:"completion_criterion"`
+	ID                  string   `json:"id"`
+	ProjectID           string   `json:"project_id"`
+	Title               string   `json:"title"`
+	Status              string   `json:"status"`
+	AcceptedDetail      string   `json:"accepted_detail"`
+	Revision            int      `json:"revision"`
+	Tags                []string `json:"tags"`
+	SourceSessions      []string `json:"source_sessions"`
+	Question            string   `json:"question"`
+	Attempts            []string `json:"attempts"`
+	Blocker             string   `json:"blocker"`
+	NextExperiment      string   `json:"next_experiment"`
+	CompletionCriterion string   `json:"completion_criterion"`
 }
 
 type acceptedTimelineEvent struct {
-	ID          string               `json:"id"`
-	OccurredAt  string               `json:"occurred_at"`
-	Revision    int                  `json:"revision"`
-	Class       ledger.FactClass     `json:"class"`
-	Title       string               `json:"title"`
-	Meaning     string               `json:"meaning"`
-	Summary     string               `json:"summary"`
-	Why         string               `json:"why"`
-	Changes     []string             `json:"changes"`
-	Results     []string             `json:"results"`
-	Next        string               `json:"next"`
-	Evidence    []ledger.EvidenceRef `json:"evidence"`
-	DecisionIDs []string             `json:"decision_ids"`
-	OpenLoopIDs []string             `json:"open_loop_ids"`
+	ID          string           `json:"id"`
+	OccurredAt  string           `json:"occurred_at"`
+	Revision    int              `json:"revision"`
+	Class       ledger.FactClass `json:"class"`
+	Title       string           `json:"title"`
+	Meaning     string           `json:"meaning"`
+	Summary     string           `json:"summary"`
+	Why         string           `json:"why"`
+	Changes     []string         `json:"changes"`
+	Results     []string         `json:"results"`
+	Next        string           `json:"next"`
+	DecisionIDs []string         `json:"decision_ids"`
+	OpenLoopIDs []string         `json:"open_loop_ids"`
 }
 
 type acceptedSessionReport struct {
-	ID                string                `json:"id"`
-	ProjectID         string                `json:"project_id"`
-	SessionID         string                `json:"session_id"`
-	Revision          int                   `json:"revision"`
-	InitialGoal       string                `json:"initial_goal"`
-	GoalChanges       []string              `json:"goal_changes"`
-	Phases            []ledger.SessionPhase `json:"phases"`
-	Commits           []string              `json:"commits"`
-	Verification      []string              `json:"verification"`
-	DecisionsAdded    []string              `json:"decisions_added"`
-	DecisionsRevised  []string              `json:"decisions_revised"`
-	OpenLoopsCreated  []string              `json:"open_loops_created"`
-	OpenLoopsClosed   []string              `json:"open_loops_closed"`
-	PreviousSessionID string                `json:"previous_session_id"`
-	NextSessionID     string                `json:"next_session_id"`
-	Evidence          []ledger.EvidenceRef  `json:"evidence"`
+	ID                string                 `json:"id"`
+	ProjectID         string                 `json:"project_id"`
+	SessionID         string                 `json:"session_id"`
+	Revision          int                    `json:"revision"`
+	InitialGoal       string                 `json:"initial_goal"`
+	GoalChanges       []string               `json:"goal_changes"`
+	Phases            []acceptedSessionPhase `json:"phases"`
+	Commits           []string               `json:"commits"`
+	Verification      []string               `json:"verification"`
+	DecisionsAdded    []string               `json:"decisions_added"`
+	DecisionsRevised  []string               `json:"decisions_revised"`
+	OpenLoopsCreated  []string               `json:"open_loops_created"`
+	OpenLoopsClosed   []string               `json:"open_loops_closed"`
+	PreviousSessionID string                 `json:"previous_session_id"`
+	NextSessionID     string                 `json:"next_session_id"`
+}
+
+type acceptedSessionPhase struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
 }
 
 const instructions = `SESSIONREVIEWER PROPOSAL WORKER
@@ -323,14 +334,63 @@ func validateInput(input Input) error {
 	if !bytes.Equal(input.OutputSchema, FinalProposalSchema()) {
 		return ErrSchemaMismatch
 	}
-	// Packet prose comes from the extractor's redaction boundary. Re-scan it so
-	// an unredacted packet can never cross into the Agent request. Ordinary
-	// paths, commands, and plugin discussion are not findings and remain data.
+	if err := validatePacketItems(packet); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validatePacketItems re-establishes the extractor boundary for every field
+// that projectPacket serializes. Protocol fields are shape checked; all string
+// fields are scanned before shape checks so malformed secret-bearing values
+// fail as unsafe without ever reaching prompt construction.
+func validatePacketItems(packet evidence.Packet) error {
+	previousLine := packet.FromCursor - 1
+	seenIDs := make(map[string]struct{}, len(packet.Events))
 	for _, item := range packet.Events {
-		for _, value := range []string{item.ToolName, item.Summary} {
+		stringsToScan := []string{item.ID, item.ItemID, item.Timestamp, item.Kind, item.Role, item.ToolName, item.Summary}
+		for _, value := range stringsToScan {
+			if !utf8.ValidString(value) {
+				return ErrInvalidInput
+			}
 			if len(redact.Default().Text(value).Findings) != 0 {
 				return ErrUnsafeInput
 			}
+		}
+		if !packetStableID.MatchString(item.ID) {
+			return ErrInvalidInput
+		}
+		if _, duplicate := seenIDs[item.ID]; duplicate {
+			return ErrInvalidInput
+		}
+		seenIDs[item.ID] = struct{}{}
+		if item.ItemID != "" && !packetItemID.MatchString(item.ItemID) {
+			return ErrInvalidInput
+		}
+		if item.Timestamp != "" {
+			if _, err := time.Parse(time.RFC3339Nano, item.Timestamp); err != nil {
+				return ErrInvalidInput
+			}
+		}
+		if item.JSONLLine <= previousLine || item.JSONLLine > packet.ToCursor || !packetSHA256.MatchString(item.SourceHash) {
+			return ErrInvalidInput
+		}
+		previousLine = item.JSONLLine
+		switch item.Kind {
+		case "message":
+			if (item.Role != "user" && item.Role != "assistant") || item.ToolName != "" {
+				return ErrInvalidInput
+			}
+		case "tool_call":
+			if item.Role != "" || !packetToolName.MatchString(item.ToolName) {
+				return ErrInvalidInput
+			}
+		case "tool_result", "cwd_change":
+			if item.Role != "" || item.ToolName != "" {
+				return ErrInvalidInput
+			}
+		default:
+			return ErrInvalidInput
 		}
 	}
 	return nil
@@ -360,6 +420,7 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 	delete(defs, "session_accounting")
 	delete(defs, "model_accounting")
 	delete(defs, "pricing")
+	root["$id"] = agentDraftSchemaID
 	root["title"] = "SessionReviewer Agent Draft Proposal v1 (trusted-host accounting omitted)"
 	data, err := json.MarshalIndent(root, "", "  ")
 	if err != nil {
@@ -387,8 +448,8 @@ func projectAccepted(state reviewv2.State) acceptedContext {
 		ProjectID: state.Review.ProjectID, Revision: state.Review.Revision, Goal: state.Review.Goal,
 		LastVerified: state.Review.LastVerification, Branch: state.Review.Stage, ProjectStatus: state.Review.Status,
 		NextAction: state.Review.NextAction, FirstInspection: current.FirstInspection, LastUpdated: current.LastUpdated,
-		SourceSessions: cloneStrings(current.SourceSessions), Evidence: cloneEvidence(current.Evidence),
-		Blockers: []string{}, OpenRisks: []string{},
+		SourceSessions: cloneStrings(current.SourceSessions),
+		Blockers:       []string{}, OpenRisks: []string{},
 	}
 	for _, source := range compatibility.CurrentRisks {
 		risk := riskByID[source.RiskID]
@@ -421,7 +482,7 @@ func projectAccepted(state reviewv2.State) acceptedContext {
 			ID: value.ID, ProjectID: value.ProjectID, OccurredAt: human.OccurredAt, Title: human.Title,
 			Status: human.Status, Revision: value.Revision, Tags: cloneStrings(value.Tags),
 			Supersedes: cloneStrings(value.Supersedes), SourceSessions: cloneStrings(value.SourceSessions),
-			Evidence: cloneEvidence(value.Evidence), Context: value.Context, Rationale: human.Rationale,
+			Context: value.Context, Rationale: human.Rationale,
 			Consequences: human.Impact, ReevaluateWhen: value.ReevaluateWhen,
 			Alternatives: cloneStrings(value.Alternatives), RejectedPaths: cloneStrings(value.RejectedPaths),
 		})
@@ -436,7 +497,7 @@ func projectAccepted(state reviewv2.State) acceptedContext {
 		context.OpenLoops = append(context.OpenLoops, acceptedOpenLoop{
 			ID: value.ID, ProjectID: value.ProjectID, Title: title, Status: status, AcceptedDetail: detail,
 			Revision: value.Revision, Tags: cloneStrings(value.Tags), SourceSessions: cloneStrings(value.SourceSessions),
-			Evidence: cloneEvidence(value.Evidence), Question: value.Question, Attempts: cloneStrings(value.Attempts),
+			Question: value.Question, Attempts: cloneStrings(value.Attempts),
 			Blocker: value.Blocker, NextExperiment: value.NextExperiment, CompletionCriterion: value.CompletionCriterion,
 		})
 	}
@@ -450,7 +511,7 @@ func projectAccepted(state reviewv2.State) acceptedContext {
 			ID: human.ID, OccurredAt: human.OccurredAt, Revision: value.Revision, Class: ledger.FactClass(human.Kind),
 			Title: human.Title, Meaning: human.Meaning, Summary: human.Summary, Why: human.Why,
 			Changes: cloneStrings(human.Changes), Results: cloneStrings(human.Results), Next: human.Next,
-			Evidence: cloneEvidence(value.Evidence), DecisionIDs: cloneStrings(human.DecisionIDs),
+			DecisionIDs: cloneStrings(human.DecisionIDs),
 			OpenLoopIDs: cloneStrings(value.OpenLoopIDs),
 		})
 	}
@@ -463,7 +524,7 @@ func projectAccepted(state reviewv2.State) acceptedContext {
 			Commits: cloneStrings(report.Commits), Verification: cloneStrings(report.Verification),
 			DecisionsAdded: cloneStrings(report.DecisionsAdded), DecisionsRevised: cloneStrings(report.DecisionsRevised),
 			OpenLoopsCreated: cloneStrings(report.OpenLoopsCreated), OpenLoopsClosed: cloneStrings(report.OpenLoopsClosed),
-			PreviousSessionID: report.PreviousSessionID, NextSessionID: report.NextSessionID, Evidence: cloneEvidence(report.Evidence),
+			PreviousSessionID: report.PreviousSessionID, NextSessionID: report.NextSessionID,
 		})
 	}
 	return context
@@ -501,13 +562,10 @@ func digestBytes(data []byte) string {
 }
 
 func cloneStrings(values []string) []string { return append([]string{}, values...) }
-func cloneEvidence(values []ledger.EvidenceRef) []ledger.EvidenceRef {
-	return append([]ledger.EvidenceRef{}, values...)
-}
-func clonePhases(values []ledger.SessionPhase) []ledger.SessionPhase {
-	result := append([]ledger.SessionPhase{}, values...)
-	for index := range result {
-		result[index].Evidence = cloneEvidence(result[index].Evidence)
+func clonePhases(values []ledger.SessionPhase) []acceptedSessionPhase {
+	result := make([]acceptedSessionPhase, 0, len(values))
+	for _, value := range values {
+		result = append(result, acceptedSessionPhase{Title: value.Title, Summary: value.Summary})
 	}
 	return result
 }
