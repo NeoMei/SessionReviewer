@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,17 +17,70 @@ import (
 
 const defaultVersion = "codex-cli 0.147.0"
 
-var requiredFeatures = []string{
-	"shell_tool",
-	"apps",
-	"browser_use",
-	"browser_use_external",
-	"browser_use_full_cdp_access",
-	"computer_use",
-	"image_generation",
-	"workspace_dependencies",
-	"skill_search",
-	"remote_plugin",
+var requiredFeatures = []struct {
+	name  string
+	stage string
+}{
+	{name: "shell_tool", stage: "stable"},
+	{name: "apps", stage: "stable"},
+	{name: "view_image", stage: "stable"},
+	{name: "unified_exec", stage: "stable"},
+	{name: "shell_zsh_fork", stage: "under development"},
+	{name: "unified_exec_zsh_fork", stage: "under development"},
+	{name: "shell_snapshot", stage: "stable"},
+	{name: "deferred_executor", stage: "under development"},
+	{name: "code_mode", stage: "under development"},
+	{name: "code_mode_buffered_exec", stage: "under development"},
+	{name: "code_mode_host", stage: "stable"},
+	{name: "code_mode_only", stage: "under development"},
+	{name: "web_search_request", stage: "deprecated"},
+	{name: "web_search_cached", stage: "deprecated"},
+	{name: "standalone_web_search", stage: "under development"},
+	{name: "memories", stage: "stable"},
+	{name: "external_agent_memory_import", stage: "under development"},
+	{name: "local_thread_store_compression", stage: "under development"},
+	{name: "chronicle", stage: "under development"},
+	{name: "exec_permission_approvals", stage: "under development"},
+	{name: "hooks", stage: "stable"},
+	{name: "request_permissions_tool", stage: "under development"},
+	{name: "network_proxy", stage: "experimental"},
+	{name: "respect_system_proxy", stage: "under development"},
+	{name: "multi_agent", stage: "stable"},
+	{name: "multi_agent_v2", stage: "stable"},
+	{name: "enable_mcp_apps", stage: "under development"},
+	{name: "mcp_2026_07_28", stage: "under development"},
+	{name: "deferred_tool_world_state", stage: "under development"},
+	{name: "non_prefixed_mcp_tool_names", stage: "under development"},
+	{name: "tool_suggest", stage: "stable"},
+	{name: "recommended_plugins", stage: "stable"},
+	{name: "plugins", stage: "stable"},
+	{name: "executor_capability_discovery", stage: "under development"},
+	{name: "in_app_browser", stage: "stable"},
+	{name: "in_app_updates", stage: "stable"},
+	{name: "browser_use", stage: "stable"},
+	{name: "browser_use_external", stage: "stable"},
+	{name: "browser_use_full_cdp_access", stage: "stable"},
+	{name: "computer_use", stage: "stable"},
+	{name: "image_generation", stage: "stable"},
+	{name: "workspace_dependencies", stage: "stable"},
+	{name: "skill_mcp_dependency_install", stage: "stable"},
+	{name: "skill_search", stage: "stable"},
+	{name: "remote_plugin", stage: "stable"},
+	{name: "plugin_sharing", stage: "stable"},
+	{name: "default_mode_request_user_input", stage: "under development"},
+	{name: "guardian_approval", stage: "stable"},
+	{name: "guardianv2", stage: "under development"},
+	{name: "goals", stage: "stable"},
+	{name: "token_budget", stage: "under development"},
+	{name: "rollout_budget", stage: "under development"},
+	{name: "current_time_reminder", stage: "under development"},
+	{name: "tool_call_mcp_elicitation", stage: "stable"},
+	{name: "auth_elicitation", stage: "stable"},
+	{name: "artifact", stage: "under development"},
+	{name: "realtime_conversation", stage: "under development"},
+	{name: "prevent_idle_sleep", stage: "experimental"},
+	{name: "remote_compaction_v2", stage: "stable"},
+	{name: "use_agent_identity", stage: "under development"},
 }
 
 func main() {
@@ -56,6 +110,14 @@ func main() {
 				_ = os.WriteFile(path, []byte("ready"), 0o600)
 			}
 			time.Sleep(300 * time.Millisecond)
+		case "verify-success-with-child":
+			spawnChild()
+		case "verify-error-with-child":
+			spawnChild()
+			fmt.Fprintln(os.Stderr, "probe error with inherited stderr")
+			os.Exit(12)
+		case "verify-writes-cwd":
+			_ = os.WriteFile("probe-canary", []byte("must not reach the next probe"), 0o600)
 		}
 		version := os.Getenv("SESSIONREVIEWER_FAKE_VERSION")
 		if version == "" {
@@ -64,9 +126,14 @@ func main() {
 		fmt.Println(version)
 		return
 	case len(os.Args) == 3 && os.Args[1] == "exec" && os.Args[2] == "--help":
+		if mode == "verify-writes-cwd" {
+			if _, err := os.Stat("probe-canary"); err == nil {
+				os.Exit(13)
+			}
+		}
 		writeExecHelp(mode)
 		return
-	case len(os.Args) == 3 && os.Args[1] == "features" && os.Args[2] == "list":
+	case len(os.Args) >= 3 && os.Args[1] == "features" && os.Args[2] == "list":
 		writeFeatures(mode)
 		return
 	case len(os.Args) >= 3 && os.Args[1] == "debug" && os.Args[2] == "prompt-input":
@@ -86,7 +153,7 @@ func writeExecHelp(mode string) {
 	flags := []string{
 		"--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox <MODE>",
 		"--json", "--color <COLOR>", "--skip-git-repo-check", "--output-schema <FILE>",
-		"--disable <FEATURE>",
+		"--disable <FEATURE>", "--config <key=value>",
 	}
 	missing := ""
 	if mode == "verify-missing-flag" {
@@ -102,19 +169,22 @@ func writeExecHelp(mode string) {
 }
 
 func writeFeatures(mode string) {
-	for index, name := range requiredFeatures {
-		if mode == "verify-missing-feature" && name == "remote_plugin" {
+	for index, feature := range requiredFeatures {
+		if mode == "verify-missing-feature" && feature.name == "view_image" {
 			continue
 		}
-		stage := "stable"
-		if mode == "verify-unstable-feature" && name == "remote_plugin" {
+		stage := feature.stage
+		if mode == "verify-unstable-feature" && feature.name == "remote_plugin" {
 			stage = "under development"
 		}
 		state := "false"
+		if mode == "verify-enabled-feature" && feature.name == "multi_agent" {
+			state = "true"
+		}
 		if mode == "verify-noncanonical-feature-state" && index == 0 {
 			state = "TRUE"
 		}
-		fmt.Printf("%-40s %-18s %s\n", name, stage, state)
+		fmt.Printf("%-40s %-18s %s\n", feature.name, stage, state)
 	}
 	if mode == "verify-malformed-features" {
 		fmt.Println("malformed")
@@ -243,6 +313,26 @@ func runExecMode(mode string) {
 	case "turn-failed-before-start":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.failed", "error": map[string]any{"message": "401 failure before turn"}})
+	case "invalid-utf8":
+		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
+		writeEvent(map[string]any{"type": "turn.started"})
+		line, _ := json.Marshal(map[string]any{
+			"type": "item.completed",
+			"item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()},
+		})
+		marker := []byte("Build a durable review ledger")
+		position := bytes.Index(line, marker)
+		if position < 0 {
+			os.Exit(6)
+		}
+		line[position] = 0xff
+		_, _ = os.Stdout.Write(append(line, '\n'))
+		writeEvent(map[string]any{"type": "turn.completed", "usage": validUsage()})
+	case "deep-embedded-proposal":
+		proposal := strings.TrimSpace(validProposal())
+		proposal = strings.TrimSuffix(proposal, "}") + `,"deep":` +
+			strings.Repeat("[", 129) + "0" + strings.Repeat("]", 129) + "}"
+		writeSuccess(proposal, validUsage())
 	default:
 		fmt.Fprintln(os.Stderr, "unknown fake mode")
 		os.Exit(2)
@@ -290,13 +380,41 @@ func validProposal() string {
 func spawnChild() {
 	command := exec.Command(os.Args[0], "fake-child")
 	command.Env = os.Environ()
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {
 		os.Exit(5)
 	}
 	pidPath := os.Getenv("SESSIONREVIEWER_FAKE_CHILD_PID_PATH")
 	if pidPath != "" {
-		_ = os.WriteFile(pidPath, []byte(strconv.Itoa(command.Process.Pid)), 0o600)
+		publishPID(pidPath, command.Process.Pid)
 	}
+}
+
+func publishPID(path string, pid int) {
+	directory := filepath.Dir(path)
+	temporary, err := os.CreateTemp(directory, ".child-pid-*")
+	if err != nil {
+		return
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o600); err != nil {
+		_ = temporary.Close()
+		return
+	}
+	if _, err := io.WriteString(temporary, strconv.Itoa(pid)); err != nil {
+		_ = temporary.Close()
+		return
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return
+	}
+	if err := temporary.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(temporaryPath, path)
 }
 
 func recordCall() {

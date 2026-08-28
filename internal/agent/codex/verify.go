@@ -39,20 +39,81 @@ var (
 		"skip-git-repo-check",
 		"output-schema",
 		"disable",
+		"config",
 	}
-	requiredStableFeatures = []string{
-		"shell_tool",
-		"apps",
-		"browser_use",
-		"browser_use_external",
-		"browser_use_full_cdp_access",
-		"computer_use",
-		"image_generation",
-		"workspace_dependencies",
-		"skill_search",
-		"remote_plugin",
+	reviewedDisabledFeatures = []reviewedFeature{
+		{name: "shell_tool", stage: "stable"},
+		{name: "apps", stage: "stable"},
+		{name: "view_image", stage: "stable"},
+		{name: "unified_exec", stage: "stable"},
+		{name: "shell_zsh_fork", stage: "under development"},
+		{name: "unified_exec_zsh_fork", stage: "under development"},
+		{name: "shell_snapshot", stage: "stable"},
+		{name: "deferred_executor", stage: "under development"},
+		{name: "code_mode", stage: "under development"},
+		{name: "code_mode_buffered_exec", stage: "under development"},
+		{name: "code_mode_host", stage: "stable"},
+		{name: "code_mode_only", stage: "under development"},
+		{name: "web_search_request", stage: "deprecated"},
+		{name: "web_search_cached", stage: "deprecated"},
+		{name: "standalone_web_search", stage: "under development"},
+		{name: "memories", stage: "stable"},
+		{name: "external_agent_memory_import", stage: "under development"},
+		{name: "local_thread_store_compression", stage: "under development"},
+		{name: "chronicle", stage: "under development"},
+		{name: "exec_permission_approvals", stage: "under development"},
+		{name: "hooks", stage: "stable"},
+		{name: "request_permissions_tool", stage: "under development"},
+		{name: "network_proxy", stage: "experimental"},
+		{name: "respect_system_proxy", stage: "under development"},
+		{name: "multi_agent", stage: "stable"},
+		{name: "multi_agent_v2", stage: "stable"},
+		{name: "enable_mcp_apps", stage: "under development"},
+		{name: "mcp_2026_07_28", stage: "under development"},
+		{name: "deferred_tool_world_state", stage: "under development"},
+		{name: "non_prefixed_mcp_tool_names", stage: "under development"},
+		{name: "tool_suggest", stage: "stable"},
+		{name: "recommended_plugins", stage: "stable"},
+		{name: "plugins", stage: "stable"},
+		{name: "executor_capability_discovery", stage: "under development"},
+		{name: "in_app_browser", stage: "stable"},
+		{name: "in_app_updates", stage: "stable"},
+		{name: "browser_use", stage: "stable"},
+		{name: "browser_use_external", stage: "stable"},
+		{name: "browser_use_full_cdp_access", stage: "stable"},
+		{name: "computer_use", stage: "stable"},
+		{name: "image_generation", stage: "stable"},
+		{name: "workspace_dependencies", stage: "stable"},
+		{name: "skill_mcp_dependency_install", stage: "stable"},
+		{name: "skill_search", stage: "stable"},
+		{name: "remote_plugin", stage: "stable"},
+		{name: "plugin_sharing", stage: "stable"},
+		{name: "default_mode_request_user_input", stage: "under development"},
+		{name: "guardian_approval", stage: "stable"},
+		{name: "guardianv2", stage: "under development"},
+		{name: "goals", stage: "stable"},
+		{name: "token_budget", stage: "under development"},
+		{name: "rollout_budget", stage: "under development"},
+		{name: "current_time_reminder", stage: "under development"},
+		{name: "tool_call_mcp_elicitation", stage: "stable"},
+		{name: "auth_elicitation", stage: "stable"},
+		{name: "artifact", stage: "under development"},
+		{name: "realtime_conversation", stage: "under development"},
+		{name: "prevent_idle_sleep", stage: "experimental"},
+		{name: "remote_compaction_v2", stage: "stable"},
+		{name: "use_agent_identity", stage: "under development"},
+	}
+	fixedConfigOverrides = []string{
+		`web_search="disabled"`,
+		"tools.update_plan.enabled=false",
+		"tools.experimental_request_user_input.enabled=false",
 	}
 )
+
+type reviewedFeature struct {
+	name  string
+	stage string
+}
 
 // Adapter verifies and invokes one physically pinned Codex executable.
 type Adapter struct {
@@ -107,16 +168,13 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	if err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
-	probeDirectory, err := os.MkdirTemp("", "session-reviewer-codex-verify-")
+	probeRoot, err := createOwnedPrivateRoot("session-reviewer-codex-verify-")
 	if err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
-	defer os.RemoveAll(probeDirectory)
-	if err := os.Chmod(probeDirectory, 0o700); err != nil {
-		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, err)
-	}
+	defer probeRoot.cleanupOwned()
 
-	versionOutput, _, err := runProbe(ctx, physical, identity, probeDirectory, []string{"--version"})
+	versionOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"--version"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -126,7 +184,7 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	}
 	version := string(match[1])
 
-	helpOutput, _, err := runProbe(ctx, physical, identity, probeDirectory, []string{"exec", "--help"})
+	helpOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"exec", "--help"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -134,7 +192,7 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	featureOutput, _, err := runProbe(ctx, physical, identity, probeDirectory, []string{"features", "list"})
+	featureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"features", "list"}))
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -142,7 +200,9 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	probeOutput, _, err := runProbe(ctx, physical, identity, probeDirectory, []string{"debug", "prompt-input", capabilityProbe})
+	probeArgs := restrictionArgs([]string{"debug", "prompt-input"})
+	probeArgs = append(probeArgs, capabilityProbe)
+	probeOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, probeArgs)
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -157,8 +217,9 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		Provider:           "codex",
 		Version:            version,
 		ProposalOnly:       true,
-		NoTools:            true,
+		NoTools:            false,
 		ReadOnly:           true,
+		Containment:        agent.ContainmentRestrictedReadOnly,
 		StructuredOutput:   true,
 		NativeCancellation: true,
 		ModelProvenance:    agent.ModelProvenanceUnavailable,
@@ -220,22 +281,39 @@ func inspectExecutable(path string) (*executableIdentity, error) {
 	return &executableIdentity{info: after, digest: digest}, nil
 }
 
-func runProbe(ctx context.Context, executable string, expected *executableIdentity, directory string, args []string) ([]byte, []byte, error) {
+func runProbeInPrivateDirectory(ctx context.Context, executable string, expected *executableIdentity, root *privateRoot, args []string) ([]byte, []byte, error) {
+	directory, err := root.createDirectory("probe-")
+	if err != nil {
+		return nil, nil, err
+	}
+	stdout, stderr, runErr := runProbe(ctx, executable, expected, directory, args)
+	cleanupErr := directory.cleanup()
+	return stdout, stderr, errors.Join(runErr, cleanupErr)
+}
+
+func runProbe(ctx context.Context, executable string, expected *executableIdentity, directory *privateDirectory, args []string) ([]byte, []byte, error) {
 	if err := recheckExecutable(executable, expected); err != nil {
 		return nil, nil, err
 	}
+	var err error
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
 	stdout := newBoundedBuffer(maxProbeStdout)
 	stderr := newBoundedBuffer(maxProbeStderr)
 	command := exec.Command(executable, args...)
-	command.Dir = directory
-	command.Stdout = stdout
-	command.Stderr = stderr
-	process, err := startManagedProcess(command)
+	if err := directory.configureCommandDirectory(command); err != nil {
+		return nil, nil, err
+	}
+	pipes, err := attachCommandIO(command, nil, stdout, stderr)
 	if err != nil {
 		return nil, nil, err
 	}
+	process, err := startManagedProcess(command, directory.recheckForStart)
+	if err != nil {
+		pipes.abort()
+		return nil, nil, err
+	}
+	pipes.started()
 	wait := make(chan error, 1)
 	go func() { wait <- command.Wait() }()
 	var stopErr error
@@ -250,12 +328,13 @@ func runProbe(ctx context.Context, executable string, expected *executableIdenti
 		}
 	}
 	cleanupErr := terminateManagedProcess(process, 0)
+	drainErr := pipes.finish(processExitWait)
 	releaseErr := releaseManagedProcess(process)
 	if stdout.Exceeded() || stderr.Exceeded() {
 		return nil, nil, errors.New("Codex capability probe exceeded output bounds")
 	}
-	if err != nil || stopErr != nil || exitErr != nil || cleanupErr != nil || releaseErr != nil {
-		return stdout.Bytes(), stderr.Bytes(), errors.Join(err, stopErr, exitErr, cleanupErr, releaseErr)
+	if err != nil || stopErr != nil || exitErr != nil || cleanupErr != nil || drainErr != nil || releaseErr != nil {
+		return stdout.Bytes(), stderr.Bytes(), errors.Join(err, stopErr, exitErr, cleanupErr, drainErr, releaseErr)
 	}
 	return stdout.Bytes(), stderr.Bytes(), nil
 }
@@ -284,7 +363,11 @@ func validateExecHelp(help string) error {
 }
 
 func validateFeatures(output string) error {
-	features := make(map[string]string)
+	type featureState struct {
+		stage   string
+		enabled string
+	}
+	features := make(map[string]featureState)
 	for lineNumber, line := range strings.Split(strings.TrimSpace(output), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 {
@@ -297,14 +380,32 @@ func validateFeatures(output string) error {
 		if _, duplicate := features[name]; duplicate {
 			return fmt.Errorf("duplicate Codex feature %q", name)
 		}
-		features[name] = strings.Join(fields[1:len(fields)-1], " ")
+		features[name] = featureState{
+			stage:   strings.Join(fields[1:len(fields)-1], " "),
+			enabled: fields[len(fields)-1],
+		}
 	}
-	for _, name := range requiredStableFeatures {
-		if features[name] != "stable" {
-			return fmt.Errorf("required stable Codex feature %q is unavailable", name)
+	for _, required := range reviewedDisabledFeatures {
+		observed, exists := features[required.name]
+		if !exists || observed.stage != required.stage {
+			return fmt.Errorf("reviewed Codex feature %q changed capability stage", required.name)
+		}
+		if observed.enabled != "false" {
+			return fmt.Errorf("reviewed Codex feature %q was not disabled", required.name)
 		}
 	}
 	return nil
+}
+
+func restrictionArgs(prefix []string) []string {
+	args := append([]string(nil), prefix...)
+	for _, override := range fixedConfigOverrides {
+		args = append(args, "--config", override)
+	}
+	for _, feature := range reviewedDisabledFeatures {
+		args = append(args, "--disable", feature.name)
+	}
+	return args
 }
 
 func validatePromptProbe(output []byte) error {

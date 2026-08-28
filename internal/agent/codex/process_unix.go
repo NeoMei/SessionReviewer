@@ -4,6 +4,7 @@ package codex
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
@@ -19,11 +20,12 @@ func executableAllowed(_ string, info os.FileInfo) bool {
 	return info.Mode().Perm()&0o111 != 0
 }
 
-func directoryPrivate(info os.FileInfo) bool {
-	return info.Mode().Perm()&0o077 == 0
-}
-
-func startPlatformProcess(command *exec.Cmd) (platformProcess, string, error) {
+func startPlatformProcess(command *exec.Cmd, startCheck func() error) (platformProcess, string, error) {
+	if startCheck != nil {
+		if err := startCheck(); err != nil {
+			return platformProcess{}, "", err
+		}
+	}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := command.Start(); err != nil {
 		return platformProcess{}, "", err
@@ -46,29 +48,36 @@ func terminatePlatformProcess(process *platformProcess, expectedToken string, gr
 		return nil
 	}
 	if err := verifyUnixStartToken(process.pid, expectedToken); err != nil {
-		return err
+		return fmt.Errorf("verify process identity before TERM: %w", err)
 	}
 	if err := syscall.Kill(-process.pgid, syscall.SIGTERM); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("signal process group with TERM: %w", err)
 	}
 	deadline := time.Now().Add(grace)
 	for grace > 0 && time.Now().Before(deadline) {
-		if !unixProcessGroupAlive(process.pgid) {
+		if !processGroupAlive(process.pgid) {
 			return nil
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !unixProcessGroupAlive(process.pgid) {
+	if !processGroupAlive(process.pgid) {
 		return nil
 	}
 	if err := verifyUnixStartToken(process.pid, expectedToken); err != nil {
-		return err
+		return fmt.Errorf("verify process identity before KILL: %w", err)
 	}
 	if err := syscall.Kill(-process.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+		// Darwin can report EPERM after delivering a group signal to every
+		// executable member while an already-dead zombie is still awaiting
+		// collection.  The platform liveness check distinguishes that safe
+		// state from a live member that really could not be signalled.
+		if !processGroupAlive(process.pgid) {
+			return nil
+		}
+		return fmt.Errorf("signal process group with KILL: %w", err)
 	}
 	return nil
 }
@@ -96,7 +105,7 @@ func processMissing(err error) bool {
 	return errors.Is(err, syscall.ESRCH) || errors.Is(err, os.ErrNotExist)
 }
 
-func unixProcessGroupAlive(pgid int) bool {
+func unixProcessGroupAliveBySignal(pgid int) bool {
 	err := syscall.Kill(-pgid, syscall.Signal(0))
 	return err == nil || errors.Is(err, syscall.EPERM)
 }

@@ -21,3 +21,7 @@ func readProcessStartToken(pid int) (string, error) {
 	}
 	return token, nil
 }
+
+func processGroupAlive(pgid int) bool {
+	return unixProcessGroupAliveBySignal(pgid)
+}

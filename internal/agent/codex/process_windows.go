@@ -26,9 +26,7 @@ func executableAllowed(path string, _ os.FileInfo) bool {
 	return strings.EqualFold(filepath.Ext(path), ".exe")
 }
 
-func directoryPrivate(_ os.FileInfo) bool { return true }
-
-func startPlatformProcess(command *exec.Cmd) (platformProcess, string, error) {
+func startPlatformProcess(command *exec.Cmd, startCheck func() error) (platformProcess, string, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return platformProcess{}, "", err
@@ -44,25 +42,23 @@ func startPlatformProcess(command *exec.Cmd) (platformProcess, string, error) {
 		_ = windows.CloseHandle(job)
 		return platformProcess{}, "", err
 	}
-	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED}
 	if err := command.Start(); err != nil {
 		_ = windows.CloseHandle(job)
 		return platformProcess{}, "", err
 	}
 	processHandle, err := windows.OpenProcess(
-		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE,
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE,
 		false,
 		uint32(command.Process.Pid),
 	)
 	if err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		_ = terminateAndWaitStartedCommand(command, job, 0)
 		_ = windows.CloseHandle(job)
 		return platformProcess{}, "", err
 	}
 	if err := windows.AssignProcessToJobObject(job, processHandle); err != nil {
-		_ = command.Process.Kill()
-		_ = command.Wait()
+		_ = terminateAndWaitStartedCommand(command, job, processHandle)
 		_ = windows.CloseHandle(processHandle)
 		_ = windows.CloseHandle(job)
 		return platformProcess{}, "", err
@@ -70,12 +66,84 @@ func startPlatformProcess(command *exec.Cmd) (platformProcess, string, error) {
 	process := platformProcess{pid: command.Process.Pid, job: job, process: processHandle}
 	token, err := windowsProcessStartToken(processHandle)
 	if err != nil {
-		_ = windows.CloseHandle(job)
-		_ = command.Wait()
+		_ = terminateAndWaitStartedCommand(command, job, processHandle)
 		_ = windows.CloseHandle(processHandle)
+		_ = windows.CloseHandle(job)
+		return platformProcess{}, "", err
+	}
+	if startCheck != nil {
+		if err := startCheck(); err != nil {
+			_ = terminateAndWaitStartedCommand(command, job, processHandle)
+			_ = windows.CloseHandle(processHandle)
+			_ = windows.CloseHandle(job)
+			return platformProcess{}, "", err
+		}
+	}
+	if err := resumeSuspendedProcessThreads(uint32(process.pid)); err != nil {
+		_ = terminateAndWaitStartedCommand(command, job, processHandle)
+		_ = windows.CloseHandle(processHandle)
+		_ = windows.CloseHandle(job)
 		return platformProcess{}, "", err
 	}
 	return process, token, nil
+}
+
+func terminateAndWaitStartedCommand(command *exec.Cmd, job, process windows.Handle) error {
+	var result error
+	if process != 0 {
+		result = errors.Join(result, windows.TerminateProcess(process, 1))
+	} else if command.Process != nil {
+		result = errors.Join(result, command.Process.Kill())
+	}
+	if job != 0 {
+		result = errors.Join(result, windows.TerminateJobObject(job, 1))
+	}
+	wait := make(chan error, 1)
+	go func() { wait <- command.Wait() }()
+	select {
+	case err := <-wait:
+		return errors.Join(result, err)
+	case <-time.After(processExitWait):
+		return errors.Join(result, errProcessExitTimeout)
+	}
+}
+
+func resumeSuspendedProcessThreads(pid uint32) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return err
+	}
+	resumed := 0
+	for {
+		if entry.OwnerProcessID == pid {
+			thread, openErr := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if openErr != nil {
+				return openErr
+			}
+			previous, resumeErr := windows.ResumeThread(thread)
+			closeErr := windows.CloseHandle(thread)
+			if resumeErr != nil || previous != 1 || closeErr != nil {
+				return errors.Join(resumeErr, closeErr, errors.New("unexpected suspended thread state"))
+			}
+			resumed++
+		}
+		nextErr := windows.Thread32Next(snapshot, &entry)
+		if errors.Is(nextErr, windows.ERROR_NO_MORE_FILES) {
+			break
+		}
+		if nextErr != nil {
+			return nextErr
+		}
+	}
+	if resumed == 0 {
+		return errors.New("suspended process had no resumable thread")
+	}
+	return nil
 }
 
 func terminatePlatformProcess(process *platformProcess, expectedToken string, _ time.Duration) error {

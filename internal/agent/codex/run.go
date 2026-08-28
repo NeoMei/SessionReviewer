@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -37,20 +36,10 @@ var (
 	errProcessExitTimeout     = errors.New("process did not exit after native termination")
 	errInvalidStream          = errors.New("invalid Codex JSONL stream")
 	errToolEvent              = errors.New("Codex emitted a forbidden tool event")
+	errJSONDepthExceeded      = errors.New("JSON nesting exceeds reviewed bound")
 )
 
-var fixedDisabledFeatures = []string{
-	"shell_tool",
-	"apps",
-	"browser_use",
-	"browser_use_external",
-	"browser_use_full_cdp_access",
-	"computer_use",
-	"image_generation",
-	"workspace_dependencies",
-	"skill_search",
-	"remote_plugin",
-}
+const outputSchemaName = "proposal-schema.json"
 
 type activeRun struct {
 	mu         sync.Mutex
@@ -97,10 +86,10 @@ func (run *activeRun) stop() error {
 	return run.stopErr
 }
 
-// GenerateProposal runs the pinned executable once with the fixed no-tools
-// invocation. Prompt bytes are supplied only on stdin and every returned byte
-// remains untrusted until the strict stream and proposal decoders accept it.
-func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Request) (agent.Result, error) {
+// GenerateProposal runs the pinned executable once with the fixed restricted
+// read-only invocation. Prompt bytes are supplied only on stdin and every
+// returned byte remains untrusted until the strict decoders accept it.
+func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Request) (result agent.Result, resultErr error) {
 	if adapter == nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, errors.New("nil Codex adapter"))
 	}
@@ -140,35 +129,48 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 	if run.cancelled.Load() {
 		return agent.Result{}, agent.NewError(agent.CodeCancelled, errors.New("Codex run cancelled before start"))
 	}
-	runDirectory, err := os.MkdirTemp(request.WorkingDirectory, ".session-reviewer-codex-")
+	workingRoot, err := openPrivateRoot(request.WorkingDirectory)
 	if err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
-	defer os.RemoveAll(runDirectory)
-	if err := os.Chmod(runDirectory, 0o700); err != nil {
+	defer workingRoot.close()
+	runDirectory, err := workingRoot.createDirectory(".session-reviewer-codex-")
+	if err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
-	schemaPath := filepath.Join(runDirectory, "proposal-schema.json")
-	if err := writePrivateFile(schemaPath, request.OutputSchema); err != nil {
+	defer func() {
+		if cleanupErr := runDirectory.cleanup(); cleanupErr != nil && resultErr == nil {
+			result = agent.Result{}
+			resultErr = agent.NewError(agent.CodeIncompatible, cleanupErr)
+		}
+	}()
+	if err := runDirectory.writePrivateFile(outputSchemaName, request.OutputSchema); err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
 	if err := recheckExecutable(executable, executableIdentity); err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	args := fixedInvocation(schemaPath)
+	args := fixedInvocation(outputSchemaName)
 	stdout := newBoundedBuffer(maxRunStdoutBytes)
 	stderr := newBoundedBuffer(maxRunStderrBytes)
 	command := exec.Command(executable, args...)
-	command.Dir = runDirectory
-	command.Stdin = bytes.NewReader(request.Prompt)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	process, err := startManagedProcess(command)
+	if err := runDirectory.configureCommandDirectory(command); err != nil {
+		run.setProcess(nil)
+		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
+	}
+	pipes, err := attachCommandIO(command, request.Prompt, stdout, stderr)
 	if err != nil {
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
 	}
+	process, err := startManagedProcess(command, runDirectory.recheckForStart)
+	if err != nil {
+		pipes.abort()
+		run.setProcess(nil)
+		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
+	}
+	pipes.started()
 	run.setProcess(process)
 	if run.cancelled.Load() {
 		_ = run.stop()
@@ -195,8 +197,9 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 	// A successfully exited parent can still leave descendants in its process
 	// group/job. Always close the native tree boundary before parsing output.
 	cleanupErr := terminateManagedProcess(process, 0)
+	drainErr := pipes.finish(processExitWait)
 	releaseErr := releaseManagedProcess(process)
-	lifecycleErr := errors.Join(stopErr, exitErr, cleanupErr, releaseErr)
+	lifecycleErr := errors.Join(stopErr, exitErr, cleanupErr, drainErr, releaseErr)
 
 	if run.cancelled.Load() && contextErr == nil {
 		return agent.Result{}, agent.NewError(agent.CodeCancelled, errors.Join(waitErr, lifecycleErr))
@@ -284,10 +287,6 @@ func validateRequest(request agent.Request) error {
 	if request.WorkingDirectory == "" || !filepath.IsAbs(request.WorkingDirectory) {
 		return errors.New("private Codex working directory must be absolute")
 	}
-	info, err := os.Lstat(request.WorkingDirectory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || !directoryPrivate(info) {
-		return errors.New("private Codex working directory is unsafe")
-	}
 	return nil
 }
 
@@ -297,24 +296,7 @@ func fixedInvocation(schemaPath string) []string {
 		"--sandbox", "read-only", "--json", "--color", "never",
 		"--skip-git-repo-check", "--output-schema", schemaPath,
 	}
-	for _, feature := range fixedDisabledFeatures {
-		args = append(args, "--disable", feature)
-	}
-	return append(args, "-")
-}
-
-func writePrivateFile(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	written, writeErr := file.Write(data)
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if writeErr != nil || written != len(data) || syncErr != nil || closeErr != nil {
-		return errors.Join(writeErr, syncErr, closeErr, errors.New("write private output schema"))
-	}
-	return nil
+	return append(restrictionArgs(args), "-")
 }
 
 type parsedStream struct {
@@ -324,7 +306,7 @@ type parsedStream struct {
 }
 
 func parseJSONL(output []byte) (parsedStream, error) {
-	if len(output) == 0 || output[len(output)-1] != '\n' {
+	if len(output) == 0 || !utf8.Valid(output) || output[len(output)-1] != '\n' {
 		return parsedStream{}, errInvalidStream
 	}
 	lines := bytes.Split(output[:len(output)-1], []byte{'\n'})
@@ -425,7 +407,7 @@ func parseJSONL(output []byte) (parsedStream, error) {
 		return result, nil
 	}
 	if err := validateProposal(result.proposal); err != nil {
-		return parsedStream{}, fmt.Errorf("%w: invalid final proposal", errInvalidStream)
+		return parsedStream{}, fmt.Errorf("%w: invalid final proposal", errors.Join(errInvalidStream, err))
 	}
 	return result, nil
 }
@@ -512,6 +494,9 @@ func validateProposal(data []byte) error {
 	if len(data) == 0 {
 		return errInvalidStream
 	}
+	if err := validateJSONNoDuplicates(data); err != nil {
+		return err
+	}
 	decoded, err := proposal.Decode(bytes.NewReader(data))
 	if err != nil {
 		return err
@@ -536,6 +521,9 @@ func decodeStrict(data []byte, destination any) error {
 }
 
 func validateJSONNoDuplicates(data []byte) error {
+	if !utf8.Valid(data) {
+		return errors.New("JSON input is not UTF-8")
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	if err := inspectJSONValue(decoder, 0); err != nil {
@@ -559,7 +547,7 @@ func inspectJSONValue(decoder *json.Decoder, depth int) error {
 	}
 	depth++
 	if depth > maxJSONDepth {
-		return errors.New("JSON nesting exceeds reviewed bound")
+		return errJSONDepthExceeded
 	}
 	switch delimiter {
 	case '{':
@@ -692,8 +680,12 @@ type managedProcess struct {
 	platform   platformProcess
 }
 
-func startManagedProcess(command *exec.Cmd) (*managedProcess, error) {
-	platform, token, err := startPlatformProcess(command)
+func startManagedProcess(command *exec.Cmd, startChecks ...func() error) (*managedProcess, error) {
+	var startCheck func() error
+	if len(startChecks) > 0 {
+		startCheck = startChecks[0]
+	}
+	platform, token, err := startPlatformProcess(command, startCheck)
 	if err != nil {
 		return nil, err
 	}

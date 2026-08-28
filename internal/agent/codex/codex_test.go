@@ -66,8 +66,9 @@ func TestVerifyPinsExactCodex0147CapabilityContract(t *testing.T) {
 		Provider:           "codex",
 		Version:            "0.147.0",
 		ProposalOnly:       true,
-		NoTools:            true,
+		NoTools:            false,
 		ReadOnly:           true,
+		Containment:        agent.ContainmentRestrictedReadOnly,
 		StructuredOutput:   true,
 		NativeCancellation: true,
 		ModelProvenance:    agent.ModelProvenanceUnavailable,
@@ -78,10 +79,35 @@ func TestVerifyPinsExactCodex0147CapabilityContract(t *testing.T) {
 	calls := readCalls(t, callsPath)
 	if len(calls) != 4 || !reflect.DeepEqual(calls[0], []string{"--version"}) ||
 		!reflect.DeepEqual(calls[1], []string{"exec", "--help"}) ||
-		!reflect.DeepEqual(calls[2], []string{"features", "list"}) ||
+		len(calls[2]) < 7 || !reflect.DeepEqual(calls[2][:2], []string{"features", "list"}) ||
+		!containsAdjacent(calls[2], "--disable", "view_image") ||
+		!containsAdjacent(calls[2], "--disable", "multi_agent") ||
 		len(calls[3]) < 3 || !reflect.DeepEqual(calls[3][:2], []string{"debug", "prompt-input"}) ||
-		calls[3][len(calls[3])-1] != capabilityProbe {
+		calls[3][len(calls[3])-1] != capabilityProbe ||
+		!containsAdjacent(calls[3], "--config", `web_search="disabled"`) ||
+		!containsAdjacent(calls[3], "--config", "tools.update_plan.enabled=false") {
 		t.Fatalf("verification calls=%v", calls)
+	}
+}
+
+func TestCapabilityNeverClaimsAnEmptyToolRegistry(t *testing.T) {
+	capability, err := verifiedAdapter(t).Verify(context.Background(), fakeExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capability.NoTools {
+		t.Fatalf("0.147.x capability falsely claimed an empty tool registry: %+v", capability)
+	}
+	if capability.Containment != agent.ContainmentRestrictedReadOnly || !capability.ReadOnly {
+		t.Fatalf("capability omitted the restricted read-only containment seam: %+v", capability)
+	}
+}
+
+func TestVerifyUsesAFreshEmptyPrivateDirectoryForEveryProbe(t *testing.T) {
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "verify-writes-cwd")
+	capability, err := New().Verify(context.Background(), fakeExecutable)
+	if err != nil || capability.Containment != agent.ContainmentRestrictedReadOnly {
+		t.Fatalf("capability=%+v err=%v", capability, err)
 	}
 }
 
@@ -107,6 +133,7 @@ func TestVerifyRejectsUnconfiguredAndIncompatibleExecutables(t *testing.T) {
 		{name: "missing flag", path: fakeExecutable, mode: "verify-missing-flag", code: agent.CodeIncompatible},
 		{name: "missing stable feature", path: fakeExecutable, mode: "verify-missing-feature", code: agent.CodeIncompatible},
 		{name: "unstable required feature", path: fakeExecutable, mode: "verify-unstable-feature", code: agent.CodeIncompatible},
+		{name: "deny feature remained enabled", path: fakeExecutable, mode: "verify-enabled-feature", code: agent.CodeIncompatible},
 		{name: "malformed feature table", path: fakeExecutable, mode: "verify-malformed-features", code: agent.CodeIncompatible},
 		{name: "noncanonical feature state", path: fakeExecutable, mode: "verify-noncanonical-feature-state", code: agent.CodeIncompatible},
 		{name: "malformed prompt probe", path: fakeExecutable, mode: "verify-malformed-probe", code: agent.CodeIncompatible},
@@ -123,6 +150,15 @@ func TestVerifyRejectsUnconfiguredAndIncompatibleExecutables(t *testing.T) {
 			assertCode(t, err, test.code)
 		})
 	}
+}
+
+func containsAdjacent(values []string, first, second string) bool {
+	for index := 0; index+1 < len(values); index++ {
+		if values[index] == first && values[index+1] == second {
+			return true
+		}
+	}
+	return false
 }
 
 func TestVerifyBoundsProbeOutputAndCancelsTheProbeTree(t *testing.T) {
@@ -155,6 +191,40 @@ func TestVerifyBoundsProbeOutputAndCancelsTheProbeTree(t *testing.T) {
 	})
 }
 
+func TestVerifyReturnsBeforeOrphanInheritedPipesClose(t *testing.T) {
+	for _, test := range []struct {
+		mode string
+		code agent.ErrorCode
+	}{
+		{mode: "verify-success-with-child"},
+		{mode: "verify-error-with-child", code: agent.CodeIncompatible},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			pidPath := filepath.Join(t.TempDir(), "child.pid")
+			t.Setenv("SESSIONREVIEWER_FAKE_MODE", test.mode)
+			t.Setenv("SESSIONREVIEWER_FAKE_CHILD_PID_PATH", pidPath)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			started := time.Now()
+			capability, err := New().Verify(ctx, fakeExecutable)
+			if test.code == "" {
+				if err != nil || capability.Containment != agent.ContainmentRestrictedReadOnly {
+					t.Fatalf("capability=%+v err=%v cause=%v", capability, err, errors.Unwrap(err))
+				}
+			} else {
+				if !reflect.DeepEqual(capability, agent.Capability{}) {
+					t.Fatalf("failed orphan probe returned capability: %+v", capability)
+				}
+				assertCode(t, err, test.code)
+			}
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("probe waited %s for inherited pipe EOF", elapsed)
+			}
+			assertRecordedProcessStops(t, pidPath)
+		})
+	}
+}
+
 func TestVerifyRejectsConcurrentVerificationAsBusy(t *testing.T) {
 	adapter := New()
 	readyPath := filepath.Join(t.TempDir(), "verify.ready")
@@ -176,11 +246,12 @@ func TestVerifyRejectsConcurrentVerificationAsBusy(t *testing.T) {
 	}
 }
 
-func TestGenerateProposalUsesOnlyTheFixedNoToolsInvocationAndStdinPrompt(t *testing.T) {
+func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(t *testing.T) {
 	adapter := verifiedAdapter(t)
 	capturePath := filepath.Join(t.TempDir(), "capture.json")
 	t.Setenv("SESSIONREVIEWER_FAKE_CAPTURE_PATH", capturePath)
-	result, err := adapter.GenerateProposal(context.Background(), validRequest(t, []byte("PROMPT_ONLY_ON_STDIN")))
+	request := validRequest(t, []byte("PROMPT_ONLY_ON_STDIN"))
+	result, err := adapter.GenerateProposal(context.Background(), request)
 	if err != nil {
 		t.Fatalf("%v (cause: %v)", err, errors.Unwrap(err))
 	}
@@ -213,12 +284,43 @@ func TestGenerateProposalUsesOnlyTheFixedNoToolsInvocationAndStdinPrompt(t *test
 	wantArgs := []string{
 		"exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
 		"--sandbox", "read-only", "--json", "--color", "never",
-		"--skip-git-repo-check", "--output-schema", capture.SchemaPath,
+		"--skip-git-repo-check", "--output-schema", "proposal-schema.json",
+		"--config", `web_search="disabled"`,
+		"--config", "tools.update_plan.enabled=false",
+		"--config", "tools.experimental_request_user_input.enabled=false",
 		"--disable", "shell_tool", "--disable", "apps",
+		"--disable", "view_image", "--disable", "unified_exec",
+		"--disable", "shell_zsh_fork", "--disable", "unified_exec_zsh_fork",
+		"--disable", "shell_snapshot", "--disable", "deferred_executor",
+		"--disable", "code_mode", "--disable", "code_mode_buffered_exec",
+		"--disable", "code_mode_host",
+		"--disable", "code_mode_only", "--disable", "web_search_request",
+		"--disable", "web_search_cached", "--disable", "standalone_web_search",
+		"--disable", "memories", "--disable", "external_agent_memory_import",
+		"--disable", "local_thread_store_compression", "--disable", "chronicle",
+		"--disable", "exec_permission_approvals", "--disable", "hooks",
+		"--disable", "request_permissions_tool", "--disable", "network_proxy",
+		"--disable", "respect_system_proxy",
+		"--disable", "multi_agent", "--disable", "multi_agent_v2",
+		"--disable", "enable_mcp_apps", "--disable", "mcp_2026_07_28",
+		"--disable", "deferred_tool_world_state", "--disable", "non_prefixed_mcp_tool_names",
+		"--disable", "tool_suggest",
+		"--disable", "recommended_plugins", "--disable", "plugins",
+		"--disable", "executor_capability_discovery", "--disable", "in_app_browser",
+		"--disable", "in_app_updates",
 		"--disable", "browser_use", "--disable", "browser_use_external",
 		"--disable", "browser_use_full_cdp_access", "--disable", "computer_use",
 		"--disable", "image_generation", "--disable", "workspace_dependencies",
-		"--disable", "skill_search", "--disable", "remote_plugin", "-",
+		"--disable", "skill_mcp_dependency_install", "--disable", "skill_search",
+		"--disable", "remote_plugin", "--disable", "plugin_sharing",
+		"--disable", "default_mode_request_user_input", "--disable", "guardian_approval",
+		"--disable", "guardianv2", "--disable", "goals",
+		"--disable", "token_budget", "--disable", "rollout_budget",
+		"--disable", "current_time_reminder",
+		"--disable", "tool_call_mcp_elicitation", "--disable", "auth_elicitation",
+		"--disable", "artifact", "--disable", "realtime_conversation",
+		"--disable", "prevent_idle_sleep", "--disable", "remote_compaction_v2",
+		"--disable", "use_agent_identity", "-",
 	}
 	if !reflect.DeepEqual(capture.Args, wantArgs) {
 		t.Fatalf("args=%q want=%q", capture.Args, wantArgs)
@@ -226,14 +328,43 @@ func TestGenerateProposalUsesOnlyTheFixedNoToolsInvocationAndStdinPrompt(t *test
 	if capture.Stdin != "PROMPT_ONLY_ON_STDIN" || strings.Contains(strings.Join(capture.Args, "\x00"), capture.Stdin) {
 		t.Fatalf("prompt placement args=%q stdin=%q", capture.Args, capture.Stdin)
 	}
-	if capture.Schema != string(schemaFixture) || capture.SchemaMode != 0o600 || !filepath.IsAbs(capture.SchemaPath) {
+	if capture.Schema != string(schemaFixture) || capture.SchemaMode != 0o600 || capture.SchemaPath != "proposal-schema.json" {
 		t.Fatalf("schema capture path=%q mode=%#o bytes=%d", capture.SchemaPath, capture.SchemaMode, len(capture.Schema))
 	}
 	if runtime.GOOS != "windows" && capture.CWDMode != 0o700 {
 		t.Fatalf("private run directory mode=%#o want=0700", capture.CWDMode)
 	}
+	physicalRoot, resolveErr := filepath.EvalSymlinks(request.WorkingDirectory)
+	relativeCWD, relativeErr := filepath.Rel(physicalRoot, capture.CWD)
+	if resolveErr != nil || relativeErr != nil || relativeCWD == "." || relativeCWD == ".." || strings.HasPrefix(relativeCWD, ".."+string(os.PathSeparator)) {
+		t.Fatalf("Codex cwd=%q escaped pinned private root=%q resolveErr=%v relativeErr=%v", capture.CWD, physicalRoot, resolveErr, relativeErr)
+	}
 	if info, statErr := os.Stat(capture.CWD); !os.IsNotExist(statErr) || info != nil {
 		t.Fatalf("private run directory was not removed: info=%v err=%v", info, statErr)
+	}
+	if entries, readErr := os.ReadDir(request.WorkingDirectory); readErr != nil || len(entries) != 0 {
+		t.Fatalf("private working root not empty after run: entries=%v err=%v", entries, readErr)
+	}
+}
+
+func TestGenerateProposalRejectsNonEmptyWorkingRootWithoutStartingCodex(t *testing.T) {
+	adapter := verifiedAdapter(t)
+	request := validRequest(t, []byte("prompt"))
+	if err := os.WriteFile(filepath.Join(request.WorkingDirectory, "foreign"), []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	capturePath := filepath.Join(t.TempDir(), "must-not-run.json")
+	t.Setenv("SESSIONREVIEWER_FAKE_CAPTURE_PATH", capturePath)
+	result, err := adapter.GenerateProposal(context.Background(), request)
+	if !reflect.DeepEqual(result, agent.Result{}) {
+		t.Fatalf("unsafe root returned result: %+v", result)
+	}
+	assertCode(t, err, agent.CodeUnconfigured)
+	if got := fmt.Sprint(err); got != string(agent.CodeUnconfigured) {
+		t.Fatalf("unsafe root leaked private detail: %q", got)
+	}
+	if _, statErr := os.Stat(capturePath); !os.IsNotExist(statErr) {
+		t.Fatalf("Codex started for unsafe root: %v", statErr)
 	}
 }
 
@@ -274,6 +405,8 @@ func TestGenerateProposalRejectsStrictOutputMatrixWithoutLeakingPrivateErrors(t 
 		{mode: "unknown-event", code: agent.CodeIncompatible},
 		{mode: "trailing-no-newline", code: agent.CodeIncompatible},
 		{mode: "turn-failed-before-start", code: agent.CodeIncompatible},
+		{mode: "invalid-utf8", code: agent.CodeIncompatible},
+		{mode: "deep-embedded-proposal", code: agent.CodeIncompatible},
 	}
 	for _, test := range tests {
 		t.Run(test.mode, func(t *testing.T) {
@@ -291,6 +424,35 @@ func TestGenerateProposalRejectsStrictOutputMatrixWithoutLeakingPrivateErrors(t 
 				}
 			}
 		})
+	}
+}
+
+func TestGenerateProposalRejectsRawInvalidUTF8BeforeJSONDecoding(t *testing.T) {
+	adapter := verifiedAdapter(t)
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "invalid-utf8")
+	result, err := adapter.GenerateProposal(context.Background(), validRequest(t, []byte("prompt")))
+	if !reflect.DeepEqual(result, agent.Result{}) {
+		t.Fatalf("invalid UTF-8 returned result: %+v", result)
+	}
+	assertCode(t, err, agent.CodeIncompatible)
+	if got := fmt.Sprint(err); got != string(agent.CodeIncompatible) {
+		t.Fatalf("invalid UTF-8 leaked a private decoder error: %q", got)
+	}
+}
+
+func TestGenerateProposalAppliesDepthBoundToEmbeddedProposal(t *testing.T) {
+	adapter := verifiedAdapter(t)
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "deep-embedded-proposal")
+	result, err := adapter.GenerateProposal(context.Background(), validRequest(t, []byte("prompt")))
+	if !reflect.DeepEqual(result, agent.Result{}) {
+		t.Fatalf("deep embedded proposal returned result: %+v", result)
+	}
+	assertCode(t, err, agent.CodeIncompatible)
+	if !errors.Is(err, errJSONDepthExceeded) {
+		t.Fatalf("deep proposal bypassed the shared depth guard: cause=%v", errors.Unwrap(err))
+	}
+	if got := fmt.Sprint(err); got != string(agent.CodeIncompatible) {
+		t.Fatalf("deep proposal leaked a private decoder error: %q", got)
 	}
 }
 
@@ -472,6 +634,41 @@ func TestGenerateProposalCleansOrphanChildAfterEveryExit(t *testing.T) {
 	}
 }
 
+func TestGenerateProposalReturnsBeforeOrphanInheritedPipesClose(t *testing.T) {
+	for _, test := range []struct {
+		mode string
+		code agent.ErrorCode
+	}{
+		{mode: "success-with-child"},
+		{mode: "exit-after-valid-output", code: agent.CodeIncompatible},
+	} {
+		t.Run(test.mode, func(t *testing.T) {
+			adapter := verifiedAdapter(t)
+			pidPath := filepath.Join(t.TempDir(), "child.pid")
+			t.Setenv("SESSIONREVIEWER_FAKE_MODE", test.mode)
+			t.Setenv("SESSIONREVIEWER_FAKE_CHILD_PID_PATH", pidPath)
+			request := validRequest(t, []byte("prompt"))
+			request.Deadline = time.Now().Add(2 * time.Second)
+			started := time.Now()
+			result, err := adapter.GenerateProposal(context.Background(), request)
+			if test.code == "" {
+				if err != nil || len(result.Proposal) == 0 {
+					t.Fatalf("result=%+v err=%v cause=%v", result, err, errors.Unwrap(err))
+				}
+			} else {
+				if !reflect.DeepEqual(result, agent.Result{}) {
+					t.Fatalf("failed orphan run returned result: %+v", result)
+				}
+				assertCode(t, err, test.code)
+			}
+			if elapsed := time.Since(started); elapsed >= time.Second {
+				t.Fatalf("run waited %s for inherited pipe EOF", elapsed)
+			}
+			assertRecordedProcessStops(t, pidPath)
+		})
+	}
+}
+
 func TestGenerateProposalRechecksVerifiedPhysicalIdentity(t *testing.T) {
 	directory := t.TempDir()
 	verifiedPath := filepath.Join(directory, "codex")
@@ -589,7 +786,7 @@ func verifiedAdapter(t *testing.T) *Adapter {
 func validRequest(t *testing.T, prompt []byte) agent.Request {
 	t.Helper()
 	workingDirectory := t.TempDir()
-	if err := os.Chmod(workingDirectory, 0o700); err != nil {
+	if err := prepareOwnedPrivateDirectory(workingDirectory); err != nil {
 		t.Fatal(err)
 	}
 	return agent.Request{
@@ -651,12 +848,22 @@ func waitForFile(t *testing.T, path string) {
 
 func assertRecordedProcessStops(t *testing.T, path string) {
 	t.Helper()
-	waitForFile(t, path)
-	pid, err := strconv.Atoi(strings.TrimSpace(string(mustRead(t, path))))
-	if err != nil {
-		t.Fatal(err)
-	}
 	deadline := time.Now().Add(5 * time.Second)
+	pid := 0
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			pid, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err == nil && pid > 0 {
+				break
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid <= 0 {
+		t.Fatalf("timed out waiting for valid PID in %s", path)
+	}
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if !processAlive(pid) {
 			return

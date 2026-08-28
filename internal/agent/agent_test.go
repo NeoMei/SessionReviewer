@@ -48,7 +48,13 @@ func TestAdapterContractCarriesProposalOnlyRequestAndResult(t *testing.T) {
 		t.Fatalf("result lost contract fields: %+v", result)
 	}
 
-	capability := agent.Capability{ModelProvenance: agent.ModelProvenanceUnavailable}
+	capability := agent.Capability{
+		Containment:     agent.ContainmentRestrictedReadOnly,
+		ModelProvenance: agent.ModelProvenanceUnavailable,
+	}
+	if capability.Containment != agent.ContainmentRestrictedReadOnly {
+		t.Fatalf("capability lost containment contract: %+v", capability)
+	}
 	if capability.ModelProvenance != agent.ModelProvenanceUnavailable {
 		t.Fatalf("capability lost model provenance contract: %+v", capability)
 	}

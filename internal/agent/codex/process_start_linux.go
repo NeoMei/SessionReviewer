@@ -42,3 +42,7 @@ func itoa(value int) string {
 	}
 	return string(buffer[position:])
 }
+
+func processGroupAlive(pgid int) bool {
+	return unixProcessGroupAliveBySignal(pgid)
+}

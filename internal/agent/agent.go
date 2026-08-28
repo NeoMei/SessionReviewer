@@ -19,15 +19,29 @@ type Adapter interface {
 
 // Capability is the verified behavior contract of an Adapter implementation.
 type Capability struct {
-	Provider           string
-	Version            string
-	ProposalOnly       bool
+	Provider     string
+	Version      string
+	ProposalOnly bool
+	// NoTools is false for Codex 0.147.x because that release has core utility
+	// tools outside its feature registry. Callers must use Containment instead.
 	NoTools            bool
 	ReadOnly           bool
+	Containment        Containment
 	StructuredOutput   bool
 	NativeCancellation bool
 	ModelProvenance    ModelProvenance
 }
+
+// Containment describes the enforced side-effect boundary of an Agent run.
+// It does not claim that the provider exposes an empty tool registry.
+type Containment string
+
+const (
+	// ContainmentRestrictedReadOnly means every reviewed external, file-read,
+	// network, and agent feature is disabled; the run has a private work root
+	// under the native read-only sandbox; and any observed tool event fails it.
+	ContainmentRestrictedReadOnly Containment = "restricted_read_only"
+)
 
 // ModelProvenance records whether the Adapter can attribute actual usage to a
 // provider-reported model. An unavailable value must never be replaced with a
@@ -43,7 +57,7 @@ const (
 type Request struct {
 	Prompt           []byte // Proposal-only prompt with bounded untrusted data.
 	OutputSchema     []byte // Agent-draft schema; host-owned accounting is forbidden.
-	WorkingDirectory string
+	WorkingDirectory string // Protected empty root outside Project and Vault.
 	Deadline         time.Time
 }
 
