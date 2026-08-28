@@ -134,6 +134,14 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
 	defer workingRoot.close()
+	forbiddenRoots, err := openForbiddenRoots(request.ForbiddenRoots)
+	if err != nil {
+		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
+	}
+	defer forbiddenRoots.close()
+	if err := forbiddenRoots.recheckDisjoint(workingRoot); err != nil {
+		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
+	}
 	runDirectory, err := workingRoot.createDirectory(".session-reviewer-codex-")
 	if err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
@@ -164,7 +172,12 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
 	}
-	process, err := startManagedProcess(command, runDirectory.recheckForStart)
+	process, err := startManagedProcess(command, func() error {
+		if err := runDirectory.recheckForStart(); err != nil {
+			return err
+		}
+		return forbiddenRoots.recheckDisjoint(workingRoot)
+	})
 	if err != nil {
 		pipes.abort()
 		run.setProcess(nil)
@@ -286,6 +299,22 @@ func validateRequest(request agent.Request) error {
 	}
 	if request.WorkingDirectory == "" || !filepath.IsAbs(request.WorkingDirectory) {
 		return errors.New("private Codex working directory must be absolute")
+	}
+	if len(request.ForbiddenRoots) != 2 {
+		return errors.New("canonical Project and Vault roots are required")
+	}
+	seen := make(map[agent.ForbiddenRootKind]struct{}, 2)
+	for _, root := range request.ForbiddenRoots {
+		if root.Kind != agent.ForbiddenRootProject && root.Kind != agent.ForbiddenRootVault {
+			return errors.New("invalid forbidden root kind")
+		}
+		if _, duplicate := seen[root.Kind]; duplicate {
+			return errors.New("duplicate forbidden root kind")
+		}
+		seen[root.Kind] = struct{}{}
+		if root.CanonicalPath == "" || !filepath.IsAbs(root.CanonicalPath) {
+			return errors.New("forbidden root must be absolute")
+		}
 	}
 	return nil
 }

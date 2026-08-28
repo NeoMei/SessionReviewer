@@ -13,6 +13,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,9 +29,12 @@ const (
 	maxProbeStderr  = 256 << 10
 )
 
+var errCodex0147HermeticRegistryUnprovable = errors.New("Codex 0.147.x cannot prove an empty effective MCP and host-tool registry")
+
 var (
 	versionPattern = regexp.MustCompile(`^codex-cli (0\.147\.(?:0|[1-9][0-9]*))\r?\n?$`)
 	requiredFlags  = []string{
+		"strict-config",
 		"ephemeral",
 		"ignore-user-config",
 		"ignore-rules",
@@ -41,78 +46,194 @@ var (
 		"disable",
 		"config",
 	}
-	reviewedDisabledFeatures = []reviewedFeature{
-		{name: "shell_tool", stage: "stable"},
-		{name: "apps", stage: "stable"},
-		{name: "view_image", stage: "stable"},
-		{name: "unified_exec", stage: "stable"},
-		{name: "shell_zsh_fork", stage: "under development"},
-		{name: "unified_exec_zsh_fork", stage: "under development"},
-		{name: "shell_snapshot", stage: "stable"},
-		{name: "deferred_executor", stage: "under development"},
-		{name: "code_mode", stage: "under development"},
-		{name: "code_mode_buffered_exec", stage: "under development"},
-		{name: "code_mode_host", stage: "stable"},
-		{name: "code_mode_only", stage: "under development"},
-		{name: "web_search_request", stage: "deprecated"},
-		{name: "web_search_cached", stage: "deprecated"},
-		{name: "standalone_web_search", stage: "under development"},
-		{name: "memories", stage: "stable"},
-		{name: "external_agent_memory_import", stage: "under development"},
-		{name: "local_thread_store_compression", stage: "under development"},
-		{name: "chronicle", stage: "under development"},
-		{name: "exec_permission_approvals", stage: "under development"},
-		{name: "hooks", stage: "stable"},
-		{name: "request_permissions_tool", stage: "under development"},
-		{name: "network_proxy", stage: "experimental"},
-		{name: "respect_system_proxy", stage: "under development"},
-		{name: "multi_agent", stage: "stable"},
-		{name: "multi_agent_v2", stage: "stable"},
-		{name: "enable_mcp_apps", stage: "under development"},
-		{name: "mcp_2026_07_28", stage: "under development"},
-		{name: "deferred_tool_world_state", stage: "under development"},
-		{name: "non_prefixed_mcp_tool_names", stage: "under development"},
-		{name: "tool_suggest", stage: "stable"},
-		{name: "recommended_plugins", stage: "stable"},
-		{name: "plugins", stage: "stable"},
-		{name: "executor_capability_discovery", stage: "under development"},
-		{name: "in_app_browser", stage: "stable"},
-		{name: "in_app_updates", stage: "stable"},
-		{name: "browser_use", stage: "stable"},
-		{name: "browser_use_external", stage: "stable"},
-		{name: "browser_use_full_cdp_access", stage: "stable"},
-		{name: "computer_use", stage: "stable"},
-		{name: "image_generation", stage: "stable"},
-		{name: "workspace_dependencies", stage: "stable"},
-		{name: "skill_mcp_dependency_install", stage: "stable"},
-		{name: "skill_search", stage: "stable"},
-		{name: "remote_plugin", stage: "stable"},
-		{name: "plugin_sharing", stage: "stable"},
-		{name: "default_mode_request_user_input", stage: "under development"},
-		{name: "guardian_approval", stage: "stable"},
-		{name: "guardianv2", stage: "under development"},
-		{name: "goals", stage: "stable"},
-		{name: "token_budget", stage: "under development"},
-		{name: "rollout_budget", stage: "under development"},
-		{name: "current_time_reminder", stage: "under development"},
-		{name: "tool_call_mcp_elicitation", stage: "stable"},
-		{name: "auth_elicitation", stage: "stable"},
-		{name: "artifact", stage: "under development"},
-		{name: "realtime_conversation", stage: "under development"},
-		{name: "prevent_idle_sleep", stage: "experimental"},
-		{name: "remote_compaction_v2", stage: "stable"},
-		{name: "use_agent_identity", stage: "under development"},
+	reviewedDisabledFeatureNames = []string{
+		"shell_tool", "apps", "view_image", "unified_exec", "shell_zsh_fork",
+		"unified_exec_zsh_fork", "shell_snapshot", "deferred_executor", "code_mode",
+		"code_mode_buffered_exec", "code_mode_host", "code_mode_only", "web_search_request",
+		"web_search_cached", "standalone_web_search", "memories", "external_agent_memory_import",
+		"local_thread_store_compression", "chronicle", "exec_permission_approvals", "hooks",
+		"request_permissions_tool", "network_proxy", "respect_system_proxy", "multi_agent",
+		"multi_agent_v2", "enable_mcp_apps", "mcp_2026_07_28", "deferred_tool_world_state",
+		"non_prefixed_mcp_tool_names", "tool_suggest", "recommended_plugins", "plugins",
+		"executor_capability_discovery", "in_app_browser", "in_app_updates", "browser_use",
+		"browser_use_external", "browser_use_full_cdp_access", "computer_use", "image_generation",
+		"workspace_dependencies", "skill_mcp_dependency_install", "skill_search", "remote_plugin",
+		"plugin_sharing", "default_mode_request_user_input", "guardian_approval", "guardianv2",
+		"goals", "token_budget", "rollout_budget", "current_time_reminder",
+		"tool_call_mcp_elicitation", "auth_elicitation", "artifact", "realtime_conversation",
+		"prevent_idle_sleep", "remote_compaction_v2", "use_agent_identity",
 	}
 	fixedConfigOverrides = []string{
 		`web_search="disabled"`,
 		"tools.update_plan.enabled=false",
 		"tools.experimental_request_user_input.enabled=false",
+		"project_doc_max_bytes=0",
+		"project_root_markers=[]",
+		"project_doc_fallback_filenames=[]",
+		"include_environment_context=false",
+		"include_permissions_instructions=false",
+		"include_apps_instructions=false",
+		"include_collaboration_mode_instructions=false",
+		"skills.include_instructions=false",
+		"orchestrator.skills.enabled=false",
+		"orchestrator.mcp.enabled=false",
+		`developer_instructions=""`,
+		`instructions=""`,
+		"mcp_servers={}",
 	}
+	reviewedFeatures = mustBuildReviewedFeatures()
 )
 
 type reviewedFeature struct {
-	name  string
-	stage string
+	name           string
+	stage          string
+	defaultEnabled bool
+	disabled       bool
+}
+
+// reviewedFeatureFingerprint is the complete feature table registered by the
+// exact rust-v0.147.0 tag. The two platform defaults are resolved below. A
+// patch release is compatible only if every row, stage, and effective default
+// remains identical to this fingerprint.
+const reviewedFeatureFingerprint = `undo|removed|false
+shell_tool|stable|true
+view_image|stable|true
+secret_auth_storage|stable|windows
+unified_exec|stable|nonwindows
+shell_zsh_fork|under development|false
+unified_exec_zsh_fork|under development|false
+shell_snapshot|stable|true
+deferred_executor|under development|false
+js_repl|removed|false
+executed_tool_call_metadata|under development|false
+code_mode|under development|false
+code_mode_buffered_exec|under development|false
+code_mode_host|stable|true
+code_mode_only|under development|false
+js_repl_tools_only|removed|false
+terminal_resize_reflow|removed|true
+web_search_request|deprecated|false
+web_search_cached|deprecated|false
+standalone_web_search|under development|false
+search_tool|removed|false
+codex_git_commit|removed|false
+runtime_metrics|under development|false
+sqlite|removed|true
+memories|stable|false
+external_agent_memory_import|under development|false
+local_thread_store_compression|under development|false
+chronicle|under development|false
+apply_patch_freeform|removed|false
+apply_patch_streaming_events|under development|false
+exec_permission_approvals|under development|false
+hooks|stable|true
+request_permissions_tool|under development|false
+use_linux_sandbox_bwrap|removed|false
+use_legacy_landlock|deprecated|false
+request_rule|removed|false
+experimental_windows_sandbox|removed|false
+elevated_windows_sandbox|removed|false
+remote_models|removed|false
+enable_request_compression|stable|true
+network_proxy|experimental|false
+respect_system_proxy|under development|false
+multi_agent|stable|true
+multi_agent_v2|stable|false
+multi_agent_mode|removed|false
+enable_fanout|removed|false
+apps|stable|true
+enable_mcp_apps|under development|false
+mcp_2026_07_28|under development|false
+apps_mcp_path_override|removed|false
+tool_search|removed|false
+tool_search_always_defer_mcp_tools|removed|true
+deferred_tool_world_state|under development|false
+non_prefixed_mcp_tool_names|under development|false
+unavailable_dummy_tools|removed|false
+tool_suggest|stable|true
+recommended_plugins|stable|false
+plugins|stable|true
+executor_capability_discovery|under development|false
+plugin_hooks|removed|false
+in_app_browser|stable|true
+in_app_updates|stable|true
+browser_use|stable|true
+browser_use_full_cdp_access|stable|true
+browser_use_external|stable|true
+computer_use|stable|true
+remote_plugin|stable|true
+plugin_sharing|stable|true
+external_migration|removed|false
+image_generation|stable|true
+image_resize_notice|under development|false
+resize_all_images|removed|true
+item_ids|removed|true
+concurrent_reasoning_summaries|under development|false
+skill_mcp_dependency_install|stable|true
+skill_search|stable|true
+skill_env_var_dependency_prompt|removed|false
+mentions_v2|stable|true
+steer|removed|true
+default_mode_request_user_input|under development|false
+terminal_visualization_instructions|under development|false
+guardian_approval|stable|true
+guardianv2|under development|false
+goals|stable|true
+token_budget|under development|false
+rollout_budget|under development|false
+current_time_reminder|under development|false
+collaboration_modes|removed|true
+tool_call_mcp_elicitation|stable|true
+auth_elicitation|stable|true
+personality|stable|true
+artifact|under development|false
+fast_mode|stable|true
+realtime_conversation|under development|false
+remote_control|removed|false
+image_detail_original|removed|false
+tui_app_server|removed|true
+prevent_idle_sleep|experimental|false
+workspace_owner_usage_nudge|removed|false
+responses_websockets|removed|false
+responses_websockets_v2|removed|false
+remote_compaction_v2|stable|true
+use_agent_identity|under development|false
+workspace_dependencies|stable|true`
+
+func mustBuildReviewedFeatures() []reviewedFeature {
+	disabled := make(map[string]struct{}, len(reviewedDisabledFeatureNames))
+	for _, name := range reviewedDisabledFeatureNames {
+		disabled[name] = struct{}{}
+	}
+	lines := strings.Split(reviewedFeatureFingerprint, "\n")
+	features := make([]reviewedFeature, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Split(line, "|")
+		if len(fields) != 3 {
+			panic("malformed reviewed Codex feature fingerprint")
+		}
+		var enabled bool
+		switch fields[2] {
+		case "windows":
+			enabled = runtime.GOOS == "windows"
+		case "nonwindows":
+			enabled = runtime.GOOS != "windows"
+		default:
+			parsed, err := strconv.ParseBool(fields[2])
+			if err != nil {
+				panic("malformed reviewed Codex feature default")
+			}
+			enabled = parsed
+		}
+		_, deny := disabled[fields[0]]
+		features = append(features, reviewedFeature{
+			name: fields[0], stage: fields[1], defaultEnabled: enabled, disabled: deny,
+		})
+	}
+	if len(features) != 104 {
+		panic("incomplete reviewed Codex feature fingerprint")
+	}
+	return features
 }
 
 // Adapter verifies and invokes one physically pinned Codex executable.
@@ -135,9 +256,10 @@ var _ agent.Adapter = (*Adapter)(nil)
 // New returns an unverified Adapter. Verify must succeed before generation.
 func New() *Adapter { return &Adapter{} }
 
-// Verify pins one absolute physical executable and the exact reviewed 0.147.x
-// capability contract. Any failed re-verification leaves the Adapter
-// unconfigured rather than retaining stale trust.
+// Verify pins and probes one absolute physical executable. Ruling P5 requires
+// the entire reviewed 0.147.x range to fail incompatible because that release
+// cannot prove an empty effective host-tool/MCP registry while retaining auth.
+// Any failed re-verification leaves the Adapter unconfigured.
 func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capability, error) {
 	if adapter == nil {
 		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, errors.New("nil Codex adapter"))
@@ -152,14 +274,11 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	adapter.executableIdentity = nil
 	adapter.capability = agent.Capability{}
 	adapter.mu.Unlock()
-	succeeded := false
 	defer func() {
 		adapter.mu.Lock()
-		if !succeeded {
-			adapter.executable = ""
-			adapter.executableIdentity = nil
-			adapter.capability = agent.Capability{}
-		}
+		adapter.executable = ""
+		adapter.executableIdentity = nil
+		adapter.capability = agent.Capability{}
 		adapter.verifying = false
 		adapter.mu.Unlock()
 	}()
@@ -174,7 +293,7 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	}
 	defer probeRoot.cleanupOwned()
 
-	versionOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"--version"})
+	versionOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"--strict-config", "--version"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -182,9 +301,8 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	if match == nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, errors.New("unsupported Codex version"))
 	}
-	version := string(match[1])
 
-	helpOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"exec", "--help"})
+	helpOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"exec", "--strict-config", "--help"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -192,11 +310,18 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	featureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"features", "list"}))
+	baselineFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"features", "list", "--strict-config"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
-	if err := validateFeatures(string(featureOutput)); err != nil {
+	if err := validateFeatureTable(string(baselineFeatureOutput), false); err != nil {
+		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
+	}
+	restrictedFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"features", "list"}))
+	if err != nil {
+		return agent.Capability{}, mapProbeError(ctx, err)
+	}
+	if err := validateFeatureTable(string(restrictedFeatureOutput), true); err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
@@ -209,28 +334,59 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	if err := validatePromptProbe(probeOutput); err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
+	if err := probeStrictConfigRecognition(ctx, physical, identity, probeRoot); err != nil {
+		return agent.Capability{}, mapProbeError(ctx, err)
+	}
+	mcpOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"mcp", "list", "--json"}))
+	if err != nil {
+		return agent.Capability{}, mapProbeError(ctx, err)
+	}
+	if err := validateEmptyMCPProbe(mcpOutput); err != nil {
+		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
+	}
 	if err := recheckExecutable(physical, identity); err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	capability := agent.Capability{
-		Provider:           "codex",
-		Version:            version,
-		ProposalOnly:       true,
-		NoTools:            false,
-		ReadOnly:           true,
-		Containment:        agent.ContainmentRestrictedReadOnly,
-		StructuredOutput:   true,
-		NativeCancellation: true,
-		ModelProvenance:    agent.ModelProvenanceUnavailable,
+	// Ruling P5: 0.147.x deep-merges mcp_servers and cannot prove that
+	// system/managed/cloud host tools are absent while retaining normal auth.
+	// The probes above retain the reviewed future-version infrastructure, but a
+	// real 0.147.x installation must never become runnable or return Capability.
+	return agent.Capability{}, agent.NewError(agent.CodeIncompatible, errCodex0147HermeticRegistryUnprovable)
+}
+
+func probeStrictConfigRecognition(ctx context.Context, executable string, identity *executableIdentity, root *privateRoot) error {
+	const unknown = "session_reviewer_unknown_config_canary=true"
+	stdout, stderr, err := runProbeInPrivateDirectory(ctx, executable, identity, root, []string{
+		"exec", "--strict-config", "--ignore-user-config", "--config", unknown, "-",
+	})
+	if err == nil {
+		return errors.New("Codex strict config accepted an unknown key")
 	}
-	adapter.mu.Lock()
-	adapter.executable = physical
-	adapter.executableIdentity = identity
-	adapter.capability = capability
-	succeeded = true
-	adapter.mu.Unlock()
-	return capability, nil
+	if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	if len(stdout) != 0 || !bytes.Contains(stderr, []byte("session_reviewer_unknown_config_canary")) ||
+		!bytes.Contains(bytes.ToLower(stderr), []byte("unknown")) {
+		return errors.New("Codex strict config rejection was not authoritative")
+	}
+	return nil
+}
+
+func validateEmptyMCPProbe(output []byte) error {
+	if err := validateJSONNoDuplicates(output); err != nil {
+		return errors.New("Codex MCP probe is malformed")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(output))
+	var servers []json.RawMessage
+	if err := decoder.Decode(&servers); err != nil || servers == nil || len(servers) != 0 {
+		return errors.New("Codex effective MCP registry is not empty")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return errors.New("Codex MCP probe has trailing data")
+	}
+	return nil
 }
 
 func resolveExecutable(path string) (string, *executableIdentity, error) {
@@ -362,10 +518,10 @@ func validateExecHelp(help string) error {
 	return nil
 }
 
-func validateFeatures(output string) error {
+func validateFeatureTable(output string, restricted bool) error {
 	type featureState struct {
 		stage   string
-		enabled string
+		enabled bool
 	}
 	features := make(map[string]featureState)
 	for lineNumber, line := range strings.Split(strings.TrimSpace(output), "\n") {
@@ -373,7 +529,8 @@ func validateFeatures(output string) error {
 		if len(fields) < 3 {
 			return fmt.Errorf("malformed Codex feature row %d", lineNumber+1)
 		}
-		if state := fields[len(fields)-1]; state != "true" && state != "false" {
+		state := fields[len(fields)-1]
+		if state != "true" && state != "false" {
 			return fmt.Errorf("malformed Codex feature state at row %d", lineNumber+1)
 		}
 		name := fields[0]
@@ -382,16 +539,23 @@ func validateFeatures(output string) error {
 		}
 		features[name] = featureState{
 			stage:   strings.Join(fields[1:len(fields)-1], " "),
-			enabled: fields[len(fields)-1],
+			enabled: state == "true",
 		}
 	}
-	for _, required := range reviewedDisabledFeatures {
+	if len(features) != len(reviewedFeatures) {
+		return errors.New("Codex feature table changed row count")
+	}
+	for _, required := range reviewedFeatures {
 		observed, exists := features[required.name]
 		if !exists || observed.stage != required.stage {
 			return fmt.Errorf("reviewed Codex feature %q changed capability stage", required.name)
 		}
-		if observed.enabled != "false" {
-			return fmt.Errorf("reviewed Codex feature %q was not disabled", required.name)
+		expected := required.defaultEnabled
+		if restricted && required.disabled {
+			expected = false
+		}
+		if observed.enabled != expected {
+			return fmt.Errorf("reviewed Codex feature %q changed effective default", required.name)
 		}
 	}
 	return nil
@@ -399,11 +563,12 @@ func validateFeatures(output string) error {
 
 func restrictionArgs(prefix []string) []string {
 	args := append([]string(nil), prefix...)
+	args = append(args, "--strict-config")
 	for _, override := range fixedConfigOverrides {
 		args = append(args, "--config", override)
 	}
-	for _, feature := range reviewedDisabledFeatures {
-		args = append(args, "--disable", feature.name)
+	for _, feature := range reviewedDisabledFeatureNames {
+		args = append(args, "--disable", feature)
 	}
 	return args
 }
@@ -413,7 +578,9 @@ func validatePromptProbe(output []byte) error {
 		return errors.New("Codex prompt-input probe is malformed")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(output))
+	decoder.DisallowUnknownFields()
 	var messages []struct {
+		ID      string `json:"id,omitempty"`
 		Type    string `json:"type"`
 		Role    string `json:"role"`
 		Content []struct {
@@ -421,26 +588,17 @@ func validatePromptProbe(output []byte) error {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if err := decoder.Decode(&messages); err != nil || messages == nil || len(messages) == 0 {
+	if err := decoder.Decode(&messages); err != nil || messages == nil || len(messages) != 1 {
 		return errors.New("Codex prompt-input probe is malformed")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("Codex prompt-input probe has trailing data")
 	}
-	found := false
-	for _, message := range messages {
-		if message.Type != "message" || message.Role != "user" {
-			continue
-		}
-		for _, content := range message.Content {
-			if content.Type == "input_text" && content.Text == capabilityProbe {
-				found = true
-			}
-		}
-	}
-	if !found {
-		return errors.New("Codex prompt-input probe omitted the harmless marker")
+	message := messages[0]
+	if message.Type != "message" || message.Role != "user" || len(message.Content) != 1 ||
+		message.Content[0].Type != "input_text" || message.Content[0].Text != capabilityProbe {
+		return errors.New("Codex prompt-input probe contains inherited context")
 	}
 	return nil
 }

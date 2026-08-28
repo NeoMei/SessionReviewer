@@ -22,8 +22,8 @@ type Capability struct {
 	Provider     string
 	Version      string
 	ProposalOnly bool
-	// NoTools is false for Codex 0.147.x because that release has core utility
-	// tools outside its feature registry. Callers must use Containment instead.
+	// NoTools may be true only when a provider proves an empty effective tool
+	// registry. Codex 0.147.x cannot do that and returns no Capability at all.
 	NoTools            bool
 	ReadOnly           bool
 	Containment        Containment
@@ -37,9 +37,10 @@ type Capability struct {
 type Containment string
 
 const (
-	// ContainmentRestrictedReadOnly means every reviewed external, file-read,
-	// network, and agent feature is disabled; the run has a private work root
-	// under the native read-only sandbox; and any observed tool event fails it.
+	// ContainmentRestrictedReadOnly is the future-version acceptance seam: every
+	// reviewed external, file-read, network, and agent feature is disabled; the
+	// run has a private work root under the native read-only sandbox; and any
+	// observed tool event fails it. Codex 0.147.x cannot prove this capability.
 	ContainmentRestrictedReadOnly Containment = "restricted_read_only"
 )
 
@@ -58,7 +59,26 @@ type Request struct {
 	Prompt           []byte // Proposal-only prompt with bounded untrusted data.
 	OutputSchema     []byte // Agent-draft schema; host-owned accounting is forbidden.
 	WorkingDirectory string // Protected empty root outside Project and Vault.
-	Deadline         time.Time
+	// ForbiddenRoots are canonical physical roots used only by the Adapter's
+	// process boundary. They are never prompt content. Generation requires one
+	// Project and one Vault root and rejects any overlap with WorkingDirectory.
+	ForbiddenRoots []ForbiddenRoot
+	Deadline       time.Time
+}
+
+// ForbiddenRootKind names a host-owned root that an Agent run must not enter.
+type ForbiddenRootKind string
+
+const (
+	ForbiddenRootProject ForbiddenRootKind = "project"
+	ForbiddenRootVault   ForbiddenRootKind = "vault"
+)
+
+// ForbiddenRoot carries a canonical physical directory path. The Adapter pins
+// its identity and rechecks it immediately before process creation.
+type ForbiddenRoot struct {
+	Kind          ForbiddenRootKind
+	CanonicalPath string
 }
 
 // Result contains untrusted Agent-draft bytes plus private review-run

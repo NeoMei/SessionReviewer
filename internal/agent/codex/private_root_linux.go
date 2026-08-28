@@ -13,9 +13,12 @@ func configureCommandDirectory(command *exec.Cmd, anchor *os.File, _ string) (st
 	if anchor == nil {
 		return "", errors.New("private directory anchor is closed")
 	}
-	childFD := 3 + len(command.ExtraFiles)
+	// os/exec performs the child chdir before it remaps ExtraFiles to fd 3+.
+	// Resolve the directory through the anchor's actual inherited descriptor;
+	// ExtraFiles keeps that descriptor alive across exec after chdir succeeds.
+	inheritedFD := anchor.Fd()
 	command.ExtraFiles = append(command.ExtraFiles, anchor)
-	path := fmt.Sprintf("/proc/self/fd/%d", childFD)
+	path := fmt.Sprintf("/proc/self/fd/%d", inheritedFD)
 	command.Dir = path
 	return path, nil
 }

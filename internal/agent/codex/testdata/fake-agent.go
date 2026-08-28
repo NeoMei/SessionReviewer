@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -17,70 +18,136 @@ import (
 
 const defaultVersion = "codex-cli 0.147.0"
 
-var requiredFeatures = []struct {
-	name  string
-	stage string
-}{
-	{name: "shell_tool", stage: "stable"},
-	{name: "apps", stage: "stable"},
-	{name: "view_image", stage: "stable"},
-	{name: "unified_exec", stage: "stable"},
-	{name: "shell_zsh_fork", stage: "under development"},
-	{name: "unified_exec_zsh_fork", stage: "under development"},
-	{name: "shell_snapshot", stage: "stable"},
-	{name: "deferred_executor", stage: "under development"},
-	{name: "code_mode", stage: "under development"},
-	{name: "code_mode_buffered_exec", stage: "under development"},
-	{name: "code_mode_host", stage: "stable"},
-	{name: "code_mode_only", stage: "under development"},
-	{name: "web_search_request", stage: "deprecated"},
-	{name: "web_search_cached", stage: "deprecated"},
-	{name: "standalone_web_search", stage: "under development"},
-	{name: "memories", stage: "stable"},
-	{name: "external_agent_memory_import", stage: "under development"},
-	{name: "local_thread_store_compression", stage: "under development"},
-	{name: "chronicle", stage: "under development"},
-	{name: "exec_permission_approvals", stage: "under development"},
-	{name: "hooks", stage: "stable"},
-	{name: "request_permissions_tool", stage: "under development"},
-	{name: "network_proxy", stage: "experimental"},
-	{name: "respect_system_proxy", stage: "under development"},
-	{name: "multi_agent", stage: "stable"},
-	{name: "multi_agent_v2", stage: "stable"},
-	{name: "enable_mcp_apps", stage: "under development"},
-	{name: "mcp_2026_07_28", stage: "under development"},
-	{name: "deferred_tool_world_state", stage: "under development"},
-	{name: "non_prefixed_mcp_tool_names", stage: "under development"},
-	{name: "tool_suggest", stage: "stable"},
-	{name: "recommended_plugins", stage: "stable"},
-	{name: "plugins", stage: "stable"},
-	{name: "executor_capability_discovery", stage: "under development"},
-	{name: "in_app_browser", stage: "stable"},
-	{name: "in_app_updates", stage: "stable"},
-	{name: "browser_use", stage: "stable"},
-	{name: "browser_use_external", stage: "stable"},
-	{name: "browser_use_full_cdp_access", stage: "stable"},
-	{name: "computer_use", stage: "stable"},
-	{name: "image_generation", stage: "stable"},
-	{name: "workspace_dependencies", stage: "stable"},
-	{name: "skill_mcp_dependency_install", stage: "stable"},
-	{name: "skill_search", stage: "stable"},
-	{name: "remote_plugin", stage: "stable"},
-	{name: "plugin_sharing", stage: "stable"},
-	{name: "default_mode_request_user_input", stage: "under development"},
-	{name: "guardian_approval", stage: "stable"},
-	{name: "guardianv2", stage: "under development"},
-	{name: "goals", stage: "stable"},
-	{name: "token_budget", stage: "under development"},
-	{name: "rollout_budget", stage: "under development"},
-	{name: "current_time_reminder", stage: "under development"},
-	{name: "tool_call_mcp_elicitation", stage: "stable"},
-	{name: "auth_elicitation", stage: "stable"},
-	{name: "artifact", stage: "under development"},
-	{name: "realtime_conversation", stage: "under development"},
-	{name: "prevent_idle_sleep", stage: "experimental"},
-	{name: "remote_compaction_v2", stage: "stable"},
-	{name: "use_agent_identity", stage: "under development"},
+type fakeFeature struct {
+	name           string
+	stage          string
+	defaultEnabled bool
+}
+
+var requiredFeatures = buildFeatures()
+
+const featureFingerprint = `undo|removed|false
+shell_tool|stable|true
+view_image|stable|true
+secret_auth_storage|stable|windows
+unified_exec|stable|nonwindows
+shell_zsh_fork|under development|false
+unified_exec_zsh_fork|under development|false
+shell_snapshot|stable|true
+deferred_executor|under development|false
+js_repl|removed|false
+executed_tool_call_metadata|under development|false
+code_mode|under development|false
+code_mode_buffered_exec|under development|false
+code_mode_host|stable|true
+code_mode_only|under development|false
+js_repl_tools_only|removed|false
+terminal_resize_reflow|removed|true
+web_search_request|deprecated|false
+web_search_cached|deprecated|false
+standalone_web_search|under development|false
+search_tool|removed|false
+codex_git_commit|removed|false
+runtime_metrics|under development|false
+sqlite|removed|true
+memories|stable|false
+external_agent_memory_import|under development|false
+local_thread_store_compression|under development|false
+chronicle|under development|false
+apply_patch_freeform|removed|false
+apply_patch_streaming_events|under development|false
+exec_permission_approvals|under development|false
+hooks|stable|true
+request_permissions_tool|under development|false
+use_linux_sandbox_bwrap|removed|false
+use_legacy_landlock|deprecated|false
+request_rule|removed|false
+experimental_windows_sandbox|removed|false
+elevated_windows_sandbox|removed|false
+remote_models|removed|false
+enable_request_compression|stable|true
+network_proxy|experimental|false
+respect_system_proxy|under development|false
+multi_agent|stable|true
+multi_agent_v2|stable|false
+multi_agent_mode|removed|false
+enable_fanout|removed|false
+apps|stable|true
+enable_mcp_apps|under development|false
+mcp_2026_07_28|under development|false
+apps_mcp_path_override|removed|false
+tool_search|removed|false
+tool_search_always_defer_mcp_tools|removed|true
+deferred_tool_world_state|under development|false
+non_prefixed_mcp_tool_names|under development|false
+unavailable_dummy_tools|removed|false
+tool_suggest|stable|true
+recommended_plugins|stable|false
+plugins|stable|true
+executor_capability_discovery|under development|false
+plugin_hooks|removed|false
+in_app_browser|stable|true
+in_app_updates|stable|true
+browser_use|stable|true
+browser_use_full_cdp_access|stable|true
+browser_use_external|stable|true
+computer_use|stable|true
+remote_plugin|stable|true
+plugin_sharing|stable|true
+external_migration|removed|false
+image_generation|stable|true
+image_resize_notice|under development|false
+resize_all_images|removed|true
+item_ids|removed|true
+concurrent_reasoning_summaries|under development|false
+skill_mcp_dependency_install|stable|true
+skill_search|stable|true
+skill_env_var_dependency_prompt|removed|false
+mentions_v2|stable|true
+steer|removed|true
+default_mode_request_user_input|under development|false
+terminal_visualization_instructions|under development|false
+guardian_approval|stable|true
+guardianv2|under development|false
+goals|stable|true
+token_budget|under development|false
+rollout_budget|under development|false
+current_time_reminder|under development|false
+collaboration_modes|removed|true
+tool_call_mcp_elicitation|stable|true
+auth_elicitation|stable|true
+personality|stable|true
+artifact|under development|false
+fast_mode|stable|true
+realtime_conversation|under development|false
+remote_control|removed|false
+image_detail_original|removed|false
+tui_app_server|removed|true
+prevent_idle_sleep|experimental|false
+workspace_owner_usage_nudge|removed|false
+responses_websockets|removed|false
+responses_websockets_v2|removed|false
+remote_compaction_v2|stable|true
+use_agent_identity|under development|false
+workspace_dependencies|stable|true`
+
+func buildFeatures() []fakeFeature {
+	lines := strings.Split(featureFingerprint, "\n")
+	features := make([]fakeFeature, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.Split(line, "|")
+		var enabled bool
+		switch fields[2] {
+		case "windows":
+			enabled = runtime.GOOS == "windows"
+		case "nonwindows":
+			enabled = runtime.GOOS != "windows"
+		default:
+			enabled, _ = strconv.ParseBool(fields[2])
+		}
+		features = append(features, fakeFeature{name: fields[0], stage: fields[1], defaultEnabled: enabled})
+	}
+	return features
 }
 
 func main() {
@@ -93,7 +160,7 @@ func main() {
 	recordCall()
 	mode := os.Getenv("SESSIONREVIEWER_FAKE_MODE")
 	switch {
-	case len(os.Args) == 2 && os.Args[1] == "--version":
+	case hasArg("--version"):
 		switch mode {
 		case "verify-huge-stdout":
 			_, _ = io.WriteString(os.Stdout, strings.Repeat("x", 3<<20))
@@ -125,7 +192,7 @@ func main() {
 		}
 		fmt.Println(version)
 		return
-	case len(os.Args) == 3 && os.Args[1] == "exec" && os.Args[2] == "--help":
+	case len(os.Args) >= 3 && os.Args[1] == "exec" && hasArg("--help"):
 		if mode == "verify-writes-cwd" {
 			if _, err := os.Stat("probe-canary"); err == nil {
 				os.Exit(13)
@@ -139,6 +206,18 @@ func main() {
 	case len(os.Args) >= 3 && os.Args[1] == "debug" && os.Args[2] == "prompt-input":
 		writePromptProbe(mode)
 		return
+	case len(os.Args) >= 4 && os.Args[1] == "mcp" && os.Args[2] == "list":
+		if mode == "verify-nonempty-mcp" {
+			fmt.Print(`[{"name":"managed-canary"}]`)
+		} else {
+			fmt.Print(`[]`)
+		}
+		return
+	case len(os.Args) >= 2 && os.Args[1] == "exec" && hasArg("session_reviewer_unknown_config_canary=true") && mode != "verify-strict-config-ignored":
+		fmt.Fprintln(os.Stderr, "unknown configuration field session_reviewer_unknown_config_canary")
+		os.Exit(2)
+	case len(os.Args) >= 2 && os.Args[1] == "exec" && hasArg("session_reviewer_unknown_config_canary=true"):
+		return
 	case len(os.Args) >= 2 && os.Args[1] == "exec":
 		captureExec()
 		runExecMode(mode)
@@ -151,6 +230,7 @@ func main() {
 
 func writeExecHelp(mode string) {
 	flags := []string{
+		"--strict-config",
 		"--ephemeral", "--ignore-user-config", "--ignore-rules", "--sandbox <MODE>",
 		"--json", "--color <COLOR>", "--skip-git-repo-check", "--output-schema <FILE>",
 		"--disable <FEATURE>", "--config <key=value>",
@@ -169,6 +249,12 @@ func writeExecHelp(mode string) {
 }
 
 func writeFeatures(mode string) {
+	disabled := make(map[string]struct{})
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] == "--disable" {
+			disabled[os.Args[index+1]] = struct{}{}
+		}
+	}
 	for index, feature := range requiredFeatures {
 		if mode == "verify-missing-feature" && feature.name == "view_image" {
 			continue
@@ -177,10 +263,17 @@ func writeFeatures(mode string) {
 		if mode == "verify-unstable-feature" && feature.name == "remote_plugin" {
 			stage = "under development"
 		}
-		state := "false"
-		if mode == "verify-enabled-feature" && feature.name == "multi_agent" {
-			state = "true"
+		enabled := feature.defaultEnabled
+		if _, deny := disabled[feature.name]; deny {
+			enabled = false
 		}
+		if mode == "verify-enabled-feature" && feature.name == "multi_agent" {
+			enabled = true
+		}
+		if mode == "verify-default-drift" && feature.name == "apps" {
+			enabled = !enabled
+		}
+		state := strconv.FormatBool(enabled)
 		if mode == "verify-noncanonical-feature-state" && index == 0 {
 			state = "TRUE"
 		}
@@ -188,6 +281,9 @@ func writeFeatures(mode string) {
 	}
 	if mode == "verify-malformed-features" {
 		fmt.Println("malformed")
+	}
+	if mode == "verify-unknown-feature" {
+		fmt.Println("future_capability stable false")
 	}
 }
 
@@ -197,6 +293,22 @@ func writePromptProbe(mode string) {
 		return
 	}
 	prompt := os.Args[len(os.Args)-1]
+	if mode == "verify-parent-instructions" {
+		_ = json.NewEncoder(os.Stdout).Encode([]map[string]any{
+			{"type": "message", "role": "developer", "content": []map[string]string{{"type": "input_text", "text": "parent AGENTS canary"}}},
+			{"type": "message", "role": "user", "content": []map[string]string{{"type": "input_text", "text": prompt}}},
+		})
+		return
+	}
+	if mode == "verify-environment-context" {
+		_ = json.NewEncoder(os.Stdout).Encode([]map[string]any{{
+			"type": "message", "role": "user", "content": []map[string]string{
+				{"type": "input_text", "text": prompt},
+				{"type": "input_text", "text": "cwd=/private/project ENV_CANARY=secret"},
+			},
+		}})
+		return
+	}
 	if mode == "verify-marker-outside-user" {
 		_ = json.NewEncoder(os.Stdout).Encode([]map[string]any{{
 			"id":     "probe",
@@ -219,6 +331,15 @@ func writePromptProbe(mode string) {
 			"text": prompt,
 		}},
 	}})
+}
+
+func hasArg(want string) bool {
+	for _, value := range os.Args[1:] {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func runExecMode(mode string) {

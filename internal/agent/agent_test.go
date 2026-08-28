@@ -31,10 +31,16 @@ func TestAdapterContractCarriesProposalOnlyRequestAndResult(t *testing.T) {
 		Prompt:           []byte("prompt"),
 		OutputSchema:     []byte(`{"type":"object"}`),
 		WorkingDirectory: "/private/job/canary",
-		Deadline:         deadline,
+		ForbiddenRoots: []agent.ForbiddenRoot{
+			{Kind: agent.ForbiddenRootProject, CanonicalPath: "/private/project"},
+			{Kind: agent.ForbiddenRootVault, CanonicalPath: "/private/vault"},
+		},
+		Deadline: deadline,
 	}
 	if string(request.Prompt) != "prompt" || string(request.OutputSchema) != `{"type":"object"}` ||
-		request.WorkingDirectory != "/private/job/canary" || !request.Deadline.Equal(deadline) {
+		request.WorkingDirectory != "/private/job/canary" || len(request.ForbiddenRoots) != 2 ||
+		request.ForbiddenRoots[0].Kind != agent.ForbiddenRootProject ||
+		request.ForbiddenRoots[1].Kind != agent.ForbiddenRootVault || !request.Deadline.Equal(deadline) {
 		t.Fatalf("request lost contract fields: %+v", request)
 	}
 

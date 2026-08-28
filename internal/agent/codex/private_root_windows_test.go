@@ -150,7 +150,7 @@ func TestWindowsPrivateRootRejectsAncestorReplacementWithoutTouchingDecoy(t *tes
 }
 
 func TestWindowsImmediateChildIsContainedBeforeProcessResume(t *testing.T) {
-	adapter := verifiedAdapter(t)
+	adapter := containedRunnerForTest(t)
 	pidPath := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "success-with-child")
 	t.Setenv("SESSIONREVIEWER_FAKE_CHILD_PID_PATH", pidPath)
