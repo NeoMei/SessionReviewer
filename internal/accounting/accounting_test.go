@@ -3,11 +3,70 @@ package accounting
 import (
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/session"
 )
+
+func TestPriceUsageAppliesEachRateOnceAndDoesNotChargeReasoningTwice(t *testing.T) {
+	usage := TokenUsage{
+		InputTokens:           1_000,
+		CachedInputTokens:     200,
+		CacheWriteInputTokens: 100,
+		OutputTokens:          100,
+		ReasoningOutputTokens: 75,
+		TotalTokens:           1_100,
+	}
+	pricing := Pricing{
+		Currency:                  "USD",
+		InputPerMillion:           2,
+		CachedInputPerMillion:     .5,
+		CacheWriteInputPerMillion: 3,
+		OutputPerMillion:          10,
+		Source:                    "https://example.com/pricing",
+		AsOf:                      "2026-08-29",
+	}
+
+	got, err := PriceUsage(usage, pricing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(got-.0028) > 1e-15 {
+		t.Fatalf("cost=%0.15f want=0.0028", got)
+	}
+}
+
+func TestPriceUsageRejectsUnsafeUsagePricingAndArithmetic(t *testing.T) {
+	validUsage := TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}
+	validPricing := Pricing{Currency: "USD", InputPerMillion: 1, OutputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "2026-08-29"}
+
+	tests := []struct {
+		name    string
+		usage   TokenUsage
+		pricing Pricing
+		want    string
+	}{
+		{name: "negative tokens", usage: TokenUsage{InputTokens: -1}, pricing: validPricing, want: "token count"},
+		{name: "unsafe integer", usage: TokenUsage{InputTokens: 1 << 53, TotalTokens: 1 << 53}, pricing: validPricing, want: "safe integer"},
+		{name: "cached exceeds input", usage: TokenUsage{InputTokens: 1, CachedInputTokens: 2, TotalTokens: 1}, pricing: validPricing, want: "cached"},
+		{name: "reasoning exceeds output", usage: TokenUsage{OutputTokens: 1, ReasoningOutputTokens: 2, TotalTokens: 1}, pricing: validPricing, want: "reasoning"},
+		{name: "wrong total", usage: TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 1}, pricing: validPricing, want: "total tokens"},
+		{name: "nonfinite rate", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: math.NaN(), Source: "https://example.com/pricing", AsOf: "2026-08-29"}, want: "finite"},
+		{name: "invalid source", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: 1, Source: "http://example.com/pricing", AsOf: "2026-08-29"}, want: "HTTPS"},
+		{name: "invalid as of", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "29-08-2026"}, want: "YYYY-MM-DD"},
+		{name: "multiplication overflow", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: math.MaxFloat64, OutputPerMillion: math.MaxFloat64, Source: "https://example.com/pricing", AsOf: "2026-08-29"}, want: "overflows"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := PriceUsage(test.usage, test.pricing); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("PriceUsage() error=%v want substring %q", err, test.want)
+			}
+		})
+	}
+}
 
 func TestAccumulatorAttributesUsageAcrossModelsAndValidatesCost(t *testing.T) {
 	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)

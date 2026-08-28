@@ -394,6 +394,42 @@ func ValidateTokenUsage(value TokenUsage) error {
 	return nil
 }
 
+// PriceUsage validates an actual token-usage sample and public USD pricing,
+// then applies each token class exactly once. OutputTokens already includes
+// ReasoningOutputTokens, so reasoning output is retained for auditability but
+// is not charged a second time.
+func PriceUsage(usage TokenUsage, pricing Pricing) (float64, error) {
+	if err := ValidateTokenUsage(usage); err != nil {
+		return 0, err
+	}
+	if err := validatePricing(pricing); err != nil {
+		return 0, err
+	}
+
+	uncachedInput := usage.InputTokens - usage.CachedInputTokens - usage.CacheWriteInputTokens
+	components := []float64{
+		float64(uncachedInput) * pricing.InputPerMillion,
+		float64(usage.CachedInputTokens) * pricing.CachedInputPerMillion,
+		float64(usage.CacheWriteInputTokens) * pricing.CacheWriteInputPerMillion,
+		float64(usage.OutputTokens) * pricing.OutputPerMillion,
+	}
+	var total float64
+	for _, component := range components {
+		if math.IsNaN(component) || math.IsInf(component, 0) {
+			return 0, errors.New("usage price calculation overflows")
+		}
+		total += component
+		if math.IsNaN(total) || math.IsInf(total, 0) {
+			return 0, errors.New("usage price calculation overflows")
+		}
+	}
+	cost := total / 1_000_000
+	if math.IsNaN(cost) || math.IsInf(cost, 0) || cost < 0 {
+		return 0, errors.New("usage price calculation overflows")
+	}
+	return cost, nil
+}
+
 func addUsage(target *TokenUsage, value TokenUsage) error {
 	fields := []*int64{&target.InputTokens, &target.CachedInputTokens, &target.CacheWriteInputTokens, &target.OutputTokens, &target.ReasoningOutputTokens, &target.TotalTokens}
 	adds := []int64{value.InputTokens, value.CachedInputTokens, value.CacheWriteInputTokens, value.OutputTokens, value.ReasoningOutputTokens, value.TotalTokens}
@@ -422,11 +458,10 @@ func ValidateSessionAccounting(report *SessionAccounting, usage *SessionUsage) e
 		if model.ModelUsage != want {
 			return errors.New("model accounting does not match packet usage")
 		}
-		if err := validatePricing(model.Pricing); err != nil {
+		cost, err := PriceUsage(model.TokenUsage, model.Pricing)
+		if err != nil {
 			return fmt.Errorf("model %q pricing: %w", model.Model, err)
 		}
-		uncached := model.InputTokens - model.CachedInputTokens - model.CacheWriteInputTokens
-		cost := (float64(uncached)*model.Pricing.InputPerMillion + float64(model.CachedInputTokens)*model.Pricing.CachedInputPerMillion + float64(model.CacheWriteInputTokens)*model.Pricing.CacheWriteInputPerMillion + float64(model.OutputTokens)*model.Pricing.OutputPerMillion) / 1_000_000
 		if !nearlyEqual(cost, model.CostUSD) {
 			return fmt.Errorf("model %q cost does not match per-million pricing", model.Model)
 		}
