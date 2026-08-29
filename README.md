@@ -82,6 +82,18 @@ session-reviewer apply \
 
 An accepted apply updates the machine ledger and the two human-readable project files before advancing the accepted cursor. Reapplying the same accepted proposal is idempotent.
 
+### Summary-and-sync review jobs
+
+The Obsidian plugin's “总结并同步” view drives the whole reviewed pipeline as one durable job: prepare a bounded packet, invoke the local Codex CLI as a proposal-only agent, validate and apply the proposal, then synchronize the vault. Jobs support retry, cancellation, and restart recovery after a killed worker. The worker's sync step repairs a machine ledger that a completed apply legitimately advanced; standalone `sync` invocations keep their conservative behavior unchanged.
+
+The agent executable fails closed by default. An operator must assert exact SHA-256 digests through `SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS` (comma-separated) to prove an executable is a purpose-built hermetic proposal agent; unproven 0.147.x installations stay blocked. The hermetic end-to-end acceptance suite uses that allowlist to exercise the real orchestration with a dedicated fake agent:
+
+```bash
+go test ./test/reviewjob -count=1
+```
+
+The suite covers the multi-session happy path, failure and retry, cancellation, and kill-based restart recovery, and skips automatically on unsupported platforms.
+
 ## Build and verify
 
 ```bash

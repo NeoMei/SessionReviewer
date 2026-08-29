@@ -40,6 +40,8 @@ jobs:
       - run: go test ./...
       - name: Repeat review v2 migration and CLI contract tests
         run: go test ./internal/reviewv2 ./internal/sync ./internal/cli ./internal/config ./internal/project -run 'Migration|MachineLedger|ProjectID|ProjectFragment|FragmentCommit|SharedConfig|ReviewV2' -count=2
+      - name: Review job end-to-end acceptance
+        run: go test ./test/reviewjob -count=1
       - name: Stress native Windows replacement
         if: runner.os == 'Windows'
         run: go test ./internal/atomicfile -run '^TestWindows' -count=20

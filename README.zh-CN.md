@@ -206,6 +206,18 @@ packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包
 
 session report 的双向链、revision、evidence 和 accounting 保存在隐藏 `ledger.json` 中，不再作为独立 Markdown 发布。apply 会在同一事务中更新这条链以及两份人类视图；已有 session 链接不能由后续 proposal 任意改写。
 
+### 总结并同步 review job
+
+Obsidian 插件的“总结并同步”视图把整条 reviewed 链路作为一个持久 job 运行：准备有界 packet、以 proposal-only 方式调用本机 Codex CLI、校验并 apply proposal，然后同步 vault。job 支持重试、取消以及 worker 被杀后的重启恢复。worker 的同步步骤会修复由已完成 apply 合法推进的 machine ledger；独立 `sync` 命令保持保守行为不变。
+
+agent 可执行文件默认 fail-closed：操作者必须通过 `SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS`（逗号分隔的精确 SHA-256 摘要）显式断言，证明该可执行文件是专用的 hermetic proposal agent；没有该证明的真实 0.147.x 安装会被拒绝。hermetic 端到端验收测试利用这个白名单，用专用 fake agent 驱动真实编排：
+
+```bash
+go test ./test/reviewjob -count=1
+```
+
+覆盖跨 session 的 happy path、失败与重试、取消以及 kill 后的重启恢复；不支持的平台上自动跳过。
+
 ## accepted-ledger-only 恢复
 
 ```bash
