@@ -242,6 +242,15 @@ func (leases *LeaseSet) Release() error {
 // state is interrupted. It never decides whether an in-flight apply was accepted:
 // E_APPLY_RECOVERY requires authoritative receipt inspection before resume.
 func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposition, retErr error) {
+	return s.RecoverInterruptedAt(jobID, time.Now().UTC())
+}
+
+// RecoverInterruptedAt is RecoverInterrupted with an explicit observation time
+// so callers that own a canonical clock — for example the review CLI's
+// injected reviewNow seam — evaluate the launch-intent grace window on the
+// same timeline as their other persisted state transitions.
+func (s Store) RecoverInterruptedAt(jobID string, observedAt time.Time) (_ Job, _ int, _ RecoveryDisposition, retErr error) {
+	observedAt = observedAt.UTC().Round(0)
 	if err := validateStoreID(jobID, "job"); err != nil {
 		return Job{}, 0, "", err
 	}
@@ -309,7 +318,6 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 	if !active(current.State) {
 		return current, currentRevision, RecoveryNotRecoverable, nil
 	}
-	observedAt := time.Now().UTC()
 	if !recoverableInterruptedState(current, observedAt) {
 		if active(current.State) {
 			return current, currentRevision, RecoveryNotInterrupted, nil

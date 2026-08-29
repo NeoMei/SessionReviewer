@@ -423,6 +423,49 @@ func TestInterruptedRecoveryLeavesRecentLaunchIntentPending(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedAtHonorsExplicitObservationTime(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		observedIn  time.Duration
+		disposition RecoveryDisposition
+	}{
+		{name: "within_grace", observedIn: 2 * time.Second, disposition: RecoveryNotInterrupted},
+		{name: "after_grace", observedIn: interruptedLaunchGrace + time.Second, disposition: RecoveryApplyInspectionNeeded},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			launchAt := time.Date(2026, 8, 29, 16, 0, 0, 0, time.UTC)
+			wanted, wantedRevision, err := store.Update("job-1", 1, func(job *Job) error {
+				job.State = Queued
+				job.Phase = Preflight
+				job.Owner = Owner{}
+				job.CreatedAt = launchAt
+				job.UpdatedAt = launchAt
+				job.LaunchTokenDigest = "sha256:" + strings.Repeat("e", 64)
+				job.LaunchIntentAt = launchAt
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, revision, disposition, err := store.RecoverInterruptedAt("job-1", launchAt.Add(test.observedIn))
+			if err != nil || disposition != test.disposition {
+				t.Fatalf("RecoverInterruptedAt(%s) disposition=%q err=%v", test.name, disposition, err)
+			}
+			if test.disposition == RecoveryNotInterrupted {
+				if revision != wantedRevision || !reflect.DeepEqual(got, wanted) {
+					t.Fatalf("RecoverInterruptedAt(%s) mutated job=%#v revision=%d want revision=%d", test.name, got, revision, wantedRevision)
+				}
+				return
+			}
+			if revision != wantedRevision+1 || got.State != Failed || got.Error.Code != ApplyRecovery {
+				t.Fatalf("RecoverInterruptedAt(%s) job=%#v revision=%d", test.name, got, revision)
+			}
+		})
+	}
+}
+
 func TestInterruptedRecoveryCancelledRetryLaunchWindowMatrix(t *testing.T) {
 	for _, test := range []struct {
 		name          string

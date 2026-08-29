@@ -626,7 +626,7 @@ func recoverReviewJob(store reviewjob.Store, job reviewjob.Job, revision int) (r
 	if !reviewStateActive(job.State) {
 		return job, revision, nil
 	}
-	recovered, recoveredRevision, _, err := store.RecoverInterrupted(job.ID)
+	recovered, recoveredRevision, _, err := store.RecoverInterruptedAt(job.ID, canonicalReviewNow())
 	if err != nil {
 		return reviewjob.Job{}, 0, err
 	}

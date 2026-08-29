@@ -379,7 +379,7 @@ func TestRunReviewStartRecoversExpiredOwnerlessLaunchBeforeCreatingSuccessor(t *
 	store := reviewjob.Store{Root: fixture.data}
 	stale := fixture.job(reviewjob.Queued)
 	stale.LaunchTokenDigest = digestReviewToken("expired-start-token-with-at-least-32-bytes")
-	stale.LaunchIntentAt = time.Now().UTC().Add(-time.Minute).Round(0)
+	stale.LaunchIntentAt = fixture.now.Add(-time.Minute).Round(0)
 	if _, err := store.Create(stale); err != nil {
 		t.Fatal(err)
 	}
@@ -588,7 +588,7 @@ func TestRunReviewCommandsRejectProjectIdentitySwapWithoutStoreMutation(t *testi
 			job.RetryRevision = 1
 			token := "identity-swap-review-token-with-at-least-32-bytes"
 			job.LaunchTokenDigest = digestReviewToken(token)
-			job.LaunchIntentAt = time.Now().UTC().Add(-time.Minute).Round(0)
+			job.LaunchIntentAt = fixture.now.Add(-time.Minute).Round(0)
 			if _, err := store.Create(job); err != nil {
 				t.Fatal(err)
 			}
