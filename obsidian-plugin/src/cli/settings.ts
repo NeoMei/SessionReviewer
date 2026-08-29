@@ -49,7 +49,15 @@ export class CliSettingsTab extends PluginSettingTab {
         .onChange((value) => { this.codexPath = value.trim(); }))
       .addButton((control) => control.setButtonText("验证并保存").setCta().onClick(async () => {
         try {
-          const verified = await this.createRunner(this.codexPath).verifyAgent(this.codexPath);
+          if (!this.cliPath) {
+            new Notice("尚未配置 SessionReviewer CLI，请先在上方验证并保存。");
+            return;
+          }
+          if (!this.codexPath) {
+            new Notice("请先填写 Codex 可执行文件的绝对路径。");
+            return;
+          }
+          const verified = await this.createRunner(this.cliPath).verifyAgent(this.codexPath);
           if (!verified.compatible) {
             new Notice("当前 Codex 版本暂不兼容自动总结。");
             return;
