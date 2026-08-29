@@ -28,11 +28,13 @@ type cancellationWatchResult struct {
 // rendered from. RequestID makes transport retries idempotent without treating
 // every later click on an active attempt as the same request.
 type RetryRequest struct {
-	JobID            string
-	ExpectedAttempt  int
-	ExpectedRevision int
-	RequestID        string
-	At               time.Time
+	JobID             string
+	ExpectedAttempt   int
+	ExpectedRevision  int
+	RequestID         string
+	At                time.Time
+	LaunchTokenDigest string
+	LaunchIntentAt    time.Time
 }
 
 // RequestRetry performs the sole failed-to-next-attempt transition. Concurrent
@@ -44,7 +46,12 @@ func RequestRetry(store Store, request RetryRequest) (Job, int, error) {
 		request.ExpectedAttempt >= maxSafeInteger || request.ExpectedRevision <= 0 || request.ExpectedRevision > maxSafeInteger || request.At.IsZero() {
 		return Job{}, 0, errors.New("retry request is invalid")
 	}
+	if (request.LaunchTokenDigest == "") != request.LaunchIntentAt.IsZero() ||
+		(request.LaunchTokenDigest != "" && !prefixedSHA256.MatchString(request.LaunchTokenDigest)) {
+		return Job{}, 0, errors.New("retry launch intent is invalid")
+	}
 	at := request.At.UTC()
+	launchAt := request.LaunchIntentAt.UTC()
 	for range maxRecoveryTransitionRetries {
 		job, revision, found, err := store.Load(request.JobID)
 		if err != nil || !found {
@@ -85,6 +92,8 @@ func RequestRetry(store Store, request RetryRequest) (Job, int, error) {
 			next.RetryRequestID = request.RequestID
 			next.RetryAttempt = request.ExpectedAttempt
 			next.RetryRevision = request.ExpectedRevision
+			next.LaunchTokenDigest = request.LaunchTokenDigest
+			next.LaunchIntentAt = launchAt
 			next.UpdatedAt = updatedAt
 			next.CompletedAt = time.Time{}
 			next.Owner = Owner{}

@@ -14,6 +14,8 @@ import (
 
 const maxLeaseOwnerBytes = 16 << 10
 
+const interruptedLaunchGrace = 5 * time.Second
+
 var ErrAgentBusy = errors.New(string(AgentBusy))
 
 var currentProcessStartToken = newProcessStartToken()
@@ -26,8 +28,8 @@ type leaseOwner struct {
 	AcquiredAt        time.Time `json:"acquired_at"`
 }
 
-// RecoveryDisposition makes every no-op reason explicit so callers cannot
-// mistake a never-started queued/retrying job for interrupted execution.
+// RecoveryDisposition makes every no-op reason explicit so callers can
+// distinguish a live/recent launch from an ownerless interrupted execution.
 type RecoveryDisposition string
 
 const (
@@ -235,8 +237,9 @@ func (leases *LeaseSet) Release() error {
 }
 
 // RecoverInterrupted checks project kernel ownership before classifying any
-// persisted state. Only running and cancel_requested prove prior lease-backed
-// execution. It never decides whether an in-flight apply was accepted:
+// persisted active state. A recent queued/retrying launch intent receives one
+// bounded parent/worker handshake grace window; every older ownerless active
+// state is interrupted. It never decides whether an in-flight apply was accepted:
 // E_APPLY_RECOVERY requires authoritative receipt inspection before resume.
 func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposition, retErr error) {
 	if err := validateStoreID(jobID, "job"); err != nil {
@@ -300,15 +303,19 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 	if !active(current.State) {
 		return current, currentRevision, RecoveryNotRecoverable, nil
 	}
-	if !leaseBackedRecoveryState(current.State) {
+	observedAt := time.Now().UTC()
+	if !recoverableInterruptedState(current, observedAt) {
+		if active(current.State) {
+			return current, currentRevision, RecoveryNotInterrupted, nil
+		}
 		return current, currentRevision, RecoveryNotRecoverable, nil
 	}
-	completedAt := time.Now().UTC()
+	completedAt := observedAt
 	if completedAt.Before(current.UpdatedAt) {
 		completedAt = current.UpdatedAt
 	}
 	updated, nextRevision, err := s.updatePinnedLayout(layout, jobID, currentRevision, func(job *Job) error {
-		if !leaseBackedRecoveryState(job.State) {
+		if !recoverableInterruptedState(*job, observedAt) {
 			return ErrStaleRevision
 		}
 		phase := job.Phase
@@ -317,6 +324,8 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		job.UpdatedAt = completedAt
 		job.CompletedAt = completedAt
 		job.Owner = Owner{}
+		job.LaunchTokenDigest = ""
+		job.LaunchIntentAt = time.Time{}
 		job.Error = SafeError{Code: ApplyRecovery}
 		job.PrivateError = "worker lease ended before a terminal state; apply receipt inspection is required"
 		if phase == Applying && hasExactRetainedApplyPayloads(*job) {
@@ -337,8 +346,15 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 	return updated, nextRevision, RecoveryApplyInspectionNeeded, nil
 }
 
-func leaseBackedRecoveryState(state State) bool {
-	return state == Running || state == CancelRequested
+func recoverableInterruptedState(job Job, observedAt time.Time) bool {
+	if !active(job.State) {
+		return false
+	}
+	if (job.State == Queued || job.State == Retrying) && job.LaunchTokenDigest != "" &&
+		observedAt.Before(job.LaunchIntentAt.Add(interruptedLaunchGrace)) {
+		return false
+	}
+	return true
 }
 
 func newProcessStartToken() string {

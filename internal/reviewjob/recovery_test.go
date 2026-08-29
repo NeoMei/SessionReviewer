@@ -94,6 +94,38 @@ func TestRetryTransitionIsAtomicIdempotentAndPreservesAcceptedState(t *testing.T
 	}
 }
 
+func TestRetryTransitionPublishesLaunchIntentInSameCAS(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	failed, revision, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	failedAt := fixture.now.Add(time.Minute)
+	failed, revision, err = fixture.store.Update(failed.ID, revision, func(job *Job) error {
+		job.State = Failed
+		job.Phase = ""
+		job.Owner = Owner{}
+		job.UpdatedAt = failedAt
+		job.CompletedAt = failedAt
+		job.Error = SafeError{Code: AgentAuth}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	launchAt := failedAt.Add(time.Minute)
+	digest := "sha256:" + strings.Repeat("e", 64)
+	retried, nextRevision, err := RequestRetry(fixture.store, RetryRequest{
+		JobID: failed.ID, ExpectedAttempt: failed.Attempt, ExpectedRevision: revision,
+		RequestID: "retry-with-launch-intent", At: launchAt,
+		LaunchTokenDigest: digest, LaunchIntentAt: launchAt,
+	})
+	if err != nil || nextRevision != revision+1 || retried.State != Retrying ||
+		retried.LaunchTokenDigest != digest || !retried.LaunchIntentAt.Equal(launchAt) {
+		t.Fatalf("RequestRetry()=%#v revision=%d err=%v", retried, nextRevision, err)
+	}
+}
+
 func TestRetryTransitionDistinguishesExactReplayFromDifferentStaleClick(t *testing.T) {
 	newFailed := func(t *testing.T) (workerFixture, Job, int, time.Time) {
 		t.Helper()

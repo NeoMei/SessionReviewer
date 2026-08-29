@@ -350,34 +350,71 @@ func TestInterruptedRecoveryUsesOnePinnedStoreAcrossDataReplacement(t *testing.T
 	}
 }
 
-func TestInterruptedRecoveryLeavesUnleasedQueuedAndRetryingJobsByteExact(t *testing.T) {
-	for _, state := range []State{Queued, Retrying} {
-		t.Run(string(state), func(t *testing.T) {
+func TestInterruptedRecoveryTerminalizesEveryUnleasedActiveState(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		state        State
+		launchIntent bool
+	}{
+		{name: "queued_expired_launch", state: Queued, launchIntent: true},
+		{name: "retrying_without_launch_token", state: Retrying},
+		{name: "retrying_expired_launch", state: Retrying, launchIntent: true},
+		{name: "running", state: Running},
+		{name: "cancel_requested", state: CancelRequested},
+	} {
+		t.Run(test.name, func(t *testing.T) {
 			root := newStoreWithJob(t)
 			store := Store{Root: root}
-			updated, wantedRevision, err := store.Update("job-1", 1, func(job *Job) error {
-				job.State = state
+			_, wantedRevision, err := store.Update("job-1", 1, func(job *Job) error {
+				job.State = test.state
 				job.Phase = Preflight
-				job.Owner = Owner{}
+				if test.state == Queued || test.state == Retrying {
+					job.Owner = Owner{}
+				}
+				if test.launchIntent {
+					job.LaunchTokenDigest = "sha256:" + strings.Repeat("e", 64)
+					job.LaunchIntentAt = job.CreatedAt
+				}
+				if test.state == CancelRequested {
+					job.CancellationRequested = job.UpdatedAt
+				}
 				return nil
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			path := filepath.Join(root, "review-jobs/jobs/job-1.json")
-			backupPath := path + ".bak"
-			before := readFile(t, path)
-			beforeBackup := readFile(t, backupPath)
 
 			job, revision, disposition, err := store.RecoverInterrupted("job-1")
-			if err != nil || disposition != RecoveryNotRecoverable || revision != wantedRevision || !reflect.DeepEqual(job, updated) {
-				t.Fatalf("RecoverInterrupted(%s) = %#v, %d, %q, %v", state, job, revision, disposition, err)
+			if err != nil || disposition != RecoveryApplyInspectionNeeded || revision != wantedRevision+1 ||
+				job.State != Failed || job.Error.Code != ApplyRecovery || job.Owner.ID != "" ||
+				job.LaunchTokenDigest != "" || !job.LaunchIntentAt.IsZero() {
+				t.Fatalf("RecoverInterrupted(%s) = %#v, %d, %q, %v", test.state, job, revision, disposition, err)
 			}
-			if after := readFile(t, path); !bytes.Equal(after, before) {
-				t.Fatalf("RecoverInterrupted(%s) mutated persisted bytes", state)
+		})
+	}
+}
+
+func TestInterruptedRecoveryLeavesRecentLaunchIntentPending(t *testing.T) {
+	for _, state := range []State{Queued, Retrying} {
+		t.Run(string(state), func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			now := time.Now().UTC().Round(0)
+			wanted, wantedRevision, err := store.Update("job-1", 1, func(job *Job) error {
+				job.State = state
+				job.Phase = Preflight
+				job.Owner = Owner{}
+				job.UpdatedAt = now
+				job.LaunchTokenDigest = "sha256:" + strings.Repeat("e", 64)
+				job.LaunchIntentAt = now
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
 			}
-			if after := readFile(t, backupPath); !bytes.Equal(after, beforeBackup) {
-				t.Fatalf("RecoverInterrupted(%s) mutated recovery-backup bytes", state)
+			got, revision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || disposition != RecoveryNotInterrupted || revision != wantedRevision || !reflect.DeepEqual(got, wanted) {
+				t.Fatalf("RecoverInterrupted(recent %s)=%#v revision=%d disposition=%q err=%v", state, got, revision, disposition, err)
 			}
 		})
 	}

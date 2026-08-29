@@ -64,11 +64,26 @@ type reviewLaunchRequest struct {
 	Token  string
 }
 
+type detachedReviewInheritance struct {
+	noInheritHandles  bool
+	additionalHandles []uintptr
+}
+
+func detachedReviewInheritancePolicy(handshake uintptr) (detachedReviewInheritance, error) {
+	if handshake == 0 {
+		return detachedReviewInheritance{}, errors.New("review handshake handle is unavailable")
+	}
+	return detachedReviewInheritance{additionalHandles: []uintptr{handshake}}, nil
+}
+
 var (
-	reviewNow    = func() time.Time { return time.Now().UTC() }
-	reviewFreeze = reviewjob.FreezePending
-	reviewLaunch = launchDetachedReviewWorker
-	reviewVerify = func(ctx context.Context, executable string) (reviewVerifiedAgent, error) {
+	reviewNow               = func() time.Time { return time.Now().UTC() }
+	reviewFreeze            = reviewjob.FreezePending
+	reviewLaunch            = launchDetachedReviewWorker
+	reviewCreate            = func(store reviewjob.Store, job reviewjob.Job) (int, error) { return store.Create(job) }
+	reviewAuthority         = newReviewLaunchAuthority
+	reviewCurrentExecutable = currentReviewExecutable
+	reviewVerify            = func(ctx context.Context, executable string) (reviewVerifiedAgent, error) {
 		handle, err := reviewjob.VerifyAgent(ctx, "codex", executable)
 		if err != nil {
 			return reviewVerifiedAgent{}, err
@@ -85,6 +100,9 @@ func resetReviewCLISeams() {
 	reviewNow = func() time.Time { return time.Now().UTC() }
 	reviewFreeze = reviewjob.FreezePending
 	reviewLaunch = launchDetachedReviewWorker
+	reviewCreate = func(store reviewjob.Store, job reviewjob.Job) (int, error) { return store.Create(job) }
+	reviewAuthority = newReviewLaunchAuthority
+	reviewCurrentExecutable = currentReviewExecutable
 	reviewVerify = func(ctx context.Context, executable string) (reviewVerifiedAgent, error) {
 		handle, err := reviewjob.VerifyAgent(ctx, "codex", executable)
 		if err != nil {
@@ -324,9 +342,9 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 }
 
 func authenticateStoredReviewJob(dataDir string, job reviewjob.Job) (authenticatedReviewMapping, error) {
-	mapping, err := authenticateReviewMapping(dataDir, job.ProjectID)
-	if err != nil || mapping.projectIdentity != job.ProjectIdentity {
-		return authenticatedReviewMapping{}, errors.New("stored review project identity changed")
+	mapping, err := authenticateStoredReviewProject(dataDir, job)
+	if err != nil {
+		return authenticatedReviewMapping{}, err
 	}
 	file, err := os.Open(job.Agent.Executable)
 	if err != nil {
@@ -337,6 +355,14 @@ func authenticateStoredReviewJob(dataDir string, job reviewjob.Job) (authenticat
 	closeErr := file.Close()
 	if identityErr != nil || statErr != nil || closeErr != nil || !info.Mode().IsRegular() || identity != job.Agent.Identity {
 		return authenticatedReviewMapping{}, errors.New("stored Agent identity changed")
+	}
+	return mapping, nil
+}
+
+func authenticateStoredReviewProject(dataDir string, job reviewjob.Job) (authenticatedReviewMapping, error) {
+	mapping, err := authenticateReviewMapping(dataDir, job.ProjectID)
+	if err != nil || mapping.projectIdentity != job.ProjectIdentity {
+		return authenticatedReviewMapping{}, errors.New("stored review project identity changed")
 	}
 	return mapping, nil
 }
@@ -356,10 +382,16 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	if current, revision, found, loadErr := store.LatestForProject(projectID); loadErr != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	} else if found && reviewStateActive(current.State) {
-		if _, authErr := authenticateStoredReviewJob(dataDir, current); authErr != nil {
+		current, revision, loadErr = recoverReviewJob(store, current, revision)
+		if loadErr != nil {
 			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 		}
-		return writeReviewStatus(stdout, &current, projectID, revision, 0)
+		if reviewStateActive(current.State) {
+			if _, authErr := authenticateStoredReviewJob(dataDir, current); authErr != nil {
+				return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+			}
+			return writeReviewStatus(stdout, &current, projectID, revision, 0)
+		}
 	}
 	sessions, err := platform.ResolveSessionsRoot("", currentEnv())
 	if err != nil {
@@ -371,11 +403,11 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
-	binary, err := currentReviewExecutable()
+	binary, err := reviewCurrentExecutable()
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.AgentUnconfigured)
 	}
-	jobID, token, ownerErr := newReviewLaunchAuthority()
+	jobID, token, ownerErr := reviewAuthority()
 	if ownerErr != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
@@ -386,11 +418,22 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 		State: reviewjob.Queued, Phase: reviewjob.Preflight, Attempt: 1, FrozenSessions: frozen,
 		CreatedAt: now, UpdatedAt: now, LaunchTokenDigest: digestReviewToken(token), LaunchIntentAt: now,
 	}
-	if _, err := store.Create(job); err != nil {
-		if current, revision, found, loadErr := store.LatestForProject(projectID); loadErr == nil && found && reviewStateActive(current.State) {
-			return writeReviewStatus(stdout, &current, projectID, revision, 0)
+	if _, err := reviewCreate(store, job); err != nil {
+		_, _, persistedFound, persistedErr := store.Load(job.ID)
+		if persistedErr != nil {
+			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 		}
-		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+		if persistedFound {
+			current, _, found, repairErr := store.LatestForProject(projectID)
+			if repairErr != nil || !found || current.ID != job.ID {
+				terminalizeReviewLaunch(store, job.ID, reviewjob.ApplyRecovery, canonicalReviewNow())
+				return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+			}
+		} else if current, revision, found, loadErr := store.LatestForProject(projectID); loadErr == nil && found && reviewStateActive(current.State) {
+			return writeReviewStatus(stdout, &current, projectID, revision, 0)
+		} else {
+			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+		}
 	}
 	if err := reviewLaunch(reviewLaunchRequest{Binary: binary, JobID: job.ID, Token: token}); err != nil {
 		failed, revision := terminalizeReviewLaunch(store, job.ID, reviewLaunchError(err), canonicalReviewNow())
@@ -415,22 +458,41 @@ func runReviewStatus(dataDir, projectID string, stdout io.Writer) int {
 	if !found {
 		return writeReviewStatus(stdout, nil, projectID, 0, 0)
 	}
+	job, revision, err = recoverReviewJob(reviewjob.Store{Root: dataDir}, job, revision)
+	if err != nil {
+		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+	}
 	if _, err := authenticateStoredReviewJob(dataDir, job); err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
 	return writeReviewStatus(stdout, &job, projectID, revision, 0)
 }
 
+func recoverReviewJob(store reviewjob.Store, job reviewjob.Job, revision int) (reviewjob.Job, int, error) {
+	if !reviewStateActive(job.State) {
+		return job, revision, nil
+	}
+	recovered, recoveredRevision, _, err := store.RecoverInterrupted(job.ID)
+	if err != nil {
+		return reviewjob.Job{}, 0, err
+	}
+	return recovered, recoveredRevision, nil
+}
+
 func runReviewCancel(dataDir, jobID string, stdout io.Writer) int {
 	store := reviewjob.Store{Root: dataDir}
-	job, _, found, err := store.Load(jobID)
+	job, revision, found, err := store.Load(jobID)
 	if err != nil || !found {
 		return writeReviewOperational(stdout, "unknown", reviewjob.ApplyRecovery)
+	}
+	job, revision, err = recoverReviewJob(store, job, revision)
+	if err != nil {
+		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
 	}
 	if _, err := authenticateStoredReviewJob(dataDir, job); err != nil {
 		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
 	}
-	job, revision, err := reviewjob.RequestCancel(store, jobID, canonicalReviewNow())
+	job, revision, err = reviewjob.RequestCancel(store, jobID, canonicalReviewNow())
 	if err != nil {
 		if current, currentRevision, currentFound, loadErr := store.Load(jobID); loadErr == nil && currentFound {
 			return writeReviewStatus(stdout, &current, current.ProjectID, currentRevision, 0)
@@ -442,9 +504,37 @@ func runReviewCancel(dataDir, jobID string, stdout io.Writer) int {
 
 func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expectedRevision int, stdout io.Writer) int {
 	store := reviewjob.Store{Root: dataDir}
-	before, _, found, err := store.Load(jobID)
+	before, beforeRevision, found, err := store.Load(jobID)
 	if err != nil || !found {
 		return writeReviewOperational(stdout, "unknown", reviewjob.ApplyRecovery)
+	}
+	requestID := deterministicRetryRequestID(jobID, expectedAttempt, expectedRevision)
+	if before.RetryRequestID == requestID {
+		if before.RetryAttempt != expectedAttempt || before.RetryRevision != expectedRevision {
+			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+		}
+		before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
+		if err != nil {
+			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+		}
+		if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+		}
+		return writeReviewStatus(stdout, &before, before.ProjectID, beforeRevision, 0)
+	}
+	before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
+	if err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+	}
+	if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+	}
+	if before.State != reviewjob.Failed || before.Attempt != expectedAttempt || beforeRevision != expectedRevision {
+		return writeReviewStatus(stdout, &before, before.ProjectID, beforeRevision, 1)
+	}
+	binary, err := reviewCurrentExecutable()
+	if err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.AgentUnconfigured)
 	}
 	if _, err := authenticateStoredReviewJob(dataDir, before); err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
@@ -458,11 +548,15 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 	if verified.Agent != before.Agent {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.AgentIncompatible)
 	}
-	requestID := deterministicRetryRequestID(jobID, expectedAttempt, expectedRevision)
-	duplicate := before.RetryRequestID == requestID
+	_, token, err := reviewAuthority()
+	if err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+	}
+	launchAt := canonicalReviewNow()
+	launchDigest := digestReviewToken(token)
 	job, revision, err := reviewjob.RequestRetry(store, reviewjob.RetryRequest{
 		JobID: jobID, ExpectedAttempt: expectedAttempt, ExpectedRevision: expectedRevision,
-		RequestID: requestID, At: canonicalReviewNow(),
+		RequestID: requestID, At: launchAt, LaunchTokenDigest: launchDigest, LaunchIntentAt: launchAt,
 	})
 	if err != nil {
 		if current, currentRevision, currentFound, loadErr := store.Load(jobID); loadErr == nil && currentFound {
@@ -470,33 +564,8 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 		}
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
-	if duplicate || (job.State != reviewjob.Retrying && job.State != reviewjob.CancelRequested) || job.Owner.ID != "" {
+	if job.LaunchTokenDigest != launchDigest || (job.State != reviewjob.Retrying && job.State != reviewjob.CancelRequested) || job.Owner.ID != "" {
 		return writeReviewStatus(stdout, &job, job.ProjectID, revision, 0)
-	}
-	binary, err := currentReviewExecutable()
-	if err != nil {
-		return writeReviewOperational(stdout, job.ProjectID, reviewjob.AgentUnconfigured)
-	}
-	_, token, err := newReviewLaunchAuthority()
-	if err != nil {
-		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
-	}
-	launchAt := canonicalReviewNow()
-	job, revision, err = store.Update(jobID, revision, func(next *reviewjob.Job) error {
-		if (next.State != reviewjob.Retrying && next.State != reviewjob.CancelRequested) || next.Owner.ID != "" || next.LaunchTokenDigest != "" {
-			return reviewjob.ErrStaleRevision
-		}
-		next.LaunchTokenDigest = digestReviewToken(token)
-		next.LaunchIntentAt = launchAt
-		next.UpdatedAt = launchAt
-		return nil
-	})
-	if err != nil {
-		current, currentRevision, currentFound, loadErr := store.Load(jobID)
-		if loadErr == nil && currentFound {
-			return writeReviewStatus(stdout, &current, current.ProjectID, currentRevision, 0)
-		}
-		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
 	if err := reviewLaunch(reviewLaunchRequest{Binary: binary, JobID: jobID, Token: token}); err != nil {
 		failed, failedRevision := terminalizeReviewLaunch(store, jobID, reviewLaunchError(err), canonicalReviewNow())

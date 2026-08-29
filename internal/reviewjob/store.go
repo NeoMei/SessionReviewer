@@ -170,25 +170,11 @@ func (s Store) activeProjectJob(layout *storeLayout, projectID string) (Job, int
 	if layout == nil || layout.missing {
 		return Job{}, 0, false, nil
 	}
-	if err := rejectCaseCollision(layout.projects, projectID+".json"); err != nil {
-		return Job{}, 0, false, err
-	}
-	pointer, found, err := readProjectPointer(layout.projects, projectID)
-	if err != nil {
-		return Job{}, 0, false, err
-	}
-	if found {
-		job, revision, loaded, err := s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
-		if err != nil || !loaded {
-			return Job{}, 0, false, err
-		}
-		if active(job.State) {
-			return job, revision, true, nil
-		}
-		return Job{}, 0, false, nil
-	}
 	job, revision, loaded, err := s.latestJobByEnumeration(layout.jobs, projectID)
 	if err != nil || !loaded || !active(job.State) {
+		return Job{}, 0, false, err
+	}
+	if err := s.publishPointer(layout.projects, projectPointerFor(job)); err != nil {
 		return Job{}, 0, false, err
 	}
 	return job, revision, true, nil
@@ -339,6 +325,11 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 	if layout.missing {
 		return Job{}, 0, false, nil
 	}
+	lock, err := acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
+	if err != nil {
+		return Job{}, 0, false, fmt.Errorf("lock review job store: %w", err)
+	}
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 	if err := rejectCaseCollision(layout.projects, projectID+".json"); err != nil {
 		return Job{}, 0, false, err
 	}
@@ -346,45 +337,22 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 	if err != nil {
 		return Job{}, 0, false, err
 	}
-	if pointerFound {
-		return s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
-	}
-
-	lock, err := acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
-	if err != nil {
-		return Job{}, 0, false, fmt.Errorf("lock review job store: %w", err)
-	}
-	defer func() { retErr = errors.Join(retErr, lock.release()) }()
-	pointer, pointerFound, err = readProjectPointer(layout.projects, projectID)
-	if err != nil {
-		return Job{}, 0, false, err
-	}
-	if pointerFound {
-		return s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
-	}
 	job, revision, found, err = s.latestJobByEnumeration(layout.jobs, projectID)
-	if err != nil || !found {
+	if err != nil {
 		return job, revision, found, err
 	}
-	if err := s.publishPointer(layout.projects, projectPointerFor(job)); err != nil {
-		return Job{}, 0, false, err
-	}
-	return job, revision, true, nil
-}
-
-func (s Store) loadAuthenticatedPointer(jobs *os.Root, pointer projectPointer, projectID string) (Job, int, bool, error) {
-	if pointer.ProjectID != projectID {
-		return Job{}, 0, false, errors.New("project pointer names another project")
-	}
-	job, revision, found, err := s.loadFromJobs(jobs, pointer.JobID)
-	if err != nil || !found {
-		if err != nil {
-			return Job{}, 0, false, err
+	if !found {
+		if pointerFound {
+			return Job{}, 0, false, errors.New("project pointer names a missing job")
 		}
-		return Job{}, 0, false, errors.New("project pointer names a missing job")
+		return Job{}, 0, false, nil
 	}
-	if job.ProjectID != projectID || job.ProjectIdentity != pointer.ProjectIdentity {
-		return Job{}, 0, false, errors.New("project pointer is not authenticated by its job")
+	wanted := projectPointerFor(job)
+	if pointerFound && pointer == wanted {
+		return job, revision, true, nil
+	}
+	if err := s.publishPointer(layout.projects, wanted); err != nil {
+		return Job{}, 0, false, err
 	}
 	return job, revision, true, nil
 }
@@ -396,6 +364,9 @@ func (s Store) latestJobByEnumeration(jobs *os.Root, projectID string) (Job, int
 	}
 	var selected Job
 	selectedRevision := 0
+	var selectedActive Job
+	selectedActiveRevision := 0
+	activeCount := 0
 	for _, pair := range pairs {
 		if pair.identityInfo == nil {
 			return Job{}, 0, false, errors.New("review job state lacks immutable identity authority")
@@ -403,6 +374,9 @@ func (s Store) latestJobByEnumeration(jobs *os.Root, projectID string) (Job, int
 		authority, err := s.readJobIdentityInfo(jobs, pair.identityName, pair.id, pair.identityInfo)
 		if err != nil {
 			return Job{}, 0, false, err
+		}
+		if authority.ProjectID != projectID {
+			continue
 		}
 		if pair.primaryInfo == nil && pair.backupInfo == nil {
 			continue
@@ -432,11 +406,21 @@ func (s Store) latestJobByEnumeration(jobs *os.Root, projectID string) (Job, int
 			return Job{}, 0, false, errors.New("review job filename does not authenticate its record")
 		}
 		if candidate.ProjectID != projectID {
-			continue
+			return Job{}, 0, false, errors.New("review job identity names a different project")
+		}
+		if active(candidate.State) {
+			activeCount++
+			selectedActive, selectedActiveRevision = candidate, candidateRevision
 		}
 		if selectedRevision == 0 || candidate.CreatedAt.After(selected.CreatedAt) || (candidate.CreatedAt.Equal(selected.CreatedAt) && candidate.ID > selected.ID) {
 			selected, selectedRevision = candidate, candidateRevision
 		}
+	}
+	if activeCount > 1 {
+		return Job{}, 0, false, errors.New("project has multiple active review jobs")
+	}
+	if activeCount == 1 {
+		return selectedActive, selectedActiveRevision, true, nil
 	}
 	return selected, selectedRevision, selectedRevision != 0, nil
 }

@@ -77,6 +77,140 @@ func TestStoreCreatePublishesJobBeforeProjectPointerAndRepairsMissingPointer(t *
 	assertMode(t, filepath.Join(root, "review-jobs/projects/project-1.json"), 0o600)
 }
 
+func TestStoreTerminalPointerCannotHideOrphanActiveJob(t *testing.T) {
+	for _, operation := range []string{"latest", "create"} {
+		t.Run(operation, func(t *testing.T) {
+			root := newStoreRoot(t)
+			store := Store{Root: root}
+			activeJob := validJobFixture()
+			activeJob.ID = "job-active"
+			if _, err := store.Create(activeJob); err != nil {
+				t.Fatal(err)
+			}
+			terminalJob := terminalJobFixture(Failed)
+			terminalJob.ID = "job-terminal"
+			terminalJob.CreatedAt = activeJob.CreatedAt.Add(time.Minute)
+			terminalJob.UpdatedAt = terminalJob.CreatedAt
+			terminalJob.CompletedAt = terminalJob.CreatedAt
+			if _, err := store.Create(terminalJob); err != nil {
+				t.Fatal(err)
+			}
+
+			switch operation {
+			case "latest":
+				latest, _, found, err := store.LatestForProject(activeJob.ProjectID)
+				if err != nil || !found || latest.ID != activeJob.ID {
+					t.Fatalf("LatestForProject()=%#v found=%v err=%v", latest, found, err)
+				}
+				pointer, found, err := readProjectPointer(mustOpenStoreProjects(t, root), activeJob.ProjectID)
+				if err != nil || !found || pointer.JobID != activeJob.ID {
+					t.Fatalf("repaired pointer=%#v found=%v err=%v", pointer, found, err)
+				}
+			case "create":
+				candidate := validJobFixture()
+				candidate.ID = "job-candidate"
+				if _, err := (Store{Root: root, RejectActiveProject: true}).Create(candidate); !errors.Is(err, ErrActiveJob) {
+					t.Fatalf("Create() error=%v, want ErrActiveJob", err)
+				}
+				if _, _, found, err := store.Load(candidate.ID); err != nil || found {
+					t.Fatalf("rejected candidate found=%v err=%v", found, err)
+				}
+				pointer, found, err := readProjectPointer(mustOpenStoreProjects(t, root), activeJob.ProjectID)
+				if err != nil || !found || pointer.JobID != activeJob.ID {
+					t.Fatalf("repaired pointer=%#v found=%v err=%v", pointer, found, err)
+				}
+			}
+		})
+	}
+}
+
+func TestStoreFailsClosedOnMultipleOrCorruptMaskedProjectJobs(t *testing.T) {
+	t.Run("multiple active", func(t *testing.T) {
+		root := newStoreRoot(t)
+		store := Store{Root: root}
+		for index, id := range []string{"job-active-1", "job-active-2"} {
+			job := validJobFixture()
+			job.ID = id
+			job.CreatedAt = job.CreatedAt.Add(time.Duration(index) * time.Minute)
+			job.UpdatedAt = job.CreatedAt
+			job.Owner = Owner{ID: "owner-" + id, AcquiredAt: job.CreatedAt}
+			if _, err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, _, err := store.LatestForProject("project-1"); err == nil {
+			t.Fatal("LatestForProject() accepted multiple active jobs")
+		}
+		candidate := validJobFixture()
+		candidate.ID = "job-active-3"
+		if _, err := (Store{Root: root, RejectActiveProject: true}).Create(candidate); err == nil {
+			t.Fatal("Create() accepted project with multiple active jobs")
+		}
+	})
+
+	t.Run("masked corrupt job", func(t *testing.T) {
+		root := newStoreRoot(t)
+		store := Store{Root: root}
+		activeJob := validJobFixture()
+		activeJob.ID = "job-corrupt"
+		if _, err := store.Create(activeJob); err != nil {
+			t.Fatal(err)
+		}
+		terminalJob := terminalJobFixture(Failed)
+		terminalJob.ID = "job-terminal"
+		terminalJob.CreatedAt = activeJob.CreatedAt.Add(time.Minute)
+		terminalJob.UpdatedAt = terminalJob.CreatedAt
+		terminalJob.CompletedAt = terminalJob.CreatedAt
+		if _, err := store.Create(terminalJob); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "review-jobs/jobs", activeJob.ID+".json"), []byte("{corrupt"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := store.LatestForProject(activeJob.ProjectID); err == nil {
+			t.Fatal("LatestForProject() ignored masked corrupt project job")
+		}
+	})
+}
+
+func TestStoreRepairsTerminalPointerFromAuthenticatedActiveBackup(t *testing.T) {
+	root := newStoreRoot(t)
+	store := Store{Root: root}
+	activeJob := validJobFixture()
+	activeJob.ID = "job-backup-active"
+	if _, err := store.Create(activeJob); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.Update(activeJob.ID, 1, func(job *Job) error {
+		job.State = Failed
+		job.Phase = ""
+		job.Owner = Owner{}
+		job.CompletedAt = job.UpdatedAt
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	terminalJob := terminalJobFixture(Failed)
+	terminalJob.ID = "job-terminal"
+	terminalJob.CreatedAt = activeJob.CreatedAt.Add(time.Minute)
+	terminalJob.UpdatedAt = terminalJob.CreatedAt
+	terminalJob.CompletedAt = terminalJob.CreatedAt
+	if _, err := store.Create(terminalJob); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "review-jobs/jobs", activeJob.ID+".json"), []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	latest, revision, found, err := store.LatestForProject(activeJob.ProjectID)
+	if err != nil || !found || latest.ID != activeJob.ID || revision != 1 || !active(latest.State) {
+		t.Fatalf("LatestForProject()=%#v revision=%d found=%v err=%v", latest, revision, found, err)
+	}
+	pointer, found, err := readProjectPointer(mustOpenStoreProjects(t, root), activeJob.ProjectID)
+	if err != nil || !found || pointer.JobID != activeJob.ID {
+		t.Fatalf("repaired pointer=%#v found=%v err=%v", pointer, found, err)
+	}
+}
+
 func TestStoreRejectsDuplicateFieldsUnknownFieldsAndOversizedRecords(t *testing.T) {
 	root := newStoreWithJob(t)
 	path := filepath.Join(root, "review-jobs/jobs/job-1.json")
@@ -804,7 +938,7 @@ func TestStoreMissingPointerRepairRejectsAggregateRecordBudget(t *testing.T) {
 func TestStoreMissingPointerRepairScansAndReadsEachCandidateOnce(t *testing.T) {
 	root := newStoreRoot(t)
 	for index := 1; index <= 3; index++ {
-		job := validJobFixture()
+		job := terminalJobFixture(Failed)
 		job.ID = fmt.Sprintf("job-%d", index)
 		if _, err := (Store{Root: root}).Create(job); err != nil {
 			t.Fatal(err)
@@ -856,6 +990,16 @@ func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
 	}); err == nil {
 		t.Fatal("Update() accepted stable identity mutation")
 	}
+}
+
+func mustOpenStoreProjects(t *testing.T, root string) *os.Root {
+	t.Helper()
+	projects, err := os.OpenRoot(filepath.Join(root, "review-jobs", "projects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = projects.Close() })
+	return projects
 }
 
 func newStoreRoot(t *testing.T) string {

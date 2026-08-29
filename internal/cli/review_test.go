@@ -196,6 +196,57 @@ func TestRunReviewStartPersistsFrozenLaunchIntentBeforeSpawn(t *testing.T) {
 	}
 }
 
+func TestRunReviewStartRepairsPartialPointerCommitAndLaunchesSameJob(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) { return nil, nil }
+	createdJobID := ""
+	reviewCreate = func(store reviewjob.Store, job reviewjob.Job) (int, error) {
+		createdJobID = job.ID
+		revision, err := store.Create(job)
+		if err != nil {
+			return revision, err
+		}
+		pointer := filepath.Join(fixture.data, "review-jobs", "projects", fixture.projectID+".json")
+		if err := os.Remove(pointer); err != nil {
+			return revision, err
+		}
+		return revision, errors.New("injected pointer publication interruption")
+	}
+	launches := 0
+	reviewLaunch = func(request reviewLaunchRequest) error {
+		launches++
+		if request.JobID != createdJobID {
+			t.Fatalf("launch job=%s created=%s", request.JobID, createdJobID)
+		}
+		store := reviewjob.Store{Root: fixture.data}
+		latest, latestRevision, found, err := store.LatestForProject(fixture.projectID)
+		if err != nil || !found || latest.ID != createdJobID {
+			t.Fatalf("repaired pointer latest=%#v revision=%d found=%v err=%v", latest, latestRevision, found, err)
+		}
+		_, _, err = store.Update(latest.ID, latestRevision, func(next *reviewjob.Job) error {
+			next.State = reviewjob.Running
+			next.Owner = reviewjob.Owner{ID: "owner-partial", AcquiredAt: fixture.now}
+			next.LaunchTokenDigest = ""
+			next.LaunchIntentAt = time.Time{}
+			return nil
+		})
+		return err
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || launches != 1 {
+		t.Fatalf("code=%d launches=%d stdout=%q stderr=%q", code, launches, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Running) || status.JobID != createdJobID {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunReviewConcurrentStartCreatesAndLaunchesOnlyOneActiveJob(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
@@ -258,6 +309,55 @@ func TestRunReviewConcurrentStartCreatesAndLaunchesOnlyOneActiveJob(t *testing.T
 	}
 }
 
+func TestRunReviewStartRecoversExpiredOwnerlessLaunchBeforeCreatingSuccessor(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	stale := fixture.job(reviewjob.Queued)
+	stale.LaunchTokenDigest = digestReviewToken("expired-start-token-with-at-least-32-bytes")
+	stale.LaunchIntentAt = time.Now().UTC().Add(-time.Minute).Round(0)
+	if _, err := store.Create(stale); err != nil {
+		t.Fatal(err)
+	}
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) { return nil, nil }
+	launches := 0
+	reviewLaunch = func(request reviewLaunchRequest) error {
+		launches++
+		if request.JobID == stale.ID {
+			t.Fatal("start relaunched the interrupted job")
+		}
+		job, revision, found, err := store.Load(request.JobID)
+		if err != nil || !found {
+			return err
+		}
+		_, _, err = store.Update(job.ID, revision, func(next *reviewjob.Job) error {
+			next.State = reviewjob.Running
+			next.Owner = reviewjob.Owner{ID: "owner-successor", AcquiredAt: fixture.now.Add(time.Minute)}
+			next.UpdatedAt = fixture.now.Add(time.Minute)
+			next.LaunchTokenDigest = ""
+			next.LaunchIntentAt = time.Time{}
+			return nil
+		})
+		return err
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 || launches != 1 {
+		t.Fatalf("code=%d launches=%d stdout=%q stderr=%q", code, launches, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Running) || status.JobID == stale.ID {
+		t.Fatalf("status=%#v", status)
+	}
+	recovered, _, found, err := store.Load(stale.ID)
+	if err != nil || !found || recovered.State != reviewjob.Failed || recovered.Error.Code != reviewjob.ApplyRecovery {
+		t.Fatalf("recovered stale job=%#v found=%v err=%v", recovered, found, err)
+	}
+}
+
 func TestRunReviewStatusAndRetryBindExactFailedRevision(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	store := reviewjob.Store{Root: fixture.data}
@@ -267,7 +367,9 @@ func TestRunReviewStatusAndRetryBindExactFailedRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	verifyCalls := 0
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		verifyCalls++
 		return reviewVerifiedAgent{Agent: fixture.agent}, nil
 	}
 	launches := 0
@@ -314,14 +416,171 @@ func TestRunReviewStatusAndRetryBindExactFailedRevision(t *testing.T) {
 	}
 
 	// A delayed transport duplicate carries the old attempt/revision and must
-	// return the current second failure without creating attempt three.
+	// return the current second failure without creating attempt three or
+	// touching an Agent executable that has since disappeared.
+	if err := os.Remove(fixture.executable); err != nil {
+		t.Fatal(err)
+	}
 	out.Reset()
 	if code := Run(args, &out, &errOut); code != 0 || errOut.Len() != 0 {
 		t.Fatalf("duplicate code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 	duplicate := decodeReviewStatus(t, out.Bytes())
-	if duplicate.Attempt != 2 || launches != 1 {
-		t.Fatalf("duplicate=%#v launches=%d", duplicate, launches)
+	if duplicate.Attempt != 2 || launches != 1 || verifyCalls != 1 {
+		t.Fatalf("duplicate=%#v launches=%d verifyCalls=%d", duplicate, launches, verifyCalls)
+	}
+	if err := os.WriteFile(fixture.executable, []byte("replacement Agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if code := Run(args, &out, &errOut); code != 0 || errOut.Len() != 0 {
+		t.Fatalf("duplicate after replacement code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	replaced := decodeReviewStatus(t, out.Bytes())
+	if replaced.Attempt != 2 || launches != 1 || verifyCalls != 1 {
+		t.Fatalf("duplicate after replacement=%#v launches=%d verifyCalls=%d", replaced, launches, verifyCalls)
+	}
+}
+
+func TestRunReviewRetryPreparationFailuresLeaveOriginalFailureRetryable(t *testing.T) {
+	for _, test := range []struct {
+		failure   string
+		errorCode string
+	}{{"current binary", string(reviewjob.AgentUnconfigured)}, {"launch authority", string(reviewjob.ApplyRecovery)}} {
+		t.Run(test.failure, func(t *testing.T) {
+			fixture := newReviewCLIFixture(t)
+			store := reviewjob.Store{Root: fixture.data}
+			job := fixture.job(reviewjob.Failed)
+			job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+			if _, err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+			reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+				return reviewVerifiedAgent{Agent: fixture.agent}, nil
+			}
+			if test.failure == "current binary" {
+				reviewCurrentExecutable = func() (string, error) { return "", errors.New("injected current binary failure") }
+			} else {
+				reviewAuthority = func() (string, string, error) {
+					return "", "", errors.New("injected launch authority failure")
+				}
+			}
+
+			var out, errOut bytes.Buffer
+			code := Run([]string{"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+				"--expected-attempt", "1", "--expected-revision", "1", "--json"}, &out, &errOut)
+			if code != 1 || errOut.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			status := decodeReviewStatus(t, out.Bytes())
+			if status.State != reviewjob.Idle || status.ErrorCode != test.errorCode {
+				t.Fatalf("status=%#v", status)
+			}
+			stored, revision, found, err := store.Load(job.ID)
+			if err != nil || !found || revision != 1 || stored.State != reviewjob.Failed || stored.Attempt != 1 {
+				t.Fatalf("stored=%#v revision=%d found=%v err=%v", stored, revision, found, err)
+			}
+		})
+	}
+}
+
+func TestRunReviewRetryRecoversDeadWorkerBeforePreflight(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Running)
+	job.Owner = reviewjob.Owner{ID: "owner-crashed", AcquiredAt: fixture.now}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	verifyCalls := 0
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		verifyCalls++
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	t.Cleanup(resetReviewCLISeams)
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+		"--expected-attempt", "1", "--expected-revision", "1", "--json"}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) || !status.CanRetry || verifyCalls != 0 {
+		t.Fatalf("status=%#v verifyCalls=%d", status, verifyCalls)
+	}
+}
+
+func TestRunReviewConcurrentRetryLaunchesOnlyWinningAuthority(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Failed)
+	job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	verified := make(chan struct{}, 2)
+	release := make(chan struct{})
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		verified <- struct{}{}
+		<-release
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	var authorityMu sync.Mutex
+	authorityCount := 0
+	reviewAuthority = func() (string, string, error) {
+		authorityMu.Lock()
+		defer authorityMu.Unlock()
+		authorityCount++
+		return fmt.Sprintf("unused-job-%d", authorityCount), fmt.Sprintf("private-retry-token-%032d", authorityCount), nil
+	}
+	var launchMu sync.Mutex
+	launches := 0
+	reviewLaunch = func(request reviewLaunchRequest) error {
+		launchMu.Lock()
+		launches++
+		launchMu.Unlock()
+		current, revision, found, err := store.Load(request.JobID)
+		if err != nil || !found {
+			return err
+		}
+		_, _, err = store.Update(current.ID, revision, func(next *reviewjob.Job) error {
+			next.State = reviewjob.Running
+			next.Owner = reviewjob.Owner{ID: "owner-retry-winner", AcquiredAt: fixture.now}
+			next.LaunchTokenDigest = ""
+			next.LaunchIntentAt = time.Time{}
+			return nil
+		})
+		return err
+	}
+	t.Cleanup(resetReviewCLISeams)
+
+	type result struct {
+		code   int
+		out    bytes.Buffer
+		errOut bytes.Buffer
+	}
+	results := make(chan result, 2)
+	args := []string{"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+		"--expected-attempt", "1", "--expected-revision", "1", "--json"}
+	for range 2 {
+		go func() {
+			var got result
+			got.code = Run(args, &got.out, &got.errOut)
+			results <- got
+		}()
+	}
+	<-verified
+	<-verified
+	close(release)
+	first, second := <-results, <-results
+	firstStatus, secondStatus := decodeReviewStatus(t, first.out.Bytes()), decodeReviewStatus(t, second.out.Bytes())
+	launchMu.Lock()
+	launchCount := launches
+	launchMu.Unlock()
+	if first.code != 0 || second.code != 0 || first.errOut.Len() != 0 || second.errOut.Len() != 0 ||
+		firstStatus.JobID != job.ID || secondStatus.JobID != job.ID || firstStatus.Attempt != 2 || secondStatus.Attempt != 2 || launchCount != 1 {
+		t.Fatalf("first=%d/%#v/%q second=%d/%#v/%q launches=%d", first.code, firstStatus, first.errOut.String(), second.code, secondStatus, second.errOut.String(), launchCount)
 	}
 }
 
@@ -349,6 +608,26 @@ func TestRunReviewCancelIsDurableAndIdempotent(t *testing.T) {
 	stored, _, found, err := store.Load(job.ID)
 	if err != nil || !found || stored.LaunchTokenDigest != "" || !stored.LaunchIntentAt.IsZero() || stored.Owner.ID != "" {
 		t.Fatalf("cancelled job=%#v found=%v err=%v", stored, found, err)
+	}
+}
+
+func TestRunReviewCancelRecoversDeadWorkerBeforeTransition(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Running)
+	job.Owner = reviewjob.Owner{ID: "owner-crashed", AcquiredAt: fixture.now}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "cancel", "--job-id", job.ID, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) || !status.CanRetry {
+		t.Fatalf("status=%#v", status)
 	}
 }
 
@@ -432,6 +711,26 @@ func TestRunReviewStatusProjectsCorruptPrivateStoreAsSafeJSON(t *testing.T) {
 	}
 }
 
+func TestRunReviewStatusRecoversUnleasedWorkerBeforeProjection(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Running)
+	job.Owner = reviewjob.Owner{ID: "owner-crashed", AcquiredAt: fixture.now}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "status", "--project-id", fixture.projectID, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) || !status.CanRetry {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunReviewPrivateWorkerRejectsIncompleteOrUnsafeAuthority(t *testing.T) {
 	for _, args := range [][]string{
 		{"review", "worker"},
@@ -507,6 +806,19 @@ func TestDetachedReviewLauncherHandlesSuccessBadByteEOFAndTimeout(t *testing.T) 
 			}
 			assertDetachedHelperReaped(t, pidFile)
 		})
+	}
+}
+
+func TestDetachedReviewInheritancePolicyAllowsOnlyExplicitHandshakeHandle(t *testing.T) {
+	policy, err := detachedReviewInheritancePolicy(uintptr(17))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy.noInheritHandles || len(policy.additionalHandles) != 1 || policy.additionalHandles[0] != uintptr(17) {
+		t.Fatalf("inheritance policy=%#v", policy)
+	}
+	if _, err := detachedReviewInheritancePolicy(0); err == nil {
+		t.Fatal("inheritance policy accepted a null handshake handle")
 	}
 }
 

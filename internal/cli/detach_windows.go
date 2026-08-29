@@ -26,22 +26,40 @@ func configureDetachedReviewCommand(command *exec.Cmd, handshake *os.File) (func
 		return nil, errors.New("detached command and handshake are required")
 	}
 	handle := windows.Handle(handshake.Fd())
+	policy, err := detachedReviewInheritancePolicy(uintptr(handle))
+	if err != nil {
+		return nil, err
+	}
 	if err := windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT); err != nil {
 		return nil, err
 	}
 	null, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
 	if err != nil {
+		_ = windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, 0)
 		return nil, err
 	}
 	command.Stdin = null
 	command.Stdout = null
 	command.Stderr = null
-	command.SysProcAttr = &syscall.SysProcAttr{
-		CreationFlags:              windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
-		NoInheritHandles:           true,
-		AdditionalInheritedHandles: []syscall.Handle{syscall.Handle(handle)},
+	command.SysProcAttr = windowsDetachedReviewSysProcAttr(policy)
+	return func() error {
+		return errors.Join(
+			windows.SetHandleInformation(handle, windows.HANDLE_FLAG_INHERIT, 0),
+			null.Close(),
+		)
+	}, nil
+}
+
+func windowsDetachedReviewSysProcAttr(policy detachedReviewInheritance) *syscall.SysProcAttr {
+	handles := make([]syscall.Handle, len(policy.additionalHandles))
+	for index, handle := range policy.additionalHandles {
+		handles[index] = syscall.Handle(handle)
 	}
-	return null.Close, nil
+	return &syscall.SysProcAttr{
+		CreationFlags:              windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+		NoInheritHandles:           policy.noInheritHandles,
+		AdditionalInheritedHandles: handles,
+	}
 }
 
 func inheritedReviewHandshake(value string) (*os.File, error) {
