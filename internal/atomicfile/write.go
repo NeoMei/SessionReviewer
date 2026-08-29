@@ -86,8 +86,21 @@ func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm
 }
 
 // WriteRootFileCreateIfAbsentPrepared applies prepare to the unpublished
-// temporary before caller bytes are written.
+// temporary before caller bytes are written. A destination captured after the
+// initial absence check is rejected before rollback or replacement handling;
+// beforePublish runs explicitly at the final no-replace Link boundary.
 func WriteRootFileCreateIfAbsentPrepared(parent *os.Root, leaf string, data []byte, perm fs.FileMode, prepare func(*os.File) error, beforePublish func() error) error {
+	ops := defaultDurabilityOps()
+	ops.publish = func(root *os.Root, temporary, destination string) error {
+		if err := root.Link(temporary, destination); err != nil {
+			return err
+		}
+		return root.Remove(temporary)
+	}
+	return writeRootFileCreateIfAbsentPreparedWithOps(parent, leaf, data, perm, prepare, beforePublish, nil, ops)
+}
+
+func writeRootFileCreateIfAbsentPreparedWithOps(parent *os.Root, leaf string, data []byte, perm fs.FileMode, prepare func(*os.File) error, beforePublish, afterInitialCheck func() error, ops durabilityOps) error {
 	if parent == nil {
 		return fmt.Errorf("atomic file root is required")
 	}
@@ -99,23 +112,15 @@ func WriteRootFileCreateIfAbsentPrepared(parent *os.Root, leaf string, data []by
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	ops := defaultDurabilityOps()
-	ops.prepareTemporary = prepare
-	ops.publish = func(root *os.Root, temporary, destination string) error {
-		if err := root.Link(temporary, destination); err != nil {
+	// afterInitialCheck is an internal deterministic race seam. Production
+	// callers leave it nil; the second rooted absence check remains mandatory.
+	if afterInitialCheck != nil {
+		if err := afterInitialCheck(); err != nil {
 			return err
 		}
-		return root.Remove(temporary)
 	}
-	checkpointCalls := 0
-	checkpoint := func() error {
-		checkpointCalls++
-		if checkpointCalls == 2 && beforePublish != nil {
-			return beforePublish()
-		}
-		return nil
-	}
-	return writeRootAtParentCheckedWithOps(parent, leaf, data, perm, checkpoint, ops)
+	ops.prepareTemporary = prepare
+	return writeRootAtParentWithPolicy(parent, leaf, data, perm, nil, nil, beforePublish, true, ops)
 }
 
 func strictRootLeaf(leaf string) bool {
@@ -183,15 +188,28 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 }
 
 func writeRootAtParentCheckedWithRollbackOps(parent *os.Root, name string, data []byte, perm fs.FileMode, checkpoint, rollbackCheckpoint func() error, ops durabilityOps) (retErr error) {
+	return writeRootAtParentWithPolicy(parent, name, data, perm, checkpoint, rollbackCheckpoint, nil, false, ops)
+}
+
+func writeRootAtParentWithPolicy(parent *os.Root, name string, data []byte, perm fs.FileMode, checkpoint, rollbackCheckpoint, beforePublish func() error, rejectExisting bool, ops durabilityOps) (retErr error) {
 	parentGuard, err := captureRootParentCleanupGuard(parent)
 	if err != nil {
 		return err
 	}
 	rollback := rootRollback{}
-	if checkpoint != nil {
-		rollback, err = captureRootRollback(parent, name)
-		if err != nil {
-			return err
+	checked := checkpoint != nil || rejectExisting
+	if checked {
+		if rejectExisting {
+			if _, err := parent.Lstat(name); err == nil {
+				return fs.ErrExist
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		} else {
+			rollback, err = captureRootRollback(parent, name)
+			if err != nil {
+				return err
+			}
 		}
 		defer func() { retErr = errors.Join(retErr, rollback.close()) }()
 		if err := reconcileRootRollbackAlias(parent, name, parentGuard, checkpoint); err != nil {
@@ -245,7 +263,7 @@ func writeRootAtParentCheckedWithRollbackOps(parent *os.Root, name string, data 
 		return errors.New("atomic temporary file changed before publication")
 	}
 	if checkpoint != nil {
-		prepared, prepareErr := prepareRootRollback(parent, name, rollback, rollbackCheckpoint, ops)
+		prepared, prepareErr := prepareRootRollback(parent, name, rollback, rollbackCheckpoint, parentGuard, ops)
 		if prepareErr != nil {
 			return prepareErr
 		}
@@ -269,6 +287,11 @@ func writeRootAtParentCheckedWithRollbackOps(parent *os.Root, name string, data 
 	}
 	if rollback.active {
 		if err := ensureRootRollbackContent(parent, name, &rollback, true, ops); err != nil {
+			return err
+		}
+	}
+	if beforePublish != nil {
+		if err := beforePublish(); err != nil {
 			return err
 		}
 	}
@@ -852,7 +875,7 @@ func captureRootRollback(parent *os.Root, destination string) (rootRollback, err
 	return rootRollback{active: true, name: BackupPath(destination), original: original, file: file, snapshot: snapshot, hash: sha256.Sum256(snapshot)}, nil
 }
 
-func prepareRootRollback(parent *os.Root, destination string, rollback rootRollback, checkpoint func() error, ops durabilityOps) (rootRollback, error) {
+func prepareRootRollback(parent *os.Root, destination string, rollback rootRollback, checkpoint func() error, guard rootParentCleanupGuard, ops durabilityOps) (prepared rootRollback, retErr error) {
 	backup := BackupPath(destination)
 	if _, err := parent.Lstat(backup); err == nil {
 		return rootRollback{}, errors.New("atomic rollback backup already exists")
@@ -888,6 +911,14 @@ func prepareRootRollback(parent *os.Root, destination string, rollback rootRollb
 	if err := link(parent, destination, backup); err != nil {
 		return rootRollback{}, fmt.Errorf("cannot establish atomic rollback hardlink: %w", err)
 	}
+	owned := true
+	defer func() {
+		if retErr != nil && owned {
+			retErr = errors.Join(retErr, guard.run(parent, func() error {
+				return cleanupOwnedRootRollback(parent, destination, &rollback, ops)
+			}))
+		}
+	}()
 	linkedDestination, destinationErr := parent.Lstat(destination)
 	linkedBackup, backupErr := parent.Lstat(backup)
 	if destinationErr != nil || backupErr != nil || !os.SameFile(current, linkedDestination) ||
@@ -900,12 +931,31 @@ func prepareRootRollback(parent *os.Root, destination string, rollback rootRollb
 		return rootRollback{}, err
 	}
 	if err := syncRootDirectoryEntry(parent, backup); err != nil {
-		return rootRollback{}, errors.Join(errors.New("cannot sync atomic rollback hardlink"), removeRootRollback(parent, &rollback))
+		return rootRollback{}, errors.New("cannot sync atomic rollback hardlink")
 	}
 	if err := ensureRootRollbackContent(parent, destination, &rollback, true, ops); err != nil {
 		return rootRollback{}, err
 	}
+	owned = false
 	return rollback, nil
+}
+
+func cleanupOwnedRootRollback(parent *os.Root, destination string, rollback *rootRollback, ops durabilityOps) error {
+	if rollback == nil || !rollback.active {
+		return nil
+	}
+	attachedErr := ensureRootRollbackContent(parent, destination, rollback, true, ops)
+	if attachedErr == nil {
+		return removeRootRollback(parent, rollback)
+	}
+	if !rollback.active {
+		return attachedErr
+	}
+	if detachedErr := ensureRootRollbackContent(parent, "", rollback, false, ops); detachedErr == nil {
+		return removeRootRollback(parent, rollback)
+	} else {
+		return errors.Join(attachedErr, detachedErr)
+	}
 }
 
 func validateRootRollbackIdentity(parent *os.Root, destination string, rollback rootRollback, requireDestination bool) error {

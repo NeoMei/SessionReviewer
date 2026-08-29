@@ -91,6 +91,68 @@ func TestWriteRootFileCreateIfAbsentPublishesNewFile(t *testing.T) {
 	}
 }
 
+func TestWriteRootFileCreateIfAbsentRejectsClaimantCapturedAfterInitialCheckWithoutStaleAuthorization(t *testing.T) {
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	revision := 1
+	authorizedRevision := 0
+	authorizationCalls := 0
+	publishCalls := 0
+	ops := defaultDurabilityOps()
+	ops.publish = func(root *os.Root, temporary, destination string) error {
+		publishCalls++
+		if authorizedRevision != revision {
+			return errors.New("publication began without current authorization")
+		}
+		// Model the claimant departing and the caller's authorization revision
+		// changing after the rollback checkpoint but before the later generic
+		// publication checkpoint. The old ordinal mapping never reauthorizes.
+		revision++
+		if err := root.Remove(destination); err != nil {
+			return err
+		}
+		if err := root.Link(temporary, destination); err != nil {
+			return err
+		}
+		return root.Remove(temporary)
+	}
+	err = writeRootFileCreateIfAbsentPreparedWithOps(
+		root, "state.json", []byte("stale-authority publication"), 0o600, nil,
+		func() error {
+			authorizationCalls++
+			authorizedRevision = revision
+			return nil
+		},
+		func() error {
+			file, err := root.OpenFile("state.json", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return err
+			}
+			_, writeErr := file.Write([]byte("claimant"))
+			return errors.Join(writeErr, file.Close())
+		},
+		ops,
+	)
+	if !errors.Is(err, os.ErrExist) {
+		got, _ := os.ReadFile(filepath.Join(directory, "state.json"))
+		t.Fatalf("captured claimant was not rejected: error=%v content=%q authorization_calls=%d publish_calls=%d revision=%d", err, got, authorizationCalls, publishCalls, revision)
+	}
+	if authorizationCalls != 0 || publishCalls != 0 || revision != 1 {
+		t.Fatalf("captured claimant entered rollback/publication: authorization_calls=%d publish_calls=%d revision=%d", authorizationCalls, publishCalls, revision)
+	}
+	if got, err := os.ReadFile(filepath.Join(directory, "state.json")); err != nil || string(got) != "claimant" {
+		t.Fatalf("claimant changed: content=%q err=%v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(directory, BackupPath("state.json"))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("captured claimant created rollback state: %v", err)
+	}
+}
+
 func TestWriteRootFileCheckedRejectsInvalidLeafBeforeCheckpointOrTemp(t *testing.T) {
 	directory := t.TempDir()
 	root, err := os.OpenRoot(directory)
@@ -625,6 +687,81 @@ func TestWriteRootFileCheckedRevalidatesDestinationAndBackupAcrossRollbackCheckp
 			}
 		})
 	}
+}
+
+func TestWriteRootFileCheckedCleansOnlyOwnedRollbackAfterPostLinkIdentityFailure(t *testing.T) {
+	for _, backupState := range []string{"owned", "third-party"} {
+		t.Run(backupState, func(t *testing.T) {
+			directory := t.TempDir()
+			destination := filepath.Join(directory, "state.json")
+			backupName := BackupPath("state.json")
+			backup := filepath.Join(directory, backupName)
+			movedOriginal := filepath.Join(directory, "authenticated-original")
+			if err := os.WriteFile(destination, []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ops := defaultDurabilityOps()
+			ops.linkRollback = func(root *os.Root, oldName, newName string) error {
+				if err := root.Link(oldName, newName); err != nil {
+					return err
+				}
+				if backupState == "third-party" {
+					if err := root.Remove(newName); err != nil {
+						return err
+					}
+					file, err := root.OpenFile(newName, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+					if err != nil {
+						return err
+					}
+					_, writeErr := file.Write([]byte("third-party backup"))
+					return errors.Join(writeErr, file.Close(), replaceRootDestinationForTest(root, oldName))
+				}
+				return replaceRootDestinationForTest(root, oldName)
+			}
+			err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("new"), 0o600, func() error { return nil }, ops)
+			if err == nil {
+				t.Fatal("post-Link destination replacement was accepted")
+			}
+			if closeErr := root.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+
+			reopened, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			if backupState == "owned" {
+				if _, err := reopened.Lstat(backupName); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("owned rollback backup was not durably cleaned: %v", err)
+				}
+			} else if got, err := os.ReadFile(backup); err != nil || string(got) != "third-party backup" {
+				t.Fatalf("third-party rollback claimant changed: content=%q err=%v", got, err)
+			}
+			if got, err := os.ReadFile(destination); err != nil || string(got) != "third-party destination" {
+				t.Fatalf("replacement destination changed: content=%q err=%v", got, err)
+			}
+			if got, err := os.ReadFile(movedOriginal); err != nil || string(got) != "original" {
+				t.Fatalf("authenticated original changed: content=%q err=%v", got, err)
+			}
+		})
+	}
+}
+
+func replaceRootDestinationForTest(root *os.Root, destination string) error {
+	if err := root.Rename(destination, "authenticated-original"); err != nil {
+		return err
+	}
+	file, err := root.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, writeErr := file.Write([]byte("third-party destination"))
+	return errors.Join(writeErr, file.Close())
 }
 
 func TestWriteRootWithoutCheckpointDoesNotRequireRollbackHardlinks(t *testing.T) {
