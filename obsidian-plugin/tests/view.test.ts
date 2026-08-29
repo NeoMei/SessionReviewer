@@ -128,3 +128,18 @@ describe("project evolution browser", () => {
     expect(risk.open).toBe(true);
   });
 });
+
+describe("review header action", () => {
+  it("appends exactly one review action to the header meta without moving existing children", () => {
+    const model = browserModelFixture();
+    const before = renderReadyView(model);
+    const metaBefore = before.querySelector(".sr-header-meta")!;
+    expect([...metaBefore.children].map((node) => (node as HTMLElement).className)).toEqual(["sr-status", ""]);
+    expect([...(before.querySelector(".sr-header") as HTMLElement).children].map((node) => (node as HTMLElement).className)).toEqual(["", "sr-header-meta"]);
+
+    const after = renderReadyView(model, undefined, undefined, undefined, { label: "总结并同步", disabled: false, onStart: () => {} });
+    const metaAfter = after.querySelector(".sr-header-meta")!;
+    expect([...metaAfter.children].map((node) => (node as HTMLElement).className)).toEqual(["sr-status", "", "sr-review-action"]);
+    expect(after.querySelectorAll(".sr-review-action")).toHaveLength(1);
+  });
+});

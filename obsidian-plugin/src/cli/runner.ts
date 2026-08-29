@@ -10,6 +10,8 @@ const REVIEW_COMMAND_FAILED = "SessionReviewer review command failed";
 const REVIEW_STATES = ["idle", "queued", "running", "completed", "failed", "cancel_requested", "cancelled", "retrying"] as const;
 const REVIEW_PHASES = ["preflight", "scanning", "preparing", "reviewing", "applying", "syncing"] as const;
 
+export const ACTIVE_REVIEW_STATES: readonly ReviewState[] = ["queued", "running", "retrying", "cancel_requested"];
+
 export type ReviewState = (typeof REVIEW_STATES)[number];
 export type ReviewPhase = (typeof REVIEW_PHASES)[number];
 

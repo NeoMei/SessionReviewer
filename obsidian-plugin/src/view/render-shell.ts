@@ -27,7 +27,13 @@ export function defaultViewState(model?: BrowserModel): ViewState {
 
 export type EditHandler = (field: EditableField) => void;
 
-export function renderReadyView(model: BrowserModel, initial?: Partial<ViewState>, save?: SaveViewState, onEdit?: EditHandler): HTMLElement {
+export interface ReviewHeaderAction {
+  label: string;
+  disabled: boolean;
+  onStart: () => void;
+}
+
+export function renderReadyView(model: BrowserModel, initial?: Partial<ViewState>, save?: SaveViewState, onEdit?: EditHandler, review?: ReviewHeaderAction): HTMLElement {
   const root = element("div", { className: "session-reviewer-browser" });
   let state: ViewState = { ...defaultViewState(model), ...initial, projectId: model.review.projectId };
   if (!model.events.some((event) => event.id === state.selectedEventId)) state.selectedEventId = model.events[0]?.id ?? null;
@@ -37,21 +43,32 @@ export function renderReadyView(model: BrowserModel, initial?: Partial<ViewState
     void save?.(state);
   };
   const draw = (): void => {
-    root.replaceChildren(renderHeader(model, onEdit), renderResume(model, onEdit), renderRisks(model, onEdit), renderTabs(state, update), renderPanel(model, state, update, onEdit));
+    root.replaceChildren(renderHeader(model, onEdit, review), renderResume(model, onEdit), renderRisks(model, onEdit), renderTabs(state, update), renderPanel(model, state, update, onEdit));
   };
   draw();
   return root;
 }
 
-function renderHeader(model: BrowserModel, onEdit?: EditHandler): HTMLElement {
+function renderHeader(model: BrowserModel, onEdit?: EditHandler, review?: ReviewHeaderAction): HTMLElement {
   const reviewStatus = presentStatus(model.review.status);
   const header = element("header", { className: "sr-header" });
   const identity = element("div");
   identity.append(element("span", { className: "sr-eyebrow", text: "SESSIONREVIEWER · 项目回顾" }), element("h1", { text: model.review.name }), editableText(element("p", { className: "sr-goal", text: model.review.goal }), model, "project-overview", "goal", onEdit));
   const meta = element("div", { className: "sr-header-meta" });
   meta.append(editableText(element("span", { className: "sr-status", text: reviewStatus.label, attrs: { "data-tone": reviewStatus.tone } }), model, "project-overview", "status", onEdit), element("span", { text: model.lastSuccessfulSync ? `最近同步 ${presentDateTime(model.lastSuccessfulSync)}` : "尚未同步" }));
+  if (review) meta.append(reviewActionNode(review));
   header.append(identity, meta);
   return header;
+}
+
+function reviewActionNode(review: ReviewHeaderAction): HTMLElement {
+  const action = button(review.label, { "data-review-action": "start" });
+  action.className = "sr-review-action";
+  action.disabled = review.disabled;
+  action.addEventListener("click", () => {
+    if (!review.disabled) review.onStart();
+  });
+  return action;
 }
 
 function renderResume(model: BrowserModel, onEdit?: EditHandler): HTMLElement {

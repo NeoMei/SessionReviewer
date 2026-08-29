@@ -1,5 +1,6 @@
 import { ItemView, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
+import { ACTIVE_REVIEW_STATES, type ReviewStatus } from "../cli/runner";
 import type { BrowserModel, EditableField } from "../contracts/review-v2";
 import type { CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
@@ -8,7 +9,7 @@ import { ConflictModal, type ConflictAction } from "./conflict-modal";
 import { element } from "./dom";
 import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
-import { renderStatusBanner } from "./status-banner";
+import { renderReviewJobBanner, renderStatusBanner, reviewActionLabel, reviewFailureText } from "./status-banner";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -19,6 +20,10 @@ export class ProjectEvolutionView extends ItemView {
   private announcement = "";
   private cliDiagnostic?: Diagnostic;
   private hiddenConflictIds: string[] = [];
+  private reviewStatus?: ReviewStatus;
+  private reviewActionInFlight = false;
+  private reviewPollGeneration = 0;
+  private reviewPollTimer?: ReturnType<typeof setTimeout>;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -26,7 +31,8 @@ export class ProjectEvolutionView extends ItemView {
     private readonly editor?: ReviewEditor,
     private readonly runner?: CliRunner,
     private readonly initialState: ViewState = defaultViewState(),
-    private readonly saveState?: SaveViewState
+    private readonly saveState?: SaveViewState,
+    private readonly agentExecutable: string | (() => string) = ""
   ) {
     super(leaf);
     this.currentState = initialState;
@@ -49,6 +55,7 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.stopReviewPolling();
     this.disposeWatch?.();
     this.contentEl.replaceChildren();
   }
@@ -69,12 +76,14 @@ export class ProjectEvolutionView extends ItemView {
     this.disposeWatch = this.repository!.watch(this.selected, () => { void this.refresh(projects); });
   }
 
-  private async refresh(projects: ProjectDescriptor[]): Promise<void> {
+  private async refresh(projects: ProjectDescriptor[], options: { reviewStatus?: boolean } = {}): Promise<void> {
     if (!this.selected) return;
     const snapshot = await this.repository!.load(this.selected, this.lastReady);
     if (snapshot.kind === "ready") this.lastReady = snapshot;
     await this.refreshCliStatus();
+    if (options.reviewStatus !== false) await this.refreshReviewStatus();
     this.renderSnapshot(snapshot, projects);
+    this.scheduleReviewPolling();
   }
 
   private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
@@ -88,14 +97,29 @@ export class ProjectEvolutionView extends ItemView {
       return;
     }
     const model = snapshot.kind === "stale" ? snapshot.lastValid.model : snapshot.model;
+    const review = this.runner
+      ? {
+          label: reviewActionLabel(this.reviewStatus),
+          disabled: this.reviewActionInFlight || (this.reviewStatus !== undefined && ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)),
+          onStart: () => this.startReview()
+        }
+      : undefined;
     const browser = renderReadyView(model, { ...this.currentState, projectId: model.review.projectId }, (viewState) => {
       this.currentState = viewState;
       return this.saveState?.(viewState);
-    }, this.editor ? (field) => this.openEditor(field, model) : undefined);
+    }, this.editor ? (field) => this.openEditor(field, model) : undefined, review);
     if (projects.length > 1) browser.prepend(this.projectPicker(projects));
     if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") browser.prepend(renderStatusBanner(snapshot.diagnostic, this.actionFor(snapshot.diagnostic)));
     if (this.cliDiagnostic) browser.prepend(renderStatusBanner(this.cliDiagnostic, this.actionFor(this.cliDiagnostic)));
     if (this.announcement) browser.prepend(element("div", { className: "sr-sr-only", text: this.announcement, attrs: { "aria-live": "polite" } }));
+    if (this.reviewStatus) {
+      const banner = renderReviewJobBanner(this.reviewStatus, {
+        onCancel: this.reviewStatus.canCancel ? () => this.cancelReview() : undefined,
+        onRetry: this.reviewStatus.canRetry ? () => this.retryReview() : undefined,
+        onSyncOnly: this.reviewStatus.canSyncOnly ? () => this.syncOnlyChanges() : undefined
+      });
+      if (banner) browser.prepend(banner);
+    }
     this.contentEl.append(browser);
   }
 
@@ -140,6 +164,105 @@ export class ProjectEvolutionView extends ItemView {
       this.announcement = error instanceof Error ? error.message : String(error);
     }
     await this.refresh(this.projects);
+  }
+
+  private agentPath(): string {
+    return typeof this.agentExecutable === "function" ? this.agentExecutable() : this.agentExecutable;
+  }
+
+  private async refreshReviewStatus(): Promise<void> {
+    this.reviewStatus = undefined;
+    if (!this.runner || !this.selected) return;
+    try {
+      this.reviewStatus = await this.runner.reviewStatus(this.selected.projectId);
+    } catch {
+      // 状态读取失败时隐藏横幅，保持既有浏览能力。
+    }
+  }
+
+  private startReview(): void {
+    if (!this.runner || !this.selected || this.reviewActionInFlight) return;
+    if (this.reviewStatus && ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)) return;
+    const projectId = this.selected.projectId;
+    const agentExecutable = this.agentPath();
+    if (!agentExecutable) {
+      this.announcement = reviewFailureText("E_AGENT_UNCONFIGURED", "尚未配置 Codex。");
+      this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
+      return;
+    }
+    void this.runReviewAction(() => this.runner!.startReview(projectId, agentExecutable), "自动总结已开始。");
+  }
+
+  private cancelReview(): void {
+    const jobId = this.reviewStatus?.jobId;
+    if (!this.runner || !jobId) return;
+    void this.runReviewAction(() => this.runner!.cancelReview(jobId), "已请求取消自动总结。");
+  }
+
+  private retryReview(): void {
+    const status = this.reviewStatus;
+    const jobId = status?.jobId;
+    if (!this.runner || !jobId || status.retryExpectedAttempt === undefined || status.retryExpectedRevision === undefined) return;
+    const attempt = status.retryExpectedAttempt;
+    const revision = status.retryExpectedRevision;
+    void this.runReviewAction(() => this.runner!.retryReview(jobId, this.agentPath(), attempt, revision), "已重新开始自动总结。");
+  }
+
+  private syncOnlyChanges(): void {
+    if (!this.runner || !this.selected) return;
+    void this.runCliAction(() => this.runner!.syncProject(this.selected!.projectId), "已有修改同步完成。");
+  }
+
+  private async runReviewAction(action: () => Promise<ReviewStatus>, success: string): Promise<void> {
+    if (this.reviewActionInFlight) return;
+    this.reviewActionInFlight = true;
+    this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
+    try {
+      this.reviewStatus = await action();
+      this.announcement = success;
+    } catch (error) {
+      this.announcement = error instanceof Error ? error.message : String(error);
+    }
+    this.reviewActionInFlight = false;
+    await this.refresh(this.projects, { reviewStatus: false });
+  }
+
+  private scheduleReviewPolling(): void {
+    this.stopReviewPolling();
+    if (!this.reviewStatus || !ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)) return;
+    void this.pollReviewJob(this.reviewPollGeneration, 0);
+  }
+
+  private stopReviewPolling(): void {
+    this.reviewPollGeneration += 1;
+    if (this.reviewPollTimer !== undefined) {
+      clearTimeout(this.reviewPollTimer);
+      this.reviewPollTimer = undefined;
+    }
+  }
+
+  private async pollReviewJob(generation: number, round: number): Promise<void> {
+    const delay = round === 0 ? 1000 : round === 1 ? 2000 : 5000;
+    await new Promise<void>((resolve) => {
+      this.reviewPollTimer = setTimeout(resolve, delay);
+    });
+    this.reviewPollTimer = undefined;
+    if (generation !== this.reviewPollGeneration) return;
+    const previous = this.reviewStatus;
+    await this.refreshReviewStatus();
+    if (generation !== this.reviewPollGeneration) return;
+    const current = this.reviewStatus;
+    if (!current) {
+      void this.pollReviewJob(generation, round + 1);
+      return;
+    }
+    if (!ACTIVE_REVIEW_STATES.includes(current.state)) {
+      if (previous && ACTIVE_REVIEW_STATES.includes(previous.state)) this.announcement = reviewTerminalAnnouncement(current);
+      await this.refresh(this.projects, { reviewStatus: false });
+      return;
+    }
+    this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
+    void this.pollReviewJob(generation, round + 1);
   }
 
   private async openConflict(): Promise<void> {
@@ -189,6 +312,8 @@ export class ProjectEvolutionView extends ItemView {
     select.addEventListener("change", () => {
       const next = projects.find((project) => project.projectId === select.value);
       if (!next) return;
+      this.stopReviewPolling();
+      this.reviewStatus = undefined;
       this.disposeWatch?.();
       this.selected = next;
       this.lastReady = undefined;
@@ -197,4 +322,15 @@ export class ProjectEvolutionView extends ItemView {
     wrapper.append(select);
     return wrapper;
   }
+}
+
+function emptyReviewSnapshot(): Snapshot {
+  return { kind: "empty", diagnostic: { code: "stale_snapshot", message: "" } };
+}
+
+function reviewTerminalAnnouncement(status: ReviewStatus): string {
+  if (status.state === "failed") return reviewFailureText(status.errorCode, "自动总结失败，可重试。");
+  if (status.state === "cancelled") return reviewFailureText(status.errorCode, "自动总结已取消。");
+  if (status.state === "completed") return "自动总结完成。";
+  return "";
 }

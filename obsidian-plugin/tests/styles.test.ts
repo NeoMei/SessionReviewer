@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderReadyView } from "../src/view/render-shell";
+import { renderReviewJobBanner } from "../src/view/status-banner";
 import { browserModelFixture } from "./fixtures/browser";
 
 const pluginStyles = readFileSync(resolve(process.cwd(), "styles.css"), "utf8");
@@ -98,5 +99,28 @@ describe("usage model card layout", () => {
     expect(getComputedStyle(metrics).gridTemplateColumns).toBe("repeat(4, minmax(0, 1fr))");
     expect(getComputedStyle(pricing).gridTemplateColumns).toBe("repeat(4, minmax(0, 1fr))");
     expect(getComputedStyle(card.querySelector<HTMLElement>(".sr-definition")!).display).toBe("flex");
+  });
+});
+
+describe("review job layout", () => {
+  it("keeps the header action compact and wraps banner controls inside scoped rules", () => {
+    installStyles();
+    const view = renderReadyView(browserModelFixture(), undefined, undefined, undefined, { label: "总结并同步", disabled: false, onStart: () => {} });
+    document.body.append(view);
+    const action = view.querySelector<HTMLElement>(".sr-review-action")!;
+    expect(getComputedStyle(action).height).toBe("auto");
+    expect(getComputedStyle(action).whiteSpace).toBe("normal");
+    expect(getComputedStyle(action).maxWidth).toBe("100%");
+
+    const banner = renderReviewJobBanner(
+      {
+        schemaVersion: 1, projectId: "project-x", state: "running", jobId: "job-1", phase: "reviewing", attempt: 1,
+        sessionIndex: 2, sessionCount: 12, acceptedPackets: 0, acceptedSessions: 0, canRetry: false, canCancel: true, canSyncOnly: true
+      },
+      { onCancel: () => {}, onRetry: () => {}, onSyncOnly: () => {} }
+    )!;
+    view.prepend(banner);
+    expect(getComputedStyle(banner).borderRadius).toBe("10px");
+    expect(getComputedStyle(banner.querySelector<HTMLElement>(".sr-review-actions")!).flexWrap).toBe("wrap");
   });
 });

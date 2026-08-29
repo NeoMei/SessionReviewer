@@ -26,7 +26,7 @@ export default class SessionReviewerPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.configuredRunner(), this.viewState, async (viewState) => {
       this.viewState = viewState;
       await this.saveData({ viewState, cliPath: this.cliPath, codexPath: this.codexPath });
-    }));
+    }, () => this.codexPath));
     this.addSettingTab(new CliSettingsTab(this.app, this, this.cliPath, async (cliPath) => {
       this.cliPath = cliPath;
       await this.saveData({ viewState: this.viewState, cliPath, codexPath: this.codexPath });

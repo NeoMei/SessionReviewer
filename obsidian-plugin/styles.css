@@ -109,6 +109,13 @@
 .sr-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .sr-sr-only { clip: rect(0 0 0 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
 
+.sr-review-action { height: auto; max-width: 100%; min-height: 24px; white-space: normal; }
+.sr-review-banner { background: var(--background-secondary); border: 1px solid var(--sr-border); border-radius: 10px; margin-bottom: 14px; padding: 10px 14px; }
+.sr-review-banner strong { font-size: 13px; }
+.sr-review-meta { color: var(--sr-muted); font-size: 12px; line-height: 1.5; margin: 4px 0 0; overflow-wrap: anywhere; }
+.sr-review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sr-review-actions button { font-size: 11px; margin: 0; padding: 4px 8px; }
+
 @media (max-width: 860px) {
   .session-reviewer-browser { padding: 18px 12px 40px; }
   .sr-header { align-items: flex-start; flex-direction: column; }
@@ -124,4 +131,8 @@
   .sr-definition { gap: 8px; grid-template-columns: minmax(0, 1fr); }
   .sr-risk-summary { grid-template-columns: minmax(0, 1fr); }
   .sr-risk-status { justify-self: start; }
+}
+
+@media (max-width: 860px) {
+  .sr-review-banner strong { font-size: 12px; }
 }
