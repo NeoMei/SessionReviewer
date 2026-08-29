@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   publish:
@@ -58,6 +60,13 @@ jobs:
           LC_ALL=C sort -o dist/SHA256SUMS dist/SHA256SUMS
           cd dist
           sha256sum --check SHA256SUMS
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/main.js
+            dist/styles.css
+            dist/manifest.json
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

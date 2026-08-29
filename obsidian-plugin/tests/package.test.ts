@@ -31,7 +31,7 @@ describe("Obsidian plugin package", () => {
     const second = await mkdtemp(join(tmpdir(), "sr-plugin-two-"));
     roots.push(first, second);
     const build = (dist: string): void => {
-      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", "0.2.6", dist], {
+      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", "0.2.7", dist], {
         cwd: repository,
         env: { ...process.env, SESSION_REVIEWER_PACKAGE_SKIP_CHECK: "1", SOURCE_DATE_EPOCH: "315532800" },
         stdio: "pipe"
@@ -39,13 +39,13 @@ describe("Obsidian plugin package", () => {
     };
     build(first);
     build(second);
-    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", "session-reviewer-obsidian-0.2.6.zip", "styles.css"]);
-    const archiveName = "session-reviewer-obsidian-0.2.6.zip";
+    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", "session-reviewer-obsidian-0.2.7.zip", "styles.css"]);
+    const archiveName = "session-reviewer-obsidian-0.2.7.zip";
     const firstArchive = join(first, archiveName);
     const entries = execFileSync("unzip", ["-Z1", firstArchive], { encoding: "utf8" }).trim().split("\n").sort();
     expect(entries).toEqual(["session-reviewer/main.js", "session-reviewer/manifest.json", "session-reviewer/styles.css"]);
     const manifest = JSON.parse(execFileSync("unzip", ["-p", firstArchive, "session-reviewer/manifest.json"], { encoding: "utf8" })) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.2.6" });
+    expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.2.7" });
     const mainJs = execFileSync("unzip", ["-p", firstArchive, "session-reviewer/main.js"], { encoding: "utf8" });
     expect(mainJs).not.toContain("sourceMappingURL=data:");
     expect(mainJs).toContain("E_APPLY_RECOVERY");
