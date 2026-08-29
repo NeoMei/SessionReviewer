@@ -30,6 +30,7 @@ type Options struct {
 	Pin       *MappingPin
 
 	pinCheckpoint func(pinCheckpointStage) error
+	beforeEngine  func() error
 }
 
 // Run authenticates one configured Project mapping, constructs the existing
@@ -60,20 +61,26 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 	if err := pin.verify(options); err != nil {
 		return syncengine.Report{}, err
 	}
+	if options.beforeEngine != nil {
+		if err := options.beforeEngine(); err != nil {
+			return syncengine.Report{}, err
+		}
+	}
 
 	engine, err := syncengine.NewEngine(syncengine.Options{
-		ProjectRoot:         pin.project.Path,
-		ProjectRootExpected: pin.project.Info(),
-		VaultRoot:           pin.vault.Path,
-		VaultRootExpected:   pin.vault.Info(),
-		VaultReviewPath:     pin.mapping.VaultReviewPath,
-		DataRoot:            pin.syncData.Path,
-		DataRootExpected:    pin.syncData.Info(),
-		ProjectID:           pin.mapping.ID,
-		GOOS:                options.GOOS,
-		VaultCaseMode:       pin.mapping.VaultCaseMode,
-		Retry:               syncengine.DefaultRetryPolicy(),
-		Now:                 options.Now,
+		ProjectRoot:          pin.project.Path,
+		ProjectRootExpected:  pin.project.Info(),
+		VaultRoot:            pin.vault.Path,
+		VaultRootExpected:    pin.vault.Info(),
+		VaultReviewPath:      pin.mapping.VaultReviewPath,
+		ReviewTargetExpected: pin.target,
+		DataRoot:             pin.syncData.Path,
+		DataRootExpected:     pin.syncData.Info(),
+		ProjectID:            pin.mapping.ID,
+		GOOS:                 options.GOOS,
+		VaultCaseMode:        pin.mapping.VaultCaseMode,
+		Retry:                syncengine.DefaultRetryPolicy(),
+		Now:                  options.Now,
 	})
 	if err != nil {
 		return syncengine.Report{}, err

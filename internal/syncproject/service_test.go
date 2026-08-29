@@ -139,6 +139,80 @@ func TestSyncProjectServiceReconcilesProjectNestedInsideVault(t *testing.T) {
 	}
 }
 
+// Removing the exact review-target capability from the MappingPin -> Engine
+// handoff lets NewEngine independently reopen an ordinary replacement at the
+// configured path and publish trusted Project bytes into it.
+func TestSyncProjectRunNeverAdoptsReviewTargetAtPinToEngineHandoff(t *testing.T) {
+	for _, targetInitiallyExists := range []bool{false, true} {
+		name := "missing target with racing creator"
+		if targetInitiallyExists {
+			name = "existing target replaced"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			projectRoot := filepath.Join(root, "project")
+			vaultRoot := filepath.Join(root, "vault")
+			dataRoot := filepath.Join(root, "data")
+			for _, directory := range []string{projectRoot, vaultRoot} {
+				if err := os.MkdirAll(directory, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
+			initialized, err := project.Initialize(project.InitOptions{
+				ProjectRoot: projectRoot, VaultRoot: vaultRoot, DataDir: dataRoot,
+				GOOS: runtime.GOOS, Now: func() time.Time { return now },
+				Random: bytes.NewReader(bytes.Repeat([]byte{0x61}, 8)),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			baseOptions := Options{
+				ProjectID: initialized.ProjectID, CWD: projectRoot, DataDir: dataRoot,
+				GOOS: runtime.GOOS, Now: func() time.Time { return now }, Trigger: syncengine.TriggerCLI,
+			}
+			if targetInitiallyExists {
+				if _, err := Run(t.Context(), baseOptions); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pin, err := PinMapping(baseOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+
+			target := filepath.Join(vaultRoot, filepath.FromSlash(pin.mapping.VaultReviewPath))
+			detached := filepath.Join(root, "detached-authority")
+			options := baseOptions
+			options.Pin = pin
+			options.beforeEngine = func() error {
+				if targetInitiallyExists {
+					if err := os.Rename(target, detached); err != nil {
+						return err
+					}
+				}
+				return os.MkdirAll(target, 0o700)
+			}
+			if _, err := Run(t.Context(), options); err == nil {
+				t.Fatal("Run() accepted a replaced review-target namespace")
+			}
+			entries, err := os.ReadDir(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("ordinary replacement received trusted writes: %v", entries)
+			}
+			if targetInitiallyExists {
+				if _, err := os.Stat(filepath.Join(detached, "项目回顾.md")); err != nil {
+					t.Fatalf("pinned detached authority was lost: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestPinMappingRejectsReviewTargetContainingOrEqualProject(t *testing.T) {
 	for _, test := range []struct {
 		name            string

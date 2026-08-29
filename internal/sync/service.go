@@ -22,8 +22,6 @@ import (
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 type Trigger string
@@ -38,6 +36,7 @@ const (
 type Options struct {
 	ProjectRoot, VaultRoot, VaultReviewPath, DataRoot, ProjectID, GOOS string
 	ProjectRootExpected, VaultRootExpected, DataRootExpected           os.FileInfo
+	ReviewTargetExpected                                               *ReviewTargetPin
 	VaultCaseMode                                                      platform.CaseMode
 	Retry                                                              RetryPolicy
 	Debounce                                                           time.Duration
@@ -135,23 +134,15 @@ type QueueReport struct{ Attempted, Completed, Rescheduled, Blocked int }
 type Engine struct {
 	options                Options
 	project                *pathguard.Directory
+	vaultRoot              *pathguard.Directory
 	vault                  *pathguard.Directory
 	data                   *pathguard.Directory
 	bases                  BaseStore
 	transactions           TransactionStore
 	writer                 RootedWriter
-	vaultTarget            ReviewTargetPin
+	vaultTarget            *ReviewTargetPin
 	trustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
-}
-
-// ReviewTargetPin authenticates the configured Vault review subtree without
-// exposing its physical identities. It is reusable by mapping and worker
-// preflight checks so sync cannot be the first component to discover overlap.
-type ReviewTargetPin struct {
-	full       string
-	anchorInfo os.FileInfo
-	targetInfo os.FileInfo
-	caseMode   platform.CaseMode
+	beforeLock             func() error
 }
 
 func NewEngine(options Options) (*Engine, error) {
@@ -215,17 +206,34 @@ func NewEngine(options Options) (*Engine, error) {
 		_ = dataRoot.Close()
 		return nil, errors.New("sync data root must be disjoint from project and vault roots")
 	}
-	vaultTarget, err := PinReviewTarget(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
+	var vaultTarget *ReviewTargetPin
+	if options.ReviewTargetExpected != nil {
+		vaultTarget, err = options.ReviewTargetExpected.cloneFor(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
+	} else {
+		vaultTarget, err = PinReviewTarget(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
+	}
 	if err != nil {
 		_ = projectRoot.Close()
 		_ = vaultRoot.Close()
 		_ = dataRoot.Close()
 		return nil, err
 	}
-	engine := &Engine{options: options, project: projectRoot, vault: vaultRoot, data: dataRoot, vaultTarget: vaultTarget}
+	targetRoot, _, err := vaultTarget.directory(false)
+	if err != nil {
+		_ = vaultTarget.Close()
+		_ = projectRoot.Close()
+		_ = vaultRoot.Close()
+		_ = dataRoot.Close()
+		return nil, err
+	}
+	// All Vault-side engine paths are now relative to the retained review-target
+	// capability, never relative to the replaceable Vault namespace.
+	options.VaultReviewPath = "."
+	options.ReviewTargetExpected = nil
+	engine := &Engine{options: options, project: projectRoot, vaultRoot: vaultRoot, vault: targetRoot, data: dataRoot, vaultTarget: vaultTarget}
 	engine.bases = BaseStore{Root: dataRoot.Root}
 	engine.transactions = TransactionStore{Root: dataRoot.Root}
-	engine.writer = RootedWriter{Project: projectRoot, Vault: vaultRoot, Retry: options.Retry}
+	engine.writer = RootedWriter{Project: projectRoot, Vault: targetRoot, Retry: options.Retry}
 	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
 		return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
 	}
@@ -251,11 +259,11 @@ func (engine *Engine) Close() error {
 	if engine == nil {
 		return nil
 	}
-	return errors.Join(engine.project.Close(), engine.vault.Close(), engine.data.Close())
+	return errors.Join(engine.vaultTarget.Close(), engine.vaultRoot.Close(), engine.project.Close(), engine.data.Close())
 }
 
 func (engine *Engine) verifyRootBindings() error {
-	if engine == nil || engine.project == nil || engine.vault == nil || engine.data == nil {
+	if engine == nil || engine.project == nil || engine.vaultRoot == nil || engine.data == nil || engine.vaultTarget == nil {
 		return errors.New("sync root bindings are unavailable")
 	}
 	for _, expected := range []struct {
@@ -264,7 +272,7 @@ func (engine *Engine) verifyRootBindings() error {
 		info os.FileInfo
 	}{
 		{name: "project", path: engine.project.Path, info: engine.project.Info()},
-		{name: "vault", path: engine.vault.Path, info: engine.vault.Info()},
+		{name: "vault", path: engine.vaultRoot.Path, info: engine.vaultRoot.Info()},
 		{name: "data", path: engine.data.Path, info: engine.data.Info()},
 	} {
 		reopened, err := pathguard.Open(expected.path)
@@ -277,92 +285,37 @@ func (engine *Engine) verifyRootBindings() error {
 			return fmt.Errorf("sync %s root identity changed", expected.name)
 		}
 	}
-	return engine.vaultTarget.Recheck(engine.project, engine.vault)
+	return engine.vaultTarget.Recheck(engine.project, engine.vaultRoot)
 }
 
-// PinReviewTarget requires Project and the editable Vault review subtree to be
-// disjoint in both containment directions. Existing components are also
-// authenticated by physical ancestry, catching aliases beyond path spelling.
-func PinReviewTarget(reviewPath string, caseMode platform.CaseMode, project, vault *pathguard.Directory) (ReviewTargetPin, error) {
-	if project == nil || vault == nil || reviewPath == "" || strings.Contains(reviewPath, `\`) ||
-		path.Clean(reviewPath) != reviewPath || path.IsAbs(reviewPath) || reviewPath == "." || reviewPath == ".." || strings.HasPrefix(reviewPath, "../") ||
-		(caseMode != platform.CaseSensitive && caseMode != platform.CaseInsensitive) {
-		return ReviewTargetPin{}, errors.New("vault review target is invalid")
+func (engine *Engine) bindReviewTarget(create bool) (bool, error) {
+	if engine == nil || engine.vaultTarget == nil {
+		return false, errors.New("vault review target binding is unavailable")
 	}
-	full := filepath.Join(vault.Path, filepath.FromSlash(reviewPath))
-	withinVault, err := filepath.Rel(vault.Path, full)
-	if err != nil || withinVault == "." || withinVault == ".." || strings.HasPrefix(withinVault, ".."+string(filepath.Separator)) {
-		return ReviewTargetPin{}, errors.New("vault review target escapes its Vault root")
-	}
-	opened, remaining, err := pathguard.OpenDeepest(full)
+	directory, ready, err := engine.vaultTarget.directory(create)
 	if err != nil {
-		return ReviewTargetPin{}, errors.New("vault review target is unsafe")
+		return false, err
 	}
-	defer opened.Close()
-	if !opened.ContainsIdentity(vault.Info()) || vaultTargetOverlapsProject(full, project, opened, len(remaining) == 0, caseMode) {
-		return ReviewTargetPin{}, errors.New("vault review target must be disjoint from the authoritative Project")
+	if !ready {
+		return false, nil
 	}
-	binding := ReviewTargetPin{full: full, anchorInfo: opened.Info(), caseMode: caseMode}
-	if len(remaining) == 0 {
-		binding.targetInfo = opened.Info()
+	if engine.vault != nil && !os.SameFile(engine.vault.Info(), directory.Info()) {
+		return false, errors.New("vault review target identity changed")
 	}
-	return binding, nil
+	engine.vault = directory
+	engine.writer.Vault = directory
+	return true, nil
 }
 
-func vaultTargetOverlapsProject(full string, project, deepest *pathguard.Directory, targetExists bool, caseMode platform.CaseMode) bool {
-	if project == nil || deepest == nil {
-		return true
-	}
-	if lexicalPathContains(project.Path, full, caseMode) || lexicalPathContains(full, project.Path, caseMode) {
-		return true
-	}
-	if deepest.ContainsIdentity(project.Info()) {
-		return true
-	}
-	return targetExists && project.ContainsIdentity(deepest.Info())
-}
-
-func lexicalPathContains(parent, child string, caseMode platform.CaseMode) bool {
-	parent = norm.NFC.String(filepath.ToSlash(filepath.Clean(parent)))
-	child = norm.NFC.String(filepath.ToSlash(filepath.Clean(child)))
-	if runtime.GOOS == "windows" || caseMode == platform.CaseInsensitive {
-		folder := cases.Fold()
-		parent = folder.String(parent)
-		child = folder.String(child)
-	}
-	if parent == "" || child == "" {
-		return false
-	}
-	if parent == child {
-		return true
-	}
-	if strings.HasSuffix(parent, "/") {
-		return strings.HasPrefix(child, parent)
-	}
-	return strings.HasPrefix(child, parent+"/")
-}
-
-// Recheck proves the current target still has the pinned ancestry and remains
-// disjoint from the authoritative Project.
-func (binding ReviewTargetPin) Recheck(project, vault *pathguard.Directory) error {
-	if binding.full == "" || binding.anchorInfo == nil || project == nil || vault == nil ||
-		(binding.caseMode != platform.CaseSensitive && binding.caseMode != platform.CaseInsensitive) {
-		return errors.New("vault review target binding is unavailable")
-	}
-	opened, remaining, err := pathguard.OpenDeepest(binding.full)
+func (engine *Engine) readReviewTargetOptional(relative string, max int64) ([]byte, bool, error) {
+	ready, err := engine.bindReviewTarget(false)
 	if err != nil {
-		return errors.New("vault review target identity changed")
+		return nil, false, err
 	}
-	defer opened.Close()
-	if !opened.ContainsIdentity(vault.Info()) ||
-		vaultTargetOverlapsProject(binding.full, project, opened, len(remaining) == 0, binding.caseMode) ||
-		!opened.ContainsIdentity(binding.anchorInfo) {
-		return errors.New("vault review target identity changed")
+	if !ready {
+		return nil, false, nil
 	}
-	if binding.targetInfo != nil && (len(remaining) != 0 || !os.SameFile(binding.targetInfo, opened.Info())) {
-		return errors.New("vault review target identity changed")
-	}
-	return nil
+	return engine.vault.ReadRegularOptional(relative, max)
 }
 
 func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (report Report, retErr error) {
@@ -387,12 +340,20 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		return report, errors.New("invalid sync trigger")
 	}
 	selectedScope := len(request.EntityIDs) != 0
+	if engine.beforeLock != nil {
+		if err := engine.beforeLock(); err != nil {
+			return report, err
+		}
+	}
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
 	}
 	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
 	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if _, err := engine.bindReviewTarget(false); err != nil {
 		return report, err
 	}
 	migrationCommitted := false
@@ -434,6 +395,9 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		}
 		if version == reviewv2.VersionLegacy {
 			return report, errors.New("legacy sync transaction blocks migration")
+		}
+		if _, err := engine.bindReviewTarget(true); err != nil {
+			return report, err
 		}
 		if err := engine.recoverTransactions(ctx, transactions); err != nil {
 			return report, fmt.Errorf("sync transaction recovery failed: %w", err)
@@ -650,7 +614,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 			continue
 		}
 		if !vaultReady {
-			if err := engine.vault.EnsureDirectory(engine.options.VaultReviewPath, 0o700); err != nil {
+			if _, err := engine.bindReviewTarget(true); err != nil {
 				report.Errors = append(report.Errors, EntityError{EntityID: id, Code: "vault_unavailable"})
 				continue
 			}
@@ -742,11 +706,10 @@ func (engine *Engine) planLegacyVaultRetirement(plan reviewv2.MigrationPlan) (le
 	}
 	directories := make(map[string]struct{})
 	err = engine.vault.WalkMarkdown(engine.options.VaultReviewPath, func(relative string, vaultBody []byte) error {
-		prefix := strings.TrimSuffix(engine.options.VaultReviewPath, "/") + "/"
-		if !strings.HasPrefix(relative, prefix) {
+		legacyRelative, inside := relativeBelowReviewRoot(relative, engine.options.VaultReviewPath)
+		if !inside {
 			return errors.New("legacy Vault file escaped the configured review root")
 		}
-		legacyRelative := strings.TrimPrefix(relative, prefix)
 		if _, expected := archives[legacyRelative]; !expected {
 			return errors.New("legacy Vault contains a Markdown file outside the Project migration inventory")
 		}
@@ -787,6 +750,18 @@ func (engine *Engine) planLegacyVaultRetirement(plan reviewv2.MigrationPlan) (le
 	return retirement, nil
 }
 
+func relativeBelowReviewRoot(relative, root string) (string, bool) {
+	if root == "." {
+		return relative, relative != "" && relative != "." && path.Clean(relative) == relative
+	}
+	prefix := strings.TrimSuffix(root, "/") + "/"
+	if !strings.HasPrefix(relative, prefix) {
+		return "", false
+	}
+	within := strings.TrimPrefix(relative, prefix)
+	return within, within != "" && path.Clean(within) == within
+}
+
 func legacyGeneratedArtifact(relative string, projectBody, vaultBody []byte) bool {
 	var marker []byte
 	switch relative {
@@ -825,6 +800,11 @@ func (engine *Engine) legacyVaultStillMatchesBase(relative string, projectBody, 
 }
 
 func (retirement legacyVaultRetirement) apply(engine *Engine) error {
+	if len(retirement.files) != 0 || len(retirement.directories) != 0 {
+		if _, err := engine.bindReviewTarget(true); err != nil {
+			return err
+		}
+	}
 	files := make([]string, 0, len(retirement.files))
 	for relative := range retirement.files {
 		files = append(files, relative)
@@ -1163,12 +1143,20 @@ func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineRe
 		return report, err
 	}
 	defer func() { retErr = errors.Join(retErr, engine.verifyRootBindings()) }()
+	if engine.beforeLock != nil {
+		if err := engine.beforeLock(); err != nil {
+			return report, err
+		}
+	}
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
 	}
 	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
 	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if _, err := engine.bindReviewTarget(false); err != nil {
 		return report, err
 	}
 	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info()); err != nil {
@@ -1218,6 +1206,11 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 		return report, err
 	}
 	defer func() { retErr = errors.Join(retErr, engine.verifyRootBindings()) }()
+	if engine.beforeLock != nil {
+		if err := engine.beforeLock(); err != nil {
+			return report, err
+		}
+	}
 	lock, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return report, errors.New("sync project is locked or unsafe")
@@ -1229,6 +1222,9 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 		}
 	}()
 	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if _, err := engine.bindReviewTarget(false); err != nil {
 		return report, err
 	}
 	if err := reviewv2.RecoverMigration(engine.options.ProjectRoot, engine.project.Info(), engine.options.DataRoot, engine.data.Info()); err != nil {
@@ -1395,13 +1391,11 @@ func (engine *Engine) DrainQueue(context.Context, int) (QueueReport, error) {
 }
 
 func (engine *Engine) scanVault() (syncdoc.Inventory, bool, error) {
-	full := filepath.Join(engine.options.VaultRoot, filepath.FromSlash(engine.options.VaultReviewPath))
-	opened, remaining, err := pathguard.OpenDeepest(full)
+	ready, err := engine.bindReviewTarget(false)
 	if err != nil {
 		return syncdoc.Inventory{}, false, errors.New("vault review path is unsafe")
 	}
-	_ = opened.Close()
-	if len(remaining) != 0 {
+	if !ready {
 		return syncdoc.Inventory{ByID: map[string]syncdoc.Entry{}}, false, nil
 	}
 	return syncdoc.Scan(engine.vault, engine.options.VaultReviewPath, engine.options.GOOS, engine.options.VaultCaseMode), true, nil
@@ -1484,6 +1478,9 @@ func operationForMerge(id, relative string, kind MergeKind, projectCandidate, va
 }
 
 func (engine *Engine) applyAccepted(ctx context.Context, id, relative string, content []byte, kind MergeKind, previous BaseRecord, hasBase bool, projectCandidate, vaultCandidate Candidate) error {
+	if _, err := engine.bindReviewTarget(true); err != nil {
+		return err
+	}
 	projectRelative := path.Join("docs/session-review", relative)
 	vaultRelative := path.Join(engine.options.VaultReviewPath, relative)
 	hash := syncdoc.ContentHash(content)
@@ -1677,7 +1674,7 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 			return errors.New("interrupted desired content is unavailable")
 		}
 		if !vaultReady {
-			if err := engine.vault.EnsureDirectory(engine.options.VaultReviewPath, 0o700); err != nil {
+			if _, err := engine.bindReviewTarget(true); err != nil {
 				return err
 			}
 			vaultReady = true

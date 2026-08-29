@@ -551,6 +551,9 @@ func (engine *Engine) persistConflictRecord(ctx context.Context, artifact Confli
 		artifact.Notes.Project.RelativePath != artifact.Notes.Vault.RelativePath {
 		return ErrInvalidConflict
 	}
+	if _, err := engine.bindReviewTarget(true); err != nil {
+		return err
+	}
 	body := artifact.Notes.Project.Content
 	relative := artifact.Notes.Project.RelativePath
 	projectRelative := path.Join("docs/session-review", relative)
@@ -559,7 +562,7 @@ func (engine *Engine) persistConflictRecord(ctx context.Context, artifact Confli
 	if err != nil {
 		return err
 	}
-	vaultBefore, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	vaultBefore, vaultFound, err := engine.readReviewTargetOptional(vaultRelative, MaxConflictRecordBytes)
 	if err != nil {
 		return err
 	}
@@ -714,6 +717,9 @@ func (engine *Engine) resumeConflictRecord(ctx context.Context, conflictID strin
 func (engine *Engine) writeHiddenConflictSide(ctx context.Context, side Side, relative string, body, expected []byte, expectedFound bool) error {
 	directory := engine.project
 	if side == SideVault {
+		if _, err := engine.bindReviewTarget(true); err != nil {
+			return err
+		}
 		directory = engine.vault
 	}
 	current, found, err := directory.ReadRegularOptional(relative, MaxConflictRecordBytes)
@@ -757,7 +763,7 @@ func (engine *Engine) recoverConflictRecord(ctx context.Context, txn Transaction
 	if err != nil {
 		return err
 	}
-	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	vaultBody, vaultFound, err := engine.readReviewTargetOptional(vaultRelative, MaxConflictRecordBytes)
 	if err != nil {
 		return err
 	}
@@ -789,7 +795,7 @@ func (engine *Engine) recoverConflictResolution(ctx context.Context, txn Transac
 	if err != nil {
 		return err
 	}
-	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(vaultRelative, MaxConflictRecordBytes)
+	vaultBody, vaultFound, err := engine.readReviewTargetOptional(vaultRelative, MaxConflictRecordBytes)
 	if err != nil {
 		return err
 	}

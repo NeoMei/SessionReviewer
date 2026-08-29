@@ -73,7 +73,7 @@ func (engine *Engine) loadMachineLedgerSnapshot(allowModifiedVault bool) (machin
 	}
 	snapshot := machineSnapshot{projectBody: bytes.Clone(body), projectHash: syncdoc.ContentHash(body), ledger: ledgerValue, operations: []Operation{}}
 	snapshot.humanStale = engine.machineLedgerBehindProject(ledgerValue)
-	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
+	vaultBody, vaultFound, err := engine.readReviewTargetOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
 	if err != nil {
 		return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("vault machine ledger is unavailable")
 	}
@@ -259,7 +259,7 @@ func (engine *Engine) recoverMachineLedger(ctx context.Context, txn Transaction)
 		}
 		return errors.New("interrupted project machine ledger changed")
 	}
-	vaultBody, vaultFound, err := engine.vault.ReadRegularOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
+	vaultBody, vaultFound, err := engine.readReviewTargetOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
 	if err != nil {
 		return err
 	}
@@ -282,6 +282,9 @@ func (engine *Engine) recoverMachineLedger(ctx context.Context, txn Transaction)
 func (engine *Engine) writeMachineSide(ctx context.Context, side Side, relative string, desired, expected []byte, expectedFound bool) error {
 	directory := engine.project
 	if side == SideVault {
+		if _, err := engine.bindReviewTarget(true); err != nil {
+			return err
+		}
 		directory = engine.vault
 	}
 	current, found, err := directory.ReadRegularOptional(relative, int64(reviewv2.MaxMachineLedgerBytes))
@@ -400,13 +403,16 @@ func (engine *Engine) planDerived() (derivedPlan, error) {
 			}
 		}
 		for _, target := range []struct {
-			side      Side
-			relative  string
-			directory interface {
-				ReadRegularOptional(string, int64) ([]byte, bool, error)
+			side     Side
+			relative string
+		}{{SideProject, artifact.RelativePath}, {SideVault, vaultRelative}} {
+			var current []byte
+			var found bool
+			if target.side == SideVault {
+				current, found, err = engine.readReviewTargetOptional(target.relative, int64(syncdoc.MaxDocumentBytes))
+			} else {
+				current, found, err = engine.project.ReadRegularOptional(target.relative, int64(syncdoc.MaxDocumentBytes))
 			}
-		}{{SideProject, artifact.RelativePath, engine.project}, {SideVault, vaultRelative, engine.vault}} {
-			current, found, err := target.directory.ReadRegularOptional(target.relative, int64(syncdoc.MaxDocumentBytes))
 			if err != nil {
 				return derivedPlan{}, errors.New("derived target cannot be read safely")
 			}
@@ -513,6 +519,9 @@ func (engine *Engine) advanceDerived(txn *Transaction, stage TransactionStage) e
 func (engine *Engine) writeDerivedSide(ctx context.Context, side Side, plan derivedPlan) error {
 	directory := engine.project
 	if side == SideVault {
+		if _, err := engine.bindReviewTarget(true); err != nil {
+			return err
+		}
 		directory = engine.vault
 	}
 	for _, artifact := range plan.artifacts {

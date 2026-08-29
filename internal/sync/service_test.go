@@ -10,12 +10,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	stdsync "sync"
 	"testing"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 )
@@ -137,7 +140,7 @@ func TestReconcileMigrationRetiresMirroredLegacyVaultBeforeCompactSync(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !compactV2Inventory(projectInventory, "docs/session-review") || !compactV2Inventory(vaultInventory, fixture.vaultReviewPath) {
+	if !compactV2Inventory(projectInventory, "docs/session-review") || !compactV2Inventory(vaultInventory, engine.options.VaultReviewPath) {
 		t.Fatalf("project=%+v vault=%+v", projectInventory, vaultInventory)
 	}
 	for _, root := range []string{
@@ -341,11 +344,10 @@ func stageLegacyOverviewTransaction(t *testing.T, fixture engineFixture, engine 
 	if stage == TxnProjectWritten {
 		return
 	}
-	vaultDirectory := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
-	if err := os.MkdirAll(vaultDirectory, 0o700); err != nil {
+	if _, err := engine.bindReviewTarget(true); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(vaultDirectory, relative), body, 0o644); err != nil {
+	if err := engine.writer.Write(context.Background(), SideVault, relative, body, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	transaction.Stage = TxnVaultWritten
@@ -1763,6 +1765,49 @@ func TestNewEngineRejectsUnsafeRootContainmentDirections(t *testing.T) {
 			}
 		})
 	}
+	t.Run("replacement after exclusive creation", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+		parent := filepath.Dir(target)
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		projectRoot, err := pathguard.Open(fixture.project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer projectRoot.Close()
+		vaultRoot, err := pathguard.Open(fixture.vault)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer vaultRoot.Close()
+		pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pin.Close()
+		const detachedName = "detached-created-leaf"
+		pin.state.afterCreateIdentity = func(root *os.Root, component string) error {
+			if err := root.Rename(component, detachedName); err != nil {
+				return err
+			}
+			return root.Mkdir(component, 0o700)
+		}
+
+		if _, _, err := pin.directory(true); err == nil {
+			t.Fatal("creation capability adopted the post-create replacement")
+		}
+		for _, directory := range []string{target, filepath.Join(parent, detachedName)} {
+			entries, err := os.ReadDir(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("creation race target received trusted writes at %s: %v", directory, entries)
+			}
+		}
+	})
 }
 
 // Removing either containment direction from the Vault review-target guard
@@ -1859,6 +1904,187 @@ func TestNewEngineRejectsSymlinkOrReparseReviewTargetAliasContainingProject(t *t
 	}
 }
 
+func TestReviewTargetPinMissingLeafRejectsRacingClaims(t *testing.T) {
+	tests := []struct {
+		name     string
+		caseMode platform.CaseMode
+		claim    func(string, string) (string, error)
+	}{
+		{
+			name:     "ordinary directory",
+			caseMode: platform.CaseSensitive,
+			claim: func(target, _ string) (string, error) {
+				return target, os.Mkdir(target, 0o700)
+			},
+		},
+		{
+			name:     "symlink or reparse point",
+			caseMode: platform.CaseSensitive,
+			claim: func(target, outside string) (string, error) {
+				if err := os.Mkdir(outside, 0o700); err != nil {
+					return outside, err
+				}
+				return outside, os.Symlink(outside, target)
+			},
+		},
+		{
+			name:     "case alias",
+			caseMode: platform.CaseInsensitive,
+			claim: func(target, _ string) (string, error) {
+				alias := filepath.Join(filepath.Dir(target), strings.ToLower(filepath.Base(target)))
+				return alias, os.Mkdir(alias, 0o700)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			projectRoot, err := pathguard.Open(fixture.project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer projectRoot.Close()
+			vaultRoot, err := pathguard.Open(fixture.vault)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer vaultRoot.Close()
+			pin, err := PinReviewTarget(fixture.vaultReviewPath, test.caseMode, projectRoot, vaultRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+
+			claimRoot, err := test.claim(target, filepath.Join(fixture.root, "outside"))
+			if err != nil {
+				if test.name == "symlink or reparse point" {
+					t.Skipf("symlink/reparse-point creation is unavailable: %v", err)
+				}
+				t.Fatal(err)
+			}
+			if _, _, err := pin.directory(true); err == nil {
+				t.Fatal("missing-target capability adopted a racing namespace claim")
+			}
+			if err := pin.Recheck(projectRoot, vaultRoot); err == nil {
+				t.Fatal("missing-target capability recheck accepted a racing namespace claim")
+			}
+			entries, err := os.ReadDir(claimRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("racing claim received trusted writes: %v", entries)
+			}
+			if err := pin.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := pin.Close(); err != nil {
+				t.Fatalf("second Close() was not idempotent: %v", err)
+			}
+		})
+	}
+}
+
+func TestReviewTargetPinSharedLifetimeRetainsDetachedAuthorityUntilLastClose(t *testing.T) {
+	fixture := newEngineFixture(t)
+	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot.Close()
+	vaultRoot, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot.Close()
+	pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const cloneCount = 8
+	clones := make([]*ReviewTargetPin, 0, cloneCount)
+	for range cloneCount {
+		clone, err := pin.cloneFor(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		clones = append(clones, clone)
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pin.Close(); err != nil {
+		t.Fatalf("owner Close() was not idempotent: %v", err)
+	}
+	detached := filepath.Join(fixture.root, "detached-review-target")
+	if err := os.Rename(target, detached); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	directory, ready, err := clones[0].directory(false)
+	if err != nil || !ready {
+		t.Fatalf("retained clone lost detached authority: ready=%v err=%v", ready, err)
+	}
+	if err := directory.EnsureDirectory("capability-only", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := clones[0].Recheck(projectRoot, vaultRoot); err == nil {
+		t.Fatal("namespace alarm accepted the ordinary replacement")
+	}
+
+	errorsFound := make(chan error, cloneCount)
+	var wait stdsync.WaitGroup
+	for _, clone := range clones {
+		clone := clone
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			directory, ready, err := clone.directory(false)
+			if err == nil && !ready {
+				err = errors.New("retained target unexpectedly became unavailable")
+			}
+			if err == nil {
+				_, err = directory.Root.Stat(".")
+			}
+			if closeErr := clone.Close(); err == nil {
+				err = closeErr
+			}
+			errorsFound <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, clone := range clones {
+		if err := clone.Close(); err != nil {
+			t.Fatalf("clone Close() was not idempotent: %v", err)
+		}
+	}
+	if _, _, err := clones[0].directory(false); err == nil {
+		t.Fatal("closed capability remained usable")
+	}
+	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+		t.Fatalf("ordinary replacement received trusted writes: entries=%v err=%v", entries, err)
+	}
+	if info, err := os.Stat(filepath.Join(detached, "capability-only")); err != nil || !info.IsDir() {
+		t.Fatalf("detached authority did not receive rooted operation: info=%v err=%v", info, err)
+	}
+}
+
 func TestMutatingEntrypointsAuthenticateReviewTargetBeforeMigrationOrRecovery(t *testing.T) {
 	for _, test := range []struct {
 		name string
@@ -1904,6 +2130,213 @@ func TestMutatingEntrypointsAuthenticateReviewTargetBeforeMigrationOrRecovery(t 
 			}
 		})
 	}
+}
+
+// Reopening VaultReviewPath after a potentially long sync-lock wait lets an
+// ordinary replacement become trusted state. Each mutating entrypoint must
+// continue only through the exact target capability retained by NewEngine.
+func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
+	t.Run("reconcile", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		writeV2EngineFixture(t, fixture)
+		engine, err := NewEngine(fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer engine.Close()
+		if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+			t.Fatal(err)
+		}
+		projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+		projectBody := readDerivedTestFile(t, projectPath)
+		projectBody = bytes.Replace(projectBody, []byte("Skill + 本地 CLI"), []byte("Pinned reconcile authority"), 1)
+		if !bytes.Contains(projectBody, []byte("Pinned reconcile authority")) {
+			t.Fatal("reconcile fixture edit did not apply")
+		}
+		if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		detached := replaceReviewTargetWhileEntrypointWaits(t, fixture, engine, func() error {
+			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+			return err
+		})
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); !bytes.Contains(got, []byte("Pinned reconcile authority")) {
+			t.Fatalf("reconcile did not use pinned detached target: %q", got)
+		}
+	})
+
+	t.Run("machine ledger repair", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		writeV2EngineFixture(t, fixture)
+		engine, err := NewEngine(fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer engine.Close()
+		if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+			t.Fatal(err)
+		}
+		projectLedger := readDerivedTestFile(t, filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
+		targetLedger := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "ledger.json")
+		if err := os.WriteFile(targetLedger, []byte("repair through pinned target\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		detached := replaceReviewTargetWhileEntrypointWaits(t, fixture, engine, func() error {
+			_, err := engine.RepairMachineLedger(t.Context())
+			return err
+		})
+		if got := readDerivedTestFile(t, filepath.Join(detached, ".session-reviewer", "ledger.json")); !bytes.Equal(got, projectLedger) {
+			t.Fatal("repair did not use pinned detached target")
+		}
+	})
+
+	t.Run("conflict resolution", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		writeV2EngineFixture(t, fixture)
+		engine, err := NewEngine(fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer engine.Close()
+		if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+			t.Fatal(err)
+		}
+		projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+		targetPath := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), "项目回顾.md")
+		base := readDerivedTestFile(t, projectPath)
+		projectBody := bytes.Replace(base, []byte("Skill + 本地 CLI"), []byte("Pinned resolution project"), 1)
+		targetBody := bytes.Replace(base, []byte("Skill + 本地 CLI"), []byte("Pinned resolution vault"), 1)
+		if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(targetPath, targetBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		conflicted, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+		if err != nil || len(conflicted.Conflicts) != 1 {
+			t.Fatalf("conflicted=%+v err=%v", conflicted, err)
+		}
+
+		detached := replaceReviewTargetWhileEntrypointWaits(t, fixture, engine, func() error {
+			_, err := engine.Resolve(t.Context(), Resolution{ConflictID: conflicted.Conflicts[0], Action: AcceptProject})
+			return err
+		})
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); !bytes.Contains(got, []byte("Pinned resolution project")) {
+			t.Fatalf("resolve did not use pinned detached target: %q", got)
+		}
+	})
+
+	t.Run("transaction recovery", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		writeV2EngineFixture(t, fixture)
+		engine, err := NewEngine(fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer engine.Close()
+		if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+			t.Fatal(err)
+		}
+		projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+		projectBody := readDerivedTestFile(t, projectPath)
+		projectBody = bytes.Replace(projectBody, []byte("信任链与 dry-run 边界修复"), []byte("Pinned recovery authority"), 1)
+		if !bytes.Contains(projectBody, []byte("Pinned recovery authority")) {
+			t.Fatal("recovery fixture edit did not apply")
+		}
+		if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		engine.writer.beforeWrite = func(side Side, _ *os.Root, _ string) error {
+			if side == SideVault {
+				return errors.New("leave transaction for recovery")
+			}
+			return nil
+		}
+		if report, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil || len(report.Errors) == 0 {
+			t.Fatalf("failed to stage recovery transaction: report=%+v err=%v", report, err)
+		}
+		engine.writer.beforeWrite = nil
+
+		detached := replaceReviewTargetWhileEntrypointWaits(t, fixture, engine, func() error {
+			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+			return err
+		})
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目历史.md")); !bytes.Contains(got, []byte("Pinned recovery authority")) {
+			t.Fatalf("transaction recovery did not use pinned detached target: %q", got)
+		}
+	})
+
+	t.Run("legacy migration", func(t *testing.T) {
+		fixture := newEngineFixture(t)
+		completeLegacyFixtureForMigration(t, fixture)
+		copyLegacyReviewToVault(t, fixture)
+		engine, err := NewEngine(fixture.options())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer engine.Close()
+
+		detached := replaceReviewTargetWhileEntrypointWaits(t, fixture, engine, func() error {
+			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+			return err
+		})
+		if _, err := os.Stat(filepath.Join(detached, "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy file was not retired through pinned target: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(detached, "项目回顾.md")); err != nil {
+			t.Fatalf("migration was not published through pinned target: %v", err)
+		}
+	})
+}
+
+func replaceReviewTargetWhileEntrypointWaits(t *testing.T, fixture engineFixture, engine *Engine, run func() error) string {
+	t.Helper()
+	blocker, err := project.AcquireProjectLock(engine.data.Root, "locks/sync.lock", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := make(chan struct{})
+	var once stdsync.Once
+	engine.beforeLock = func() error {
+		once.Do(func() { close(reached) })
+		return nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- run() }()
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		_ = blocker.Release()
+		t.Fatal("entrypoint did not reach the held sync lock")
+	}
+	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	detached := filepath.Join(fixture.root, "detached-"+strings.ReplaceAll(t.Name(), "/", "-"))
+	if err := os.Rename(target, detached); err != nil {
+		_ = blocker.Release()
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		_ = blocker.Release()
+		t.Fatal(err)
+	}
+	if err := blocker.Release(); err != nil {
+		t.Fatal(err)
+	}
+	err = <-done
+	engine.beforeLock = nil
+	if err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+		t.Fatalf("entrypoint error=%v, want post-operation namespace identity failure", err)
+	}
+	entries, readErr := os.ReadDir(target)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("ordinary replacement received trusted writes: %v", entries)
+	}
+	return detached
 }
 
 func writeFixtureDecision(t *testing.T, fixture engineFixture, relative string) {

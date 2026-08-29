@@ -43,7 +43,7 @@ type MappingPin struct {
 	syncData *pathguard.Directory
 	mapping  config.ProjectMapping
 	config   configNamespacePin
-	target   syncengine.ReviewTargetPin
+	target   *syncengine.ReviewTargetPin
 }
 
 type configNamespacePin struct {
@@ -151,7 +151,7 @@ func (pin *MappingPin) Close() error {
 	if pin == nil {
 		return nil
 	}
-	return errors.Join(closeDirectory(pin.syncData), closeDirectory(pin.vault), closeDirectory(pin.project), closeDirectory(pin.data))
+	return errors.Join(pin.target.Close(), closeDirectory(pin.syncData), closeDirectory(pin.vault), closeDirectory(pin.project), closeDirectory(pin.data))
 }
 
 // Recheck authenticates the current namespace against this pin without
