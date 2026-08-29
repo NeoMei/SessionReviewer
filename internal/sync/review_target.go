@@ -54,10 +54,12 @@ type reviewTargetState struct {
 	remaining   []string
 	closed      bool
 
-	// afterCreateIdentity is a test-only adversarial namespace seam. The
-	// production value is nil; identity continuity below remains mandatory.
-	afterCreateIdentity func(*os.Root, string) error
-	afterCreatePinned   func(*pathguard.Directory) error
+	// These are test-only adversarial namespace seams around creation. Their
+	// production values are nil; the rechecks and identity continuity below
+	// remain mandatory.
+	beforeTargetMutation func(*pathguard.Directory, string) error
+	afterCreateIdentity  func(*os.Root, string) error
+	afterCreatePinned    func(*pathguard.Directory) error
 }
 
 // PinReviewTarget requires Project and the editable Vault review subtree to be
@@ -234,7 +236,22 @@ func (binding *ReviewTargetPin) directory(create bool) (*pathguard.Directory, bo
 		if err := reviewTargetLeafStillUnclaimed(state.current, component, state.caseMode); err != nil {
 			return nil, false, err
 		}
-		next, err := createPinnedReviewTargetChild(state.current, component, state.caseMode, state.afterCreateIdentity)
+		beforeMutation := func() error {
+			if state.beforeTargetMutation != nil {
+				if err := state.beforeTargetMutation(state.current, component); err != nil {
+					return err
+				}
+			}
+			return state.recheckNamespaceLocked(project, vault, data)
+		}
+		next, err := createPinnedReviewTargetChild(state.current, component, state.caseMode, beforeMutation, func(created *pathguard.Directory) error {
+			if state.beforeTargetMutation != nil {
+				if err := state.beforeTargetMutation(state.current, component); err != nil {
+					return err
+				}
+			}
+			return state.recheckNamespaceAtLocked(project, vault, data, created, state.remaining[1:])
+		}, state.afterCreateIdentity)
 		if err != nil {
 			return nil, false, err
 		}
@@ -349,18 +366,22 @@ func closeReviewTargetRoots(project, vault, data *pathguard.Directory) {
 }
 
 func (state *reviewTargetState) recheckNamespaceLocked(project, vault, data *pathguard.Directory) error {
-	opened, remaining, err := pathguard.OpenDeepest(state.full)
+	return state.recheckNamespaceAtLocked(project, vault, data, state.current, state.remaining)
+}
+
+func (state *reviewTargetState) recheckNamespaceAtLocked(project, vault, data, current *pathguard.Directory, expectedRemaining []string) error {
+	opened, actualRemaining, err := pathguard.OpenDeepest(state.full)
 	if err != nil {
 		return errors.New("vault review target identity changed")
 	}
 	defer opened.Close()
-	if !os.SameFile(state.current.Info(), opened.Info()) || !sameReviewTargetComponents(state.remaining, remaining) ||
+	if current == nil || current.Info() == nil || !os.SameFile(current.Info(), opened.Info()) || !sameReviewTargetComponents(expectedRemaining, actualRemaining) ||
 		!opened.ContainsIdentity(vault.Info()) ||
-		vaultTargetOverlapsProject(state.full, project, opened, len(remaining) == 0, state.caseMode) ||
-		targetOverlapsDirectory(opened, len(remaining) == 0, data) {
+		vaultTargetOverlapsProject(state.full, project, opened, len(actualRemaining) == 0, state.caseMode) ||
+		targetOverlapsDirectory(opened, len(actualRemaining) == 0, data) {
 		return errors.New("vault review target identity changed")
 	}
-	if err := verifyEquivalentReviewTargetPath(state.reviewPath, state.caseMode, vault, state.current, state.remaining); err != nil {
+	if err := verifyEquivalentReviewTargetPath(state.reviewPath, state.caseMode, vault, current, expectedRemaining); err != nil {
 		return err
 	}
 	return nil
@@ -373,9 +394,14 @@ func firstDirectory(values []*pathguard.Directory) *pathguard.Directory {
 	return values[0]
 }
 
-func createPinnedReviewTargetChild(parent *pathguard.Directory, component string, caseMode platform.CaseMode, afterCreateIdentity func(*os.Root, string) error) (*pathguard.Directory, error) {
+func createPinnedReviewTargetChild(parent *pathguard.Directory, component string, caseMode platform.CaseMode, beforeCreate func() error, beforeProtect func(*pathguard.Directory) error, afterCreateIdentity func(*os.Root, string) error) (*pathguard.Directory, error) {
 	if parent == nil || parent.Root == nil || component == "" || component == "." || component == ".." || strings.ContainsAny(component, `/\`) {
 		return nil, errors.New("vault review target creation capability is invalid")
+	}
+	if beforeCreate != nil {
+		if err := beforeCreate(); err != nil {
+			return nil, err
+		}
 	}
 	if err := parent.Root.Mkdir(component, 0o700); err != nil {
 		return nil, errors.New("vault review target was claimed by another namespace entry")
@@ -396,10 +422,21 @@ func createPinnedReviewTargetChild(parent *pathguard.Directory, component string
 		}
 		return nil, errors.New("created vault review target is redirected or changed")
 	}
-	modeHandle, err := child.Open(".")
+	modeHandle, err := openReviewTargetSecurityHandle(parent.Root, component)
 	if err != nil {
 		_ = child.Close()
 		return nil, errors.New("created vault review target cannot be protected")
+	}
+	if beforeProtect != nil {
+		pending := &pathguard.Directory{
+			Root: child, Path: filepath.Join(parent.Path, component),
+			Ancestors: append(append([]os.FileInfo(nil), parent.Ancestors...), opened),
+		}
+		if err := beforeProtect(pending); err != nil {
+			_ = modeHandle.Close()
+			_ = child.Close()
+			return nil, err
+		}
 	}
 	protectErr := protectReviewTargetDirectory(modeHandle)
 	closeErr := modeHandle.Close()
@@ -472,13 +509,18 @@ type reviewTargetEquivalentCandidate struct {
 
 func validateReviewTargetEquivalentCandidates(component string, expected os.FileInfo, candidates []reviewTargetEquivalentCandidate) error {
 	folder := cases.Fold()
-	wanted := folder.String(norm.NFC.String(component))
+	configured := norm.NFC.String(component)
+	wanted := folder.String(configured)
 	matches := 0
 	for _, candidate := range candidates {
-		if folder.String(norm.NFC.String(candidate.name)) != wanted {
+		candidateName := norm.NFC.String(candidate.name)
+		if folder.String(candidateName) != wanted {
 			continue
 		}
 		matches++
+		if candidateName != configured {
+			return errors.New("vault review target equivalent alias has the wrong spelling")
+		}
 		if expected != nil && (candidate.info == nil || !os.SameFile(expected, candidate.info)) {
 			return errors.New("vault review target equivalent alias changed identity")
 		}

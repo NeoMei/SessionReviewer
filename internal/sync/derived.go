@@ -298,7 +298,7 @@ func (engine *Engine) writeMachineSide(ctx context.Context, side Side, relative 
 		return errors.New("machine ledger changed after planning")
 	}
 	if parent := path.Dir(relative); parent != "." {
-		if err := directory.EnsureDirectory(parent, 0o700); err != nil {
+		if err := engine.ensureDirectory(side, directory, parent, 0o700); err != nil {
 			return err
 		}
 	}
@@ -537,7 +537,7 @@ func (engine *Engine) writeDerivedSide(ctx context.Context, side Side, plan deri
 			continue
 		}
 		if parent := path.Dir(relative); parent != "." {
-			if err := directory.EnsureDirectory(parent, 0o700); err != nil {
+			if err := engine.ensureDirectory(side, directory, parent, 0o700); err != nil {
 				return err
 			}
 		}

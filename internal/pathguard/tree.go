@@ -32,6 +32,12 @@ type treeParentIdentity struct {
 // root. Every component is opened and identity-checked before it becomes the
 // parent for the next component.
 func (directory *Directory) EnsureDirectory(relative string, perm fs.FileMode) error {
+	return directory.EnsureDirectoryChecked(relative, perm, nil)
+}
+
+// EnsureDirectoryChecked invokes checkpoint at the rooted atomic creation
+// boundaries and immediately before handle-based protection of each component.
+func (directory *Directory) EnsureDirectoryChecked(relative string, perm fs.FileMode, checkpoint func() error) error {
 	components, err := cleanTreeRelative(relative, false)
 	if err != nil {
 		return err
@@ -45,7 +51,7 @@ func (directory *Directory) EnsureDirectory(relative string, perm fs.FileMode) e
 	}
 	defer func() { _ = current.Close() }()
 	for _, component := range components {
-		if err := atomicfile.EnsureRootDir(current, component, perm); err != nil {
+		if err := atomicfile.EnsureRootDirChecked(current, component, perm, checkpoint); err != nil {
 			return fmt.Errorf("ensure directory component: %w", err)
 		}
 		before, err := current.Lstat(component)
@@ -66,7 +72,13 @@ func (directory *Directory) EnsureDirectory(relative string, perm fs.FileMode) e
 			_ = next.Close()
 			return fmt.Errorf("open ensured directory mode handle: %w", err)
 		}
-		chmodErr := file.Chmod(perm)
+		var chmodErr error
+		if checkpoint != nil {
+			chmodErr = checkpoint()
+		}
+		if chmodErr == nil {
+			chmodErr = file.Chmod(perm)
+		}
 		closeErr := file.Close()
 		if err := errors.Join(chmodErr, closeErr); err != nil {
 			_ = next.Close()
@@ -100,6 +112,12 @@ func (directory *Directory) ReadRegularOptional(relative string, max int64) ([]b
 // tree only when its stable SHA-256 matches the caller-authenticated value.
 // A missing leaf is already converged and succeeds without mutation.
 func (directory *Directory) RemoveRegularIfHashMatches(relative, expectedHash string) error {
+	return directory.RemoveRegularIfHashMatchesChecked(relative, expectedHash, nil)
+}
+
+// RemoveRegularIfHashMatchesChecked keeps the rooted path/content checks and
+// invokes checkpoint immediately before the final authenticated unlink.
+func (directory *Directory) RemoveRegularIfHashMatchesChecked(relative, expectedHash string, checkpoint func() error) error {
 	components, err := cleanTreeRelative(relative, false)
 	if err != nil {
 		return err
@@ -139,7 +157,7 @@ func (directory *Directory) RemoveRegularIfHashMatches(relative, expectedHash st
 		openedRoots = append(openedRoots, next)
 		current = next
 	}
-	if err := atomicfile.RemoveRootFileIfHashMatches(current, components[len(components)-1], expectedHash); err != nil {
+	if err := atomicfile.RemoveRootFileIfHashMatchesChecked(current, components[len(components)-1], expectedHash, checkpoint); err != nil {
 		return err
 	}
 	for _, parent := range parents {

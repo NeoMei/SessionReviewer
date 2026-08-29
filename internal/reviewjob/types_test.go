@@ -236,6 +236,68 @@ func TestJobValidationRejectsPublicationIntentWithoutExactPayload(t *testing.T) 
 	}
 }
 
+func TestJobValidationEnforcesFiniteApplyRecoveryErrorMatrix(t *testing.T) {
+	applyRecovery := func(state State, code ErrorCode, attempt int) Job {
+		job := validJobFixture()
+		job.State = state
+		job.Phase = Preflight
+		job.Error = SafeError{Code: code}
+		if attempt != 0 {
+			job.Attempt = attempt
+		}
+		job.PacketDigest = "sha256:" + strings.Repeat("a", 64)
+		job.ResultDigest = "sha256:" + strings.Repeat("b", 64)
+		job.PayloadState = PayloadApplyRecovery
+		job.PayloadRetainedFor = ApplyRecovery
+		job.PayloadPublications = []PayloadPublication{
+			{Kind: PayloadPacket, Name: packetWorkName, Digest: job.PacketDigest, State: PayloadApplyRecovery, CleanupAuthority: PayloadCleanupAfterReceipt},
+			{Kind: PayloadProposal, Name: proposalWorkName, Digest: job.ResultDigest, State: PayloadApplyRecovery, CleanupAuthority: PayloadCleanupAfterReceipt},
+		}
+		if state == Failed {
+			job.Phase = ""
+			job.Owner = Owner{}
+			job.CompletedAt = job.UpdatedAt
+		}
+		return job
+	}
+	for _, test := range []struct {
+		name    string
+		state   State
+		code    ErrorCode
+		attempt int
+		valid   bool
+	}{
+		{name: "running without terminal error", state: Running, valid: true},
+		{name: "retrying without terminal error", state: Retrying, valid: true},
+		{name: "cancel requested without terminal error", state: CancelRequested, valid: true},
+		{name: "failed apply recovery", state: Failed, code: ApplyRecovery, valid: true},
+		{name: "failed retry agent unconfigured", state: Failed, code: AgentUnconfigured, attempt: 2, valid: true},
+		{name: "failed retry agent incompatible", state: Failed, code: AgentIncompatible, attempt: 2, valid: true},
+		{name: "failed first attempt agent unconfigured", state: Failed, code: AgentUnconfigured},
+		{name: "failed first attempt agent incompatible", state: Failed, code: AgentIncompatible},
+		{name: "active apply recovery error", state: Running, code: ApplyRecovery},
+		{name: "failed missing error", state: Failed},
+		{name: "failed proposal contradiction", state: Failed, code: ProposalRejected},
+		{name: "failed sync conflict contradiction", state: Failed, code: SyncConflict},
+		{name: "failed sync partial contradiction", state: Failed, code: SyncPartial},
+		{name: "failed cancellation contradiction", state: Failed, code: AgentCancelled},
+		{name: "failed auth contradiction", state: Failed, code: AgentAuth},
+		{name: "failed busy contradiction", state: Failed, code: AgentBusy},
+		{name: "failed timeout contradiction", state: Failed, code: AgentTimeout},
+		{name: "failed tool contradiction", state: Failed, code: AgentToolForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := Validate(applyRecovery(test.state, test.code, test.attempt))
+			if test.valid && err != nil {
+				t.Fatalf("Validate() rejected supported apply recovery: %v", err)
+			}
+			if !test.valid && err == nil {
+				t.Fatal("Validate() accepted contradictory apply-recovery state")
+			}
+		})
+	}
+}
+
 func validJobFixture() Job {
 	created := time.Date(2026, 8, 28, 4, 0, 0, 0, time.UTC)
 	return Job{

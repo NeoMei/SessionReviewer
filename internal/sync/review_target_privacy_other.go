@@ -6,6 +6,13 @@ import (
 	"os"
 )
 
+func openReviewTargetSecurityHandle(parent *os.Root, component string) (*os.File, error) {
+	if parent == nil {
+		return nil, os.ErrInvalid
+	}
+	return parent.Open(component)
+}
+
 func protectReviewTargetDirectory(file *os.File) error {
 	if file == nil {
 		return os.ErrInvalid

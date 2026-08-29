@@ -2214,6 +2214,135 @@ func TestReviewTargetPinRechecksRelocationBetweenMissingComponentCreates(t *test
 	}
 }
 
+func TestReviewTargetPinRechecksRelocationAtMissingComponentMutationBoundary(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		reviewPath string
+		seedParent string
+	}{
+		{name: "one component", reviewPath: "Missing"},
+		{name: "nested component", reviewPath: "Existing/Leaf", seedParent: "Existing"},
+	} {
+		for _, destination := range []string{"project", "data"} {
+			t.Run(test.name+"/"+destination, func(t *testing.T) {
+				fixture := newEngineFixture(t)
+				if test.seedParent != "" {
+					if err := os.Mkdir(filepath.Join(fixture.vault, test.seedParent), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
+				projectRoot, err := pathguard.Open(fixture.project)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer projectRoot.Close()
+				vaultRoot, err := pathguard.Open(fixture.vault)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer vaultRoot.Close()
+				dataRoot, err := pathguard.Open(fixture.data)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer dataRoot.Close()
+				pin, err := PinReviewTarget(test.reviewPath, platform.CaseSensitive, projectRoot, vaultRoot, dataRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pin.Close()
+				destinationRoot := fixture.project
+				if destination == "data" {
+					destinationRoot = fixture.data
+				}
+				var relocated, replacement string
+				pin.state.beforeTargetMutation = func(parent *pathguard.Directory, _ string) error {
+					pin.state.beforeTargetMutation = nil
+					relocated = filepath.Join(destinationRoot, "relocated-missing-parent-"+strings.ReplaceAll(t.Name(), "/", "-"))
+					replacement = parent.Path
+					if err := os.Rename(parent.Path, relocated); err != nil {
+						return err
+					}
+					return os.Mkdir(parent.Path, 0o700)
+				}
+
+				if _, _, err := pin.directory(true); err == nil {
+					t.Fatal("missing target creation crossed a relocated mutation boundary")
+				}
+				for _, directory := range []string{relocated, replacement} {
+					entries, err := os.ReadDir(directory)
+					if err != nil || len(entries) != 0 {
+						t.Fatalf("mutation-boundary directory changed at %s: entries=%v err=%v", directory, entries, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestReviewTargetPinRechecksRelocationBeforeMissingComponentProtection(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			projectRoot, err := pathguard.Open(fixture.project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer projectRoot.Close()
+			vaultRoot, err := pathguard.Open(fixture.vault)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer vaultRoot.Close()
+			dataRoot, err := pathguard.Open(fixture.data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer dataRoot.Close()
+			pin, err := PinReviewTarget("Missing", platform.CaseSensitive, projectRoot, vaultRoot, dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			pin.state.afterCreateIdentity = func(root *os.Root, component string) error {
+				created, err := root.Open(component)
+				if err != nil {
+					return err
+				}
+				chmodErr := created.Chmod(0o755)
+				return errors.Join(chmodErr, created.Close())
+			}
+			destinationRoot := fixture.project
+			if destination == "data" {
+				destinationRoot = fixture.data
+			}
+			checks := 0
+			relocated := filepath.Join(destinationRoot, "relocated-before-protection-"+destination)
+			pin.state.beforeTargetMutation = func(parent *pathguard.Directory, _ string) error {
+				checks++
+				if checks != 2 {
+					return nil
+				}
+				if err := os.Rename(parent.Path, relocated); err != nil {
+					return err
+				}
+				return os.Mkdir(parent.Path, 0o700)
+			}
+
+			if _, _, err := pin.directory(true); err == nil {
+				t.Fatal("missing target protection crossed a relocated mutation boundary")
+			}
+			createdInfo, err := os.Stat(filepath.Join(relocated, "Missing"))
+			if err != nil || createdInfo.Mode().Perm() != 0o755 {
+				t.Fatalf("relocated target was protected after detachment: mode=%v err=%v", createdInfo, err)
+			}
+			if entries, err := os.ReadDir(fixture.vault); err != nil || len(entries) != 0 {
+				t.Fatalf("replacement Vault received writes: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
 // The pre-create alias scan is not enough: a racer can add a folded/NFC
 // equivalent after the exact Mkdir. The post-create and later recheck scans
 // must bind the sole equivalent entry to the authenticated inode.
@@ -2314,6 +2443,27 @@ func TestReviewTargetEquivalentAliasRaceSnapshotRejectsSecondFoldedEntry(t *test
 	}
 	if err := validateReviewTargetEquivalentCandidates("Review", nil, candidates); err == nil {
 		t.Fatal("pre-create folded alias snapshot was accepted")
+	}
+}
+
+// A sole folded match is still ambiguous authority when its spelling is not
+// the configured case-preserving NFC component. Same-inode aliases must not
+// make a wrong-case namespace entry authoritative.
+func TestReviewTargetEquivalentSnapshotRejectsSoleWrongCaseAliasOfSameInode(t *testing.T) {
+	root := t.TempDir()
+	exactPath := filepath.Join(root, "exact")
+	if err := os.Mkdir(exactPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := os.Lstat(exactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReviewTargetEquivalentCandidates("Review", exact, []reviewTargetEquivalentCandidate{{
+		name: "review",
+		info: exact,
+	}}); err == nil {
+		t.Fatal("sole wrong-case alias of the authenticated inode was accepted")
 	}
 }
 
@@ -2521,6 +2671,293 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			t.Fatalf("migration published through a detached target: %v", err)
 		}
 	})
+}
+
+// Entry and deferred checks leave a final race window: the retained target can
+// be moved beneath Project/Data after its immediate parent is pinned but before
+// atomic publication. The publication callback must re-prove the configured
+// namespace and current disjoint ancestry before creating any temporary bytes.
+func TestVaultAtomicPublicationRechecksRelocationAtTheMutationBoundary(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			writeV2EngineFixture(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+				t.Fatal(err)
+			}
+
+			projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+			projectBody := readDerivedTestFile(t, projectPath)
+			projectBody = bytes.Replace(projectBody, []byte("Skill + 本地 CLI"), []byte("mutation-boundary update"), 1)
+			if !bytes.Contains(projectBody, []byte("mutation-boundary update")) {
+				t.Fatal("publication fixture edit did not apply")
+			}
+			if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			before := readDerivedTestFile(t, filepath.Join(target, "项目回顾.md"))
+			destinationRoot := fixture.project
+			if destination == "data" {
+				destinationRoot = fixture.data
+			}
+			relocated := filepath.Join(destinationRoot, "relocated-at-publication")
+			var once stdsync.Once
+			engine.writer.beforeWrite = func(side Side, _ *os.Root, _ string) error {
+				if side != SideVault {
+					return nil
+				}
+				var moveErr error
+				once.Do(func() {
+					moveErr = os.Rename(target, relocated)
+					if moveErr == nil {
+						moveErr = os.MkdirAll(target, 0o700)
+					}
+				})
+				return moveErr
+			}
+			_, err = engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+			if err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+				t.Fatalf("reconcile error=%v, want mutation-boundary identity failure", err)
+			}
+			if got := readDerivedTestFile(t, filepath.Join(relocated, "项目回顾.md")); !bytes.Equal(got, before) {
+				t.Fatal("atomic publication changed bytes through relocated target authority")
+			}
+			entries, err := os.ReadDir(target)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("replacement namespace received writes: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestVaultAtomicRecoveryCleanupRechecksRelocationBeforeRemovingRollbackAlias(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			oldBody := []byte("old authenticated body\n")
+			leaf := filepath.Join(target, "state.md")
+			if err := os.WriteFile(leaf, oldBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(leaf, atomicfile.BackupPath(leaf)); err != nil {
+				t.Fatal(err)
+			}
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			before := snapshotFixtureTree(t, target)
+			destinationRoot := fixture.project
+			if destination == "data" {
+				destinationRoot = fixture.data
+			}
+			relocation := &vaultMutationRelocation{
+				target:    target,
+				relocated: filepath.Join(destinationRoot, "relocated-rollback-"+destination),
+			}
+			checks := 0
+			engine.beforeVaultMutation = func(class vaultMutationClass) error {
+				if class != vaultMutationPublish {
+					return nil
+				}
+				checks++
+				if checks != 1 {
+					return nil
+				}
+				if err := os.Rename(relocation.target, relocation.relocated); err != nil {
+					return err
+				}
+				if err := os.MkdirAll(relocation.target, 0o700); err != nil {
+					return err
+				}
+				relocation.moved = true
+				return nil
+			}
+			err = engine.writer.WriteIfUnchanged(t.Context(), SideVault, "state.md", []byte("new body\n"), 0o600, oldBody, true)
+			if err == nil {
+				t.Fatal("checked write ignored recovery-boundary relocation")
+			}
+			relocation.assertUnchanged(t, before)
+		})
+	}
+}
+
+func TestVaultDirectoryCreationRechecksRelocationAtTheMutationBoundary(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			before := snapshotFixtureTree(t, target)
+			relocation := installVaultMutationRelocation(t, fixture, engine, vaultMutationClass("directory-create"), destination)
+
+			err = engine.ensureDirectory(SideVault, engine.vault, "new-parent", 0o700)
+			if err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+				t.Fatalf("ensure directory error=%v, want identity failure", err)
+			}
+			relocation.assertUnchanged(t, before)
+		})
+	}
+}
+
+func TestLegacyVaultRetirementRechecksEveryRemovalMutation(t *testing.T) {
+	for _, mutation := range []struct {
+		name  string
+		class vaultMutationClass
+		seed  func(*testing.T, string) legacyVaultRetirement
+	}{
+		{
+			name:  "file delete",
+			class: vaultMutationClass("file-delete"),
+			seed: func(t *testing.T, target string) legacyVaultRetirement {
+				body := []byte("authenticated legacy bytes\n")
+				if err := os.WriteFile(filepath.Join(target, "legacy.md"), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return legacyVaultRetirement{files: map[string]string{"legacy.md": syncdoc.ContentHash(body)}}
+			},
+		},
+		{
+			name:  "directory delete",
+			class: vaultMutationClass("directory-delete"),
+			seed: func(t *testing.T, target string) legacyVaultRetirement {
+				if err := os.Mkdir(filepath.Join(target, "empty-legacy"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return legacyVaultRetirement{directories: []string{"empty-legacy"}}
+			},
+		},
+	} {
+		for _, destination := range []string{"project", "data"} {
+			t.Run(mutation.name+"/"+destination, func(t *testing.T) {
+				fixture := newEngineFixture(t)
+				target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+				if err := os.MkdirAll(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				retirement := mutation.seed(t, target)
+				engine, err := NewEngine(fixture.options())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer engine.Close()
+				before := snapshotFixtureTree(t, target)
+				relocation := installVaultMutationRelocation(t, fixture, engine, mutation.class, destination)
+
+				if err := retirement.apply(engine); err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+					t.Fatalf("retirement error=%v, want %s identity failure", err, mutation.class)
+				}
+				relocation.assertUnchanged(t, before)
+			})
+		}
+	}
+}
+
+func TestVaultTransactionRecoveryRechecksRelocationAtWriteBoundary(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			writeV2EngineFixture(t, fixture)
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+			if _, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+				t.Fatal(err)
+			}
+			projectPath := filepath.Join(fixture.project, "docs", "session-review", "项目历史.md")
+			projectBody := readDerivedTestFile(t, projectPath)
+			projectBody = bytes.Replace(projectBody, []byte("信任链与 dry-run 边界修复"), []byte("mutation recovery boundary"), 1)
+			if !bytes.Contains(projectBody, []byte("mutation recovery boundary")) {
+				t.Fatal("recovery fixture edit did not apply")
+			}
+			if err := os.WriteFile(projectPath, projectBody, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			engine.writer.beforeWrite = func(side Side, _ *os.Root, _ string) error {
+				if side == SideVault {
+					return errors.New("stage transaction recovery")
+				}
+				return nil
+			}
+			if report, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI}); err != nil || len(report.Errors) == 0 {
+				t.Fatalf("stage recovery report=%+v err=%v", report, err)
+			}
+			engine.writer.beforeWrite = nil
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			before := snapshotFixtureTree(t, target)
+			relocation := installVaultMutationRelocation(t, fixture, engine, vaultMutationPublish, destination)
+
+			_, err = engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
+			if err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
+				t.Fatalf("recovery error=%v, want write-boundary identity failure", err)
+			}
+			relocation.assertUnchanged(t, before)
+		})
+	}
+}
+
+type vaultMutationRelocation struct {
+	target    string
+	relocated string
+	moved     bool
+}
+
+func installVaultMutationRelocation(t *testing.T, fixture engineFixture, engine *Engine, class vaultMutationClass, destination string) *vaultMutationRelocation {
+	t.Helper()
+	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	destinationRoot := fixture.project
+	if destination == "data" {
+		destinationRoot = fixture.data
+	}
+	relocation := &vaultMutationRelocation{target: target, relocated: filepath.Join(destinationRoot, "relocated-"+strings.ReplaceAll(t.Name(), "/", "-"))}
+	engine.beforeVaultMutation = func(got vaultMutationClass) error {
+		if got != class || relocation.moved {
+			return nil
+		}
+		if err := os.Rename(relocation.target, relocation.relocated); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(relocation.target, 0o700); err != nil {
+			return err
+		}
+		relocation.moved = true
+		return nil
+	}
+	return relocation
+}
+
+func (relocation *vaultMutationRelocation) assertUnchanged(t *testing.T, before []string) {
+	t.Helper()
+	if relocation == nil || !relocation.moved {
+		t.Fatal("mutation boundary hook did not relocate the target")
+	}
+	if got := snapshotFixtureTree(t, relocation.relocated); !reflect.DeepEqual(got, before) {
+		t.Fatalf("relocated target bytes changed: before=%v after=%v", before, got)
+	}
+	entries, err := os.ReadDir(relocation.target)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("replacement namespace received writes: entries=%v err=%v", entries, err)
+	}
 }
 
 func replaceReviewTargetWhileEntrypointWaits(t *testing.T, fixture engineFixture, engine *Engine, run func() error) string {

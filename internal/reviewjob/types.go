@@ -133,6 +133,9 @@ type Job struct {
 	State           State                   `json:"state"`
 	Phase           Phase                   `json:"phase,omitempty"`
 	Attempt         int                     `json:"attempt"`
+	RetryRequestID  string                  `json:"retry_request_id,omitempty"`
+	RetryAttempt    int                     `json:"retry_expected_attempt,omitempty"`
+	RetryRevision   int                     `json:"retry_expected_revision,omitempty"`
 
 	FrozenSessions   []FrozenSession         `json:"frozen_sessions"`
 	SessionIndex     int                     `json:"session_index"`
@@ -254,6 +257,14 @@ func Validate(job Job) error {
 	if err := validatePublicCounts(job.Attempt, job.SessionIndex, len(job.FrozenSessions), job.AcceptedPackets, job.AcceptedSessions); err != nil {
 		return err
 	}
+	if job.RetryRequestID == "" {
+		if job.RetryAttempt != 0 || job.RetryRevision != 0 {
+			return errors.New("retry request receipt is incomplete")
+		}
+	} else if !validID(job.RetryRequestID) || job.RetryAttempt <= 0 || job.RetryRevision <= 0 ||
+		job.RetryAttempt >= maxSafeInteger || job.RetryRevision > maxSafeInteger || job.Attempt != job.RetryAttempt+1 {
+		return errors.New("retry request receipt is invalid")
+	}
 	if active(job.State) && job.Phase == "" {
 		return errors.New("active job phase is required")
 	}
@@ -314,8 +325,7 @@ func validatePayloadState(job Job) error {
 		return errors.New("private payload retention reason is invalid")
 	}
 	if job.PayloadState == PayloadApplyRecovery {
-		if (job.State != Failed && job.State != Retrying && job.State != Running && job.State != CancelRequested) ||
-			(job.State == Failed && job.Error.Code == "") || job.PayloadRetainedFor != ApplyRecovery ||
+		if !validApplyRecoveryErrorState(job) || job.PayloadRetainedFor != ApplyRecovery ||
 			job.PacketDigest == "" || job.ResultDigest == "" {
 			return errors.New("apply-recovery payload retention is incomplete")
 		}
@@ -329,6 +339,18 @@ func validatePayloadState(job Job) error {
 		return errors.New("payload publication intent requires an active job")
 	}
 	return nil
+}
+
+func validApplyRecoveryErrorState(job Job) bool {
+	switch job.State {
+	case Running, Retrying, CancelRequested:
+		return job.Error.Code == ""
+	case Failed:
+		return job.Error.Code == ApplyRecovery ||
+			job.Attempt > 1 && (job.Error.Code == AgentUnconfigured || job.Error.Code == AgentIncompatible)
+	default:
+		return false
+	}
 }
 
 func validatePayloadPublications(job Job) error {

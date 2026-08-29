@@ -24,38 +24,45 @@ type cancellationWatchResult struct {
 	err      error
 }
 
+// RetryRequest binds one user intent to the exact failed job revision it was
+// rendered from. RequestID makes transport retries idempotent without treating
+// every later click on an active attempt as the same request.
+type RetryRequest struct {
+	JobID            string
+	ExpectedAttempt  int
+	ExpectedRevision int
+	RequestID        string
+	At               time.Time
+}
+
 // RequestRetry performs the sole failed-to-next-attempt transition. Concurrent
 // clicks converge on one incremented attempt; a durable cancellation request is
 // preserved, and accepted progress, accounting, frozen boundaries, and
 // authenticated payload state are never rewritten.
-func RequestRetry(store Store, jobID string, at time.Time) (Job, int, error) {
-	if at.IsZero() {
-		return Job{}, 0, errors.New("retry time is required")
+func RequestRetry(store Store, request RetryRequest) (Job, int, error) {
+	if !validID(request.JobID) || !validID(request.RequestID) || request.ExpectedAttempt <= 0 ||
+		request.ExpectedAttempt >= maxSafeInteger || request.ExpectedRevision <= 0 || request.ExpectedRevision > maxSafeInteger || request.At.IsZero() {
+		return Job{}, 0, errors.New("retry request is invalid")
 	}
-	at = at.UTC()
+	at := request.At.UTC()
 	for range maxRecoveryTransitionRetries {
-		job, revision, found, err := store.Load(jobID)
+		job, revision, found, err := store.Load(request.JobID)
 		if err != nil || !found {
 			if err != nil {
 				return Job{}, 0, err
 			}
 			return Job{}, 0, os.ErrNotExist
 		}
-		switch job.State {
-		case Retrying:
+		if job.RetryRequestID == request.RequestID {
+			if job.RetryAttempt != request.ExpectedAttempt || job.RetryRevision != request.ExpectedRevision {
+				return Job{}, revision, errors.New("retry request ID was reused with different expectations")
+			}
 			return job, revision, nil
-		case CancelRequested:
-			if job.Phase == Preflight && job.Owner.ID == "" && job.Attempt > 1 {
-				return job, revision, nil
-			}
-			return Job{}, revision, errors.New("review job is not retryable")
-		case Running:
-			if job.Attempt > 1 {
-				return job, revision, nil
-			}
-			return Job{}, revision, errors.New("review job is not retryable")
-		case Failed:
-		default:
+		}
+		if job.Attempt != request.ExpectedAttempt || revision != request.ExpectedRevision {
+			return Job{}, revision, ErrStaleRevision
+		}
+		if job.State != Failed {
 			return Job{}, revision, errors.New("review job is not retryable")
 		}
 		if job.Attempt == maxSafeInteger {
@@ -65,8 +72,8 @@ func RequestRetry(store Store, jobID string, at time.Time) (Job, int, error) {
 		if updatedAt.Before(job.UpdatedAt) {
 			updatedAt = job.UpdatedAt
 		}
-		next, nextRevision, err := store.Update(jobID, revision, func(next *Job) error {
-			if next.State != Failed || next.Attempt != job.Attempt {
+		next, nextRevision, err := store.Update(request.JobID, revision, func(next *Job) error {
+			if next.State != Failed || next.Attempt != request.ExpectedAttempt || next.RetryRequestID == request.RequestID {
 				return ErrStaleRevision
 			}
 			next.State = Retrying
@@ -75,6 +82,9 @@ func RequestRetry(store Store, jobID string, at time.Time) (Job, int, error) {
 			}
 			next.Phase = Preflight
 			next.Attempt++
+			next.RetryRequestID = request.RequestID
+			next.RetryAttempt = request.ExpectedAttempt
+			next.RetryRevision = request.ExpectedRevision
 			next.UpdatedAt = updatedAt
 			next.CompletedAt = time.Time{}
 			next.Owner = Owner{}

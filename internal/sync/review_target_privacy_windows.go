@@ -5,10 +5,56 @@ package sync
 import (
 	"errors"
 	"os"
+	"path/filepath"
+	"strings"
+	"unsafe"
 
 	"github.com/neomei/SessionReviewer/internal/winsecurity"
 	"golang.org/x/sys/windows"
 )
+
+func openReviewTargetSecurityHandle(parent *os.Root, component string) (*os.File, error) {
+	if parent == nil || component == "" || component == "." || component == ".." || strings.ContainsAny(component, `/\\`) {
+		return nil, os.ErrInvalid
+	}
+	parentFile, err := parent.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	defer parentFile.Close()
+	objectName, err := windows.NewNTUnicodeString(component)
+	if err != nil {
+		return nil, err
+	}
+	attributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: windows.Handle(parentFile.Fd()),
+		ObjectName:    objectName,
+	}
+	var handle windows.Handle
+	err = windows.NtCreateFile(
+		&handle,
+		windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE,
+		attributes,
+		&windows.IO_STATUS_BLOCK{},
+		nil,
+		windows.FILE_ATTRIBUTE_DIRECTORY,
+		windows.FILE_SHARE_DELETE|windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		windows.FILE_OPEN,
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+		0,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), filepath.Join(parentFile.Name(), component))
+	if file == nil {
+		_ = windows.CloseHandle(handle)
+		return nil, os.ErrInvalid
+	}
+	return file, nil
+}
 
 func reviewTargetPrivateSDDL() (string, *windows.SID, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
@@ -24,6 +70,10 @@ func protectReviewTargetDirectory(file *os.File) error {
 	if file == nil {
 		return os.ErrInvalid
 	}
+	before, err := reviewTargetSecurityHandleIdentity(file)
+	if err != nil {
+		return err
+	}
 	sddl, owner, err := reviewTargetPrivateSDDL()
 	if err != nil {
 		return err
@@ -36,11 +86,44 @@ func protectReviewTargetDirectory(file *os.File) error {
 	if err != nil || dacl == nil {
 		return errors.New("protected review-target DACL is unavailable")
 	}
-	return windows.SetSecurityInfo(
+	if err := windows.SetSecurityInfo(
 		windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
 		owner, nil, dacl, nil,
+	); err != nil {
+		return err
+	}
+	persistedDescriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()), windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
+	if err != nil || persistedDescriptor == nil || !winsecurity.ProtectedDACLMatches(persistedDescriptor, sddl) {
+		return errors.New("protected review-target DACL did not persist")
+	}
+	gotOwner, _, err := persistedDescriptor.Owner()
+	if err != nil || gotOwner == nil || !gotOwner.Equals(owner) {
+		return errors.New("protected review-target owner changed")
+	}
+	after, err := reviewTargetSecurityHandleIdentity(file)
+	if err != nil || !os.SameFile(before, after) {
+		return errors.New("protected review-target handle identity changed")
+	}
+	return nil
+}
+
+func reviewTargetSecurityHandleIdentity(file *os.File) (os.FileInfo, error) {
+	info, err := file.Stat()
+	if err != nil || info == nil || !info.IsDir() {
+		return nil, errors.New("review-target security handle is not a directory")
+	}
+	var native windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &native); err != nil {
+		return nil, err
+	}
+	if native.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return nil, errors.New("review-target security handle is a reparse point")
+	}
+	return info, nil
 }
 
 func reviewTargetDirectoryProtected(path string, info os.FileInfo) bool {

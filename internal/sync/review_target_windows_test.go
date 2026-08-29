@@ -10,6 +10,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"golang.org/x/sys/windows"
 )
 
 // This is a Task 13 native gate. Cross-compilation in Task 9 proves the test
@@ -68,6 +69,23 @@ func TestWindowsReviewTargetMissingCreationUsesProtectedDACLAndStableIdentity(t 
 					t.Fatal("created component path and handle identities differ")
 				}
 				_ = opened.Close()
+				parent, err := os.OpenRoot(filepath.Dir(current))
+				if err != nil {
+					t.Fatal(err)
+				}
+				securityHandle, err := openReviewTargetSecurityHandle(parent, filepath.Base(current))
+				_ = parent.Close()
+				if err != nil {
+					t.Fatalf("open handle-relative security handle: %v", err)
+				}
+				securityInfo, statErr := securityHandle.Stat()
+				var nativeInfo windows.ByHandleFileInformation
+				nativeErr := windows.GetFileInformationByHandle(windows.Handle(securityHandle.Fd()), &nativeInfo)
+				closeErr := securityHandle.Close()
+				if statErr != nil || nativeErr != nil || closeErr != nil || !os.SameFile(info, securityInfo) ||
+					nativeInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+					t.Fatalf("security handle is redirected or changed: stat=%v native=%v close=%v", statErr, nativeErr, closeErr)
+				}
 			}
 			if info, err := os.Stat(current); err != nil || !os.SameFile(info, target.Info()) {
 				t.Fatalf("returned target identity differs from created leaf: info=%v err=%v", info, err)

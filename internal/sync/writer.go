@@ -51,6 +51,11 @@ type RootedWriter struct {
 	// parent is pinned. Returning nil cannot replace or bypass the real atomic
 	// write through that pinned handle.
 	beforeWrite func(Side, *os.Root, string) error
+
+	// beforeMutation reauthenticates the higher-level namespace capability.
+	// It runs after the adversarial hook, before atomic recovery/temporary
+	// creation, and at every checked publication boundary.
+	beforeMutation func(Side) error
 }
 
 func (writer RootedWriter) Write(ctx context.Context, side Side, relative string, content []byte, mode fs.FileMode) error {
@@ -174,14 +179,20 @@ func (writer RootedWriter) writeAttempt(side Side, directory *pathguard.Director
 			return err
 		}
 	}
+	checkpoint := func() error {
+		if writer.beforeMutation != nil {
+			if err := writer.beforeMutation(side); err != nil {
+				return err
+			}
+		}
+		return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
+	}
 	if expectation != nil {
 		if err := verifyWriterPreimage(parent, leaf, *expectation); err != nil {
 			return err
 		}
 	}
-	return atomicfile.WriteRootFileChecked(parent, leaf, content, mode, func() error {
-		return verifyWriterParentNamespace(directory, parent, parentInfo, parentRelative)
-	})
+	return atomicfile.WriteRootFileChecked(parent, leaf, content, mode, checkpoint)
 }
 
 func verifyWriterPreimage(parent *os.Root, leaf string, expected writerExpectation) error {

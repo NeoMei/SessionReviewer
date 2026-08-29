@@ -75,8 +75,23 @@ func randomRootDirectoryMachineName(prefix string) (string, error) {
 // passed the platform durability operation. Existing directories are resynced
 // so a retry can resolve an earlier create-then-sync failure.
 func EnsureRootDir(root *os.Root, path string, perm fs.FileMode) error {
-	_, err := ensureRootDirCreatedWithOps(root, path, perm, directoryDurabilityOps{
-		syncParent: syncRootDirectoryEntry,
+	return EnsureRootDirChecked(root, path, perm, nil)
+}
+
+// EnsureRootDirChecked revalidates caller authority immediately before every
+// creation/publication/protection mutation used to establish a missing rooted
+// directory. Existing entries invoke no callback unless their handle mode must
+// be protected by the higher-level caller.
+func EnsureRootDirChecked(root *os.Root, path string, perm fs.FileMode, checkpoint func() error) error {
+	var beforePublish func(*os.Root, string, string) error
+	if checkpoint != nil {
+		beforePublish = func(*os.Root, string, string) error { return checkpoint() }
+	}
+	_, err := ensureRootDirPreparedWithOps(root, path, perm, checkpoint, nil, directoryDurabilityOps{
+		beforeParentLock:       checkpoint,
+		beforeCreate:           checkpoint,
+		beforeDirectoryPublish: beforePublish,
+		syncParent:             syncRootDirectoryEntry,
 	})
 	return err
 }
@@ -105,6 +120,8 @@ func EnsureRootDirPrepared(root *os.Root, path string, perm fs.FileMode, beforeP
 
 type directoryDurabilityOps struct {
 	createDirectory              func(*os.Root, string, fs.FileMode) (*os.File, error)
+	beforeParentLock             func() error
+	beforeCreate                 func() error
 	afterStagingIdentity         func(*os.Root, string, string) error
 	beforeDirectoryPublish       func(*os.Root, string, string) error
 	afterStagingPublicationCheck func(*os.Root, string, string) error
@@ -143,6 +160,11 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 		return false, err
 	}
 	defer parent.Close()
+	if ops.beforeParentLock != nil {
+		if err := ops.beforeParentLock(); err != nil {
+			return false, err
+		}
+	}
 	releaseParentLock, err := lockRootDirectoryParent(parent)
 	if err != nil {
 		return false, fmt.Errorf("lock directory creation parent: %w", err)
@@ -161,6 +183,11 @@ func ensureRootDirPreparedWithOps(root *os.Root, path string, perm fs.FileMode, 
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("inspect directory: %w", err)
+	}
+	if ops.beforeCreate != nil {
+		if err := ops.beforeCreate(); err != nil {
+			return false, err
+		}
 	}
 	var creation *rootDirectoryCreation
 	if ops.createDirectory != nil {
@@ -447,15 +474,30 @@ func renameRootWithSync(root *os.Root, oldPath, newPath string, syncParent func(
 
 // RemoveRoot durably removes an entry from its pinned immediate parent.
 func RemoveRoot(root *os.Root, path string) error {
-	return removeRootWithSync(root, path, syncRootDirectoryEntry)
+	return RemoveRootChecked(root, path, nil)
+}
+
+// RemoveRootChecked calls checkpoint through the pinned immediate parent
+// immediately before removing the authenticated entry.
+func RemoveRootChecked(root *os.Root, path string, checkpoint func() error) error {
+	return removeRootWithSyncChecked(root, path, checkpoint, syncRootDirectoryEntry)
 }
 
 func removeRootWithSync(root *os.Root, path string, syncParent func(*os.Root, string) error) error {
+	return removeRootWithSyncChecked(root, path, nil, syncParent)
+}
+
+func removeRootWithSyncChecked(root *os.Root, path string, checkpoint func() error, syncParent func(*os.Root, string) error) error {
 	parent, name, err := openPinnedParent(root, path)
 	if err != nil {
 		return err
 	}
 	defer parent.Close()
+	if checkpoint != nil {
+		if err := checkpoint(); err != nil {
+			return err
+		}
+	}
 	if err := parent.Remove(name); err != nil {
 		return err
 	}

@@ -64,13 +64,17 @@ func TestRetryTransitionIsAtomicIdempotentAndPreservesAcceptedState(t *testing.T
 		err      error
 	}
 	results := make(chan result, 2)
+	retryRequest := RetryRequest{
+		JobID: fixture.job.ID, ExpectedAttempt: job.Attempt, ExpectedRevision: revision,
+		RequestID: "retry-preserve-accepted", At: failedAt.Add(time.Minute),
+	}
 	var start sync.WaitGroup
 	start.Add(2)
 	for range 2 {
 		go func() {
 			start.Done()
 			start.Wait()
-			retried, nextRevision, retryErr := RequestRetry(fixture.store, fixture.job.ID, failedAt.Add(time.Minute))
+			retried, nextRevision, retryErr := RequestRetry(fixture.store, retryRequest)
 			results <- result{job: retried, revision: nextRevision, err: retryErr}
 		}()
 	}
@@ -88,6 +92,81 @@ func TestRetryTransitionIsAtomicIdempotentAndPreservesAcceptedState(t *testing.T
 		!reflect.DeepEqual(stored.FrozenSessions, originalFrozen) {
 		t.Fatalf("retried job lost durable state: job=%#v revision=%d found=%v err=%v", stored, storedRevision, found, err)
 	}
+}
+
+func TestRetryTransitionDistinguishesExactReplayFromDifferentStaleClick(t *testing.T) {
+	newFailed := func(t *testing.T) (workerFixture, Job, int, time.Time) {
+		t.Helper()
+		fixture := newWorkerFixture(t, nil)
+		job, revision, found, err := fixture.store.Load(fixture.job.ID)
+		if err != nil || !found {
+			t.Fatalf("load: found=%v err=%v", found, err)
+		}
+		failedAt := fixture.now.Add(time.Minute)
+		job, revision, err = fixture.store.Update(job.ID, revision, func(job *Job) error {
+			job.State, job.Phase = Failed, ""
+			job.UpdatedAt, job.CompletedAt = failedAt, failedAt
+			job.Error = SafeError{Code: ProposalRejected}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fixture, job, revision, failedAt.Add(time.Minute)
+	}
+
+	t.Run("different click with stale expectation is rejected", func(t *testing.T) {
+		fixture, failed, revision, requestedAt := newFailed(t)
+		first := RetryRequest{JobID: failed.ID, ExpectedAttempt: failed.Attempt, ExpectedRevision: revision, RequestID: "retry-first", At: requestedAt}
+		if _, _, err := RequestRetry(fixture.store, first); err != nil {
+			t.Fatal(err)
+		}
+		different := first
+		different.RequestID = "retry-different"
+		different.At = requestedAt.Add(time.Second)
+		if _, _, err := RequestRetry(fixture.store, different); !errors.Is(err, ErrStaleRevision) {
+			t.Fatalf("different stale retry error=%v, want ErrStaleRevision", err)
+		}
+		reusedID := first
+		reusedID.ExpectedRevision++
+		if _, _, err := RequestRetry(fixture.store, reusedID); err == nil {
+			t.Fatal("retry request ID was reusable with different expected revision")
+		}
+		stored, storedRevision, found, err := fixture.store.Load(failed.ID)
+		if err != nil || !found || stored.Attempt != failed.Attempt+1 || storedRevision != revision+1 {
+			t.Fatalf("stale click mutated retry: job=%#v revision=%d found=%v err=%v", stored, storedRevision, found, err)
+		}
+	})
+
+	t.Run("delayed exact replay returns current failed attempt", func(t *testing.T) {
+		fixture, failed, revision, requestedAt := newFailed(t)
+		request := RetryRequest{JobID: failed.ID, ExpectedAttempt: failed.Attempt, ExpectedRevision: revision, RequestID: "retry-delayed", At: requestedAt}
+		if _, _, err := RequestRetry(fixture.store, request); err != nil {
+			t.Fatal(err)
+		}
+		current, currentRevision, found, err := fixture.store.Load(failed.ID)
+		if err != nil || !found {
+			t.Fatalf("load retry: found=%v err=%v", found, err)
+		}
+		failedAgainAt := requestedAt.Add(time.Minute)
+		current, currentRevision, err = fixture.store.Update(failed.ID, currentRevision, func(job *Job) error {
+			job.State, job.Phase = Failed, ""
+			job.UpdatedAt, job.CompletedAt = failedAgainAt, failedAgainAt
+			job.Owner = Owner{}
+			job.Error = SafeError{Code: ProposalRejected}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		replayed, replayRevision, err := RequestRetry(fixture.store, request)
+		if err != nil || replayRevision != currentRevision || !reflect.DeepEqual(replayed, current) {
+			t.Fatalf("delayed replay=%#v revision=%d err=%v, want unchanged current attempt", replayed, replayRevision, err)
+		}
+		if current.Attempt != failed.Attempt+1 || currentRevision != revision+2 {
+			t.Fatalf("fixture did not stage second failure: job=%#v revision=%d", current, currentRevision)
+		}
+	})
 }
 
 func TestRetryRecoveryResolvesExactApplyBeforePrepareAndPreservesProgress(t *testing.T) {
@@ -128,7 +207,7 @@ func TestRetryRecoveryResolvesExactApplyBeforePrepareAndPreservesProgress(t *tes
 		t.Fatalf("failed apply-recovery job=%#v found=%v err=%v", failed, found, err)
 	}
 	resultDigest := failed.ResultDigest
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute)); err != nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-apply-recovery", fixture.now.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -208,7 +287,7 @@ func TestRetryRecoverySyncsDurableAcceptedCursorWithoutRegeneration(t *testing.T
 	if err != nil || !found || !failed.AcceptedSyncPending || failed.CurrentPacket != packet.NextCursor {
 		t.Fatalf("failed sync job=%#v found=%v err=%v", failed, found, err)
 	}
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute)); err != nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-sync-only", fixture.now.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,7 +355,7 @@ func TestRetryRecoveryReauthenticatesFrozenAgentBeforeApplyReceipt(t *testing.T)
 		t.Fatalf("failed recovery job=%#v found=%v err=%v", failed, found, err)
 	}
 	resultDigest := failed.ResultDigest
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute)); err != nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-stale-agent", fixture.now.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,7 +423,7 @@ func TestCancelRequestedUncertainApplyRetryResolvesBeforeTerminalCancelled(t *te
 	if err := Run(ctx, first); err == nil {
 		t.Fatal("first attempt did not retain uncertain apply")
 	}
-	requested, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute))
+	requested, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-cancelled-receipt", fixture.now.Add(time.Minute)))
 	if err != nil || requested.State != CancelRequested || requested.Phase != Preflight || requested.Attempt != 2 {
 		t.Fatalf("retry did not preserve commit-window cancellation=%#v err=%v", requested, err)
 	}
@@ -374,6 +453,137 @@ func TestCancelRequestedUncertainApplyRetryResolvesBeforeTerminalCancelled(t *te
 		job.Attempt != 2 || job.AcceptedPackets != 1 || job.AcceptedSessions != 1 ||
 		job.AcceptedSyncPending || applyCalls != 1 || syncCalls != 1 || retryAdapter.generateCalls != 0 {
 		t.Fatalf("cancelled recovery=%#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+	}
+}
+
+func TestCancelledRetryWithoutCommitRecoveryFinishesBeforeAgentValidation(t *testing.T) {
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: strings.Repeat("5", 64)},
+	}})
+	job, revision, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	failedAt := fixture.now.Add(time.Minute)
+	_, _, err = fixture.store.Update(job.ID, revision, func(job *Job) error {
+		job.State, job.Phase = Failed, ""
+		job.UpdatedAt, job.CompletedAt = failedAt, failedAt
+		job.CancellationRequested = failedAt
+		job.Error = SafeError{Code: ProposalRejected}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-cancel-before-agent", failedAt.Add(time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) { panic("cancelled retry reached Prepare") },
+		nil,
+		func(context.Context, ApplyRequest) (apply.Result, error) { panic("cancelled retry reached Apply") },
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			panic("cancelled retry reached Sync")
+		},
+		nil,
+	)
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("cancelled retry returned success")
+	}
+	cancelled, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || cancelled.State != Cancelled || cancelled.Error.Code != AgentCancelled || cancelled.Attempt != 2 {
+		t.Fatalf("cancelled retry=%#v found=%v err=%v", cancelled, found, err)
+	}
+}
+
+func TestCancelledRetryWithUnresolvedCommitStillValidatesFrozenAgent(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		mutate   func(*Job)
+		code     ErrorCode
+		syncOnly bool
+	}{
+		{
+			name: "uncertain apply receipt",
+			code: AgentUnconfigured,
+			mutate: func(job *Job) {
+				job.Error = SafeError{Code: ApplyRecovery}
+				job.PacketDigest = "sha256:" + strings.Repeat("a", 64)
+				job.ResultDigest = "sha256:" + strings.Repeat("b", 64)
+				job.PayloadState = PayloadApplyRecovery
+				job.PayloadRetainedFor = ApplyRecovery
+				job.PayloadPublications = []PayloadPublication{
+					{Kind: PayloadPacket, Name: packetWorkName, Digest: job.PacketDigest, State: PayloadApplyRecovery, CleanupAuthority: PayloadCleanupAfterReceipt},
+					{Kind: PayloadProposal, Name: proposalWorkName, Digest: job.ResultDigest, State: PayloadApplyRecovery, CleanupAuthority: PayloadCleanupAfterReceipt},
+				}
+			},
+		},
+		{
+			name:     "accepted mandatory sync",
+			code:     AgentUnconfigured,
+			syncOnly: true,
+			mutate: func(job *Job) {
+				job.Error = SafeError{Code: SyncPartial}
+				job.AcceptedPackets = 1
+				job.CurrentPacket = job.FrozenSessions[0].Upper
+				job.AcceptedSyncPending = true
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newWorkerFixture(t, []FrozenSession{{
+				SessionID: "session-s1", StartedAt: fixtureTime(7),
+				Upper: evidence.CursorBoundary{Line: 1, SourceHash: strings.Repeat("c", 64)},
+			}})
+			job, revision, found, err := fixture.store.Load(fixture.job.ID)
+			if err != nil || !found {
+				t.Fatalf("load: found=%v err=%v", found, err)
+			}
+			failedAt := fixture.now.Add(time.Minute)
+			_, _, err = fixture.store.Update(job.ID, revision, func(job *Job) error {
+				job.State, job.Phase = Failed, ""
+				job.UpdatedAt, job.CompletedAt = failedAt, failedAt
+				job.CancellationRequested = failedAt
+				test.mutate(job)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestID := "retry-cancelled-apply"
+			if test.syncOnly {
+				requestID = "retry-cancelled-sync"
+			}
+			if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, requestID, failedAt.Add(time.Minute))); err != nil {
+				t.Fatal(err)
+			}
+			options := workerRunOptions(
+				fixture,
+				func(context.Context, PrepareRequest) (Prepared, error) { panic("commit recovery reached Prepare") },
+				nil,
+				func(context.Context, ApplyRequest) (apply.Result, error) {
+					panic("commit recovery skipped Agent validation")
+				},
+				func(context.Context, syncproject.Options) (syncengine.Report, error) {
+					panic("mandatory sync skipped Agent validation")
+				},
+				nil,
+			)
+			if err := Run(t.Context(), options); err == nil {
+				t.Fatal("commit recovery without frozen Agent returned success")
+			}
+			stopped, _, found, err := fixture.store.Load(fixture.job.ID)
+			if err != nil || !found || stopped.State != Failed || stopped.Error.Code != test.code ||
+				(stopped.PayloadState == PayloadApplyRecovery) == test.syncOnly || stopped.AcceptedSyncPending != test.syncOnly {
+				t.Fatalf("commit recovery=%#v found=%v err=%v", stopped, found, err)
+			}
+			status, err := ProjectStatus(&stopped, stopped.ProjectID)
+			if err != nil || status.CanSyncOnly != test.syncOnly {
+				t.Fatalf("commit recovery status=%#v err=%v", status, err)
+			}
+		})
 	}
 }
 
@@ -412,7 +622,7 @@ func TestRetryRecoveryFinishesAuthenticatedCleanupPendingBeforePrepare(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, failedAt.Add(time.Minute)); err != nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-cleanup-pending", failedAt.Add(time.Minute))); err != nil {
 		t.Fatal(err)
 	}
 	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
@@ -563,7 +773,7 @@ func TestCancelRequestTransitionMatrixAndDoubleClickAreIdempotent(t *testing.T) 
 
 func TestRetryTransitionRejectsNonFailedTerminalAndPreservesAttemptOnStaleClicks(t *testing.T) {
 	fixture := newWorkerFixture(t, nil)
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute)); err == nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-queued-reject", fixture.now.Add(time.Minute))); err == nil {
 		t.Fatal("RequestRetry accepted queued job")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
@@ -579,7 +789,7 @@ func TestRetryTransitionRejectsNonFailedTerminalAndPreservesAttemptOnStaleClicks
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := RequestRetry(fixture.store, fixture.job.ID, fixture.now.Add(2*time.Minute)); err == nil {
+	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-running-reject", fixture.now.Add(2*time.Minute))); err == nil {
 		t.Fatal("RequestRetry accepted a first-attempt running job as a double click")
 	}
 	stored, storedRevision, _, err := fixture.store.Load(fixture.job.ID)
@@ -595,4 +805,16 @@ func mustMarshalProposal(t *testing.T, value interface{}) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func currentRetryRequest(t *testing.T, store Store, jobID, requestID string, at time.Time) RetryRequest {
+	t.Helper()
+	job, revision, found, err := store.Load(jobID)
+	if err != nil || !found {
+		t.Fatalf("load retry request state: found=%v err=%v", found, err)
+	}
+	return RetryRequest{
+		JobID: jobID, ExpectedAttempt: job.Attempt, ExpectedRevision: revision,
+		RequestID: requestID, At: at,
+	}
 }

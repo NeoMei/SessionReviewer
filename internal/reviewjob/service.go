@@ -274,6 +274,20 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	runner.roots = roots
 	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 
+	cancelWithoutCommitRecovery := runner.retry && runner.job.State == CancelRequested &&
+		!runner.job.AcceptedSyncPending && runner.job.PayloadState != PayloadApplyRecovery
+	if cancelWithoutCommitRecovery {
+		if runner.job.PayloadState == "" {
+			return runner.finishCancelled(errors.New("review cancellation requested"))
+		}
+		work, err := openJobWork(leases, runner.job.ID)
+		if err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
+		runner.work = work
+		defer func() { retErr = errors.Join(retErr, work.close()) }()
+		return runner.recoverRetryState(ctx)
+	}
 	if runner.retry {
 		if options.Agent == nil {
 			return runner.fail(AgentUnconfigured, errors.New("retry lacks its frozen verified Agent"))

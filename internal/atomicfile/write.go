@@ -179,7 +179,7 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 			return err
 		}
 		defer func() { retErr = errors.Join(retErr, rollback.close()) }()
-		if err := reconcileRootRollbackAlias(parent, name, parentGuard); err != nil {
+		if err := reconcileRootRollbackAlias(parent, name, parentGuard, checkpoint); err != nil {
 			return err
 		}
 	}
@@ -302,7 +302,7 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 	return nil
 }
 
-func reconcileRootRollbackAlias(parent *os.Root, destination string, guard rootParentCleanupGuard) error {
+func reconcileRootRollbackAlias(parent *os.Root, destination string, guard rootParentCleanupGuard, checkpoint func() error) error {
 	backupName := BackupPath(destination)
 	backup, err := parent.Lstat(backupName)
 	if errors.Is(err, os.ErrNotExist) {
@@ -319,6 +319,16 @@ func reconcileRootRollbackAlias(parent *os.Root, destination string, guard rootP
 		before, err := parent.Lstat(backupName)
 		if err != nil || !secureAtomicRecoveryFile(before) || !os.SameFile(backup, before) {
 			return errors.New("atomic rollback alias changed before cleanup")
+		}
+		if checkpoint != nil {
+			if err := checkpoint(); err != nil {
+				return err
+			}
+			currentBackup, backupErr := parent.Lstat(backupName)
+			currentDestination, destinationErr := parent.Lstat(destination)
+			if backupErr != nil || destinationErr != nil || !os.SameFile(before, currentBackup) || !os.SameFile(currentBackup, currentDestination) {
+				return errors.New("atomic rollback alias changed across cleanup authorization")
+			}
 		}
 		if err := parent.Remove(backupName); err != nil {
 			return fmt.Errorf("cannot remove atomic rollback alias: %w", err)
@@ -472,6 +482,12 @@ func RecoverRootFileRollback(parent *os.Root, leaf, expectedOldHash string) (ret
 // to retire a converged migration backup without deleting an unrelated file
 // merely because it occupies the recovery name.
 func RemoveRootFileIfHashMatches(parent *os.Root, leaf, expectedHash string) (retErr error) {
+	return RemoveRootFileIfHashMatchesChecked(parent, leaf, expectedHash, nil)
+}
+
+// RemoveRootFileIfHashMatchesChecked revalidates caller authority after the
+// exact content/identity check and immediately before the rooted unlink.
+func RemoveRootFileIfHashMatchesChecked(parent *os.Root, leaf, expectedHash string, checkpoint func() error) (retErr error) {
 	if parent == nil || !strictRootLeaf(leaf) || !validRootRollbackHash(expectedHash) {
 		return errors.New("atomic cleanup input is invalid")
 	}
@@ -509,6 +525,15 @@ func RemoveRootFileIfHashMatches(parent *os.Root, leaf, expectedHash string) (re
 		current, ok := authenticatedRootFile(parent, leaf, expectedBytes)
 		if !ok || !os.SameFile(before, current) {
 			return ErrRootRollbackRecoveryRequired
+		}
+		if checkpoint != nil {
+			if err := checkpoint(); err != nil {
+				return err
+			}
+			currentAfterCheckpoint, ok := authenticatedRootFile(parent, leaf, expectedBytes)
+			if !ok || !os.SameFile(before, currentAfterCheckpoint) {
+				return ErrRootRollbackRecoveryRequired
+			}
 		}
 		if err := parent.Remove(leaf); err != nil {
 			return errors.New("cannot remove authenticated atomic file")

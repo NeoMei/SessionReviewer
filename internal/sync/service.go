@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -143,7 +144,18 @@ type Engine struct {
 	vaultTarget            *ReviewTargetPin
 	trustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 	beforeLock             func() error
+	beforeVaultMutation    func(vaultMutationClass) error
 }
+
+type vaultMutationClass string
+
+const vaultMutationPublish vaultMutationClass = "publish"
+
+const (
+	vaultMutationDirectoryCreate vaultMutationClass = "directory-create"
+	vaultMutationFileDelete      vaultMutationClass = "file-delete"
+	vaultMutationDirectoryDelete vaultMutationClass = "directory-delete"
+)
 
 func NewEngine(options Options) (*Engine, error) {
 	if options.GOOS == "" {
@@ -234,6 +246,12 @@ func NewEngine(options Options) (*Engine, error) {
 	engine.bases = BaseStore{Root: dataRoot.Root}
 	engine.transactions = TransactionStore{Root: dataRoot.Root}
 	engine.writer = RootedWriter{Project: projectRoot, Vault: targetRoot, Retry: options.Retry}
+	engine.writer.beforeMutation = func(side Side) error {
+		if side != SideVault {
+			return nil
+		}
+		return engine.verifyVaultMutation(vaultMutationPublish)
+	}
 	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
 		return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
 	}
@@ -286,6 +304,42 @@ func (engine *Engine) verifyRootBindings() error {
 		}
 	}
 	return engine.vaultTarget.Recheck(engine.project, engine.vaultRoot, engine.data)
+}
+
+func (engine *Engine) verifyVaultMutation(class vaultMutationClass) error {
+	if engine == nil || engine.vaultTarget == nil {
+		return errors.New("vault review target binding is unavailable")
+	}
+	if engine.beforeVaultMutation != nil {
+		if err := engine.beforeVaultMutation(class); err != nil {
+			return err
+		}
+	}
+	return engine.vaultTarget.Recheck(engine.project, engine.vaultRoot, engine.data)
+}
+
+func (engine *Engine) ensureDirectory(side Side, directory *pathguard.Directory, relative string, mode fs.FileMode) error {
+	if side != SideVault {
+		return directory.EnsureDirectory(relative, mode)
+	}
+	return directory.EnsureDirectoryChecked(relative, mode, func() error {
+		return engine.verifyVaultMutation(vaultMutationDirectoryCreate)
+	})
+}
+
+func (engine *Engine) removeRegular(side Side, directory *pathguard.Directory, relative, expectedHash string) error {
+	if side != SideVault {
+		return directory.RemoveRegularIfHashMatches(relative, expectedHash)
+	}
+	return directory.RemoveRegularIfHashMatchesChecked(relative, expectedHash, func() error {
+		return engine.verifyVaultMutation(vaultMutationFileDelete)
+	})
+}
+
+func (engine *Engine) removeVaultDirectory(relative string) error {
+	return atomicfile.RemoveRootChecked(engine.vault.Root, filepath.FromSlash(relative), func() error {
+		return engine.verifyVaultMutation(vaultMutationDirectoryDelete)
+	})
 }
 
 func (engine *Engine) bindReviewTarget(create bool) (bool, error) {
@@ -811,12 +865,12 @@ func (retirement legacyVaultRetirement) apply(engine *Engine) error {
 	}
 	sort.Strings(files)
 	for _, relative := range files {
-		if err := engine.vault.RemoveRegularIfHashMatches(relative, retirement.files[relative]); err != nil {
+		if err := engine.removeRegular(SideVault, engine.vault, relative, retirement.files[relative]); err != nil {
 			return err
 		}
 	}
 	for _, directory := range retirement.directories {
-		if err := atomicfile.RemoveRoot(engine.vault.Root, filepath.FromSlash(directory)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := engine.removeVaultDirectory(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
@@ -1514,12 +1568,12 @@ func (engine *Engine) applyAccepted(ctx context.Context, id, relative string, co
 			if target.side == SideVault {
 				oldRelative, oldHash = path.Join(engine.options.VaultReviewPath, previous.RelativePath), previous.VaultHash
 			}
-			if err := directory.RemoveRegularIfHashMatches(oldRelative, oldHash); err != nil {
+			if err := engine.removeRegular(target.side, directory, oldRelative, oldHash); err != nil {
 				return err
 			}
 		}
 		if parent := path.Dir(target.relative); parent != "." {
-			if err := directory.EnsureDirectory(parent, 0o700); err != nil {
+			if err := engine.ensureDirectory(target.side, directory, parent, 0o700); err != nil {
 				return err
 			}
 		}
@@ -1704,7 +1758,7 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 				if target.side == SideVault {
 					oldRelative, oldHash = path.Join(engine.options.VaultReviewPath, base.RelativePath), base.VaultHash
 				}
-				if err := target.directory.RemoveRegularIfHashMatches(oldRelative, oldHash); err != nil {
+				if err := engine.removeRegular(target.side, target.directory, oldRelative, oldHash); err != nil {
 					return err
 				}
 			}
@@ -1712,7 +1766,7 @@ func (engine *Engine) recoverTransactions(ctx context.Context, transactions []Tr
 				continue
 			}
 			if parent := path.Dir(target.relative); parent != "." {
-				if err := target.directory.EnsureDirectory(parent, 0o700); err != nil {
+				if err := engine.ensureDirectory(target.side, target.directory, parent, 0o700); err != nil {
 					return err
 				}
 			}

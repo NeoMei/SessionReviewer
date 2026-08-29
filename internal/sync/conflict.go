@@ -732,7 +732,7 @@ func (engine *Engine) writeHiddenConflictSide(ctx context.Context, side Side, re
 	if found != expectedFound || (found && !bytes.Equal(current, expected)) {
 		return errors.New("hidden conflict changed after planning")
 	}
-	if err := directory.EnsureDirectory(path.Dir(relative), 0o700); err != nil {
+	if err := engine.ensureDirectory(side, directory, path.Dir(relative), 0o700); err != nil {
 		return err
 	}
 	return engine.writer.WriteIfUnchanged(ctx, side, relative, body, 0o600, expected, expectedFound)
