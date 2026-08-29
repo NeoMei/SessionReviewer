@@ -162,6 +162,7 @@ export class ProjectEvolutionView extends ItemView {
       this.announcement = success;
     } catch (error) {
       this.announcement = error instanceof Error ? error.message : String(error);
+      new Notice(this.announcement);
     }
     await this.refresh(this.projects);
   }

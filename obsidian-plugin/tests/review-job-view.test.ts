@@ -245,6 +245,29 @@ describe("review job view", () => {
     await view.onClose();
   });
 
+  it("surfaces sync-only failures as a visible notice", async () => {
+    const repository = fakeRepository([PROJECT_A]);
+    const runner = fakeRunner();
+    runner.reviewStatus.mockResolvedValue(reviewStatusFixture({
+      state: "failed",
+      jobId: "job-1",
+      attempt: 1,
+      canRetry: true,
+      canSyncOnly: true
+    }));
+    runner.syncProject.mockRejectedValue(new Error("SessionReviewer CLI failed: sync unavailable"));
+    const view = await openView(runner, repository);
+    noticeInstances().length = 0;
+
+    view.contentEl.querySelector<HTMLButtonElement>('[data-review-action="sync-only"]')!.click();
+    await settle();
+    await settle();
+
+    expect(runner.syncProject).toHaveBeenCalledWith(PROJECT_A.projectId);
+    expect(noticeInstances()).toContain("SessionReviewer CLI failed: sync unavailable");
+    await view.onClose();
+  });
+
   it("explains that Codex must be configured when starting without an agent path", async () => {
     const repository = fakeRepository([PROJECT_A]);
     const runner = fakeRunner();

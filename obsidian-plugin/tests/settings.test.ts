@@ -120,4 +120,22 @@ describe("CLI settings", () => {
     expect(verifyAgent).not.toHaveBeenCalled();
     expect(saveCodexPath).not.toHaveBeenCalled();
   });
+
+  it("explains the missing CLI path instead of surfacing a runner failure", async () => {
+    Notice.instances.length = 0;
+    const saveCliPath = vi.fn();
+    const verifyExecutable = vi.fn();
+    const tab = new CliSettingsTab({} as never, {} as never, "", saveCliPath, "/bin/codex", vi.fn(), () => ({
+      verifyExecutable,
+      verifyAgent: vi.fn()
+    }));
+    tab.display();
+
+    const cliSetting = Setting.instances[1];
+    await cliSetting?.buttonControls[0]?.onClickHandler?.();
+
+    expect(Notice.instances).toContain("请先填写 SessionReviewer CLI 可执行文件的绝对路径。");
+    expect(verifyExecutable).not.toHaveBeenCalled();
+    expect(saveCliPath).not.toHaveBeenCalled();
+  });
 });

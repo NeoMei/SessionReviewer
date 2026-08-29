@@ -33,6 +33,10 @@ export class CliSettingsTab extends PluginSettingTab {
         .onChange((value) => { this.cliPath = value.trim(); }))
       .addButton((control) => control.setButtonText("验证并保存").setCta().onClick(async () => {
         try {
+          if (!this.cliPath) {
+            new Notice("请先填写 SessionReviewer CLI 可执行文件的绝对路径。");
+            return;
+          }
           const verified = await this.createRunner(this.cliPath).verifyExecutable();
           await this.saveCliPath(this.cliPath);
           new Notice(`已连接 SessionReviewer ${verified.version}`);
