@@ -55,7 +55,7 @@ func TestLinuxCommandUsesPinnedDirectoryFDForPreExecChdir(t *testing.T) {
 	}
 
 	command := exec.Command(os.Args[0], "-test.run=^TestLinuxCommandUsesPinnedDirectoryFDForPreExecChdir$")
-	command.Env = append(os.Environ(), "SESSIONREVIEWER_LINUX_CWD_HELPER=1")
+	command.Env = append(os.Environ(), "SESSIONREVIEWER_LINUX_CWD_HELPER=1", sessionReviewerTestChildHelperEnv+"=1")
 	if err := directory.configureCommandDirectory(command); err != nil {
 		t.Fatal(err)
 	}

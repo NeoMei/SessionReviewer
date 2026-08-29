@@ -28,7 +28,16 @@ var (
 	schemaFixture   []byte
 )
 
+// sessionReviewerTestChildHelperEnv marks a re-executed test binary as a
+// probe child. Probe children start with a relocated working directory and a
+// filtered test set, so they must not rebuild fixtures relative to the
+// relocated cwd before running the filtered tests.
+const sessionReviewerTestChildHelperEnv = "SESSIONREVIEWER_TEST_CHILD_HELPER"
+
 func TestMain(m *testing.M) {
+	if os.Getenv(sessionReviewerTestChildHelperEnv) == "1" {
+		os.Exit(m.Run())
+	}
 	directory, err := os.MkdirTemp("", "session-reviewer-codex-test-")
 	if err != nil {
 		panic(err)
@@ -690,6 +699,9 @@ func TestGenerateProposalTimesOutAndKillsIgnoredProcessTree(t *testing.T) {
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "ignored-term-child")
 	t.Setenv("SESSIONREVIEWER_FAKE_CHILD_PID_PATH", pidPath)
 	request := validRequest(t, []byte("prompt"))
+	// The deadline must stay comfortably above scheduler jitter on loaded
+	// machines: the fake agent records the ignored child's PID as its first
+	// action, and a kill that wins that race leaves no PID to assert on.
 	request.Deadline = time.Now().Add(200 * time.Millisecond)
 	result, err := adapter.GenerateProposal(context.Background(), request)
 	if !reflect.DeepEqual(result, agent.Result{}) {
