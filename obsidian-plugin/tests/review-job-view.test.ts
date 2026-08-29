@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkspaceLeaf } from "obsidian";
+import { Notice, WorkspaceLeaf } from "obsidian";
 import type { CliRunner, ReviewStatus } from "../src/cli/runner";
 import type { ProjectDescriptor, ProjectRepository } from "../src/data/repository";
 import { ProjectEvolutionView } from "../src/view/project-view";
@@ -9,6 +9,10 @@ import { browserModelFixture } from "./fixtures/browser";
 const PROJECT_A: ProjectDescriptor = { projectId: "project-aaaaaaaaaaaaaaaa", root: "Projects/A", name: "项目甲" };
 const PROJECT_B: ProjectDescriptor = { projectId: "project-bbbbbbbbbbbbbbbb", root: "Projects/B", name: "项目乙" };
 const AGENT = "/bin/codex";
+
+function noticeInstances(): string[] {
+  return (Notice as unknown as { instances: string[] }).instances;
+}
 
 function reviewStatusFixture(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
   return {
@@ -112,6 +116,35 @@ describe("review job view", () => {
     const action = view.contentEl.querySelector<HTMLButtonElement>(".sr-review-action")!;
     expect(action.textContent).toBe("正在总结");
     expect(action.disabled).toBe(true);
+    await view.onClose();
+  });
+
+  it("shows a visible notice when Codex is not configured and never starts a job", async () => {
+    const repository = fakeRepository([PROJECT_A]);
+    const runner = fakeRunner();
+    const view = await openView(runner, repository, "");
+    noticeInstances().length = 0;
+
+    view.contentEl.querySelector<HTMLButtonElement>(".sr-review-action")!.click();
+    await settle();
+
+    expect(runner.startReview).not.toHaveBeenCalled();
+    expect(noticeInstances()).toContain("尚未配置 Codex，请先在设置中验证。");
+    await view.onClose();
+  });
+
+  it("surfaces review command failures as a visible notice", async () => {
+    const repository = fakeRepository([PROJECT_A]);
+    const runner = fakeRunner();
+    runner.startReview.mockRejectedValue(new Error("SessionReviewer review command failed"));
+    const view = await openView(runner, repository);
+    noticeInstances().length = 0;
+
+    view.contentEl.querySelector<HTMLButtonElement>(".sr-review-action")!.click();
+    await settle();
+    await settle();
+
+    expect(noticeInstances()).toContain("SessionReviewer review command failed");
     await view.onClose();
   });
 

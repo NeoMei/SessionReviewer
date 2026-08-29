@@ -37,7 +37,10 @@ export class Modal {
 }
 
 export class Notice {
-  constructor(_message: string) {}
+  static instances: string[] = [];
+  constructor(message: string) {
+    Notice.instances.push(message);
+  }
 }
 
 export function normalizePath(path: string): string { return path.replaceAll("\\", "/"); }

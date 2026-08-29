@@ -1,4 +1,4 @@
-import { ItemView, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import { ACTIVE_REVIEW_STATES, type ReviewStatus } from "../cli/runner";
 import type { BrowserModel, EditableField } from "../contracts/review-v2";
@@ -186,7 +186,9 @@ export class ProjectEvolutionView extends ItemView {
     const projectId = this.selected.projectId;
     const agentExecutable = this.agentPath();
     if (!agentExecutable) {
-      this.announcement = reviewFailureText("E_AGENT_UNCONFIGURED", "尚未配置 Codex。");
+      const message = reviewFailureText("E_AGENT_UNCONFIGURED", "尚未配置 Codex。");
+      this.announcement = message;
+      new Notice(message);
       this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
       return;
     }
@@ -222,6 +224,7 @@ export class ProjectEvolutionView extends ItemView {
       this.announcement = success;
     } catch (error) {
       this.announcement = error instanceof Error ? error.message : String(error);
+      new Notice(this.announcement);
     }
     this.reviewActionInFlight = false;
     await this.refresh(this.projects, { reviewStatus: false });
