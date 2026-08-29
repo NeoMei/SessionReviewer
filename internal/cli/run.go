@@ -33,6 +33,7 @@ Commands:
   resume                Render accepted ledger recovery state
   history               Render accepted cross-session history
   sync                  Synchronize editable Markdown with Obsidian
+  review                Control durable Agent review jobs
   version               Print the version
 
 Options:
@@ -46,6 +47,7 @@ Options:
         repair-machine-ledger [--cwd | --project-id ID] [--data-dir]
         resolve --conflict ID --action <accept_project|accept_obsidian|manual_merge>
           [--file MERGED.md] [--cwd | --project-id ID] [--data-dir]
+  review: agent verify|start|status|cancel|retry (JSON only)
 
 Apply validates a Skill proposal against its exact bounded evidence packet.
 Ledger-only resume and history do not process pending sessions.
@@ -103,6 +105,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runRecovery("history", args[1:], stdout, stderr)
 	case "sync":
 		return runSync(args[1:], stdout, stderr)
+	case "review":
+		return runReview(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, rootHelp)

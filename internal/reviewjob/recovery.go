@@ -139,6 +139,8 @@ func RequestCancel(store Store, jobID string, at time.Time) (Job, int, error) {
 				next.Owner = Owner{}
 				next.Error = SafeError{Code: AgentCancelled}
 				next.PrivateError = "review cancelled before worker start"
+				next.LaunchTokenDigest = ""
+				next.LaunchIntentAt = time.Time{}
 				return nil
 			}
 			next.State = CancelRequested

@@ -5,6 +5,7 @@ package reviewjob
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 	"time"
@@ -125,17 +126,19 @@ type SafeError struct {
 // paths, source content, prompts, output, or diagnostics must be projected
 // through ProjectStatus instead of serialized as a CLI response.
 type Job struct {
-	SchemaVersion   int                     `json:"schema_version"`
-	ID              string                  `json:"id"`
-	ProjectID       string                  `json:"project_id"`
-	ProjectIdentity pathguard.IdentityToken `json:"project_identity"`
-	Agent           VerifiedAgent           `json:"agent"`
-	State           State                   `json:"state"`
-	Phase           Phase                   `json:"phase,omitempty"`
-	Attempt         int                     `json:"attempt"`
-	RetryRequestID  string                  `json:"retry_request_id,omitempty"`
-	RetryAttempt    int                     `json:"retry_expected_attempt,omitempty"`
-	RetryRevision   int                     `json:"retry_expected_revision,omitempty"`
+	SchemaVersion     int                     `json:"schema_version"`
+	ID                string                  `json:"id"`
+	ProjectID         string                  `json:"project_id"`
+	ProjectIdentity   pathguard.IdentityToken `json:"project_identity"`
+	Agent             VerifiedAgent           `json:"agent"`
+	State             State                   `json:"state"`
+	Phase             Phase                   `json:"phase,omitempty"`
+	Attempt           int                     `json:"attempt"`
+	RetryRequestID    string                  `json:"retry_request_id,omitempty"`
+	RetryAttempt      int                     `json:"retry_expected_attempt,omitempty"`
+	RetryRevision     int                     `json:"retry_expected_revision,omitempty"`
+	LaunchTokenDigest string                  `json:"launch_token_digest,omitempty"`
+	LaunchIntentAt    time.Time               `json:"launch_intent_at,omitempty"`
 
 	FrozenSessions   []FrozenSession         `json:"frozen_sessions"`
 	SessionIndex     int                     `json:"session_index"`
@@ -174,26 +177,86 @@ type PublicReviewUsage struct {
 // PublicStatus is the complete JSON response allowed to cross the CLI/plugin
 // boundary. Its tags are a versioned snake_case protocol.
 type PublicStatus struct {
-	SchemaVersion    int                `json:"schema_version"`
-	JobID            string             `json:"job_id,omitempty"`
-	ProjectID        string             `json:"project_id"`
-	State            PublicState        `json:"state"`
-	Phase            Phase              `json:"phase,omitempty"`
-	Attempt          int                `json:"attempt"`
-	SessionIndex     int                `json:"session_index"`
-	SessionCount     int                `json:"session_count"`
-	AcceptedPackets  int                `json:"accepted_packets"`
-	AcceptedSessions int                `json:"accepted_sessions"`
-	ErrorCode        string             `json:"error_code,omitempty"`
-	CanRetry         bool               `json:"can_retry"`
-	CanCancel        bool               `json:"can_cancel"`
-	CanSyncOnly      bool               `json:"can_sync_only"`
-	ReviewUsage      *PublicReviewUsage `json:"review_usage,omitempty"`
+	SchemaVersion         int                `json:"schema_version"`
+	JobID                 string             `json:"job_id,omitempty"`
+	ProjectID             string             `json:"project_id"`
+	State                 PublicState        `json:"state"`
+	Phase                 Phase              `json:"phase,omitempty"`
+	Attempt               int                `json:"attempt"`
+	SessionIndex          int                `json:"session_index"`
+	SessionCount          int                `json:"session_count"`
+	AcceptedPackets       int                `json:"accepted_packets"`
+	AcceptedSessions      int                `json:"accepted_sessions"`
+	ErrorCode             string             `json:"error_code,omitempty"`
+	CanRetry              bool               `json:"can_retry"`
+	RetryExpectedAttempt  int                `json:"retry_expected_attempt,omitempty"`
+	RetryExpectedRevision int                `json:"retry_expected_revision,omitempty"`
+	CanCancel             bool               `json:"can_cancel"`
+	CanSyncOnly           bool               `json:"can_sync_only"`
+	ReviewUsage           *PublicReviewUsage `json:"review_usage,omitempty"`
 }
 
 // ProjectStatus creates the only public projection of a private Job. A nil job
 // deliberately means this project is idle; it never inherits a historical ID.
 func ProjectStatus(job *Job, projectID string) (PublicStatus, error) {
+	return projectStatus(job, projectID, 0)
+}
+
+// ProjectStatusAtRevision binds a retryable public status to the exact Store
+// record the caller loaded. A retry command must present both expectations, so
+// stale or duplicated UI actions cannot increment a later failed attempt.
+func ProjectStatusAtRevision(job *Job, projectID string, revision int) (PublicStatus, error) {
+	return projectStatus(job, projectID, revision)
+}
+
+// ValidatePublicStatus is the runtime companion to the checked-in JSON
+// Schema. CLI writers call it before serialization so schema-invalid state can
+// never cross the plugin boundary even when private storage is corrupt.
+func ValidatePublicStatus(status PublicStatus) error {
+	if status.SchemaVersion != PublicStatusSchemaVersion || !validID(status.ProjectID) || !validPublicState(string(status.State)) {
+		return errors.New("public review status identity is invalid")
+	}
+	if status.State == Idle {
+		if status.JobID != "" || status.Phase != "" || status.Attempt != 0 || status.SessionIndex != 0 ||
+			status.SessionCount != 0 || status.AcceptedPackets != 0 || status.AcceptedSessions != 0 ||
+			status.CanRetry || status.CanCancel || status.CanSyncOnly || status.RetryExpectedAttempt != 0 || status.RetryExpectedRevision != 0 {
+			return errors.New("idle public review status contains job state")
+		}
+	} else {
+		if !validID(status.JobID) || status.Attempt < 1 ||
+			validatePublicCounts(status.Attempt, status.SessionIndex, status.SessionCount, status.AcceptedPackets, status.AcceptedSessions) != nil {
+			return errors.New("public review job progress is invalid")
+		}
+		state := State(status.State)
+		if active(state) != status.CanCancel || (active(state) && status.Phase == "") || (!active(state) && status.Phase != "") || !validPhase(status.Phase) {
+			return errors.New("public review state controls are inconsistent")
+		}
+		wantRetry := state == Failed
+		if status.CanRetry != wantRetry || wantRetry != (status.RetryExpectedAttempt > 0 && status.RetryExpectedRevision > 0) ||
+			(wantRetry && (status.RetryExpectedAttempt != status.Attempt || status.RetryExpectedRevision > maxSafeInteger)) ||
+			(!wantRetry && (status.RetryExpectedAttempt != 0 || status.RetryExpectedRevision != 0)) {
+			return errors.New("public retry expectations are inconsistent")
+		}
+		if status.CanSyncOnly && (state != Failed || status.AcceptedPackets == 0) {
+			return errors.New("public sync-only control is inconsistent")
+		}
+	}
+	if status.ErrorCode != "" && !validErrorCode(ErrorCode(status.ErrorCode)) {
+		return errors.New("public review error code is invalid")
+	}
+	if usage := status.ReviewUsage; usage != nil {
+		if usage.TotalTokens < 0 || usage.TotalTokens > maxSafeInteger ||
+			usage.PricingComplete != (usage.TotalCostUSD != nil) {
+			return errors.New("public review usage is invalid")
+		}
+		if usage.TotalCostUSD != nil && (*usage.TotalCostUSD < 0 || math.IsNaN(*usage.TotalCostUSD) || math.IsInf(*usage.TotalCostUSD, 0)) {
+			return errors.New("public review cost is invalid")
+		}
+	}
+	return nil
+}
+
+func projectStatus(job *Job, projectID string, revision int) (PublicStatus, error) {
 	if err := validateProjectID(projectID); err != nil {
 		return PublicStatus{}, err
 	}
@@ -221,6 +284,13 @@ func ProjectStatus(job *Job, projectID string) (PublicStatus, error) {
 		CanRetry:         job.State == Failed,
 		CanCancel:        active(job.State),
 		CanSyncOnly:      job.State == Failed && job.AcceptedSyncPending,
+	}
+	if status.CanRetry {
+		if revision <= 0 || revision > maxSafeInteger {
+			return PublicStatus{}, errors.New("retryable public status requires an exact safe Store revision")
+		}
+		status.RetryExpectedAttempt = job.Attempt
+		status.RetryExpectedRevision = revision
 	}
 	if hasReviewAccounting(job.ReviewAccounting) {
 		tokens, cost, complete := reviewAccountingPublicTotals(job.ReviewAccounting)
@@ -264,6 +334,15 @@ func Validate(job Job) error {
 	} else if !validID(job.RetryRequestID) || job.RetryAttempt <= 0 || job.RetryRevision <= 0 ||
 		job.RetryAttempt >= maxSafeInteger || job.RetryRevision > maxSafeInteger || job.Attempt != job.RetryAttempt+1 {
 		return errors.New("retry request receipt is invalid")
+	}
+	if (job.LaunchTokenDigest == "") != job.LaunchIntentAt.IsZero() {
+		return errors.New("private launch intent is incomplete")
+	}
+	if job.LaunchTokenDigest != "" {
+		if !prefixedSHA256.MatchString(job.LaunchTokenDigest) || !canonicalTime(job.LaunchIntentAt) ||
+			!active(job.State) || job.Phase != Preflight || job.Owner.ID != "" {
+			return errors.New("private launch intent is invalid")
+		}
 	}
 	if active(job.State) && job.Phase == "" {
 		return errors.New("active job phase is required")

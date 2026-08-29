@@ -51,6 +51,47 @@ func TestPublicStatusForNilJobIsIdleWithoutJobID(t *testing.T) {
 	}
 }
 
+// Ruling P7: the UI must bind retry to the exact failed attempt and Store
+// revision that it rendered, while every non-retryable status omits both
+// expectations entirely.
+func TestPublicStatusRetryExpectationsAreExactAndConditional(t *testing.T) {
+	failed := terminalJobFixture(Failed)
+	failed.Error = SafeError{Code: AgentAuth}
+	status, err := ProjectStatusAtRevision(&failed, failed.ProjectID, 17)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.CanRetry || status.RetryExpectedAttempt != failed.Attempt || status.RetryExpectedRevision != 17 {
+		t.Fatalf("retryable status=%#v", status)
+	}
+	body := mustJSON(t, status)
+	if !bytes.Contains(body, []byte(`"retry_expected_attempt":1`)) || !bytes.Contains(body, []byte(`"retry_expected_revision":17`)) {
+		t.Fatalf("retry expectations missing from %s", body)
+	}
+	validateAgainstSchema(t, "../../schemas/review-job-status-v1.schema.json", body)
+
+	running := validJobFixture()
+	runningStatus, err := ProjectStatusAtRevision(&running, running.ProjectID, 18)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runningBody := mustJSON(t, runningStatus)
+	if runningStatus.CanRetry || bytes.Contains(runningBody, []byte("retry_expected")) {
+		t.Fatalf("non-retryable status exposed retry expectations: %s", runningBody)
+	}
+	validateAgainstSchema(t, "../../schemas/review-job-status-v1.schema.json", runningBody)
+}
+
+func TestPublicStatusRejectsMissingOrUnsafeRetryRevision(t *testing.T) {
+	failed := terminalJobFixture(Failed)
+	failed.Error = SafeError{Code: AgentAuth}
+	for _, revision := range []int{0, -1, jsSafeInteger + 1} {
+		if _, err := ProjectStatusAtRevision(&failed, failed.ProjectID, revision); err == nil {
+			t.Fatalf("retryable status accepted revision %d", revision)
+		}
+	}
+}
+
 // This catches accepting a private job whose state cannot safely be projected
 // because progress exceeds the frozen session set.
 func TestJobValidationRejectsImpossibleProgress(t *testing.T) {
@@ -176,6 +217,45 @@ func TestJobValidationRejectsNonFiniteCostAndUnsafePublicCounts(t *testing.T) {
 			mutate(&job)
 			if err := Validate(job); err == nil {
 				t.Fatal("Validate() accepted non-finite cost or unsafe public count")
+			}
+		})
+	}
+}
+
+func TestJobValidationBindsPrivateLaunchIntentWithoutPublicProjection(t *testing.T) {
+	job := validJobFixture()
+	job.State = Queued
+	job.Phase = Preflight
+	job.Owner = Owner{}
+	job.LaunchTokenDigest = "sha256:" + strings.Repeat("c", 64)
+	job.LaunchIntentAt = job.CreatedAt
+	if err := Validate(job); err != nil {
+		t.Fatalf("Validate() rejected complete private launch intent: %v", err)
+	}
+	status, err := ProjectStatus(&job, job.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustJSON(t, status)
+	if bytes.Contains(body, []byte("launch")) || bytes.Contains(body, []byte(strings.Repeat("c", 16))) {
+		t.Fatalf("public status leaked launch authority: %s", body)
+	}
+
+	for name, mutate := range map[string]func(*Job){
+		"missing digest": func(candidate *Job) { candidate.LaunchTokenDigest = "" },
+		"missing time":   func(candidate *Job) { candidate.LaunchIntentAt = time.Time{} },
+		"bad digest":     func(candidate *Job) { candidate.LaunchTokenDigest = "sha256:ABC" },
+		"terminal": func(candidate *Job) {
+			candidate.State = Failed
+			candidate.Phase = ""
+			candidate.CompletedAt = candidate.UpdatedAt
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := job
+			mutate(&candidate)
+			if err := Validate(candidate); err == nil {
+				t.Fatal("Validate() accepted incomplete or terminal launch intent")
 			}
 		})
 	}
@@ -450,6 +530,14 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 			return fmt.Errorf("public numeric field %q is not a JS-safe nonnegative integer", name)
 		}
 	}
+	for _, name := range []string{"retry_expected_attempt", "retry_expected_revision"} {
+		if value, exists := status[name]; exists {
+			number, ok := value.(float64)
+			if !ok || math.Trunc(number) != number || number < 1 || number > float64(jsSafeInteger) {
+				return fmt.Errorf("public retry expectation %q is not a JS-safe positive integer", name)
+			}
+		}
+	}
 	if status["schema_version"] != float64(PublicStatusSchemaVersion) {
 		return fmt.Errorf("public schema_version is invalid")
 	}
@@ -457,6 +545,12 @@ func validateStatusAgainstSchema(filename string, body []byte) error {
 		if _, ok := status[name].(bool); !ok {
 			return fmt.Errorf("public boolean field %q has wrong type", name)
 		}
+	}
+	canRetry := status["can_retry"].(bool)
+	_, hasRetryAttempt := status["retry_expected_attempt"]
+	_, hasRetryRevision := status["retry_expected_revision"]
+	if canRetry != (hasRetryAttempt && hasRetryRevision) || (!canRetry && (hasRetryAttempt || hasRetryRevision)) {
+		return fmt.Errorf("retry expectations do not match can_retry")
 	}
 	for _, name := range []string{"project_id", "state"} {
 		if _, ok := status[name].(string); !ok {

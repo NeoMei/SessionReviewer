@@ -22,6 +22,7 @@ import (
 var (
 	ErrStaleRevision     = errors.New("stale review job revision")
 	ErrRevisionExhausted = errors.New("review job revision is exhausted")
+	ErrActiveJob         = errors.New("project already has an active review job")
 )
 
 const (
@@ -35,7 +36,8 @@ const (
 )
 
 type Store struct {
-	Root string
+	Root                string
+	RejectActiveProject bool
 
 	beforePointerWrite    func() error
 	afterIdentityWrite    func() error
@@ -105,6 +107,15 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 		return 0, fmt.Errorf("lock review job store: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	if s.RejectActiveProject {
+		activeJob, activeRevision, found, err := s.activeProjectJob(layout, job.ProjectID)
+		if err != nil {
+			return 0, err
+		}
+		if found {
+			return activeRevision, fmt.Errorf("%w: %s", ErrActiveJob, activeJob.ID)
+		}
+	}
 
 	if err := rejectCaseCollision(layout.jobs, jobIdentityName(job.ID), job.ID+".json", job.ID+".json.bak"); err != nil {
 		return 0, err
@@ -153,6 +164,34 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 		return 0, err
 	}
 	return 1, nil
+}
+
+func (s Store) activeProjectJob(layout *storeLayout, projectID string) (Job, int, bool, error) {
+	if layout == nil || layout.missing {
+		return Job{}, 0, false, nil
+	}
+	if err := rejectCaseCollision(layout.projects, projectID+".json"); err != nil {
+		return Job{}, 0, false, err
+	}
+	pointer, found, err := readProjectPointer(layout.projects, projectID)
+	if err != nil {
+		return Job{}, 0, false, err
+	}
+	if found {
+		job, revision, loaded, err := s.loadAuthenticatedPointer(layout.jobs, pointer, projectID)
+		if err != nil || !loaded {
+			return Job{}, 0, false, err
+		}
+		if active(job.State) {
+			return job, revision, true, nil
+		}
+		return Job{}, 0, false, nil
+	}
+	job, revision, loaded, err := s.latestJobByEnumeration(layout.jobs, projectID)
+	if err != nil || !loaded || !active(job.State) {
+		return Job{}, 0, false, err
+	}
+	return job, revision, true, nil
 }
 
 func (s Store) Load(jobID string) (job Job, revision int, found bool, retErr error) {
@@ -235,11 +274,12 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	if currentRevision == maxSafeInteger {
 		return Job{}, currentRevision, ErrRevisionExhausted
 	}
-	currentEncoded, err := marshalCanonical(storedJob{Revision: currentRevision, Job: current}, maxJobRecordBytes)
-	if err != nil {
-		return Job{}, currentRevision, err
-	}
+	backup := current
+	backup.FrozenSessions = append([]FrozenSession(nil), current.FrozenSessions...)
+	backup.ReviewAccounting = cloneReviewAccounting(current.ReviewAccounting)
+	backup.PayloadPublications = append([]PayloadPublication(nil), current.PayloadPublications...)
 	next := current
+	next.FrozenSessions = append([]FrozenSession(nil), current.FrozenSessions...)
 	next.ReviewAccounting = cloneReviewAccounting(current.ReviewAccounting)
 	next.PayloadPublications = append([]PayloadPublication(nil), current.PayloadPublications...)
 	if err := mutate(&next); err != nil {
@@ -257,7 +297,16 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	if err := verify(); err != nil {
 		return Job{}, currentRevision, err
 	}
-	if err := s.writer()(layout.jobs, jobID+".json.bak", currentEncoded, 0o600); err != nil {
+	if current.LaunchTokenDigest != "" && next.LaunchTokenDigest == "" {
+		// Once an ownership or cancellation CAS consumes launch authority, no
+		// authenticated recovery record may resurrect the one-use token.
+		backup = next
+	}
+	backupEncoded, err := marshalCanonical(storedJob{Revision: currentRevision, Job: backup}, maxJobRecordBytes)
+	if err != nil {
+		return Job{}, currentRevision, err
+	}
+	if err := s.writer()(layout.jobs, jobID+".json.bak", backupEncoded, 0o600); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("persist review job recovery backup: %w", err)
 	}
 	nextRevision := currentRevision + 1

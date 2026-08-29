@@ -133,6 +133,43 @@ func TestStoreRecoversFromAuthenticatedBackup(t *testing.T) {
 	}
 }
 
+func TestStoreConsumedLaunchTokenCannotBeRestoredFromBackup(t *testing.T) {
+	root := newStoreRoot(t)
+	store := Store{Root: root}
+	job := validJobFixture()
+	job.State = Queued
+	job.Phase = Preflight
+	job.Owner = Owner{}
+	job.LaunchTokenDigest = "sha256:" + strings.Repeat("c", 64)
+	job.LaunchIntentAt = job.CreatedAt
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, revision, err := store.Update(job.ID, 1, func(next *Job) error {
+		next.State = Running
+		next.Owner = Owner{ID: "owner-token", AcquiredAt: job.CreatedAt}
+		next.LaunchTokenDigest = ""
+		next.LaunchIntentAt = time.Time{}
+		return nil
+	})
+	if err != nil || revision != 2 || updated.LaunchTokenDigest != "" {
+		t.Fatalf("Update() = %#v, %d, %v", updated, revision, err)
+	}
+
+	primary := filepath.Join(root, "review-jobs/jobs", job.ID+".json")
+	if err := os.WriteFile(primary, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, _, found, err := store.Load(job.ID)
+	if err != nil || !found {
+		t.Fatalf("Load() = %#v, %v, %v", loaded, found, err)
+	}
+	if loaded.LaunchTokenDigest != "" || !loaded.LaunchIntentAt.IsZero() {
+		t.Fatalf("consumed launch authority was restored from backup: %#v", loaded)
+	}
+}
+
 func TestStoreConcurrentUpdateHasExactlyOneCASWinner(t *testing.T) {
 	root := newStoreWithJob(t)
 	store := Store{Root: root}

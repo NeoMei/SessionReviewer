@@ -574,12 +574,12 @@ func TestCancelledRetryWithUnresolvedCommitStillValidatesFrozenAgent(t *testing.
 			if err := Run(t.Context(), options); err == nil {
 				t.Fatal("commit recovery without frozen Agent returned success")
 			}
-			stopped, _, found, err := fixture.store.Load(fixture.job.ID)
+			stopped, stoppedRevision, found, err := fixture.store.Load(fixture.job.ID)
 			if err != nil || !found || stopped.State != Failed || stopped.Error.Code != test.code ||
 				(stopped.PayloadState == PayloadApplyRecovery) == test.syncOnly || stopped.AcceptedSyncPending != test.syncOnly {
 				t.Fatalf("commit recovery=%#v found=%v err=%v", stopped, found, err)
 			}
-			status, err := ProjectStatus(&stopped, stopped.ProjectID)
+			status, err := ProjectStatusAtRevision(&stopped, stopped.ProjectID, stoppedRevision)
 			if err != nil || status.CanSyncOnly != test.syncOnly {
 				t.Fatalf("commit recovery status=%#v err=%v", status, err)
 			}

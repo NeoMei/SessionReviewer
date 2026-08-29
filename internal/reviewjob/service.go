@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -152,6 +153,11 @@ type RunOptions struct {
 	Apply   ApplyFunc
 	Sync    SyncFunc
 	Pricing PricingResolver
+	// LaunchToken is the private one-use authority persisted before a detached
+	// worker is spawned. OwnershipReady runs only after both leases and durable
+	// Owner state exist and the token has been consumed.
+	LaunchToken    string
+	OwnershipReady func() error
 
 	beforeCleanupBoundary func() error
 	afterCleanupBoundary  func() error
@@ -250,6 +256,9 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	if err := validateRunOptions(options); err != nil {
 		return err
 	}
+	if err := verifyLaunchToken(options.Store, options.JobID, options.LaunchToken); err != nil {
+		return err
+	}
 	job, revision, leases, err := options.Store.acquireJobLeases(options.JobID, options.LeaseTimeout)
 	if err != nil {
 		return err
@@ -266,6 +275,11 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	runner := &worker{options: options, job: job, revision: revision, leases: leases, retry: job.State == Retrying || retryCancellation}
 	if err := runner.start(); err != nil {
 		return err
+	}
+	if options.OwnershipReady != nil {
+		if err := options.OwnershipReady(); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
 	}
 	roots, err := authenticateWorkerRoots(options, runner.job, leases)
 	if err != nil {
@@ -378,7 +392,59 @@ func validateRunOptions(options RunOptions) error {
 	if !validID(options.OwnerID) {
 		return errors.New("review worker owner ID is invalid")
 	}
+	if options.LaunchToken != "" && !validLaunchToken(options.LaunchToken) {
+		return errors.New("review worker launch token is invalid")
+	}
 	return nil
+}
+
+func verifyLaunchToken(store Store, jobID, token string) error {
+	job, _, found, err := store.Load(jobID)
+	if err != nil || !found {
+		if err != nil {
+			return err
+		}
+		return os.ErrNotExist
+	}
+	if job.LaunchTokenDigest == "" {
+		if token != "" {
+			return errors.New("review worker launch token was already consumed")
+		}
+		return nil
+	}
+	if !validLaunchToken(token) || subtle.ConstantTimeCompare([]byte(job.LaunchTokenDigest), []byte(launchTokenDigest(token))) != 1 {
+		return errors.New("review worker launch token is invalid")
+	}
+	return nil
+}
+
+// VerifyLaunchAuthority authenticates a detached worker before it opens
+// configured roots or probes the stored Agent. Run rechecks and consumes the
+// same authority atomically with durable ownership after both leases exist.
+func VerifyLaunchAuthority(store Store, jobID, token string) error {
+	if strings.TrimSpace(store.Root) == "" || !validID(jobID) {
+		return errors.New("review worker launch authority target is invalid")
+	}
+	return verifyLaunchToken(store, jobID, token)
+}
+
+func validLaunchToken(token string) bool {
+	if len(token) < 32 || len(token) > 128 {
+		return false
+	}
+	for _, character := range token {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || character == '-' || character == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func launchTokenDigest(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func (runner *worker) start() error {
@@ -390,6 +456,15 @@ func (runner *worker) start() error {
 		}
 		if !cancelRequested {
 			job.State = Running
+		}
+		if job.LaunchTokenDigest != "" {
+			if subtle.ConstantTimeCompare([]byte(job.LaunchTokenDigest), []byte(launchTokenDigest(runner.options.LaunchToken))) != 1 {
+				return errors.New("review worker launch token changed before ownership")
+			}
+			job.LaunchTokenDigest = ""
+			job.LaunchIntentAt = time.Time{}
+		} else if runner.options.LaunchToken != "" {
+			return errors.New("review worker launch token was already consumed")
 		}
 		job.Phase = Preflight
 		if job.StartedAt.IsZero() {

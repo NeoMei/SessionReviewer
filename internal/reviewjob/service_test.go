@@ -1460,8 +1460,8 @@ func TestWorkerFailureMatrixStopsAtFirstFailureWithFixedSafeCode(t *testing.T) {
 			if err := Run(t.Context(), options); err == nil {
 				t.Fatal("Run() accepted injected first failure")
 			}
-			job, _, found, err := fixture.store.Load(fixture.job.ID)
-			status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+			job, revision, found, err := fixture.store.Load(fixture.job.ID)
+			status, statusErr := ProjectStatusAtRevision(&job, fixture.job.ProjectID, revision)
 			if err != nil || statusErr != nil || !found || job.State != Failed || job.Error.Code != test.want ||
 				prepareCalls != test.prepareCalls || adapter.generateCalls != test.generateCalls ||
 				applyCalls != test.applyCalls || syncCalls != test.syncCalls ||
@@ -1505,8 +1505,8 @@ func TestWorkerIncompleteSyncDoesNotAdvanceSession(t *testing.T) {
 	if err := Run(t.Context(), options); err == nil {
 		t.Fatal("Run() accepted an incomplete sync report")
 	}
-	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	job, revision, found, err := fixture.store.Load(fixture.job.ID)
+	status, statusErr := ProjectStatusAtRevision(&job, fixture.job.ProjectID, revision)
 	if err != nil || statusErr != nil || !found || job.State != Failed || job.Error.Code != SyncPartial || job.AcceptedPackets != 1 || job.AcceptedSessions != 0 || job.SessionIndex != 0 || job.CurrentPacket != packet.NextCursor || !job.AcceptedSyncPending || !status.CanSyncOnly {
 		t.Fatalf("incomplete-sync job=%#v found=%v err=%v", job, found, err)
 	}
@@ -1542,8 +1542,8 @@ func TestWorkerApplyRecoveryRetainsAuthenticatedExactPacketAndProposal(t *testin
 	if err := Run(t.Context(), options); err == nil {
 		t.Fatal("Run() accepted uncertain apply")
 	}
-	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	job, revision, found, err := fixture.store.Load(fixture.job.ID)
+	status, statusErr := ProjectStatusAtRevision(&job, fixture.job.ProjectID, revision)
 	if err != nil || statusErr != nil || !found || job.Error.Code != ApplyRecovery ||
 		job.PayloadState != PayloadApplyRecovery || job.PayloadRetainedFor != ApplyRecovery ||
 		job.AcceptedSyncPending || status.CanSyncOnly {
@@ -1757,6 +1757,59 @@ func TestWorkerRejectsPrepareBytesThatDoNotAuthenticatePacketBeforeIntent(t *tes
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
 	if err != nil || !found || job.Error.Code != ProposalRejected || job.PacketDigest != "" || len(job.PayloadPublications) != 0 || generateCalls != 0 {
 		t.Fatalf("mismatched prepare job=%#v found=%v err=%v generate=%d", job, found, err, generateCalls)
+	}
+}
+
+func TestWorkerConsumesLaunchTokenOnlyWithDurableOwnership(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	token := "private-launch-token-with-at-least-32-bytes"
+	loaded, revision, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("Load() found=%v err=%v", found, err)
+	}
+	loaded, _, err = fixture.store.Update(fixture.job.ID, revision, func(job *Job) error {
+		job.LaunchTokenDigest = launchTokenDigest(token)
+		job.LaunchIntentAt = fixture.now
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.job = loaded
+
+	wrong := workerRunOptions(fixture, nil, nil, nil, func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		panic("wrong launch token reached sync")
+	}, nil)
+	wrong.LaunchToken = token + "-wrong"
+	if err := Run(t.Context(), wrong); err == nil {
+		t.Fatal("Run() accepted wrong launch token")
+	}
+	unchanged, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || unchanged.State != Queued || unchanged.Owner.ID != "" || unchanged.LaunchTokenDigest == "" {
+		t.Fatalf("wrong-token job=%#v found=%v err=%v", unchanged, found, err)
+	}
+
+	owned := false
+	options := workerRunOptions(fixture, nil, nil, nil, func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		return workerSyncReport(fixture.job.ProjectID), nil
+	}, nil)
+	options.LaunchToken = token
+	options.OwnershipReady = func() error {
+		current, _, found, err := fixture.store.Load(fixture.job.ID)
+		if err != nil || !found || current.State != Running || current.Owner.ID == "" || current.LaunchTokenDigest != "" || !current.LaunchIntentAt.IsZero() {
+			t.Fatalf("ownership callback job=%#v found=%v err=%v", current, found, err)
+		}
+		owned = true
+		return nil
+	}
+	if err := Run(t.Context(), options); err != nil {
+		t.Fatal(err)
+	}
+	if !owned {
+		t.Fatal("worker did not signal durable ownership")
+	}
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("replayed launch token was accepted")
 	}
 }
 
@@ -2115,8 +2168,8 @@ func TestWorkerRejectsDryRunAndPartialMigrationSyncReports(t *testing.T) {
 			if err := Run(t.Context(), options); err == nil {
 				t.Fatal("Run() accepted a non-real or partial sync report")
 			}
-			job, _, found, err := fixture.store.Load(fixture.job.ID)
-			status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+			job, revision, found, err := fixture.store.Load(fixture.job.ID)
+			status, statusErr := ProjectStatusAtRevision(&job, fixture.job.ProjectID, revision)
 			if err != nil || statusErr != nil || !found || job.Error.Code != SyncPartial ||
 				!job.AcceptedSyncPending || !status.CanSyncOnly || job.CurrentPacket != packet.NextCursor {
 				t.Fatalf("rejected sync job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
@@ -2208,8 +2261,8 @@ func TestWorkerEarlierSyncedPacketDoesNotOfferSyncOnlyAfterLaterAgentFailure(t *
 	if err := Run(t.Context(), options); err == nil {
 		t.Fatal("Run() accepted later Agent failure")
 	}
-	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+	job, revision, found, err := fixture.store.Load(fixture.job.ID)
+	status, statusErr := ProjectStatusAtRevision(&job, fixture.job.ProjectID, revision)
 	if err != nil || statusErr != nil || !found || job.Error.Code != AgentAuth || job.AcceptedPackets != 1 ||
 		job.AcceptedSyncPending || status.CanSyncOnly {
 		t.Fatalf("later failure job=%#v status=%#v found=%v err=%v statusErr=%v", job, status, found, err, statusErr)
