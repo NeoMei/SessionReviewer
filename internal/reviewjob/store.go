@@ -314,6 +314,20 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 }
 
 func (s Store) LatestForProject(projectID string) (job Job, revision int, found bool, retErr error) {
+	return s.latestForProject(projectID, nil)
+}
+
+// LatestForProjectAuthenticated repairs a project pointer only after the
+// selected durable job is bound to the caller's already authenticated Project
+// identity. CLI control-plane callers use this before any recovery or CAS.
+func (s Store) LatestForProjectAuthenticated(projectID string, projectIdentity pathguard.IdentityToken) (job Job, revision int, found bool, retErr error) {
+	if !projectIdentity.Valid() {
+		return Job{}, 0, false, errors.New("authenticated project identity is invalid")
+	}
+	return s.latestForProject(projectID, &projectIdentity)
+}
+
+func (s Store) latestForProject(projectID string, expectedIdentity *pathguard.IdentityToken) (job Job, revision int, found bool, retErr error) {
 	if err := validateStoreID(projectID, "project"); err != nil {
 		return Job{}, 0, false, err
 	}
@@ -346,6 +360,9 @@ func (s Store) LatestForProject(projectID string) (job Job, revision int, found 
 			return Job{}, 0, false, errors.New("project pointer names a missing job")
 		}
 		return Job{}, 0, false, nil
+	}
+	if expectedIdentity != nil && job.ProjectIdentity != *expectedIdentity {
+		return Job{}, 0, false, errors.New("review job project identity does not match authenticated mapping")
 	}
 	wanted := projectPointerFor(job)
 	if pointerFound && pointer == wanted {

@@ -379,9 +379,12 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 		return writeReviewOperational(stdout, projectID, reviewAgentError(err))
 	}
 	store := reviewjob.Store{Root: dataDir, RejectActiveProject: true}
-	if current, revision, found, loadErr := store.LatestForProject(projectID); loadErr != nil {
+	if current, revision, found, loadErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity); loadErr != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	} else if found && reviewStateActive(current.State) {
+		if _, authErr := authenticateStoredReviewProject(dataDir, current); authErr != nil {
+			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+		}
 		current, revision, loadErr = recoverReviewJob(store, current, revision)
 		if loadErr != nil {
 			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
@@ -448,17 +451,22 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 }
 
 func runReviewStatus(dataDir, projectID string, stdout io.Writer) int {
-	if _, err := authenticateReviewMapping(dataDir, projectID); err != nil {
+	mapping, err := authenticateReviewMapping(dataDir, projectID)
+	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
-	job, revision, found, err := (reviewjob.Store{Root: dataDir}).LatestForProject(projectID)
+	store := reviewjob.Store{Root: dataDir}
+	job, revision, found, err := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity)
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
 	if !found {
 		return writeReviewStatus(stdout, nil, projectID, 0, 0)
 	}
-	job, revision, err = recoverReviewJob(reviewjob.Store{Root: dataDir}, job, revision)
+	if _, err := authenticateStoredReviewProject(dataDir, job); err != nil {
+		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+	}
+	job, revision, err = recoverReviewJob(store, job, revision)
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
@@ -484,6 +492,9 @@ func runReviewCancel(dataDir, jobID string, stdout io.Writer) int {
 	job, revision, found, err := store.Load(jobID)
 	if err != nil || !found {
 		return writeReviewOperational(stdout, "unknown", reviewjob.ApplyRecovery)
+	}
+	if _, err := authenticateStoredReviewProject(dataDir, job); err != nil {
+		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
 	}
 	job, revision, err = recoverReviewJob(store, job, revision)
 	if err != nil {
@@ -513,20 +524,20 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 		if before.RetryAttempt != expectedAttempt || before.RetryRevision != expectedRevision {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
+		if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+		}
 		before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 		if err != nil {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
-		if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
-			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
-		}
 		return writeReviewStatus(stdout, &before, before.ProjectID, beforeRevision, 0)
+	}
+	if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
 	before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 	if err != nil {
-		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
-	}
-	if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
 	if before.State != reviewjob.Failed || before.Attempt != expectedAttempt || beforeRevision != expectedRevision {

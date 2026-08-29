@@ -350,11 +350,22 @@ func recoverableInterruptedState(job Job, observedAt time.Time) bool {
 	if !active(job.State) {
 		return false
 	}
-	if (job.State == Queued || job.State == Retrying) && job.LaunchTokenDigest != "" &&
-		observedAt.Before(job.LaunchIntentAt.Add(interruptedLaunchGrace)) {
+	if protectedLaunchIntent(job, observedAt) {
 		return false
 	}
 	return true
+}
+
+func protectedLaunchIntent(job Job, observedAt time.Time) bool {
+	if !prefixedSHA256.MatchString(job.LaunchTokenDigest) || !canonicalTime(job.LaunchIntentAt) ||
+		!observedAt.Before(job.LaunchIntentAt.Add(interruptedLaunchGrace)) {
+		return false
+	}
+	if job.State == Queued || job.State == Retrying {
+		return true
+	}
+	return job.State == CancelRequested && job.Attempt > 1 && job.Phase == Preflight &&
+		job.Owner.ID == "" && !job.CancellationRequested.IsZero()
 }
 
 func newProcessStartToken() string {

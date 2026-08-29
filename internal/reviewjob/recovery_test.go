@@ -501,15 +501,25 @@ func TestCancelledRetryWithoutCommitRecoveryFinishesBeforeAgentValidation(t *tes
 	_, _, err = fixture.store.Update(job.ID, revision, func(job *Job) error {
 		job.State, job.Phase = Failed, ""
 		job.UpdatedAt, job.CompletedAt = failedAt, failedAt
-		job.CancellationRequested = failedAt
 		job.Error = SafeError{Code: ProposalRejected}
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := RequestRetry(fixture.store, currentRetryRequest(t, fixture.store, fixture.job.ID, "retry-cancel-before-agent", failedAt.Add(time.Minute))); err != nil {
-		t.Fatal(err)
+	launchAt := failedAt.Add(time.Minute)
+	token := "cancelled-retry-worker-token-with-at-least-32-bytes"
+	retried, _, err := RequestRetry(fixture.store, RetryRequest{
+		JobID: fixture.job.ID, ExpectedAttempt: 1, ExpectedRevision: 2,
+		RequestID: "retry-cancel-before-agent", At: launchAt,
+		LaunchTokenDigest: launchTokenDigest(token), LaunchIntentAt: launchAt,
+	})
+	if err != nil || retried.State != Retrying {
+		t.Fatalf("retry=%#v err=%v", retried, err)
+	}
+	cancelled, _, err := RequestCancel(fixture.store, fixture.job.ID, launchAt.Add(time.Second))
+	if err != nil || cancelled.State != CancelRequested || cancelled.LaunchTokenDigest != launchTokenDigest(token) {
+		t.Fatalf("cancelled retry launch=%#v err=%v", cancelled, err)
 	}
 	options := workerRunOptions(
 		fixture,
@@ -521,10 +531,11 @@ func TestCancelledRetryWithoutCommitRecoveryFinishesBeforeAgentValidation(t *tes
 		},
 		nil,
 	)
+	options.LaunchToken = token
 	if err := Run(t.Context(), options); err == nil {
 		t.Fatal("cancelled retry returned success")
 	}
-	cancelled, _, found, err := fixture.store.Load(fixture.job.ID)
+	cancelled, _, found, err = fixture.store.Load(fixture.job.ID)
 	if err != nil || !found || cancelled.State != Cancelled || cancelled.Error.Code != AgentCancelled || cancelled.Attempt != 2 {
 		t.Fatalf("cancelled retry=%#v found=%v err=%v", cancelled, found, err)
 	}

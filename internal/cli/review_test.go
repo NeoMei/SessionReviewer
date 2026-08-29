@@ -511,6 +511,84 @@ func TestRunReviewRetryRecoversDeadWorkerBeforePreflight(t *testing.T) {
 	}
 }
 
+func TestRunReviewCommandsRejectProjectIdentitySwapWithoutStoreMutation(t *testing.T) {
+	for _, command := range []string{"status", "cancel", "start", "retry"} {
+		t.Run(command, func(t *testing.T) {
+			fixture := newReviewCLIFixture(t)
+			store := reviewjob.Store{Root: fixture.data}
+			job := fixture.job(reviewjob.Retrying)
+			job.Attempt = 2
+			job.RetryRequestID = deterministicRetryRequestID(job.ID, 1, 1)
+			job.RetryAttempt = 1
+			job.RetryRevision = 1
+			token := "identity-swap-review-token-with-at-least-32-bytes"
+			job.LaunchTokenDigest = digestReviewToken(token)
+			job.LaunchIntentAt = time.Now().UTC().Add(-time.Minute).Round(0)
+			if _, err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+			pointer := filepath.Join(fixture.data, "review-jobs", "projects", fixture.projectID+".json")
+			if err := os.Remove(pointer); err != nil {
+				t.Fatal(err)
+			}
+			dataBefore := snapshotCLITree(t, fixture.data)
+
+			originalProject := fixture.project + "-original"
+			if err := os.Rename(fixture.project, originalProject); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(fixture.project, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			replacementBefore := snapshotCLITree(t, fixture.project)
+			verifyCalls, freezeCalls, launchCalls := 0, 0, 0
+			reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+				verifyCalls++
+				return reviewVerifiedAgent{Agent: fixture.agent}, nil
+			}
+			reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) {
+				freezeCalls++
+				return nil, nil
+			}
+			reviewLaunch = func(reviewLaunchRequest) error {
+				launchCalls++
+				return errors.New("identity swap test must not launch")
+			}
+
+			args := map[string][]string{
+				"status": {"review", "status", "--project-id", fixture.projectID, "--json"},
+				"cancel": {"review", "cancel", "--job-id", job.ID, "--json"},
+				"start":  {"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"},
+				"retry": {"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+					"--expected-attempt", "1", "--expected-revision", "1", "--json"},
+			}[command]
+			var out, errOut bytes.Buffer
+			code := Run(args, &out, &errOut)
+			if code != 1 || errOut.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			status := decodeReviewStatus(t, out.Bytes())
+			if status.State != reviewjob.Idle || status.ErrorCode != string(reviewjob.ApplyRecovery) {
+				t.Fatalf("status=%#v", status)
+			}
+			if got := snapshotCLITree(t, fixture.data); got != dataBefore {
+				t.Fatalf("%s mutated review store after project identity swap\nbefore:\n%s\nafter:\n%s", command, dataBefore, got)
+			}
+			if got := snapshotCLITree(t, fixture.project); got != replacementBefore {
+				t.Fatalf("%s mutated replacement project\nbefore:\n%s\nafter:\n%s", command, replacementBefore, got)
+			}
+			stored, revision, found, err := store.Load(job.ID)
+			if err != nil || !found || revision != 1 || stored.State != reviewjob.Retrying ||
+				stored.LaunchTokenDigest != digestReviewToken(token) || stored.LaunchIntentAt.IsZero() {
+				t.Fatalf("stored=%#v revision=%d found=%v err=%v", stored, revision, found, err)
+			}
+			if freezeCalls != 0 || launchCalls != 0 || (command == "retry" && verifyCalls != 0) {
+				t.Fatalf("command=%s verify=%d freeze=%d launch=%d", command, verifyCalls, freezeCalls, launchCalls)
+			}
+		})
+	}
+}
+
 func TestRunReviewConcurrentRetryLaunchesOnlyWinningAuthority(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	store := reviewjob.Store{Root: fixture.data}

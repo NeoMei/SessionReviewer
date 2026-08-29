@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/neomei/SessionReviewer/internal/atomicfile"
 )
 
 func TestLeaseSameProjectHasExactlyOneCrossProcessWinner(t *testing.T) {
@@ -418,6 +421,185 @@ func TestInterruptedRecoveryLeavesRecentLaunchIntentPending(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestInterruptedRecoveryCancelledRetryLaunchWindowMatrix(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		launchAge     time.Duration
+		liveLease     bool
+		wantProtected bool
+	}{
+		{name: "recent_ownerless", launchAge: 100 * time.Millisecond, wantProtected: true},
+		{name: "expired_ownerless", launchAge: interruptedLaunchGrace + time.Second},
+		{name: "expired_live_lease", launchAge: interruptedLaunchGrace + time.Second, liveLease: true, wantProtected: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, wanted, wantedRevision, token := cancelledRetryLaunchFixture(t, time.Now().UTC().Add(-test.launchAge).Round(0))
+			var leases *LeaseSet
+			if test.liveLease {
+				var err error
+				leases, err = store.AcquireLeases(wanted.ProjectID, wanted.ID, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer leases.Release()
+			}
+
+			got, revision, disposition, err := store.RecoverInterrupted(wanted.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.wantProtected {
+				if disposition != RecoveryNotInterrupted || revision != wantedRevision || !reflect.DeepEqual(got, wanted) ||
+					got.State != CancelRequested || got.Attempt != 2 || got.Owner.ID != "" ||
+					got.LaunchTokenDigest != launchTokenDigest(token) || got.LaunchIntentAt.IsZero() {
+					t.Fatalf("protected cancelled retry=%#v revision=%d disposition=%q", got, revision, disposition)
+				}
+				return
+			}
+			if disposition != RecoveryApplyInspectionNeeded || revision != wantedRevision+1 || got.State != Failed ||
+				got.Error.Code != ApplyRecovery || got.LaunchTokenDigest != "" || !got.LaunchIntentAt.IsZero() {
+				t.Fatalf("expired cancelled retry=%#v revision=%d disposition=%q", got, revision, disposition)
+			}
+		})
+	}
+}
+
+func TestInterruptedRecoveryDoesNotGraceOrdinaryOrCommitWindowCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*Job, time.Time)
+	}{
+		{
+			name: "first_attempt_preflight",
+			mutate: func(job *Job, now time.Time) {
+				job.State, job.Phase, job.Owner = CancelRequested, Preflight, Owner{}
+				job.CancellationRequested = now
+				job.LaunchTokenDigest = launchTokenDigest("ordinary-cancel-token-with-at-least-32-bytes")
+				job.LaunchIntentAt = now
+			},
+		},
+		{
+			name: "applying_commit_window",
+			mutate: func(job *Job, now time.Time) {
+				job.State, job.Phase = CancelRequested, Applying
+				job.CancellationRequested = now
+			},
+		},
+		{
+			name: "syncing_commit_window",
+			mutate: func(job *Job, now time.Time) {
+				job.State, job.Phase = CancelRequested, Syncing
+				job.CancellationRequested = now
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := newStoreWithJob(t)
+			store := Store{Root: root}
+			now := time.Now().UTC().Add(-100 * time.Millisecond).Round(0)
+			_, revision, err := store.Update("job-1", 1, func(job *Job) error {
+				job.UpdatedAt = now
+				test.mutate(job, now)
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, gotRevision, disposition, err := store.RecoverInterrupted("job-1")
+			if err != nil || disposition != RecoveryApplyInspectionNeeded || gotRevision != revision+1 ||
+				got.State != Failed || got.Error.Code != ApplyRecovery {
+				t.Fatalf("RecoverInterrupted(%s)=%#v revision=%d disposition=%q err=%v", test.name, got, gotRevision, disposition, err)
+			}
+		})
+	}
+}
+
+func TestInterruptedRecoveryConvergesWithConcurrentCancelledRetryLaunch(t *testing.T) {
+	for iteration := 0; iteration < 8; iteration++ {
+		store, retried, _, token := retryLaunchFixture(t, time.Now().UTC().Add(-100*time.Millisecond).Round(0))
+		cancelPublished := make(chan struct{})
+		recoveryRead := make(chan struct{})
+		cancelStore := Store{Root: store.Root, writeRoot: func(root *os.Root, name string, body []byte, mode fs.FileMode) error {
+			if err := atomicfile.WriteRoot(root, name, body, mode); err != nil {
+				return err
+			}
+			if name == retried.ID+".json" {
+				close(cancelPublished)
+				<-recoveryRead
+			}
+			return nil
+		}}
+		var readOnce sync.Once
+		recoveryStore := Store{Root: store.Root, afterJobRead: func() error {
+			readOnce.Do(func() { close(recoveryRead) })
+			return nil
+		}}
+		type cancelResult struct {
+			job Job
+			err error
+		}
+		type recoveryResult struct {
+			disposition RecoveryDisposition
+			err         error
+		}
+		cancelled := make(chan cancelResult, 1)
+		recovered := make(chan recoveryResult, 1)
+		go func() {
+			job, _, err := RequestCancel(cancelStore, retried.ID, time.Now().UTC().Round(0))
+			cancelled <- cancelResult{job: job, err: err}
+		}()
+		go func() {
+			<-cancelPublished
+			_, _, disposition, err := recoveryStore.RecoverInterrupted(retried.ID)
+			recovered <- recoveryResult{disposition: disposition, err: err}
+		}()
+		gotCancel, gotRecovery := <-cancelled, <-recovered
+		if gotCancel.err != nil || gotRecovery.err != nil || gotRecovery.disposition != RecoveryNotInterrupted {
+			t.Fatalf("iteration %d cancel=%#v recovery=%#v", iteration, gotCancel, gotRecovery)
+		}
+		final, _, found, err := store.Load(retried.ID)
+		if err != nil || !found || final.State != CancelRequested || final.Attempt != 2 || final.Owner.ID != "" ||
+			final.LaunchTokenDigest != launchTokenDigest(token) || final.LaunchIntentAt.IsZero() {
+			t.Fatalf("iteration %d final=%#v found=%v err=%v", iteration, final, found, err)
+		}
+	}
+}
+
+func cancelledRetryLaunchFixture(t *testing.T, launchAt time.Time) (Store, Job, int, string) {
+	t.Helper()
+	store, retried, _, token := retryLaunchFixture(t, launchAt)
+	cancelled, revision, err := RequestCancel(store, retried.ID, launchAt.Add(time.Millisecond))
+	if err != nil || cancelled.State != CancelRequested || cancelled.Attempt != 2 || cancelled.Owner.ID != "" ||
+		cancelled.LaunchTokenDigest != launchTokenDigest(token) || cancelled.LaunchIntentAt.IsZero() {
+		t.Fatalf("RequestCancel(retrying)=%#v revision=%d err=%v", cancelled, revision, err)
+	}
+	return store, cancelled, revision, token
+}
+
+func retryLaunchFixture(t *testing.T, launchAt time.Time) (Store, Job, int, string) {
+	t.Helper()
+	root := newStoreRoot(t)
+	store := Store{Root: root}
+	job := terminalJobFixture(Failed)
+	job.CreatedAt = launchAt.Add(-time.Minute)
+	job.UpdatedAt = launchAt.Add(-time.Second)
+	job.CompletedAt = job.UpdatedAt
+	job.Error = SafeError{Code: AgentAuth}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	token := "cancelled-retry-launch-token-with-at-least-32-bytes"
+	retried, revision, err := RequestRetry(store, RetryRequest{
+		JobID: job.ID, ExpectedAttempt: 1, ExpectedRevision: 1,
+		RequestID: "cancelled-retry-launch", At: launchAt,
+		LaunchTokenDigest: launchTokenDigest(token), LaunchIntentAt: launchAt,
+	})
+	if err != nil || retried.State != Retrying || retried.Attempt != 2 || retried.Owner.ID != "" {
+		t.Fatalf("RequestRetry()=%#v revision=%d err=%v", retried, revision, err)
+	}
+	return store, retried, revision, token
 }
 
 func TestInterruptedRecoveryReturnsTypedDisposition(t *testing.T) {
