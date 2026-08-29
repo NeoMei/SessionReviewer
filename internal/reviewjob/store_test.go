@@ -968,6 +968,73 @@ func TestStoreMissingPointerRepairScansAndReadsEachCandidateOnce(t *testing.T) {
 	}
 }
 
+func TestStoreMutationGuardPreventsCreatePointerRepairRecoveryAndCASWrites(t *testing.T) {
+	guardErr := errors.New("Project mapping authority changed")
+	guard := func(Job) error { return guardErr }
+
+	t.Run("create", func(t *testing.T) {
+		root := newStoreRoot(t)
+		if _, err := (Store{Root: root}).WithMutationGuard(guard).Create(validJobFixture()); !errors.Is(err, guardErr) {
+			t.Fatalf("Create() error=%v, want mutation guard", err)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 0 {
+			t.Fatalf("guarded Create mutated empty store: entries=%v err=%v", entries, err)
+		}
+	})
+
+	t.Run("pointer repair", func(t *testing.T) {
+		root := newStoreWithJob(t)
+		pointer := filepath.Join(root, "review-jobs/projects/project-1.json")
+		if err := os.Remove(pointer); err != nil {
+			t.Fatal(err)
+		}
+		identity := validJobFixture().ProjectIdentity
+		if _, _, _, err := (Store{Root: root}).WithMutationGuard(guard).LatestForProjectAuthenticated("project-1", identity); !errors.Is(err, guardErr) {
+			t.Fatalf("LatestForProjectAuthenticated() error=%v, want mutation guard", err)
+		}
+		if _, err := os.Stat(pointer); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("guarded latest repaired pointer: %v", err)
+		}
+	})
+
+	t.Run("recovery", func(t *testing.T) {
+		root := newStoreWithJob(t)
+		primary := filepath.Join(root, "review-jobs/jobs/job-1.json")
+		before := readFile(t, primary)
+		if _, _, _, err := (Store{Root: root}).WithMutationGuard(guard).RecoverInterrupted("job-1"); !errors.Is(err, guardErr) {
+			t.Fatalf("RecoverInterrupted() error=%v, want mutation guard", err)
+		}
+		if got := readFile(t, primary); !bytes.Equal(got, before) {
+			t.Fatal("guarded recovery changed the job record")
+		}
+		lease := filepath.Join(root, "review-jobs/locks/projects/project-1.lock")
+		if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("guarded recovery created a project lease: %v", err)
+		}
+	})
+
+	t.Run("CAS", func(t *testing.T) {
+		root := newStoreWithJob(t)
+		primary := filepath.Join(root, "review-jobs/jobs/job-1.json")
+		before := readFile(t, primary)
+		_, _, err := (Store{Root: root}).WithMutationGuard(guard).Update("job-1", 1, func(job *Job) error {
+			job.State = Running
+			return nil
+		})
+		if !errors.Is(err, guardErr) {
+			t.Fatalf("Update() error=%v, want mutation guard", err)
+		}
+		if got := readFile(t, primary); !bytes.Equal(got, before) {
+			t.Fatal("guarded CAS changed the job record")
+		}
+		backup := filepath.Join(root, "review-jobs/jobs/job-1.json.bak")
+		if _, err := os.Stat(backup); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("guarded CAS created a backup: %v", err)
+		}
+	})
+}
+
 func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
 	root := newStoreRoot(t)
 	store := Store{Root: root}

@@ -298,6 +298,12 @@ type authenticatedReviewMapping struct {
 	projectRoot     string
 	vaultRoot       string
 	projectIdentity pathguard.IdentityToken
+	vaultIdentity   pathguard.IdentityToken
+}
+
+type reviewProjectAuthority struct {
+	dataDir string
+	mapping authenticatedReviewMapping
 }
 
 func resolveReviewDataDir() (string, error) {
@@ -336,9 +342,37 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 	if err != nil {
 		return authenticatedReviewMapping{}, err
 	}
+	vaultIdentity, err := vault.PhysicalIdentity()
+	if err != nil {
+		return authenticatedReviewMapping{}, err
+	}
 	return authenticatedReviewMapping{
-		projectID: projectID, projectRoot: project.Path, vaultRoot: vault.Path, projectIdentity: projectIdentity,
+		projectID: projectID, projectRoot: project.Path, vaultRoot: vault.Path,
+		projectIdentity: projectIdentity, vaultIdentity: vaultIdentity,
 	}, nil
+}
+
+func pinReviewProjectAuthority(dataDir string, expected authenticatedReviewMapping) (reviewProjectAuthority, error) {
+	current, err := authenticateReviewMapping(dataDir, expected.projectID)
+	if err != nil || current != expected {
+		return reviewProjectAuthority{}, errors.New("review project mapping authority changed")
+	}
+	return reviewProjectAuthority{dataDir: dataDir, mapping: current}, nil
+}
+
+func (authority reviewProjectAuthority) authorizeMutation(job reviewjob.Job) error {
+	if job.ProjectID != authority.mapping.projectID || job.ProjectIdentity != authority.mapping.projectIdentity {
+		return errors.New("review job is outside the pinned project authority")
+	}
+	current, err := authenticateReviewMapping(authority.dataDir, authority.mapping.projectID)
+	if err != nil || current != authority.mapping {
+		return errors.New("review project mapping authority changed")
+	}
+	return nil
+}
+
+func (authority reviewProjectAuthority) store(rejectActive bool) reviewjob.Store {
+	return (reviewjob.Store{Root: authority.dataDir, RejectActiveProject: rejectActive}).WithMutationGuard(authority.authorizeMutation)
 }
 
 func authenticateStoredReviewJob(dataDir string, job reviewjob.Job) (authenticatedReviewMapping, error) {
@@ -368,7 +402,7 @@ func authenticateStoredReviewProject(dataDir string, job reviewjob.Job) (authent
 }
 
 func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int {
-	mapping, err := authenticateReviewMapping(dataDir, projectID)
+	initialMapping, err := authenticateReviewMapping(dataDir, projectID)
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
@@ -378,11 +412,16 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewAgentError(err))
 	}
-	store := reviewjob.Store{Root: dataDir, RejectActiveProject: true}
+	authority, err := pinReviewProjectAuthority(dataDir, initialMapping)
+	if err != nil {
+		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+	}
+	mapping := authority.mapping
+	store := authority.store(true)
 	if current, revision, found, loadErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity); loadErr != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	} else if found && reviewStateActive(current.State) {
-		if _, authErr := authenticateStoredReviewProject(dataDir, current); authErr != nil {
+		if authErr := authority.authorizeMutation(current); authErr != nil {
 			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 		}
 		current, revision, loadErr = recoverReviewJob(store, current, revision)
@@ -427,12 +466,12 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 		}
 		if persistedFound {
-			current, _, found, repairErr := store.LatestForProject(projectID)
+			current, _, found, repairErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity)
 			if repairErr != nil || !found || current.ID != job.ID {
 				terminalizeReviewLaunch(store, job.ID, reviewjob.ApplyRecovery, canonicalReviewNow())
 				return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 			}
-		} else if current, revision, found, loadErr := store.LatestForProject(projectID); loadErr == nil && found && reviewStateActive(current.State) {
+		} else if current, revision, found, loadErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity); loadErr == nil && found && reviewStateActive(current.State) {
 			return writeReviewStatus(stdout, &current, projectID, revision, 0)
 		} else {
 			return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
@@ -455,7 +494,8 @@ func runReviewStatus(dataDir, projectID string, stdout io.Writer) int {
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
-	store := reviewjob.Store{Root: dataDir}
+	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	store := authority.store(false)
 	job, revision, found, err := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity)
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
@@ -463,7 +503,7 @@ func runReviewStatus(dataDir, projectID string, stdout io.Writer) int {
 	if !found {
 		return writeReviewStatus(stdout, nil, projectID, 0, 0)
 	}
-	if _, err := authenticateStoredReviewProject(dataDir, job); err != nil {
+	if err := authority.authorizeMutation(job); err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
 	job, revision, err = recoverReviewJob(store, job, revision)
@@ -493,9 +533,12 @@ func runReviewCancel(dataDir, jobID string, stdout io.Writer) int {
 	if err != nil || !found {
 		return writeReviewOperational(stdout, "unknown", reviewjob.ApplyRecovery)
 	}
-	if _, err := authenticateStoredReviewProject(dataDir, job); err != nil {
+	mapping, err := authenticateStoredReviewProject(dataDir, job)
+	if err != nil {
 		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
 	}
+	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	store = authority.store(false)
 	job, revision, err = recoverReviewJob(store, job, revision)
 	if err != nil {
 		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
@@ -524,18 +567,23 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 		if before.RetryAttempt != expectedAttempt || before.RetryRevision != expectedRevision {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
-		if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+		mapping, err := authenticateStoredReviewProject(dataDir, before)
+		if err != nil {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
+		store = (reviewProjectAuthority{dataDir: dataDir, mapping: mapping}).store(false)
 		before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 		if err != nil {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
 		return writeReviewStatus(stdout, &before, before.ProjectID, beforeRevision, 0)
 	}
-	if _, err := authenticateStoredReviewProject(dataDir, before); err != nil {
+	mapping, err := authenticateStoredReviewProject(dataDir, before)
+	if err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
+	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	store = authority.store(false)
 	before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 	if err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)

@@ -247,6 +247,57 @@ func TestRunReviewStartRepairsPartialPointerCommitAndLaunchesSameJob(t *testing.
 	}
 }
 
+func TestRunReviewStartAgentVerificationIdentitySwapCannotRepairMissingPointer(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Failed)
+	job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	pointer := filepath.Join(fixture.data, "review-jobs", "projects", fixture.projectID+".json")
+	if err := os.Remove(pointer); err != nil {
+		t.Fatal(err)
+	}
+	dataBefore := snapshotCLITree(t, fixture.data)
+	originalProject := fixture.project + "-before-agent-verify"
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		if err := os.Rename(fixture.project, originalProject); err != nil {
+			return reviewVerifiedAgent{}, err
+		}
+		if err := os.Mkdir(fixture.project, 0o700); err != nil {
+			return reviewVerifiedAgent{}, err
+		}
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	freezeCalls := 0
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) {
+		freezeCalls++
+		return nil, errors.New("identity drift must stop before freeze")
+	}
+	launchCalls := 0
+	reviewLaunch = func(reviewLaunchRequest) error {
+		launchCalls++
+		return errors.New("identity drift must not launch")
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.Idle || status.ErrorCode != string(reviewjob.ApplyRecovery) {
+		t.Fatalf("status=%#v", status)
+	}
+	if got := snapshotCLITree(t, fixture.data); got != dataBefore {
+		t.Fatalf("start repaired the missing pointer with stale Project authority\nbefore:\n%s\nafter:\n%s", dataBefore, got)
+	}
+	if freezeCalls != 0 || launchCalls != 0 {
+		t.Fatalf("freeze=%d launch=%d", freezeCalls, launchCalls)
+	}
+}
+
 func TestRunReviewConcurrentStartCreatesAndLaunchesOnlyOneActiveJob(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {

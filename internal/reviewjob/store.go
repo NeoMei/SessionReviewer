@@ -45,6 +45,7 @@ type Store struct {
 	afterJobIdentityRead  func() error
 	afterJobDirectoryScan func() error
 	writeRoot             func(*os.Root, string, []byte, fs.FileMode) error
+	mutationGuard         func(Job) error
 }
 
 type storedJob struct {
@@ -87,6 +88,25 @@ type storeLayout struct {
 	missing      bool
 }
 
+// WithMutationGuard returns a Store whose control-plane mutations must be
+// reauthorized against the selected durable job immediately before writes.
+// Workers leave this unset because their leases and pinned roots are their
+// mutation authority.
+func (s Store) WithMutationGuard(guard func(Job) error) Store {
+	s.mutationGuard = guard
+	return s
+}
+
+func (s Store) guardMutation(job Job) error {
+	if s.mutationGuard == nil {
+		return nil
+	}
+	if err := s.mutationGuard(job); err != nil {
+		return fmt.Errorf("review job mutation authority changed: %w", err)
+	}
+	return nil
+}
+
 func (s Store) Create(job Job) (revision int, retErr error) {
 	if err := Validate(job); err != nil {
 		return 0, fmt.Errorf("invalid review job: %w", err)
@@ -95,6 +115,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 		return 0, err
 	}
 	if err := validateStoreID(job.ProjectID, "project"); err != nil {
+		return 0, err
+	}
+	if err := s.guardMutation(job); err != nil {
 		return 0, err
 	}
 	layout, err := s.openLayout(true)
@@ -107,6 +130,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 		return 0, fmt.Errorf("lock review job store: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	if err := s.guardMutation(job); err != nil {
+		return 0, err
+	}
 	if s.RejectActiveProject {
 		activeJob, activeRevision, found, err := s.activeProjectJob(layout, job.ProjectID)
 		if err != nil {
@@ -118,6 +144,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	}
 
 	if err := rejectCaseCollision(layout.jobs, jobIdentityName(job.ID), job.ID+".json", job.ID+".json.bak"); err != nil {
+		return 0, err
+	}
+	if err := s.guardMutation(job); err != nil {
 		return 0, err
 	}
 	createdIdentity, err := s.ensureJobIdentity(layout.jobs, job)
@@ -134,6 +163,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	} else if found {
 		return 0, errors.New("review job already exists")
 	}
+	if err := s.guardMutation(job); err != nil {
+		return 0, err
+	}
 	work, err := ensurePrivateDirectory(layout.work, job.ID)
 	if err != nil {
 		return 0, fmt.Errorf("create review job work directory: %w", err)
@@ -145,6 +177,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	record := storedJob{Revision: 1, Job: job}
 	encoded, err := marshalCanonical(record, maxJobRecordBytes)
 	if err != nil {
+		return 0, err
+	}
+	if err := s.guardMutation(job); err != nil {
 		return 0, err
 	}
 	if err := s.writer()(layout.jobs, job.ID+".json", encoded, 0o600); err != nil {
@@ -160,6 +195,9 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 			return 0, fmt.Errorf("publish project pointer: %w", err)
 		}
 	}
+	if err := s.guardMutation(job); err != nil {
+		return 0, err
+	}
 	if err := s.publishPointer(layout.projects, projectPointerFor(job)); err != nil {
 		return 0, err
 	}
@@ -172,6 +210,9 @@ func (s Store) activeProjectJob(layout *storeLayout, projectID string) (Job, int
 	}
 	job, revision, loaded, err := s.latestJobByEnumeration(layout.jobs, projectID)
 	if err != nil || !loaded || !active(job.State) {
+		return Job{}, 0, false, err
+	}
+	if err := s.guardMutation(job); err != nil {
 		return Job{}, 0, false, err
 	}
 	if err := s.publishPointer(layout.projects, projectPointerFor(job)); err != nil {
@@ -280,6 +321,9 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	if err := validateReviewAccountingTransition(current.ReviewAccounting, next.ReviewAccounting); err != nil {
 		return Job{}, currentRevision, fmt.Errorf("invalid review accounting update: %w", err)
 	}
+	if err := s.guardMutation(current); err != nil {
+		return Job{}, currentRevision, err
+	}
 	if err := verify(); err != nil {
 		return Job{}, currentRevision, err
 	}
@@ -298,6 +342,9 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	nextRevision := currentRevision + 1
 	encoded, err := marshalCanonical(storedJob{Revision: nextRevision, Job: next}, maxJobRecordBytes)
 	if err != nil {
+		return Job{}, currentRevision, err
+	}
+	if err := s.guardMutation(next); err != nil {
 		return Job{}, currentRevision, err
 	}
 	if err := s.writer()(layout.jobs, jobID+".json", encoded, 0o600); err != nil {
@@ -367,6 +414,9 @@ func (s Store) latestForProject(projectID string, expectedIdentity *pathguard.Id
 	wanted := projectPointerFor(job)
 	if pointerFound && pointer == wanted {
 		return job, revision, true, nil
+	}
+	if err := s.guardMutation(job); err != nil {
+		return Job{}, 0, false, err
 	}
 	if err := s.publishPointer(layout.projects, wanted); err != nil {
 		return Job{}, 0, false, err

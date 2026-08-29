@@ -270,6 +270,9 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 		}
 		return Job{}, 0, "", os.ErrNotExist
 	}
+	if err := s.guardMutation(job); err != nil {
+		return Job{}, 0, "", err
+	}
 	if err := layout.verifyPinned(); err != nil {
 		return Job{}, 0, "", err
 	}
@@ -296,6 +299,9 @@ func (s Store) RecoverInterrupted(jobID string) (_ Job, _ int, _ RecoveryDisposi
 	}
 	if current.ID != job.ID || current.ProjectID != job.ProjectID || current.ProjectIdentity != job.ProjectIdentity || currentRevision < revision {
 		return Job{}, 0, "", errors.New("review job identity or revision changed while acquiring recovery lease")
+	}
+	if err := s.guardMutation(current); err != nil {
+		return Job{}, 0, "", err
 	}
 	if err := layout.verifyPinned(); err != nil {
 		return Job{}, 0, "", err
