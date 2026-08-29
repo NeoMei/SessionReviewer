@@ -54,16 +54,22 @@ export class PluginSettingTab {
 }
 
 class TextControl {
+  value = "";
+  onChangeHandler?: (value: string) => void;
   setPlaceholder(_value: string): this { return this; }
-  setValue(_value: string): this { return this; }
-  onChange(_callback: (value: string) => void): this { return this; }
+  setValue(value: string): this { this.value = value; return this; }
+  onChange(callback: (value: string) => void): this { this.onChangeHandler = callback; return this; }
 }
 class ButtonControl {
+  onClickHandler?: () => void;
   setButtonText(_value: string): this { return this; }
   setCta(): this { return this; }
-  onClick(_callback: () => void): this { return this; }
+  onClick(callback: () => void): this { this.onClickHandler = callback; return this; }
 }
 export class Setting {
+  static instances: Setting[] = [];
+  readonly textControls: TextControl[] = [];
+  readonly buttonControls: ButtonControl[] = [];
   private readonly settingEl: HTMLElement;
   private readonly nameEl: HTMLElement;
   private readonly descEl: HTMLElement;
@@ -77,11 +83,12 @@ export class Setting {
     this.descEl.className = "setting-item-description";
     this.settingEl.append(this.nameEl, this.descEl);
     container.append(this.settingEl);
+    Setting.instances.push(this);
   }
 
   setName(value: string): this { this.nameEl.textContent = value; return this; }
   setDesc(value: string): this { this.descEl.textContent = value; return this; }
   setHeading(): this { this.settingEl.classList.add("mod-heading"); return this; }
-  addText(callback: (control: TextControl) => void): this { callback(new TextControl()); return this; }
-  addButton(callback: (control: ButtonControl) => void): this { callback(new ButtonControl()); return this; }
+  addText(callback: (control: TextControl) => void): this { const control = new TextControl(); this.textControls.push(control); callback(control); return this; }
+  addButton(callback: (control: ButtonControl) => void): this { const control = new ButtonControl(); this.buttonControls.push(control); callback(control); return this; }
 }
