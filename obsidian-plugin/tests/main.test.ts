@@ -12,7 +12,7 @@ describe("plugin lifecycle", () => {
     expect(VIEW_TYPE).toBe("session-reviewer-project-evolution");
     expect(registerView).toHaveBeenCalledOnce();
     expect(addCommand).toHaveBeenCalledWith(expect.objectContaining({ id: "open-project-evolution" }));
-    expect(addRibbonIcon).toHaveBeenCalledWith("history", "SessionReviewer：打开项目脉络", expect.any(Function));
+    expect(addRibbonIcon).toHaveBeenCalledWith("history", "打开项目脉络", expect.any(Function));
   });
 
   it("persists the Codex path next to the CLI path without extra credentials", async () => {
@@ -36,7 +36,7 @@ describe("plugin lifecycle", () => {
     const settingsTab = addSettingTab.mock.calls[0]?.[0] as { saveCodexPath?: (path: string) => Promise<void> };
     await settingsTab.saveCodexPath?.("/bin/codex-next");
 
-    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything(), cliPath: "/bin/sr", codexPath: "/bin/codex-next" });
+    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything() as unknown, cliPath: "/bin/sr", codexPath: "/bin/codex-next" });
     const payload = saveData.mock.lastCall?.[0] as Record<string, unknown>;
     expect(Object.keys(payload).sort()).toEqual(["cliPath", "codexPath", "viewState"]);
   });

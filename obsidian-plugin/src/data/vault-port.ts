@@ -21,7 +21,7 @@ export class ObsidianVaultPort implements VaultPort {
   getFrontmatter(path: string): Record<string, unknown> | undefined {
     const file = this.app.vault.getAbstractFileByPath(normalizePath(path));
     if (!file || !isFile(file)) return undefined;
-    return this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+    return this.app.metadataCache.getFileCache(file)?.frontmatter;
   }
 
   read(path: string): Promise<string> {

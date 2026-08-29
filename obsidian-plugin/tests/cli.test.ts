@@ -47,7 +47,7 @@ describe("CLI runner", () => {
         unknown_future_field: "ignored"
       }), "");
     });
-    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
     await expect(runner.reviewStatus("project-0123456789abcdef")).resolves.toEqual({
       schemaVersion: 1,
       jobId: "job-abc.def_1",
@@ -132,15 +132,15 @@ describe("CLI runner", () => {
         ""
       );
     });
-    const runner = new CliRunner("/usr/local/bin/session-reviewer", exitOne as never);
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", exitOne);
     const status = await runner.reviewStatus("project-0123456789abcdef");
     expect(status).toMatchObject({ state: "idle", errorCode: "E_AGENT_BUSY", canCancel: false });
-    expect(String(status)).not.toContain("private stderr");
+    expect(JSON.stringify(status)).not.toContain("private stderr");
 
     const malformed = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
       callback(Object.assign(new Error("exit status 2"), { stdout: "not json" }), "usage text", "");
     });
-    const broken = new CliRunner("/usr/local/bin/session-reviewer", malformed as never);
+    const broken = new CliRunner("/usr/local/bin/session-reviewer", malformed);
     await expect(broken.reviewStatus("project-0123456789abcdef")).rejects.toThrow("SessionReviewer review command failed");
   });
 
@@ -148,7 +148,7 @@ describe("CLI runner", () => {
     const execFile = vi.fn((_file: string, args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
       callback(null, JSON.stringify({ schema_version: 1, project_id: "project-0123456789abcdef" }), "");
     });
-    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
     await expect(runner.reviewStatus("project-0123456789abcdef")).rejects.toThrow("SessionReviewer review command failed");
   });
 
@@ -156,7 +156,7 @@ describe("CLI runner", () => {
     const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
       callback(null, JSON.stringify({ schema_version: 1, kind: "codex", compatible: true, version: "0.147.1" }), "");
     });
-    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
     await expect(runner.verifyAgent("/usr/local/bin/codex")).resolves.toEqual({
       schemaVersion: 1,
       kind: "codex",
@@ -172,7 +172,7 @@ describe("CLI runner", () => {
         ""
       );
     });
-    const stale = new CliRunner("/usr/local/bin/session-reviewer", incompatible as never);
+    const stale = new CliRunner("/usr/local/bin/session-reviewer", incompatible);
     await expect(stale.verifyAgent("/usr/local/bin/codex")).resolves.toEqual({
       schemaVersion: 1,
       kind: "codex",

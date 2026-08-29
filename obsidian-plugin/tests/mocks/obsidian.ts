@@ -64,10 +64,10 @@ class TextControl {
   onChange(callback: (value: string) => void): this { this.onChangeHandler = callback; return this; }
 }
 class ButtonControl {
-  onClickHandler?: () => void;
+  onClickHandler?: () => unknown;
   setButtonText(_value: string): this { return this; }
   setCta(): this { return this; }
-  onClick(callback: () => void): this { this.onClickHandler = callback; return this; }
+  onClick(callback: () => unknown): this { this.onClickHandler = callback; return this; }
 }
 export class Setting {
   static instances: Setting[] = [];

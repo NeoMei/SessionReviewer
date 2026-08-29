@@ -100,8 +100,8 @@ export function parseHistory(input: string): HistoryModel {
     events.push(parseEvent(source, lines, block, fields));
   }
   for (let index = 1; index < events.length; index += 1) {
-    const previous = eventTime(events[index - 1] as HistoryEvent);
-    const current = eventTime(events[index] as HistoryEvent);
+    const previous = eventTime(events[index - 1]);
+    const current = eventTime(events[index]);
     if (previous < current || (previous === current && (events[index - 1]?.id ?? "") > (events[index]?.id ?? ""))) {
       throw new Error("history events are not in reverse chronological order");
     }
@@ -122,9 +122,9 @@ function parseFrontmatter(source: string, expectedId: string, expectedType: stri
   for (const raw of source.slice(4, closing).split("\n")) {
     const match = /^([A-Za-z0-9_-]+):\s*(.*?)\s*$/.exec(raw);
     if (!match) throw new Error("malformed YAML frontmatter");
-    const key = match[1] as string;
+    const key = match[1];
     if (values.has(key)) throw new Error(`duplicate YAML frontmatter key "${key}"`);
-    values.set(key, match[2] as string);
+    values.set(key, match[2]);
   }
   if (values.get("id") !== expectedId) throw new Error(`frontmatter id must be "${expectedId}"`);
   if (values.get("entity_type") !== expectedType) throw new Error(`frontmatter entity_type must be "${expectedType}"`);
@@ -147,7 +147,7 @@ function scanLines(source: string): Line[] {
     const text = source.slice(start, end);
     const run = /^ {0,3}(`{3,}|~{3,})/.exec(text)?.[1];
     const wasFenced = fence !== undefined;
-    if (run && !fence) fence = { marker: run[0] as string, width: run.length };
+    if (run && !fence) fence = { marker: run[0], width: run.length };
     else if (run && fence && run[0] === fence.marker && run.length >= fence.width && /^ {0,3}(`+|~+)\s*$/.test(text)) fence = undefined;
     result.push({ text, start, end, next, fenced: wasFenced || Boolean(run) });
     if (next === source.length) break;
@@ -167,7 +167,7 @@ function scanMarkers(lines: Line[], bodyStart: number): MarkerBlock[] {
     const close = /^<!-- \/session-reviewer:(risk|decision|event) -->$/.exec(line.text);
     if (open) {
       const kind = open[1] as MarkerBlock["kind"];
-      const id = open[2] as string;
+      const id = open[2];
       if (active) throw new Error(`nested ${kind} marker inside ${active.kind} "${active.id}"`);
       if (ids.has(id)) throw new Error(`duplicate ${kind} identity "${id}"`);
       active = { kind, id, start: line.next };
@@ -198,13 +198,13 @@ function scanHeadings(lines: Line[], bodyStart: number, range?: SourceRange): He
 function rootHeading(headings: Heading[], expected: string): Heading {
   const roots = headings.filter((heading) => heading.level === 1);
   if (roots.length !== 1 || (expected && roots[0]?.name !== expected)) throw new Error(`document must contain one level-one title${expected ? ` "${expected}"` : ""}`);
-  return roots[0] as Heading;
+  return roots[0];
 }
 
 function requiredHeading(headings: Heading[], level: number, name: string): Heading {
   const found = headings.filter((heading) => heading.level === level && heading.name === name);
   if (found.length !== 1) throw new Error(`${name} must appear exactly once`);
-  return found[0] as Heading;
+  return found[0];
 }
 
 function sectionRange(headings: Heading[], heading: Heading, sourceEnd: number): SourceRange {

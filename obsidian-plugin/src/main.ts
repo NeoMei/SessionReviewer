@@ -36,7 +36,7 @@ export default class SessionReviewerPlugin extends Plugin {
       this.codexPath = codexPath;
       await this.saveData({ viewState: this.viewState, cliPath: this.cliPath, codexPath });
     }));
-    this.addRibbonIcon("history", "SessionReviewer：打开项目脉络", () => void this.activateView());
+    this.addRibbonIcon("history", "打开项目脉络", () => void this.activateView());
     this.addCommand({
       id: "open-project-evolution",
       name: "打开项目脉络",
@@ -47,7 +47,7 @@ export default class SessionReviewerPlugin extends Plugin {
   async activateView(): Promise<void> {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
-    this.app.workspace.revealLeaf(leaf);
+    void this.app.workspace.revealLeaf(leaf);
   }
 
   private configuredRunner(): CliRunner | undefined {

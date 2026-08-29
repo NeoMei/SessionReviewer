@@ -1,10 +1,24 @@
-import { type App, Notice, PluginSettingTab, Setting } from "obsidian";
+import { type App, Notice, PluginSettingTab, Setting, type SettingDefinitionItem } from "obsidian";
 import type SessionReviewerPlugin from "../main";
 import { CliRunner } from "./runner";
 
 type RunnerFactory = (executable: string) => Pick<CliRunner, "verifyExecutable" | "verifyAgent">;
 
 const defaultRunnerFactory: RunnerFactory = (executable) => new CliRunner(executable);
+
+const TEXT = {
+  heading: "CLI",
+  cliName: "CLI 可执行文件",
+  cliDesc: "仅保存在 Obsidian 插件设置中。不会写入 Markdown 或机器账本。",
+  cliPlaceholder: "/usr/local/bin/session-reviewer",
+  cliMissingPath: "请先填写 CLI 可执行文件的绝对路径。",
+  codexName: "Codex 可执行文件",
+  codexDesc: "“总结并同步”使用的命令行。需为绝对路径，仅保存在插件设置中，验证通过后才会保存。",
+  codexPlaceholder: "/usr/local/bin/codex",
+  codexMissingCli: "尚未配置 CLI，请先在上方验证并保存。",
+  codexMissingPath: "请先填写可执行文件的绝对路径。",
+  codexIncompatible: "当前版本暂不兼容自动总结。"
+} as const;
 
 export class CliSettingsTab extends PluginSettingTab {
   constructor(
@@ -19,55 +33,69 @@ export class CliSettingsTab extends PluginSettingTab {
     super(app, plugin);
   }
 
+  getSettingDefinitions(): SettingDefinitionItem[] {
+    return [
+      { name: TEXT.heading, render: (setting) => { setting.setName(TEXT.heading).setHeading(); } },
+      { name: TEXT.cliName, desc: TEXT.cliDesc, render: (setting) => { this.configureCliSetting(setting); } },
+      { name: TEXT.codexName, desc: TEXT.codexDesc, render: (setting) => { this.configureCodexSetting(setting); } }
+    ];
+  }
+
   display(): void {
     this.containerEl.empty();
-    new Setting(this.containerEl)
-      .setName("CLI")
-      .setHeading();
-    new Setting(this.containerEl)
-      .setName("CLI 可执行文件")
-      .setDesc("仅保存在 Obsidian 插件设置中。不会写入 Markdown 或机器账本。")
+    new Setting(this.containerEl).setName(TEXT.heading).setHeading();
+    this.configureCliSetting(new Setting(this.containerEl));
+    this.configureCodexSetting(new Setting(this.containerEl));
+  }
+
+  private configureCliSetting(setting: Setting): void {
+    setting
+      .setName(TEXT.cliName)
+      .setDesc(TEXT.cliDesc)
       .addText((text) => text
-        .setPlaceholder("/usr/local/bin/session-reviewer")
+        .setPlaceholder(TEXT.cliPlaceholder)
         .setValue(this.cliPath)
         .onChange((value) => { this.cliPath = value.trim(); }))
       .addButton((control) => control.setButtonText("验证并保存").setCta().onClick(async () => {
         try {
           if (!this.cliPath) {
-            new Notice("请先填写 SessionReviewer CLI 可执行文件的绝对路径。");
+            new Notice(TEXT.cliMissingPath);
             return;
           }
           const verified = await this.createRunner(this.cliPath).verifyExecutable();
           await this.saveCliPath(this.cliPath);
-          new Notice(`已连接 SessionReviewer ${verified.version}`);
+          new Notice("已连接 SessionReviewer " + verified.version);
         } catch (error) {
           new Notice(error instanceof Error ? error.message : String(error));
         }
       }));
-    new Setting(this.containerEl)
-      .setName("Codex 可执行文件")
-      .setDesc("“总结并同步”使用的 Codex 命令行。需为绝对路径，仅保存在插件设置中，验证通过后才会保存。")
+  }
+
+  private configureCodexSetting(setting: Setting): void {
+    setting
+      .setName(TEXT.codexName)
+      .setDesc(TEXT.codexDesc)
       .addText((text) => text
-        .setPlaceholder("/usr/local/bin/codex")
+        .setPlaceholder(TEXT.codexPlaceholder)
         .setValue(this.codexPath)
         .onChange((value) => { this.codexPath = value.trim(); }))
       .addButton((control) => control.setButtonText("验证并保存").setCta().onClick(async () => {
         try {
           if (!this.cliPath) {
-            new Notice("尚未配置 SessionReviewer CLI，请先在上方验证并保存。");
+            new Notice(TEXT.codexMissingCli);
             return;
           }
           if (!this.codexPath) {
-            new Notice("请先填写 Codex 可执行文件的绝对路径。");
+            new Notice(TEXT.codexMissingPath);
             return;
           }
           const verified = await this.createRunner(this.cliPath).verifyAgent(this.codexPath);
           if (!verified.compatible) {
-            new Notice("当前 Codex 版本暂不兼容自动总结。");
+            new Notice(TEXT.codexIncompatible);
             return;
           }
           await this.saveCodexPath(this.codexPath);
-          new Notice(verified.version ? `Codex ${verified.version} 已就绪` : "Codex 已就绪");
+          new Notice(verified.version ? "Codex " + verified.version + " 已就绪" : "Codex 已就绪");
         } catch (error) {
           new Notice(error instanceof Error ? error.message : String(error));
         }

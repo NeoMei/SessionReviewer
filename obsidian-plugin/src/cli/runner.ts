@@ -84,7 +84,7 @@ export type AllowedAction =
 export class CliRunner {
   constructor(
     readonly executable: string,
-    private readonly execFile: ExecFileLike = nodeExecFile as unknown as ExecFileLike
+    private readonly execFile: ExecFileLike = nodeExecFile
   ) {
     if (!absoluteExecutable(executable)) throw new Error("CLI executable path must be absolute");
   }
@@ -249,8 +249,8 @@ function parseAgentVerification(value: Record<string, unknown>): AgentVerificati
     schemaVersion: 1,
     kind: "codex",
     compatible: value.compatible,
-    version: value.version as string | undefined,
-    errorCode: value.error_code as string | undefined
+    version: value.version,
+    errorCode: value.error_code
   };
 }
 

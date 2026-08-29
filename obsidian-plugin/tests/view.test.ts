@@ -63,7 +63,7 @@ describe("project evolution browser", () => {
 
   it("groups one model into a compact horizontal usage card", () => {
     const model = browserModelFixture();
-    model.accounting.models[0]!.totalTokens = 573_135_757;
+    model.accounting.models[0].totalTokens = 573_135_757;
 
     const view = renderReadyView(model);
     click(view, '[data-view="usage"]');
@@ -84,11 +84,11 @@ describe("project evolution browser", () => {
     const model = browserModelFixture();
     model.review.status = "at_risk";
     model.review.stage = "main";
-    model.review.risks[0]!.status = "open";
-    model.review.decisions[0]!.status = "accepted";
-    model.review.decisions[0]!.occurredAt = "2026-08-25T03:45:44.447Z";
-    model.events[0]!.kind = "verified";
-    model.events[0]!.occurredAt = "2026-08-25T04:11:09.847Z";
+    model.review.risks[0].status = "open";
+    model.review.decisions[0].status = "accepted";
+    model.review.decisions[0].occurredAt = "2026-08-25T03:45:44.447Z";
+    model.events[0].kind = "verified";
+    model.events[0].occurredAt = "2026-08-25T04:11:09.847Z";
 
     const view = renderReadyView(model);
     const status = view.querySelector<HTMLElement>(".sr-status")!;
@@ -107,8 +107,8 @@ describe("project evolution browser", () => {
 
   it("keeps each risk concise until that individual card is expanded", () => {
     const model = browserModelFixture();
-    model.review.risks[0]!.status = "open";
-    model.review.risks[0]!.detail = "问题：真实 Vault 尚未完成验收。下一步：重新加载插件并逐项检查。";
+    model.review.risks[0].status = "open";
+    model.review.risks[0].detail = "问题：真实 Vault 尚未完成验收。下一步：重新加载插件并逐项检查。";
 
     const view = renderReadyView(model);
     const risk = view.querySelector<HTMLDetailsElement>("details.sr-risk")!;

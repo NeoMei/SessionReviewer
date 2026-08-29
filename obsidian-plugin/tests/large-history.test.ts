@@ -6,7 +6,7 @@ describe("large history", () => {
   it("bounds rendered options for twenty thousand events", () => {
     const model = browserModelFixture();
     model.events = Array.from({ length: 20_000 }, (_, index) => ({
-      ...model.events[0]!,
+      ...model.events[0],
       id: `event-${String(index).padStart(5, "0")}`,
       occurredAt: `2026-08-${String(27 - index % 27).padStart(2, "0")}`,
       title: `Event ${index}`

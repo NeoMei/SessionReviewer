@@ -6,6 +6,7 @@ import type { CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
 import type { Diagnostic, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
 import { ConflictModal, type ConflictAction } from "./conflict-modal";
+import { ConfirmModal } from "./confirm-modal";
 import { element } from "./dom";
 import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
@@ -23,7 +24,7 @@ export class ProjectEvolutionView extends ItemView {
   private reviewStatus?: ReviewStatus;
   private reviewActionInFlight = false;
   private reviewPollGeneration = 0;
-  private reviewPollTimer?: ReturnType<typeof setTimeout>;
+  private reviewPollTimer?: number;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -43,7 +44,7 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   getDisplayText(): string {
-    return "SessionReviewer 项目脉络";
+    return "项目脉络";
   }
 
   async onOpen(): Promise<void> {
@@ -240,7 +241,7 @@ export class ProjectEvolutionView extends ItemView {
   private stopReviewPolling(): void {
     this.reviewPollGeneration += 1;
     if (this.reviewPollTimer !== undefined) {
-      clearTimeout(this.reviewPollTimer);
+      window.clearTimeout(this.reviewPollTimer);
       this.reviewPollTimer = undefined;
     }
   }
@@ -248,7 +249,7 @@ export class ProjectEvolutionView extends ItemView {
   private async pollReviewJob(generation: number, round: number): Promise<void> {
     const delay = round === 0 ? 1000 : round === 1 ? 2000 : 5000;
     await new Promise<void>((resolve) => {
-      this.reviewPollTimer = setTimeout(resolve, delay);
+      this.reviewPollTimer = window.setTimeout(resolve, delay);
     });
     this.reviewPollTimer = undefined;
     if (generation !== this.reviewPollGeneration) return;
@@ -274,9 +275,10 @@ export class ProjectEvolutionView extends ItemView {
     try {
       const conflict = await this.repository.loadConflict(this.selected, this.hiddenConflictIds[0]);
       const modal = new ConflictModal(this.app, conflict, (action, manual) => {
-        if (!window.confirm("确认用选定内容解决这个冲突？")) return;
-        modal.close();
-        void this.resolveConflict(conflict.id, action, manual);
+        new ConfirmModal(this.app, "确认用选定内容解决这个冲突？", () => {
+          modal.close();
+          void this.resolveConflict(conflict.id, action, manual);
+        }).open();
       });
       modal.open();
     } catch (error) {

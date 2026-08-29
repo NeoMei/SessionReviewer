@@ -60,10 +60,10 @@ describe("project repository", () => {
     const repo = new ProjectRepository(vault);
     const projects = await repo.discover();
     expect(projects).toEqual([{ projectId: "project-0123456789abcdef", root, name: "SessionReviewer v2" }]);
-    const first = await repo.load(projects[0]!);
+    const first = await repo.load(projects[0]);
     expect(first.kind).toBe("ready");
     vault.write(`${root}/项目历史.md`, "broken");
-    const second = await repo.load(projects[0]!, first as SnapshotReady);
+    const second = await repo.load(projects[0], first as SnapshotReady);
     expect(second.kind).toBe("stale");
     if (second.kind !== "stale") throw new Error("expected stale snapshot");
     expect(second.lastValid).toEqual(first);
@@ -73,7 +73,7 @@ describe("project repository", () => {
   it("shows valid human edits immediately but labels machine accounting pending", async () => {
     const { vault, root } = await configuredVault();
     const repo = new ProjectRepository(vault);
-    const project = (await repo.discover())[0]!;
+    const project = (await repo.discover())[0];
     vault.write(`${root}/项目回顾.md`, (await vault.read(`${root}/项目回顾.md`)).replace("正在实现无损 Markdown codec。", "页面中的新状态。"));
     const snapshot = await repo.load(project);
     expect(snapshot.kind).toBe("pending_edit");

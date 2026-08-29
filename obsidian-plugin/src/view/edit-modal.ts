@@ -23,7 +23,7 @@ export class EditModal extends Modal {
     const cancel = button("取消", { "data-action": "cancel-edit" });
     const submit = button("保存", { "data-action": "save-edit" });
     cancel.addEventListener("click", () => this.close());
-    submit.addEventListener("click", async () => {
+    const handleSubmit = async (): Promise<void> => {
       error.textContent = "";
       submit.disabled = true;
       try {
@@ -36,7 +36,8 @@ export class EditModal extends Modal {
         error.textContent = message.includes("stale edit") ? "文件已变更，请重新加载后再编辑。" : message;
         submit.disabled = false;
       }
-    });
+    };
+    submit.addEventListener("click", () => { void handleSubmit(); });
     actions.append(cancel, submit);
     this.contentEl.append(hint, input, error, actions);
     input.focus();

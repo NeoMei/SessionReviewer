@@ -98,7 +98,7 @@ describe("CLI settings", () => {
     const codexSetting = Setting.instances.at(-1);
     await codexSetting?.buttonControls[0]?.onClickHandler?.();
 
-    expect(Notice.instances).toContain("请先填写 Codex 可执行文件的绝对路径。");
+    expect(Notice.instances).toContain("请先填写可执行文件的绝对路径。");
     expect(verifyAgent).not.toHaveBeenCalled();
     expect(saveCodexPath).not.toHaveBeenCalled();
   });
@@ -116,7 +116,7 @@ describe("CLI settings", () => {
     const codexSetting = Setting.instances.at(-1);
     await codexSetting?.buttonControls[0]?.onClickHandler?.();
 
-    expect(Notice.instances).toContain("尚未配置 SessionReviewer CLI，请先在上方验证并保存。");
+    expect(Notice.instances).toContain("尚未配置 CLI，请先在上方验证并保存。");
     expect(verifyAgent).not.toHaveBeenCalled();
     expect(saveCodexPath).not.toHaveBeenCalled();
   });
@@ -134,8 +134,18 @@ describe("CLI settings", () => {
     const cliSetting = Setting.instances[1];
     await cliSetting?.buttonControls[0]?.onClickHandler?.();
 
-    expect(Notice.instances).toContain("请先填写 SessionReviewer CLI 可执行文件的绝对路径。");
+    expect(Notice.instances).toContain("请先填写 CLI 可执行文件的绝对路径。");
     expect(verifyExecutable).not.toHaveBeenCalled();
     expect(saveCliPath).not.toHaveBeenCalled();
+  });
+
+  it("exposes setting definitions for the declarative settings search", () => {
+    const tab = new CliSettingsTab({} as never, {} as never, "/bin/sr", vi.fn(), "/bin/codex", vi.fn());
+
+    const definitions = tab.getSettingDefinitions() as unknown as Array<{ name?: string; heading?: string; desc?: string }>;
+
+    expect(definitions.map((definition) => definition.name)).toEqual(["CLI", "CLI 可执行文件", "Codex 可执行文件"]);
+    expect(definitions[1]?.desc).toContain("仅保存在 Obsidian 插件设置中");
+    expect(definitions[2]?.desc).toContain("总结并同步");
   });
 });

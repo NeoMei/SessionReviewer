@@ -129,7 +129,7 @@ export class ProjectRepository {
       `${project.root}/项目历史.md`,
       `${project.root}/.session-reviewer/ledger.json`
     ]);
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timer: number | undefined;
     let closed = false;
     const dispose = this.vault.onChange((path) => {
       const normalizedPath = normalize(path);
@@ -144,12 +144,12 @@ export class ProjectRepository {
       schedule();
     });
     const schedule = (): void => {
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(() => { timer = undefined; if (!closed) refresh(); }, 150);
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = undefined; if (!closed) refresh(); }, 150);
     };
     return () => {
       closed = true;
-      if (timer) clearTimeout(timer);
+      if (timer !== undefined) window.clearTimeout(timer);
       dispose();
     };
   }
@@ -168,7 +168,9 @@ export class ProjectRepository {
     const projectText = requiredConflictText(value, "project");
     const obsidian = requiredConflictText(value, "vault");
     if (value.base_hash !== sha256Text(base) || value.project_hash !== sha256Text(projectText) || value.vault_hash !== sha256Text(obsidian)) throw new Error("conflict candidate hashes do not match");
-    return { id: conflictId, unit: String(value.entity_id ?? "未知语义单元"), base, project: projectText, obsidian };
+    const entityId = value.entity_id;
+    const unit = typeof entityId === "string" || typeof entityId === "number" ? String(entityId) : "未知语义单元";
+    return { id: conflictId, unit, base, project: projectText, obsidian };
   }
 }
 
