@@ -300,6 +300,17 @@ func TestRunReviewStartAgentVerificationIdentitySwapCannotRepairMissingPointer(t
 
 func TestRunReviewConcurrentStartCreatesAndLaunchesOnlyOneActiveJob(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
+	var createMu sync.Mutex
+	var createErrors []error
+	reviewCreate = func(store reviewjob.Store, job reviewjob.Job) (int, error) {
+		revision, err := store.Create(job)
+		if err != nil {
+			createMu.Lock()
+			createErrors = append(createErrors, err)
+			createMu.Unlock()
+		}
+		return revision, err
+	}
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
 		return reviewVerifiedAgent{Agent: fixture.agent}, nil
 	}
@@ -354,9 +365,12 @@ func TestRunReviewConcurrentStartCreatesAndLaunchesOnlyOneActiveJob(t *testing.T
 	launchMu.Lock()
 	launchCount := launches
 	launchMu.Unlock()
+	createMu.Lock()
+	gotCreateErrors := append([]error(nil), createErrors...)
+	createMu.Unlock()
 	if first.code != 0 || second.code != 0 || first.errOut.Len() != 0 || second.errOut.Len() != 0 ||
 		firstStatus.JobID == "" || firstStatus.JobID != secondStatus.JobID || launchCount != 1 {
-		t.Fatalf("first=%d/%#v/%q second=%d/%#v/%q launches=%d", first.code, firstStatus, first.errOut.String(), second.code, secondStatus, second.errOut.String(), launchCount)
+		t.Fatalf("first=%d/%#v/%q second=%d/%#v/%q launches=%d createErrors=%v", first.code, firstStatus, first.errOut.String(), second.code, secondStatus, second.errOut.String(), launchCount, gotCreateErrors)
 	}
 }
 
@@ -785,6 +799,88 @@ func TestRunReviewLaunchFailureTerminalizesWithoutPublicLeak(t *testing.T) {
 	}
 }
 
+func TestRunReviewWorkerRootAuthenticationFailureTerminalizesOwnedLaunch(t *testing.T) {
+	for _, rootKind := range []string{"Project", "Vault"} {
+		t.Run(rootKind, func(t *testing.T) {
+			fixture := newReviewCLIFixture(t)
+			reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+				return reviewVerifiedAgent{Agent: fixture.agent}, nil
+			}
+			reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) { return nil, nil }
+			launchedJobID := ""
+			reviewLaunch = func(request reviewLaunchRequest) error {
+				launchedJobID = request.JobID
+				target := fixture.project
+				if rootKind == "Vault" {
+					target = fixture.vault
+				}
+				if err := os.Rename(target, target+"-worker-auth-failure"); err != nil {
+					return err
+				}
+				if err := os.Mkdir(target, 0o700); err != nil {
+					return err
+				}
+				return errors.New("worker rejected changed root authority")
+			}
+
+			var out, errOut bytes.Buffer
+			code := Run([]string{"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"}, &out, &errOut)
+			if code != 1 || errOut.Len() != 0 {
+				t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+			}
+			status := decodeReviewStatus(t, out.Bytes())
+			if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) ||
+				status.JobID != launchedJobID || !status.CanRetry {
+				t.Fatalf("status=%#v launchedJobID=%q", status, launchedJobID)
+			}
+			stored, _, found, err := (reviewjob.Store{Root: fixture.data}).Load(launchedJobID)
+			if err != nil || !found || stored.State != reviewjob.Failed || stored.Owner.ID != "" ||
+				stored.LaunchTokenDigest != "" || !stored.LaunchIntentAt.IsZero() {
+				t.Fatalf("stored=%#v found=%v err=%v", stored, found, err)
+			}
+		})
+	}
+}
+
+func TestRunReviewRetryWorkerRootAuthenticationFailureTerminalizesOwnedLaunch(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Failed)
+	job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewLaunch = func(reviewLaunchRequest) error {
+		if err := os.Rename(fixture.project, fixture.project+"-retry-worker-auth-failure"); err != nil {
+			return err
+		}
+		if err := os.Mkdir(fixture.project, 0o700); err != nil {
+			return err
+		}
+		return errors.New("retry worker rejected changed root authority")
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+		"--expected-attempt", "1", "--expected-revision", "1", "--json"}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) ||
+		status.JobID != job.ID || status.Attempt != 2 || !status.CanRetry {
+		t.Fatalf("status=%#v", status)
+	}
+	stored, _, found, err := store.Load(job.ID)
+	if err != nil || !found || stored.State != reviewjob.Failed || stored.Attempt != 2 || stored.Owner.ID != "" ||
+		stored.LaunchTokenDigest != "" || !stored.LaunchIntentAt.IsZero() {
+		t.Fatalf("stored=%#v found=%v err=%v", stored, found, err)
+	}
+}
+
 func TestReviewProduction0147FailsClosedBeforeJobCreation(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	executable := filepath.Join(t.TempDir(), "fake-codex")
@@ -898,6 +994,63 @@ func TestPrivateReviewWorkerRejectsWrongTokenBeforeAgentVerification(t *testing.
 	defer write.Close()
 	if err := executePrivateReviewWorker(fixture.data, job.ID, token+"-wrong", write); err == nil || verifyCalls != 0 {
 		t.Fatalf("err=%v verifyCalls=%d", err, verifyCalls)
+	}
+}
+
+func TestPrivateReviewWorkerRootSwapDuringAgentVerifyDoesNotHandshakeOrConsumeAuthority(t *testing.T) {
+	for _, rootKind := range []string{"Project", "Vault"} {
+		t.Run(rootKind, func(t *testing.T) {
+			fixture := newReviewCLIFixture(t)
+			store := reviewjob.Store{Root: fixture.data}
+			job := fixture.job(reviewjob.Queued)
+			token := "private-worker-root-swap-token-with-at-least-32-bytes"
+			job.LaunchTokenDigest = digestReviewToken(token)
+			job.LaunchIntentAt = fixture.now
+			if _, err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+			target := fixture.project
+			if rootKind == "Vault" {
+				target = fixture.vault
+			}
+			original := target + "-during-agent-verify"
+			reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+				if err := os.Rename(target, original); err != nil {
+					return reviewVerifiedAgent{}, err
+				}
+				if err := os.Mkdir(target, 0o700); err != nil {
+					return reviewVerifiedAgent{}, err
+				}
+				return reviewVerifiedAgent{Agent: fixture.agent, Handle: &reviewjob.AgentHandle{}}, nil
+			}
+			t.Cleanup(resetReviewCLISeams)
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer read.Close()
+			if err := executePrivateReviewWorker(fixture.data, job.ID, token, write); err == nil {
+				t.Fatalf("private worker accepted %s replacement during Agent verification", rootKind)
+			}
+			if err := write.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				t.Fatal(err)
+			}
+			handshake, err := io.ReadAll(read)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(handshake) != 0 {
+				t.Fatalf("private worker emitted a success handshake before %s authentication: %v", rootKind, handshake)
+			}
+			unchanged, _, found, err := store.Load(job.ID)
+			if err != nil || !found {
+				t.Fatalf("Load() found=%v err=%v", found, err)
+			}
+			if unchanged.State != reviewjob.Queued || unchanged.Owner.ID != "" || unchanged.LaunchTokenDigest != digestReviewToken(token) ||
+				!unchanged.LaunchIntentAt.Equal(fixture.now) {
+				t.Fatalf("private entry consumed authority before %s authentication: %#v", rootKind, unchanged)
+			}
+		})
 	}
 }
 

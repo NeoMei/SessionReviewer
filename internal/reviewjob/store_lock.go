@@ -19,16 +19,24 @@ type storeFileLock struct {
 	name string
 	file *os.File
 	info os.FileInfo
+	// created is true only when this acquisition published the stable leaf.
+	// Guarded Store bootstrap uses it to roll back an otherwise empty layout
+	// without ever removing a pre-existing or concurrently replaced lock.
+	created bool
 }
 
 // acquireStoreFileLock locks only the stable private lock file below the
 // already pinned locks directory. It deliberately does not lock directory
 // ancestors, so long-lived worker leases can coexist with short CAS writes.
 func acquireStoreFileLock(root *os.Root, name string, timeout time.Duration) (*storeFileLock, error) {
+	return acquireStoreFileLockChecked(root, name, timeout, nil)
+}
+
+func acquireStoreFileLockChecked(root *os.Root, name string, timeout time.Duration, checkpoint func() error) (*storeFileLock, error) {
 	if root == nil || name != "store.lock" || timeout < 0 {
 		return nil, errors.New("invalid review job store lock request")
 	}
-	return acquirePrivateFileLock(root, name, timeout)
+	return acquirePrivateFileLockChecked(root, name, timeout, checkpoint)
 }
 
 var errPrivateFileLocked = errors.New("private advisory lock remains held by a live owner")
@@ -37,6 +45,10 @@ var errPrivateFileLocked = errors.New("private advisory lock remains held by a l
 // lock directory ancestors, so independently named long-lived worker leases
 // can coexist with the short store CAS lock.
 func acquirePrivateFileLock(root *os.Root, name string, timeout time.Duration) (*storeFileLock, error) {
+	return acquirePrivateFileLockChecked(root, name, timeout, nil)
+}
+
+func acquirePrivateFileLockChecked(root *os.Root, name string, timeout time.Duration, checkpoint func() error) (*storeFileLock, error) {
 	if root == nil || !validPrivateLockLeaf(name) || timeout < 0 {
 		return nil, errors.New("invalid private advisory lock request")
 	}
@@ -45,7 +57,7 @@ func acquirePrivateFileLock(root *os.Root, name string, timeout time.Duration) (
 		if err := rejectCaseCollision(root, name); err != nil {
 			return nil, err
 		}
-		file, info, err := openStableStoreLockFile(root, name)
+		file, info, created, err := openStableStoreLockFileChecked(root, name, checkpoint)
 		if err != nil {
 			return nil, err
 		}
@@ -63,7 +75,7 @@ func acquirePrivateFileLock(root *os.Root, name string, timeout time.Duration) (
 			if err := rejectCaseCollision(root, name); err != nil {
 				return nil, errors.Join(err, unlockStorePlatformLock(file), file.Close())
 			}
-			return &storeFileLock{root: root, name: name, file: file, info: info}, nil
+			return &storeFileLock{root: root, name: name, file: file, info: info, created: created}, nil
 		}
 		_ = file.Close()
 		if !time.Now().Before(deadline) {
@@ -78,13 +90,23 @@ func validPrivateLockLeaf(name string) bool {
 }
 
 func openStableStoreLockFile(root *os.Root, name string) (*os.File, os.FileInfo, error) {
+	file, info, _, err := openStableStoreLockFileChecked(root, name, nil)
+	return file, info, err
+}
+
+func openStableStoreLockFileChecked(root *os.Root, name string, checkpoint func() error) (*os.File, os.FileInfo, bool, error) {
 	for {
 		before, found, err := regularPrivateEntry(root, name)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		flags := os.O_RDWR
 		if !found {
+			if checkpoint != nil {
+				if err := checkpoint(); err != nil {
+					return nil, nil, false, err
+				}
+			}
 			flags |= os.O_CREATE | os.O_EXCL
 		}
 		file, err := root.OpenFile(name, flags, 0o600)
@@ -92,37 +114,70 @@ func openStableStoreLockFile(root *os.Root, name string) (*os.File, os.FileInfo,
 			continue
 		}
 		if err != nil {
-			return nil, nil, errors.New("cannot open review job store lock")
+			return nil, nil, false, errors.New("cannot open review job store lock")
+		}
+		created := !found
+		createdInfo, inspectErr := file.Stat()
+		if inspectErr != nil {
+			_ = file.Close()
+			return nil, nil, false, errors.New("cannot inspect opened review job store lock")
 		}
 		file, err = stabilizeStoreLockFile(file)
 		if err != nil {
-			return nil, nil, err
+			if created {
+				_ = removeOwnedPrivateLock(root, name, createdInfo)
+			}
+			return nil, nil, false, err
 		}
 		opened, err := file.Stat()
 		if err != nil {
 			_ = file.Close()
-			return nil, nil, errors.New("cannot inspect review job store lock")
+			if created {
+				_ = removeOwnedPrivateLock(root, name, createdInfo)
+			}
+			return nil, nil, false, errors.New("cannot inspect review job store lock")
 		}
 		after, afterFound, err := regularPrivateEntry(root, name)
 		if err != nil || !afterFound || !os.SameFile(opened, after) || (found && !os.SameFile(before, opened)) {
 			_ = file.Close()
 			if err != nil {
-				return nil, nil, err
+				if created {
+					_ = removeOwnedPrivateLock(root, name, createdInfo)
+				}
+				return nil, nil, false, err
 			}
 			continue
 		}
-		if err := file.Chmod(0o600); err != nil {
-			_ = file.Close()
-			return nil, nil, errors.New("cannot protect review job store lock")
+		if created {
+			if err := file.Chmod(0o600); err != nil {
+				_ = file.Close()
+				_ = removeOwnedPrivateLock(root, name, opened)
+				return nil, nil, false, errors.New("cannot protect review job store lock")
+			}
 		}
 		opened, err = file.Stat()
-		after, inspectErr := root.Lstat(name)
+		after, inspectErr = root.Lstat(name)
 		if err != nil || inspectErr != nil || !sameStoreLockEntry(opened, after) {
 			_ = file.Close()
-			return nil, nil, errors.New("cannot verify review job store lock")
+			if created {
+				_ = removeOwnedPrivateLock(root, name, createdInfo)
+			}
+			return nil, nil, false, errors.New("cannot verify review job store lock")
 		}
-		return file, opened, nil
+		return file, opened, created, nil
 	}
+}
+
+func removeOwnedPrivateLock(root *os.Root, name string, expected os.FileInfo) error {
+	current, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || expected == nil || current == nil || !os.SameFile(expected, current) ||
+		!expected.Mode().IsRegular() || !current.Mode().IsRegular() || isRedirect(expected) || isRedirect(current) || current.Size() != 0 {
+		return errors.New("owned private lock changed before rollback")
+	}
+	return root.Remove(name)
 }
 
 func sameStoreLockEntry(first, second os.FileInfo) bool {

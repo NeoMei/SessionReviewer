@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -23,6 +24,7 @@ var (
 	ErrStaleRevision     = errors.New("stale review job revision")
 	ErrRevisionExhausted = errors.New("review job revision is exhausted")
 	ErrActiveJob         = errors.New("project already has an active review job")
+	errMutationAuthority = errors.New("review job mutation authority changed")
 )
 
 const (
@@ -86,6 +88,20 @@ type storeLayout struct {
 	projectLocks *os.Root
 	work         *os.Root
 	missing      bool
+	created      []ownedStoreDirectory
+	createdFiles []ownedStoreFile
+}
+
+type ownedStoreDirectory struct {
+	relative string
+	info     os.FileInfo
+}
+
+type ownedStoreFile struct {
+	root     *os.Root
+	name     string
+	info     os.FileInfo
+	expected []byte
 }
 
 // WithMutationGuard returns a Store whose control-plane mutations must be
@@ -102,7 +118,7 @@ func (s Store) guardMutation(job Job) error {
 		return nil
 	}
 	if err := s.mutationGuard(job); err != nil {
-		return fmt.Errorf("review job mutation authority changed: %w", err)
+		return fmt.Errorf("%w: %w", errMutationAuthority, err)
 	}
 	return nil
 }
@@ -120,16 +136,37 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	if err := s.guardMutation(job); err != nil {
 		return 0, err
 	}
-	layout, err := s.openLayout(true)
+	var layout *storeLayout
+	var err error
+	if s.mutationGuard == nil {
+		layout, err = s.openLayout(true)
+	} else {
+		layout, err = s.openLayoutChecked(true, func() error { return s.guardMutation(job) })
+	}
 	if err != nil {
 		return 0, err
 	}
-	defer func() { retErr = errors.Join(retErr, layout.finish()) }()
-	lock, err := acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
+	var lock *storeFileLock
+	durableRecordPublished := false
+	defer func() {
+		if lock != nil {
+			retErr = errors.Join(retErr, lock.release())
+		}
+		if errors.Is(retErr, errMutationAuthority) && !durableRecordPublished && (len(layout.created) != 0 || len(layout.createdFiles) != 0 || lock != nil && lock.created) {
+			retErr = errors.Join(retErr, layout.rollbackCreated(lock))
+			retErr = errors.Join(retErr, layout.close())
+			return
+		}
+		retErr = errors.Join(retErr, layout.finish())
+	}()
+	if s.mutationGuard == nil {
+		lock, err = acquireStoreFileLock(layout.locks, storeLockName, 2*time.Second)
+	} else {
+		lock, err = acquireStoreFileLockChecked(layout.locks, storeLockName, 2*time.Second, func() error { return s.guardMutation(job) })
+	}
 	if err != nil {
 		return 0, fmt.Errorf("lock review job store: %w", err)
 	}
-	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 	if err := s.guardMutation(job); err != nil {
 		return 0, err
 	}
@@ -153,6 +190,15 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	if err != nil {
 		return 0, err
 	}
+	if createdIdentity {
+		name := jobIdentityName(job.ID)
+		info, found, inspectErr := regularPrivateEntry(layout.jobs, name)
+		expected, marshalErr := marshalCanonical(jobIdentityFor(job), maxJobIdentityBytes)
+		if inspectErr != nil || !found || marshalErr != nil {
+			return 0, errors.Join(errors.New("cannot track owned review job identity"), inspectErr, marshalErr)
+		}
+		layout.createdFiles = append(layout.createdFiles, ownedStoreFile{root: layout.jobs, name: name, info: info, expected: expected})
+	}
 	if createdIdentity && s.afterIdentityWrite != nil {
 		if err := s.afterIdentityWrite(); err != nil {
 			return 0, fmt.Errorf("publish review job identity: %w", err)
@@ -163,12 +209,17 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	} else if found {
 		return 0, errors.New("review job already exists")
 	}
-	if err := s.guardMutation(job); err != nil {
-		return 0, err
-	}
-	work, err := ensurePrivateDirectory(layout.work, job.ID)
+	work, _, workCreated, err := openPrivateDirectoryChecked(layout.work, job.ID, true, func() error { return s.guardMutation(job) })
 	if err != nil {
 		return 0, fmt.Errorf("create review job work directory: %w", err)
+	}
+	if workCreated {
+		info, statErr := work.Stat(".")
+		if statErr != nil {
+			_ = work.Close()
+			return 0, fmt.Errorf("inspect review job work directory: %w", statErr)
+		}
+		layout.created = append(layout.created, ownedStoreDirectory{relative: "review-jobs/work/" + job.ID, info: info})
 	}
 	if err := work.Close(); err != nil {
 		return 0, fmt.Errorf("close review job work directory: %w", err)
@@ -189,6 +240,10 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	if err != nil || !found || writtenRevision != 1 || !reflect.DeepEqual(written, job) {
 		return 0, errors.New("review job failed canonical post-write verification")
 	}
+	// From this point the job record is the durable partial-commit authority.
+	// A pointer failure is repaired by authenticated enumeration and must not
+	// roll the newly initialized private store back.
+	durableRecordPublished = true
 
 	if s.beforePointerWrite != nil {
 		if err := s.beforePointerWrite(); err != nil {
@@ -746,75 +801,169 @@ func projectPointerFor(job Job) projectPointer {
 }
 
 func (s Store) openLayout(create bool) (*storeLayout, error) {
+	return s.openLayoutChecked(create, nil)
+}
+
+func (s Store) openLayoutChecked(create bool, checkpoint func() error) (*storeLayout, error) {
 	data, err := pathguard.Open(s.Root)
 	if err != nil {
 		return nil, fmt.Errorf("open review job data root: %w", err)
 	}
 	layout := &storeLayout{data: data}
-	review, found, err := openPrivateDirectory(data.Root, "review-jobs", create)
+	fail := func(cause error) (*storeLayout, error) {
+		rollbackErr := layout.rollbackCreated(nil)
+		closeErr := layout.close()
+		return nil, errors.Join(cause, rollbackErr, closeErr)
+	}
+	review, found, created, err := openPrivateDirectoryChecked(data.Root, "review-jobs", create, checkpoint)
 	if err != nil {
-		_ = layout.close()
-		return nil, err
+		return fail(err)
 	}
 	if !found {
 		layout.missing = true
 		return layout, nil
 	}
 	layout.review = review
+	if created {
+		info, statErr := review.Stat(".")
+		if statErr != nil {
+			return fail(statErr)
+		}
+		layout.created = append(layout.created, ownedStoreDirectory{relative: "review-jobs", info: info})
+	}
 	for _, item := range []struct {
-		name string
-		dst  **os.Root
+		name     string
+		relative string
+		dst      **os.Root
 	}{
-		{"jobs", &layout.jobs}, {"projects", &layout.projects}, {"locks", &layout.locks}, {"work", &layout.work},
+		{"jobs", "review-jobs/jobs", &layout.jobs},
+		{"projects", "review-jobs/projects", &layout.projects},
+		{"locks", "review-jobs/locks", &layout.locks},
+		{"work", "review-jobs/work", &layout.work},
 	} {
-		child, _, err := openPrivateDirectory(layout.review, item.name, create)
+		child, _, childCreated, err := openPrivateDirectoryChecked(layout.review, item.name, create, checkpoint)
 		if err != nil {
-			_ = layout.close()
-			return nil, err
+			return fail(err)
 		}
 		if child == nil {
-			_ = layout.close()
-			return nil, fmt.Errorf("review job %s directory is missing", item.name)
+			return fail(fmt.Errorf("review job %s directory is missing", item.name))
 		}
 		*item.dst = child
-	}
-	projectLocks, _, err := openPrivateDirectory(layout.locks, "projects", create)
-	if err != nil || projectLocks == nil {
-		_ = layout.close()
-		if err != nil {
-			return nil, err
+		if childCreated {
+			info, statErr := child.Stat(".")
+			if statErr != nil {
+				return fail(statErr)
+			}
+			layout.created = append(layout.created, ownedStoreDirectory{relative: item.relative, info: info})
 		}
-		return nil, errors.New("review job project lock directory is missing")
+	}
+	projectLocks, _, projectLocksCreated, err := openPrivateDirectoryChecked(layout.locks, "projects", create, checkpoint)
+	if err != nil || projectLocks == nil {
+		if err != nil {
+			return fail(err)
+		}
+		return fail(errors.New("review job project lock directory is missing"))
 	}
 	layout.projectLocks = projectLocks
+	if projectLocksCreated {
+		info, statErr := projectLocks.Stat(".")
+		if statErr != nil {
+			return fail(statErr)
+		}
+		layout.created = append(layout.created, ownedStoreDirectory{relative: "review-jobs/locks/projects", info: info})
+	}
 	return layout, nil
 }
 
 func openPrivateDirectory(parent *os.Root, name string, create bool) (*os.Root, bool, error) {
+	child, found, _, err := openPrivateDirectoryChecked(parent, name, create, nil)
+	return child, found, err
+}
+
+func openPrivateDirectoryChecked(parent *os.Root, name string, create bool, checkpoint func() error) (_ *os.Root, _ bool, created bool, retErr error) {
 	before, err := parent.Lstat(name)
 	if errors.Is(err, os.ErrNotExist) && !create {
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if errors.Is(err, os.ErrNotExist) {
-		if err := atomicfile.EnsureRootDir(parent, name, 0o700); err != nil {
-			return nil, false, fmt.Errorf("create private directory %s: %w", name, err)
+		if checkpoint == nil {
+			var ensureErr error
+			created, ensureErr = atomicfile.EnsureRootDirCreated(parent, name, 0o700)
+			if ensureErr != nil {
+				return nil, false, false, fmt.Errorf("create private directory %s: %w", name, ensureErr)
+			}
+		} else {
+			if err := checkpoint(); err != nil {
+				return nil, false, false, err
+			}
+			if err := parent.Mkdir(name, 0o700); err != nil {
+				if !errors.Is(err, os.ErrExist) {
+					return nil, false, false, fmt.Errorf("create private directory %s: %w", name, err)
+				}
+			} else {
+				created = true
+			}
 		}
 		before, err = parent.Lstat(name)
 	}
 	if err != nil || before == nil || !before.IsDir() || isRedirect(before) || !privateMode(before, 0o700) {
-		return nil, true, fmt.Errorf("private directory %s is redirected, invalid, or has weak permissions", name)
+		return nil, true, created, fmt.Errorf("private directory %s is redirected, invalid, or has weak permissions", name)
+	}
+	if created {
+		defer func() {
+			if retErr == nil {
+				return
+			}
+			current, inspectErr := parent.Lstat(name)
+			if inspectErr == nil && os.SameFile(before, current) && current.IsDir() && !isRedirect(current) {
+				_ = parent.Remove(name)
+			}
+		}()
 	}
 	child, err := parent.OpenRoot(name)
 	if err != nil {
-		return nil, true, fmt.Errorf("open private directory %s: %w", name, err)
+		return nil, true, created, fmt.Errorf("open private directory %s: %w", name, err)
 	}
 	opened, err := child.Stat(".")
 	after, afterErr := parent.Lstat(name)
 	if err != nil || afterErr != nil || !os.SameFile(before, opened) || !os.SameFile(before, after) || !privateMode(opened, 0o700) || isRedirect(after) {
 		_ = child.Close()
-		return nil, true, fmt.Errorf("private directory %s changed while opening", name)
+		return nil, true, created, fmt.Errorf("private directory %s changed while opening", name)
 	}
-	return child, true, nil
+	if created && checkpoint != nil {
+		if err := checkpoint(); err != nil {
+			_ = child.Close()
+			return nil, true, created, err
+		}
+		if runtime.GOOS != "windows" {
+			file, err := child.Open(".")
+			if err != nil {
+				_ = child.Close()
+				return nil, true, created, fmt.Errorf("open private directory protection handle: %w", err)
+			}
+			protectErr := file.Chmod(0o700)
+			closeErr := file.Close()
+			if err := errors.Join(protectErr, closeErr); err != nil {
+				_ = child.Close()
+				return nil, true, created, fmt.Errorf("protect private directory %s: %w", name, err)
+			}
+		}
+		if err := atomicfile.SyncRootDirectory(child); err != nil {
+			_ = child.Close()
+			return nil, true, created, fmt.Errorf("sync private directory %s: %w", name, err)
+		}
+		if err := atomicfile.SyncRootDirectory(parent); err != nil {
+			_ = child.Close()
+			return nil, true, created, fmt.Errorf("sync private directory parent for %s: %w", name, err)
+		}
+		opened, err = child.Stat(".")
+		after, afterErr = parent.Lstat(name)
+		if err != nil || afterErr != nil || !os.SameFile(before, opened) || !os.SameFile(before, after) || !privateMode(opened, 0o700) || isRedirect(after) {
+			_ = child.Close()
+			return nil, true, created, fmt.Errorf("private directory %s changed while protecting", name)
+		}
+	}
+	return child, true, created, nil
 }
 
 func ensurePrivateDirectory(parent *os.Root, name string) (*os.Root, error) {
@@ -822,18 +971,96 @@ func ensurePrivateDirectory(parent *os.Root, name string) (*os.Root, error) {
 	return child, err
 }
 
-func (layout *storeLayout) close() error {
+// rollbackCreated removes only empty entries whose inode/file identity was
+// published by this guarded bootstrap. Unexpected content or replacement is
+// preserved: cleanup never uses RemoveAll and never adopts a concurrent
+// creator's entry.
+func (layout *storeLayout) rollbackCreated(lock *storeFileLock) error {
+	if layout == nil || layout.data == nil || layout.data.Root == nil {
+		return nil
+	}
+	var retErr error
+	for index := len(layout.createdFiles) - 1; index >= 0; index-- {
+		owned := layout.createdFiles[index]
+		current, found, err := regularPrivateEntry(owned.root, owned.name)
+		if err == nil && found && os.SameFile(owned.info, current) {
+			var body []byte
+			body, err = readStableCanonical(owned.root, owned.name, current, int64(len(owned.expected)), nil)
+			if err == nil && bytes.Equal(body, owned.expected) {
+				err = owned.root.Remove(owned.name)
+			} else if err == nil {
+				err = errors.New("owned store file changed before bootstrap rollback")
+			}
+		} else if err == nil && !found {
+			err = nil
+		} else if err == nil {
+			err = errors.New("owned store file changed before bootstrap rollback")
+		}
+		retErr = errors.Join(retErr, err)
+	}
+	layout.createdFiles = nil
+	retErr = errors.Join(retErr, layout.closeDescendants())
+	if lock != nil && lock.created {
+		current, err := layout.data.Root.Lstat(filepath.FromSlash("review-jobs/locks/" + storeLockName))
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		} else if err == nil && sameStoreLockEntry(lock.info, current) && current.Size() == 0 {
+			err = layout.data.Root.Remove(filepath.FromSlash("review-jobs/locks/" + storeLockName))
+		} else if err == nil {
+			err = errors.New("owned store lock changed before bootstrap rollback")
+		}
+		retErr = errors.Join(retErr, err)
+	}
+	for index := len(layout.created) - 1; index >= 0; index-- {
+		owned := layout.created[index]
+		relative := filepath.FromSlash(owned.relative)
+		current, err := layout.data.Root.Lstat(relative)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil || current == nil || !current.IsDir() || isRedirect(current) || !os.SameFile(owned.info, current) {
+			if err == nil {
+				err = errors.New("owned store directory changed before bootstrap rollback")
+			}
+			retErr = errors.Join(retErr, err)
+			continue
+		}
+		if err := layout.data.Root.Remove(relative); err != nil {
+			// A non-empty directory contains content we do not own. Preserve it
+			// and the remaining ancestor instead of escalating to recursive
+			// deletion.
+			continue
+		}
+	}
+	if err := atomicfile.SyncRootDirectory(layout.data.Root); err != nil {
+		retErr = errors.Join(retErr, err)
+	}
+	layout.created = nil
+	return retErr
+}
+
+func (layout *storeLayout) closeDescendants() error {
 	if layout == nil {
 		return nil
 	}
 	var err error
-	for _, root := range []*os.Root{layout.projectLocks, layout.work, layout.locks, layout.projects, layout.jobs, layout.review} {
-		if root != nil {
-			err = errors.Join(err, root.Close())
+	for _, root := range []**os.Root{&layout.projectLocks, &layout.work, &layout.locks, &layout.projects, &layout.jobs, &layout.review} {
+		if *root != nil {
+			err = errors.Join(err, (*root).Close())
+			*root = nil
 		}
 	}
+	return err
+}
+
+func (layout *storeLayout) close() error {
+	if layout == nil {
+		return nil
+	}
+	err := layout.closeDescendants()
 	if layout.data != nil {
 		err = errors.Join(err, layout.data.Close())
+		layout.data = nil
 	}
 	return err
 }

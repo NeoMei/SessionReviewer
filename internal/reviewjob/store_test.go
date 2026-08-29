@@ -1035,6 +1035,135 @@ func TestStoreMutationGuardPreventsCreatePointerRepairRecoveryAndCASWrites(t *te
 	})
 }
 
+func TestStoreCreateStatefulMutationGuardDriftLeavesEmptyDataRootUnchanged(t *testing.T) {
+	root := newStoreRoot(t)
+	guardErr := errors.New("Project mapping authority changed after initial check")
+	calls := 0
+	store := (Store{Root: root}).WithMutationGuard(func(Job) error {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		return guardErr
+	})
+
+	if _, err := store.Create(validJobFixture()); !errors.Is(err, guardErr) {
+		t.Fatalf("Create() error=%v, want stateful mutation guard", err)
+	}
+	if calls < 2 {
+		t.Fatalf("mutation guard calls=%d, want a recheck at the first bootstrap mutation", calls)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("guard drift left bootstrap entries in an initially empty Data root: %v", entries)
+	}
+}
+
+func TestStoreCreateMutationGuardDriftAfterOwnedBootstrapRollsBackEmptyDataRoot(t *testing.T) {
+	for _, checkpoint := range []struct {
+		name string
+		path string
+	}{
+		{name: "store_lock", path: filepath.Join("review-jobs", "locks", storeLockName)},
+		{name: "job_identity", path: filepath.Join("review-jobs", "jobs", jobIdentityName("job-1"))},
+	} {
+		t.Run(checkpoint.name, func(t *testing.T) {
+			root := newStoreRoot(t)
+			guardErr := errors.New("Project mapping authority changed after owned bootstrap publication")
+			observed := false
+			store := (Store{Root: root}).WithMutationGuard(func(Job) error {
+				if _, err := os.Stat(filepath.Join(root, checkpoint.path)); err == nil {
+					observed = true
+					return guardErr
+				}
+				return nil
+			})
+
+			if _, err := store.Create(validJobFixture()); !errors.Is(err, guardErr) {
+				t.Fatalf("Create() error=%v, want stateful mutation guard", err)
+			}
+			if !observed {
+				t.Fatalf("test did not observe owned %s publication", checkpoint.name)
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("guard drift after %s left owned bootstrap entries: %v", checkpoint.name, entries)
+			}
+		})
+	}
+}
+
+func TestStoreCreateMutationGuardRunsBeforeMissingStoreLockCreation(t *testing.T) {
+	root := newStoreRoot(t)
+	layout, err := (Store{Root: root}).openLayout(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.finish(); err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(root, "review-jobs", "locks", storeLockName)
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("test layout unexpectedly has a store lock: %v", err)
+	}
+	guardErr := errors.New("Project mapping authority changed before lock publication")
+	calls := 0
+	store := (Store{Root: root}).WithMutationGuard(func(Job) error {
+		calls++
+		if calls == 1 {
+			return nil
+		}
+		return guardErr
+	})
+
+	if _, err := store.Create(validJobFixture()); !errors.Is(err, guardErr) {
+		t.Fatalf("Create() error=%v, want lock-publication guard", err)
+	}
+	if calls != 2 {
+		t.Fatalf("mutation guard calls=%d, want initial check plus lock-publication check", calls)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("guard drift published the missing store lock: %v", err)
+	}
+}
+
+func TestStoreCreateBootstrapRollbackNeverDeletesThirdPartyRaceContent(t *testing.T) {
+	root := newStoreRoot(t)
+	guardErr := errors.New("Project mapping authority changed after third-party publication")
+	sentinel := filepath.Join(root, "review-jobs", "third-party.txt")
+	injected := false
+	store := (Store{Root: root}).WithMutationGuard(func(Job) error {
+		if injected {
+			return guardErr
+		}
+		if info, err := os.Stat(filepath.Join(root, "review-jobs")); err == nil && info.IsDir() {
+			if err := os.WriteFile(sentinel, []byte("third-party-owned\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			injected = true
+			return guardErr
+		}
+		return nil
+	})
+
+	if _, err := store.Create(validJobFixture()); !errors.Is(err, guardErr) {
+		t.Fatalf("Create() error=%v, want stateful mutation guard", err)
+	}
+	if !injected {
+		t.Fatal("test did not reach a post-bootstrap authority checkpoint")
+	}
+	body, err := os.ReadFile(sentinel)
+	if err != nil || string(body) != "third-party-owned\n" {
+		t.Fatalf("rollback deleted or changed third-party race content: body=%q err=%v", body, err)
+	}
+}
+
 func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
 	root := newStoreRoot(t)
 	store := Store{Root: root}

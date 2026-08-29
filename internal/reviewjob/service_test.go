@@ -1813,6 +1813,55 @@ func TestWorkerConsumesLaunchTokenOnlyWithDurableOwnership(t *testing.T) {
 	}
 }
 
+func TestWorkerDoesNotConsumeLaunchAuthorityBeforeRootAuthentication(t *testing.T) {
+	fixture := newWorkerFixture(t, nil)
+	token := "private-root-auth-token-with-at-least-32-bytes"
+	loaded, revision, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("Load() found=%v err=%v", found, err)
+	}
+	loaded, _, err = fixture.store.Update(fixture.job.ID, revision, func(job *Job) error {
+		job.LaunchTokenDigest = launchTokenDigest(token)
+		job.LaunchIntentAt = fixture.now
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.job = loaded
+
+	originalProject := fixture.project + "-before-root-auth"
+	if err := os.Rename(fixture.project, originalProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(fixture.project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	readyCalls := 0
+	options := workerRunOptions(fixture, nil, nil, nil, func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		t.Fatal("unauthenticated worker roots reached sync")
+		return syncengine.Report{}, nil
+	}, nil)
+	options.LaunchToken = token
+	options.OwnershipReady = func() error {
+		readyCalls++
+		return nil
+	}
+	if err := Run(t.Context(), options); err == nil {
+		t.Fatal("Run() accepted a replaced Project before durable ownership")
+	}
+
+	unchanged, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found {
+		t.Fatalf("Load() found=%v err=%v", found, err)
+	}
+	if unchanged.State != Queued || unchanged.Owner.ID != "" || unchanged.LaunchTokenDigest != launchTokenDigest(token) ||
+		!unchanged.LaunchIntentAt.Equal(fixture.now) || readyCalls != 0 {
+		t.Fatalf("pre-auth failure mutated launch authority: job=%#v readyCalls=%d", unchanged, readyCalls)
+	}
+}
+
 func TestWorkerOwnsRealPreparePayloadPublicationAcrossPreIntentCrashes(t *testing.T) {
 	tests := []struct {
 		name    string

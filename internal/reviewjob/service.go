@@ -246,9 +246,11 @@ func closeRoot(root *os.Root) error {
 	return root.Close()
 }
 
-// Run consumes one already frozen durable job. It holds Task 3's project and
-// global leases until a terminal state is durable and then releases them in
-// LeaseSet order.
+// Run consumes one already frozen durable job. It authenticates and pins every
+// mutation root before publishing ownership. After ownership is durable it
+// holds Task 3's project and global leases until a terminal state is durable;
+// a detached pre-ownership authentication failure instead leaves the one-use
+// launch authority untouched for the parent to terminalize.
 func Run(ctx context.Context, options RunOptions) (retErr error) {
 	if ctx == nil {
 		return errors.New("review worker context is required")
@@ -273,6 +275,20 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	}
 
 	runner := &worker{options: options, job: job, revision: revision, leases: leases, retry: job.State == Retrying || retryCancellation}
+	roots, err := authenticateWorkerRoots(options, runner.job, leases)
+	if err != nil {
+		// Detached workers still hold their one-use launch authority here. The
+		// parent owns terminalization after the failure handshake, so a stale
+		// Project/Vault mapping cannot consume the token or publish ownership.
+		// Tokenless in-process callers have no parent launch handshake, so they
+		// may persist the failure directly without first publishing an owner.
+		if options.LaunchToken == "" {
+			return runner.fail(ApplyRecovery, err)
+		}
+		return err
+	}
+	runner.roots = roots
+	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 	if err := runner.start(); err != nil {
 		return err
 	}
@@ -281,12 +297,6 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 			return runner.fail(ApplyRecovery, err)
 		}
 	}
-	roots, err := authenticateWorkerRoots(options, runner.job, leases)
-	if err != nil {
-		return runner.fail(ApplyRecovery, err)
-	}
-	runner.roots = roots
-	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 
 	cancelWithoutCommitRecovery := runner.retry && runner.job.State == CancelRequested &&
 		!runner.job.AcceptedSyncPending && runner.job.PayloadState != PayloadApplyRecovery

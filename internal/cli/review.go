@@ -297,6 +297,7 @@ type authenticatedReviewMapping struct {
 	projectID       string
 	projectRoot     string
 	vaultRoot       string
+	dataIdentity    pathguard.IdentityToken
 	projectIdentity pathguard.IdentityToken
 	vaultIdentity   pathguard.IdentityToken
 }
@@ -320,6 +321,10 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 		return authenticatedReviewMapping{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, data.Close()) }()
+	dataIdentity, err := data.PhysicalIdentity()
+	if err != nil {
+		return authenticatedReviewMapping{}, err
+	}
 	cfg, err := config.LoadRoot(data.Root, "config.toml")
 	if err != nil {
 		return authenticatedReviewMapping{}, err
@@ -348,7 +353,7 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 	}
 	return authenticatedReviewMapping{
 		projectID: projectID, projectRoot: project.Path, vaultRoot: vault.Path,
-		projectIdentity: projectIdentity, vaultIdentity: vaultIdentity,
+		dataIdentity: dataIdentity, projectIdentity: projectIdentity, vaultIdentity: vaultIdentity,
 	}, nil
 }
 
@@ -373,6 +378,28 @@ func (authority reviewProjectAuthority) authorizeMutation(job reviewjob.Job) err
 
 func (authority reviewProjectAuthority) store(rejectActive bool) reviewjob.Store {
 	return (reviewjob.Store{Root: authority.dataDir, RejectActiveProject: rejectActive}).WithMutationGuard(authority.authorizeMutation)
+}
+
+// launchTerminalStore authorizes only cleanup of the exact launch job inside
+// the still-pinned Data namespace. Project or Vault drift must prevent new
+// work, but cannot strand an ownerless one-use launch token after the worker
+// rejects that drift.
+func (authority reviewProjectAuthority) launchTerminalStore(jobID string) reviewjob.Store {
+	return (reviewjob.Store{Root: authority.dataDir}).WithMutationGuard(func(job reviewjob.Job) (retErr error) {
+		if job.ID != jobID || job.ProjectID != authority.mapping.projectID || job.ProjectIdentity != authority.mapping.projectIdentity {
+			return errors.New("review launch cleanup is outside the pinned job authority")
+		}
+		data, err := pathguard.Open(authority.dataDir)
+		if err != nil {
+			return err
+		}
+		defer func() { retErr = errors.Join(retErr, data.Close()) }()
+		identity, err := data.PhysicalIdentity()
+		if err != nil || identity != authority.mapping.dataIdentity {
+			return errors.New("review Data authority changed")
+		}
+		return nil
+	})
 }
 
 func authenticateStoredReviewJob(dataDir string, job reviewjob.Job) (authenticatedReviewMapping, error) {
@@ -468,7 +495,7 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 		if persistedFound {
 			current, _, found, repairErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity)
 			if repairErr != nil || !found || current.ID != job.ID {
-				terminalizeReviewLaunch(store, job.ID, reviewjob.ApplyRecovery, canonicalReviewNow())
+				terminalizeReviewLaunch(authority, job.ID, job.LaunchTokenDigest, reviewjob.ApplyRecovery, canonicalReviewNow())
 				return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 			}
 		} else if current, revision, found, loadErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity); loadErr == nil && found && reviewStateActive(current.State) {
@@ -478,12 +505,12 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 		}
 	}
 	if err := reviewLaunch(reviewLaunchRequest{Binary: binary, JobID: job.ID, Token: token}); err != nil {
-		failed, revision := terminalizeReviewLaunch(store, job.ID, reviewLaunchError(err), canonicalReviewNow())
+		failed, revision := terminalizeReviewLaunch(authority, job.ID, job.LaunchTokenDigest, reviewLaunchError(err), canonicalReviewNow())
 		return writeReviewStatus(stdout, &failed, projectID, revision, 1)
 	}
 	current, revision, found, err := store.Load(job.ID)
 	if err != nil || !found || (reviewStateActive(current.State) && current.Owner.ID == "") {
-		failed, failedRevision := terminalizeReviewLaunch(store, job.ID, reviewjob.ApplyRecovery, canonicalReviewNow())
+		failed, failedRevision := terminalizeReviewLaunch(authority, job.ID, job.LaunchTokenDigest, reviewjob.ApplyRecovery, canonicalReviewNow())
 		return writeReviewStatus(stdout, &failed, projectID, failedRevision, 1)
 	}
 	return writeReviewStatus(stdout, &current, projectID, revision, 0)
@@ -627,12 +654,12 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 		return writeReviewStatus(stdout, &job, job.ProjectID, revision, 0)
 	}
 	if err := reviewLaunch(reviewLaunchRequest{Binary: binary, JobID: jobID, Token: token}); err != nil {
-		failed, failedRevision := terminalizeReviewLaunch(store, jobID, reviewLaunchError(err), canonicalReviewNow())
+		failed, failedRevision := terminalizeReviewLaunch(authority, jobID, launchDigest, reviewLaunchError(err), canonicalReviewNow())
 		return writeReviewStatus(stdout, &failed, failed.ProjectID, failedRevision, 1)
 	}
 	current, currentRevision, found, err := store.Load(jobID)
 	if err != nil || !found || (reviewStateActive(current.State) && current.Owner.ID == "") {
-		failed, failedRevision := terminalizeReviewLaunch(store, jobID, reviewjob.ApplyRecovery, canonicalReviewNow())
+		failed, failedRevision := terminalizeReviewLaunch(authority, jobID, launchDigest, reviewjob.ApplyRecovery, canonicalReviewNow())
 		return writeReviewStatus(stdout, &failed, before.ProjectID, failedRevision, 1)
 	}
 	return writeReviewStatus(stdout, &current, current.ProjectID, currentRevision, 0)
@@ -696,7 +723,8 @@ func reviewLaunchError(err error) reviewjob.ErrorCode {
 	return reviewjob.ApplyRecovery
 }
 
-func terminalizeReviewLaunch(store reviewjob.Store, jobID string, code reviewjob.ErrorCode, at time.Time) (reviewjob.Job, int) {
+func terminalizeReviewLaunch(authority reviewProjectAuthority, jobID, launchDigest string, code reviewjob.ErrorCode, at time.Time) (reviewjob.Job, int) {
+	store := authority.launchTerminalStore(jobID)
 	for attempts := 0; attempts < 64; attempts++ {
 		job, revision, found, err := store.Load(jobID)
 		if err != nil || !found {
@@ -705,8 +733,11 @@ func terminalizeReviewLaunch(store reviewjob.Store, jobID string, code reviewjob
 		if !reviewStateActive(job.State) {
 			return job, revision
 		}
+		if launchDigest == "" || job.Owner.ID != "" || job.LaunchTokenDigest != launchDigest {
+			return job, revision
+		}
 		next, nextRevision, err := store.Update(jobID, revision, func(next *reviewjob.Job) error {
-			if !reviewStateActive(next.State) {
+			if !reviewStateActive(next.State) || next.Owner.ID != "" || next.LaunchTokenDigest != launchDigest {
 				return reviewjob.ErrStaleRevision
 			}
 			next.State = reviewjob.Failed
