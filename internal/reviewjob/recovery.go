@@ -232,6 +232,41 @@ func (runner *worker) recoverRetryState(ctx context.Context) error {
 	return nil
 }
 
+// clearStaleAgentWork removes leftover Agent scratch entries from an attempt
+// that ended before its own cleanup could run. The retry path reopens the job
+// work directory, which requires an empty Agent root, and a SIGKILLed worker
+// leaves that state behind. Only the Agent scratch directory is removed;
+// authenticated payload bytes keep their digest-verified cleanup boundary in
+// recoverRetryState.
+func clearStaleAgentWork(leases *LeaseSet, jobID string) error {
+	if leases == nil || leases.layout == nil || leases.layout.missing {
+		return os.ErrNotExist
+	}
+	if err := leases.verify(); err != nil {
+		return err
+	}
+	jobRoot, found, err := openPrivateDirectory(leases.layout.work, jobID, false)
+	if err != nil || !found || jobRoot == nil {
+		return errors.Join(os.ErrNotExist, err)
+	}
+	defer jobRoot.Close()
+	agentRoot, err := ensurePrivateDirectory(jobRoot, "agent")
+	if err != nil {
+		return err
+	}
+	defer agentRoot.Close()
+	entries, err := readBoundedEntries(agentRoot, maxWorkEntries)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := agentRoot.RemoveAll(entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (runner *worker) loadRetainedApplyPayload() (evidence.Packet, proposal.Proposal, error) {
 	if runner.work == nil || runner.job.PayloadState != PayloadApplyRecovery ||
 		runner.job.PacketDigest == "" || runner.job.ResultDigest == "" {

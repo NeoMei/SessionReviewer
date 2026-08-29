@@ -28,6 +28,12 @@ type Options struct {
 	Trigger   syncengine.Trigger
 	DryRun    bool
 	Pin       *MappingPin
+	// RepairMachineLedger publishes the project machine ledger over a stale
+	// vault copy before reconciling. It is reserved for the review worker,
+	// whose accepted apply is the legitimate writer that advanced the project
+	// copy since the last successful sync; interactive sync keeps failing
+	// closed so an out-of-band vault edit still requires an explicit repair.
+	RepairMachineLedger bool
 
 	pinCheckpoint func(pinCheckpointStage) error
 	beforeEngine  func() error
@@ -86,14 +92,38 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 		return syncengine.Report{}, err
 	}
 	defer engine.Close()
-	report, err := engine.Reconcile(ctx, syncengine.ReconcileRequest{DryRun: options.DryRun, Trigger: options.Trigger})
+	request := syncengine.ReconcileRequest{DryRun: options.DryRun, Trigger: options.Trigger}
+	report, err := engine.Reconcile(ctx, request)
 	if err != nil {
 		return report, err
+	}
+	if options.RepairMachineLedger && machineLedgerBlockedByVaultCopy(report) {
+		if _, repairErr := engine.RepairMachineLedger(ctx); repairErr != nil {
+			return report, repairErr
+		}
+		report, err = engine.Reconcile(ctx, request)
+		if err != nil {
+			return report, err
+		}
 	}
 	if err := pin.verify(options); err != nil {
 		return syncengine.Report{}, err
 	}
 	return report, nil
+}
+
+// machineLedgerBlockedByVaultCopy reports whether reconciliation stopped only
+// because the vault machine ledger differs from the project copy. That exact
+// single-entity report is the signature of the review worker's own apply
+// advance; anything broader still fails closed.
+func machineLedgerBlockedByVaultCopy(report syncengine.Report) bool {
+	if report.Machine.State != syncengine.MachineBlocked || len(report.Conflicts) != 0 {
+		return false
+	}
+	if len(report.Errors) != 1 {
+		return false
+	}
+	return report.Errors[0].EntityID == "machine-ledger" && report.Errors[0].Code == "machine_ledger_modified"
 }
 
 func resolveMapping(cfg config.Config, projectID, cwd string) (config.ProjectMapping, *pathguard.Directory, error) {

@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -93,6 +94,54 @@ func TestCapabilityCannotBeMislabeledNoToolsOrConstructedFor0147(t *testing.T) {
 	assertCode(t, err, agent.CodeIncompatible)
 	if capability.NoTools || capability.Containment != "" || !reflect.DeepEqual(capability, agent.Capability{}) {
 		t.Fatalf("0.147.x capability was constructible or mislabeled NoTools: %+v", capability)
+	}
+}
+
+func TestVerifyAllowsOperatorAssertedHermeticDigestAfterProbes(t *testing.T) {
+	digestBytes, err := os.ReadFile(fakeExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(hermeticDigestEnv, fmt.Sprintf("%x", sha256.Sum256(digestBytes)))
+	capability, err := New().Verify(context.Background(), fakeExecutable)
+	if err != nil {
+		t.Fatalf("hermetic allow-listed executable rejected: %v", err)
+	}
+	want := agent.Capability{
+		Provider: "codex", Version: "0.147.0", ProposalOnly: true, NoTools: true,
+		ReadOnly: true, Containment: agent.ContainmentRestrictedReadOnly,
+		StructuredOutput: true, NativeCancellation: true,
+		ModelProvenance: agent.ModelProvenanceUnavailable,
+	}
+	if !reflect.DeepEqual(capability, want) {
+		t.Fatalf("capability=%+v want=%+v", capability, want)
+	}
+}
+
+func TestVerifyRejectsWrongAndMalformedHermeticDigestEntries(t *testing.T) {
+	tests := []struct {
+		name   string
+		allow  string
+		target string
+	}{
+		{name: "wrong digest", allow: strings.Repeat("0", 64), target: strings.Repeat("f", 64)},
+		{name: "malformed digest", allow: strings.Repeat("a", 63), target: strings.Repeat("f", 64)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(hermeticDigestEnv, test.target)
+			if _, err := New().Verify(context.Background(), fakeExecutable); err == nil {
+				t.Fatal("accepted an executable that is not allow-listed")
+			} else {
+				assertCode(t, err, agent.CodeIncompatible)
+			}
+			t.Setenv(hermeticDigestEnv, strings.Repeat("f", 64)+","+test.allow)
+			if _, err := New().Verify(context.Background(), fakeExecutable); err == nil {
+				t.Fatalf("accepted a malformed allow-list entry: %s", test.allow)
+			} else {
+				assertCode(t, err, agent.CodeIncompatible)
+			}
+		})
 	}
 }
 

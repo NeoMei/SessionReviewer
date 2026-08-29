@@ -304,6 +304,9 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 		if runner.job.PayloadState == "" {
 			return runner.finishCancelled(errors.New("review cancellation requested"))
 		}
+		if err := clearStaleAgentWork(leases, runner.job.ID); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
 		work, err := openJobWork(leases, runner.job.ID)
 		if err != nil {
 			return runner.fail(ApplyRecovery, err)
@@ -322,6 +325,9 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	}
 	needsWork := runner.retry && (runner.job.PayloadState != "" || runner.job.AcceptedSyncPending)
 	if needsWork {
+		if err := clearStaleAgentWork(leases, runner.job.ID); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
 		work, err := openJobWork(leases, runner.job.ID)
 		if err != nil {
 			return runner.fail(ApplyRecovery, err)
@@ -976,6 +982,11 @@ func (runner *worker) runSync(ctx context.Context) error {
 		DataDir: runner.roots.data.Path, GOOS: runner.options.GOOS,
 		Now: runner.options.Now, Trigger: syncengine.TriggerCLI,
 		Pin: runner.roots.syncPin,
+		// The accepted apply just advanced the project machine ledger, so the
+		// vault copy is one accepted revision behind by construction. Publish
+		// it through the reviewed repair transaction instead of failing the
+		// session after the ledger was already accepted.
+		RepairMachineLedger: true,
 	})
 	cancelErr := stopCommitCancellation()
 	if err != nil {

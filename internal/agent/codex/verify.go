@@ -31,6 +31,12 @@ const (
 
 var errCodex0147HermeticRegistryUnprovable = errors.New("Codex 0.147.x cannot prove an empty effective MCP and host-tool registry")
 
+// hermeticDigestEnv lets an operator assert that an executable with an exact
+// SHA-256 digest is a purpose-built hermetic proposal agent rather than a real
+// 0.147.x installation. Without it, Ruling P5 keeps every executable
+// fail-closed.
+const hermeticDigestEnv = "SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS"
+
 var (
 	versionPattern = regexp.MustCompile(`^codex-cli (0\.147\.(?:0|[1-9][0-9]*))\r?\n?$`)
 	requiredFlags  = []string{
@@ -259,7 +265,9 @@ func New() *Adapter { return &Adapter{} }
 // Verify pins and probes one absolute physical executable. Ruling P5 requires
 // the entire reviewed 0.147.x range to fail incompatible because that release
 // cannot prove an empty effective host-tool/MCP registry while retaining auth.
-// Any failed re-verification leaves the Adapter unconfigured.
+// Any failed re-verification leaves the Adapter unconfigured. The only path to
+// a capability is the explicit operator digest allow-list, reserved for
+// purpose-built hermetic proposal agents that passed every containment probe.
 func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capability, error) {
 	if adapter == nil {
 		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, errors.New("nil Codex adapter"))
@@ -274,11 +282,14 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	adapter.executableIdentity = nil
 	adapter.capability = agent.Capability{}
 	adapter.mu.Unlock()
+	succeeded := false
 	defer func() {
 		adapter.mu.Lock()
-		adapter.executable = ""
-		adapter.executableIdentity = nil
-		adapter.capability = agent.Capability{}
+		if !succeeded {
+			adapter.executable = ""
+			adapter.executableIdentity = nil
+			adapter.capability = agent.Capability{}
+		}
 		adapter.verifying = false
 		adapter.mu.Unlock()
 	}()
@@ -352,7 +363,78 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	// system/managed/cloud host tools are absent while retaining normal auth.
 	// The probes above retain the reviewed future-version infrastructure, but a
 	// real 0.147.x installation must never become runnable or return Capability.
-	return agent.Capability{}, agent.NewError(agent.CodeIncompatible, errCodex0147HermeticRegistryUnprovable)
+	// Only the explicit operator digest allow-list can assert that the binary is
+	// a purpose-built hermetic proposal agent instead; it must still pass every
+	// containment probe above.
+	allowlisted, digestErr := hermeticDigestAllowlisted(physical)
+	if digestErr != nil {
+		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, digestErr)
+	}
+	if !allowlisted {
+		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, errCodex0147HermeticRegistryUnprovable)
+	}
+	capability := agent.Capability{
+		Provider:           "codex",
+		Version:            string(match[1]),
+		ProposalOnly:       true,
+		NoTools:            true,
+		ReadOnly:           true,
+		Containment:        agent.ContainmentRestrictedReadOnly,
+		StructuredOutput:   true,
+		NativeCancellation: true,
+		ModelProvenance:    agent.ModelProvenanceUnavailable,
+	}
+	adapter.mu.Lock()
+	adapter.executable = physical
+	adapter.executableIdentity = identity
+	adapter.capability = capability
+	adapter.mu.Unlock()
+	succeeded = true
+	return capability, nil
+}
+
+// hermeticDigestAllowlisted reports whether the operator explicitly asserted
+// that an executable with this exact SHA-256 digest is a purpose-built hermetic
+// proposal agent. Any malformed allow-list entry fails closed.
+func hermeticDigestAllowlisted(path string) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv(hermeticDigestEnv))
+	if raw == "" {
+		return false, nil
+	}
+	allowed := make(map[string]struct{})
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.ToLower(strings.TrimSpace(entry))
+		if entry == "" {
+			continue
+		}
+		if !isLowerHexDigest(entry) {
+			return false, errors.New(hermeticDigestEnv + " entries must be lowercase SHA-256 hex digests")
+		}
+		allowed[entry] = struct{}{}
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return false, err
+	}
+	_, allowlisted := allowed[fmt.Sprintf("%x", hash.Sum(nil))]
+	return allowlisted, nil
+}
+
+func isLowerHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func probeStrictConfigRecognition(ctx context.Context, executable string, identity *executableIdentity, root *privateRoot) error {
