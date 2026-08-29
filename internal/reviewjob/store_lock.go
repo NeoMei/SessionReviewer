@@ -23,6 +23,10 @@ type storeFileLock struct {
 	// Guarded Store bootstrap uses it to roll back an otherwise empty layout
 	// without ever removing a pre-existing or concurrently replaced lock.
 	created bool
+	// unlinked records an authenticated bootstrap rollback performed while the
+	// kernel lock was still held. release then validates the open file identity
+	// instead of requiring the intentionally removed namespace entry.
+	unlinked bool
 }
 
 // acquireStoreFileLock locks only the stable private lock file below the
@@ -194,14 +198,60 @@ func (lock *storeFileLock) release() error {
 	if lock.file == nil {
 		return nil
 	}
-	after, err := lock.root.Lstat(lock.name)
 	var identityErr error
-	if err != nil || !sameStoreLockEntry(lock.info, after) {
-		identityErr = errors.New("review job store lock identity changed before release")
+	opened, statErr := lock.file.Stat()
+	if statErr != nil || !sameStoreLockEntry(lock.info, opened) {
+		identityErr = errors.New("review job store lock handle identity changed before release")
+	}
+	if !lock.unlinked {
+		after, err := lock.root.Lstat(lock.name)
+		if err != nil || !sameStoreLockEntry(lock.info, after) {
+			identityErr = errors.Join(identityErr, errors.New("review job store lock identity changed before release"))
+		}
 	}
 	file := lock.file
 	lock.file = nil
 	return errors.Join(identityErr, unlockStorePlatformLock(file), file.Close())
+}
+
+func (lock *storeFileLock) held() bool {
+	if lock == nil {
+		return false
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	return lock.file != nil
+}
+
+// unlinkOwnedWhileHeld removes only the exact empty stable leaf published by
+// this acquisition, and only while this process still owns its kernel lock.
+// A waiter that already opened the inode can acquire it only after release and
+// must then fail the acquisition's mandatory pathname/handle identity check.
+func (lock *storeFileLock) unlinkOwnedWhileHeld() error {
+	if lock == nil {
+		return nil
+	}
+	lock.mu.Lock()
+	defer lock.mu.Unlock()
+	if !lock.created {
+		return nil
+	}
+	if lock.file == nil {
+		return errors.New("owned store lock cleanup requires live kernel ownership")
+	}
+	current, err := lock.root.Lstat(lock.name)
+	opened, statErr := lock.file.Stat()
+	if err != nil || statErr != nil || !sameStoreLockEntry(lock.info, current) || !sameStoreLockEntry(lock.info, opened) || current.Size() != 0 || opened.Size() != 0 {
+		return errors.New("owned store lock changed before bootstrap rollback")
+	}
+	if err := lock.root.Remove(lock.name); err != nil {
+		return errors.New("owned store lock could not be removed during bootstrap rollback")
+	}
+	if _, err := lock.root.Lstat(lock.name); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("owned store lock remained named after bootstrap rollback")
+	}
+	lock.unlinked = true
+	return nil
 }
 
 func (lock *storeFileLock) replaceContent(body []byte, maxBytes int) error {

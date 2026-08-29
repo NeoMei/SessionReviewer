@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/agent"
@@ -303,8 +304,19 @@ type authenticatedReviewMapping struct {
 }
 
 type reviewProjectAuthority struct {
-	dataDir string
+	owner   *reviewProjectAuthorityOwner
 	mapping authenticatedReviewMapping
+	dataDir string
+}
+
+// reviewProjectAuthorityOwner is pointer-scoped so shallow copies of the
+// authority share one idempotent close token. The pinned Data handle therefore
+// cannot be double-closed or silently reopened by a copied Store value.
+type reviewProjectAuthorityOwner struct {
+	mu       sync.Mutex
+	data     *pathguard.Directory
+	closed   bool
+	closeErr error
 }
 
 func resolveReviewDataDir() (string, error) {
@@ -321,6 +333,13 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 		return authenticatedReviewMapping{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, data.Close()) }()
+	return authenticateReviewMappingAt(data, projectID)
+}
+
+func authenticateReviewMappingAt(data *pathguard.Directory, projectID string) (_ authenticatedReviewMapping, retErr error) {
+	if data == nil || data.Root == nil || data.Info() == nil {
+		return authenticatedReviewMapping{}, errors.New("review Data authority is unavailable")
+	}
 	dataIdentity, err := data.PhysicalIdentity()
 	if err != nil {
 		return authenticatedReviewMapping{}, err
@@ -358,16 +377,28 @@ func authenticateReviewMapping(dataDir, projectID string) (_ authenticatedReview
 }
 
 func pinReviewProjectAuthority(dataDir string, expected authenticatedReviewMapping) (reviewProjectAuthority, error) {
-	current, err := authenticateReviewMapping(dataDir, expected.projectID)
-	if err != nil || current != expected {
+	data, err := pathguard.Open(dataDir)
+	if err != nil {
 		return reviewProjectAuthority{}, errors.New("review project mapping authority changed")
 	}
-	return reviewProjectAuthority{dataDir: dataDir, mapping: current}, nil
+	current, err := authenticateReviewMappingAt(data, expected.projectID)
+	if err != nil || current != expected {
+		_ = data.Close()
+		return reviewProjectAuthority{}, errors.New("review project mapping authority changed")
+	}
+	return reviewProjectAuthority{
+		owner:   &reviewProjectAuthorityOwner{data: data},
+		dataDir: data.Path,
+		mapping: current,
+	}, nil
 }
 
 func (authority reviewProjectAuthority) authorizeMutation(job reviewjob.Job) error {
 	if job.ProjectID != authority.mapping.projectID || job.ProjectIdentity != authority.mapping.projectIdentity {
 		return errors.New("review job is outside the pinned project authority")
+	}
+	if err := authority.validatePinnedData(); err != nil {
+		return err
 	}
 	current, err := authenticateReviewMapping(authority.dataDir, authority.mapping.projectID)
 	if err != nil || current != authority.mapping {
@@ -377,7 +408,10 @@ func (authority reviewProjectAuthority) authorizeMutation(job reviewjob.Job) err
 }
 
 func (authority reviewProjectAuthority) store(rejectActive bool) reviewjob.Store {
-	return (reviewjob.Store{Root: authority.dataDir, RejectActiveProject: rejectActive}).WithMutationGuard(authority.authorizeMutation)
+	store := reviewjob.Store{Root: authority.dataDir, RejectActiveProject: rejectActive}
+	data, _ := authority.dataRoot()
+	store = store.WithPinnedDataRoot(data)
+	return store.WithMutationGuard(authority.authorizeMutation)
 }
 
 // launchTerminalStore authorizes only cleanup of the exact launch job inside
@@ -385,21 +419,61 @@ func (authority reviewProjectAuthority) store(rejectActive bool) reviewjob.Store
 // work, but cannot strand an ownerless one-use launch token after the worker
 // rejects that drift.
 func (authority reviewProjectAuthority) launchTerminalStore(jobID string) reviewjob.Store {
-	return (reviewjob.Store{Root: authority.dataDir}).WithMutationGuard(func(job reviewjob.Job) (retErr error) {
+	store := reviewjob.Store{Root: authority.dataDir}
+	data, _ := authority.dataRoot()
+	store = store.WithPinnedDataRoot(data)
+	return store.WithMutationGuard(func(job reviewjob.Job) error {
 		if job.ID != jobID || job.ProjectID != authority.mapping.projectID || job.ProjectIdentity != authority.mapping.projectIdentity {
 			return errors.New("review launch cleanup is outside the pinned job authority")
 		}
-		data, err := pathguard.Open(authority.dataDir)
-		if err != nil {
-			return err
-		}
-		defer func() { retErr = errors.Join(retErr, data.Close()) }()
-		identity, err := data.PhysicalIdentity()
-		if err != nil || identity != authority.mapping.dataIdentity {
-			return errors.New("review Data authority changed")
-		}
-		return nil
+		return authority.validatePinnedData()
 	})
+}
+
+func (authority reviewProjectAuthority) dataRoot() (*pathguard.Directory, error) {
+	if authority.owner == nil {
+		return nil, errors.New("review Data authority is unavailable")
+	}
+	authority.owner.mu.Lock()
+	defer authority.owner.mu.Unlock()
+	if authority.owner.closed || authority.owner.data == nil || authority.owner.data.Root == nil {
+		return nil, errors.New("review Data authority is unavailable")
+	}
+	return authority.owner.data, nil
+}
+
+func (authority reviewProjectAuthority) validatePinnedData() error {
+	data, err := authority.dataRoot()
+	if err != nil {
+		return err
+	}
+	opened, err := data.Root.Stat(".")
+	if err != nil || opened == nil || data.Info() == nil || !opened.IsDir() || !os.SameFile(data.Info(), opened) {
+		return errors.New("review Data authority changed")
+	}
+	identity, err := data.PhysicalIdentity()
+	if err != nil || identity != authority.mapping.dataIdentity {
+		return errors.New("review Data authority changed")
+	}
+	return nil
+}
+
+func (authority reviewProjectAuthority) Close() error {
+	if authority.owner == nil {
+		return nil
+	}
+	authority.owner.mu.Lock()
+	defer authority.owner.mu.Unlock()
+	if authority.owner.closed {
+		return authority.owner.closeErr
+	}
+	authority.owner.closed = true
+	data := authority.owner.data
+	authority.owner.data = nil
+	if data != nil {
+		authority.owner.closeErr = data.Close()
+	}
+	return authority.owner.closeErr
 }
 
 func authenticateStoredReviewJob(dataDir string, job reviewjob.Job) (authenticatedReviewMapping, error) {
@@ -443,6 +517,7 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
+	defer authority.Close()
 	mapping := authority.mapping
 	store := authority.store(true)
 	if current, revision, found, loadErr := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity); loadErr != nil {
@@ -521,7 +596,11 @@ func runReviewStatus(dataDir, projectID string, stdout io.Writer) int {
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
-	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	authority, err := pinReviewProjectAuthority(dataDir, mapping)
+	if err != nil {
+		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+	}
+	defer authority.Close()
 	store := authority.store(false)
 	job, revision, found, err := store.LatestForProjectAuthenticated(projectID, mapping.projectIdentity)
 	if err != nil {
@@ -564,7 +643,11 @@ func runReviewCancel(dataDir, jobID string, stdout io.Writer) int {
 	if err != nil {
 		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
 	}
-	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	authority, err := pinReviewProjectAuthority(dataDir, mapping)
+	if err != nil {
+		return writeReviewOperational(stdout, job.ProjectID, reviewjob.ApplyRecovery)
+	}
+	defer authority.Close()
 	store = authority.store(false)
 	job, revision, err = recoverReviewJob(store, job, revision)
 	if err != nil {
@@ -598,7 +681,12 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 		if err != nil {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 		}
-		store = (reviewProjectAuthority{dataDir: dataDir, mapping: mapping}).store(false)
+		authority, err := pinReviewProjectAuthority(dataDir, mapping)
+		if err != nil {
+			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+		}
+		defer authority.Close()
+		store = authority.store(false)
 		before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 		if err != nil {
 			return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
@@ -609,7 +697,11 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 	if err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
-	authority := reviewProjectAuthority{dataDir: dataDir, mapping: mapping}
+	authority, err := pinReviewProjectAuthority(dataDir, mapping)
+	if err != nil {
+		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
+	}
+	defer authority.Close()
 	store = authority.store(false)
 	before, beforeRevision, err = recoverReviewJob(store, before, beforeRevision)
 	if err != nil {

@@ -13,6 +13,7 @@ import (
 const (
 	storeLockfileFailImmediately = 0x1
 	storeLockfileExclusiveLock   = 0x2
+	storeLockDeleteAccess        = 0x00010000
 )
 
 var (
@@ -25,8 +26,8 @@ var (
 func stabilizeStoreLockFile(file *os.File) (*os.File, error) {
 	result, _, callErr := storeProcReOpenFile.Call(
 		file.Fd(),
-		uintptr(syscall.GENERIC_READ|syscall.GENERIC_WRITE),
-		uintptr(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE),
+		uintptr(syscall.GENERIC_READ|syscall.GENERIC_WRITE|storeLockDeleteAccess),
+		uintptr(syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE),
 		0,
 	)
 	runtime.KeepAlive(file)

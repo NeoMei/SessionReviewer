@@ -1164,6 +1164,61 @@ func TestStoreCreateBootstrapRollbackNeverDeletesThirdPartyRaceContent(t *testin
 	}
 }
 
+func TestStoreBootstrapRollbackCannotUnlinkStableLockAfterWaiterAcquires(t *testing.T) {
+	root := newStoreRoot(t)
+	firstLayout, err := (Store{Root: root}).openLayout(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstLock, err := acquireStoreFileLock(firstLayout.locks, storeLockName, time.Second)
+	if err != nil {
+		_ = firstLayout.close()
+		t.Fatal(err)
+	}
+	if err := firstLock.release(); err != nil {
+		_ = firstLayout.close()
+		t.Fatal(err)
+	}
+
+	waiterLayout, err := (Store{Root: root}).openLayout(false)
+	if err != nil {
+		_ = firstLayout.close()
+		t.Fatal(err)
+	}
+	waiterLock, err := acquireStoreFileLock(waiterLayout.locks, storeLockName, time.Second)
+	if err != nil {
+		_ = firstLayout.close()
+		_ = waiterLayout.close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = waiterLock.release()
+		_ = waiterLayout.close()
+		_ = firstLayout.close()
+	})
+
+	if err := firstLayout.rollbackCreated(firstLock); err == nil {
+		t.Fatal("released bootstrap owner was allowed to roll back a stable lock adopted by a waiter")
+	}
+	current, err := os.Lstat(filepath.Join(root, "review-jobs", "locks", storeLockName))
+	if err != nil || !sameStoreLockEntry(waiterLock.info, current) {
+		t.Fatalf("rollback detached the waiter's stable lock: current=%v err=%v", current, err)
+	}
+
+	contenderLayout, err := (Store{Root: root}).openLayout(false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer contenderLayout.close()
+	contender, err := acquireStoreFileLock(contenderLayout.locks, storeLockName, 50*time.Millisecond)
+	if contender != nil {
+		_ = contender.release()
+	}
+	if !errors.Is(err, errPrivateFileLocked) {
+		t.Fatalf("second lock acquired while waiter held the adopted inode: lock=%v err=%v", contender, err)
+	}
+}
+
 func TestStoreRejectsUnsafeIDsAndMutationOfStableIdentity(t *testing.T) {
 	root := newStoreRoot(t)
 	store := Store{Root: root}

@@ -799,6 +799,131 @@ func TestRunReviewLaunchFailureTerminalizesWithoutPublicLeak(t *testing.T) {
 	}
 }
 
+func TestRunReviewStartDataSwapDuringLaunchFailureTerminalizesPinnedStore(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) { return nil, nil }
+	originalData := fixture.data + "-launch-original"
+	replacementBefore := ""
+	reviewLaunch = func(reviewLaunchRequest) error {
+		if err := os.Rename(fixture.data, originalData); err != nil {
+			return err
+		}
+		if err := os.Mkdir(fixture.data, 0o700); err != nil {
+			return err
+		}
+		replacementBefore = snapshotCLITree(t, fixture.data)
+		return errors.New("detached worker rejected the swapped Data namespace")
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--project-id", fixture.projectID, "--agent-executable", fixture.executable, "--json"}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) || status.JobID == "" || !status.CanRetry {
+		t.Fatalf("status=%#v", status)
+	}
+	stored, _, found, err := (reviewjob.Store{Root: originalData}).Load(status.JobID)
+	if err != nil || !found || stored.State != reviewjob.Failed || stored.Owner.ID != "" || stored.LaunchTokenDigest != "" || !stored.LaunchIntentAt.IsZero() {
+		t.Fatalf("original Data job=%#v found=%v err=%v", stored, found, err)
+	}
+	if got := snapshotCLITree(t, fixture.data); got != replacementBefore {
+		t.Fatalf("launch cleanup wrote the replacement Data root\nbefore:\n%s\nafter:\n%s", replacementBefore, got)
+	}
+}
+
+func TestRunReviewRetryDataSwapDuringLaunchFailureTerminalizesPinnedStore(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	store := reviewjob.Store{Root: fixture.data}
+	job := fixture.job(reviewjob.Failed)
+	job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+	if _, err := store.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	originalData := fixture.data + "-retry-launch-original"
+	replacementBefore := ""
+	reviewLaunch = func(reviewLaunchRequest) error {
+		if err := os.Rename(fixture.data, originalData); err != nil {
+			return err
+		}
+		if err := os.Mkdir(fixture.data, 0o700); err != nil {
+			return err
+		}
+		replacementBefore = snapshotCLITree(t, fixture.data)
+		return errors.New("detached retry worker rejected the swapped Data namespace")
+	}
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "retry", "--job-id", job.ID, "--agent-executable", fixture.executable,
+		"--expected-attempt", "1", "--expected-revision", "1", "--json"}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.PublicState(reviewjob.Failed) || status.ErrorCode != string(reviewjob.ApplyRecovery) ||
+		status.JobID != job.ID || status.Attempt != 2 || !status.CanRetry {
+		t.Fatalf("status=%#v", status)
+	}
+	stored, _, found, err := (reviewjob.Store{Root: originalData}).Load(job.ID)
+	if err != nil || !found || stored.State != reviewjob.Failed || stored.Attempt != 2 || stored.Owner.ID != "" ||
+		stored.LaunchTokenDigest != "" || !stored.LaunchIntentAt.IsZero() {
+		t.Fatalf("original Data job=%#v found=%v err=%v", stored, found, err)
+	}
+	if got := snapshotCLITree(t, fixture.data); got != replacementBefore {
+		t.Fatalf("retry cleanup wrote the replacement Data root\nbefore:\n%s\nafter:\n%s", replacementBefore, got)
+	}
+}
+
+func TestReviewProjectAuthorityCopiesSharePinnedDataLifetime(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	job := fixture.job(reviewjob.Failed)
+	job.Error = reviewjob.SafeError{Code: reviewjob.AgentAuth}
+	if _, err := (reviewjob.Store{Root: fixture.data}).Create(job); err != nil {
+		t.Fatal(err)
+	}
+	mapping, err := authenticateReviewMapping(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := pinReviewProjectAuthority(fixture.data, mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyAuthority := authority
+	store := copyAuthority.store(false)
+	originalData := fixture.data + "-authority-original"
+	if err := os.Rename(fixture.data, originalData); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(fixture.data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacementBefore := snapshotCLITree(t, fixture.data)
+	loaded, _, found, err := store.Load(job.ID)
+	if err != nil || !found || loaded.ID != job.ID {
+		t.Fatalf("borrowed Store did not clone the pinned Data handle: job=%#v found=%v err=%v", loaded, found, err)
+	}
+	if err := copyAuthority.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := authority.Close(); err != nil {
+		t.Fatalf("shallow authority copy double-closed the Data handle: %v", err)
+	}
+	if _, _, _, err := store.Load(job.ID); err == nil {
+		t.Fatal("Store reopened the replacement path after its borrowed authority closed")
+	}
+	if got := snapshotCLITree(t, fixture.data); got != replacementBefore {
+		t.Fatalf("closed authority fallback wrote the replacement Data root\nbefore:\n%s\nafter:\n%s", replacementBefore, got)
+	}
+}
+
 func TestRunReviewWorkerRootAuthenticationFailureTerminalizesOwnedLaunch(t *testing.T) {
 	for _, rootKind := range []string{"Project", "Vault"} {
 		t.Run(rootKind, func(t *testing.T) {

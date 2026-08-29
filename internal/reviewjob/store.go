@@ -48,6 +48,8 @@ type Store struct {
 	afterJobDirectoryScan func() error
 	writeRoot             func(*os.Root, string, []byte, fs.FileMode) error
 	mutationGuard         func(Job) error
+	pinnedData            *pathguard.Directory
+	pinnedDataRequired    bool
 }
 
 type storedJob struct {
@@ -88,6 +90,7 @@ type storeLayout struct {
 	projectLocks *os.Root
 	work         *os.Root
 	missing      bool
+	pinnedOnly   bool
 	created      []ownedStoreDirectory
 	createdFiles []ownedStoreFile
 }
@@ -110,6 +113,18 @@ type ownedStoreFile struct {
 // mutation authority.
 func (s Store) WithMutationGuard(guard func(Job) error) Store {
 	s.mutationGuard = guard
+	return s
+}
+
+// WithPinnedDataRoot binds every Store operation to the already opened Data
+// directory instead of reopening Root by pathname. The caller retains
+// ownership of data for the full Store operation lifetime; each operation
+// clones its own rooted handle, so Store value copies never close or consume
+// the borrowed capability. Mutation guards remain responsible for deciding
+// whether the configured pathname must still name the pinned directory.
+func (s Store) WithPinnedDataRoot(data *pathguard.Directory) Store {
+	s.pinnedData = data
+	s.pinnedDataRequired = true
 	return s
 }
 
@@ -149,11 +164,18 @@ func (s Store) Create(job Job) (revision int, retErr error) {
 	var lock *storeFileLock
 	durableRecordPublished := false
 	defer func() {
+		rollback := errors.Is(retErr, errMutationAuthority) && !durableRecordPublished &&
+			(len(layout.created) != 0 || len(layout.createdFiles) != 0 || lock != nil && lock.created)
+		if rollback {
+			// Cleanup is part of the same lock ownership epoch as bootstrap.
+			// Releasing first would let a waiter acquire this inode before the
+			// creator unlinks it, splitting the store into two lock domains.
+			retErr = errors.Join(retErr, layout.rollbackCreated(lock))
+		}
 		if lock != nil {
 			retErr = errors.Join(retErr, lock.release())
 		}
-		if errors.Is(retErr, errMutationAuthority) && !durableRecordPublished && (len(layout.created) != 0 || len(layout.createdFiles) != 0 || lock != nil && lock.created) {
-			retErr = errors.Join(retErr, layout.rollbackCreated(lock))
+		if rollback {
 			retErr = errors.Join(retErr, layout.close())
 			return
 		}
@@ -329,7 +351,7 @@ func (s Store) updateLayoutMode(layout *storeLayout, jobID string, expectedRevis
 	}
 	verify := layout.verifyPinned
 	if requireNamespace {
-		verify = layout.verify
+		verify = layout.verifyOperation
 	}
 	if err := verify(); err != nil {
 		return Job{}, 0, err
@@ -805,11 +827,11 @@ func (s Store) openLayout(create bool) (*storeLayout, error) {
 }
 
 func (s Store) openLayoutChecked(create bool, checkpoint func() error) (*storeLayout, error) {
-	data, err := pathguard.Open(s.Root)
+	data, pinnedOnly, err := s.openDataRoot()
 	if err != nil {
 		return nil, fmt.Errorf("open review job data root: %w", err)
 	}
-	layout := &storeLayout{data: data}
+	layout := &storeLayout{data: data, pinnedOnly: pinnedOnly}
 	fail := func(cause error) (*storeLayout, error) {
 		rollbackErr := layout.rollbackCreated(nil)
 		closeErr := layout.close()
@@ -873,6 +895,37 @@ func (s Store) openLayoutChecked(create bool, checkpoint func() error) (*storeLa
 		layout.created = append(layout.created, ownedStoreDirectory{relative: "review-jobs/locks/projects", info: info})
 	}
 	return layout, nil
+}
+
+func (s Store) openDataRoot() (*pathguard.Directory, bool, error) {
+	if !s.pinnedDataRequired {
+		data, err := pathguard.Open(s.Root)
+		return data, false, err
+	}
+	pinned := s.pinnedData
+	if pinned == nil || pinned.Root == nil || pinned.Info() == nil || pinned.Path == "" {
+		return nil, true, errors.New("pinned review job Data root is unavailable")
+	}
+	current, err := pinned.Root.Stat(".")
+	if err != nil || current == nil || !current.IsDir() || !os.SameFile(pinned.Info(), current) {
+		return nil, true, errors.New("pinned review job Data root changed")
+	}
+	root, err := pinned.Root.OpenRoot(".")
+	if err != nil {
+		return nil, true, errors.New("clone pinned review job Data root")
+	}
+	opened, err := root.Stat(".")
+	if err != nil || opened == nil || !opened.IsDir() || !os.SameFile(pinned.Info(), opened) || !os.SameFile(current, opened) {
+		_ = root.Close()
+		return nil, true, errors.New("cloned review job Data root changed")
+	}
+	ancestors := append([]os.FileInfo(nil), pinned.Ancestors...)
+	if len(ancestors) == 0 {
+		ancestors = []os.FileInfo{opened}
+	} else {
+		ancestors[len(ancestors)-1] = opened
+	}
+	return &pathguard.Directory{Root: root, Path: pinned.Path, Ancestors: ancestors}, true, nil
 }
 
 func openPrivateDirectory(parent *os.Root, name string, create bool) (*os.Root, bool, error) {
@@ -979,6 +1032,9 @@ func (layout *storeLayout) rollbackCreated(lock *storeFileLock) error {
 	if layout == nil || layout.data == nil || layout.data.Root == nil {
 		return nil
 	}
+	if lock != nil && !lock.held() {
+		return errors.New("bootstrap rollback requires the original store lock ownership")
+	}
 	var retErr error
 	for index := len(layout.createdFiles) - 1; index >= 0; index-- {
 		owned := layout.createdFiles[index]
@@ -999,17 +1055,8 @@ func (layout *storeLayout) rollbackCreated(lock *storeFileLock) error {
 		retErr = errors.Join(retErr, err)
 	}
 	layout.createdFiles = nil
-	retErr = errors.Join(retErr, layout.closeDescendants())
 	if lock != nil && lock.created {
-		current, err := layout.data.Root.Lstat(filepath.FromSlash("review-jobs/locks/" + storeLockName))
-		if errors.Is(err, os.ErrNotExist) {
-			err = nil
-		} else if err == nil && sameStoreLockEntry(lock.info, current) && current.Size() == 0 {
-			err = layout.data.Root.Remove(filepath.FromSlash("review-jobs/locks/" + storeLockName))
-		} else if err == nil {
-			err = errors.New("owned store lock changed before bootstrap rollback")
-		}
-		retErr = errors.Join(retErr, err)
+		retErr = errors.Join(retErr, lock.unlinkOwnedWhileHeld())
 	}
 	for index := len(layout.created) - 1; index >= 0; index-- {
 		owned := layout.created[index]
@@ -1069,7 +1116,14 @@ func (layout *storeLayout) finish() error {
 	if layout == nil {
 		return nil
 	}
-	return errors.Join(layout.verify(), layout.close())
+	return errors.Join(layout.verifyOperation(), layout.close())
+}
+
+func (layout *storeLayout) verifyOperation() error {
+	if layout != nil && layout.pinnedOnly {
+		return layout.verifyPinned()
+	}
+	return layout.verify()
 }
 
 func (layout *storeLayout) verify() error {
