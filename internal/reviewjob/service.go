@@ -1278,7 +1278,7 @@ func writePrivatePayload(root *os.Root, name string, body []byte, limit int64, e
 		return errors.New("private worker payload is invalid, oversized, or unauthenticated")
 	}
 	checkpointCalls := 0
-	if err := atomicfile.WriteRootFileChecked(root, name, body, 0o600, func() error {
+	if err := atomicfile.WriteRootFileCheckedWithRollbackCheckpoint(root, name, body, 0o600, func() error {
 		checkpointCalls++
 		switch checkpointCalls {
 		case 1:
@@ -1293,7 +1293,7 @@ func writePrivatePayload(root *os.Root, name string, body []byte, limit int64, e
 		default:
 			return errors.New("private payload writer exceeded checkpoint contract")
 		}
-	}); err != nil {
+	}, nil); err != nil {
 		return err
 	}
 	if checkpointCalls != 3 {

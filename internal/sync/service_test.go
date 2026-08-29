@@ -2343,6 +2343,78 @@ func TestReviewTargetPinRechecksRelocationBeforeMissingComponentProtection(t *te
 	}
 }
 
+func TestReviewTargetPinRejectsReopenedProtectionHandleIdentitySwap(t *testing.T) {
+	fixture := newEngineFixture(t)
+	projectRoot, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot.Close()
+	vaultRoot, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot.Close()
+	pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+
+	const decoyName = "protection-handle-swap-decoy"
+	const detachedName = "protection-handle-retained-child"
+	decoy := filepath.Join(fixture.vault, decoyName)
+	if err := os.Mkdir(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	decoyBefore, err := os.Stat(decoy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opens := 0
+	pin.state.openSecurityHandle = func(root *os.Root, component string) (*os.File, error) {
+		opens++
+		if err := root.Rename(component, detachedName); err != nil {
+			return nil, err
+		}
+		if err := root.Rename(decoyName, component); err != nil {
+			_ = root.Rename(detachedName, component)
+			return nil, err
+		}
+		modeHandle, err := openReviewTargetSecurityHandle(root, component)
+		if err != nil {
+			_ = root.Rename(component, decoyName)
+			_ = root.Rename(detachedName, component)
+			return nil, err
+		}
+		if err := root.Rename(component, decoyName); err != nil {
+			_ = modeHandle.Close()
+			return nil, err
+		}
+		if err := root.Rename(detachedName, component); err != nil {
+			_ = modeHandle.Close()
+			return nil, err
+		}
+		// The configured name again binds the retained child, while this
+		// named-reopen handle still binds the swapped-in attacker directory.
+		return modeHandle, nil
+	}
+
+	if _, _, err := pin.directory(true); err == nil || !strings.Contains(err.Error(), "security handle identity changed") {
+		t.Fatalf("reopened protection handle identity error=%v", err)
+	}
+	if opens != 1 {
+		t.Fatalf("security handle reopen calls=%d, want 1", opens)
+	}
+	decoyAfter, err := os.Stat(decoy)
+	if err != nil || !os.SameFile(decoyBefore, decoyAfter) || decoyAfter.Mode() != decoyBefore.Mode() {
+		t.Fatalf("untrusted protection handle was mutated: before=%v after=%v err=%v", decoyBefore, decoyAfter, err)
+	}
+}
+
 // The pre-create alias scan is not enough: a racer can add a folded/NFC
 // equivalent after the exact Mkdir. The post-create and later recheck scans
 // must bind the sole equivalent entry to the authenticated inode.
@@ -2731,6 +2803,88 @@ func TestVaultAtomicPublicationRechecksRelocationAtTheMutationBoundary(t *testin
 			entries, err := os.ReadDir(target)
 			if err != nil || len(entries) != 0 {
 				t.Fatalf("replacement namespace received writes: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestVaultAtomicRollbackLinkRechecksRelocationAfterTemporarySync(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			const leaf = "state.md"
+			oldBody := []byte("authenticated original bytes\n")
+			originalPath := filepath.Join(target, leaf)
+			if err := os.WriteFile(originalPath, oldBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			originalInfo, err := os.Stat(originalPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine, err := NewEngine(fixture.options())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer engine.Close()
+
+			destinationRoot := fixture.project
+			if destination == "data" {
+				destinationRoot = fixture.data
+			}
+			relocated := filepath.Join(destinationRoot, "relocated-before-rollback-link-"+destination)
+			checks := 0
+			moved := false
+			rollbackExistedAtRelocation := false
+			engine.beforeVaultMutation = func(class vaultMutationClass) error {
+				if class != vaultMutationPublish {
+					return nil
+				}
+				checks++
+				if checks != 2 {
+					return nil
+				}
+				if _, err := os.Lstat(filepath.Join(target, atomicfile.BackupPath(leaf))); err == nil {
+					rollbackExistedAtRelocation = true
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				if err := os.Rename(target, relocated); err != nil {
+					return err
+				}
+				if err := os.MkdirAll(target, 0o700); err != nil {
+					return err
+				}
+				moved = true
+				return nil
+			}
+
+			err = engine.writer.WriteIfUnchanged(t.Context(), SideVault, leaf, []byte("new bytes must not commit\n"), 0o600, oldBody, true)
+			if err == nil {
+				t.Fatal("write accepted a detached target")
+			}
+			if !moved {
+				t.Fatal("second publication checkpoint did not run after temporary sync")
+			}
+			if rollbackExistedAtRelocation {
+				t.Fatal("rollback hardlink was created before final target authorization")
+			}
+			relocatedPath := filepath.Join(relocated, leaf)
+			afterBody, readErr := os.ReadFile(relocatedPath)
+			afterInfo, statErr := os.Stat(relocatedPath)
+			if readErr != nil || statErr != nil || !bytes.Equal(afterBody, oldBody) || !os.SameFile(originalInfo, afterInfo) ||
+				afterInfo.Mode() != originalInfo.Mode() || !afterInfo.ModTime().Equal(originalInfo.ModTime()) {
+				t.Fatalf("original changed: body=%q info=%v read=%v stat=%v", afterBody, afterInfo, readErr, statErr)
+			}
+			if _, err := os.Lstat(filepath.Join(relocated, atomicfile.BackupPath(leaf))); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rollback alias remains after rejected write: %v", err)
+			}
+			if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+				t.Fatalf("replacement target changed: entries=%v err=%v", entries, err)
 			}
 		})
 	}

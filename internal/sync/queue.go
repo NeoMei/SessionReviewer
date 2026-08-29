@@ -609,19 +609,23 @@ func writeQueueItemCAS(root *os.Root, item QueueItem, policy RetryPolicy, expect
 		return errors.New("queue state exceeds size limit")
 	}
 	leaf := queueRecordPath(item.ID)
-	checkpoint := 0
-	if err := atomicfile.WriteRootFileChecked(root, leaf, encoded, 0o600, func() error {
-		checkpoint++
+	checkpointCalls := 0
+	checkpoint := func() error {
+		checkpointCalls++
 		if hook != nil {
-			if err := hook(operation, checkpoint, root, leaf); err != nil {
+			if err := hook(operation, checkpointCalls, root, leaf); err != nil {
 				return errors.New("queue mutation probe failed")
 			}
 		}
-		if checkpoint < 3 {
+		if checkpointCalls < 3 {
 			return verifyQueueExpected(root, item.ID, expected)
 		}
 		return verifyQueuePublication(root, item, encoded, policy)
-	}); err != nil {
+	}
+	rollbackCheckpoint := func() error {
+		return verifyQueueExpected(root, item.ID, expected)
+	}
+	if err := atomicfile.WriteRootFileCheckedWithRollbackCheckpoint(root, leaf, encoded, 0o600, checkpoint, rollbackCheckpoint); err != nil {
 		if cleanupErr := cleanupQueueRollbackBackup(root, item.ID, expected, encoded); cleanupErr != nil {
 			if errors.Is(cleanupErr, ErrQueueRecoveryRequired) {
 				if expected != nil {

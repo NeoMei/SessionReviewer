@@ -391,7 +391,7 @@ func TestWriteRootFileCheckedRestoresExistingDestinationAfterFinalCheckpointFail
 	checkpointErr := errors.New("namespace changed")
 	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error {
 		checks++
-		if checks == 3 {
+		if checks == 4 {
 			return checkpointErr
 		}
 		return nil
@@ -473,7 +473,7 @@ func TestWriteRootFileCheckedRejectsTamperedRollbackBeforePublish(t *testing.T) 
 	checks := 0
 	err = WriteRootFileChecked(root, "state.json", []byte("new"), 0o600, func() error {
 		checks++
-		if checks != 2 {
+		if checks != 3 {
 			return nil
 		}
 		if err := os.Rename(backup, filepath.Join(directory, "old-moved")); err != nil {
@@ -571,6 +571,62 @@ func TestWriteRootFileCheckedCheckpointTwoFailureRemovesRollbackAndPreservesDest
 	}
 }
 
+func TestWriteRootFileCheckedRevalidatesDestinationAndBackupAcrossRollbackCheckpoint(t *testing.T) {
+	for _, mutation := range []string{"destination", "backup"} {
+		t.Run(mutation, func(t *testing.T) {
+			directory := t.TempDir()
+			destination := filepath.Join(directory, "state.json")
+			backup := filepath.Join(directory, BackupPath("state.json"))
+			if err := os.WriteFile(destination, []byte("original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			root, err := os.OpenRoot(directory)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			ops := defaultDurabilityOps()
+			linkCalls := 0
+			ops.linkRollback = func(root *os.Root, oldName, newName string) error {
+				linkCalls++
+				return root.Link(oldName, newName)
+			}
+			checks := 0
+			err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("new"), 0o600, func() error {
+				checks++
+				if checks != 2 {
+					return nil
+				}
+				switch mutation {
+				case "destination":
+					if err := os.Rename(destination, filepath.Join(directory, "original-moved")); err != nil {
+						return err
+					}
+					return os.WriteFile(destination, []byte("attacker destination"), 0o600)
+				case "backup":
+					if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+						return err
+					}
+					return os.WriteFile(backup, []byte("attacker backup"), 0o600)
+				default:
+					return errors.New("unknown mutation")
+				}
+			}, ops)
+			if err == nil {
+				t.Fatal("write accepted an identity change across rollback authorization")
+			}
+			if linkCalls != 0 {
+				t.Fatalf("rollback hardlink calls=%d, want zero before identity revalidation", linkCalls)
+			}
+			if mutation == "backup" {
+				if got, err := os.ReadFile(backup); err != nil || string(got) != "attacker backup" {
+					t.Fatalf("claimed backup changed: content=%q err=%v", got, err)
+				}
+			}
+		})
+	}
+}
+
 func TestWriteRootWithoutCheckpointDoesNotRequireRollbackHardlinks(t *testing.T) {
 	directory := t.TempDir()
 	destination := filepath.Join(directory, "state.json")
@@ -607,7 +663,7 @@ func TestWriteRootFileCheckedRestoresFrozenOldContentAfterRollbackHardlinkTamper
 	checks := 0
 	err = WriteRootFileChecked(root, "state.json", []byte("SECRET-CANARY"), 0o600, func() error {
 		checks++
-		if checks != 3 {
+		if checks != 4 {
 			return nil
 		}
 		if err := os.WriteFile(filepath.Join(directory, BackupPath("state.json")), []byte("ATTACKER-TAMPER"), 0o600); err != nil {
@@ -627,7 +683,7 @@ func TestWriteRootFileCheckedRestoresFrozenOldContentAfterRollbackHardlinkTamper
 }
 
 func TestWriteRootFileCheckedRestoresTamperedRollbackByCopyOnWrite(t *testing.T) {
-	for _, failedCheckpoint := range []int{2, 3} {
+	for _, failedCheckpoint := range []int{3, 4} {
 		t.Run(fmt.Sprintf("checkpoint-%d", failedCheckpoint), func(t *testing.T) {
 			base := t.TempDir()
 			directory := filepath.Join(base, "parent")
@@ -687,7 +743,7 @@ func TestWriteRootFileCheckedRestoresCapturedModeAfterModeOnlyTamper(t *testing.
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows exposes only read-only versus writable mode semantics")
 	}
-	for _, checkpoint := range []int{2, 3} {
+	for _, checkpoint := range []int{3, 4} {
 		for _, tamperedMode := range []os.FileMode{0o600, 0o666} {
 			t.Run(fmt.Sprintf("checkpoint-%d/%04o", checkpoint, tamperedMode), func(t *testing.T) {
 				directory := t.TempDir()
@@ -712,7 +768,7 @@ func TestWriteRootFileCheckedRestoresCapturedModeAfterModeOnlyTamper(t *testing.
 						return nil
 					}
 					tamperTarget := destination
-					if checkpoint == 3 {
+					if checkpoint == 4 {
 						tamperTarget = backup
 					}
 					if err := os.Chmod(tamperTarget, tamperedMode); err != nil {
@@ -788,7 +844,7 @@ func TestWriteRootFileCheckedCopyOnWriteFailureNeverModifiesUniqueOldInode(t *te
 			checkpointErr := errors.New("namespace changed")
 			err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET-NEW"), 0o644, func() error {
 				checks++
-				if checks != 2 {
+				if checks != 3 {
 					return nil
 				}
 				if err := os.WriteFile(backup, []byte("ATTACKER-TAMPER"), 0o644); err != nil {
@@ -859,7 +915,7 @@ func TestRecoverRootFileRollbackConvergesAfterCopyPublicationSyncFailure(t *test
 	checks := 0
 	err = writeRootAtParentCheckedWithOps(root, "state.json", []byte("SECRET-NEW"), 0o644, func() error {
 		checks++
-		if checks != 3 {
+		if checks != 4 {
 			return nil
 		}
 		if err := os.WriteFile(backup, []byte("TAMPERED"), 0o644); err != nil {
@@ -917,7 +973,7 @@ func TestWriteRootFileCheckedRecoversPrivateParentModeAndCleanupAfterCheckpointF
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows directory ACLs are not represented by os.FileMode")
 	}
-	for _, failedCheckpoint := range []int{2, 3} {
+	for _, failedCheckpoint := range []int{2, 3, 4} {
 		t.Run(fmt.Sprintf("checkpoint-%d", failedCheckpoint), func(t *testing.T) {
 			directory := t.TempDir()
 			if err := os.Chmod(directory, 0o700); err != nil {

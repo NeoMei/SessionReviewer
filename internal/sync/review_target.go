@@ -59,6 +59,7 @@ type reviewTargetState struct {
 	// remain mandatory.
 	beforeTargetMutation func(*pathguard.Directory, string) error
 	afterCreateIdentity  func(*os.Root, string) error
+	openSecurityHandle   func(*os.Root, string) (*os.File, error)
 	afterCreatePinned    func(*pathguard.Directory) error
 }
 
@@ -244,6 +245,10 @@ func (binding *ReviewTargetPin) directory(create bool) (*pathguard.Directory, bo
 			}
 			return state.recheckNamespaceLocked(project, vault, data)
 		}
+		openSecurityHandle := state.openSecurityHandle
+		if openSecurityHandle == nil {
+			openSecurityHandle = openReviewTargetSecurityHandle
+		}
 		next, err := createPinnedReviewTargetChild(state.current, component, state.caseMode, beforeMutation, func(created *pathguard.Directory) error {
 			if state.beforeTargetMutation != nil {
 				if err := state.beforeTargetMutation(state.current, component); err != nil {
@@ -251,7 +256,7 @@ func (binding *ReviewTargetPin) directory(create bool) (*pathguard.Directory, bo
 				}
 			}
 			return state.recheckNamespaceAtLocked(project, vault, data, created, state.remaining[1:])
-		}, state.afterCreateIdentity)
+		}, state.afterCreateIdentity, openSecurityHandle)
 		if err != nil {
 			return nil, false, err
 		}
@@ -394,8 +399,8 @@ func firstDirectory(values []*pathguard.Directory) *pathguard.Directory {
 	return values[0]
 }
 
-func createPinnedReviewTargetChild(parent *pathguard.Directory, component string, caseMode platform.CaseMode, beforeCreate func() error, beforeProtect func(*pathguard.Directory) error, afterCreateIdentity func(*os.Root, string) error) (*pathguard.Directory, error) {
-	if parent == nil || parent.Root == nil || component == "" || component == "." || component == ".." || strings.ContainsAny(component, `/\`) {
+func createPinnedReviewTargetChild(parent *pathguard.Directory, component string, caseMode platform.CaseMode, beforeCreate func() error, beforeProtect func(*pathguard.Directory) error, afterCreateIdentity func(*os.Root, string) error, openSecurityHandle func(*os.Root, string) (*os.File, error)) (*pathguard.Directory, error) {
+	if parent == nil || parent.Root == nil || component == "" || component == "." || component == ".." || strings.ContainsAny(component, `/\`) || openSecurityHandle == nil {
 		return nil, errors.New("vault review target creation capability is invalid")
 	}
 	if beforeCreate != nil {
@@ -422,10 +427,16 @@ func createPinnedReviewTargetChild(parent *pathguard.Directory, component string
 		}
 		return nil, errors.New("created vault review target is redirected or changed")
 	}
-	modeHandle, err := openReviewTargetSecurityHandle(parent.Root, component)
+	modeHandle, err := openSecurityHandle(parent.Root, component)
 	if err != nil {
 		_ = child.Close()
 		return nil, errors.New("created vault review target cannot be protected")
+	}
+	modeOpened, err := reviewTargetSecurityHandleIdentity(modeHandle)
+	if err != nil || !os.SameFile(opened, modeOpened) {
+		_ = modeHandle.Close()
+		_ = child.Close()
+		return nil, errors.New("created vault review target security handle identity changed")
 	}
 	if beforeProtect != nil {
 		pending := &pathguard.Directory{
@@ -438,13 +449,21 @@ func createPinnedReviewTargetChild(parent *pathguard.Directory, component string
 			return nil, err
 		}
 	}
+	modeBeforeProtect, err := reviewTargetSecurityHandleIdentity(modeHandle)
+	if err != nil || !os.SameFile(opened, modeBeforeProtect) || !os.SameFile(modeOpened, modeBeforeProtect) {
+		_ = modeHandle.Close()
+		_ = child.Close()
+		return nil, errors.New("created vault review target security handle identity changed")
+	}
 	protectErr := protectReviewTargetDirectory(modeHandle)
+	modeAfterProtect, modeStatErr := reviewTargetSecurityHandleIdentity(modeHandle)
 	closeErr := modeHandle.Close()
 	afterOpen, statErr := child.Stat(".")
 	afterName, nameErr := parent.Root.Lstat(component)
-	if protectErr != nil || closeErr != nil || statErr != nil || nameErr != nil ||
+	if protectErr != nil || modeStatErr != nil || closeErr != nil || statErr != nil || nameErr != nil ||
 		!afterOpen.IsDir() || !afterName.IsDir() || !reviewTargetDirectoryProtected(filepath.Join(parent.Path, component), afterOpen) ||
-		!os.SameFile(created, afterOpen) || !os.SameFile(opened, afterOpen) || !os.SameFile(afterOpen, afterName) {
+		!os.SameFile(created, afterOpen) || !os.SameFile(opened, afterOpen) || !os.SameFile(modeOpened, modeAfterProtect) ||
+		!os.SameFile(afterOpen, modeAfterProtect) || !os.SameFile(afterOpen, afterName) {
 		_ = child.Close()
 		return nil, errors.New("created vault review target changed while pinning")
 	}

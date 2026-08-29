@@ -53,18 +53,29 @@ func WriteRootFile(parent *os.Root, leaf string, data []byte, perm fs.FileMode) 
 	return WriteRootFileChecked(parent, leaf, data, perm, nil)
 }
 
-// WriteRootFileChecked applies checkpoint before temporary creation, after
-// temporary durability but before publication, and after durable publication.
-// A failed post-publication checkpoint removes only a still-identical file
-// whose content matches this write.
+// WriteRootFileChecked applies checkpoint before temporary creation and after
+// temporary durability. Existing destinations receive separate checkpoints
+// immediately before rollback-link creation and publication; new destinations
+// receive the publication checkpoint only. A final checkpoint follows durable
+// publication. A failed post-publication checkpoint removes only a
+// still-identical file whose content matches this write.
 func WriteRootFileChecked(parent *os.Root, leaf string, data []byte, perm fs.FileMode, checkpoint func() error) error {
+	return WriteRootFileCheckedWithRollbackCheckpoint(parent, leaf, data, perm, checkpoint, checkpoint)
+}
+
+// WriteRootFileCheckedWithRollbackCheckpoint separates the ordinary checked
+// write checkpoints from the authorization performed immediately before an
+// existing destination's rollback hardlink. It is for callers whose ordinary
+// checkpoint API has a fixed phase contract; rollbackCheckpoint must still
+// reauthenticate any authority governing that namespace mutation.
+func WriteRootFileCheckedWithRollbackCheckpoint(parent *os.Root, leaf string, data []byte, perm fs.FileMode, checkpoint, rollbackCheckpoint func() error) error {
 	if parent == nil {
 		return fmt.Errorf("atomic file root is required")
 	}
 	if !strictRootLeaf(leaf) {
 		return fmt.Errorf("atomic file leaf is invalid")
 	}
-	return writeRootAtParentCheckedWithOps(parent, leaf, data, perm, checkpoint, defaultDurabilityOps())
+	return writeRootAtParentCheckedWithRollbackOps(parent, leaf, data, perm, checkpoint, rollbackCheckpoint, defaultDurabilityOps())
 }
 
 // WriteRootFileCreateIfAbsent durably publishes a new regular file without
@@ -168,6 +179,10 @@ func writeRootAtParentWithOps(parent *os.Root, name string, data []byte, perm fs
 }
 
 func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, perm fs.FileMode, checkpoint func() error, ops durabilityOps) (retErr error) {
+	return writeRootAtParentCheckedWithRollbackOps(parent, name, data, perm, checkpoint, checkpoint, ops)
+}
+
+func writeRootAtParentCheckedWithRollbackOps(parent *os.Root, name string, data []byte, perm fs.FileMode, checkpoint, rollbackCheckpoint func() error, ops durabilityOps) (retErr error) {
 	parentGuard, err := captureRootParentCleanupGuard(parent)
 	if err != nil {
 		return err
@@ -230,7 +245,7 @@ func writeRootAtParentCheckedWithOps(parent *os.Root, name string, data []byte, 
 		return errors.New("atomic temporary file changed before publication")
 	}
 	if checkpoint != nil {
-		prepared, prepareErr := prepareRootRollback(parent, name, rollback, ops)
+		prepared, prepareErr := prepareRootRollback(parent, name, rollback, rollbackCheckpoint, ops)
 		if prepareErr != nil {
 			return prepareErr
 		}
@@ -837,7 +852,7 @@ func captureRootRollback(parent *os.Root, destination string) (rootRollback, err
 	return rootRollback{active: true, name: BackupPath(destination), original: original, file: file, snapshot: snapshot, hash: sha256.Sum256(snapshot)}, nil
 }
 
-func prepareRootRollback(parent *os.Root, destination string, rollback rootRollback, ops durabilityOps) (rootRollback, error) {
+func prepareRootRollback(parent *os.Root, destination string, rollback rootRollback, checkpoint func() error, ops durabilityOps) (rootRollback, error) {
 	backup := BackupPath(destination)
 	if _, err := parent.Lstat(backup); err == nil {
 		return rootRollback{}, errors.New("atomic rollback backup already exists")
@@ -851,12 +866,35 @@ func prepareRootRollback(parent *os.Root, destination string, rollback rootRollb
 	if err != nil || !os.SameFile(rollback.original, current) || !current.Mode().IsRegular() || isAtomicRedirect(current) {
 		return rootRollback{}, errors.New("atomic destination changed before rollback")
 	}
+	if checkpoint != nil {
+		if err := checkpoint(); err != nil {
+			return rootRollback{}, err
+		}
+	}
+	if _, err := parent.Lstat(backup); err == nil {
+		return rootRollback{}, errors.New("atomic rollback backup appeared across authorization")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return rootRollback{}, errors.New("cannot recheck atomic rollback backup")
+	}
+	authorized, err := parent.Lstat(destination)
+	if err != nil || !os.SameFile(current, authorized) || !os.SameFile(rollback.original, authorized) ||
+		!authorized.Mode().IsRegular() || isAtomicRedirect(authorized) {
+		return rootRollback{}, errors.New("atomic destination changed across rollback authorization")
+	}
 	link := ops.linkRollback
 	if link == nil {
 		link = (*os.Root).Link
 	}
 	if err := link(parent, destination, backup); err != nil {
 		return rootRollback{}, fmt.Errorf("cannot establish atomic rollback hardlink: %w", err)
+	}
+	linkedDestination, destinationErr := parent.Lstat(destination)
+	linkedBackup, backupErr := parent.Lstat(backup)
+	if destinationErr != nil || backupErr != nil || !os.SameFile(current, linkedDestination) ||
+		!os.SameFile(rollback.original, linkedDestination) || !os.SameFile(linkedDestination, linkedBackup) ||
+		!linkedDestination.Mode().IsRegular() || !linkedBackup.Mode().IsRegular() ||
+		isAtomicRedirect(linkedDestination) || isAtomicRedirect(linkedBackup) {
+		return rootRollback{}, errors.New("atomic rollback identities changed during hardlink publication")
 	}
 	if err := ensureRootRollbackContent(parent, destination, &rollback, true, ops); err != nil {
 		return rootRollback{}, err
