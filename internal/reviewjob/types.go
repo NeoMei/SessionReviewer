@@ -314,7 +314,8 @@ func validatePayloadState(job Job) error {
 		return errors.New("private payload retention reason is invalid")
 	}
 	if job.PayloadState == PayloadApplyRecovery {
-		if job.State != Failed || job.Error.Code != ApplyRecovery || job.PayloadRetainedFor != ApplyRecovery ||
+		if (job.State != Failed && job.State != Retrying && job.State != Running && job.State != CancelRequested) ||
+			(job.State == Failed && job.Error.Code == "") || job.PayloadRetainedFor != ApplyRecovery ||
 			job.PacketDigest == "" || job.ResultDigest == "" {
 			return errors.New("apply-recovery payload retention is incomplete")
 		}

@@ -121,16 +121,16 @@ func PinMapping(options Options) (_ *MappingPin, retErr error) {
 	if err := runPinCheckpoint(options, pinAfterVaultOpen); err != nil {
 		return nil, err
 	}
-	target, err := syncengine.PinReviewTarget(mapping.VaultReviewPath, mapping.VaultCaseMode, project, vault)
-	if err != nil {
-		return nil, err
-	}
-	pin.target = target
 	syncData, err := pathguard.Open(filepath.Join(data.Path, "projects", mapping.ID))
 	if err != nil {
 		return nil, errors.New("configured project sync data root is unavailable or unsafe")
 	}
 	pin.syncData = syncData
+	target, err := syncengine.PinReviewTarget(mapping.VaultReviewPath, mapping.VaultCaseMode, project, vault, syncData)
+	if err != nil {
+		return nil, err
+	}
+	pin.target = target
 	if err := runPinCheckpoint(options, pinBeforeFinalVerify); err != nil {
 		return nil, err
 	}
@@ -228,7 +228,7 @@ func (pin *MappingPin) verify(options Options) error {
 	if err := verifyConfigNamespace(pin.data, pin.config); err != nil {
 		return err
 	}
-	return pin.target.Recheck(pin.project, pin.vault)
+	return pin.target.Recheck(pin.project, pin.vault, pin.syncData)
 }
 
 func captureConfigNamespace(data *pathguard.Directory) (configNamespacePin, error) {

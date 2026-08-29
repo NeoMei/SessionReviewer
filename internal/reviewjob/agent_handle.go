@@ -102,6 +102,13 @@ func (handle *AgentHandle) generate(ctx context.Context, request agent.Request) 
 	return handle.adapter.GenerateProposal(ctx, request)
 }
 
+func (handle *AgentHandle) cancel(ctx context.Context) error {
+	if handle == nil || handle.adapter == nil {
+		return agent.NewError(agent.CodeUnconfigured, errors.New("verified Agent handle is unavailable"))
+	}
+	return handle.adapter.Cancel(ctx)
+}
+
 func validateCapabilityContract(capability agent.Capability) error {
 	if strings.TrimSpace(capability.Provider) == "" || strings.TrimSpace(capability.Version) == "" ||
 		!capability.ProposalOnly || !capability.NoTools || !capability.ReadOnly ||

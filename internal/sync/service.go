@@ -208,9 +208,9 @@ func NewEngine(options Options) (*Engine, error) {
 	}
 	var vaultTarget *ReviewTargetPin
 	if options.ReviewTargetExpected != nil {
-		vaultTarget, err = options.ReviewTargetExpected.cloneFor(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
+		vaultTarget, err = options.ReviewTargetExpected.cloneFor(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot, dataRoot)
 	} else {
-		vaultTarget, err = PinReviewTarget(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot)
+		vaultTarget, err = PinReviewTarget(options.VaultReviewPath, options.VaultCaseMode, projectRoot, vaultRoot, dataRoot)
 	}
 	if err != nil {
 		_ = projectRoot.Close()
@@ -285,7 +285,7 @@ func (engine *Engine) verifyRootBindings() error {
 			return fmt.Errorf("sync %s root identity changed", expected.name)
 		}
 	}
-	return engine.vaultTarget.Recheck(engine.project, engine.vaultRoot)
+	return engine.vaultTarget.Recheck(engine.project, engine.vaultRoot, engine.data)
 }
 
 func (engine *Engine) bindReviewTarget(create bool) (bool, error) {

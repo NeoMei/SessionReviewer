@@ -67,7 +67,9 @@ type verifiedWorkerAgent struct {
 	capability      agent.Capability
 	capabilityCalls int
 	generateCalls   int
+	cancelCalls     int
 	generate        func(agent.Request) (agent.Result, error)
+	cancel          func()
 }
 
 func (adapter *verifiedWorkerAgent) VerifiedCapability() agent.Capability {
@@ -84,7 +86,13 @@ func (adapter *verifiedWorkerAgent) GenerateProposal(_ context.Context, request 
 	return adapter.generate(request)
 }
 
-func (adapter *verifiedWorkerAgent) Cancel(context.Context) error { return nil }
+func (adapter *verifiedWorkerAgent) Cancel(context.Context) error {
+	adapter.cancelCalls++
+	if adapter.cancel != nil {
+		adapter.cancel()
+	}
+	return nil
+}
 
 type workerFixture struct {
 	root, project, vault, data, agent string
@@ -591,12 +599,12 @@ func TestWorkerEmptyQueueCancellationAfterDurableSyncingStillFinishesSync(t *tes
 		}
 		return workerSyncReport(fixture.job.ProjectID), nil
 	}, nil)
-	if err := Run(ctx, options); err != nil {
-		t.Fatal(err)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() completed instead of terminalizing cancellation after durable Syncing")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Completed || syncCalls != 1 {
-		t.Fatalf("completed job=%#v found=%v err=%v sync=%d", job, found, err, syncCalls)
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled || syncCalls != 1 {
+		t.Fatalf("cancelled job=%#v found=%v err=%v sync=%d", job, found, err, syncCalls)
 	}
 }
 
@@ -627,7 +635,7 @@ func TestWorkerEmptyQueueHonorsCancellationWithoutSync(t *testing.T) {
 		t.Fatal("Run() ignored cancellation with no mandatory commit")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled || syncCalls != 0 {
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled || syncCalls != 0 {
 		t.Fatalf("cancelled empty job=%#v found=%v err=%v sync=%d", job, found, err, syncCalls)
 	}
 }
@@ -653,11 +661,11 @@ func TestWorkerEmptyQueueFinishesDurableAcceptedApplyDespiteCancellation(t *test
 		}
 		return workerSyncReport(fixture.job.ProjectID), nil
 	}, nil)
-	if err := Run(ctx, options); err != nil {
-		t.Fatal(err)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() completed instead of terminalizing cancellation after mandatory sync")
 	}
 	completed, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || completed.State != Completed || completed.AcceptedSyncPending || syncCalls != 1 {
+	if err != nil || !found || completed.State != Cancelled || completed.Error.Code != AgentCancelled || completed.AcceptedSyncPending || syncCalls != 1 {
 		t.Fatalf("mandatory-sync job=%#v found=%v err=%v sync=%d", completed, found, err, syncCalls)
 	}
 }
@@ -1066,10 +1074,65 @@ func TestWorkerCancellationAfterGenerateStopsBeforeApply(t *testing.T) {
 		t.Fatal("Run() ignored cancellation after Generate")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled ||
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
 		job.AcceptedPackets != 0 || job.AcceptedSessions != 0 || hasReviewAccounting(job.ReviewAccounting) ||
-		applyCalls != 0 || syncCalls != 0 {
-		t.Fatalf("cancelled job = %#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+		applyCalls != 0 || syncCalls != 0 || adapter.cancelCalls != 1 {
+		t.Fatalf("cancelled job = %#v found=%v err=%v apply=%d sync=%d cancel=%d", job, found, err, applyCalls, syncCalls, adapter.cancelCalls)
+	}
+}
+
+func TestCancelRequestDuringReviewCallsNativeAgentCancelAndDiscardsPayload(t *testing.T) {
+	hash := strings.Repeat("3", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000033")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	entered, released := make(chan struct{}), make(chan struct{})
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.cancel = func() { close(released) }
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		close(entered)
+		<-released
+		return agent.Result{}, agent.NewError(agent.CodeCancelled, errors.New("provider acknowledged cancellation"))
+	}
+	applyCalls, syncCalls := 0, 0
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
+		},
+		adapter,
+		func(context.Context, ApplyRequest) (apply.Result, error) {
+			applyCalls++
+			return apply.Result{}, errors.New("cancelled review reached apply")
+		},
+		func(context.Context, syncproject.Options) (syncengine.Report, error) {
+			syncCalls++
+			return workerSyncReport(packet.ProjectID), nil
+		},
+		nil,
+	)
+	done := make(chan error, 1)
+	go func() { done <- Run(t.Context(), options) }()
+	<-entered
+	requested, _, err := RequestCancel(fixture.store, fixture.job.ID, fixture.now.Add(time.Minute))
+	if err != nil || requested.State != CancelRequested || requested.Phase != Reviewing {
+		t.Fatalf("RequestCancel()=%#v err=%v", requested, err)
+	}
+	if err := <-done; err == nil {
+		t.Fatal("worker ignored persisted cancellation during review")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 0 || applyCalls != 0 || syncCalls != 0 || adapter.cancelCalls != 1 {
+		t.Fatalf("cancelled review job=%#v found=%v err=%v apply=%d sync=%d cancel=%d", job, found, err, applyCalls, syncCalls, adapter.cancelCalls)
+	}
+	entries, err := os.ReadDir(filepath.Join(fixture.data, "review-jobs", "work", fixture.job.ID, "inputs"))
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("cancelled review retained private input bytes: entries=%v err=%v", entries, err)
 	}
 }
 
@@ -1130,9 +1193,9 @@ func TestWorkerCancellationAfterFinalValidationStopsBeforeApply(t *testing.T) {
 		t.Fatal("Run() ignored cancellation after final validation")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Failed || job.Error.Code != AgentCancelled ||
-		job.AcceptedPackets != 0 || applyCalls != 0 || syncCalls != 0 {
-		t.Fatalf("cancelled validation job=%#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 0 || applyCalls != 0 || syncCalls != 0 || adapter.cancelCalls != 1 {
+		t.Fatalf("cancelled validation job=%#v found=%v err=%v apply=%d sync=%d cancel=%d", job, found, err, applyCalls, syncCalls, adapter.cancelCalls)
 	}
 }
 
@@ -1175,12 +1238,237 @@ func TestWorkerCancellationAfterDurableApplyingStillFinishesApplyAndMandatorySyn
 		},
 		nil,
 	)
-	if err := Run(ctx, options); err != nil {
-		t.Fatal(err)
+	if err := Run(ctx, options); err == nil {
+		t.Fatal("Run() completed instead of terminalizing the durable cancellation")
 	}
 	job, _, found, err := fixture.store.Load(fixture.job.ID)
-	if err != nil || !found || job.State != Completed || applyCalls != 1 || syncCalls != 1 {
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 1 || job.AcceptedSessions != 1 || applyCalls != 1 || syncCalls != 1 {
 		t.Fatalf("post-Applying cancellation job=%#v found=%v err=%v apply=%d sync=%d", job, found, err, applyCalls, syncCalls)
+	}
+}
+
+func TestCancelDuringApplyingPersistsRequestBeforeCommitReturns(t *testing.T) {
+	hash := strings.Repeat("d", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000031")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	ctx, cancel := context.WithCancel(t.Context())
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
+		},
+		adapter,
+		func(commitCtx context.Context, request ApplyRequest) (apply.Result, error) {
+			close(entered)
+			<-release
+			if commitCtx.Err() != nil {
+				return apply.Result{}, errors.New("apply commit context was cancelled")
+			}
+			accepted.apply(t, request.Changes)
+			return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+		},
+		func(commitCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
+			if commitCtx.Err() != nil {
+				return syncengine.Report{}, errors.New("sync commit context was cancelled")
+			}
+			return workerSyncReport(packet.ProjectID), nil
+		},
+		nil,
+	)
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, options) }()
+	<-entered
+	cancel()
+	waitForWorkerState(t, fixture.store, fixture.job.ID, CancelRequested, Applying)
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("worker ignored durable cancellation during apply")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 1 || job.AcceptedSessions != 1 || job.AcceptedSyncPending {
+		t.Fatalf("cancelled apply job=%#v found=%v err=%v", job, found, err)
+	}
+}
+
+func TestCancelDuringSyncPersistsRequestAndFinishesTypedSync(t *testing.T) {
+	hash := strings.Repeat("e", 64)
+	fixture := newWorkerFixture(t, []FrozenSession{{
+		SessionID: "session-s1", StartedAt: fixtureTime(7),
+		Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+	}})
+	packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000032")
+	packet.CWD = "/repo"
+	accepted := workerInitialAccepted(fixture.job.ProjectID)
+	ctx, cancel := context.WithCancel(t.Context())
+	adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+	adapter.generate = func(agent.Request) (agent.Result, error) {
+		return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	options := workerRunOptions(
+		fixture,
+		func(context.Context, PrepareRequest) (Prepared, error) {
+			return workerPrepared(t, packet, accepted.snapshot(t)), nil
+		},
+		adapter,
+		func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+			accepted.apply(t, request.Changes)
+			return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+		},
+		func(commitCtx context.Context, _ syncproject.Options) (syncengine.Report, error) {
+			close(entered)
+			<-release
+			if commitCtx.Err() != nil {
+				return syncengine.Report{}, errors.New("sync commit context was cancelled")
+			}
+			return workerSyncReport(packet.ProjectID), nil
+		},
+		nil,
+	)
+	done := make(chan error, 1)
+	go func() { done <- Run(ctx, options) }()
+	<-entered
+	cancel()
+	waitForWorkerState(t, fixture.store, fixture.job.ID, CancelRequested, Syncing)
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("worker ignored durable cancellation during sync")
+	}
+	job, _, found, err := fixture.store.Load(fixture.job.ID)
+	if err != nil || !found || job.State != Cancelled || job.Error.Code != AgentCancelled ||
+		job.AcceptedPackets != 1 || job.AcceptedSessions != 1 || job.AcceptedSyncPending {
+		t.Fatalf("cancelled sync job=%#v found=%v err=%v", job, found, err)
+	}
+}
+
+func waitForWorkerState(t *testing.T, store Store, jobID string, state State, phase Phase) Job {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		job, _, found, err := store.Load(jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found && job.State == state && job.Phase == phase {
+			return job
+		}
+		time.Sleep(time.Millisecond)
+	}
+	job, _, _, err := store.Load(jobID)
+	t.Fatalf("job did not reach %s/%s: job=%#v err=%v", state, phase, job, err)
+	return Job{}
+}
+
+func TestWorkerFailureMatrixStopsAtFirstFailureWithFixedSafeCode(t *testing.T) {
+	tests := []struct {
+		name            string
+		missingAgent    bool
+		prepareErr      error
+		agentErr        error
+		malformed       bool
+		applyErr        error
+		syncReport      func(string) syncengine.Report
+		want            ErrorCode
+		prepareCalls    int
+		generateCalls   int
+		applyCalls      int
+		syncCalls       int
+		wantSyncPending bool
+	}{
+		{name: "preflight unconfigured", missingAgent: true, want: AgentUnconfigured},
+		{name: "discovery rejected", prepareErr: errors.New("private discovery failure"), want: ProposalRejected, prepareCalls: 1},
+		{name: "Agent unconfigured", agentErr: agent.NewError(agent.CodeUnconfigured, errors.New("private")), want: AgentUnconfigured, prepareCalls: 1, generateCalls: 1},
+		{name: "Agent incompatible", agentErr: agent.NewError(agent.CodeIncompatible, errors.New("private")), want: AgentIncompatible, prepareCalls: 1, generateCalls: 1},
+		{name: "Agent auth", agentErr: agent.NewError(agent.CodeAuth, errors.New("private")), want: AgentAuth, prepareCalls: 1, generateCalls: 1},
+		{name: "Agent busy", agentErr: agent.NewError(agent.CodeBusy, errors.New("private")), want: AgentBusy, prepareCalls: 1, generateCalls: 1},
+		{name: "Agent timeout", agentErr: agent.NewError(agent.CodeTimeout, errors.New("private")), want: AgentTimeout, prepareCalls: 1, generateCalls: 1},
+		{name: "Agent forbidden tool", agentErr: agent.NewError(agent.CodeToolForbidden, errors.New("private")), want: AgentToolForbidden, prepareCalls: 1, generateCalls: 1},
+		{name: "malformed proposal", malformed: true, want: ProposalRejected, prepareCalls: 1, generateCalls: 1},
+		{name: "uncertain apply", applyErr: errors.New("private uncertain receipt"), want: ApplyRecovery, prepareCalls: 1, generateCalls: 1, applyCalls: 1},
+		{name: "sync conflict", syncReport: func(projectID string) syncengine.Report {
+			report := workerSyncReport(projectID)
+			report.Conflicts = []string{"private-conflict"}
+			return report
+		}, want: SyncConflict, prepareCalls: 1, generateCalls: 1, applyCalls: 1, syncCalls: 1, wantSyncPending: true},
+		{name: "partial sync", syncReport: func(projectID string) syncengine.Report {
+			return syncengine.Report{ProjectID: projectID}
+		}, want: SyncPartial, prepareCalls: 1, generateCalls: 1, applyCalls: 1, syncCalls: 1, wantSyncPending: true},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			hash := strings.Repeat(string("0123456789abcdef"[index%16]), 64)
+			fixture := newWorkerFixture(t, []FrozenSession{{
+				SessionID: "session-s1", StartedAt: fixtureTime(7),
+				Upper: evidence.CursorBoundary{Line: 1, SourceHash: hash},
+			}})
+			packet := workerPacket(fixture.job.ProjectID, "session-s1", 1, 1, "", hash, false, "ev-000000000051")
+			packet.CWD = "/repo"
+			accepted := workerInitialAccepted(fixture.job.ProjectID)
+			prepareCalls, applyCalls, syncCalls := 0, 0, 0
+			adapter := &verifiedWorkerAgent{capability: workerCapability("fixture", "1.0.0")}
+			adapter.generate = func(agent.Request) (agent.Result, error) {
+				if test.agentErr != nil {
+					return agent.Result{}, test.agentErr
+				}
+				if test.malformed {
+					return agent.Result{Proposal: []byte(`{"malformed":true}`)}, nil
+				}
+				return agent.Result{Proposal: workerDraft(t, packet, accepted.legacy)}, nil
+			}
+			options := workerRunOptions(
+				fixture,
+				func(context.Context, PrepareRequest) (Prepared, error) {
+					prepareCalls++
+					if test.prepareErr != nil {
+						return Prepared{}, test.prepareErr
+					}
+					return workerPrepared(t, packet, accepted.snapshot(t)), nil
+				},
+				adapter,
+				func(_ context.Context, request ApplyRequest) (apply.Result, error) {
+					applyCalls++
+					if test.applyErr != nil {
+						return apply.Result{}, test.applyErr
+					}
+					accepted.apply(t, request.Changes)
+					return apply.Result{ProjectID: packet.ProjectID, SessionID: packet.SessionID, FromCursor: 1, ToCursor: 1, CursorAdvanced: true}, nil
+				},
+				func(context.Context, syncproject.Options) (syncengine.Report, error) {
+					syncCalls++
+					if test.syncReport != nil {
+						return test.syncReport(packet.ProjectID), nil
+					}
+					return workerSyncReport(packet.ProjectID), nil
+				},
+				nil,
+			)
+			if test.missingAgent {
+				options.Agent = nil
+			}
+			if err := Run(t.Context(), options); err == nil {
+				t.Fatal("Run() accepted injected first failure")
+			}
+			job, _, found, err := fixture.store.Load(fixture.job.ID)
+			status, statusErr := ProjectStatus(&job, fixture.job.ProjectID)
+			if err != nil || statusErr != nil || !found || job.State != Failed || job.Error.Code != test.want ||
+				prepareCalls != test.prepareCalls || adapter.generateCalls != test.generateCalls ||
+				applyCalls != test.applyCalls || syncCalls != test.syncCalls ||
+				job.AcceptedSyncPending != test.wantSyncPending || status.CanSyncOnly != test.wantSyncPending {
+				t.Fatalf("failure matrix job=%#v status=%#v found=%v loadErr=%v statusErr=%v calls=%d/%d/%d/%d", job, status, found, err, statusErr, prepareCalls, adapter.generateCalls, applyCalls, syncCalls)
+			}
+		})
 	}
 }
 

@@ -1989,7 +1989,7 @@ func TestReviewTargetPinMissingLeafRejectsRacingClaims(t *testing.T) {
 	}
 }
 
-func TestReviewTargetPinSharedLifetimeRetainsDetachedAuthorityUntilLastClose(t *testing.T) {
+func TestReviewTargetPinSharedLifetimeRejectsDetachedAuthorityUntilLastClose(t *testing.T) {
 	fixture := newEngineFixture(t)
 	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
 	if err := os.MkdirAll(target, 0o700); err != nil {
@@ -2031,12 +2031,8 @@ func TestReviewTargetPinSharedLifetimeRetainsDetachedAuthorityUntilLastClose(t *
 	if err := os.Mkdir(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	directory, ready, err := clones[0].directory(false)
-	if err != nil || !ready {
-		t.Fatalf("retained clone lost detached authority: ready=%v err=%v", ready, err)
-	}
-	if err := directory.EnsureDirectory("capability-only", 0o700); err != nil {
-		t.Fatal(err)
+	if _, _, err := clones[0].directory(false); err == nil {
+		t.Fatal("retained clone remained usable after namespace detachment")
 	}
 	if err := clones[0].Recheck(projectRoot, vaultRoot); err == nil {
 		t.Fatal("namespace alarm accepted the ordinary replacement")
@@ -2049,12 +2045,11 @@ func TestReviewTargetPinSharedLifetimeRetainsDetachedAuthorityUntilLastClose(t *
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			directory, ready, err := clone.directory(false)
-			if err == nil && !ready {
-				err = errors.New("retained target unexpectedly became unavailable")
-			}
+			_, _, err := clone.directory(false)
 			if err == nil {
-				_, err = directory.Root.Stat(".")
+				err = errors.New("detached target unexpectedly remained usable")
+			} else {
+				err = nil
 			}
 			if closeErr := clone.Close(); err == nil {
 				err = closeErr
@@ -2080,8 +2075,245 @@ func TestReviewTargetPinSharedLifetimeRetainsDetachedAuthorityUntilLastClose(t *
 	if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
 		t.Fatalf("ordinary replacement received trusted writes: entries=%v err=%v", entries, err)
 	}
-	if info, err := os.Stat(filepath.Join(detached, "capability-only")); err != nil || !info.IsDir() {
-		t.Fatalf("detached authority did not receive rooted operation: info=%v err=%v", info, err)
+	if entries, err := os.ReadDir(detached); err != nil || len(entries) != 0 {
+		t.Fatalf("detached authority received a rooted operation: entries=%v err=%v", entries, err)
+	}
+}
+
+// A shallow copy is not a new capability owner. If each value carries its own
+// sync.Once, closing the original and its shallow copy decrements the shared
+// handle twice and invalidates a separately retained live clone.
+func TestReviewTargetPinShallowCopiesShareOneOwnerToken(t *testing.T) {
+	fixture := newEngineFixture(t)
+	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	projectRoot, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot.Close()
+	vaultRoot, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot.Close()
+	pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shallow := *pin
+	live, err := pin.cloneFor(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+
+	if err := pin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := shallow.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pin.directory(false); err == nil {
+		t.Fatal("closed owner remained usable")
+	}
+	if _, err := shallow.cloneFor(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot); err == nil {
+		t.Fatal("closed shallow-copied owner remained cloneable")
+	}
+	targetInfo, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directory, ready, err := live.directory(false); err != nil || !ready || !os.SameFile(directory.Info(), targetInfo) {
+		t.Fatalf("independent live owner lost the retained target: ready=%v err=%v", ready, err)
+	}
+}
+
+// A retained handle is never authority to write after its configured
+// namespace detaches, including when the directory is relocated underneath an
+// authoritative Project or private Data root.
+func TestReviewTargetPinRejectsRelocationUnderProjectOrDataBeforeUse(t *testing.T) {
+	for _, destination := range []string{"project", "data"} {
+		t.Run(destination, func(t *testing.T) {
+			fixture := newEngineFixture(t)
+			target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+			if err := os.MkdirAll(target, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			projectRoot, err := pathguard.Open(fixture.project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer projectRoot.Close()
+			vaultRoot, err := pathguard.Open(fixture.vault)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer vaultRoot.Close()
+			pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseSensitive, projectRoot, vaultRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pin.Close()
+			destinationRoot := fixture.project
+			if destination == "data" {
+				destinationRoot = fixture.data
+			}
+			relocated := filepath.Join(destinationRoot, "relocated-review-target")
+			if err := os.Rename(target, relocated); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, _, err := pin.directory(true); err == nil {
+				t.Fatal("detached review-target capability remained usable")
+			}
+			if entries, err := os.ReadDir(relocated); err != nil || len(entries) != 0 {
+				t.Fatalf("relocated target changed before failure: entries=%v err=%v", entries, err)
+			}
+		})
+	}
+}
+
+func TestReviewTargetPinRechecksRelocationBetweenMissingComponentCreates(t *testing.T) {
+	fixture := newEngineFixture(t)
+	projectRoot, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot.Close()
+	vaultRoot, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot.Close()
+	dataRoot, err := pathguard.Open(fixture.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dataRoot.Close()
+	pin, err := PinReviewTarget("Missing/Leaf", platform.CaseSensitive, projectRoot, vaultRoot, dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	relocated := filepath.Join(fixture.project, "relocated-missing-target")
+	pin.state.afterCreatePinned = func(created *pathguard.Directory) error {
+		pin.state.afterCreatePinned = nil
+		if err := os.Rename(filepath.Join(fixture.vault, "Missing"), relocated); err != nil {
+			return err
+		}
+		return os.Mkdir(filepath.Join(fixture.vault, "Missing"), 0o700)
+	}
+	if _, _, err := pin.directory(true); err == nil {
+		t.Fatal("relocated intermediate target remained authorized for leaf creation")
+	}
+	if _, err := os.Stat(filepath.Join(relocated, "Leaf")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("leaf was created through relocated Project authority: %v", err)
+	}
+}
+
+// The pre-create alias scan is not enough: a racer can add a folded/NFC
+// equivalent after the exact Mkdir. The post-create and later recheck scans
+// must bind the sole equivalent entry to the authenticated inode.
+func TestReviewTargetPinRejectsEquivalentAliasCreatedAfterExactTarget(t *testing.T) {
+	fixture := newEngineFixture(t)
+	projectRoot, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot.Close()
+	vaultRoot, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot.Close()
+	pin, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseInsensitive, projectRoot, vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin.Close()
+	createdAlias := false
+	pin.state.afterCreateIdentity = func(root *os.Root, component string) error {
+		if createdAlias {
+			return nil
+		}
+		createdAlias = true
+		if err := root.Mkdir(strings.ToLower(component), 0o700); err != nil {
+			if errors.Is(err, os.ErrExist) {
+				t.Skip("filesystem natively rejects folded aliases")
+			}
+			return err
+		}
+		return nil
+	}
+	if _, _, err := pin.directory(true); err == nil {
+		t.Fatal("post-create folded alias race was accepted")
+	}
+
+	fixture = newEngineFixture(t)
+	projectRoot2, err := pathguard.Open(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectRoot2.Close()
+	vaultRoot2, err := pathguard.Open(fixture.vault)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultRoot2.Close()
+	pin2, err := PinReviewTarget(fixture.vaultReviewPath, platform.CaseInsensitive, projectRoot2, vaultRoot2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pin2.Close()
+	if _, ready, err := pin2.directory(true); err != nil || !ready {
+		t.Fatalf("create exact target: ready=%v err=%v", ready, err)
+	}
+	target := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath))
+	alias := filepath.Join(filepath.Dir(target), strings.ToLower(filepath.Base(target)))
+	if err := os.Mkdir(alias, 0o700); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			t.Skip("filesystem natively rejects folded aliases")
+		}
+		t.Fatal(err)
+	}
+	if err := pin2.Recheck(projectRoot2, vaultRoot2); err == nil {
+		t.Fatal("recheck accepted a second folded/NFC-equivalent target")
+	}
+}
+
+// This pure namespace snapshot test is intentionally filesystem-independent:
+// it exercises the post-create race decision even on default macOS volumes
+// that cannot physically contain both folded spellings.
+func TestReviewTargetEquivalentAliasRaceSnapshotRejectsSecondFoldedEntry(t *testing.T) {
+	root := t.TempDir()
+	exactPath := filepath.Join(root, "exact")
+	aliasPath := filepath.Join(root, "alias")
+	if err := os.Mkdir(exactPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(aliasPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exact, err := os.Lstat(exactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias, err := os.Lstat(aliasPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidates := []reviewTargetEquivalentCandidate{
+		{name: "Review", info: exact},
+		{name: "review", info: alias},
+	}
+	if err := validateReviewTargetEquivalentCandidates("Review", exact, candidates); err == nil {
+		t.Fatal("post-create folded alias snapshot was accepted")
+	}
+	if err := validateReviewTargetEquivalentCandidates("Review", nil, candidates); err == nil {
+		t.Fatal("pre-create folded alias snapshot was accepted")
 	}
 }
 
@@ -2161,8 +2393,8 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
 			return err
 		})
-		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); !bytes.Contains(got, []byte("Pinned reconcile authority")) {
-			t.Fatalf("reconcile did not use pinned detached target: %q", got)
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); bytes.Contains(got, []byte("Pinned reconcile authority")) {
+			t.Fatalf("reconcile mutated a detached target: %q", got)
 		}
 	})
 
@@ -2187,8 +2419,8 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			_, err := engine.RepairMachineLedger(t.Context())
 			return err
 		})
-		if got := readDerivedTestFile(t, filepath.Join(detached, ".session-reviewer", "ledger.json")); !bytes.Equal(got, projectLedger) {
-			t.Fatal("repair did not use pinned detached target")
+		if got := readDerivedTestFile(t, filepath.Join(detached, ".session-reviewer", "ledger.json")); bytes.Equal(got, projectLedger) || !bytes.Equal(got, []byte("repair through pinned target\n")) {
+			t.Fatal("repair mutated the detached target")
 		}
 	})
 
@@ -2223,8 +2455,8 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			_, err := engine.Resolve(t.Context(), Resolution{ConflictID: conflicted.Conflicts[0], Action: AcceptProject})
 			return err
 		})
-		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); !bytes.Contains(got, []byte("Pinned resolution project")) {
-			t.Fatalf("resolve did not use pinned detached target: %q", got)
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目回顾.md")); bytes.Contains(got, []byte("Pinned resolution project")) || !bytes.Contains(got, []byte("Pinned resolution vault")) {
+			t.Fatalf("resolve mutated the detached target: %q", got)
 		}
 	})
 
@@ -2263,8 +2495,8 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
 			return err
 		})
-		if got := readDerivedTestFile(t, filepath.Join(detached, "项目历史.md")); !bytes.Contains(got, []byte("Pinned recovery authority")) {
-			t.Fatalf("transaction recovery did not use pinned detached target: %q", got)
+		if got := readDerivedTestFile(t, filepath.Join(detached, "项目历史.md")); bytes.Contains(got, []byte("Pinned recovery authority")) {
+			t.Fatalf("transaction recovery mutated the detached target: %q", got)
 		}
 	})
 
@@ -2282,11 +2514,11 @@ func TestMutatingEntrypointsUsePinnedReviewTargetAcrossLockWait(t *testing.T) {
 			_, err := engine.Reconcile(t.Context(), ReconcileRequest{Trigger: TriggerCLI})
 			return err
 		})
-		if _, err := os.Stat(filepath.Join(detached, "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("legacy file was not retired through pinned target: %v", err)
+		if _, err := os.Stat(filepath.Join(detached, "project-overview.md")); err != nil {
+			t.Fatalf("legacy file changed after target detachment: %v", err)
 		}
-		if _, err := os.Stat(filepath.Join(detached, "项目回顾.md")); err != nil {
-			t.Fatalf("migration was not published through pinned target: %v", err)
+		if _, err := os.Stat(filepath.Join(detached, "项目回顾.md")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("migration published through a detached target: %v", err)
 		}
 	})
 }
@@ -2327,7 +2559,7 @@ func replaceReviewTargetWhileEntrypointWaits(t *testing.T, fixture engineFixture
 	err = <-done
 	engine.beforeLock = nil
 	if err == nil || !strings.Contains(err.Error(), "vault review target identity changed") {
-		t.Fatalf("entrypoint error=%v, want post-operation namespace identity failure", err)
+		t.Fatalf("entrypoint error=%v, want pre-mutation namespace identity failure", err)
 	}
 	entries, readErr := os.ReadDir(target)
 	if readErr != nil {

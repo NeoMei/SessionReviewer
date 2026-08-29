@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -165,6 +166,10 @@ type worker struct {
 	leases   *LeaseSet
 	roots    *workerRoots
 	work     *jobWork
+	retry    bool
+
+	agentCancelOnce sync.Once
+	agentCancelErr  error
 }
 
 type workerRoots struct {
@@ -250,14 +255,15 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, leases.Release()) }()
-	if job.State != Queued && job.State != Retrying {
+	retryCancellation := job.State == CancelRequested && job.Phase == Preflight && job.Owner.ID == "" && job.Attempt > 1
+	if job.State != Queued && job.State != Retrying && !retryCancellation {
 		return errors.New("review job is not ready for one-shot execution")
 	}
 	if job.Phase != Preflight {
 		return errors.New("review job does not begin at preflight")
 	}
 
-	runner := &worker{options: options, job: job, revision: revision, leases: leases}
+	runner := &worker{options: options, job: job, revision: revision, leases: leases, retry: job.State == Retrying || retryCancellation}
 	if err := runner.start(); err != nil {
 		return err
 	}
@@ -268,11 +274,49 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	runner.roots = roots
 	defer func() { retErr = errors.Join(retErr, roots.close()) }()
 
+	if runner.retry {
+		if options.Agent == nil {
+			return runner.fail(AgentUnconfigured, errors.New("retry lacks its frozen verified Agent"))
+		}
+		if err := options.Agent.validateFor(runner.job); err != nil {
+			return runner.fail(AgentIncompatible, err)
+		}
+	}
+	needsWork := runner.retry && (runner.job.PayloadState != "" || runner.job.AcceptedSyncPending)
+	if needsWork {
+		work, err := openJobWork(leases, runner.job.ID)
+		if err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
+		runner.work = work
+		defer func() { retErr = errors.Join(retErr, work.close()) }()
+		if err := runner.recoverRetryState(ctx); err != nil {
+			return err
+		}
+	}
+	if len(runner.job.FrozenSessions) != 0 && runner.job.SessionIndex == len(runner.job.FrozenSessions) {
+		if requested, err := runner.observeCancellation(ctx); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		} else if requested {
+			return runner.finishCancelled(errors.New("review cancellation requested"))
+		}
+		return runner.complete()
+	}
 	if len(runner.job.FrozenSessions) == 0 {
 		if err := runner.runSync(ctx); err != nil {
 			return err
 		}
+		if requested, err := runner.observeCancellation(ctx); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		} else if requested {
+			return runner.finishCancelled(errors.New("review cancellation requested"))
+		}
 		return runner.complete()
+	}
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
 	}
 	if options.Prepare == nil || options.Agent == nil || options.Apply == nil {
 		return runner.fail(AgentUnconfigured, errors.New("pending review job lacks a worker dependency"))
@@ -280,18 +324,27 @@ func Run(ctx context.Context, options RunOptions) (retErr error) {
 	if err := options.Agent.validateFor(runner.job); err != nil {
 		return runner.fail(AgentIncompatible, err)
 	}
-	work, err := openJobWork(leases, runner.job.ID)
-	if err != nil {
-		return runner.fail(ApplyRecovery, err)
+	if runner.work == nil {
+		work, err := openJobWork(leases, runner.job.ID)
+		if err != nil {
+			return runner.fail(ApplyRecovery, err)
+		}
+		runner.work = work
+		defer func() { retErr = errors.Join(retErr, work.close()) }()
 	}
-	runner.work = work
-	defer func() { retErr = errors.Join(retErr, work.close()) }()
 
 	for runner.job.SessionIndex < len(runner.job.FrozenSessions) {
-		if err := ctx.Err(); err != nil {
-			return runner.fail(AgentCancelled, err)
+		if requested, err := runner.observeCancellation(ctx); err != nil {
+			return runner.fail(ApplyRecovery, err)
+		} else if requested {
+			return runner.finishCancelled(errors.New("review cancellation requested"))
 		}
 		if err := runner.runPacket(ctx); err != nil {
+			if refreshErr := runner.refreshConcurrentCancellation(); refreshErr == nil &&
+				runner.job.State == CancelRequested && runner.job.Phase != Applying && runner.job.Phase != Syncing &&
+				!runner.job.AcceptedSyncPending && runner.job.PayloadState != PayloadApplyRecovery {
+				return runner.finishCancelled(err)
+			}
 			return err
 		}
 	}
@@ -317,10 +370,13 @@ func validateRunOptions(options RunOptions) error {
 func (runner *worker) start() error {
 	started := runner.timestamp()
 	return runner.update(func(job *Job) error {
-		if job.State != Queued && job.State != Retrying {
+		cancelRequested := job.State == CancelRequested && job.Phase == Preflight && job.Owner.ID == "" && job.Attempt > 1
+		if job.State != Queued && job.State != Retrying && !cancelRequested {
 			return ErrStaleRevision
 		}
-		job.State = Running
+		if !cancelRequested {
+			job.State = Running
+		}
 		job.Phase = Preflight
 		if job.StartedAt.IsZero() {
 			job.StartedAt = started
@@ -448,7 +504,12 @@ func openJobWork(leases *LeaseSet, jobID string) (_ *jobWork, retErr error) {
 
 func (runner *worker) runPacket(ctx context.Context) error {
 	frozen := runner.job.FrozenSessions[runner.job.SessionIndex]
-	if err := runner.setPhase(Preparing); err != nil {
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
+	}
+	if err := runner.setPreCommitPhaseOrCancel(Preparing); err != nil {
 		return err
 	}
 	if err := runner.verifyMutationRoots(); err != nil {
@@ -462,6 +523,11 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		ProjectIdentity: runner.roots.projectIdentity, DataIdentity: runner.roots.dataIdentity,
 	})
 	if err != nil {
+		if requested, cancelErr := runner.observeCancellation(ctx); cancelErr != nil {
+			return runner.fail(ApplyRecovery, errors.Join(err, cancelErr))
+		} else if requested {
+			return runner.finishCancelled(errors.Join(err, ctx.Err()))
+		}
 		return runner.fail(ProposalRejected, err)
 	}
 	if len(prepared.PacketBytes) == 0 || len(prepared.PacketBytes) > maxPrivatePacketBytes {
@@ -511,6 +577,15 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
+	}
+	if err := runner.setPreCommitPhaseOrCancel(Reviewing); err != nil {
+		return err
+	}
+	stopAgentCancellation := runner.watchAgentCancellation(ctx)
 	result, err := runner.options.Agent.generate(ctx, agent.Request{
 		Prompt:           bundle.Prompt,
 		OutputSchema:     bundle.OutputSchema,
@@ -521,11 +596,26 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		},
 		Deadline: runner.timestamp().Add(runner.options.AgentTimeout),
 	})
-	if err != nil {
-		return runner.fail(mapAgentError(err), err)
+	watchErr := stopAgentCancellation()
+	requested, cancelErr := runner.observeCancellation(ctx)
+	if cancelErr != nil {
+		return runner.fail(ApplyRecovery, errors.Join(err, watchErr, cancelErr))
 	}
-	if err := ctx.Err(); err != nil {
-		return runner.fail(AgentCancelled, err)
+	if requested {
+		return runner.finishCancelled(errors.Join(err, watchErr, ctx.Err(), errors.New("review cancellation requested")))
+	}
+	if watchErr != nil {
+		return runner.fail(ApplyRecovery, watchErr)
+	}
+	if err != nil {
+		if mapAgentError(err) == AgentCancelled {
+			_ = runner.cancelAgent()
+			if _, cancelErr := runner.persistCancellationRequest(); cancelErr != nil {
+				return runner.fail(ApplyRecovery, errors.Join(err, cancelErr))
+			}
+			return runner.finishCancelled(err)
+		}
+		return runner.fail(mapAgentError(err), err)
 	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(ApplyRecovery, err)
@@ -547,9 +637,6 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return runner.fail(AgentCancelled, err)
-	}
 	draft, err := proposal.Decode(bytes.NewReader(result.Proposal))
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
@@ -567,8 +654,10 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return runner.fail(AgentCancelled, err)
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
 	}
 	proposalBody, err := json.Marshal(draft)
 	if err != nil || len(proposalBody) > maxPrivateProposalBytes {
@@ -581,26 +670,30 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		}
 		return runner.fail(ProposalRejected, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return runner.fail(AgentCancelled, err)
-	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
-	if err := ctx.Err(); err != nil {
-		return runner.fail(AgentCancelled, err)
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
 	}
-	if err := runner.setPhase(Applying); err != nil {
-		return runner.fail(ProposalRejected, err)
+	if err := runner.setPreCommitPhaseOrCancel(Applying); err != nil {
+		return err
 	}
+	stopCommitCancellation := runner.watchCommitCancellation(ctx)
 	applyResult, err := runner.options.Apply(context.WithoutCancel(ctx), ApplyRequest{
 		JobID: runner.job.ID, ProjectRoot: runner.roots.project.Path, DataDir: runner.roots.data.Path,
 		ProjectIdentity: runner.roots.projectIdentity, DataIdentity: runner.roots.dataIdentity,
 		EvidencePath: runner.work.packetPath, ProposalPath: runner.work.proposalPath,
 		Packet: packet, Proposal: draft, Changes: changes,
 	})
+	cancelErr = stopCommitCancellation()
 	if err != nil {
-		return runner.fail(ApplyRecovery, err)
+		return runner.fail(ApplyRecovery, errors.Join(err, cancelErr))
+	}
+	if cancelErr != nil {
+		return runner.fail(ApplyRecovery, cancelErr)
 	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(ApplyRecovery, err)
@@ -608,16 +701,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err := validateApplyResult(applyResult, packet); err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
-	if err := runner.update(func(job *Job) error {
-		if job.AcceptedPackets == maxSafeInteger {
-			return errors.New("accepted packet count is exhausted")
-		}
-		job.AcceptedPackets++
-		job.CurrentPacket = packet.NextCursor
-		job.AcceptedSyncPending = true
-		job.UpdatedAt = runner.timestamp()
-		return nil
-	}); err != nil {
+	if err := runner.persistAcceptedApply(packet); err != nil {
 		return runner.fail(ApplyRecovery, err)
 	}
 	if err := runner.runSync(ctx); err != nil {
@@ -659,6 +743,11 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		return nil
 	}); err != nil {
 		return runner.fail(SyncPartial, err)
+	}
+	if requested, err := runner.observeCancellation(ctx); err != nil {
+		return runner.fail(ApplyRecovery, err)
+	} else if requested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
 	}
 	return nil
 }
@@ -754,10 +843,12 @@ func validateApplyResult(result apply.Result, packet evidence.Packet) error {
 
 func (runner *worker) runSync(ctx context.Context) error {
 	mandatory := runner.job.AcceptedSyncPending
-	if !mandatory {
-		if err := ctx.Err(); err != nil {
-			return runner.fail(AgentCancelled, err)
-		}
+	requested, err := runner.observeCancellation(ctx)
+	if err != nil {
+		return runner.fail(ApplyRecovery, err)
+	}
+	if requested && !mandatory {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
 	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		code := ApplyRecovery
@@ -766,22 +857,36 @@ func (runner *worker) runSync(ctx context.Context) error {
 		}
 		return runner.fail(code, err)
 	}
-	if !mandatory {
-		if err := ctx.Err(); err != nil {
-			return runner.fail(AgentCancelled, err)
+	if err := runner.setPhase(Syncing); err != nil {
+		if !errors.Is(err, ErrStaleRevision) {
+			return runner.fail(SyncPartial, err)
+		}
+		if refreshErr := runner.refreshConcurrentCancellation(); refreshErr != nil {
+			return runner.fail(SyncPartial, errors.Join(err, refreshErr))
+		}
+		if runner.job.State != CancelRequested || !mandatory {
+			return runner.finishCancelled(errors.New("review cancellation requested"))
+		}
+		if err := runner.setPhase(Syncing); err != nil {
+			return runner.fail(SyncPartial, err)
 		}
 	}
-	if err := runner.setPhase(Syncing); err != nil {
-		return runner.fail(SyncPartial, err)
-	}
+	stopCommitCancellation := runner.watchCommitCancellation(ctx)
 	report, err := runner.options.Sync(context.WithoutCancel(ctx), syncproject.Options{
 		ProjectID: runner.job.ProjectID, CWD: runner.roots.project.Path,
 		DataDir: runner.roots.data.Path, GOOS: runner.options.GOOS,
 		Now: runner.options.Now, Trigger: syncengine.TriggerCLI,
 		Pin: runner.roots.syncPin,
 	})
+	cancelErr := stopCommitCancellation()
 	if err != nil {
-		return runner.fail(SyncPartial, err)
+		if len(report.Conflicts) != 0 {
+			return runner.fail(SyncConflict, errors.Join(err, cancelErr))
+		}
+		return runner.fail(SyncPartial, errors.Join(err, cancelErr))
+	}
+	if cancelErr != nil {
+		return runner.fail(SyncPartial, cancelErr)
 	}
 	if err := runner.verifyMutationRoots(); err != nil {
 		return runner.fail(SyncPartial, err)
@@ -798,25 +903,50 @@ func (runner *worker) runSync(ctx context.Context) error {
 		report.Machine.State != syncengine.MachineCurrent {
 		return runner.fail(SyncPartial, errors.New("sync reported partial or blocked work"))
 	}
-	err = runner.update(func(job *Job) error {
-		job.AcceptedSyncPending = false
-		job.UpdatedAt = runner.timestamp()
-		return nil
-	})
+	err = runner.clearAcceptedSyncPending()
 	if err != nil {
 		return runner.fail(SyncPartial, err)
 	}
 	return nil
 }
 
+func (runner *worker) clearAcceptedSyncPending() error {
+	for range 2 {
+		err := runner.update(func(job *Job) error {
+			if job.State != Running && job.State != CancelRequested {
+				return ErrStaleRevision
+			}
+			job.AcceptedSyncPending = false
+			job.UpdatedAt = runner.timestamp()
+			return nil
+		})
+		if !errors.Is(err, ErrStaleRevision) {
+			return err
+		}
+		if err := runner.refreshConcurrentCancellation(); err != nil {
+			return err
+		}
+		if runner.job.State != CancelRequested {
+			return ErrStaleRevision
+		}
+	}
+	return ErrStaleRevision
+}
+
 func (runner *worker) complete() error {
+	if err := runner.refreshConcurrentCancellation(); err != nil {
+		return err
+	}
+	if runner.job.State == CancelRequested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
+	}
 	if runner.job.SessionIndex != len(runner.job.FrozenSessions) ||
 		runner.job.AcceptedSessions != len(runner.job.FrozenSessions) ||
 		runner.job.CurrentPacket != (evidence.CursorBoundary{}) {
 		return runner.fail(ApplyRecovery, errors.New("review worker cannot complete with unfinished frozen progress"))
 	}
 	completed := runner.timestamp()
-	return runner.update(func(job *Job) error {
+	err := runner.update(func(job *Job) error {
 		job.State = Completed
 		job.Phase = ""
 		job.UpdatedAt = completed
@@ -830,17 +960,41 @@ func (runner *worker) complete() error {
 		}
 		return nil
 	})
+	if !errors.Is(err, ErrStaleRevision) {
+		return err
+	}
+	if refreshErr := runner.refreshConcurrentCancellation(); refreshErr != nil {
+		return errors.Join(err, refreshErr)
+	}
+	if runner.job.State == CancelRequested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
+	}
+	return err
 }
 
 func (runner *worker) setPhase(phase Phase) error {
 	return runner.update(func(job *Job) error {
-		if job.State != Running {
+		if job.State != Running && job.State != CancelRequested {
 			return errors.New("review worker phase transition requires a running job")
 		}
 		job.Phase = phase
 		job.UpdatedAt = runner.timestamp()
 		return nil
 	})
+}
+
+func (runner *worker) setPreCommitPhaseOrCancel(phase Phase) error {
+	err := runner.setPhase(phase)
+	if !errors.Is(err, ErrStaleRevision) {
+		return err
+	}
+	if refreshErr := runner.refreshConcurrentCancellation(); refreshErr != nil {
+		return errors.Join(err, refreshErr)
+	}
+	if runner.job.State == CancelRequested {
+		return runner.finishCancelled(errors.New("review cancellation requested"))
+	}
+	return err
 }
 
 func (runner *worker) update(mutate func(*Job) error) error {
@@ -891,7 +1045,7 @@ func (runner *worker) timestamp() time.Time {
 
 func (runner *worker) fail(code ErrorCode, cause error) error {
 	retainForRecovery := code == ApplyRecovery && runner.work != nil && runner.job.Phase == Applying &&
-		hasExactRetainedApplyPayloads(runner.job)
+		(hasExactRetainedApplyPayloads(runner.job) || hasExactApplyRecoveryPayloads(runner.job))
 	completed := runner.timestamp()
 	if !retainForRecovery && runner.work != nil && runner.options.beforeCleanupBoundary != nil {
 		if err := runner.options.beforeCleanupBoundary(); err != nil {
@@ -1191,6 +1345,17 @@ func hasExactRetainedApplyPayloads(job Job) bool {
 		job.PayloadPublications[0].Digest == job.PacketDigest && job.PayloadPublications[0].State == PayloadRetained &&
 		job.PayloadPublications[1].Kind == PayloadProposal && job.PayloadPublications[1].Name == proposalWorkName &&
 		job.PayloadPublications[1].Digest == job.ResultDigest && job.PayloadPublications[1].State == PayloadRetained
+}
+
+func hasExactApplyRecoveryPayloads(job Job) bool {
+	return job.PayloadState == PayloadApplyRecovery && job.PayloadRetainedFor == ApplyRecovery &&
+		job.PacketDigest != "" && job.ResultDigest != "" && len(job.PayloadPublications) == 2 &&
+		job.PayloadPublications[0].Kind == PayloadPacket && job.PayloadPublications[0].Name == packetWorkName &&
+		job.PayloadPublications[0].Digest == job.PacketDigest && job.PayloadPublications[0].State == PayloadApplyRecovery &&
+		job.PayloadPublications[0].CleanupAuthority == PayloadCleanupAfterReceipt &&
+		job.PayloadPublications[1].Kind == PayloadProposal && job.PayloadPublications[1].Name == proposalWorkName &&
+		job.PayloadPublications[1].Digest == job.ResultDigest && job.PayloadPublications[1].State == PayloadApplyRecovery &&
+		job.PayloadPublications[1].CleanupAuthority == PayloadCleanupAfterReceipt
 }
 
 func cleanupPrivatePayloads(root *os.Root, job Job) error {
