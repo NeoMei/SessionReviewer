@@ -1,6 +1,6 @@
 # Multi-agent SessionReviewer
 
-- Status: approved design, pending implementation plan
+- Status: approved design, implementation plan revised after architecture review
 - Date: 2026-08-30
 - Target: Codex, Claude Code, and OpenCode on macOS and Windows
 - Decision: one project ledger, namespaced session IDs, source adapters, and two invocation paths
@@ -18,14 +18,14 @@ The product goal is equal experience, not a Codex-shaped export of other logs. A
 - Collect pending work from Codex, Claude Code, and OpenCode into one project ledger.
 - Let the user start a review from Claude, OpenCode, Codex, or Obsidian.
 - Keep one primary Obsidian action, `总结并同步`, and one human-facing project-evolution view.
-- Preserve the current evidence, cursor, proposal, apply, and sync contracts.
+- Preserve the cursor, proposal-only worker, apply, and sync safety properties while replacing the source-accounting JSON contracts cleanly.
 - Keep raw session stores local, redacted, and unread by Skills.
 - Fail closed on identity collisions, source drift, and unproven worker capabilities.
 
 ## 3. Non-goals
 
-- Evidence, proposal, or ledger schema v3.
 - A sidecar copy of Claude or OpenCode sessions rewritten as Codex JSONL.
+- Direct reads of OpenCode's private SQLite schema.
 - An OpenCode Obsidian worker before it can prove the proposal-only contract.
 - A per-source worker split inside one click.
 - Changing the evolution, decision, usage, risk, or resume layout.
@@ -38,26 +38,29 @@ The product goal is equal experience, not a Codex-shaped export of other logs. A
 - The starter is the semantic worker: the current Claude, OpenCode, or Codex conversation writes the proposal. Obsidian uses one configured default worker.
 - Session IDs are always `provider.nativeId`. Unprefixed IDs are invalid.
 - Source adapters emit a canonical ordered record stream. `jsonl_line` remains the 1-based sequence number.
-- Skills never read raw JSONL or SQLite. The only evidence is a prepared packet.
+- Skills never read raw source stores or OpenCode export JSON. The only evidence is a prepared packet.
 - Obsidian workers must prove proposal-only, no-write, structured-output behavior. OpenCode's isolated worker stays closed until that proof exists.
 - Missing source roots are skipped. Corrupt data that may belong to the current project fails the whole freeze.
+- In-agent review owns one durable review run from freeze through the final sync. Kernel leases protect each command; the durable owner record prevents an Obsidian job from starting between commands.
+- Source usage keeps exact token counts even when public pricing is unavailable. Unknown prices are represented as incomplete pricing, never as zero cost and never as a failed semantic review.
+- OpenCode collection uses its documented local CLI JSON interfaces. SessionReviewer does not depend on OpenCode database tables.
 
 ## 5. Selected approach
 
 Three approaches were compared.
 
-A. Export Claude JSONL and OpenCode SQLite into Codex-shaped sidecar JSONL, then reuse the current locator and extractor. This is the smallest code change and the weakest provenance story: OpenCode would keep a private copy, export instability would look like cursor drift, and the engine would no longer hash the real source.
+A. Rewrite Claude and OpenCode into Codex-shaped sidecar JSONL, then reuse the current locator and extractor. This is the smallest code change and the weakest provenance story: it keeps a second private copy and makes exporter behavior part of cursor provenance.
 
-B. Provider adapters plus namespaced session IDs plus a canonical record stream. Selected. The ledger, Obsidian view, and CAS cursor stay project-shaped. Each source is responsible for Discover and Stream. Evidence packets keep their current fields.
+B. Provider adapters plus namespaced session IDs plus a canonical record stream. Selected. The ledger, Obsidian view, and CAS cursor stay project-shaped. Each source owns discovery and streaming behind an opaque reader. The accounting contracts advance once so partial pricing is represented honestly.
 
-C. Opaque per-source cursor tokens and evidence v3. Cleaner for a fourth and fifth agent, but it would rewrite proposal, ledger, Skill, plugin, and tests now. Two additional sources do not justify that migration.
+C. Opaque per-source cursor tokens. Cleaner for a fourth and fifth agent, but it would also replace the proven sequence-plus-hash CAS. Stable finalized prefixes solve the current three-source problem without that cursor migration.
 
 ## 6. Architecture
 
 ```text
 Codex JSONL -+
 Claude JSONL-+- Source adapters - canonical records - prepare - evidence packet
-OpenCode DB -+                                              |
+OpenCode CLI-+                                              |
                                                             v
 In-agent Skill (current conversation) -- proposal -- apply -- project ledger
 Obsidian default worker (isolated)    -- proposal -- apply --      |
@@ -79,13 +82,13 @@ The native ID may itself contain dots. Unknown prefixes are invalid. Job and pro
 
 `--session`, cursor files, packets, proposals, and ledger session IDs store only the canonical form. Unprefixed values fail closed. There is no alias, dual lookup, or rewrite path.
 
-`--session` and Skill wrappers accept only canonical IDs. Host environment variables stay native; the resolver prefixes them from the known host variable, never by guessing.
+`--session` accepts only canonical IDs. Skill wrappers receive canonical session IDs from `interactive begin`; they do not inspect host session environment variables or guess by cwd and time.
 
 Human display maps prefixes to short labels: Codex, Claude Code, OpenCode. The same rule applies to timeline nodes, session titles, and evidence citations. Usage cards remain model-aggregated. The machine schema does not gain a `source` field.
 
 ## 8. Source adapters
 
-Each source implements three operations: resolve its root, discover sessions for the authenticated project identity, and stream canonical records. A canonical record matches the current `session.Record`: 1-based sequence, timestamp, type, payload, and SHA-256. Cursor CAS remains sequence plus hash. Adapters assign the sequence; extract requires it to increase strictly. Codex emits one record per JSONL line, so sequence equals the source line number. Claude and OpenCode assign sequence in stream order. One Claude JSONL line may become several sequence numbers when it contains multiple evidence-bearing parts. `source_hash` authenticates the underlying source atom: the JSONL line for Codex and Claude, or the canonical payload for OpenCode.
+Each source resolves its availability, discovers sessions for the authenticated project identity, and opens an opaque session reader. The orchestration layer sees provider-neutral candidate metadata and a `Reader` with `Stream` and `Close`; it never receives `[]*os.File`, a database path, or a provider-specific handle. A canonical record contains 1-based sequence, timestamp, type, payload, and SHA-256. Cursor CAS remains sequence plus hash. Adapters assign the sequence; extract requires it to increase strictly. Codex emits one record per JSONL line, so sequence equals the source line number. Claude and OpenCode assign sequence in stream order. One Claude JSONL line may become several sequence numbers when it contains multiple evidence-bearing parts. `source_hash` authenticates the underlying source atom: the JSONL line for Codex and Claude, or one compact canonical record payload for OpenCode.
 
 ### 8.1 Codex
 
@@ -93,23 +96,25 @@ Keep the current sessions-root discovery. The adapter translates Codex JSONL int
 
 ### 8.2 Claude Code
 
-Default root is `~/.claude/projects` on macOS and `%USERPROFILE%\.claude\projects` on Windows. Override with `--claude-sessions-root` or `SESSION_REVIEWER_CLAUDE_SESSIONS_ROOT`. Files are `<uuid>.jsonl`. Project membership uses the physical `cwd` inside records, not the encoded directory name. Hashes cover the source JSONL line. Filename UUID and record `sessionId` must match.
+Default root is `~/.claude/projects` on macOS and `%USERPROFILE%\.claude\projects` on Windows. Override with `--claude-sessions-root` or `SESSION_REVIEWER_CLAUDE_SESSIONS_ROOT`. Files are `<uuid>.jsonl`. The encoded project directory is an untrusted discovery prefilter so an unrelated malformed project cannot block every Claude project. Every selected record must still prove project membership with its physical `cwd`. Hashes cover the source JSONL line. Filename UUID and record `sessionId` must match.
 
-Included evidence: `user` / `assistant` text as messages, `tool_use` as tool calls, `tool_result` as tool results. `thinking`, queue, and attachment records advance the cursor only. Evidence-bearing parts on one JSONL line receive consecutive sequence numbers and share that line's source hash.
+Included evidence: `user` / `assistant` text as messages, `tool_use` as tool calls, `tool_result` as tool results. `thinking`, queue, and attachment records advance the cursor only. Evidence-bearing parts on one JSONL line receive consecutive sequence numbers and share that line's source hash. A final EOF fragment without a newline is an active tail and is deferred; an invalid newline-terminated record is corrupt.
 
 ### 8.3 OpenCode
 
-Default source is the official data-directory `opencode.db`, opened read-only. Override with `--opencode-db` or `SESSION_REVIEWER_OPENCODE_DB`. If the Windows path is not the documented location, the flag is required; the engine does not guess `%APPDATA%`. Session `directory` must match the current project identity.
+The source is the installed OpenCode CLI. SessionReviewer resolves and authenticates an absolute executable from `--opencode-executable`, `SESSION_REVIEWER_OPENCODE_EXECUTABLE`, or `PATH`, then invokes only `opencode session list --format json --pure` and `opencode export SESSION_ID --pure` with the project root as the child working directory. Stdout and stderr have fixed byte budgets and timeouts. A successful empty `session list` means no sessions; empty `export`, non-UTF-8, truncated, or schema-invalid output fails the source. Session `directory` must match the current physical project identity. The JSON is consumed in memory; no sidecar export is written.
 
-Canonical order is messages by `(time_created, id)`, then parts of one message by `id`, matching existing SQLite indexes. Hashes cover a SessionReviewer-defined canonical payload, not SQLite's stored JSON byte layout. `text` parts become messages; a completed `tool` part becomes a tool call followed by a tool result. `step-start`, `step-finish`, and `reasoning` advance the sequence only.
+Canonical order is exported messages by `(info.time.created, info.id)`, then exported parts in their array order. Hashes cover a SessionReviewer-defined compact canonical payload. `text` parts become messages; a finalized `tool` part becomes a tool call followed by a tool result. `step-start`, `step-finish`, and `reasoning` advance the sequence only.
 
-If OpenCode rewrites history or inserts an earlier message, the sequence drifts. Report source drift; do not reorder or guess. An unexpected schema fails closed.
+OpenCode exposes a mutable active tail. The adapter streams only a stable prefix ending at a finished assistant message. Every tool part through that boundary must be `completed` or `error`; `pending` or `running` stops the prefix before its owning user/assistant turn. A user turn without a finished assistant response is deferred. Every finalized part has fixed expansion cardinality, so normal tool completion cannot renumber an accepted prefix. A later export that changes an already accepted canonical payload is genuine source drift.
+
+If OpenCode rewrites history or inserts an earlier finalized message, the sequence drifts. Report source drift; do not reorder or guess. An unexpected export schema fails closed. A missing or incompatible executable skips OpenCode only when no explicit OpenCode executable was configured; an explicitly configured but invalid executable fails preflight.
 
 ### 8.4 Freeze and prepare
 
-`Discover(sessionsRoot)` becomes a project-identity merge across the three sources, sorted by `StartedAt`. One review is still one job, one worker, and one ledger. A missing or uninstalled source is skipped. A present root with corrupt data that may belong to the current project fails the whole freeze.
+Freeze becomes a project-identity merge across the three adapters, sorted by `StartedAt`. One review is still one run/job, one worker, and one ledger. A missing or uninstalled source is skipped. A configured source with corrupt data narrowed to the current project fails the whole freeze.
 
-Tests use trimmed Claude JSONL fixtures and a small OpenCode SQLite fixture. They must not scan the live local database.
+Tests use trimmed Claude JSONL fixtures and captured synthetic OpenCode `session list` / `export` JSON fixtures behind a fake executable. Tests never scan the live local database or depend on a user's session history.
 
 ## 9. Invocation paths
 
@@ -123,7 +128,7 @@ The Skill still must not read raw session stores, mutate Git, or edit `ledger.js
 
 ### 9.2 Obsidian worker
 
-Obsidian keeps the durable one-shot job: freeze, isolated proposal worker, trusted apply/sync. The primary action remains `总结并同步`. Settings store a default worker kind plus an absolute executable path. CLI review commands take `--agent-kind` and `--agent-executable`. The global Agent lease still prevents an in-agent review and an Obsidian job from running together.
+Obsidian keeps the durable one-shot job: freeze, isolated proposal worker, trusted apply/sync. The primary action remains `总结并同步`. Settings store a default worker kind plus an absolute executable path. CLI review commands take `--agent-kind` and `--agent-executable`. Obsidian and in-agent review share one durable owner registry. Job start and every interactive command acquire the current project and global kernel leases before checking or changing that registry.
 
 When no default worker is configured, Obsidian can sync but cannot start a review.
 
@@ -132,52 +137,52 @@ When no default worker is configured, Obsidian can sync but cannot start a revie
 An Obsidian worker must prove: ephemeral non-interactive run, structured output, empty tool registry or fail on any tool event, private read-only work root, no Project/Vault access, and no raw session reads. `AgentAdapter.Verify` remains the capability gate. Failure is `E_AGENT_INCOMPATIBLE`. Skills do not need this gate.
 
 - Codex: the existing adapter remains the Obsidian worker.
-- Claude: ship the Skill first. An Obsidian adapter may use `claude -p --json-schema --bare` with MCP and tools disabled, and only after verification proves no tool events.
+- Claude: ship the Skill first. The Obsidian adapter uses the authenticated local CLI without `--bare`: `claude -p --output-format stream-json --verbose --json-schema ... --safe-mode --tools "" --strict-mcp-config --mcp-config {"mcpServers":{}} --no-session-persistence` from the private work root. Verification must prove the installed version accepts that fixed argv, returns a schema-valid final result, and emits no tool event. OAuth, keychain, API-key, and supported third-party authentication remain Claude's responsibility.
 - OpenCode: ship the Skill or command first. `opencode run --format json --pure` does not currently prove a no-tools or JSON-schema contract, so it cannot be saved as the Obsidian default worker in this version.
 
 The same Skill semantics are packaged per host: Codex Skill, Claude Skill, OpenCode command or Skill. Wrappers differ; prepare/apply scripts and schemas do not.
 
-## 10. Current session, pending freeze, and usage
+## 10. Durable in-agent run, pending freeze, and usage
 
-### 10.1 Current session
+### 10.1 Durable in-agent run
 
-`--session` wins and must already be canonical.
+Project-wide review does not need to guess the host's current session ID. The current conversation is the semantic worker, not a source selector. `interactive begin` returns every pending canonical session for the project, and later `prepare` calls use those IDs exactly.
 
-Otherwise:
+The Skill starts with:
 
-1. `--current-session-id`
-2. Host environment IDs: Codex keeps `CODEX_THREAD_ID` / `CODEX_SESSION_ID`; Claude and OpenCode use only documented session-id variables
-3. cwd plus time window across all three sources
+```text
+session-reviewer interactive begin --cwd "$PROJECT_ROOT" --json
+```
 
-Skill wrappers must pass the current canonical ID. Ambiguous cwd/time matches fail closed. `--sessions-root` still overrides only Codex.
+`begin` acquires the project and global kernel leases, freezes the pending set, persists one active-owner record bound to the authenticated project identity, and returns an unguessable `run_id` plus the frozen session list. It then releases the kernel leases. Every `prepare`, `apply`, and `sync` in that run reacquires both leases, verifies the owner record, project identity, and exact `run_id`, performs one bounded operation, updates the owner heartbeat, and releases the leases. Obsidian start checks the same record and returns `E_AGENT_BUSY` while it is active. `interactive complete` clears ownership only after every frozen session is accepted and final sync succeeds. `interactive abort` clears a run while preserving already accepted cursor/apply work. An owner expires after six hours without a successful run command and is recovered under both leases before another run starts.
 
 ### 10.2 Skill freeze
 
-Obsidian jobs freeze inside the worker. In-agent reviews freeze at Skill start through a read-only command:
+Obsidian jobs freeze inside the worker. In-agent reviews freeze atomically with durable ownership through `interactive begin`; there is no standalone unlocked `pending` command.
 
 ```text
-session-reviewer pending --cwd "$PROJECT_ROOT" --json
+session-reviewer interactive begin --cwd "$PROJECT_ROOT" --json
 ```
 
-The result lists pending canonical `session_id`, `started_at`, and the start-time `upper` line/hash. It writes no job and starts no worker. Later prepare calls must reuse that upper bound:
+The result lists pending canonical `session_id`, `started_at`, and the start-time `upper` line/hash. It writes an owner record but starts no worker. Later prepare calls must reuse the run ID and that upper bound:
 
 ```text
-session-reviewer prepare checkpoint --session ID --until-line N --until-hash HASH ...
+session-reviewer prepare checkpoint --run-id RUN --session ID --until-line N --until-hash HASH ...
 ```
 
-A mismatched bound is source drift. The Skill may not rescan for a new bound. `pending` runs under the global Agent lease; failure to acquire it is `E_AGENT_BUSY`.
+A mismatched bound is source drift. The Skill may not rescan for a new bound. Failure to create or authenticate ownership is `E_AGENT_BUSY` or `E_RUN_INVALID`.
 
-If nothing is pending, the Skill performs deterministic sync only.
+If nothing is pending, the Skill performs deterministic sync and then completes the owner run.
 
 ### 10.3 Usage
 
-`session_usage` is unchanged. Each source maps reviewed counters; if the mapping is not exact, omit usage and warn instead of writing zeros.
+The clean multi-agent release increments the evidence, proposal, and ledger contracts. Old packets, proposals, ledgers, cursors, and plugin worker settings are out of contract and are not migrated. Each source maps reviewed counters; if the mapping is not exact, omit usage and emit one canonical `usage_unavailable:<reason>:<count>` warning. Reasons are `inexact_mapping`, `totals_mismatch`, and `missing_model`.
 
 - Codex: existing `token_count` events
 - Claude: assistant `message.usage`; `cache_read_input_tokens` maps to cached input, `cache_creation_input_tokens` to cache write; model is `message.model`; thinking is not evidence and is not invented as reasoning
 - OpenCode: sum assistant message tokens (`input`, `cache.read`, `cache.write`, `output`, `reasoning`); model is `providerID/modelID`. If session-level totals disagree with the sum, omit usage and warn
 
-Costs remain public USD list prices. Subscriptions are not discounts. Models missing an HTTPS catalog price fail apply rather than recording zero cost. Review-run usage stays separate from source-session totals.
+Costs remain public USD list prices. Subscriptions are not discounts. Exact source token usage is retained even when a model has no trusted HTTPS catalog price. Source session and project accounting add `pricing_complete`. Each individually priced model keeps its `pricing` and `cost_usd`; an unpriced model omits both. Aggregate `total_cost_usd` and cost-share percentages are omitted unless every included model is priced. Obsidian shows tokens plus `价格未覆盖` for incomplete pricing. Review-run usage stays separate from source-session totals and uses the same incomplete-pricing semantics.
 
 ## 11. CLI and Obsidian contract
 
@@ -185,9 +190,9 @@ Costs remain public USD list prices. Subscriptions are not discounts. Models mis
 
 Claude: `--claude-sessions-root` / `SESSION_REVIEWER_CLAUDE_SESSIONS_ROOT`.
 
-OpenCode: `--opencode-db` / `SESSION_REVIEWER_OPENCODE_DB`.
+OpenCode: `--opencode-executable` / `SESSION_REVIEWER_OPENCODE_EXECUTABLE`; an unconfigured source may resolve `opencode` from `PATH` to an authenticated absolute executable.
 
-`pending` is a Skill command, not an Obsidian command. Its JSON contains no source paths and no record bodies.
+`interactive begin|complete|abort` are Skill commands, not Obsidian commands. Their JSON contains the run ID and frozen public boundaries, but no source paths, record bodies, raw owner record, or executable path. The run ID is never written into an evidence packet or proposal.
 
 Review commands require an explicit kind:
 
@@ -203,44 +208,45 @@ Plugin settings store `agentKind` plus an absolute executable. A previous `codex
 
 ## 12. Failure boundaries
 
-- Missing or uninstalled source root: skip that source.
-- Present root with corrupt data that may belong to the current project: fail freeze/pending.
+- Missing or uninstalled unconfigured source: skip that source.
+- Present source with corrupt data narrowed to the current project: fail freeze/begin.
 - Claude filename UUID disagrees with record `sessionId`: fail.
-- OpenCode schema or unreproducible order: fail.
+- OpenCode CLI output schema, encoding, bounds, stable-prefix, or reproducible order failure: fail.
 - `--until-line` / `--until-hash` disagree with the source: fail as source drift.
-- Ambiguous cwd/time current session: fail.
-- Missing HTTPS list price for a used model: fail apply.
+- Missing HTTPS list price for a used model: retain tokens, mark pricing incomplete, and omit costs.
 - Unproven Obsidian worker: `E_AGENT_INCOMPATIBLE` and refuse to save it.
-- Concurrent in-agent review and Obsidian job: `E_AGENT_BUSY`.
+- Concurrent in-agent review and Obsidian job: durable owner check returns `E_AGENT_BUSY`.
+- Missing, expired, mismatched, or completed interactive owner: `E_RUN_INVALID`.
 
 Never skip a failed session to continue later sessions. Earlier fully accepted and synchronized work remains.
 
 ## 13. Compatibility
 
-Evidence, proposal, and ledger schemas do not change. `jsonl_line` remains the monotonic sequence number. Unprefixed session IDs, legacy cursor filenames, and old plugin `codexPath` settings are out of contract and are not loaded as aliases. Users start from a canonical review on this version.
+Evidence becomes v3, proposal becomes v2, and ledger becomes v3 so incomplete pricing and canonical usage warnings are represented directly. `jsonl_line` remains the monotonic sequence number. Unprefixed session IDs, old packet/proposal/ledger/cursor files, and old plugin `codexPath` settings are out of contract and are not loaded as aliases. Users start from a fresh canonical review on this version.
 
 The 2026-08-28 orchestration design remains the Obsidian job model. This spec replaces only its Codex-only v1 product limit and its leave-Claude/OpenCode-unimplemented non-goal.
 
 ## 14. Delivery slices
 
-1. Fold Codex into the source-adapter interface. Land canonical `codex.` IDs, `pending`, and `--until-*` on Codex. Update fixtures and tests to canonical IDs; do not keep an unprefixed compatibility path.
-2. Claude collection plus Claude Skill. A Claude-started review accepts pending Claude and Codex sessions into one ledger visible in Obsidian.
-3. OpenCode collection plus OpenCode Skill or command. All three sources can enter the same ledger.
-4. Obsidian settings become default worker kind plus path. Claude may be saved only after verification. OpenCode's isolated worker stays closed.
+1. Land the v3/v2/v3 accounting contracts and the provider-neutral Reader interface as one Codex vertical slice. Canonical `codex.` IDs, prepare, freeze, apply, sync, and all repository tests are green in the same commit.
+2. Add durable interactive ownership plus Claude collection and Claude Skill. A Claude-started review accepts pending Claude and Codex sessions into one ledger visible in Obsidian.
+3. Add the OpenCode documented-CLI collector with stable-prefix tests plus the OpenCode Skill or command. All three sources can enter the same ledger.
+4. Obsidian settings become default worker kind plus path. Claude may be saved only after its fixed-argv conformance gate passes. OpenCode's isolated worker stays closed.
 
 ## 15. Testing
 
 - Prefix parse/format, rejection of unprefixed IDs, and mixed-case OpenCode IDs
 - Claude filename/`sessionId` mismatch and OpenCode schema mismatch
-- Source drift, including `--until-*` reuse versus rescan
+- Source drift, including `--until-*` reuse versus rescan and OpenCode pending/running-to-completed tail growth
 - Missing source skipped; corrupt in-project source fails closed
-- Pending lease busy path
+- Durable interactive owner busy, expiry, abort, completion, and per-command authentication paths
 - Plugin argv allowlist for `--agent-kind`
 - Ignored legacy `codexPath` settings; user must save `agentKind` plus executable
 - OpenCode Obsidian worker rejected as incompatible
-- Fixture-only Claude JSONL and small OpenCode SQLite; no live 800MB+ database scans
+- Fixture-only Claude JSONL and fake-CLI OpenCode list/export JSON; no live database scans
+- Exact source tokens with unknown price produce `pricing_complete=false`, no zero cost, and no semantic-review failure
 - Existing Codex prepare/apply/review tests remain green without weakened assertions
 
 Repository gates stay: focused TDD, `go test ./...`, targeted race, `go vet ./...`, `go mod tidy -diff`, plugin lint/test/build, macOS arm64/amd64 and Windows amd64 builds, and credential scanning.
 
-Real acceptance still requires the installed Obsidian bundle plus one authorized review started from Claude and one from OpenCode against a connected project, confirming the same ledger and browser update. A passing unit suite is not that proof.
+Real acceptance still requires the installed Obsidian bundle plus one authorized review started from Claude and one from OpenCode against a connected project, confirming the same ledger and browser update. Claude worker acceptance additionally proves existing local authentication works without `--bare`; OpenCode collector acceptance proves UTF-8 and complete bounded JSON on macOS and Windows. A passing unit suite is not that proof.
