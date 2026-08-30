@@ -38,6 +38,7 @@ describe("runtime discovery", () => {
       home: darwinHome,
       platform: "darwin",
       env: { PATH: "" },
+      executableExists: async (candidate: string) => candidate === cli || candidate === agent,
       createRunner: (candidate: string) => candidate === cli ? runner : (() => { throw new Error("unexpected CLI"); })()
     } as never);
 
