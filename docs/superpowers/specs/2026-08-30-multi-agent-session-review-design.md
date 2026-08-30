@@ -36,7 +36,7 @@ The product goal is equal experience, not a Codex-shaped export of other logs. A
 
 - One click reviews every pending session for the selected project, regardless of source.
 - The starter is the semantic worker: the current Claude, OpenCode, or Codex conversation writes the proposal. Obsidian uses one configured default worker.
-- Session IDs are always `provider.nativeId`. Unprefixed historical IDs are a Codex alias only.
+- Session IDs are always `provider.nativeId`. Unprefixed IDs are invalid.
 - Source adapters emit a canonical ordered record stream. `jsonl_line` remains the 1-based sequence number.
 - Skills never read raw JSONL or SQLite. The only evidence is a prepared packet.
 - Obsidian workers must prove proposal-only, no-write, structured-output behavior. OpenCode's isolated worker stays closed until that proof exists.
@@ -77,31 +77,31 @@ Canonical IDs use a single known prefix and treat everything after the first dot
 
 The native ID may itself contain dots. Unknown prefixes are invalid. Job and project IDs keep the current lowercase `validID` rule. Session IDs use the cursor character set `[A-Za-z0-9._-]`, which allows mixed case.
 
-Read compatibility: an unprefixed historical ID is exactly `codex.<old-value>`. Cursor lookup tries `codex.<id>` first, then the legacy filename. Write compatibility: the next successful apply or cursor commit stores the canonical ID. There is no bulk rewrite.
+`--session`, cursor files, packets, proposals, and ledger session IDs store only the canonical form. Unprefixed values fail closed. There is no alias, dual lookup, or rewrite path.
 
-`--session` and Skill wrappers accept canonical IDs. Unprefixed input is accepted only as a Codex alias and is normalized immediately.
+`--session` and Skill wrappers accept only canonical IDs. Host environment variables stay native; the resolver prefixes them from the known host variable, never by guessing.
 
 Human display maps prefixes to short labels: Codex, Claude Code, OpenCode. The same rule applies to timeline nodes, session titles, and evidence citations. Usage cards remain model-aggregated. The machine schema does not gain a `source` field.
 
 ## 8. Source adapters
 
-Each source implements three operations: resolve its root, discover sessions for the authenticated project identity, and stream canonical records. A canonical record matches the current `session.Record`: 1-based sequence, timestamp, type, payload, and SHA-256. Cursor CAS remains sequence plus hash.
+Each source implements three operations: resolve its root, discover sessions for the authenticated project identity, and stream canonical records. A canonical record matches the current `session.Record`: 1-based sequence, timestamp, type, payload, and SHA-256. Cursor CAS remains sequence plus hash. Adapters assign the sequence; extract requires it to increase strictly. Codex emits one record per JSONL line, so sequence equals the source line number. Claude and OpenCode assign sequence in stream order. One Claude JSONL line may become several sequence numbers when it contains multiple evidence-bearing parts. `source_hash` authenticates the underlying source atom: the JSONL line for Codex and Claude, or the canonical payload for OpenCode.
 
 ### 8.1 Codex
 
-Keep the current sessions-root discovery, JSONL line numbers, and source-line hashes. New writes use `codex.<nativeId>`. Existing unprefixed IDs remain aliases.
+Keep the current sessions-root discovery. The adapter translates Codex JSONL into canonical record types, preserves one-record-per-JSONL-line numbering and source-line hashes, and always emits `codex.<nativeId>`.
 
 ### 8.2 Claude Code
 
-Default root is `~/.claude/projects` on macOS and `%USERPROFILE%\.claude\projects` on Windows. Override with `--claude-sessions-root` or `SESSION_REVIEWER_CLAUDE_SESSIONS_ROOT`. Files are `<uuid>.jsonl`. Project membership uses the physical `cwd` inside records, not the encoded directory name. Sequence numbers are file line numbers; hashes cover the source line. Filename UUID and record `sessionId` must match.
+Default root is `~/.claude/projects` on macOS and `%USERPROFILE%\.claude\projects` on Windows. Override with `--claude-sessions-root` or `SESSION_REVIEWER_CLAUDE_SESSIONS_ROOT`. Files are `<uuid>.jsonl`. Project membership uses the physical `cwd` inside records, not the encoded directory name. Hashes cover the source JSONL line. Filename UUID and record `sessionId` must match.
 
-Included evidence: `user` / `assistant` text as messages, `tool_use` as tool calls, `tool_result` as tool results. `thinking`, queue, and attachment records advance the cursor only.
+Included evidence: `user` / `assistant` text as messages, `tool_use` as tool calls, `tool_result` as tool results. `thinking`, queue, and attachment records advance the cursor only. Evidence-bearing parts on one JSONL line receive consecutive sequence numbers and share that line's source hash.
 
 ### 8.3 OpenCode
 
 Default source is the official data-directory `opencode.db`, opened read-only. Override with `--opencode-db` or `SESSION_REVIEWER_OPENCODE_DB`. If the Windows path is not the documented location, the flag is required; the engine does not guess `%APPDATA%`. Session `directory` must match the current project identity.
 
-Canonical order is messages by `(time_created, id)`, then parts of one message by `id`, matching existing SQLite indexes. Hashes cover a SessionReviewer-defined canonical payload, not SQLite's stored JSON byte layout. `text` parts become messages; `tool` parts become tool calls and results. `step-start`, `step-finish`, and `reasoning` advance the sequence only.
+Canonical order is messages by `(time_created, id)`, then parts of one message by `id`, matching existing SQLite indexes. Hashes cover a SessionReviewer-defined canonical payload, not SQLite's stored JSON byte layout. `text` parts become messages; a completed `tool` part becomes a tool call followed by a tool result. `step-start`, `step-finish`, and `reasoning` advance the sequence only.
 
 If OpenCode rewrites history or inserts an earlier message, the sequence drifts. Report source drift; do not reorder or guess. An unexpected schema fails closed.
 
@@ -141,7 +141,7 @@ The same Skill semantics are packaged per host: Codex Skill, Claude Skill, OpenC
 
 ### 10.1 Current session
 
-`--session` wins and must be a canonical ID, with unprefixed Codex aliases normalized.
+`--session` wins and must already be canonical.
 
 Otherwise:
 
@@ -199,7 +199,7 @@ session-reviewer review retry --job-id ID --agent-kind KIND --agent-executable A
 
 `KIND` is `codex`, `claude`, or `opencode`. Verify echoes the requested kind. OpenCode returns `compatible: false` until the no-tools contract is proven. Plugin argv remains an allowlist of absolute paths and fixed flags.
 
-Saved Codex executable settings migrate to `{kind: "codex", executable: previousPath}`. Selecting OpenCode as the Obsidian worker is rejected with a compatibility error; the in-agent Skill still works.
+Plugin settings store `agentKind` plus an absolute executable. A previous `codexPath`-only setting is ignored; the user re-verifies the default worker. Selecting OpenCode as the Obsidian worker is rejected with a compatibility error; the in-agent Skill still works.
 
 ## 12. Failure boundaries
 
@@ -217,26 +217,26 @@ Never skip a failed session to continue later sessions. Earlier fully accepted a
 
 ## 13. Compatibility
 
-Existing Codex ledgers, cursors, Obsidian mappings, and unprefixed session IDs remain valid Codex aliases. Evidence, proposal, and ledger schemas do not change. `jsonl_line` remains the monotonic sequence number. New projects and old projects share the same loader.
+Evidence, proposal, and ledger schemas do not change. `jsonl_line` remains the monotonic sequence number. Unprefixed session IDs, legacy cursor filenames, and old plugin `codexPath` settings are out of contract and are not loaded as aliases. Users start from a canonical review on this version.
 
 The 2026-08-28 orchestration design remains the Obsidian job model. This spec replaces only its Codex-only v1 product limit and its leave-Claude/OpenCode-unimplemented non-goal.
 
 ## 14. Delivery slices
 
-1. Fold Codex into the source-adapter interface. Land canonical `codex.` IDs, aliases, `pending`, and `--until-*` on Codex with equivalent current behavior.
+1. Fold Codex into the source-adapter interface. Land canonical `codex.` IDs, `pending`, and `--until-*` on Codex. Update fixtures and tests to canonical IDs; do not keep an unprefixed compatibility path.
 2. Claude collection plus Claude Skill. A Claude-started review accepts pending Claude and Codex sessions into one ledger visible in Obsidian.
 3. OpenCode collection plus OpenCode Skill or command. All three sources can enter the same ledger.
 4. Obsidian settings become default worker kind plus path. Claude may be saved only after verification. OpenCode's isolated worker stays closed.
 
 ## 15. Testing
 
-- Prefix parse/format, unprefixed Codex alias round-trip, and mixed-case OpenCode IDs
+- Prefix parse/format, rejection of unprefixed IDs, and mixed-case OpenCode IDs
 - Claude filename/`sessionId` mismatch and OpenCode schema mismatch
 - Source drift, including `--until-*` reuse versus rescan
 - Missing source skipped; corrupt in-project source fails closed
 - Pending lease busy path
 - Plugin argv allowlist for `--agent-kind`
-- Settings migration from a bare Codex path
+- Ignored legacy `codexPath` settings; user must save `agentKind` plus executable
 - OpenCode Obsidian worker rejected as incompatible
 - Fixture-only Claude JSONL and small OpenCode SQLite; no live 800MB+ database scans
 - Existing Codex prepare/apply/review tests remain green without weakened assertions
