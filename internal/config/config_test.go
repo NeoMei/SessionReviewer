@@ -671,7 +671,6 @@ func TestConfigRejectsUnsafeVaultReviewMapping(t *testing.T) {
 		{name: "device", path: `\\?\C:\Projects\work--11111111\Session Review`, caseMode: platform.CaseSensitive},
 		{name: "reserved", path: "Projects/CON/Session Review", caseMode: platform.CaseSensitive},
 		{name: "trailing dot", path: "Projects/work./Session Review", caseMode: platform.CaseSensitive},
-		{name: "trailing space", path: "Projects/work /Session Review", caseMode: platform.CaseSensitive},
 		{name: "NUL", path: "Projects/work\x00name/Session Review", caseMode: platform.CaseSensitive},
 	}
 	for _, test := range tests {
@@ -684,6 +683,16 @@ func TestConfigRejectsUnsafeVaultReviewMapping(t *testing.T) {
 				t.Fatalf("accepted unsafe mapping path %q", test.path)
 			}
 		})
+	}
+}
+
+func TestConfigAllowsDarwinVaultReviewPathWithTrailingSpaceComponent(t *testing.T) {
+	mapping := ProjectMapping{
+		ID: "project-1111111111111111", Root: "/work", VaultRoot: "/vault",
+		VaultReviewPath: "Projects/work /Session Review", VaultCaseMode: platform.CaseSensitive,
+	}
+	if err := Save(filepath.Join(t.TempDir(), "config.toml"), Config{Version: 1, Projects: []ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
 	}
 }
 

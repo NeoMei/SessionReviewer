@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -76,8 +77,27 @@ func FreezePending(opts FreezeOptions) ([]FrozenSession, error) {
 	}
 	for _, issue := range discovery.Issues {
 		associatedProject, classified := associations[issue.SessionID]
-		if classified && associatedProject != opts.ProjectID {
-			continue
+		if classified {
+			if associatedProject != opts.ProjectID {
+				continue
+			}
+			return nil, fmt.Errorf("session discovery issue could belong to configured project: %w", issue.Err)
+		}
+		if issue.CWD != "" {
+			issueProject, openErr := pathguard.Open(issue.CWD)
+			if openErr == nil {
+				issueIdentity, identityErr := issueProject.PhysicalIdentity()
+				closeErr := issueProject.Close()
+				if identityErr != nil {
+					return nil, fmt.Errorf("identify session discovery project directory: %w", identityErr)
+				}
+				if closeErr != nil {
+					return nil, fmt.Errorf("close session discovery project directory: %w", closeErr)
+				}
+				if issueIdentity != projectIdentity {
+					continue
+				}
+			}
 		}
 		return nil, fmt.Errorf("session discovery issue could belong to configured project: %w", issue.Err)
 	}
@@ -90,7 +110,13 @@ func FreezePending(opts FreezeOptions) ([]FrozenSession, error) {
 		associatedProject, classified := associations[candidate.ID]
 		candidateProject, openErr := pathguard.Open(candidate.CWD)
 		if openErr != nil {
-			if classified && associatedProject != opts.ProjectID {
+			if classified {
+				if associatedProject != opts.ProjectID {
+					continue
+				}
+				return nil, fmt.Errorf("authenticate session project directory: %w", openErr)
+			}
+			if filepath.Clean(candidate.CWD) != filepath.Clean(mapping.Root) {
 				continue
 			}
 			return nil, fmt.Errorf("authenticate session project directory: %w", openErr)

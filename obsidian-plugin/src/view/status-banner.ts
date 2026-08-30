@@ -53,6 +53,7 @@ const REVIEW_FAILURE_TEXT: Record<string, string> = {
   E_AGENT_TOOL_FORBIDDEN: "自动总结尝试调用工具，已安全停止。",
   E_AGENT_CANCELLED: "自动总结已取消。",
   E_PROPOSAL_REJECTED: "总结结果未通过校验，未写入项目。",
+  E_SESSION_DISCOVERY: "项目 Session 扫描失败，请检查 Session 文件后重试。",
   E_APPLY_RECOVERY: "写入状态需要恢复，请重试。",
   E_SYNC_CONFLICT: "已总结，但同步存在冲突，请先处理冲突。",
   E_SYNC_PARTIAL: "已总结，但部分内容尚未同步。"

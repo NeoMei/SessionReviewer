@@ -326,6 +326,50 @@ func TestDiscoverExplicitIDIgnoresUnrelatedCorruptFile(t *testing.T) {
 	}
 }
 
+// This catches rejecting newer Codex subagent metadata merely because source
+// evolved from a string into a structured object. Discovery only needs the
+// session ID and cwd, and must preserve a trailing-space cwd byte-for-byte.
+func TestDiscoverAcceptsStructuredSourceAndPreservesTrailingSpaceCWD(t *testing.T) {
+	root := t.TempDir()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project/AgentWiki ","source":{"subagent":{"thread_spawn":{"depth":1}}}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "selected.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "wanted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveDiscovery(discovery, ResolveOptions{SessionID: "wanted"})
+	if err != nil {
+		t.Fatalf("ResolveDiscovery() error = %v, issues=%+v", err, discovery.Issues)
+	}
+	if got.ID != "wanted" || got.CWD != "/project/AgentWiki " {
+		t.Fatalf("candidate=%+v", got)
+	}
+}
+
+// This catches treating inherited parent metadata in a Codex subagent rollout
+// as a conflicting physical session. Different IDs are legitimate only when
+// both records name the same root session_id and exact cwd.
+func TestDiscoverAcceptsInheritedSubagentMetadataForSameRootSession(t *testing.T) {
+	root := t.TempDir()
+	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"session_id":"root-session","id":"child-session","cwd":"/project/AgentWiki ","source":{"subagent":{"thread_spawn":{"depth":2}}}}}` + "\n" +
+		`{"timestamp":"2026-08-22T00:00:01Z","type":"session_meta","payload":{"session_id":"root-session","id":"parent-session","cwd":"/project/AgentWiki ","source":{"subagent":{"thread_spawn":{"depth":1}}}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(root, "child.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err := Discover(root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Issues) != 0 || len(discovery.Candidates) != 1 {
+		t.Fatalf("discovery=%+v", discovery)
+	}
+	if got := discovery.Candidates[0]; got.ID != "child-session" || got.CWD != "/project/AgentWiki " {
+		t.Fatalf("candidate=%+v", got)
+	}
+}
+
 func TestDiscoverExplicitIDRejectsSelectedCorruptCandidate(t *testing.T) {
 	root := t.TempDir()
 	body := `{"timestamp":"2026-08-22T00:00:00Z","type":"session_meta","payload":{"id":"wanted","cwd":"/project"}}` + "\n{broken\n"

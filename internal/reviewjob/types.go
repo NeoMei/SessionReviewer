@@ -111,6 +111,7 @@ const (
 	AgentToolForbidden ErrorCode = "E_AGENT_TOOL_FORBIDDEN"
 	AgentCancelled     ErrorCode = "E_AGENT_CANCELLED"
 	ProposalRejected   ErrorCode = "E_PROPOSAL_REJECTED"
+	SessionDiscovery   ErrorCode = "E_SESSION_DISCOVERY"
 	ApplyRecovery      ErrorCode = "E_APPLY_RECOVERY"
 	SyncConflict       ErrorCode = "E_SYNC_CONFLICT"
 	SyncPartial        ErrorCode = "E_SYNC_PARTIAL"
@@ -608,7 +609,7 @@ func terminal(value State) bool { return !active(value) }
 
 func validErrorCode(value ErrorCode) bool {
 	switch value {
-	case AgentUnconfigured, AgentIncompatible, AgentAuth, AgentBusy, AgentTimeout, AgentToolForbidden, AgentCancelled, ProposalRejected, ApplyRecovery, SyncConflict, SyncPartial:
+	case AgentUnconfigured, AgentIncompatible, AgentAuth, AgentBusy, AgentTimeout, AgentToolForbidden, AgentCancelled, ProposalRejected, SessionDiscovery, ApplyRecovery, SyncConflict, SyncPartial:
 		return true
 	default:
 		return false

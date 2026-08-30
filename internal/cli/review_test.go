@@ -196,6 +196,28 @@ func TestRunReviewStartPersistsFrozenLaunchIntentBeforeSpawn(t *testing.T) {
 	}
 }
 
+func TestRunReviewStartClassifiesFreezeFailureAsSessionDiscovery(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	const privateCanary = "private-session-path-canary"
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) {
+		return nil, errors.New(privateCanary)
+	}
+	t.Cleanup(resetReviewCLISeams)
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--json", "--agent-executable", fixture.executable, "--project-id", fixture.projectID}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 || strings.Contains(out.String(), privateCanary) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.Idle || status.ErrorCode != "E_SESSION_DISCOVERY" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunReviewStartRepairsPartialPointerCommitAndLaunchesSameJob(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {

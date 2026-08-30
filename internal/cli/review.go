@@ -539,13 +539,13 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	}
 	sessions, err := platform.ResolveSessionsRoot("", currentEnv())
 	if err != nil {
-		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+		return writeReviewOperational(stdout, projectID, reviewjob.SessionDiscovery)
 	}
 	frozen, err := reviewFreeze(reviewjob.FreezeOptions{
 		SessionsRoot: sessions.Path, DataRoot: dataDir, ProjectID: projectID, ProjectIdentity: mapping.projectIdentity,
 	})
 	if err != nil {
-		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
+		return writeReviewOperational(stdout, projectID, reviewjob.SessionDiscovery)
 	}
 	binary, err := reviewCurrentExecutable()
 	if err != nil {
