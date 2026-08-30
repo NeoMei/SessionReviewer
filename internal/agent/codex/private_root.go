@@ -27,16 +27,17 @@ func PrepareWorkingDirectory(path string) error {
 		return errors.New("private working root is not a physical directory")
 	}
 	physical, err := filepath.EvalSymlinks(path)
-	if err != nil || !filepath.IsAbs(physical) || !canonicalPathEqual(filepath.Clean(physical), path) {
-		return errors.New("private working root path is not canonical")
+	if err != nil || !filepath.IsAbs(physical) {
+		return errors.New("private working root cannot be resolved")
 	}
-	anchor, err := os.Open(path)
+	physical = filepath.Clean(physical)
+	anchor, err := os.Open(physical)
 	if err != nil {
 		return err
 	}
 	defer anchor.Close()
 	opened, err := anchor.Stat()
-	visible, visibleErr := os.Stat(path)
+	visible, visibleErr := os.Stat(physical)
 	if err != nil || visibleErr != nil || !os.SameFile(requested, opened) || !os.SameFile(opened, visible) {
 		return errPrivateRootIdentityChanged
 	}
@@ -47,15 +48,15 @@ func PrepareWorkingDirectory(path string) error {
 	if err := anchor.Chmod(0o700); err != nil {
 		return err
 	}
-	if err := protectPrivateDirectory(path, anchor); err != nil {
+	if err := protectPrivateDirectory(physical, anchor); err != nil {
 		return err
 	}
 	protected, err := anchor.Stat()
-	visible, visibleErr = os.Stat(path)
+	visible, visibleErr = os.Stat(physical)
 	if err != nil || visibleErr != nil || !os.SameFile(opened, protected) || !os.SameFile(protected, visible) {
 		return errPrivateRootIdentityChanged
 	}
-	return validatePrivateDirectory(path, anchor, protected)
+	return validatePrivateDirectory(physical, anchor, protected)
 }
 
 // privateRoot pins a physical directory with os.Root. Every descendant
