@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -387,7 +388,7 @@ func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter *verif
 	return RunOptions{
 		Store: fixture.store, JobID: fixture.job.ID, OwnerID: "worker-owner-1",
 		LeaseTimeout: 0, ProjectRoot: fixture.project, VaultRoot: fixture.vault,
-		DataDir: fixture.data, GOOS: "test", AgentTimeout: time.Minute,
+		DataDir: fixture.data, GOOS: runtime.GOOS, AgentTimeout: time.Minute,
 		Now:     func() time.Time { return fixture.now },
 		Prepare: prepare, Agent: handle, Apply: applyFn, Sync: syncFn, Pricing: pricing,
 	}
@@ -828,7 +829,7 @@ func TestWorkerRejectsVaultRootOutsideConfiguredMapping(t *testing.T) {
 }
 
 // Accepting a structurally plausible but unverified capability would recreate
-// the forbidden Codex 0.147 production bypass from Ruling P5.
+// a provider-specific production verification bypass.
 func TestWorkerRejectsUnverifiedCapabilityBeforePrepare(t *testing.T) {
 	hash := strings.Repeat("d", 64)
 	fixture := newWorkerFixture(t, []FrozenSession{{

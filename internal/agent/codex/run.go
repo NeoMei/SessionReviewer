@@ -251,7 +251,7 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 	}
 	return agent.Result{
 		Proposal: append([]byte(nil), parsed.proposal...),
-		// Ruling P3: Codex 0.147.x does not expose provider model provenance
+		// The reviewed Codex JSONL contract does not expose provider model provenance
 		// in exec JSONL. Empty is authoritative and must not be guessed.
 		Model: "",
 		Usage: parsed.usage,

@@ -16,7 +16,7 @@ const PRESENTATIONS: Record<Diagnostic["code"], StatusPresentation> = {
   review_parse_failed: { title: "项目回顾暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目回顾" },
   stale_snapshot: { title: "正在显示上次可信内容", explanation: "当前文件身份、引用或 revision 不一致。", action: "重新加载" },
   sync_not_run: { title: "等待同步到代码目录", explanation: "新的人类内容已显示，机器用量仍来自上次验收。", action: "查看同步状态" },
-  cli_unavailable: { title: "未连接 SessionReviewer CLI", explanation: "阅读和 Markdown 编辑仍可用，同步与冲突处理需要配置 CLI。", action: "配置 CLI" }
+  cli_unavailable: { title: "尚未发现 SessionReviewer", explanation: "阅读和 Markdown 编辑仍可用；如需总结或同步，请先在 Agent 中运行一次 SessionReviewer。" }
 };
 
 export function statusPresentation(code: Diagnostic["code"]): StatusPresentation {
@@ -45,7 +45,7 @@ const REVIEW_PHASE_LABELS: Record<ReviewPhase, string> = {
 };
 
 const REVIEW_FAILURE_TEXT: Record<string, string> = {
-  E_AGENT_UNCONFIGURED: "尚未配置 Codex，请先在设置中验证。",
+  E_AGENT_UNCONFIGURED: "未发现可用的 Codex，请先在 Agent 中运行一次 SessionReviewer。",
   E_AGENT_INCOMPATIBLE: "当前 Codex 版本暂不兼容自动总结。",
   E_AGENT_AUTH: "Codex 登录已失效，请先在终端重新登录。",
   E_AGENT_BUSY: "已有自动总结任务正在运行。",

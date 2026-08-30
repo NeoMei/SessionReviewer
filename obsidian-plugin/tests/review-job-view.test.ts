@@ -55,12 +55,12 @@ function fakeRunner() {
 type FakeRepository = ReturnType<typeof fakeRepository>;
 type FakeRunner = ReturnType<typeof fakeRunner>;
 
-async function openView(runner: FakeRunner, repository: FakeRepository, agentExecutable = AGENT): Promise<ProjectEvolutionView> {
+async function openView(runner: FakeRunner | undefined, repository: FakeRepository, agentExecutable = AGENT): Promise<ProjectEvolutionView> {
   const view = new ProjectEvolutionView(
     new WorkspaceLeaf(),
     repository as unknown as ProjectRepository,
     undefined,
-    runner as unknown as CliRunner,
+    runner as unknown as CliRunner | undefined,
     defaultViewState(),
     undefined,
     agentExecutable
@@ -80,6 +80,16 @@ afterEach(() => {
 });
 
 describe("review job view", () => {
+  it("directs a missing CLI installation back to the Agent instead of settings", async () => {
+    const repository = fakeRepository([PROJECT_A]);
+    const view = await openView(undefined, repository, "");
+
+    const banner = view.contentEl.querySelector<HTMLElement>(".sr-banner-cli_unavailable")!;
+    expect(banner.textContent).toContain("请先在 Agent 中运行一次 SessionReviewer");
+    expect(banner.textContent).not.toContain("配置 CLI");
+    await view.onClose();
+  });
+
   it("keeps one review action in the header meta and no banner while idle", async () => {
     const repository = fakeRepository([PROJECT_A]);
     const runner = fakeRunner();
@@ -119,7 +129,7 @@ describe("review job view", () => {
     await view.onClose();
   });
 
-  it("shows a visible notice when Codex is not configured and never starts a job", async () => {
+  it("directs the user back to the Agent when Codex was not auto-discovered", async () => {
     const repository = fakeRepository([PROJECT_A]);
     const runner = fakeRunner();
     const view = await openView(runner, repository, "");
@@ -129,7 +139,7 @@ describe("review job view", () => {
     await settle();
 
     expect(runner.startReview).not.toHaveBeenCalled();
-    expect(noticeInstances()).toContain("尚未配置 Codex，请先在设置中验证。");
+    expect(noticeInstances()).toContain("未发现可用的 Codex，请先在 Agent 中运行一次 SessionReviewer。");
     await view.onClose();
   });
 
@@ -268,7 +278,7 @@ describe("review job view", () => {
     await view.onClose();
   });
 
-  it("explains that Codex must be configured when starting without an agent path", async () => {
+  it("keeps the Agent discovery guidance visible when starting without an agent path", async () => {
     const repository = fakeRepository([PROJECT_A]);
     const runner = fakeRunner();
     const view = await openView(runner, repository, "");
@@ -277,7 +287,7 @@ describe("review job view", () => {
     await settle();
 
     expect(runner.startReview).not.toHaveBeenCalled();
-    expect(view.contentEl.querySelector(".sr-sr-only")?.textContent).toContain("尚未配置 Codex，请先在设置中验证。");
+    expect(view.contentEl.querySelector(".sr-sr-only")?.textContent).toContain("未发现可用的 Codex，请先在 Agent 中运行一次 SessionReviewer。");
   });
 
   it("stops polling when the view closes", async () => {

@@ -1006,7 +1006,7 @@ func TestRunReviewRetryWorkerRootAuthenticationFailureTerminalizesOwnedLaunch(t 
 	}
 }
 
-func TestReviewProduction0147FailsClosedBeforeJobCreation(t *testing.T) {
+func TestReviewUnreviewed0147FailsClosedBeforeJobCreation(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	executable := filepath.Join(t.TempDir(), "fake-codex")
 	if runtime.GOOS == "windows" {
@@ -1017,6 +1017,7 @@ func TestReviewProduction0147FailsClosedBeforeJobCreation(t *testing.T) {
 		t.Fatalf("build fake Codex: %v\n%s", err, output)
 	}
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "success")
+	t.Setenv("SESSIONREVIEWER_FAKE_VERSION", "codex-cli 0.147.0")
 	resetReviewCLISeams()
 	t.Cleanup(resetReviewCLISeams)
 	var out, errOut bytes.Buffer

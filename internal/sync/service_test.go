@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	stdsync "sync"
 	"testing"
@@ -2281,6 +2282,9 @@ func TestReviewTargetPinRechecksRelocationAtMissingComponentMutationBoundary(t *
 }
 
 func TestReviewTargetPinRechecksRelocationBeforeMissingComponentProtection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents relocating the pinned directory while its protection handle is open")
+	}
 	for _, destination := range []string{"project", "data"} {
 		t.Run(destination, func(t *testing.T) {
 			fixture := newEngineFixture(t)
@@ -2809,6 +2813,9 @@ func TestVaultAtomicPublicationRechecksRelocationAtTheMutationBoundary(t *testin
 }
 
 func TestVaultAtomicRollbackLinkRechecksRelocationAfterTemporarySync(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents relocating the pinned target while its authorization handle is open")
+	}
 	for _, destination := range []string{"project", "data"} {
 		t.Run(destination, func(t *testing.T) {
 			fixture := newEngineFixture(t)
@@ -2891,6 +2898,9 @@ func TestVaultAtomicRollbackLinkRechecksRelocationAfterTemporarySync(t *testing.
 }
 
 func TestVaultAtomicRecoveryCleanupRechecksRelocationBeforeRemovingRollbackAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents relocating the pinned target while its authorization handle is open")
+	}
 	for _, destination := range []string{"project", "data"} {
 		t.Run(destination, func(t *testing.T) {
 			fixture := newEngineFixture(t)
@@ -2973,6 +2983,9 @@ func TestVaultDirectoryCreationRechecksRelocationAtTheMutationBoundary(t *testin
 }
 
 func TestLegacyVaultRetirementRechecksEveryRemovalMutation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents relocating the pinned target while its authorization handle is open")
+	}
 	for _, mutation := range []struct {
 		name  string
 		class vaultMutationClass
@@ -3026,6 +3039,9 @@ func TestLegacyVaultRetirementRechecksEveryRemovalMutation(t *testing.T) {
 }
 
 func TestVaultTransactionRecoveryRechecksRelocationAtWriteBoundary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows prevents relocating the pinned target while its authorization handle is open")
+	}
 	for _, destination := range []string{"project", "data"} {
 		t.Run(destination, func(t *testing.T) {
 			fixture := newEngineFixture(t)

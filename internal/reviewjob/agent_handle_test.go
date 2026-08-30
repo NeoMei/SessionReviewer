@@ -31,7 +31,19 @@ func TestAgentHandleHasNoExportedForgeableState(t *testing.T) {
 	}
 }
 
-func TestVerifyAgentCodex0147CannotProduceHandle(t *testing.T) {
+func TestRestrictedCapabilityDoesNotClaimOrRequireAnEmptyToolRegistry(t *testing.T) {
+	capability := agent.Capability{
+		Provider: "codex", Version: "0.150.1", ProposalOnly: true, NoTools: false,
+		ReadOnly: true, Containment: agent.ContainmentRestrictedReadOnly,
+		StructuredOutput: true, NativeCancellation: true,
+		ModelProvenance: agent.ModelProvenanceUnavailable,
+	}
+	if err := validateCapabilityContract(capability); err != nil {
+		t.Fatalf("restricted capability rejected: %v", err)
+	}
+}
+
+func TestVerifyAgentCodex0150ProducesRestrictedHandle(t *testing.T) {
 	executable := filepath.Join(t.TempDir(), "codex")
 	if runtime.GOOS == "windows" {
 		executable += ".exe"
@@ -42,12 +54,12 @@ func TestVerifyAgentCodex0147CannotProduceHandle(t *testing.T) {
 	}
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "success")
 	handle, err := VerifyAgent(t.Context(), "codex", executable)
-	if handle != nil {
-		t.Fatal("Codex 0.147 produced a production AgentHandle")
+	if err != nil || handle == nil {
+		t.Fatalf("Codex 0.150 did not produce a restricted AgentHandle: handle=%v err=%v", handle, err)
 	}
-	code, ok := agent.CodeOf(err)
-	if !ok || code != agent.CodeIncompatible {
-		t.Fatalf("VerifyAgent() error=%v code=%q found=%v", err, code, ok)
+	verified, err := handle.VerifiedAgent()
+	if err != nil || verified.Kind != "codex" || verified.Version != "0.150.1" {
+		t.Fatalf("verified Agent=%+v err=%v", verified, err)
 	}
 }
 

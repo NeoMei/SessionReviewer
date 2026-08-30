@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const defaultVersion = "codex-cli 0.147.0"
+const defaultVersion = "codex-cli 0.150.1"
 
 type fakeFeature struct {
 	name           string
@@ -129,7 +129,25 @@ responses_websockets|removed|false
 responses_websockets_v2|removed|false
 remote_compaction_v2|stable|true
 use_agent_identity|under development|false
-workspace_dependencies|stable|true`
+workspace_dependencies|stable|true
+apply_patch_preserve_line_endings|under development|false
+background_paginated_rollout_migration|under development|false
+code_mode_interrupt|under development|false
+content_item_kinds|under development|false
+cwd_relative_turn_diffs|under development|false
+guardian_enhanced_node_repl_transcripts|under development|false
+guardian_ext|under development|false
+guardian_node_repl_transcript_images|under development|false
+guardian_reuse_parent_compaction|under development|false
+in_app_chat|stable|true
+in_app_dictation|stable|true
+in_app_local_automation|stable|true
+psp|under development|false
+retain_client_developer_messages|under development|false
+send_async_message|removed|false
+shell_snapshot_v2|under development|false
+transcript_v2|under development|false
+unified_image_budget|under development|false`
 
 func buildFeatures() []fakeFeature {
 	lines := strings.Split(featureFingerprint, "\n")

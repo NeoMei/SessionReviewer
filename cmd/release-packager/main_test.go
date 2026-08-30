@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,10 +67,11 @@ func TestCommonEntriesPackagesAuthoritativeReviewV2SchemaBytes(t *testing.T) {
 	}
 }
 
-func TestReleaseWrappersDefaultToV023AndPassExactSourceAndDist(t *testing.T) {
+func TestReleaseWrappersDefaultToCurrentManifestVersionAndPassExactSourceAndDist(t *testing.T) {
+	version := currentReleaseVersion(t)
 	checks := map[string][]string{
-		"../../scripts/build-release.sh":  {"version=${1:-0.2.5}", "--source .", "--dist \"$dist\""},
-		"../../scripts/build-release.ps1": {"[string]$Version = \"0.2.5\"", "--source .", "--dist $Dist"},
+		"../../scripts/build-release.sh":  {"version=${1:-" + version + "}", "--source .", "--dist \"$dist\""},
+		"../../scripts/build-release.ps1": {"[string]$Version = \"" + version + "\"", "--source .", "--dist $Dist"},
 	}
 	for name, required := range checks {
 		body, err := os.ReadFile(name)
@@ -90,16 +92,20 @@ func TestCIExecutesBothReleaseWrappersTwiceAndVerifiesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	if strings.Count(text, "./scripts/build-release.sh 0.2.5") != 2 {
+	if !strings.Contains(text, `RELEASE_VERSION=$(node -p \"require('./obsidian-plugin/package.json').version\")`) {
+		t.Fatalf("CI must resolve the release version from the plugin package:\n%s", text)
+	}
+	if strings.Count(text, `./scripts/build-release.sh "$RELEASE_VERSION"`) != 2 {
 		t.Fatalf("CI must execute the shell wrapper twice:\n%s", text)
 	}
-	if strings.Count(text, `.\scripts\build-release.ps1 -Version 0.2.5`) != 2 {
+	if strings.Count(text, `.\scripts\build-release.ps1 -Version $env:RELEASE_VERSION`) != 2 {
 		t.Fatalf("CI must execute the PowerShell wrapper twice:\n%s", text)
 	}
 	for _, required := range []string{
-		"session-reviewer_0.2.5_darwin_amd64.tar.gz",
-		"session-reviewer_0.2.5_darwin_arm64.tar.gz",
-		"session-reviewer_0.2.5_windows_amd64.zip",
+		"session-reviewer_${RELEASE_VERSION}_darwin_amd64.tar.gz",
+		"session-reviewer_${RELEASE_VERSION}_darwin_arm64.tar.gz",
+		"session-reviewer_${RELEASE_VERSION}_windows_amd64.zip",
+		"session-reviewer_$($env:RELEASE_VERSION)_windows_amd64.zip",
 		"shasum -a 256 -c SHA256SUMS", "Get-FileHash -Algorithm SHA256",
 		"session-reviewer/schemas/review-ledger-v2.schema.json",
 		`session-reviewer\schemas\review-ledger-v2.schema.json`,
@@ -108,6 +114,24 @@ func TestCIExecutesBothReleaseWrappersTwiceAndVerifiesArtifacts(t *testing.T) {
 			t.Errorf("CI packaging gate missing %q", required)
 		}
 	}
+}
+
+func currentReleaseVersion(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile("../../manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version == "" {
+		t.Fatal("manifest version is empty")
+	}
+	return manifest.Version
 }
 
 func TestReadmeDocumentsPublicReviewV2Workflow(t *testing.T) {

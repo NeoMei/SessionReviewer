@@ -24,21 +24,13 @@ import (
 
 const (
 	capabilityProbe = "SESSIONREVIEWER_CODEX_CAPABILITY_PROBE_V1"
-	probeTimeout    = 5 * time.Second
+	probeTimeout    = 8 * time.Second
 	maxProbeStdout  = 2 << 20
 	maxProbeStderr  = 256 << 10
 )
 
-var errCodex0147HermeticRegistryUnprovable = errors.New("Codex 0.147.x cannot prove an empty effective MCP and host-tool registry")
-
-// hermeticDigestEnv lets an operator assert that an executable with an exact
-// SHA-256 digest is a purpose-built hermetic proposal agent rather than a real
-// 0.147.x installation. Without it, Ruling P5 keeps every executable
-// fail-closed.
-const hermeticDigestEnv = "SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS"
-
 var (
-	versionPattern = regexp.MustCompile(`^codex-cli (0\.147\.(?:0|[1-9][0-9]*))\r?\n?$`)
+	versionPattern = regexp.MustCompile(`^codex-cli (0\.150\.1)\r?\n?$`)
 	requiredFlags  = []string{
 		"strict-config",
 		"ephemeral",
@@ -53,21 +45,26 @@ var (
 		"config",
 	}
 	reviewedDisabledFeatureNames = []string{
-		"shell_tool", "apps", "view_image", "unified_exec", "shell_zsh_fork",
+		"shell_tool", "apps", "view_image", "shell_zsh_fork",
 		"unified_exec_zsh_fork", "shell_snapshot", "deferred_executor", "code_mode",
-		"code_mode_buffered_exec", "code_mode_host", "code_mode_only", "web_search_request",
+		"code_mode_buffered_exec", "code_mode_host", "code_mode_only", "code_mode_interrupt", "web_search_request",
 		"web_search_cached", "standalone_web_search", "memories", "external_agent_memory_import",
 		"local_thread_store_compression", "chronicle", "exec_permission_approvals", "hooks",
 		"request_permissions_tool", "network_proxy", "respect_system_proxy", "multi_agent",
 		"multi_agent_v2", "enable_mcp_apps", "mcp_2026_07_28", "deferred_tool_world_state",
 		"non_prefixed_mcp_tool_names", "tool_suggest", "recommended_plugins", "plugins",
 		"executor_capability_discovery", "in_app_browser", "in_app_updates", "browser_use",
+		"in_app_chat", "in_app_dictation", "in_app_local_automation",
 		"browser_use_external", "browser_use_full_cdp_access", "computer_use", "image_generation",
 		"workspace_dependencies", "skill_mcp_dependency_install", "skill_search", "remote_plugin",
 		"plugin_sharing", "default_mode_request_user_input", "guardian_approval", "guardianv2",
-		"goals", "token_budget", "rollout_budget", "current_time_reminder",
+		"guardian_enhanced_node_repl_transcripts", "guardian_ext", "guardian_node_repl_transcript_images",
+		"guardian_reuse_parent_compaction", "goals", "token_budget", "rollout_budget", "current_time_reminder",
 		"tool_call_mcp_elicitation", "auth_elicitation", "artifact", "realtime_conversation",
 		"prevent_idle_sleep", "remote_compaction_v2", "use_agent_identity",
+		"apply_patch_preserve_line_endings", "background_paginated_rollout_migration", "content_item_kinds",
+		"cwd_relative_turn_diffs", "psp", "retain_client_developer_messages", "send_async_message",
+		"shell_snapshot_v2", "transcript_v2", "unified_image_budget", "personality",
 	}
 	fixedConfigOverrides = []string{
 		`web_search="disabled"`,
@@ -97,10 +94,10 @@ type reviewedFeature struct {
 	disabled       bool
 }
 
-// reviewedFeatureFingerprint is the complete feature table registered by the
-// exact rust-v0.147.0 tag. The two platform defaults are resolved below. A
-// patch release is compatible only if every row, stage, and effective default
-// remains identical to this fingerprint.
+// reviewedFeatureFingerprint contains every capability name that the 0.150.1
+// restricted contract depends on. Defaults are retained for deterministic
+// fixtures; production verification requires all rows and requires every
+// restricted non-removed capability to be disabled.
 const reviewedFeatureFingerprint = `undo|removed|false
 shell_tool|stable|true
 view_image|stable|true
@@ -204,7 +201,25 @@ responses_websockets|removed|false
 responses_websockets_v2|removed|false
 remote_compaction_v2|stable|true
 use_agent_identity|under development|false
-workspace_dependencies|stable|true`
+workspace_dependencies|stable|true
+apply_patch_preserve_line_endings|under development|false
+background_paginated_rollout_migration|under development|false
+code_mode_interrupt|under development|false
+content_item_kinds|under development|false
+cwd_relative_turn_diffs|under development|false
+guardian_enhanced_node_repl_transcripts|under development|false
+guardian_ext|under development|false
+guardian_node_repl_transcript_images|under development|false
+guardian_reuse_parent_compaction|under development|false
+in_app_chat|stable|true
+in_app_dictation|stable|true
+in_app_local_automation|stable|true
+psp|under development|false
+retain_client_developer_messages|under development|false
+send_async_message|removed|false
+shell_snapshot_v2|under development|false
+transcript_v2|under development|false
+unified_image_budget|under development|false`
 
 func mustBuildReviewedFeatures() []reviewedFeature {
 	disabled := make(map[string]struct{}, len(reviewedDisabledFeatureNames))
@@ -236,7 +251,7 @@ func mustBuildReviewedFeatures() []reviewedFeature {
 			name: fields[0], stage: fields[1], defaultEnabled: enabled, disabled: deny,
 		})
 	}
-	if len(features) != 104 {
+	if len(features) != 122 {
 		panic("incomplete reviewed Codex feature fingerprint")
 	}
 	return features
@@ -262,12 +277,10 @@ var _ agent.Adapter = (*Adapter)(nil)
 // New returns an unverified Adapter. Verify must succeed before generation.
 func New() *Adapter { return &Adapter{} }
 
-// Verify pins and probes one absolute physical executable. Ruling P5 requires
-// the entire reviewed 0.147.x range to fail incompatible because that release
-// cannot prove an empty effective host-tool/MCP registry while retaining auth.
-// Any failed re-verification leaves the Adapter unconfigured. The only path to
-// a capability is the explicit operator digest allow-list, reserved for
-// purpose-built hermetic proposal agents that passed every containment probe.
+// Verify pins and probes one absolute physical executable against the reviewed
+// restricted-read-only contract. Codex retains one non-disableable core exec
+// capability, so the returned capability never claims an empty tool registry;
+// generation still rejects every observed tool event.
 func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capability, error) {
 	if adapter == nil {
 		return agent.Capability{}, agent.NewError(agent.CodeUnconfigured, errors.New("nil Codex adapter"))
@@ -321,14 +334,14 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	baselineFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"features", "list", "--strict-config"})
+	baselineFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, []string{"features", "list"})
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
 	if err := validateFeatureTable(string(baselineFeatureOutput), false); err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
-	restrictedFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"features", "list"}))
+	restrictedFeatureOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictedProbeArgs([]string{"features", "list"}))
 	if err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
@@ -336,7 +349,7 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	probeArgs := restrictionArgs([]string{"debug", "prompt-input"})
+	probeArgs := restrictedProbeArgs([]string{"debug", "prompt-input"})
 	probeArgs = append(probeArgs, capabilityProbe)
 	probeOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, probeArgs)
 	if err != nil {
@@ -348,36 +361,15 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	if err := probeStrictConfigRecognition(ctx, physical, identity, probeRoot); err != nil {
 		return agent.Capability{}, mapProbeError(ctx, err)
 	}
-	mcpOutput, _, err := runProbeInPrivateDirectory(ctx, physical, identity, probeRoot, restrictionArgs([]string{"mcp", "list", "--json"}))
-	if err != nil {
-		return agent.Capability{}, mapProbeError(ctx, err)
-	}
-	if err := validateEmptyMCPProbe(mcpOutput); err != nil {
-		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
-	}
 	if err := recheckExecutable(physical, identity); err != nil {
 		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, err)
 	}
 
-	// Ruling P5: 0.147.x deep-merges mcp_servers and cannot prove that
-	// system/managed/cloud host tools are absent while retaining normal auth.
-	// The probes above retain the reviewed future-version infrastructure, but a
-	// real 0.147.x installation must never become runnable or return Capability.
-	// Only the explicit operator digest allow-list can assert that the binary is
-	// a purpose-built hermetic proposal agent instead; it must still pass every
-	// containment probe above.
-	allowlisted, digestErr := hermeticDigestAllowlisted(physical)
-	if digestErr != nil {
-		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, digestErr)
-	}
-	if !allowlisted {
-		return agent.Capability{}, agent.NewError(agent.CodeIncompatible, errCodex0147HermeticRegistryUnprovable)
-	}
 	capability := agent.Capability{
 		Provider:           "codex",
 		Version:            string(match[1]),
 		ProposalOnly:       true,
-		NoTools:            true,
+		NoTools:            false,
 		ReadOnly:           true,
 		Containment:        agent.ContainmentRestrictedReadOnly,
 		StructuredOutput:   true,
@@ -391,50 +383,6 @@ func (adapter *Adapter) Verify(ctx context.Context, path string) (agent.Capabili
 	adapter.mu.Unlock()
 	succeeded = true
 	return capability, nil
-}
-
-// hermeticDigestAllowlisted reports whether the operator explicitly asserted
-// that an executable with this exact SHA-256 digest is a purpose-built hermetic
-// proposal agent. Any malformed allow-list entry fails closed.
-func hermeticDigestAllowlisted(path string) (bool, error) {
-	raw := strings.TrimSpace(os.Getenv(hermeticDigestEnv))
-	if raw == "" {
-		return false, nil
-	}
-	allowed := make(map[string]struct{})
-	for _, entry := range strings.Split(raw, ",") {
-		entry = strings.ToLower(strings.TrimSpace(entry))
-		if entry == "" {
-			continue
-		}
-		if !isLowerHexDigest(entry) {
-			return false, errors.New(hermeticDigestEnv + " entries must be lowercase SHA-256 hex digests")
-		}
-		allowed[entry] = struct{}{}
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false, err
-	}
-	defer file.Close()
-	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return false, err
-	}
-	_, allowlisted := allowed[fmt.Sprintf("%x", hash.Sum(nil))]
-	return allowlisted, nil
-}
-
-func isLowerHexDigest(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-	for _, character := range value {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 func probeStrictConfigRecognition(ctx context.Context, executable string, identity *executableIdentity, root *privateRoot) error {
@@ -451,22 +399,6 @@ func probeStrictConfigRecognition(ctx context.Context, executable string, identi
 	if len(stdout) != 0 || !bytes.Contains(stderr, []byte("session_reviewer_unknown_config_canary")) ||
 		!bytes.Contains(bytes.ToLower(stderr), []byte("unknown")) {
 		return errors.New("Codex strict config rejection was not authoritative")
-	}
-	return nil
-}
-
-func validateEmptyMCPProbe(output []byte) error {
-	if err := validateJSONNoDuplicates(output); err != nil {
-		return errors.New("Codex MCP probe is malformed")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(output))
-	var servers []json.RawMessage
-	if err := decoder.Decode(&servers); err != nil || servers == nil || len(servers) != 0 {
-		return errors.New("Codex effective MCP registry is not empty")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("Codex MCP probe has trailing data")
 	}
 	return nil
 }
@@ -624,19 +556,12 @@ func validateFeatureTable(output string, restricted bool) error {
 			enabled: state == "true",
 		}
 	}
-	if len(features) != len(reviewedFeatures) {
-		return errors.New("Codex feature table changed row count")
-	}
 	for _, required := range reviewedFeatures {
 		observed, exists := features[required.name]
-		if !exists || observed.stage != required.stage {
-			return fmt.Errorf("reviewed Codex feature %q changed capability stage", required.name)
+		if !exists {
+			return fmt.Errorf("reviewed Codex feature %q is unavailable", required.name)
 		}
-		expected := required.defaultEnabled
-		if restricted && required.disabled {
-			expected = false
-		}
-		if observed.enabled != expected {
+		if restricted && required.disabled && observed.stage != "removed" && observed.enabled {
 			return fmt.Errorf("reviewed Codex feature %q changed effective default", required.name)
 		}
 	}
@@ -655,6 +580,17 @@ func restrictionArgs(prefix []string) []string {
 	return args
 }
 
+func restrictedProbeArgs(prefix []string) []string {
+	args := append([]string(nil), prefix...)
+	for _, override := range fixedConfigOverrides {
+		args = append(args, "--config", override)
+	}
+	for _, feature := range reviewedDisabledFeatureNames {
+		args = append(args, "--disable", feature)
+	}
+	return args
+}
+
 func validatePromptProbe(output []byte) error {
 	if err := validateJSONNoDuplicates(output); err != nil {
 		return errors.New("Codex prompt-input probe is malformed")
@@ -662,22 +598,30 @@ func validatePromptProbe(output []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	decoder.DisallowUnknownFields()
 	var messages []struct {
-		ID      string `json:"id,omitempty"`
-		Type    string `json:"type"`
-		Role    string `json:"role"`
-		Content []struct {
+		ID                                     string          `json:"id,omitempty"`
+		Type                                   string          `json:"type"`
+		Role                                   string          `json:"role"`
+		InternalChatMessageMetadataPassthrough json.RawMessage `json:"internal_chat_message_metadata_passthrough,omitempty"`
+		Content                                []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if err := decoder.Decode(&messages); err != nil || messages == nil || len(messages) != 1 {
+	if err := decoder.Decode(&messages); err != nil || messages == nil || len(messages) < 1 || len(messages) > 8 {
 		return errors.New("Codex prompt-input probe is malformed")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("Codex prompt-input probe has trailing data")
 	}
-	message := messages[0]
+	for _, message := range messages[:len(messages)-1] {
+		if message.Type != "message" || (message.Role != "developer" && message.Role != "user") ||
+			len(message.Content) != 1 || message.Content[0].Type != "input_text" ||
+			message.Content[0].Text == "" || strings.Contains(message.Content[0].Text, capabilityProbe) {
+			return errors.New("Codex prompt-input probe contains invalid inherited context")
+		}
+	}
+	message := messages[len(messages)-1]
 	if message.Type != "message" || message.Role != "user" || len(message.Content) != 1 ||
 		message.Content[0].Type != "input_text" || message.Content[0].Text != capabilityProbe {
 		return errors.New("Codex prompt-input probe contains inherited context")

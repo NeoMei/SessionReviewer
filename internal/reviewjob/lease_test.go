@@ -79,6 +79,9 @@ func TestLeaseAbruptProcessExitReleasesKernelOwnership(t *testing.T) {
 }
 
 func TestLeaseStaleMetadataNeverOverridesLiveKernelLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies metadata replacement while the kernel lock handle is live")
+	}
 	root := newStoreWithJob(t)
 	exitGate := filepath.Join(t.TempDir(), "exit")
 	command, result := startLeaseHelper(t, root, "project-1", "job-child", exitGate)
@@ -112,7 +115,9 @@ func TestLeaseMetadataUsesExactPrivateStablePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer leases.Release()
+	if err := leases.Release(); err != nil {
+		t.Fatal(err)
+	}
 
 	var owners []leaseOwner
 	for _, name := range []string{"review-jobs/locks/projects/project-1.lock", "review-jobs/locks/global.lock"} {
@@ -303,6 +308,9 @@ func TestInterruptedLeaseBackedJobBecomesApplyRecoveryWithoutInferringReceiptSta
 }
 
 func TestInterruptedRecoveryUsesOnePinnedStoreAcrossDataReplacement(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows denies replacing the pinned store namespace while handles are open")
+	}
 	for _, replaceAtRead := range []int{1, 2} {
 		name := "before_lease"
 		if replaceAtRead == 2 {

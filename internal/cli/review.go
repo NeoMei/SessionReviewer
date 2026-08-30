@@ -251,7 +251,7 @@ func safeReviewID(value string) bool {
 }
 
 func runReviewVerify(executable string, stdout io.Writer) int {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	verified, err := reviewVerify(ctx, executable)
 	response := reviewVerifyResponse{SchemaVersion: reviewjob.PublicStatusSchemaVersion, Kind: "codex"}
@@ -507,7 +507,7 @@ func runReviewStart(dataDir, projectID, executable string, stdout io.Writer) int
 	if err != nil {
 		return writeReviewOperational(stdout, projectID, reviewjob.ApplyRecovery)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	verified, err := reviewVerify(ctx, executable)
 	cancel()
 	if err != nil {
@@ -717,7 +717,7 @@ func runReviewRetry(dataDir, jobID, executable string, expectedAttempt, expected
 	if _, err := authenticateStoredReviewJob(dataDir, before); err != nil {
 		return writeReviewOperational(stdout, before.ProjectID, reviewjob.ApplyRecovery)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	verified, err := reviewVerify(ctx, executable)
 	cancel()
 	if err != nil {
@@ -936,7 +936,7 @@ func executePrivateReviewWorker(dataDir, jobID, token string, handshake *os.File
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	verified, err := reviewVerify(ctx, job.Agent.Executable)
 	cancel()
 	if err != nil || verified.Agent != job.Agent || verified.Handle == nil {
@@ -1029,24 +1029,48 @@ func launchDetachedReviewWorker(request reviewLaunchRequest) error {
 	}
 	_ = child.Close()
 	_ = cleanup()
-	if err := parent.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
-		terminateDetachedReviewProcess(command)
-		return err
-	}
-	var response [1]byte
-	n, readErr := parent.Read(response[:])
-	if readErr != nil || n != 1 || response[0] != 1 {
+	response, readErr := readDetachedReviewHandshake(parent, 3*time.Second)
+	if readErr != nil || response != 1 {
 		terminateDetachedReviewProcess(command)
 		if readErr != nil {
 			return readErr
 		}
-		if response[0] == 2 {
+		if response == 2 {
 			return reviewjob.ErrAgentBusy
 		}
 		return errors.New("detached review worker rejected launch")
 	}
 	go func() { _ = command.Wait() }()
 	return nil
+}
+
+func readDetachedReviewHandshake(parent *os.File, timeout time.Duration) (byte, error) {
+	if parent == nil || timeout <= 0 {
+		return 0, errors.New("detached review handshake is invalid")
+	}
+	type result struct {
+		value byte
+		err   error
+	}
+	completed := make(chan result, 1)
+	go func() {
+		var response [1]byte
+		n, err := parent.Read(response[:])
+		if err == nil && n != 1 {
+			err = io.ErrUnexpectedEOF
+		}
+		completed <- result{value: response[0], err: err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case read := <-completed:
+		return read.value, read.err
+	case <-timer.C:
+		_ = parent.Close()
+		<-completed
+		return 0, context.DeadlineExceeded
+	}
 }
 
 func terminateDetachedReviewProcess(command *exec.Cmd) {

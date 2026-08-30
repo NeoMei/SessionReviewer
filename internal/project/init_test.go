@@ -53,6 +53,9 @@ func TestInitCreatesReviewV2(t *testing.T) {
 }
 
 func TestInitializeNormalizesTrailingSpaceProjectDirectoryName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Win32 cannot represent a directory leaf with a trailing space")
+	}
 	parent := t.TempDir()
 	root := filepath.Join(parent, "AgentWiki ")
 	if err := os.Mkdir(root, 0o755); err != nil {
