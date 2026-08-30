@@ -384,6 +384,28 @@ func TestTwoDocumentCanonicalRenderReparses(t *testing.T) {
 	}
 }
 
+func TestRenderReviewNormalizesTrailingSpaceProjectName(t *testing.T) {
+	review := Review{
+		ProjectID: "project-canonical-render", Revision: 1, Name: "AgentWiki ",
+		Goal: "在这里记录项目目标。", Stage: "初始化", Status: "进行中",
+		NextAction: "准备第一次 session review。", LastVerification: "2026-08-30T08:31:11Z",
+	}
+	reviewBytes, err := RenderReview(review)
+	if err != nil {
+		t.Fatalf("render trailing-space project name: %v", err)
+	}
+	parsed, err := ParseReview(reviewBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Model.Name != "AgentWiki" {
+		t.Fatalf("parsed name=%q want %q", parsed.Model.Name, "AgentWiki")
+	}
+	if !bytes.Contains(reviewBytes, []byte("# AgentWiki\n")) {
+		t.Fatalf("rendered heading missing canonical name:\n%s", reviewBytes)
+	}
+}
+
 func TestMarkerScannerRejectsIndentedReservedMarkerInsteadOfDroppingIdentity(t *testing.T) {
 	source := mustFixture(t, "../../testdata/review-v2/项目历史.valid.md")
 	source = bytes.Replace(source, []byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->"), []byte(" <!-- session-reviewer:event id=\"timeline-trust-chain\" -->"), 1)

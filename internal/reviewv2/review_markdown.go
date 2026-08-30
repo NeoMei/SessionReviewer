@@ -159,6 +159,7 @@ func RenderReview(value Review) ([]byte, error) {
 	if value.Revision < 1 {
 		return nil, errors.New("render review: revision must be positive")
 	}
+	value.Name = strings.TrimSpace(value.Name)
 	if err := validateHeadingValue("project name", value.Name); err != nil {
 		return nil, err
 	}

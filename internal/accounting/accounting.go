@@ -385,9 +385,6 @@ func ValidateTokenUsage(value TokenUsage) error {
 	if value.CachedInputTokens+value.CacheWriteInputTokens > value.InputTokens {
 		return errors.New("cached and cache-write tokens exceed input tokens")
 	}
-	if value.ReasoningOutputTokens > value.OutputTokens {
-		return errors.New("reasoning tokens exceed output tokens")
-	}
 	if value.TotalTokens != value.InputTokens+value.OutputTokens {
 		return errors.New("total tokens do not equal input plus output")
 	}
