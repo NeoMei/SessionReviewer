@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { discoverRuntime } from "../src/cli/discovery";
 import type { CliRunner } from "../src/cli/runner";
@@ -15,10 +15,11 @@ describe("runtime discovery", () => {
   it("uses the standard agent-installed locations without any plugin settings", async () => {
     const home = await mkdtemp(join(tmpdir(), "session-reviewer-discovery-"));
     roots.push(home);
-    const cli = join(home, ".local", "bin", "session-reviewer");
-    const agent = join(home, ".npm-global", "bin", "codex");
-    await mkdir(join(home, ".local", "bin"), { recursive: true });
-    await mkdir(join(home, ".npm-global", "bin"), { recursive: true });
+    const darwinHome = home.replaceAll("\\", "/");
+    const cli = posix.join(darwinHome, ".local", "bin", "session-reviewer");
+    const agent = posix.join(darwinHome, ".npm-global", "bin", "codex");
+    await mkdir(posix.join(darwinHome, ".local", "bin"), { recursive: true });
+    await mkdir(posix.join(darwinHome, ".npm-global", "bin"), { recursive: true });
     await writeFile(cli, "cli");
     await writeFile(agent, "agent");
     await chmod(cli, 0o700);
@@ -34,7 +35,7 @@ describe("runtime discovery", () => {
     const runner = { executable: cli, verifyExecutable, verifyAgent } as unknown as CliRunner;
 
     const runtime = await discoverRuntime({
-      home,
+      home: darwinHome,
       platform: "darwin",
       env: { PATH: "" },
       createRunner: (candidate: string) => candidate === cli ? runner : (() => { throw new Error("unexpected CLI"); })()
