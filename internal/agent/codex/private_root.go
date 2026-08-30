@@ -27,7 +27,7 @@ func PrepareWorkingDirectory(path string) error {
 		return errors.New("private working root is not a physical directory")
 	}
 	physical, err := filepath.EvalSymlinks(path)
-	if err != nil || !filepath.IsAbs(physical) {
+	if err != nil || !filepath.IsAbs(physical) || !canonicalPathEqual(filepath.Clean(physical), path) {
 		return errors.New("private working root cannot be resolved")
 	}
 	physical = filepath.Clean(physical)
