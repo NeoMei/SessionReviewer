@@ -146,7 +146,7 @@ function parseModelAccounting(value: unknown, path: string): ModelAccounting {
   const outputTokens = integer(row.output_tokens, `${path}.output_tokens`);
   const reasoningOutputTokens = integer(row.reasoning_output_tokens, `${path}.reasoning_output_tokens`);
   const totalTokens = integer(row.total_tokens, `${path}.total_tokens`);
-  if (cachedInputTokens + cacheWriteInputTokens > inputTokens || reasoningOutputTokens > outputTokens || totalTokens !== inputTokens + outputTokens) {
+  if (cachedInputTokens + cacheWriteInputTokens > inputTokens || totalTokens !== inputTokens + outputTokens) {
     throw new Error(`${path} token totals are invalid`);
   }
   const pricing = parsePricing(row.pricing, `${path}.pricing`);

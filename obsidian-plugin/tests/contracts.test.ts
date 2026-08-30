@@ -32,4 +32,19 @@ describe("review v2 machine contract", () => {
     forged.accounting.total_tokens += 1;
     expect(() => parseLedger(JSON.stringify(forged))).toThrow(/aggregate total/i);
   });
+
+  it("accepts host token_count when reasoning exceeds visible output", async () => {
+    const valid = JSON.parse(await fixture("ledger.valid.json")) as {
+      sessions: Array<{ accounting: { models: Array<{ output_tokens: number; reasoning_output_tokens: number; total_tokens: number }> } }>;
+    };
+    const model = valid.sessions[0]?.accounting.models[0];
+    if (!model) throw new Error("golden ledger is missing session model accounting");
+    model.reasoning_output_tokens = model.output_tokens + 326;
+    const ledger = parseLedger(JSON.stringify(valid));
+    expect(ledger.sessions[0]?.accounting?.models[0]).toMatchObject({
+      outputTokens: model.output_tokens,
+      reasoningOutputTokens: model.reasoning_output_tokens,
+      totalTokens: model.total_tokens
+    });
+  });
 });
