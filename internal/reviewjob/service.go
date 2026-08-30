@@ -20,6 +20,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/agent"
+	"github.com/neomei/SessionReviewer/internal/agent/codex"
 	"github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/evidence"
@@ -602,6 +603,9 @@ func openJobWork(leases *LeaseSet, jobID string) (_ *jobWork, retErr error) {
 	base := filepath.Join(layout.data.Path, "review-jobs", "work", jobID)
 	work.inputsPath = filepath.Join(base, "inputs")
 	work.agentPath = filepath.Join(base, "agent")
+	if err := codex.PrepareWorkingDirectory(work.agentPath); err != nil {
+		return nil, fmt.Errorf("protect private Agent work directory: %w", err)
+	}
 	work.packetPath = filepath.Join(work.inputsPath, packetWorkName)
 	work.proposalPath = filepath.Join(work.inputsPath, proposalWorkName)
 	return work, nil

@@ -2381,6 +2381,7 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 				pinnedTarget := target + ".pinned-" + phase
 				var configReplacement []byte
 				mutated := false
+				replacementBlocked := false
 				mutate := func(at string) {
 					if mutated || at != phase {
 						return
@@ -2394,6 +2395,13 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 						configReplacement = append([]byte(nil), body...)
 					}
 					if err := os.Rename(target, pinnedTarget); err != nil {
+						// Windows refuses to rename Data/Vault directories while
+						// their authenticated handles are open. That is the secure
+						// outcome this adversarial replacement test is exercising.
+						if runtime.GOOS == "windows" && rootKind != "config" && errors.Is(err, os.ErrPermission) {
+							replacementBlocked = true
+							return
+						}
 						t.Fatal(err)
 					}
 					if rootKind == "config" {
@@ -2430,8 +2438,18 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 					},
 					nil,
 				)
-				if err := Run(t.Context(), options); err == nil || !mutated {
-					t.Fatalf("Run() err=%v mutated=%v", err, mutated)
+				runErr := Run(t.Context(), options)
+				if replacementBlocked {
+					if _, err := os.Stat(target); err != nil {
+						t.Fatalf("blocked replacement lost authoritative root: %v", err)
+					}
+					if _, err := os.Stat(pinnedTarget); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("blocked replacement created pinned decoy: %v", err)
+					}
+					return
+				}
+				if runErr == nil || !mutated {
+					t.Fatalf("Run() err=%v mutated=%v", runErr, mutated)
 				}
 				authoritativeStore := fixture.store
 				if rootKind == "data" {

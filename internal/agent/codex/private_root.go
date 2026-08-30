@@ -13,6 +13,51 @@ import (
 
 var errPrivateRootIdentityChanged = errors.New("private working root identity changed")
 
+// PrepareWorkingDirectory converts one existing empty physical directory into
+// the owner-only boundary required by GenerateProposal. The caller owns the
+// directory lifecycle; this function only pins its identity while applying and
+// validating the platform-specific protection (mode bits on Unix, a protected
+// DACL on Windows).
+func PrepareWorkingDirectory(path string) error {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("private working root must be a canonical absolute path")
+	}
+	requested, err := os.Lstat(path)
+	if err != nil || !requested.IsDir() || requested.Mode()&os.ModeSymlink != 0 {
+		return errors.New("private working root is not a physical directory")
+	}
+	physical, err := filepath.EvalSymlinks(path)
+	if err != nil || !filepath.IsAbs(physical) || !canonicalPathEqual(filepath.Clean(physical), path) {
+		return errors.New("private working root path is not canonical")
+	}
+	anchor, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer anchor.Close()
+	opened, err := anchor.Stat()
+	visible, visibleErr := os.Stat(path)
+	if err != nil || visibleErr != nil || !os.SameFile(requested, opened) || !os.SameFile(opened, visible) {
+		return errPrivateRootIdentityChanged
+	}
+	entries, readErr := anchor.ReadDir(1)
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		return errors.New("private working root must be empty")
+	}
+	if err := anchor.Chmod(0o700); err != nil {
+		return err
+	}
+	if err := protectPrivateDirectory(path, anchor); err != nil {
+		return err
+	}
+	protected, err := anchor.Stat()
+	visible, visibleErr = os.Stat(path)
+	if err != nil || visibleErr != nil || !os.SameFile(opened, protected) || !os.SameFile(protected, visible) {
+		return errPrivateRootIdentityChanged
+	}
+	return validatePrivateDirectory(path, anchor, protected)
+}
+
 // privateRoot pins a physical directory with os.Root. Every descendant
 // operation is root-relative, so renaming or replacing an ancestor cannot
 // redirect job creation, writes, or cleanup into an attacker-selected tree.
