@@ -92,7 +92,8 @@ func TestCIExecutesBothReleaseWrappersTwiceAndVerifiesArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	if !strings.Contains(text, `RELEASE_VERSION=$(node -p \"require('./obsidian-plugin/package.json').version\")`) {
+	if !strings.Contains(text, `version="$(node -p 'require("./obsidian-plugin/package.json").version')"`) ||
+		!strings.Contains(text, `printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"`) {
 		t.Fatalf("CI must resolve the release version from the plugin package:\n%s", text)
 	}
 	if strings.Count(text, `./scripts/build-release.sh "$RELEASE_VERSION"`) != 2 {
