@@ -19,10 +19,13 @@ import (
 var ErrAssociationRequired = errors.New("project association requires explicit confirmation")
 
 type Binding struct {
-	ProjectID         string
-	CanonicalRoot     string
-	RootIdentity      pathguard.IdentityToken
-	CommonDirIdentity string
+	ProjectID          string
+	CanonicalRoot      string
+	RootIdentity       pathguard.IdentityToken
+	CommonDirIdentity  string
+	Bootstrap          bool
+	NewAuthentication  bool
+	AuthenticatedAlias config.AuthenticatedProjectAlias
 }
 
 // Resolve authenticates requestedRoot before resolving it. A legacy mapping
@@ -53,14 +56,16 @@ func Resolve(mapping config.ProjectMapping, requestedRoot, goos string) (Binding
 	binding := Binding{
 		ProjectID: mapping.ID, CanonicalRoot: directory.Path,
 		RootIdentity: rootIdentity, CommonDirIdentity: commonIdentity,
+		AuthenticatedAlias: config.AuthenticatedProjectAlias{
+			SchemaVersion: 1, Path: requestedRoot, RootIdentity: rootIdentity, CommonDirIdentity: commonIdentity,
+		},
 	}
 
 	if len(mapping.AuthenticatedAliases) == 0 {
 		configuredKey, keyErr := pathAliasKey(goos, mapping.Root)
 		if keyErr == nil && configuredKey == requestedKey {
-			return binding, nil
-		}
-		if commonIdentity != "" && matchesConfiguredCommonDir(mapping.CommonDirs, commonIdentity) {
+			binding.Bootstrap = true
+			binding.NewAuthentication = true
 			return binding, nil
 		}
 		return Binding{}, ErrAssociationRequired
@@ -68,6 +73,7 @@ func Resolve(mapping config.ProjectMapping, requestedRoot, goos string) (Binding
 
 	matched := false
 	conflict := false
+	currentAliasKnown := false
 	for _, alias := range mapping.AuthenticatedAliases {
 		if alias.SchemaVersion != 1 || !alias.RootIdentity.Valid() {
 			return Binding{}, ErrAssociationRequired
@@ -88,10 +94,14 @@ func Resolve(mapping config.ProjectMapping, requestedRoot, goos string) (Binding
 		if rootMatch || commonMatch {
 			matched = true
 		}
+		if pathMatch && rootMatch && alias.CommonDirIdentity == commonIdentity {
+			currentAliasKnown = true
+		}
 	}
 	if conflict || !matched {
 		return Binding{}, ErrAssociationRequired
 	}
+	binding.NewAuthentication = !currentAliasKnown
 	return binding, nil
 }
 
@@ -124,21 +134,6 @@ func pathAliasKey(goos, value string) (string, error) {
 	}
 	relative := "absolute/" + strings.TrimPrefix(filepath.ToSlash(value), "/")
 	return platform.PathKey(goos, mode, relative)
-}
-
-func matchesConfiguredCommonDir(paths []string, wanted string) bool {
-	for _, path := range paths {
-		directory, err := pathguard.Open(path)
-		if err != nil {
-			continue
-		}
-		token, tokenErr := directory.PhysicalIdentity()
-		_ = directory.Close()
-		if tokenErr == nil && identityKey(token) == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {

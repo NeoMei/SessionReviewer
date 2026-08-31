@@ -9,7 +9,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/memory"
@@ -136,6 +138,78 @@ func TestCatalogRejectsRedirectedNamespaceWithoutWritingOutside(t *testing.T) {
 	}
 }
 
+func TestCatalogReadersWaitForConcurrentAtomicPublication(t *testing.T) {
+	dataRoot := t.TempDir()
+	writer := openCatalog(t, dataRoot)
+	reader := openCatalog(t, dataRoot)
+	publicationReady := make(chan struct{})
+	releasePublication := make(chan struct{})
+	var publishOnce sync.Once
+	writer.beforePublish = func() error {
+		publishOnce.Do(func() { close(publicationReady) })
+		<-releasePublication
+		return nil
+	}
+	readerAttempts := make(chan struct{}, 3)
+	reader.beforeAdvisoryLock = func() { readerAttempts <- struct{}{} }
+
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := writer.UpsertSource(sourceRecord("s1", []string{"project-a"}, 10))
+		writeResult <- err
+	}()
+	receiveSignal(t, publicationReady, "writer publication checkpoint")
+	if !catalogHasAtomicTemporary(t, dataRoot) {
+		t.Fatal("publication checkpoint did not expose the intended atomic temporary window")
+	}
+
+	type readResult struct {
+		name string
+		err  error
+	}
+	results := make(chan readResult, 3)
+	go func() {
+		records, err := reader.ListCandidates()
+		if err == nil && (len(records) != 1 || records[0].SessionID != "s1") {
+			err = errors.New("enumeration did not return canonical published record")
+		}
+		results <- readResult{name: "list", err: err}
+	}()
+	go func() {
+		record, found, err := reader.GetSource("codex", "s1")
+		if err == nil && (!found || record.SessionID != "s1") {
+			err = errors.New("lookup did not return canonical published record")
+		}
+		results <- readResult{name: "get", err: err}
+	}()
+	go func() {
+		usage, err := reader.AssociatedUsage("project-a")
+		if err == nil && (len(usage) != 1 || usage[0].SessionID != "s1") {
+			err = errors.New("usage did not return canonical published record")
+		}
+		results <- readResult{name: "usage", err: err}
+	}()
+	for range 3 {
+		receiveSignal(t, readerAttempts, "reader advisory-lock attempt")
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("reader %s completed before publication release: %v", result.name, result.err)
+	default:
+	}
+
+	close(releasePublication)
+	if err := receiveResult(t, writeResult, "catalog upsert"); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		result := receiveResult(t, results, "catalog reader")
+		if result.err != nil {
+			t.Fatalf("reader %s: %v", result.name, result.err)
+		}
+	}
+}
+
 func openCatalog(t *testing.T, dataRoot string) *Catalog {
 	t.Helper()
 	catalog, err := Open(dataRoot)
@@ -206,4 +280,39 @@ func catalogJSONSnapshot(t *testing.T, dataRoot string) [][]byte {
 	}
 	sort.Slice(result, func(i, j int) bool { return bytes.Compare(result[i], result[j]) < 0 })
 	return result
+}
+
+func catalogHasAtomicTemporary(t *testing.T, dataRoot string) bool {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "source-catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".session-reviewer-") {
+			return true
+		}
+	}
+	return false
+}
+
+func receiveSignal(t *testing.T, channel <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-channel:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+	}
+}
+
+func receiveResult[T any](t *testing.T, channel <-chan T, name string) T {
+	t.Helper()
+	select {
+	case result := <-channel:
+		return result
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", name)
+		var zero T
+		return zero
+	}
 }

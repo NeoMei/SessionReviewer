@@ -25,12 +25,7 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bootstrap main root: %v", err)
 	}
-	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{{
-		SchemaVersion:     1,
-		Path:              mainRoot,
-		RootIdentity:      mainBinding.RootIdentity,
-		CommonDirIdentity: mainBinding.CommonDirIdentity,
-	}}
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{mainBinding.AuthenticatedAlias}
 
 	worktree := filepath.Join(parent, "linked")
 	if err := os.MkdirAll(worktree, 0o700); err != nil {
@@ -44,7 +39,7 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	worktreeBinding, err := Resolve(mapping, worktree, runtime.GOOS)
-	if err != nil || worktreeBinding.ProjectID != "project-a" || worktreeBinding.CommonDirIdentity != mainBinding.CommonDirIdentity {
+	if err != nil || worktreeBinding.ProjectID != "project-a" || worktreeBinding.CommonDirIdentity != mainBinding.CommonDirIdentity || !worktreeBinding.NewAuthentication {
 		t.Fatalf("worktree binding=%#v err=%v", worktreeBinding, err)
 	}
 
@@ -53,8 +48,127 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 		t.Fatal(err)
 	}
 	movedBinding, err := Resolve(mapping, movedRoot, runtime.GOOS)
-	if err != nil || movedBinding.ProjectID != "project-a" || movedBinding.RootIdentity != mainBinding.RootIdentity {
+	if err != nil || movedBinding.ProjectID != "project-a" || movedBinding.RootIdentity != mainBinding.RootIdentity || !movedBinding.NewAuthentication {
 		t.Fatalf("moved binding=%#v err=%v", movedBinding, err)
+	}
+}
+
+func TestResolveBootstrapReturnsPersistableAuthenticatedAlias(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: "project-a", Root: root, VaultRoot: filepath.Join(parent, "vault")}
+	wantMapping := cloneMapping(mapping)
+	binding, err := Resolve(mapping, root, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !binding.Bootstrap || !binding.NewAuthentication {
+		t.Fatal("first exact-root resolution was not marked as bootstrap")
+	}
+	alias := binding.AuthenticatedAlias
+	if alias.SchemaVersion != 1 || alias.Path != root || alias.RootIdentity != binding.RootIdentity || alias.CommonDirIdentity != binding.CommonDirIdentity {
+		t.Fatalf("bootstrap alias does not capture binding: alias=%#v binding=%#v", alias, binding)
+	}
+	if !reflect.DeepEqual(mapping, wantMapping) {
+		t.Fatalf("bootstrap mutated caller mapping: got=%+v want=%+v", mapping, wantMapping)
+	}
+
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{alias}
+	configPath := filepath.Join(parent, "config", "config.toml")
+	if err := config.Save(configPath, config.Config{Version: 1, Projects: []config.ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil || len(loaded.Projects) != 1 || len(loaded.Projects[0].AuthenticatedAliases) != 1 {
+		t.Fatalf("load persisted bootstrap metadata: projects=%+v err=%v", loaded.Projects, err)
+	}
+	alias = loaded.Projects[0].AuthenticatedAliases[0]
+	authenticated, err := Resolve(loaded.Projects[0], root, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.Bootstrap || authenticated.NewAuthentication || authenticated.ProjectID != mapping.ID || authenticated.RootIdentity != binding.RootIdentity || authenticated.AuthenticatedAlias != alias {
+		t.Fatalf("persisted metadata did not round trip immediately: %#v", authenticated)
+	}
+}
+
+func TestResolveRejectsReplacedExactRootAfterBootstrapWithoutMutation(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "project")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: "project-a", Root: root}
+	binding, err := Resolve(mapping, root, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{binding.AuthenticatedAlias}
+	wantMapping := cloneMapping(mapping)
+	if err := os.Rename(root, root+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(mapping, root, runtime.GOOS); !errors.Is(err, ErrAssociationRequired) {
+		t.Fatalf("replacement error=%v, want association required", err)
+	}
+	if !reflect.DeepEqual(mapping, wantMapping) {
+		t.Fatalf("replacement resolution mutated mapping: got=%+v want=%+v", mapping, wantMapping)
+	}
+}
+
+func TestResolveNeverUsesLegacyCommonDirsAsIdentityAuthority(t *testing.T) {
+	parent := t.TempDir()
+	configuredRoot := filepath.Join(parent, "configured")
+	if err := os.MkdirAll(configuredRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requestedRoot := filepath.Join(parent, "worktree")
+	commonDir := filepath.Join(parent, "common.git")
+	gitDir := filepath.Join(commonDir, "worktrees", "linked")
+	if err := os.MkdirAll(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(requestedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(requestedRoot, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: "project-a", Root: configuredRoot, CommonDirs: []string{commonDir}}
+	if _, err := Resolve(mapping, requestedRoot, runtime.GOOS); !errors.Is(err, ErrAssociationRequired) {
+		t.Fatalf("mutable CommonDirs path authenticated worktree: %v", err)
+	}
+}
+
+func TestResolveNeverUsesReplacedLegacyCommonDirAsIdentityAuthority(t *testing.T) {
+	parent := t.TempDir()
+	configuredRoot := filepath.Join(parent, "configured")
+	requestedRoot := filepath.Join(parent, "requested")
+	commonPath := filepath.Join(requestedRoot, ".git")
+	if err := os.MkdirAll(configuredRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(commonPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(commonPath, commonPath+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(commonPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: "project-a", Root: configuredRoot, CommonDirs: []string{commonPath}}
+	if _, err := Resolve(mapping, requestedRoot, runtime.GOOS); !errors.Is(err, ErrAssociationRequired) {
+		t.Fatalf("replaced CommonDirs path authenticated project: %v", err)
 	}
 }
 

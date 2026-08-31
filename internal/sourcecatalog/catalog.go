@@ -36,10 +36,12 @@ const (
 )
 
 type Catalog struct {
-	mu     sync.RWMutex
-	data   *pathguard.Directory
-	root   *pathguard.Directory
-	closed bool
+	mu                 sync.RWMutex
+	data               *pathguard.Directory
+	root               *pathguard.Directory
+	closed             bool
+	beforeAdvisoryLock func()
+	beforePublish      func() error
 }
 
 func Open(dataRoot string) (*Catalog, error) {
@@ -91,7 +93,7 @@ func (c *Catalog) UpsertSource(record memory.SourceRecord) (string, error) {
 		return "", fmt.Errorf("invalid source record: %w", err)
 	}
 	var digest string
-	err := c.withLock(func() error {
+	err := c.withWriteLock(func() error {
 		leaf := sourceLeaf(record.Provider, record.SessionID)
 		existing, found, body, err := c.readLeaf(leaf)
 		if err != nil {
@@ -130,7 +132,7 @@ func (c *Catalog) UpsertSource(record memory.SourceRecord) (string, error) {
 			if err := atomicfile.WriteRootFileCheckedWithRollbackCheckpoint(c.root.Root, leaf, newBody, privateFileMode, checkpoint, rollbackCheckpoint); err != nil {
 				return err
 			}
-		} else if err := atomicfile.WriteRootFileCreateIfAbsent(c.root.Root, leaf, newBody, privateFileMode, c.verifyLiveRoot); err != nil {
+		} else if err := atomicfile.WriteRootFileCreateIfAbsent(c.root.Root, leaf, newBody, privateFileMode, c.verifyBeforePublish); err != nil {
 			return err
 		}
 		stored, present, storedBody, err := c.readLeaf(leaf)
@@ -143,15 +145,13 @@ func (c *Catalog) UpsertSource(record memory.SourceRecord) (string, error) {
 }
 
 func (c *Catalog) GetSource(provider, sessionID string) (memory.SourceRecord, bool, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if err := c.requireOpen(); err != nil {
-		return memory.SourceRecord{}, false, err
-	}
-	if err := c.verifyLiveRoot(); err != nil {
-		return memory.SourceRecord{}, false, err
-	}
-	record, found, _, err := c.readLeaf(sourceLeaf(provider, sessionID))
+	var record memory.SourceRecord
+	var found bool
+	err := c.withReadLock(func() error {
+		var err error
+		record, found, _, err = c.readLeaf(sourceLeaf(provider, sessionID))
+		return err
+	})
 	return cloneRecord(record), found, err
 }
 
@@ -161,15 +161,12 @@ func (c *Catalog) ListCandidates(projectIDs ...string) ([]memory.SourceRecord, e
 	if len(projectIDs) > 1 {
 		return nil, errors.New("at most one project filter is allowed")
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if err := c.requireOpen(); err != nil {
-		return nil, err
-	}
-	if err := c.verifyLiveRoot(); err != nil {
-		return nil, err
-	}
-	records, err := c.listRecords()
+	var records []memory.SourceRecord
+	err := c.withReadLock(func() error {
+		var err error
+		records, err = c.listRecords()
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -264,20 +261,43 @@ func compareBoundary(first, second memory.FrozenBoundary) (int, error) {
 	return comparison, nil
 }
 
-func (c *Catalog) withLock(run func() error) error {
+func (c *Catalog) withWriteLock(run func() error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.withAdvisoryLock(run)
+}
+
+func (c *Catalog) withReadLock(run func() error) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.withAdvisoryLock(run)
+}
+
+func (c *Catalog) withAdvisoryLock(run func() error) error {
 	if err := c.requireOpen(); err != nil {
 		return err
 	}
 	if err := c.verifyLiveRoot(); err != nil {
 		return err
 	}
+	if c.beforeAdvisoryLock != nil {
+		c.beforeAdvisoryLock()
+	}
 	lock, err := project.AcquireProjectLock(c.root.Root, "catalog.lock", catalogLockTimeout)
 	if err != nil {
 		return err
 	}
 	return errors.Join(run(), lock.Release())
+}
+
+func (c *Catalog) verifyBeforePublish() error {
+	if err := c.verifyLiveRoot(); err != nil {
+		return err
+	}
+	if c.beforePublish != nil {
+		return c.beforePublish()
+	}
+	return nil
 }
 
 func (c *Catalog) requireOpen() error {
