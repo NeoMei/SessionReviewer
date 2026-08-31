@@ -31,7 +31,7 @@ const (
 	MaxAcceptedContextBytes = 2 << 20
 	MaxOutputSchemaBytes    = 1 << 20
 
-	proposalSchemaDigest = "6f84e74c4c0fdc2d6ad9ffdc9ebf1e45c05200f82387af263d7e63eb31dd33ee"
+	proposalSchemaDigest = "b4da13ba50e50d9a37833412e9c6c5a479a6ea54e510c46b96266c1066d61034"
 	applyInvariantDigest = "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa"
 	agentDraftSchemaID   = "https://github.com/neomei/SessionReviewer/schemas/proposal-agent-draft-v1.schema.json"
 	maxSafeInteger       = 1<<53 - 1
@@ -818,6 +818,8 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 	delete(defs, "session_accounting")
 	delete(defs, "model_accounting")
 	delete(defs, "pricing")
+	delete(defs, "trusted_pricing")
+	delete(defs, "unknown_pricing")
 	root["$id"] = agentDraftSchemaID
 	root["title"] = "SessionReviewer Agent Draft Proposal v1 (trusted-host accounting omitted)"
 	data, err := json.MarshalIndent(root, "", "  ")
