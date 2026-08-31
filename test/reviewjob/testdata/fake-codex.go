@@ -426,12 +426,12 @@ func runExecMode(mode string) {
 	case "missing-usage":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeEvent(map[string]any{"type": "turn.completed"})
 	case "duplicate-final":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeAgentAndUsage(validProposal(), validUsage())
 	case "event-after-complete":
 		writeSuccess(validProposal(), validUsage())
@@ -439,7 +439,7 @@ func runExecMode(mode string) {
 	case "model-spoof":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeEvent(map[string]any{"type": "turn.completed", "model": "invented-model", "usage": validUsage()})
 	case "duplicate-json-key":
 		fmt.Println(`{"type":"thread.started","type":"thread.started","thread_id":"thread-1"}`)
@@ -452,7 +452,7 @@ func runExecMode(mode string) {
 	case "trailing-no-newline":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		data, _ := json.Marshal(map[string]any{"type": "turn.completed", "usage": validUsage()})
 		_, _ = os.Stdout.Write(data)
 	case "turn-failed-before-start":
@@ -463,7 +463,7 @@ func runExecMode(mode string) {
 		writeEvent(map[string]any{"type": "turn.started"})
 		line, _ := json.Marshal(map[string]any{
 			"type": "item.completed",
-			"item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()},
+			"item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())},
 		})
 		marker := []byte("Build a durable review ledger")
 		position := bytes.Index(line, marker)
@@ -492,8 +492,16 @@ func writeSuccess(proposal string, usage map[string]int64) {
 }
 
 func writeAgentAndUsage(proposal string, usage map[string]int64) {
-	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": proposal}})
+	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(proposal)}})
 	writeEvent(map[string]any{"type": "turn.completed", "usage": usage})
+}
+
+func transportProposal(proposal string) string {
+	body, err := json.Marshal(map[string]string{"proposal": proposal})
+	if err != nil {
+		os.Exit(3)
+	}
+	return string(body)
 }
 
 func writeEvent(value any) {
