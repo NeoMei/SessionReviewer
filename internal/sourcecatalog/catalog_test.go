@@ -1,0 +1,209 @@
+package sourcecatalog
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/projectidentity"
+)
+
+func TestCatalogStoresSharedSessionUsageOnce(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	first := sourceRecord("s1", []string{"project-b"}, 573135757)
+	if _, err := catalog.UpsertSource(first); err != nil {
+		t.Fatal(err)
+	}
+	second := sourceRecord("s1", []string{"project-a", "project-b", "project-a"}, 573135757)
+	digest, err := catalog.UpsertSource(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := catalog.GetSource("codex", "s1")
+	if err != nil || !found || !reflect.DeepEqual(got.ProjectIDs, []string{"project-a", "project-b"}) {
+		t.Fatalf("record=%+v found=%v err=%v", got, found, err)
+	}
+	if count := catalogJSONCount(t, dataRoot); count != 1 {
+		t.Fatalf("rows=%d", count)
+	}
+	for _, projectID := range []string{"project-a", "project-b"} {
+		usage, err := catalog.AssociatedUsage(projectID)
+		if err != nil || len(usage) != 1 {
+			t.Fatalf("project=%s usage=%+v err=%v", projectID, usage, err)
+		}
+		want := memory.AssociatedUsage{Provider: "codex", SessionID: "s1", UsageRecordDigest: digest, Shared: true}
+		if usage[0] != want {
+			t.Fatalf("project=%s usage=%+v want=%+v", projectID, usage[0], want)
+		}
+	}
+}
+
+func TestCatalogIsContentFreePrivateRootedAndSorted(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	for _, record := range []memory.SourceRecord{
+		sourceRecord("s2", []string{"project-b", "project-a"}, 20),
+		sourceRecord("s1", []string{"project-a"}, 10),
+	} {
+		if _, err := catalog.UpsertSource(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	records, err := catalog.ListCandidates()
+	if err != nil || len(records) != 2 || records[0].SessionID != "s1" || records[1].SessionID != "s2" {
+		t.Fatalf("records=%+v err=%v", records, err)
+	}
+	filtered, err := catalog.ListCandidates("project-b")
+	if err != nil || len(filtered) != 1 || filtered[0].SessionID != "s2" {
+		t.Fatalf("filtered=%+v err=%v", filtered, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "source-catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dataRoot, "source-catalog", entry.Name())
+		info, err := entry.Info()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" {
+			wantMode := os.FileMode(0o600)
+			if entry.IsDir() {
+				wantMode = 0o700
+			}
+			if info.Mode().Perm() != wantMode {
+				t.Fatalf("%s mode=%#o want=%#o", path, info.Mode().Perm(), wantMode)
+			}
+		}
+		if strings.HasSuffix(entry.Name(), ".json") {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{"message", "tool_output", "raw_tool_output", "transcript"} {
+				if bytes.Contains(bytes.ToLower(body), []byte(forbidden)) {
+					t.Fatalf("catalog JSON contains %q: %s", forbidden, body)
+				}
+			}
+		}
+	}
+}
+
+func TestCatalogConflictingSourceIdentityDoesNotMutate(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	record := sourceRecord("s1", []string{"project-a"}, 10)
+	if _, err := catalog.UpsertSource(record); err != nil {
+		t.Fatal(err)
+	}
+	before := catalogJSONSnapshot(t, dataRoot)
+	conflict := sourceRecord("s1", []string{"project-b"}, 10)
+	conflict.SourceIdentity = "different-source"
+	if _, err := catalog.UpsertSource(conflict); !errors.Is(err, projectidentity.ErrAssociationRequired) {
+		t.Fatalf("error=%v, want association required", err)
+	}
+	after := catalogJSONSnapshot(t, dataRoot)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("catalog mutated on conflict: before=%q after=%q", before, after)
+	}
+}
+
+func TestCatalogRejectsRedirectedNamespaceWithoutWritingOutside(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ordinary symlink setup requires Windows privileges; pathguard has Windows reparse tests")
+	}
+	dataRoot := t.TempDir()
+	out := t.TempDir()
+	if err := os.Symlink(out, filepath.Join(dataRoot, "source-catalog")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dataRoot); err == nil {
+		t.Fatal("redirected catalog namespace was accepted")
+	}
+	entries, err := os.ReadDir(out)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("redirect target mutated: entries=%v err=%v", entries, err)
+	}
+}
+
+func openCatalog(t *testing.T, dataRoot string) *Catalog {
+	t.Helper()
+	catalog, err := Open(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	return catalog
+}
+
+func sourceRecord(sessionID string, projectIDs []string, total int64) memory.SourceRecord {
+	return memory.SourceRecord{
+		SchemaVersion:  memory.MemorySchemaVersion,
+		Provider:       "codex",
+		SessionID:      sessionID,
+		SourceIdentity: "source-" + sessionID,
+		StartedAt:      "2026-08-31T10:00:00Z",
+		EndedAt:        "2026-08-31T10:00:01Z",
+		FrozenBoundary: memory.FrozenBoundary{
+			Location:   memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: 9, ByteOffset: 128}},
+			SourceHash: strings.Repeat("a", 64),
+		},
+		Availability: memory.SourceAvailable,
+		Usage: accounting.SessionUsage{
+			StartedAt:  "2026-08-31T10:00:00Z",
+			EndedAt:    "2026-08-31T10:00:01Z",
+			DurationMS: 1000,
+			Models: []accounting.ModelUsage{{Model: "gpt-5", TokenUsage: accounting.TokenUsage{
+				InputTokens: total, TotalTokens: total,
+			}}},
+			TotalTokens: total,
+		},
+		ProjectIDs: append([]string(nil), projectIDs...),
+	}
+}
+
+func catalogJSONCount(t *testing.T, dataRoot string) int {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "source-catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".json") {
+			count++
+		}
+	}
+	return count
+}
+
+func catalogJSONSnapshot(t *testing.T, dataRoot string) [][]byte {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "source-catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result [][]byte
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dataRoot, "source-catalog", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		result = append(result, body)
+	}
+	sort.Slice(result, func(i, j int) bool { return bytes.Compare(result[i], result[j]) < 0 })
+	return result
+}

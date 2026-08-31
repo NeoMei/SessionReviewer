@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -621,6 +622,12 @@ func TestConfigUnionRoundTripPreservesEveryField(t *testing.T) {
 			RemoteIdentities: []string{"origin:https://example.invalid/repo.git"},
 			CommonDirs:       []string{"/work/common"},
 			Aliases:          []string{"reviewer", "会话审查"},
+			AuthenticatedAliases: []AuthenticatedProjectAlias{{
+				SchemaVersion:     1,
+				Path:              "/work/项目",
+				RootIdentity:      pathguard.IdentityToken{Kind: "posix-dev-inode", Volume: "1", File: "2"},
+				CommonDirIdentity: "posix-dev-inode:1:3",
+			}},
 		}},
 		SessionAssociations: []SessionAssociation{{SessionID: "session-1", ProjectID: "project-2a2a2a2a2a2a2a2a"}},
 	}

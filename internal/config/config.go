@@ -30,14 +30,26 @@ type projectFragment struct {
 }
 
 type ProjectMapping struct {
-	ID               string            `toml:"id"`
-	Root             string            `toml:"root"`
-	VaultRoot        string            `toml:"vault_root"`
-	VaultReviewPath  string            `toml:"vault_review_path,omitempty"`
-	VaultCaseMode    platform.CaseMode `toml:"vault_case_mode,omitempty"`
-	RemoteIdentities []string          `toml:"remote_identities,omitempty"`
-	CommonDirs       []string          `toml:"common_dirs,omitempty"`
-	Aliases          []string          `toml:"aliases,omitempty"`
+	ID                   string                      `toml:"id"`
+	Root                 string                      `toml:"root"`
+	VaultRoot            string                      `toml:"vault_root"`
+	VaultReviewPath      string                      `toml:"vault_review_path,omitempty"`
+	VaultCaseMode        platform.CaseMode           `toml:"vault_case_mode,omitempty"`
+	RemoteIdentities     []string                    `toml:"remote_identities,omitempty"`
+	CommonDirs           []string                    `toml:"common_dirs,omitempty"`
+	Aliases              []string                    `toml:"aliases,omitempty"`
+	AuthenticatedAliases []AuthenticatedProjectAlias `toml:"authenticated_aliases,omitempty"`
+}
+
+// AuthenticatedProjectAlias binds an exact historical path spelling to the
+// physical project and optional Git common-directory identities observed
+// there. SchemaVersion allows the authentication contract to evolve without
+// reinterpreting legacy path, remote, or common-directory strings as proof.
+type AuthenticatedProjectAlias struct {
+	SchemaVersion     int                     `toml:"schema_version"`
+	Path              string                  `toml:"path"`
+	RootIdentity      pathguard.IdentityToken `toml:"root_identity"`
+	CommonDirIdentity string                  `toml:"common_dir_identity,omitempty"`
 }
 
 type SessionAssociation struct {
@@ -436,7 +448,8 @@ func compatibleLegacyExtension(legacy, fragment ProjectMapping) bool {
 		(legacy.VaultCaseMode == "" || legacy.VaultCaseMode == fragment.VaultCaseMode) &&
 		(len(legacy.RemoteIdentities) == 0 || reflect.DeepEqual(legacy.RemoteIdentities, fragment.RemoteIdentities)) &&
 		(len(legacy.CommonDirs) == 0 || reflect.DeepEqual(legacy.CommonDirs, fragment.CommonDirs)) &&
-		(len(legacy.Aliases) == 0 || reflect.DeepEqual(legacy.Aliases, fragment.Aliases))
+		(len(legacy.Aliases) == 0 || reflect.DeepEqual(legacy.Aliases, fragment.Aliases)) &&
+		(len(legacy.AuthenticatedAliases) == 0 || reflect.DeepEqual(legacy.AuthenticatedAliases, fragment.AuthenticatedAliases))
 }
 
 func sharedConfigForSave(root *os.Root, name string, cfg Config) (Config, error) {
@@ -569,11 +582,46 @@ func validate(cfg Config) error {
 		if err := validateVaultMapping(project); err != nil {
 			return fmt.Errorf("project %q: %w", project.ID, err)
 		}
+		if err := validateAuthenticatedAliases(project.AuthenticatedAliases); err != nil {
+			return fmt.Errorf("project %q: %w", project.ID, err)
+		}
 	}
 	if err := validateMappingDestinations(cfg.Projects); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateAuthenticatedAliases(aliases []AuthenticatedProjectAlias) error {
+	seenPaths := make(map[string]struct{}, len(aliases))
+	for _, alias := range aliases {
+		if alias.SchemaVersion != 1 {
+			return errors.New("unsupported authenticated alias version")
+		}
+		if alias.Path == "" || strings.ContainsRune(alias.Path, 0) || !filepath.IsAbs(alias.Path) || filepath.Clean(alias.Path) != alias.Path {
+			return errors.New("authenticated alias path must be a clean absolute path")
+		}
+		if !alias.RootIdentity.Valid() {
+			return errors.New("authenticated alias root identity is invalid")
+		}
+		if alias.CommonDirIdentity != "" && !validIdentityKey(alias.CommonDirIdentity) {
+			return errors.New("authenticated alias common-directory identity is invalid")
+		}
+		key := portableAbsoluteKey(alias.Path, runtime.GOOS == "windows")
+		if _, duplicate := seenPaths[key]; duplicate {
+			return errors.New("authenticated alias path is duplicated")
+		}
+		seenPaths[key] = struct{}{}
+	}
+	return nil
+}
+
+func validIdentityKey(value string) bool {
+	parts := strings.Split(value, ":")
+	if len(parts) != 3 {
+		return false
+	}
+	return (pathguard.IdentityToken{Kind: parts[0], Volume: parts[1], File: parts[2]}).Valid()
 }
 
 func selectedSharedConfigBase(root *os.Root, name string) (Config, error) {
