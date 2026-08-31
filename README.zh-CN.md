@@ -13,12 +13,12 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [GitHub Release 0.2.10](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.10) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+无需 Go 工具链时，从 [GitHub Release 0.2.11](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.11) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
 
-- Apple Silicon Mac：`session-reviewer_0.2.10_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.2.10_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.2.10_windows_amd64.zip`
-- Obsidian：`session-reviewer-obsidian-0.2.10.zip`
+- Apple Silicon Mac：`session-reviewer_0.2.11_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.2.11_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.2.11_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.2.11.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -148,7 +148,7 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-`0.2.10` 发布包中的 `session-reviewer-obsidian-0.2.10.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+`0.2.11` 发布包中的 `session-reviewer-obsidian-0.2.11.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
@@ -252,28 +252,28 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.2.10 dist
+./scripts/build-release.sh 0.2.11 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.2.10 -Dist dist
+.\scripts\build-release.ps1 -Version 0.2.11 -Dist dist
 ```
 
 Obsidian 插件包可独立构建：
 
 ```bash
-./scripts/build-obsidian-plugin.sh 0.2.10 dist
+./scripts/build-obsidian-plugin.sh 0.2.11 dist
 ```
 
 ```powershell
-.\scripts\build-obsidian-plugin.ps1 -Version 0.2.10 -Dist dist
+.\scripts\build-obsidian-plugin.ps1 -Version 0.2.11 -Dist dist
 ```
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.10` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.11` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 
