@@ -342,10 +342,8 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 		"--disable", "unified_exec_zsh_fork",
 		"--disable", "shell_snapshot", "--disable", "deferred_executor",
 		"--disable", "code_mode", "--disable", "code_mode_buffered_exec",
-		"--disable", "code_mode_host",
 		"--disable", "code_mode_only", "--disable", "code_mode_interrupt",
-		"--disable", "web_search_request",
-		"--disable", "web_search_cached", "--disable", "standalone_web_search",
+		"--disable", "standalone_web_search",
 		"--disable", "memories", "--disable", "external_agent_memory_import",
 		"--disable", "local_thread_store_compression", "--disable", "chronicle",
 		"--disable", "exec_permission_approvals", "--disable", "hooks",
@@ -409,6 +407,18 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 	}
 	if entries, readErr := os.ReadDir(request.WorkingDirectory); readErr != nil || len(entries) != 0 {
 		t.Fatalf("private working root not empty after run: entries=%v err=%v", entries, readErr)
+	}
+}
+
+func TestGenerateProposalAvoidsCodexDiagnosticItemsFromRedundantDisableFlags(t *testing.T) {
+	adapter := containedRunnerForTest(t)
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "noisy-disable-diagnostics")
+	result, err := adapter.GenerateProposal(context.Background(), validRequest(t, []byte("prompt")))
+	if err != nil {
+		t.Fatalf("fixed restricted invocation triggered non-proposal diagnostics: %v (cause: %v)", err, errors.Unwrap(err))
+	}
+	if !bytes.Equal(result.Proposal, mustRead(t, proposalFixture)) {
+		t.Fatal("proposal bytes changed")
 	}
 }
 

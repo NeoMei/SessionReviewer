@@ -360,9 +360,27 @@ func hasArg(want string) bool {
 	return false
 }
 
+func hasAdjacentArg(first, second string) bool {
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] == first && os.Args[index+1] == second {
+			return true
+		}
+	}
+	return false
+}
+
 func runExecMode(mode string) {
 	switch mode {
 	case "", "success":
+		writeSuccess(validProposal(), validUsage())
+	case "noisy-disable-diagnostics":
+		if hasAdjacentArg("--disable", "web_search_cached") || hasAdjacentArg("--disable", "web_search_request") || hasAdjacentArg("--disable", "code_mode_host") {
+			writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
+			writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-warning", "type": "error", "message": "redundant disable warning"}})
+			writeEvent(map[string]any{"type": "turn.started"})
+			writeAgentAndUsage(validProposal(), validUsage())
+			return
+		}
 		writeSuccess(validProposal(), validUsage())
 	case "success-stderr-model":
 		fmt.Fprintln(os.Stderr, "configured/default model: invented-stderr-model")

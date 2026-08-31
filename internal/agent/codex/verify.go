@@ -47,8 +47,8 @@ var (
 	reviewedDisabledFeatureNames = []string{
 		"shell_tool", "apps", "view_image", "shell_zsh_fork",
 		"unified_exec_zsh_fork", "shell_snapshot", "deferred_executor", "code_mode",
-		"code_mode_buffered_exec", "code_mode_host", "code_mode_only", "code_mode_interrupt", "web_search_request",
-		"web_search_cached", "standalone_web_search", "memories", "external_agent_memory_import",
+		"code_mode_buffered_exec", "code_mode_only", "code_mode_interrupt", "standalone_web_search",
+		"memories", "external_agent_memory_import",
 		"local_thread_store_compression", "chronicle", "exec_permission_approvals", "hooks",
 		"request_permissions_tool", "network_proxy", "respect_system_proxy", "multi_agent",
 		"multi_agent_v2", "enable_mcp_apps", "mcp_2026_07_28", "deferred_tool_world_state",
