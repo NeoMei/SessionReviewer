@@ -480,7 +480,8 @@ func assertNonnegativeNumericDefinitions(t *testing.T, schema map[string]any) {
 						t.Fatalf("%s.%s is not a nonnegative integer: %+v", path, name, property)
 					}
 				case strings.Contains(name, "cost") || strings.HasSuffix(name, "_per_million"):
-					if property["type"] != "number" || property["minimum"] != float64(0) {
+					zeroSentinel := property["const"] == float64(0)
+					if !zeroSentinel && (property["type"] != "number" || property["minimum"] != float64(0)) {
 						t.Fatalf("%s.%s is not a nonnegative number: %+v", path, name, property)
 					}
 				}

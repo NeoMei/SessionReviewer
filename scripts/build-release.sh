@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-version=${1:-0.2.11}
+version=${1:-0.2.12}
 dist=${2:-dist}
 
 if [ -n "$(git status --porcelain=v1 --untracked-files=all)" ]; then

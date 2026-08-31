@@ -32,10 +32,14 @@ export function parseLedger(source: string): MachineLedger {
   const acceptedRevision = integer(root.accepted_revision, "$.accepted_revision");
   const reviewSha256 = hash(root.review_sha256, "$.review_sha256");
   const historySha256 = hash(root.history_sha256, "$.history_sha256");
-  const accounting = parseProjectAccounting(root.accounting, "$.accounting");
+  const parsedAccounting = parseProjectAccounting(root.accounting, "$.accounting");
   const sessions = array(root.sessions, "$.sessions").map((item, index) => parseSession(item, `$.sessions[${index}]`, projectId));
   unique(sessions.map((session) => session.id), "session report identity");
   unique(sessions.map((session) => session.sessionId), "session identity");
+  const accounting = {
+    ...parsedAccounting,
+    pricingComplete: sessions.every((session) => session.accounting === undefined || session.accounting.pricingComplete)
+  };
   validateProjectAggregate(accounting, sessions);
 
   const sessionIds = new Set(sessions.map((session) => session.sessionId));
@@ -73,7 +77,8 @@ function parseProjectAccounting(value: unknown, path: string): ProjectAccounting
     totalDurationMs: integer(row.total_duration_ms, `${path}.total_duration_ms`),
     totalTokens: integer(row.total_tokens, `${path}.total_tokens`),
     totalCostUsd: finite(row.total_cost_usd, `${path}.total_cost_usd`),
-    models
+    models,
+    pricingComplete: true
   };
   const tokens = sum(models.map((model) => model.totalTokens));
   const cost = sum(models.map((model) => model.totalCostUsd));
@@ -132,7 +137,7 @@ function parseSessionAccounting(value: unknown, path: string): SessionAccounting
   if (sum(models.map((model) => model.totalTokens)) !== totalTokens || !near(sum(models.map((model) => model.costUsd)), totalCostUsd)) {
     throw new Error(`${path} aggregate total differs from model rows`);
   }
-  return { startedAt, endedAt, durationMs, models, totalTokens, totalCostUsd };
+  return { startedAt, endedAt, durationMs, models, totalTokens, totalCostUsd, pricingComplete: models.every((model) => model.pricing !== undefined) };
 }
 
 function parseModelAccounting(value: unknown, path: string): ModelAccounting {
@@ -151,14 +156,25 @@ function parseModelAccounting(value: unknown, path: string): ModelAccounting {
   }
   const pricing = parsePricing(row.pricing, `${path}.pricing`);
   const costUsd = finite(row.cost_usd, `${path}.cost_usd`);
-  const uncached = inputTokens - cachedInputTokens - cacheWriteInputTokens;
-  const calculated = (uncached * pricing.inputPerMillion + cachedInputTokens * pricing.cachedInputPerMillion + cacheWriteInputTokens * pricing.cacheWriteInputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
-  if (!near(calculated, costUsd)) throw new Error(`${path} cost does not match pricing`);
-  return { model: nonempty(row.model, `${path}.model`), inputTokens, cachedInputTokens, cacheWriteInputTokens, outputTokens, reasoningOutputTokens, totalTokens, pricing, costUsd };
+  if (pricing === undefined) {
+    if (costUsd !== 0) throw new Error(`${path} unknown pricing must not claim a cost`);
+  } else {
+    const uncached = inputTokens - cachedInputTokens - cacheWriteInputTokens;
+    const calculated = (uncached * pricing.inputPerMillion + cachedInputTokens * pricing.cachedInputPerMillion + cacheWriteInputTokens * pricing.cacheWriteInputPerMillion + outputTokens * pricing.outputPerMillion) / 1_000_000;
+    if (!near(calculated, costUsd)) throw new Error(`${path} cost does not match pricing`);
+  }
+  return {
+    model: nonempty(row.model, `${path}.model`), inputTokens, cachedInputTokens, cacheWriteInputTokens,
+    outputTokens, reasoningOutputTokens, totalTokens, ...(pricing === undefined ? {} : { pricing }), costUsd
+  };
 }
 
-function parsePricing(value: unknown, path: string): Pricing {
+function parsePricing(value: unknown, path: string): Pricing | undefined {
   const row = object(value, path, ["currency", "input_per_million", "cached_input_per_million", "cache_write_input_per_million", "output_per_million", "source", "as_of"]);
+  if (row.currency === "" && row.input_per_million === 0 && row.cached_input_per_million === 0 &&
+      row.cache_write_input_per_million === 0 && row.output_per_million === 0 && row.source === "" && row.as_of === "") {
+    return undefined;
+  }
   if (row.currency !== "USD") throw new Error(`${path}.currency must be USD`);
   const source = nonempty(row.source, `${path}.source`);
   let url: URL;

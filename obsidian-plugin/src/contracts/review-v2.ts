@@ -101,7 +101,7 @@ export interface ModelAccounting {
   outputTokens: number;
   reasoningOutputTokens: number;
   totalTokens: number;
-  pricing: Pricing;
+  pricing?: Pricing;
   costUsd: number;
 }
 
@@ -112,6 +112,7 @@ export interface SessionAccounting {
   models: ModelAccounting[];
   totalTokens: number;
   totalCostUsd: number;
+  pricingComplete: boolean;
 }
 
 export interface SessionReport {
@@ -136,6 +137,7 @@ export interface ProjectAccounting {
   totalTokens: number;
   totalCostUsd: number;
   models: ProjectModelSummary[];
+  pricingComplete: boolean;
 }
 
 export interface MachineLedger {

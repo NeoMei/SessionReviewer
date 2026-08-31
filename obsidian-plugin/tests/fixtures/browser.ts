@@ -32,12 +32,13 @@ export function browserModelFixture(): BrowserModel {
       totalDurationMs: 180000,
       totalTokens: 350,
       totalCostUsd: 0.0038,
+      pricingComplete: true,
       models: [{ model: "gpt-test", totalTokens: 350, totalCostUsd: 0.0038, tokenSharePct: 100, costSharePct: 100 }]
     },
     sessions: [{
       id: "session-report-a", projectId: "project-0123456789abcdef", sessionId: "session-a", previousSessionId: "", nextSessionId: "",
       accounting: {
-        startedAt: "2026-08-25T07:00:00Z", endedAt: "2026-08-25T07:03:00Z", durationMs: 180000, totalTokens: 350, totalCostUsd: 0.0038,
+        startedAt: "2026-08-25T07:00:00Z", endedAt: "2026-08-25T07:03:00Z", durationMs: 180000, totalTokens: 350, totalCostUsd: 0.0038, pricingComplete: true,
         models: [{ model: "gpt-test", inputTokens: 200, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 150, reasoningOutputTokens: 0, totalTokens: 350, costUsd: 0.0038,
           pricing: { currency: "USD", inputPerMillion: 4, cachedInputPerMillion: 0.4, cacheWriteInputPerMillion: 5, outputPerMillion: 20, source: "https://example.com/pricing", asOf: "2026-08-25" } }]
       }
