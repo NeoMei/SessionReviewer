@@ -551,7 +551,19 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 		if !reflect.DeepEqual(request.ForbiddenRoots, wantRoots) || request.WorkingDirectory == fixture.project || request.WorkingDirectory == fixture.vault {
 			return agent.Result{}, errors.New("agent request lost physical root isolation")
 		}
-		return agent.Result{Proposal: workerDraft(t, current, accepted.legacy)}, nil
+		body := workerDraft(t, current, accepted.legacy)
+		var draft proposal.Proposal
+		if err := json.Unmarshal(body, &draft); err != nil {
+			t.Fatal(err)
+		}
+		draft.EvidenceLinks = append(draft.EvidenceLinks, proposal.EvidenceLink{
+			EntityID: current.ProjectID, EvidenceID: current.Events[0].ID, Relation: "supports",
+		})
+		body, err := json.Marshal(draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agent.Result{Proposal: body}, nil
 	}
 	applyFn := func(_ context.Context, request ApplyRequest) (apply.Result, error) {
 		sequence = append(sequence, "apply")
@@ -563,6 +575,9 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 		}
 		if request.Proposal.SessionReport.Accounting != nil {
 			return apply.Result{}, errors.New("unexpected host accounting")
+		}
+		if len(request.Proposal.EvidenceLinks) != 2 {
+			return apply.Result{}, errors.New("unchanged-entity evidence link reached apply")
 		}
 		if request.ProjectIdentity != fixture.job.ProjectIdentity || !request.DataIdentity.Valid() {
 			return apply.Result{}, errors.New("apply request lost pinned root identities")

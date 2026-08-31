@@ -763,6 +763,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err := restoreEvidenceSummaries(&draft, packet); err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
+	discardProjectEvidenceLinks(&draft)
 	changes, err := proposal.Validate(draft, packet, prepared.Accepted.Legacy)
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
@@ -973,6 +974,24 @@ func restoreEvidenceSummaries(draft *proposal.Proposal, packet evidence.Packet) 
 		ref.Summary = replacements[index]
 	}
 	return nil
+}
+
+// discardProjectEvidenceLinks removes the one structurally impossible link
+// target that models may infer from the proposal envelope. A project ID is
+// context, not a change entity. All other links remain untouched so final
+// validation still rejects unknown entities, unbound evidence, duplicates,
+// and invalid relations.
+func discardProjectEvidenceLinks(draft *proposal.Proposal) {
+	if draft == nil {
+		return
+	}
+	filtered := make([]proposal.EvidenceLink, 0, len(draft.EvidenceLinks))
+	for _, link := range draft.EvidenceLinks {
+		if link.EntityID != draft.ProjectID {
+			filtered = append(filtered, link)
+		}
+	}
+	draft.EvidenceLinks = filtered
 }
 
 func enrichSourceAccounting(draft *proposal.Proposal, usage *accounting.SessionUsage, at time.Time, resolver PricingResolver) error {
