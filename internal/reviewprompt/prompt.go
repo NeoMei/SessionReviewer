@@ -272,7 +272,11 @@ func Build(input Input) (Bundle, error) {
 	if digestBytes(finalSchema) != proposalSchemaDigest || digestBytes(invariants) != applyInvariantDigest {
 		return Bundle{}, fmt.Errorf("%w: pinned prompt source drift", ErrInvalidInput)
 	}
-	draftSchema, err := agentDraftSchema(finalSchema)
+	reportRevision, err := expectedSessionReportRevision(accepted, input.Packet.SessionID)
+	if err != nil {
+		return Bundle{}, err
+	}
+	draftSchema, err := agentDraftSchema(finalSchema, reportRevision)
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -826,7 +830,7 @@ func validatePacketItems(packet evidence.Packet) error {
 	return nil
 }
 
-func agentDraftSchema(final []byte) ([]byte, error) {
+func agentDraftSchema(final []byte, reportRevision int) ([]byte, error) {
 	var root map[string]any
 	if err := json.Unmarshal(final, &root); err != nil {
 		return nil, fmt.Errorf("%w: decode final proposal schema", ErrInvalidInput)
@@ -846,6 +850,10 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 	if _, ok := properties["accounting"]; !ok {
 		return nil, fmt.Errorf("%w: missing accounting seam", ErrInvalidInput)
 	}
+	if _, ok := properties["revision"]; !ok {
+		return nil, fmt.Errorf("%w: missing session report revision", ErrInvalidInput)
+	}
+	properties["revision"] = map[string]any{"type": "integer", "const": reportRevision}
 	delete(properties, "accounting")
 	delete(defs, "session_accounting")
 	delete(defs, "model_accounting")
@@ -859,6 +867,22 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: encode Agent draft schema", ErrInvalidInput)
 	}
 	return append(data, '\n'), nil
+}
+
+func expectedSessionReportRevision(context acceptedContext, sessionID string) (int, error) {
+	revision := 1
+	found := false
+	for _, report := range context.Sessions {
+		if report.SessionID != sessionID {
+			continue
+		}
+		if found || report.Revision <= 0 || report.Revision >= maxSafeInteger {
+			return 0, ErrInvalidInput
+		}
+		found = true
+		revision = report.Revision + 1
+	}
+	return revision, nil
 }
 
 func projectPacket(packet evidence.Packet) packetData {

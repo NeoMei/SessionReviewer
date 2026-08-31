@@ -1154,7 +1154,8 @@ BEGIN_AGENT_DRAFT_JSON_SCHEMA_V1
           "$ref": "#/$defs/nonempty_string"
         },
         "revision": {
-          "$ref": "#/$defs/positive_integer"
+          "const": 1,
+          "type": "integer"
         },
         "session_id": {
           "$ref": "#/$defs/nonempty_string"

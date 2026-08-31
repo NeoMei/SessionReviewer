@@ -2,6 +2,7 @@ package reviewprompt_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -183,6 +184,38 @@ func TestBuildAllowsValidatedHighEntropyIdentityOnlyInIdentityFields(t *testing.
 	human.Accepted.Events[0].Summary = longID
 	if bundle, err := reviewprompt.Build(human); bundle.Prompt != nil || !errors.Is(err, reviewprompt.ErrUnsafeInput) {
 		t.Fatalf("high-entropy human summary was accepted: prompt=%q err=%v", bundle.Prompt, err)
+	}
+}
+
+func TestBuildConstrainsSessionReportRevisionFromAcceptedState(t *testing.T) {
+	tests := []struct {
+		name      string
+		sessionID string
+		want      float64
+	}{
+		{name: "new session report starts at one", sessionID: "s1", want: 1},
+		{name: "existing session report increments accepted revision", sessionID: "s0", want: 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fixtureInput()
+			input.Packet.SessionID = test.sessionID
+			bundle, err := reviewprompt.Build(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(bundle.OutputSchema, &schema); err != nil {
+				t.Fatal(err)
+			}
+			defs := schema["$defs"].(map[string]any)
+			report := defs["session_report"].(map[string]any)
+			properties := report["properties"].(map[string]any)
+			revision := properties["revision"].(map[string]any)
+			if got, ok := revision["const"].(float64); !ok || got != test.want {
+				t.Fatalf("session report revision schema=%v want const %v", revision, test.want)
+			}
+		})
 	}
 }
 
