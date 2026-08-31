@@ -16,7 +16,7 @@ Project-wide scanning must not depend on Agent output. SessionReviewer should fi
 - Scan every discoverable project Session without invoking an Agent or consuming model tokens.
 - Process data in two deterministic passes: per-Session materialization, then project-level reduction.
 - Preserve both passes as long-lived, versioned analysis assets without duplicating complete raw Session text.
-- Keep one unambiguous machine-fact authority with complete provenance.
+- Keep one unambiguous authority for machine-observed facts, with every deterministic derived claim isolated in a dependency-bound view.
 - Generate the current concise Obsidian project review, history, evolution, status, and usage presentation.
 - Preserve human editability of the rendered review/history and give human edits highest presentation precedence.
 - Support incremental, resumable, cross-platform rescans without rewriting unchanged data.
@@ -39,7 +39,7 @@ Project-wide scanning must not depend on Agent output. SessionReviewer should fi
 ## Confirmed product decisions
 
 - The default pipeline is zero-token and has two passes: Session materialization followed by project reduction.
-- `ObservationStore` is the sole authority for machine facts.
+- `ObservationStore` is the sole authority for machine-observed facts. Deterministic derived claims live only in dependency-bound `SessionView` or `ProjectView` records and never flow back into `ObservationStore`.
 - `SessionView` and `ProjectView` are durable, versioned materialized views, not competing authorities.
 - The complete private memory store lives in the platform SessionReviewer data root and remains logically isolated per project.
 - Full original Session text is not duplicated. Facts retain typed provenance, hashes, source references, and only bounded safe excerpts needed for presentation.
@@ -48,7 +48,13 @@ Project-wide scanning must not depend on Agent output. SessionReviewer should fi
 - New versions are created only when input fact digests change.
 - Agent semantic content is stored as granular dependency-bound annotations.
 - Human-edited review/history content is a `HumanPresentation` layer with highest presentation precedence.
+- Human edits are represented as field-level patches with explicit set, suppress, and restore-default operations, while unknown custom Markdown blocks remain byte-preserved.
 - Obsidian is a human-readable presentation and editing container for scan results, not the machine-fact authority.
+- Private generations and Project/Vault projections are published through a durable journal; a generation is not authoritative until every required destination verifies the same generation and hashes.
+- Public projection schema v3 declares a minimum writer version, and older writers fail closed rather than downgrade or overwrite it.
+- A zero-token, read-only `ProjectProbe` records live project state separately from Session history.
+- Shared Session usage is stored once in `SourceCatalog`; project views report associated usage with an explicit shared marker, while future global totals deduplicate by Session ID.
+- Human presentation authority never bypasses structural, identity, or security checks during Project/Vault propagation.
 - Existing accepted ledger content is migrated according to evidence validity; a fresh zero-token scan reconstructs machine facts from all source Sessions.
 
 ## Refined architecture
@@ -60,7 +66,7 @@ Agent Session sources
 SourceAdapter + content-free SourceCatalog
         |
         v
-ObservationStore                         sole machine-fact authority
+ObservationStore                    sole machine-observation authority
         |
         +--------------------+
         |                    |
@@ -112,9 +118,9 @@ Read(ref) -> bounded source material for explicit later analysis
 
 The platform-level `SourceCatalog` stores no conversation body. It records provider, Session identity, authenticated physical source identity, time range, available boundary, source availability, and project-affinity metadata. It prevents duplicate discovery work and lets project stores refer to one source without copying the original Session.
 
-## ObservationStore: sole machine-fact authority
+## ObservationStore: sole machine-observation authority
 
-An Observation is a typed, immutable record of something witnessed in a Session or deterministically derived by an identified rule.
+An Observation is a typed, immutable record of something directly witnessed in a Session source. `ObservationStore` contains only observed records. It never stores reducer output or a conclusion derived from other observations.
 
 Every Observation contains:
 
@@ -124,8 +130,8 @@ Every Observation contains:
 - source line/range and authenticated source hash;
 - event time and sequence;
 - typed kind, subject, operation, object, outcome, and relevant structured fields;
-- certainty: `observed` or `derived`;
-- provenance: source-adapter version or reducer-rule ID/version;
+- certainty: always `observed` in this store;
+- provenance: source-adapter ID and version;
 - bounded safe excerpt only when required for human presentation;
 - source availability state; and
 - redaction diagnostics without sensitive values.
@@ -136,11 +142,11 @@ Examples:
 observed: command exited with code 0
 observed: file path was modified
 observed: commit hash was created
-derived: later compatible verification recovered an earlier failure signature
+derived: excluded from ObservationStore; belongs to a dependency-bound SessionView or ProjectView
 semantic: excluded from ObservationStore; belongs to AgentAnnotation or HumanPresentation
 ```
 
-The distinction prevents a rule-based conclusion from silently becoming an original fact.
+Deterministic conclusions such as compatible failure recovery, rankings, phase boundaries, and current-state selection are versioned view fields. Each carries the exact Observation or lower-level view dependencies and reducer rule/version that produced it. Derived output is never written back as Observation input, preventing circular authority and self-reinforcing reductions.
 
 ### Text and raw-source policy
 
@@ -164,6 +170,7 @@ The complete fact and view store lives outside Project and Vault:
 ```text
 <SessionReviewer data>/
 ├── source-catalog/
+├── publication-journal/
 └── projects/
     └── <project-id>/
         └── memory-v1/
@@ -180,11 +187,22 @@ The complete fact and view store lives outside Project and Vault:
                 └── <scan-generation>.json
 ```
 
-Directories and records use the existing private platform-data permissions, rooted path validation, identity pinning, atomic publication, and project locks. Complete facts are not placed in Git, Project Markdown, or the Obsidian Vault.
+Directories and records use the existing private platform-data permissions, rooted path validation, identity pinning, atomic private-object writes, and project locks. Complete facts are not placed in Git, Project Markdown, or the Obsidian Vault.
 
 Observation chunks are immutable and content-addressed. A Session append writes only successor chunks. SessionView manifests reference old and new chunks instead of copying all prior facts. ProjectViews contain compact aggregates and references rather than duplicating complete Session observations.
 
-Unchanged scans produce no new version. A SessionView is versioned only when its Observation dependency digest changes. A ProjectView is versioned only when its ordered SessionView dependency digest or reducer version changes. Referenced historical chunks and views are retained; unreferenced compaction is a future explicit maintenance operation, not an automatic first-release behavior.
+Unchanged scans produce no new version. A SessionView is versioned only when its Observation dependency digest changes. A ProjectView is versioned only when its ordered SessionView dependency digest, ProjectProbe digest, or reducer version changes. Referenced historical chunks and views are retained; unreferenced compaction is a future explicit maintenance operation, not an automatic first-release behavior.
+
+Private immutable objects can be committed atomically within the SessionReviewer data root, but the private store, Project files, and Obsidian Vault cannot share one filesystem transaction. Publication therefore uses a durable, restartable journal:
+
+1. write and verify a complete private generation as `prepared`, without changing `published_generation`;
+2. durably record a publication intent containing the generation ID, all destination preimage hashes, and all expected output hashes;
+3. update the Project projection only if its preimage still matches;
+4. use the existing Project/Vault sync transaction to update the Vault projection only if its preimage still matches;
+5. reopen and verify the private manifest, Project projection, Vault projection, schema, generation ID, and hashes; and
+6. atomically switch `published_generation` and mark the journal entry `committed`.
+
+On restart, the journal either completes the same intent idempotently or restores presentation from its recorded preimages before abandoning the prepared generation. A prepared or partially projected generation is never exposed as the published machine state. Concurrent human edits produce a preimage mismatch and enter explicit conflict handling; they are never overwritten by recovery.
 
 ## Project association and cross-project Sessions
 
@@ -200,13 +218,15 @@ Each Observation is associated using authenticated context available at that rec
 
 Observations that belong to another mapped project go only to that project's store. Provider-level Session metadata may be referenced by multiple projects through the content-free SourceCatalog, but original text is not copied. Ambiguous observations remain quarantined and contribute a safe diagnostic; they are not assigned by guesswork.
 
+Provider-level model and token usage belongs to the Session as a whole and is stored exactly once in `SourceCatalog`. It is not divided among projects using guessed ratios. Each contributing project may display that Session's usage as `associated_usage` with `shared=true`; the project total is therefore explicitly an associated-usage total, not an exclusive cost allocation. Future cross-project/global totals deduplicate by provider and Session ID before summing.
+
 ## First pass: SessionView materialization
 
 A scan freezes the ordered source candidates and readable boundaries. The first pass converts each project's Observations into one durable SessionView.
 
 SessionView includes:
 
-- Session identity, provider, time range, model, and token usage;
+- Session identity, provider, time range, and a reference to the SourceCatalog model/token usage record;
 - coverage and source-availability state;
 - ordered references to observations and chunks;
 - user-request presentation excerpts;
@@ -239,14 +259,15 @@ ProjectView contains:
 
 - Session coverage and terminal-state counts;
 - project time range and change generation;
-- current witnessed branch, version, Git status, and verification state with observation times;
+- current Session-witnessed branch, version, Git status, and verification state with observation times;
+- current read-only ProjectProbe state with a separate probe time;
 - chronological Session and event timeline;
 - files/modules ranked by documented frequency and recency rules;
 - commits, tags, releases, deployments, and artifacts;
 - tests, builds, lint, sync, and verification outcomes;
 - errors, normalized signatures, and compatible later recovery links;
 - recent activity, source availability, and inspection pointers;
-- model and token accounting;
+- associated model and token accounting, including shared-Session markers;
 - deterministic differences from the preceding ProjectView; and
 - references to every contributing SessionView and Observation.
 
@@ -260,6 +281,18 @@ Reduction rules are transparent and versioned:
 - ambiguous data contributes diagnostics, not guessed facts.
 
 ProjectView is the complete deterministic second-pass result. Obsidian renders only its concise human-facing subset.
+
+## Read-only ProjectProbe
+
+Session history alone cannot prove the project's state at scan time. After Session materialization and before ProjectView reduction, a zero-token `ProjectProbe` records a narrow, read-only snapshot of the authenticated project root:
+
+- project identity and canonical root;
+- Git branch, HEAD, worktree status, and configured remote identity when available;
+- declared version-file paths and content hashes;
+- existence and hashes of files required by the public projection contract; and
+- probe time, probe version, and typed diagnostics.
+
+The probe does not run tests, builds, scripts, package installation, network requests, or dependency resolution. It does not reinterpret prior Session events. ProjectView keeps live probe values and historical Session-witnessed values distinct so the UI cannot claim that a present Git state proves a historical release, deployment, or test outcome.
 
 ## Granular Agent annotations
 
@@ -278,7 +311,21 @@ Invalid, unsafe, or unavailable Agent output rejects only that annotation attemp
 
 ## HumanPresentation: highest presentation authority
 
-Project review and history remain human editable in the Project/Obsidian synchronization workflow. Parsed human edits form `HumanPresentation`, the highest-precedence source for editable semantic and display fields.
+Project review and history remain human editable in the Project/Obsidian synchronization workflow. Parsed human edits form field-level `HumanPresentationPatch` records, the highest-precedence source for editable semantic and display fields.
+
+Each supported patch records:
+
+```text
+HumanPresentationPatch {
+  entity_id
+  field
+  operation: set | suppress | restore_default
+  value                         required only for set
+  base_generated_hash
+}
+```
+
+`set` pins the human value, including an intentionally empty value when the field contract permits it. `suppress` intentionally removes a generated item or optional section. `restore_default` removes the human override so normal Agent/ProjectView precedence resumes. The stored `base_generated_hash` distinguishes a human change from unchanged generated text and supports later rebase/conflict diagnostics.
 
 HumanPresentation may override:
 
@@ -291,7 +338,7 @@ HumanPresentation may override:
 
 HumanPresentation does not delete or rewrite underlying observed facts. If a human presentation conflicts with a machine observation, the human wording remains the primary human-facing view while the observation remains available for traceability and future analysis.
 
-Stable hidden identities and existing parse/render contracts preserve edits across rescans. The renderer merges sources field by field:
+Stable hidden identities and schema-v3 parse/render contracts preserve edits across rescans. Unknown custom Markdown blocks and unsupported fields remain byte-preserved in place; they are not normalized or deleted merely because the scanner does not understand them. The renderer merges supported fields individually:
 
 ```text
 human value, when present
@@ -300,7 +347,7 @@ otherwise deterministic ProjectView value
 otherwise omit the optional section
 ```
 
-Sync conflicts between Project and Obsidian continue through the existing explicit conflict workflow; the scan does not arbitrarily choose one human edit over another.
+Sync conflicts between Project and Obsidian continue through the existing explicit conflict workflow; the scan does not arbitrarily choose one human edit over another. Human precedence governs accepted presentation meaning, but it does not bypass rooted-path checks, stable entity identity, schema validation, redaction, link safety, or Project/Vault propagation rules. A human edit that is valid locally but unsafe to propagate remains on its originating side and creates an explicit diagnostic/conflict; it is never auto-copied, silently discarded, or converted into a machine fact.
 
 ## Obsidian projection boundary
 
@@ -316,6 +363,8 @@ The current information volume remains the target:
 - model/token usage.
 
 The zero-token ProjectView supplies machine-backed content. HumanPresentation supplies authoritative edits. Optional semantic sections with no human or Agent content are omitted rather than filled with invented conclusions or empty cards.
+
+Usage is labeled as associated project usage. When a Session contributes to multiple projects, the relevant row/card carries a shared marker so a human cannot mistake per-project associated totals for mutually exclusive allocation.
 
 The primary scan action is named `更新项目脉络`. It freezes, extracts, reduces, renders, and synchronizes. Agent deep analysis is not part of this action and need not be implemented as an Obsidian workflow; it may be invoked explicitly through the Agent/CLI and its accepted annotations then appear in the normal projection.
 
@@ -346,7 +395,7 @@ queued -> discovering -> extracting -> reducing -> rendering -> syncing
 
 `completed_with_issues` means every frozen Session reached a terminal deterministic state but one or more were unsupported, missing, unreadable, ambiguous, or malformed. It is a complete scan with explicit coverage issues, not a successful index claim for those sources.
 
-`failed` is reserved for project-wide integrity failures: unauthenticated project identity, inability to publish the private store atomically, corrupt manifest lineage, unrecoverable human-presentation parse conflict, or failure to render/sync an otherwise committed generation. A malformed Session is not a project-wide failure.
+`failed` is reserved for project-wide integrity failures: unauthenticated project identity, inability to prepare or journal a private generation, corrupt manifest lineage, unrecoverable human-presentation parse conflict, or inability to complete/restore a journaled Project/Vault publication. A malformed Session is not a project-wide failure.
 
 Agent annotation status is independent and cannot change scan completion.
 
@@ -389,9 +438,11 @@ Cross-project analysis reads only explicitly selected stores and produces separa
 
 Observation, SessionView, ProjectView, AgentAnnotation, HumanPresentation, and public projection have independent schema versions. Adapter/materializer/reducer versions are included in dependency identities so only affected layers rebuild.
 
-Private-store migration writes new immutable chunks/views and atomically publishes a new manifest generation. Interrupted migration leaves the prior generation authoritative. Readers reject unsupported required versions without deleting existing objects.
+Private-store migration writes new immutable chunks/views and publishes them through the durable generation journal. Interrupted migration leaves the prior committed generation authoritative. Readers reject unsupported required versions without deleting existing objects.
 
-Existing project-review Markdown, hidden stable identities, project/vault sync, conflicts, and concise Obsidian layout remain compatible. The existing machine ledger becomes a public projection compatibility artifact rather than the long-term machine-fact authority.
+The new public Project/Vault projection is schema v3 and declares `minimum_writer_version`. A CLI or Obsidian plugin that cannot parse the schema or does not satisfy the minimum writer version must fail closed before any mutation and show an upgrade-required message. It may render only an explicitly supported read-only fallback; it may not rewrite the file as schema v2, strip unknown blocks, or silently downgrade metadata.
+
+Existing project-review Markdown, hidden stable identities, project/vault sync, conflicts, and concise Obsidian layout remain compatible through an explicit v2-to-v3 migration. The existing machine ledger becomes a public projection compatibility artifact rather than the long-term machine-fact authority.
 
 ## Acceptance criteria
 
@@ -409,6 +460,7 @@ Existing project-review Markdown, hidden stable identities, project/vault sync, 
 - A repeated unchanged scan writes no new versions.
 - Restart resumes from published dependencies without duplicate facts or broken lineage.
 - Cross-platform fixtures normalize paths and produce equivalent semantic identities.
+- Deterministic derived fields exist only in SessionView/ProjectView and never re-enter ObservationStore.
 
 ### Storage and privacy
 
@@ -417,6 +469,7 @@ Existing project-review Markdown, hidden stable identities, project/vault sync, 
 - Source references and hashes allow bounded on-demand retrieval while the source exists.
 - Missing sources preserve retained facts and display honest availability state.
 - Content-addressed chunks and reference-based views prevent full-copy growth on every scan.
+- Shared Session usage exists once in SourceCatalog; project totals are marked associated/shared and global totals deduplicate by Session ID.
 
 ### Traceability and future analysis
 
@@ -433,6 +486,8 @@ Existing project-review Markdown, hidden stable identities, project/vault sync, 
 - Machine facts remain immutable and traceable beneath a conflicting human presentation.
 - Project/Vault concurrent human edits still use the existing explicit conflict workflow.
 - Empty semantic sections are omitted rather than populated with invented content.
+- `set`, `suppress`, and `restore_default` survive rescans at field level; unknown custom Markdown remains byte-preserved.
+- Unsafe human edits remain visible at their origin with an explicit conflict and are not propagated or silently deleted.
 
 ### Migration and Obsidian
 
@@ -441,17 +496,20 @@ Existing project-review Markdown, hidden stable identities, project/vault sync, 
 - Legacy Agent semantics with valid evidence become granular annotations; unresolved legacy content is not promoted to machine fact.
 - The partially completed Agent job is not required to scan all source Sessions.
 - Obsidian displays only the concise scan-result presentation and safe scan status.
+- Schema-v2 writers fail closed on schema-v3 projections and cannot downgrade or overwrite them.
+- A crash at every publication-journal step either resumes the same generation or leaves/restores the prior published generation without losing concurrent human edits.
+- ProjectProbe reports live Git/version/file state without running tests, scripts, installs, or network requests and without rewriting historical claims.
 
 ## Delivery sequence
 
 Implementation planning must preserve these dependency boundaries:
 
-1. private Observation schemas, chunk store, manifests, and SourceAdapter contract;
-2. Codex source discovery, project-affinity partitioning, and first-pass SessionView materialization;
-3. deterministic ProjectView reducer and version history;
-4. HumanPresentation parse/precedence preservation and deterministic render bridge;
-5. zero-token scan job/control plane and Obsidian `更新项目脉络` integration;
-6. legacy-ledger migration and real AgentWiki 154-Session acceptance;
+1. private observed-only Observation schemas, chunk store, manifests, SourceCatalog, and SourceAdapter contract;
+2. Codex source discovery, project-affinity partitioning, shared-usage references, and first-pass SessionView materialization;
+3. read-only ProjectProbe plus deterministic ProjectView reducer and version history;
+4. schema-v3 HumanPresentationPatch parse/precedence preservation and deterministic render bridge;
+5. durable publication journal, zero-token scan job/control plane, and Obsidian `更新项目脉络` integration;
+6. v2-to-v3 and legacy-ledger migration plus real AgentWiki 154-Session acceptance;
 7. granular AgentAnnotation as a separate optional milestone; and
 8. future query/global-catalog work as a separate project.
 
