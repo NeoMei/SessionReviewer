@@ -151,11 +151,72 @@ func TestBoundedExcerptPreservesCompleteRedactedContentWhenWithinLimits(t *testi
 func TestVerificationComponentNormalizesArbitraryCommandToken(t *testing.T) {
 	const raw = "ARBITRARY-COMPONENT-MUST-NOT-PERSIST"
 	classified := classifyCommand("go test " + raw)
-	if classified.verification != "package" {
-		t.Fatalf("verification component=%q want normalized package class", classified.verification)
+	if classified.verification != "other" {
+		t.Fatalf("verification component=%q want normalized other class", classified.verification)
 	}
 	if strings.Contains(classified.signature+classified.verification, raw) {
 		t.Fatalf("classified command retained arbitrary token: %+v", classified)
+	}
+}
+
+func TestVerificationComponentAcceptsKnownSafePackageGrammar(t *testing.T) {
+	classified := classifyCommand("go test ./...")
+	if classified.signature != "go:test" || classified.verification != "package" || classified.verificationOperation != "test" {
+		t.Fatalf("safe Go package grammar was not classified: %+v", classified)
+	}
+}
+
+func TestCommandClassificationNeverPersistsUnknownExecutableOrSecretOperand(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	workdir := filepath.ToSlash(fixture.projectA)
+	const unknownExecutable = "unknown-executable-canary"
+	const secretOperand = "sk-round-two-secret-shaped-12345678901234567890"
+	unknownInput, err := json.Marshal(map[string]string{"cmd": unknownExecutable + " status", "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretInput, err := json.Marshal(map[string]string{"cmd": "go " + secretOperand, "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := encodedRecord(t, "2026-08-31T12:30:00Z", "session_meta", map[string]any{"id": "command-privacy", "cwd": workdir}) +
+		encodedRecord(t, "2026-08-31T12:30:01Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-unknown", "name": "exec_command", "input": string(unknownInput)}) +
+		encodedRecord(t, "2026-08-31T12:30:02Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-unknown", "output": "exit code: 0"}) +
+		encodedRecord(t, "2026-08-31T12:30:03Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-secret-operand", "name": "exec_command", "input": string(secretInput)}) +
+		encodedRecord(t, "2026-08-31T12:30:04Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-secret-operand", "output": "exit code: 0"}) +
+		usageEvent("2026-08-31T12:30:05Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "command-privacy.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v2", "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "command-privacy"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	persisted, err := json.Marshal(struct {
+		Observations []memory.ObservationRevision
+		Report       source.DecodeReport
+	}{Observations: observations, Report: report})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{unknownExecutable, secretOperand} {
+		if strings.Contains(string(persisted), forbidden) {
+			t.Fatalf("command source token %q entered persisted effects: %s", forbidden, persisted)
+		}
+	}
+	wantSignatures := map[string]string{"call-unknown": "other", "call-secret-operand": "go:other"}
+	for _, observation := range observations {
+		if want, found := wantSignatures[observation.Key.Subject]; found && observation.Operation == "command_started" {
+			if got := observation.Fields["command_signature"]; got != want {
+				t.Fatalf("command %s signature=%q want %q", observation.Key.Subject, got, want)
+			}
+			delete(wantSignatures, observation.Key.Subject)
+		}
+	}
+	if len(wantSignatures) != 0 {
+		t.Fatalf("command signatures not observed: %v", wantSignatures)
 	}
 }
 
@@ -330,8 +391,18 @@ func TestDuplicateToolCallIDInvalidatesResultPairing(t *testing.T) {
 	}
 	observations, report := decodeBoundary(t, adapter, boundary)
 	for _, observation := range observations {
-		if observation.Key.Subject == "call-duplicate" && observation.Operation != "command_started" {
-			t.Fatalf("ambiguous call output paired to a command: %+v", observation)
+		if observation.Key.Subject == "call-duplicate" || observation.Fields["tool_id"] == "call-duplicate" {
+			t.Fatalf("ambiguous call retained an attributable observation: %+v", observation)
+		}
+	}
+	for _, lineage := range report.Supersessions {
+		if lineage.Key.Subject == "call-duplicate" {
+			t.Fatalf("ambiguous call retained lineage: %+v", lineage)
+		}
+	}
+	for _, quarantined := range report.Quarantined {
+		if quarantined.Subject == "call-duplicate" {
+			t.Fatalf("ambiguous call retained quarantine: %+v", quarantined)
 		}
 	}
 	if !hasDiagnostic(report.Diagnostics, "duplicate_tool_call_id") {
@@ -345,6 +416,67 @@ func TestDuplicateToolCallIDInvalidatesResultPairing(t *testing.T) {
 	}
 	if !foundLater {
 		t.Fatalf("later record did not decode after duplicate call: %+v", observations)
+	}
+}
+
+func TestDuplicateApplyPatchCallIDInvalidatesPathFactsQuarantineAndLineage(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	fixture.bindings = append(fixture.bindings, authenticateBinding(t, "project-b-shadow", fixture.projectB))
+	workdir := filepath.ToSlash(fixture.projectA)
+	targetA := filepath.ToSlash(filepath.Join(fixture.projectA, "internal", "from-ambiguous-call.go"))
+	targetB := filepath.ToSlash(filepath.Join(fixture.projectB, "ambiguous", "from-ambiguous-call.go"))
+	patch := "*** Begin Patch\n*** Add File: " + targetA + "\n+safe\n*** Add File: " + targetB + "\n+safe\n*** End Patch"
+	firstInput, err := json.Marshal(map[string]string{"patch": patch, "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput, err := json.Marshal(map[string]string{"patch": "*** Begin Patch\n*** Add File: later.go\n+ignored\n*** End Patch", "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := encodedRecord(t, "2026-08-31T15:00:00Z", "session_meta", map[string]any{"id": "duplicate-patch", "cwd": workdir}) +
+		encodedRecord(t, "2026-08-31T15:00:01Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-duplicate-patch", "name": "apply_patch", "input": string(firstInput)}) +
+		encodedRecord(t, "2026-08-31T15:00:02Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-duplicate-patch", "output": "Done!"}) +
+		encodedRecord(t, "2026-08-31T15:00:03Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-duplicate-patch", "name": "apply_patch", "input": string(secondInput)}) +
+		encodedRecord(t, "2026-08-31T15:00:04Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-duplicate-patch", "output": "Done!"}) +
+		encodedRecord(t, "2026-08-31T15:00:05Z", "response_item", map[string]any{"type": "message", "id": "after-duplicate-patch", "role": "user", "content": []map[string]string{{"type": "input_text", "text": "continue after patch"}}}) +
+		usageEvent("2026-08-31T15:00:06Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "duplicate-patch.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v2", "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "duplicate-patch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	for _, observation := range observations {
+		if observation.Fields["tool_id"] == "call-duplicate-patch" || observation.Operation == "file_change" {
+			t.Fatalf("ambiguous patch retained an attributable observation: %+v", observation)
+		}
+	}
+	for _, lineage := range report.Supersessions {
+		if lineage.Key.Kind == "file" {
+			t.Fatalf("ambiguous patch retained file lineage: %+v", lineage)
+		}
+	}
+	if len(report.Quarantined) != 0 {
+		t.Fatalf("ambiguous patch retained quarantine effects: %+v", report.Quarantined)
+	}
+	if fmt.Sprint(report.ProjectIDs) != fmt.Sprint([]string{"project-a"}) {
+		t.Fatalf("ambiguous patch retained project effects: %v", report.ProjectIDs)
+	}
+	if !hasDiagnostic(report.Diagnostics, "duplicate_tool_call_id") || !hasDiagnostic(report.Diagnostics, "ambiguous_tool_call_output") {
+		t.Fatalf("bounded duplicate diagnostics missing: %+v", report.Diagnostics)
+	}
+	foundLater := false
+	for _, observation := range observations {
+		if observation.Key.Subject == "after-duplicate-patch" {
+			foundLater = true
+		}
+	}
+	if !foundLater {
+		t.Fatalf("later unrelated record did not decode: %+v", observations)
 	}
 }
 

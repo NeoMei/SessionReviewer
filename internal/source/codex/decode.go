@@ -38,6 +38,7 @@ var (
 	gitObjectPattern  = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	tagPattern        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+\-]{0,255}$`)
 	gitStatusPattern  = regexp.MustCompile(`^[MADRCUT?!]{1,2}[ \t]+[^\r\n]+$`)
+	packageSegment    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 	redactionMarker   = regexp.MustCompile(`\[REDACTED:[A-Z0-9_]+\]`)
 	patchTarget       = regexp.MustCompile(`^\*\*\* (?:Add|Update|Delete|Move to) File: (.+)$`)
 )
@@ -62,9 +63,13 @@ type recordDecoder struct {
 	pending      map[string]pendingCall
 	seenCalls    map[string]struct{}
 	invalidCalls map[string]struct{}
-	observations []memory.ObservationRevision
-	projectIDs   map[string]struct{}
-	report       source.DecodeReport
+	// Tool provenance is decoder-internal and is never copied into report
+	// quarantine or lineage envelopes.
+	observationToolCalls map[string]string
+	quarantineToolCalls  []string
+	observations         []memory.ObservationRevision
+	projectIDs           map[string]struct{}
+	report               source.DecodeReport
 }
 
 func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (source.DecodeReport, error) {
@@ -98,8 +103,9 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		ctx: ctx, adapter: a, frozen: frozen, currentCWD: boundary.Candidate.InitialCWD,
 		accounting: accounting.NewAccumulator(startedAt), pending: make(map[string]pendingCall),
 		seenCalls: make(map[string]struct{}), invalidCalls: make(map[string]struct{}),
-		projectIDs: make(map[string]struct{}),
-		report:     source.DecodeReport{TerminalState: memory.Indexed},
+		observationToolCalls: make(map[string]string),
+		projectIDs:           make(map[string]struct{}),
+		report:               source.DecodeReport{TerminalState: memory.Indexed},
 	}
 	segmentBytes := make([]int64, len(frozen.segments))
 	for index, segment := range frozen.segments {
@@ -319,7 +325,7 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		d.pending[callID] = pending
 		return d.observe(record, observedFact{
 			kind: "command", subject: callID, operation: "command_started", object: workdir, affinityPath: workdir,
-			fields: map[string]string{"command_signature": command.signature, "path": workdir, "tool_id": callID},
+			fields: map[string]string{"command_signature": command.signature, "path": workdir, "tool_id": callID}, toolCallID: callID,
 		})
 	case "apply_patch":
 		var input struct {
@@ -382,7 +388,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 			if err := d.observe(record, observedFact{
 				kind: "file", subject: subjectID(target), operation: "file_change", object: target, outcome: outcome,
 				affinityPath: target, fileTarget: true,
-				fields: map[string]string{"path": target, "failed": failed, "tool_id": pending.id},
+				fields: map[string]string{"path": target, "failed": failed, "tool_id": pending.id}, toolCallID: pending.id,
 			}); err != nil {
 				return err
 			}
@@ -403,7 +409,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 	}
 	if err := d.observe(record, observedFact{
 		kind: "command", subject: pending.id, operation: "command_finished", object: pending.workdir,
-		outcome: outcome, affinityPath: pending.workdir, fields: fields,
+		outcome: outcome, affinityPath: pending.workdir, fields: fields, toolCallID: pending.id,
 	}); err != nil {
 		return err
 	}
@@ -419,7 +425,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		}
 		if err := d.observe(record, observedFact{
 			kind: "verification", subject: pending.id, operation: "verification", object: pending.verificationComponent,
-			outcome: verificationOutcome, affinityPath: pending.workdir, fields: verificationFields,
+			outcome: verificationOutcome, affinityPath: pending.workdir, fields: verificationFields, toolCallID: pending.id,
 		}); err != nil {
 			return err
 		}
@@ -430,7 +436,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 			gitFields["tool_id"] = pending.id
 			if err := d.observe(record, observedFact{
 				kind: "git_status", subject: pending.id, operation: "git_observation", object: pending.gitOperation,
-				outcome: "observed", affinityPath: pending.workdir, fields: gitFields,
+				outcome: "observed", affinityPath: pending.workdir, fields: gitFields, toolCallID: pending.id,
 			}); err != nil {
 				return err
 			}
@@ -449,6 +455,7 @@ type observedFact struct {
 	excerpt      string
 	affinityPath string
 	fileTarget   bool
+	toolCallID   string
 }
 
 func (d *recordDecoder) observe(record session.Record, fact observedFact) error {
@@ -466,6 +473,7 @@ func (d *recordDecoder) observe(record session.Record, fact observedFact) error 
 			Ref: validated.Ref, Timestamp: validated.Timestamp, Kind: validated.Key.Kind, Subject: validated.Key.Subject,
 			CandidateProjectIDs: append([]string(nil), projectIDs...), ReasonCode: reason,
 		})
+		d.quarantineToolCalls = append(d.quarantineToolCalls, fact.toolCallID)
 		return nil
 	}
 	projectID := projectIDs[0]
@@ -477,6 +485,9 @@ func (d *recordDecoder) observe(record session.Record, fact observedFact) error 
 		return nil
 	}
 	d.observations = append(d.observations, validated)
+	if fact.toolCallID != "" {
+		d.observationToolCalls[validated.RevisionID] = fact.toolCallID
+	}
 	stableKeyDigest, err := memory.Digest(validated.Key)
 	if err != nil {
 		return fmt.Errorf("digest decoded observation key at line %d: %w", record.Line, err)
@@ -530,8 +541,9 @@ func (d *recordDecoder) invalidateToolResults(callID string) {
 	removed := make(map[string]struct{})
 	kept := d.observations[:0]
 	for _, observation := range d.observations {
-		if observation.Key.Subject == callID && observation.Operation != "command_started" {
+		if d.observationToolCalls[observation.RevisionID] == callID {
 			removed[observation.RevisionID] = struct{}{}
+			delete(d.observationToolCalls, observation.RevisionID)
 			continue
 		}
 		kept = append(kept, observation)
@@ -545,12 +557,28 @@ func (d *recordDecoder) invalidateToolResults(callID string) {
 	}
 	d.report.Supersessions = lineage
 	quarantined := d.report.Quarantined[:0]
-	for _, item := range d.report.Quarantined {
-		if item.Subject != callID {
+	provenance := d.quarantineToolCalls[:0]
+	for index, item := range d.report.Quarantined {
+		if d.quarantineToolCalls[index] != callID {
 			quarantined = append(quarantined, item)
+			provenance = append(provenance, d.quarantineToolCalls[index])
 		}
 	}
 	d.report.Quarantined = quarantined
+	d.quarantineToolCalls = provenance
+	d.rebuildProjectIDs()
+}
+
+func (d *recordDecoder) rebuildProjectIDs() {
+	d.projectIDs = make(map[string]struct{})
+	for _, observation := range d.observations {
+		d.projectIDs[observation.Key.ProjectID] = struct{}{}
+	}
+	for _, quarantined := range d.report.Quarantined {
+		for _, projectID := range quarantined.CandidateProjectIDs {
+			d.projectIDs[projectID] = struct{}{}
+		}
+	}
 }
 
 func (a *adapter) classifyAffinity(path string, fileTarget bool) ([]string, string) {
@@ -625,40 +653,63 @@ type commandClass struct {
 func classifyCommand(command string) commandClass {
 	fields := strings.Fields(command)
 	if len(fields) == 0 {
-		return commandClass{signature: "unknown:none"}
+		return commandClass{signature: "other"}
 	}
 	executable := strings.ToLower(filepath.Base(fields[0]))
-	argumentClass := "other"
-	if len(fields) > 1 {
-		argumentClass = normalizedToken(fields[1])
+	result := commandClass{}
+	switch executable {
+	case "go":
+		result.signature = "go:other"
+	case "npm":
+		result.signature = "npm:other"
+	case "git":
+		result.signature = "git:other"
+	default:
+		return commandClass{signature: "other"}
 	}
-	result := commandClass{signature: executable + ":" + argumentClass}
+	if len(fields) < 2 {
+		return result
+	}
+	operation := strings.ToLower(fields[1])
 	switch {
-	case executable == "go" && argumentClass == "test":
+	case executable == "go" && operation == "test":
+		result.signature = "go:test"
 		result.verification = commandComponent(fields[2:])
 		result.verificationOperation = "test"
-	case executable == "go" && argumentClass == "build":
+	case executable == "go" && operation == "build":
+		result.signature = "go:build"
 		result.verification = commandComponent(fields[2:])
 		result.verificationOperation = "build"
-	case executable == "go" && argumentClass == "vet":
+	case executable == "go" && operation == "vet":
+		result.signature = "go:vet"
 		result.verification = commandComponent(fields[2:])
 		result.verificationOperation = "lint"
-	case executable == "npm" && argumentClass == "test":
+	case executable == "npm" && operation == "test":
+		result.signature = "npm:test"
 		result.verification = "npm:test"
 		result.verificationOperation = "test"
-	case executable == "npm" && argumentClass == "run" && len(fields) > 2 && (fields[2] == "test" || fields[2] == "build" || fields[2] == "lint"):
-		result.verification = "npm:" + fields[2]
-		result.verificationOperation = fields[2]
-	case executable == "git" && argumentClass == "status" && containsAll(fields[2:], "--porcelain=v1", "--branch"):
+	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "test":
+		result.signature = "npm:test"
+		result.verification = "npm:test"
+		result.verificationOperation = "test"
+	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "build":
+		result.signature = "npm:build"
+		result.verification = "npm:build"
+		result.verificationOperation = "build"
+	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "lint":
+		result.signature = "npm:lint"
+		result.verification = "npm:lint"
+		result.verificationOperation = "lint"
+	case executable == "git" && operation == "status" && containsAll(fields[2:], "--porcelain=v1", "--branch"):
 		result.gitOperation = "status"
 		result.signature = "git:status"
-	case executable == "git" && argumentClass == "rev-parse" && len(fields) == 3 && fields[2] == "HEAD":
+	case executable == "git" && operation == "rev-parse" && len(fields) == 3 && fields[2] == "HEAD":
 		result.gitOperation = "head"
 		result.signature = "git:head"
-	case executable == "git" && argumentClass == "branch" && len(fields) == 3 && fields[2] == "--show-current":
+	case executable == "git" && operation == "branch" && len(fields) == 3 && fields[2] == "--show-current":
 		result.gitOperation = "branch"
 		result.signature = "git:branch"
-	case executable == "git" && argumentClass == "describe" && containsAll(fields[2:], "--tags", "--exact-match"):
+	case executable == "git" && operation == "describe" && containsAll(fields[2:], "--tags", "--exact-match"):
 		result.gitOperation = "tag"
 		result.signature = "git:tag"
 	}
@@ -668,18 +719,30 @@ func classifyCommand(command string) commandClass {
 func commandComponent(arguments []string) string {
 	for _, argument := range arguments {
 		if !strings.HasPrefix(argument, "-") {
-			return "package"
+			if validPackageComponent(argument) {
+				return "package"
+			}
+			return "other"
 		}
 	}
 	return "."
 }
 
-func normalizedToken(value string) string {
-	value = strings.ToLower(value)
-	if !adapterIdentityPattern.MatchString(value) {
-		return "other"
+func validPackageComponent(value string) bool {
+	if !validStructured(value, 256) {
+		return false
 	}
-	return value
+	if value == "." || value == "./..." {
+		return true
+	}
+	value = strings.TrimPrefix(value, "./")
+	value = strings.TrimSuffix(value, "/...")
+	for _, segment := range strings.Split(value, "/") {
+		if !packageSegment.MatchString(segment) {
+			return false
+		}
+	}
+	return true
 }
 
 func containsAll(values []string, wanted ...string) bool {
