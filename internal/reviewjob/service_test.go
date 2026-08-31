@@ -23,6 +23,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/proposal"
+	"github.com/neomei/SessionReviewer/internal/reviewprompt"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
@@ -371,6 +372,88 @@ func workerDraft(t *testing.T, packet evidence.Packet, state ledger.State) []byt
 		t.Fatalf("invalid fake draft: %v\n%s", err, body)
 	}
 	return body
+}
+
+func TestRestoreEvidenceSummariesUsesAuthenticatedPacketTuples(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	packet := workerPacket("project-1111111111111111", "session-s1", 1, 1, "", hash, false, "ev-111111111111")
+	packet.Events[0].Summary = `run in "/Users/Neo/AgentWiki /agentwiki"`
+	redacted := ledger.EvidenceRef{
+		EvidenceID: packet.Events[0].ID, SessionID: packet.SessionID, JSONLLine: 1,
+		SourceHash: hash, Summary: `[REDACTED:HOST_PATH]`,
+	}
+	draft := proposal.Proposal{
+		NewDecisions:     []ledger.Decision{{Evidence: []ledger.EvidenceRef{redacted}}},
+		UpdatedDecisions: []proposal.DecisionPatch{{Evidence: &[]ledger.EvidenceRef{redacted}}},
+		OpenLoops: []proposal.OpenLoopChange{
+			{Entity: &ledger.OpenLoop{Evidence: []ledger.EvidenceRef{redacted}}},
+			{Patch: &proposal.OpenLoopPatch{Evidence: &[]ledger.EvidenceRef{redacted}}},
+		},
+		TimelineEvents:    []ledger.TimelineEvent{{Evidence: []ledger.EvidenceRef{redacted}}},
+		CurrentStatePatch: proposal.CurrentStatePatch{Evidence: &[]ledger.EvidenceRef{redacted}},
+		SessionReport: ledger.SessionReport{
+			Evidence: []ledger.EvidenceRef{redacted},
+			Phases:   []ledger.SessionPhase{{Evidence: []ledger.EvidenceRef{redacted}}},
+		},
+	}
+
+	if err := restoreEvidenceSummaries(&draft, packet); err != nil {
+		t.Fatal(err)
+	}
+	want := packet.Events[0].Summary
+	refs := []*ledger.EvidenceRef{
+		&draft.NewDecisions[0].Evidence[0],
+		&(*draft.UpdatedDecisions[0].Evidence)[0],
+		&draft.OpenLoops[0].Entity.Evidence[0],
+		&(*draft.OpenLoops[1].Patch.Evidence)[0],
+		&draft.TimelineEvents[0].Evidence[0],
+		&(*draft.CurrentStatePatch.Evidence)[0],
+		&draft.SessionReport.Evidence[0],
+		&draft.SessionReport.Phases[0].Evidence[0],
+	}
+	for index, ref := range refs {
+		if ref.Summary != want {
+			t.Fatalf("reference %d summary=%q want authenticated %q", index, ref.Summary, want)
+		}
+	}
+
+	draft.NewDecisions[0].Evidence[0] = redacted
+	draft.NewDecisions[0].Evidence[0].JSONLLine = 2
+	if err := restoreEvidenceSummaries(&draft, packet); err == nil {
+		t.Fatal("restored a summary for a mismatched evidence tuple")
+	}
+}
+
+func TestClassifyWorkerInputFailuresSeparately(t *testing.T) {
+	segmentErr := errors.Join(errors.New("private candidate path"), prepare.ErrSessionSegmentConflict)
+	if got := classifyPrepareFailure(segmentErr); got != SessionSegmentConflict {
+		t.Fatalf("prepare code=%s want %s", got, SessionSegmentConflict)
+	}
+	if got := classifyPromptFailure(reviewprompt.ErrUnsafeInput); got != ProposalUnsafeInput {
+		t.Fatalf("prompt code=%s want %s", got, ProposalUnsafeInput)
+	}
+	if got := classifyPromptFailure(errors.New("malformed prompt input")); got != ProposalRejected {
+		t.Fatalf("generic prompt code=%s want %s", got, ProposalRejected)
+	}
+}
+
+func TestDistinctAliasesPreservesTrailingSpacePathIdentity(t *testing.T) {
+	root := "/Users/Neo/AgentWiki "
+	if aliases := distinctAliases(root, root); len(aliases) != 0 {
+		t.Fatalf("same trailing-space root became aliases=%q", aliases)
+	}
+	aliases := distinctAliases("/private/physical", root)
+	if len(aliases) != 1 || aliases[0] != root {
+		t.Fatalf("aliases=%q want exact trailing-space spelling", aliases)
+	}
+}
+
+func TestBoundedPrivateErrorRetainsWrappedAgentCause(t *testing.T) {
+	err := agent.NewError(agent.CodeIncompatible, errors.New("private adapter diagnostic"))
+	got := boundedPrivateError(err)
+	if !strings.Contains(got, "E_AGENT_INCOMPATIBLE") || !strings.Contains(got, "private adapter diagnostic") {
+		t.Fatalf("private error lost wrapped cause: %q", got)
+	}
 }
 
 func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter *verifiedWorkerAgent, applyFn ApplyFunc, syncFn SyncFunc, pricing PricingResolver) RunOptions {

@@ -103,18 +103,20 @@ type Owner struct {
 type ErrorCode string
 
 const (
-	AgentUnconfigured  ErrorCode = "E_AGENT_UNCONFIGURED"
-	AgentIncompatible  ErrorCode = "E_AGENT_INCOMPATIBLE"
-	AgentAuth          ErrorCode = "E_AGENT_AUTH"
-	AgentBusy          ErrorCode = "E_AGENT_BUSY"
-	AgentTimeout       ErrorCode = "E_AGENT_TIMEOUT"
-	AgentToolForbidden ErrorCode = "E_AGENT_TOOL_FORBIDDEN"
-	AgentCancelled     ErrorCode = "E_AGENT_CANCELLED"
-	ProposalRejected   ErrorCode = "E_PROPOSAL_REJECTED"
-	SessionDiscovery   ErrorCode = "E_SESSION_DISCOVERY"
-	ApplyRecovery      ErrorCode = "E_APPLY_RECOVERY"
-	SyncConflict       ErrorCode = "E_SYNC_CONFLICT"
-	SyncPartial        ErrorCode = "E_SYNC_PARTIAL"
+	AgentUnconfigured      ErrorCode = "E_AGENT_UNCONFIGURED"
+	AgentIncompatible      ErrorCode = "E_AGENT_INCOMPATIBLE"
+	AgentAuth              ErrorCode = "E_AGENT_AUTH"
+	AgentBusy              ErrorCode = "E_AGENT_BUSY"
+	AgentTimeout           ErrorCode = "E_AGENT_TIMEOUT"
+	AgentToolForbidden     ErrorCode = "E_AGENT_TOOL_FORBIDDEN"
+	AgentCancelled         ErrorCode = "E_AGENT_CANCELLED"
+	ProposalRejected       ErrorCode = "E_PROPOSAL_REJECTED"
+	ProposalUnsafeInput    ErrorCode = "E_PROPOSAL_UNSAFE_INPUT"
+	SessionDiscovery       ErrorCode = "E_SESSION_DISCOVERY"
+	SessionSegmentConflict ErrorCode = "E_SESSION_SEGMENT_CONFLICT"
+	ApplyRecovery          ErrorCode = "E_APPLY_RECOVERY"
+	SyncConflict           ErrorCode = "E_SYNC_CONFLICT"
+	SyncPartial            ErrorCode = "E_SYNC_PARTIAL"
 )
 
 // SafeError is a stable public error classification. Detail is private and is
@@ -609,7 +611,7 @@ func terminal(value State) bool { return !active(value) }
 
 func validErrorCode(value ErrorCode) bool {
 	switch value {
-	case AgentUnconfigured, AgentIncompatible, AgentAuth, AgentBusy, AgentTimeout, AgentToolForbidden, AgentCancelled, ProposalRejected, SessionDiscovery, ApplyRecovery, SyncConflict, SyncPartial:
+	case AgentUnconfigured, AgentIncompatible, AgentAuth, AgentBusy, AgentTimeout, AgentToolForbidden, AgentCancelled, ProposalRejected, ProposalUnsafeInput, SessionDiscovery, SessionSegmentConflict, ApplyRecovery, SyncConflict, SyncPartial:
 		return true
 	default:
 		return false

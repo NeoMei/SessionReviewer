@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -204,7 +202,7 @@ func TestBuildRejectsOversizedOrUnsafeIncludedData(t *testing.T) {
 	})
 }
 
-func TestBuildRejectsForbiddenRootAliasesBeforeMarshalling(t *testing.T) {
+func TestBuildRedactsForbiddenRootAliasesBeforeMarshalling(t *testing.T) {
 	t.Run("windows case and backslash alias", func(t *testing.T) {
 		input := fixtureInput()
 		input.GOOS = "windows"
@@ -214,85 +212,94 @@ func TestBuildRejectsForbiddenRootAliasesBeforeMarshalling(t *testing.T) {
 		}}
 		input.Packet.Events[0].Summary = `inspect C:\USERS\NEO\PROJECT\private.md`
 		bundle, err := reviewprompt.Build(input)
-		if err != reviewprompt.ErrUnsafeInput || !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
-			t.Fatalf("bundle=%+v err=%v want zero bundle and exact ErrUnsafeInput", bundle, err)
+		if err != nil || !bytes.Contains(bundle.Prompt, []byte("[REDACTED:HOST_PATH]")) || bytes.Contains(bundle.Prompt, []byte(`C:\USERS\NEO\PROJECT`)) {
+			t.Fatalf("prompt redaction failed err=%v", err)
 		}
 	})
 
 	t.Run("posix canonical and symlink alias", func(t *testing.T) {
-		parent := t.TempDir()
-		canonical := filepath.Join(parent, "physical-project")
-		alias := filepath.Join(parent, "project-alias")
-		if err := os.Mkdir(canonical, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(canonical, alias); err != nil {
-			t.Fatal(err)
-		}
-		resolved, err := filepath.EvalSymlinks(alias)
-		if err != nil {
-			t.Fatal(err)
-		}
+		canonical := "/private/physical-project"
+		alias := "/private/project-alias"
 		input := fixtureInput()
 		input.GOOS = "darwin"
-		input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: resolved, Aliases: []string{alias}}}
+		input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: canonical, Aliases: []string{alias}}}
 		input.Accepted.Review.Goal = "read " + alias + "/private.md"
 		bundle, err := reviewprompt.Build(input)
-		if err != reviewprompt.ErrUnsafeInput || !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
-			t.Fatalf("bundle=%+v err=%v want zero bundle and exact ErrUnsafeInput", bundle, err)
+		if err != nil || !bytes.Contains(bundle.Prompt, []byte("[REDACTED:HOST_PATH]")) || bytes.Contains(bundle.Prompt, []byte(alias)) {
+			t.Fatalf("prompt redaction failed err=%v", err)
 		}
 	})
 }
 
+func TestBuildRedactsTrailingSpaceProjectRootFromPromptData(t *testing.T) {
+	input := fixtureInput()
+	input.GOOS = "darwin"
+	input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: "/Users/Neo/AgentWiki "}}
+	input.Packet.CWD = "/Users/Neo/AgentWiki "
+	input.Packet.Events[0].Summary = `run tests in "/Users/Neo/AgentWiki /agentwiki"`
+
+	bundle, err := reviewprompt.Build(input)
+	if err != nil {
+		t.Fatalf("Build rejected a packet containing its authenticated project root: %v", err)
+	}
+	prompt := string(bundle.Prompt)
+	if strings.Contains(prompt, "/Users/Neo/AgentWiki ") {
+		t.Fatalf("prompt leaked the authenticated project root: %q", prompt)
+	}
+	if !strings.Contains(prompt, `run tests in \"[REDACTED:HOST_PATH]/agentwiki\"`) {
+		t.Fatalf("prompt did not preserve the useful summary around the redacted path: %q", prompt)
+	}
+}
+
 func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
 	tests := []struct {
-		name      string
-		goos      string
-		root      string
-		value     string
-		wantError error
+		name          string
+		goos          string
+		root          string
+		value         string
+		wantRedaction bool
 	}{
 		{
-			name:      "windows drive case and separators",
-			goos:      "windows",
-			root:      `C:\Users\Neo\Project`,
-			value:     `inspect c:/USERS/NEO/PROJECT/private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows drive case and separators",
+			goos:          "windows",
+			root:          `C:\Users\Neo\Project`,
+			value:         `inspect c:/USERS/NEO/PROJECT/private.md`,
+			wantRedaction: true,
 		},
 		{
-			name:      "windows extended drive alias",
-			goos:      "windows",
-			root:      `C:\Users\Neo\Project`,
-			value:     `inspect \\?\C:\USERS\NEO\PROJECT\private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows extended drive alias",
+			goos:          "windows",
+			root:          `C:\Users\Neo\Project`,
+			value:         `inspect \\?\C:\USERS\NEO\PROJECT\private.md`,
+			wantRedaction: true,
 		},
 		{
-			name:      "windows UNC case and separators",
-			goos:      "windows",
-			root:      `\\server\share\Project`,
-			value:     `inspect //SERVER/SHARE/PROJECT/private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows UNC case and separators",
+			goos:          "windows",
+			root:          `\\server\share\Project`,
+			value:         `inspect //SERVER/SHARE/PROJECT/private.md`,
+			wantRedaction: true,
 		},
 		{
-			name:      "windows extended UNC alias",
-			goos:      "windows",
-			root:      `\\server\share\Project`,
-			value:     `inspect \\?\UNC\SERVER\SHARE\PROJECT\private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows extended UNC alias",
+			goos:          "windows",
+			root:          `\\server\share\Project`,
+			value:         `inspect \\?\UNC\SERVER\SHARE\PROJECT\private.md`,
+			wantRedaction: true,
 		},
 		{
-			name:      "windows NT UNC alias",
-			goos:      "windows",
-			root:      `\\server\share\Project`,
-			value:     `inspect \??\UNC\SERVER\SHARE\PROJECT\private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows NT UNC alias",
+			goos:          "windows",
+			root:          `\\server\share\Project`,
+			value:         `inspect \??\UNC\SERVER\SHARE\PROJECT\private.md`,
+			wantRedaction: true,
 		},
 		{
-			name:      "windows slash NT UNC alias",
-			goos:      "windows",
-			root:      `\\server\share\Project`,
-			value:     `inspect //??//UNC//SERVER//SHARE//PROJECT/private.md`,
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "windows slash NT UNC alias",
+			goos:          "windows",
+			root:          `\\server\share\Project`,
+			value:         `inspect //??//UNC//SERVER//SHARE//PROJECT/private.md`,
+			wantRedaction: true,
 		},
 		{
 			name:  "windows NT UNC sibling is not the root",
@@ -301,11 +308,11 @@ func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
 			value: `inspect \??\UNC\server\share\project-old\private.md`,
 		},
 		{
-			name:      "darwin unicode normalization and case",
-			goos:      "darwin",
-			root:      "/Users/Neo/Caf\u00e9",
-			value:     "inspect /users/neo/cafe\u0301/private.md",
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "darwin unicode normalization and case",
+			goos:          "darwin",
+			root:          "/Users/Neo/Caf\u00e9",
+			value:         "inspect /users/neo/cafe\u0301/private.md",
+			wantRedaction: true,
 		},
 		{
 			name:  "posix sibling prefix is not the root",
@@ -314,11 +321,11 @@ func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
 			value: "ordinary prose about /srv/project-old and project history",
 		},
 		{
-			name:      "posix child is the root",
-			goos:      "linux",
-			root:      "/srv/project",
-			value:     "inspect /srv/project/private.md",
-			wantError: reviewprompt.ErrUnsafeInput,
+			name:          "posix child is the root",
+			goos:          "linux",
+			root:          "/srv/project",
+			value:         "inspect /srv/project/private.md",
+			wantRedaction: true,
 		},
 	}
 
@@ -329,11 +336,12 @@ func TestBuildMatchesForbiddenRootsOnPathComponentBoundaries(t *testing.T) {
 			input.ForbiddenRoots = []reviewprompt.ForbiddenRoot{{CanonicalPath: test.root}}
 			input.Packet.Events[0].Summary = test.value
 			bundle, err := reviewprompt.Build(input)
-			if !errors.Is(err, test.wantError) {
-				t.Fatalf("Build error=%v want %v", err, test.wantError)
+			if err != nil {
+				t.Fatalf("Build error=%v", err)
 			}
-			if test.wantError != nil && !reflect.DeepEqual(bundle, reviewprompt.Bundle{}) {
-				t.Fatalf("unsafe input returned nonzero bundle: %+v", bundle)
+			redacted := bytes.Contains(bundle.Prompt, []byte("[REDACTED:HOST_PATH]"))
+			if redacted != test.wantRedaction {
+				t.Fatalf("redacted=%v want %v", redacted, test.wantRedaction)
 			}
 		})
 	}
