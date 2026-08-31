@@ -141,6 +141,24 @@ func TestBoundedExcerptRejectsOversizedMarkerWithoutExceedingPersistenceLimits(t
 	}
 }
 
+func TestBoundedExcerptPreservesCompleteRedactedContentWhenWithinLimits(t *testing.T) {
+	const redacted = "Use [REDACTED:NAMED_SECRET] for the configured service."
+	if excerpt := boundedExcerpt(redacted); excerpt != redacted {
+		t.Fatalf("bounded excerpt=%q want complete redacted content %q", excerpt, redacted)
+	}
+}
+
+func TestVerificationComponentNormalizesArbitraryCommandToken(t *testing.T) {
+	const raw = "ARBITRARY-COMPONENT-MUST-NOT-PERSIST"
+	classified := classifyCommand("go test " + raw)
+	if classified.verification != "package" {
+		t.Fatalf("verification component=%q want normalized package class", classified.verification)
+	}
+	if strings.Contains(classified.signature+classified.verification, raw) {
+		t.Fatalf("classified command retained arbitrary token: %+v", classified)
+	}
+}
+
 func TestAffinityDoesNotFallBackToBroaderProjectWhenNestedBindingLosesAuthentication(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	nested := filepath.Join(fixture.projectA, "nested")
@@ -242,6 +260,116 @@ func TestAmbiguousAuthenticatedRootsQuarantineOnlyAffectedRevisions(t *testing.T
 	}
 }
 
+func TestMalformedRecordMetadataNeverEntersQuarantineAndLaterRecordsContinue(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	duplicateBinding := authenticateBinding(t, "project-shadow", fixture.projectA)
+	fixture.bindings = []projectidentity.Binding{fixture.bindings[0], duplicateBinding}
+	badTimestamp := strings.Repeat("RAW-TIMESTAMP-", 80)
+	body := fmt.Sprintf("{\"timestamp\":\"2026-08-31T13:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"metadata-quarantine\",\"cwd\":%q}}\n", filepath.ToSlash(fixture.projectA)) +
+		fmt.Sprintf("{\"timestamp\":%q,\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"bad-metadata\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"bad timestamp\"}]}}\n", badTimestamp) +
+		"{\"timestamp\":\"2026-08-31T13:00:02Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"later-valid\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"later request\"}]}}\n" +
+		usageEvent("2026-08-31T13:00:03Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "metadata-quarantine.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "metadata-quarantine"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	if len(observations) != 0 {
+		t.Fatalf("ambiguous observations emitted: %+v", observations)
+	}
+	bodyJSON, err := json.Marshal(report.Quarantined)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(bodyJSON), badTimestamp) || strings.Contains(string(bodyJSON), "bad-metadata") {
+		t.Fatalf("malformed record metadata entered quarantine: %s", bodyJSON)
+	}
+	if !hasDiagnostic(report.Diagnostics, "malformed_observation") {
+		t.Fatalf("bounded malformed observation diagnostic missing: %+v", report.Diagnostics)
+	}
+	foundLater := false
+	for _, quarantined := range report.Quarantined {
+		if quarantined.Subject == "later-valid" {
+			foundLater = true
+		}
+	}
+	if !foundLater {
+		t.Fatalf("later valid record did not continue to quarantine: %+v", report.Quarantined)
+	}
+}
+
+func TestDuplicateToolCallIDInvalidatesResultPairing(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	workdir := filepath.ToSlash(fixture.projectA)
+	firstInput, err := json.Marshal(map[string]string{"cmd": "go test ./...", "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondInput, err := json.Marshal(map[string]string{"cmd": "go build ./...", "workdir": workdir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "duplicate-call", "cwd": workdir}) +
+		encodedRecord(t, "2026-08-31T14:00:01Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-duplicate", "name": "exec_command", "input": string(firstInput)}) +
+		encodedRecord(t, "2026-08-31T14:00:02Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-duplicate", "output": "exit code: 0"}) +
+		encodedRecord(t, "2026-08-31T14:00:03Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-duplicate", "name": "exec_command", "input": string(secondInput)}) +
+		encodedRecord(t, "2026-08-31T14:00:04Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-duplicate", "output": "exit code: 0"}) +
+		encodedRecord(t, "2026-08-31T14:00:05Z", "response_item", map[string]any{"type": "message", "id": "after-duplicate", "role": "user", "content": []map[string]string{{"type": "input_text", "text": "continue"}}}) +
+		usageEvent("2026-08-31T14:00:06Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "duplicate-call.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "duplicate-call"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	for _, observation := range observations {
+		if observation.Key.Subject == "call-duplicate" && observation.Operation != "command_started" {
+			t.Fatalf("ambiguous call output paired to a command: %+v", observation)
+		}
+	}
+	if !hasDiagnostic(report.Diagnostics, "duplicate_tool_call_id") {
+		t.Fatalf("duplicate tool-call diagnostic missing: %+v", report.Diagnostics)
+	}
+	foundLater := false
+	for _, observation := range observations {
+		if observation.Key.Subject == "after-duplicate" {
+			foundLater = true
+		}
+	}
+	if !foundLater {
+		t.Fatalf("later record did not decode after duplicate call: %+v", observations)
+	}
+}
+
+func hasDiagnostic(diagnostics []memory.Diagnostic, code string) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func usageEvent(timestamp string) string {
+	return fmt.Sprintf("{\"timestamp\":%q,\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":2},\"total_token_usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0,\"total_tokens\":2}}}}\n", timestamp)
+}
+
+func encodedRecord(t *testing.T, timestamp, recordType string, payload any) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"timestamp": timestamp, "type": recordType, "payload": payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body) + "\n"
+}
+
 func TestAdapterVersionCreatesStableKeySuccessorsWithoutMutatingAnActiveSet(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	fixture.installFixture(t, "session-shared.jsonl")
@@ -271,7 +399,14 @@ func TestAdapterVersionCreatesStableKeySuccessorsWithoutMutatingAnActiveSet(t *t
 		if item.SupersededAdapter != "v1" || item.SuccessorAdapter != "v2" {
 			t.Fatalf("adapter lineage=%+v", item)
 		}
-		successors[item.SupersededRevisionID] = item.SuccessorRevisionID
+		wantKeyDigest, err := memory.Digest(item.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if item.StableKeyDigest != wantKeyDigest {
+			t.Fatalf("lineage stable key digest=%q want %q", item.StableKeyDigest, wantKeyDigest)
+		}
+		successors[item.StableKeyDigest] = item.SuccessorRevisionID
 	}
 	for _, current := range v2Observations {
 		previous, found := v1BySlot[observationSlot(current.Key)]
@@ -281,8 +416,12 @@ func TestAdapterVersionCreatesStableKeySuccessorsWithoutMutatingAnActiveSet(t *t
 		if previous.RevisionID == current.RevisionID {
 			t.Fatalf("adapter version did not change revision ID for %+v", current.Key)
 		}
-		if successors[previous.RevisionID] != current.RevisionID {
-			t.Fatalf("successor metadata missing: old=%s new=%s report=%+v", previous.RevisionID, current.RevisionID, report.Supersessions)
+		keyDigest, err := memory.Digest(current.Key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if successors[keyDigest] != current.RevisionID {
+			t.Fatalf("key-based successor metadata missing: key=%s new=%s report=%+v", keyDigest, current.RevisionID, report.Supersessions)
 		}
 	}
 }

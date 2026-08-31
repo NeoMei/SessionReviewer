@@ -47,13 +47,17 @@ func TestDecodeReportCarriesLineageWithoutSelectingAnActiveRevision(t *testing.T
 		Provider: "codex", SessionID: "session-a", SourceIdentity: "source-a",
 		Sequence: 7, ProjectID: "project-a", Kind: "command", Subject: "call-a",
 	}
+	keyDigest, err := memory.Digest(key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	report := source.DecodeReport{Supersessions: []source.RevisionSupersession{{
-		Key: key, SupersededRevisionID: "sha256:old", SuccessorRevisionID: "sha256:new",
+		Key: key, StableKeyDigest: keyDigest, SuccessorRevisionID: "sha256:new",
 		SupersededAdapter: "v1", SuccessorAdapter: "v2",
 	}}}
 
 	got := report.Supersessions[0]
-	if got.Key != key || got.SupersededRevisionID != "sha256:old" || got.SuccessorRevisionID != "sha256:new" {
+	if got.Key != key || got.StableKeyDigest != keyDigest || got.SuccessorRevisionID != "sha256:new" {
 		t.Fatalf("supersession metadata changed: %+v", got)
 	}
 }

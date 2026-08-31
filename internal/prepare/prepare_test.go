@@ -872,7 +872,7 @@ func TestRunRejectsNoSessionAndAmbiguousSession(t *testing.T) {
 	}
 }
 
-func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
+func TestRunSkipsOversizedRecordAndPublishesBoundedMalformedWarning(t *testing.T) {
 	large := strings.Repeat("x", 2048)
 	f := newRunFixture(t, sessionBody("PROJECT", `{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"`+large+`"}]}}`))
 	path := filepath.Join(f.sessions, "s1.jsonl")
@@ -891,11 +891,22 @@ func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.MaxRecordBytes = 512
-	if _, err := Write(opts); err == nil {
-		t.Fatal("expected stream error")
+	packet, err := Write(opts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if body, err := os.ReadFile(f.output); err != nil || string(body) != "old" {
-		t.Fatalf("output=%q err=%v", body, err)
+	if !containsString(packet.Warnings, "malformed_jsonl_lines:1") {
+		t.Fatalf("warnings=%v", packet.Warnings)
+	}
+	body, err = os.ReadFile(f.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) == "old" {
+		t.Fatal("successful bounded decode did not replace stale output")
+	}
+	if bytes.Contains(body, []byte(large)) {
+		t.Fatal("oversized raw record leaked into output")
 	}
 }
 

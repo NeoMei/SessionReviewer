@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 )
@@ -103,17 +102,26 @@ func TestStreamPreservesProvenanceAndWarnsOnMalformedLine(t *testing.T) {
 	}
 }
 
-func TestStreamRejectsOversizedRecord(t *testing.T) {
+func TestStreamDrainsOversizedRecordAndContinuesAtNextLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "large.jsonl")
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", 1025)+"\n"), 0o600); err != nil {
+	oversized := strings.Repeat("x", 1025) + "\n"
+	later := `{"timestamp":"2026-08-22T10:01:00Z","type":"later","payload":{}}` + "\n"
+	if err := os.WriteFile(path, []byte(oversized+later), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := Stream(path, DecodeOptions{MaxRecordBytes: 1024}, func(Record) error { return nil })
-	if err == nil || !strings.Contains(err.Error(), "exceeds 1024 bytes") {
-		t.Fatalf("err=%v", err)
+	var records []Record
+	summary, err := Stream(path, DecodeOptions{MaxRecordBytes: 1024}, func(record Record) error {
+		records = append(records, record)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), path) && !strings.Contains(err.Error(), strconv.Quote(path)) {
-		t.Fatalf("oversized error lacks source path: %v", err)
+	if summary.Lines != 2 || summary.MalformedLines != 1 || summary.Records != 1 || len(records) != 1 {
+		t.Fatalf("summary=%+v records=%+v", summary, records)
+	}
+	if records[0].Line != 2 || records[0].ByteOffset != int64(len(oversized)) || records[0].Type != "later" {
+		t.Fatalf("later record lost provenance after oversized line: %+v", records[0])
 	}
 }

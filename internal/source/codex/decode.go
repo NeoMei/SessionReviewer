@@ -60,6 +60,8 @@ type recordDecoder struct {
 	currentCWD   string
 	accounting   *accounting.Accumulator
 	pending      map[string]pendingCall
+	seenCalls    map[string]struct{}
+	invalidCalls map[string]struct{}
 	observations []memory.ObservationRevision
 	projectIDs   map[string]struct{}
 	report       source.DecodeReport
@@ -86,7 +88,7 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	if err != nil {
 		return report, errors.New("frozen Codex boundary has an invalid start time")
 	}
-	files, err := a.openExactFrozen(ctx, frozen)
+	files, err := a.openFrozenPrefix(ctx, frozen)
 	if err != nil {
 		return report, err
 	}
@@ -95,10 +97,18 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	decoder := &recordDecoder{
 		ctx: ctx, adapter: a, frozen: frozen, currentCWD: boundary.Candidate.InitialCWD,
 		accounting: accounting.NewAccumulator(startedAt), pending: make(map[string]pendingCall),
+		seenCalls: make(map[string]struct{}), invalidCalls: make(map[string]struct{}),
 		projectIDs: make(map[string]struct{}),
 		report:     source.DecodeReport{TerminalState: memory.Indexed},
 	}
-	summary, err := session.StreamFiles(files, session.DecodeOptions{MaxRecordBytes: maxReadRecordBytes}, decoder.add)
+	segmentBytes := make([]int64, len(frozen.segments))
+	for index, segment := range frozen.segments {
+		segmentBytes[index] = segment.size
+	}
+	summary, err := session.StreamFiles(files, session.DecodeOptions{
+		MaxRecordBytes: maxReadRecordBytes,
+		SegmentBytes:   segmentBytes,
+	}, decoder.add)
 	if err != nil {
 		return decoder.report, err
 	}
@@ -137,6 +147,10 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 func (d *recordDecoder) add(record session.Record) error {
 	if err := d.ctx.Err(); err != nil {
 		return err
+	}
+	if !validRecordMetadata(record) {
+		d.diagnostic("malformed_observation")
+		return nil
 	}
 	if err := d.accounting.Observe(record); err != nil {
 		d.diagnostic("invalid_accounting")
@@ -273,6 +287,14 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		d.unsupported()
 		return nil
 	}
+	if _, duplicate := d.seenCalls[callID]; duplicate {
+		delete(d.pending, callID)
+		d.invalidCalls[callID] = struct{}{}
+		d.invalidateToolResults(callID)
+		d.diagnostic("duplicate_tool_call_id")
+		return nil
+	}
+	d.seenCalls[callID] = struct{}{}
 	switch payload.Name {
 	case "exec_command":
 		var input struct {
@@ -331,6 +353,10 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		d.malformedPayload()
 		return nil
 	}
+	if _, invalid := d.invalidCalls[payload.CallID]; invalid {
+		d.diagnostic("ambiguous_tool_call_output")
+		return nil
+	}
 	pending, found := d.pending[payload.CallID]
 	if !found {
 		d.unsupported()
@@ -385,7 +411,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		verificationOutcome := "passed"
 		verificationFields := map[string]string{
 			"component": pending.verificationComponent, "status": pending.verificationOperation,
-			"exit_code": strconv.Itoa(exitCode), "passed": "true", "failed": "false",
+			"exit_code": strconv.Itoa(exitCode), "passed": "true", "failed": "false", "tool_id": pending.id,
 		}
 		if exitCode != 0 {
 			verificationOutcome = "failed"
@@ -426,7 +452,46 @@ type observedFact struct {
 }
 
 func (d *recordDecoder) observe(record session.Record, fact observedFact) error {
+	validated, err := d.buildObservation(record, fact, "quarantine")
+	if err != nil {
+		d.diagnostic("malformed_observation")
+		return nil
+	}
 	projectIDs, reason := d.adapter.classifyAffinity(fact.affinityPath, fact.fileTarget)
+	if reason != "" || len(projectIDs) != 1 {
+		for _, projectID := range projectIDs {
+			d.projectIDs[projectID] = struct{}{}
+		}
+		d.report.Quarantined = append(d.report.Quarantined, source.QuarantinedRevision{
+			Ref: validated.Ref, Timestamp: validated.Timestamp, Kind: validated.Key.Kind, Subject: validated.Key.Subject,
+			CandidateProjectIDs: append([]string(nil), projectIDs...), ReasonCode: reason,
+		})
+		return nil
+	}
+	projectID := projectIDs[0]
+	d.projectIDs[projectID] = struct{}{}
+	validated.Key.ProjectID = projectID
+	validated.RevisionID = memory.ObservationRevisionID(validated)
+	if err := memory.ValidateObservationRevision(validated); err != nil {
+		d.diagnostic("malformed_observation")
+		return nil
+	}
+	d.observations = append(d.observations, validated)
+	stableKeyDigest, err := memory.Digest(validated.Key)
+	if err != nil {
+		return fmt.Errorf("digest decoded observation key at line %d: %w", record.Line, err)
+	}
+	for _, predecessorVersion := range d.adapter.supersedes {
+		d.report.Supersessions = append(d.report.Supersessions, source.RevisionSupersession{
+			Key: validated.Key, StableKeyDigest: stableKeyDigest,
+			SuccessorRevisionID: validated.RevisionID,
+			SupersededAdapter:   predecessorVersion, SuccessorAdapter: d.adapter.version,
+		})
+	}
+	return nil
+}
+
+func (d *recordDecoder) buildObservation(record session.Record, fact observedFact, projectID string) (memory.ObservationRevision, error) {
 	ref := memory.SourceRef{
 		Provider: providerCodex, SessionID: d.frozen.boundary.Candidate.SessionID,
 		SourceIdentity: d.frozen.boundary.SourceIdentity,
@@ -435,18 +500,6 @@ func (d *recordDecoder) observe(record session.Record, fact observedFact) error 
 		}},
 		SourceHash: record.SourceHash,
 	}
-	if reason != "" || len(projectIDs) != 1 {
-		for _, projectID := range projectIDs {
-			d.projectIDs[projectID] = struct{}{}
-		}
-		d.report.Quarantined = append(d.report.Quarantined, source.QuarantinedRevision{
-			Ref: ref, Timestamp: record.Timestamp, Kind: fact.kind, Subject: fact.subject,
-			CandidateProjectIDs: append([]string(nil), projectIDs...), ReasonCode: reason,
-		})
-		return nil
-	}
-	projectID := projectIDs[0]
-	d.projectIDs[projectID] = struct{}{}
 	observation := memory.ObservationRevision{
 		SchemaVersion: memory.MemorySchemaVersion,
 		Key: memory.ObservationKey{
@@ -460,20 +513,44 @@ func (d *recordDecoder) observe(record session.Record, fact observedFact) error 
 	}
 	observation.RevisionID = memory.ObservationRevisionID(observation)
 	if err := memory.ValidateObservationRevision(observation); err != nil {
-		return fmt.Errorf("validate decoded observation at line %d: %w", record.Line, err)
+		return memory.ObservationRevision{}, fmt.Errorf("validate decoded observation at line %d: %w", record.Line, err)
 	}
-	d.observations = append(d.observations, observation)
-	for _, predecessorVersion := range d.adapter.supersedes {
-		predecessor := observation
-		predecessor.AdapterVersion = predecessorVersion
-		predecessor.RevisionID = memory.ObservationRevisionID(predecessor)
-		d.report.Supersessions = append(d.report.Supersessions, source.RevisionSupersession{
-			Key: observation.Key, SupersededRevisionID: predecessor.RevisionID,
-			SuccessorRevisionID: observation.RevisionID,
-			SupersededAdapter:   predecessorVersion, SuccessorAdapter: d.adapter.version,
-		})
+	return observation, nil
+}
+
+func validRecordMetadata(record session.Record) bool {
+	if record.Line < 1 || record.ByteOffset < 0 || !lowercaseSHA256.MatchString(record.SourceHash) || !validStructured(record.Type, 64) {
+		return false
 	}
-	return nil
+	_, err := time.Parse(time.RFC3339Nano, record.Timestamp)
+	return err == nil
+}
+
+func (d *recordDecoder) invalidateToolResults(callID string) {
+	removed := make(map[string]struct{})
+	kept := d.observations[:0]
+	for _, observation := range d.observations {
+		if observation.Key.Subject == callID && observation.Operation != "command_started" {
+			removed[observation.RevisionID] = struct{}{}
+			continue
+		}
+		kept = append(kept, observation)
+	}
+	d.observations = kept
+	lineage := d.report.Supersessions[:0]
+	for _, item := range d.report.Supersessions {
+		if _, discard := removed[item.SuccessorRevisionID]; !discard {
+			lineage = append(lineage, item)
+		}
+	}
+	d.report.Supersessions = lineage
+	quarantined := d.report.Quarantined[:0]
+	for _, item := range d.report.Quarantined {
+		if item.Subject != callID {
+			quarantined = append(quarantined, item)
+		}
+	}
+	d.report.Quarantined = quarantined
 }
 
 func (a *adapter) classifyAffinity(path string, fileTarget bool) ([]string, string) {
@@ -590,8 +667,8 @@ func classifyCommand(command string) commandClass {
 
 func commandComponent(arguments []string) string {
 	for _, argument := range arguments {
-		if !strings.HasPrefix(argument, "-") && validStructured(argument, 256) {
-			return argument
+		if !strings.HasPrefix(argument, "-") {
+			return "package"
 		}
 	}
 	return "."
@@ -770,6 +847,9 @@ func boundedExcerpt(value string) string {
 	if value == "" {
 		return ""
 	}
+	if utf8.ValidString(value) && utf8.RuneCountInString(value) <= maxExcerptRunes && len(value) <= maxExcerptBytes {
+		return value
+	}
 	marker := ""
 	if found := redactionMarker.FindString(value); found != "" {
 		if utf8.RuneCountInString(found) <= maxMarkerRunes && len(found) <= maxMarkerBytes {
@@ -815,7 +895,6 @@ func (d *recordDecoder) unsupported() {
 
 func (d *recordDecoder) malformedPayload() {
 	d.diagnostic("malformed_payload")
-
 }
 
 func (d *recordDecoder) diagnostic(code string) {

@@ -20,6 +20,9 @@ type envelope struct {
 type DecodeOptions struct {
 	FromLine       int
 	MaxRecordBytes int
+	// SegmentBytes limits each StreamFiles member to an authenticated prefix.
+	// Nil reads complete files; a non-nil slice must match the file count.
+	SegmentBytes []int64
 }
 
 type DecodeSummary struct {

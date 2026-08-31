@@ -155,9 +155,12 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 		return source.Discovery{}, err
 	}
 
-	grouped := make(map[string]struct{}, len(raw.Candidates))
+	grouped := make(map[string]struct{}, len(raw.Candidates)+len(raw.Issues))
 	for _, candidate := range raw.Candidates {
 		grouped[candidate.ID] = struct{}{}
+	}
+	for _, issue := range raw.Issues {
+		grouped[issue.SessionID] = struct{}{}
 	}
 	ids := make([]string, 0, len(grouped))
 	for id := range grouped {
@@ -169,32 +172,37 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 	defer a.mu.Unlock()
 	a.discovery++
 	result := source.Discovery{}
-	for _, issue := range raw.Issues {
-		state := memory.Unreadable
-		code := "unreadable_segment"
-		if errors.Is(issue.Err, os.ErrNotExist) {
-			state = memory.Missing
-			code = "missing_segment"
-		}
-		result.Issues = append(result.Issues, source.Issue{
-			Code: code, Provider: providerCodex, SessionID: issue.SessionID,
-			Path: issue.Path, TerminalState: state,
-		})
-	}
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			return source.Discovery{}, err
 		}
-		resolved, resolveErr := session.Resolve(raw.Candidates, session.ResolveOptions{SessionID: id, GOOS: runtime.GOOS})
+		if id == "" {
+			for _, issue := range raw.Issues {
+				if issue.SessionID == "" {
+					result.Issues = append(result.Issues, codexDiscoveryIssue(issue))
+				}
+			}
+			continue
+		}
+		resolved, resolveErr := session.ResolveDiscovery(raw, session.ResolveOptions{SessionID: id, GOOS: runtime.GOOS})
 		if resolveErr != nil {
-			state, code := memory.Unreadable, "unreadable_segment"
+			state, code, path := memory.Unreadable, "unreadable_segment", ""
 			if errors.Is(resolveErr, session.ErrSessionConflict) {
 				state, code = memory.Ambiguous, "duplicate_segment"
-			} else if errors.Is(resolveErr, os.ErrNotExist) {
-				state, code = memory.Missing, "missing_segment"
+			} else {
+				for _, issue := range raw.Issues {
+					if issue.SessionID != id {
+						continue
+					}
+					path = issue.Path
+					if errors.Is(issue.Err, os.ErrNotExist) {
+						state, code = memory.Missing, "missing_segment"
+					}
+					break
+				}
 			}
 			result.Issues = append(result.Issues, source.Issue{
-				Code: code, Provider: providerCodex, SessionID: id, TerminalState: state,
+				Code: code, Provider: providerCodex, SessionID: id, Path: path, TerminalState: state,
 			})
 			continue
 		}
@@ -214,6 +222,17 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 		return result.Issues[i].Path < result.Issues[j].Path
 	})
 	return result, nil
+}
+
+func codexDiscoveryIssue(issue session.DiscoveryIssue) source.Issue {
+	state, code := memory.Unreadable, "unreadable_segment"
+	if errors.Is(issue.Err, os.ErrNotExist) {
+		state, code = memory.Missing, "missing_segment"
+	}
+	return source.Issue{
+		Code: code, Provider: providerCodex, SessionID: issue.SessionID,
+		Path: issue.Path, TerminalState: state,
+	}
 }
 
 func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (source.Boundary, error) {
@@ -307,7 +326,7 @@ func (a *adapter) Read(ctx context.Context, ref memory.SourceRef, limit int64) (
 	return nil, errors.Join(append([]error{errors.New("no frozen Codex boundary matched the exact source hash")}, failures...)...)
 }
 
-func (a *adapter) openExactFrozen(ctx context.Context, frozen frozenSource) ([]*os.File, error) {
+func (a *adapter) openFrozenPrefix(ctx context.Context, frozen frozenSource) ([]*os.File, error) {
 	files, err := session.OpenCandidates(a.sessionsRoot, frozen.candidate)
 	if err != nil {
 		return nil, err
@@ -330,8 +349,8 @@ func (a *adapter) verifyExactFrozen(ctx context.Context, files []*os.File, froze
 		}
 		segment := frozen.segments[index]
 		info, err := file.Stat()
-		if err != nil || info.Size() != segment.size {
-			return errors.Join(errors.New("frozen Codex segment size changed"), err)
+		if err != nil || info.Size() < segment.size {
+			return errors.Join(errors.New("frozen Codex segment was truncated"), err)
 		}
 		identity, err := pathguard.PhysicalFileIdentity(file)
 		if err != nil || identity != segment.identity {

@@ -69,14 +69,15 @@ type SegmentBoundary struct {
 	SourceHash string
 }
 
-// RevisionSupersession describes immutable lineage only. Selecting active,
-// superseded, or withdrawn revisions belongs to generation construction.
+// RevisionSupersession describes immutable stable-key lineage only. It does not
+// infer a predecessor revision ID; selecting active, superseded, or withdrawn
+// revisions belongs to generation construction.
 type RevisionSupersession struct {
-	Key                  memory.ObservationKey
-	SupersededRevisionID string
-	SuccessorRevisionID  string
-	SupersededAdapter    string
-	SuccessorAdapter     string
+	Key                 memory.ObservationKey
+	StableKeyDigest     string
+	SuccessorRevisionID string
+	SupersededAdapter   string
+	SuccessorAdapter    string
 }
 
 // QuarantinedRevision records only typed identity and candidate associations;

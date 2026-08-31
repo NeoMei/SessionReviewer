@@ -340,6 +340,69 @@ func TestFreezeOrdersPhysicalSegmentsAsOneBoundaryAndAppendCreatesSuccessorBound
 	}
 }
 
+func TestDiscoverMixedValidAndCorruptSegmentsYieldsOnlyTerminalIssue(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	valid := fmt.Sprintf("{\"timestamp\":\"2026-08-31T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"mixed-segments\",\"cwd\":%q}}\n", filepath.ToSlash(fixture.projectA))
+	corrupt := fmt.Sprintf("{\"timestamp\":\"not-a-time\",\"type\":\"session_meta\",\"payload\":{\"id\":\"mixed-segments\",\"cwd\":%q}}\n", filepath.ToSlash(fixture.projectA))
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "mixed-valid.jsonl"), []byte(valid), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "mixed-corrupt.jsonl"), []byte(corrupt), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	discovery, err := fixture.adapter(t, "v1").Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range discovery.Candidates {
+		if candidate.SessionID == "mixed-segments" {
+			t.Fatalf("mixed valid/corrupt Session became incomplete indexed candidate: %+v", candidate)
+		}
+	}
+	found := false
+	for _, issue := range discovery.Issues {
+		if issue.SessionID == "mixed-segments" && issue.Code == "duplicate_segment" && issue.TerminalState == memory.Ambiguous {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("mixed Session terminal issue missing: %+v", discovery.Issues)
+	}
+}
+
+func TestDecodeOlderFrozenBoundaryAfterAppendReadsOnlyAuthenticatedPrefix(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-shared.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-shared"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended := "{\"timestamp\":\"2026-08-31T11:00:08Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"id\":\"appended-must-not-decode\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"new suffix\"}]}}\n"
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(appended); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	observations, report := decodeBoundary(t, adapter, boundary)
+	if report.UnsupportedRecords != 0 {
+		t.Fatalf("appended suffix affected old boundary report: %+v", report)
+	}
+	for _, observation := range observations {
+		if observation.Key.Subject == "appended-must-not-decode" || observation.Key.Sequence > boundary.Frozen.Location.JSONL.Line {
+			t.Fatalf("old boundary decoded appended suffix: %+v", observation)
+		}
+	}
+}
+
 func TestMissingAndDuplicateSegmentsBecomeTerminalIssues(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	duplicate := func(path string) {
