@@ -3,3 +3,5 @@
 docs/session-review/.session-reviewer/backups/
 **/.session-reviewer-directory.lock
 docs/session-review/.session-reviewer/
+!/.superpowers/
+.superpowers/sdd/
