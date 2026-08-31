@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -235,15 +236,18 @@ func (s *Store) putImmutable(kind ObjectKind, digest string, body []byte) error 
 			}
 			return validateObjectBytes(kind, digest, existing, s.projectID)
 		}
-		if err := atomicfile.WriteRootFileChecked(parent.Root, leaf, body, privateFileMode, s.objectCheckpoint); err != nil {
-			return fmt.Errorf("write immutable object: %w", err)
+		if err := atomicfile.WriteRootFileCreateIfAbsent(parent.Root, leaf, body, privateFileMode, s.objectCheckpoint); err != nil && !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("publish immutable object: %w", err)
 		}
 		stored, found, err := parent.ReadRegular(leaf, maxObjectBytes)
-		if err != nil || !found || !bytes.Equal(stored, body) {
+		if err != nil || !found {
 			return errors.Join(errors.New("immutable object canonical re-read failed"), err)
 		}
 		if err := requirePrivateRegular(parent.Root, leaf); err != nil {
 			return err
+		}
+		if !bytes.Equal(stored, body) {
+			return ErrImmutableConflict
 		}
 		return validateObjectBytes(kind, digest, stored, s.projectID)
 	})
@@ -288,7 +292,7 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 		if !errors.Is(loadErr, ErrNoPreparedGeneration) {
 			return loadErr
 		}
-		if err := s.verifyManifestObjects(value); err != nil {
+		if err := s.reconcileGenerationGraph(value); err != nil {
 			return err
 		}
 
@@ -303,6 +307,9 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 			return fmt.Errorf("inspect generation object: %w", err)
 		}
 		if found {
+			if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
+				return err
+			}
 			if !bytes.Equal(existingGeneration, manifestBody) {
 				return ErrImmutableConflict
 			}
@@ -310,12 +317,18 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 				return err
 			}
 		} else {
-			if err := atomicfile.WriteRootFileChecked(generations.Root, generationLeaf, manifestBody, privateFileMode, s.objectCheckpoint); err != nil {
-				return fmt.Errorf("write immutable generation: %w", err)
+			if err := atomicfile.WriteRootFileCreateIfAbsent(generations.Root, generationLeaf, manifestBody, privateFileMode, s.objectCheckpoint); err != nil && !errors.Is(err, fs.ErrExist) {
+				return fmt.Errorf("publish immutable generation: %w", err)
 			}
 			stored, found, err := generations.ReadRegular(generationLeaf, maxManifestBytes)
-			if err != nil || !found || !bytes.Equal(stored, manifestBody) {
+			if err != nil || !found {
 				return errors.Join(errors.New("generation canonical re-read failed"), err)
+			}
+			if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
+				return err
+			}
+			if !bytes.Equal(stored, manifestBody) {
+				return ErrImmutableConflict
 			}
 			if _, err := decodeGeneration(stored, s.projectID, value.GenerationID, manifestDigest); err != nil {
 				return err
@@ -390,7 +403,7 @@ func (s *Store) loadPreparedUnlocked() (Prepared, memory.GenerationManifest, err
 	if err != nil || digest != prepared.ManifestDigest || manifest.ProjectViewDigest != prepared.ProjectViewDigest {
 		return Prepared{}, memory.GenerationManifest{}, errors.New("prepared pointer does not match immutable generation")
 	}
-	if err := s.verifyManifestObjects(manifest); err != nil {
+	if err := s.reconcileGenerationGraph(manifest); err != nil {
 		return Prepared{}, memory.GenerationManifest{}, err
 	}
 	return prepared, manifest, nil
@@ -512,12 +525,40 @@ func (s *Store) openCollection(name string) (*pathguard.Directory, error) {
 	return current, nil
 }
 
-func (s *Store) verifyManifestObjects(value memory.GenerationManifest) error {
+func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error {
+	sourceRecords := make(map[string]bool, len(value.SourceRecordDigests))
+	for _, digest := range value.SourceRecordDigests {
+		sourceRecords[digest] = false
+	}
+
+	chunks := make(map[string][]memory.ObservationRevision, len(value.ObservationChunkDigests))
+	revisions := make(map[string]memory.ObservationRevision)
+	revisionKeys := make(map[string]string)
 	for _, digest := range value.ObservationChunkDigests {
-		if _, err := s.loadObjectUnlocked(ObjectObservationChunk, digest); err != nil {
+		body, err := s.loadObjectUnlocked(ObjectObservationChunk, digest)
+		if err != nil {
 			return fmt.Errorf("verify observation chunk %s: %w", digest, err)
 		}
+		records, err := decodeObservationChunk(body)
+		if err != nil {
+			return fmt.Errorf("decode observation chunk %s: %w", digest, err)
+		}
+		chunks[digest] = records
+		for _, record := range records {
+			if _, duplicate := revisions[record.RevisionID]; duplicate {
+				return fmt.Errorf("observation revision %s occurs in multiple chunks", record.RevisionID)
+			}
+			keyDigest, err := memory.Digest(record.Key)
+			if err != nil {
+				return fmt.Errorf("digest observation key: %w", err)
+			}
+			revisions[record.RevisionID] = record
+			revisionKeys[record.RevisionID] = keyDigest
+		}
 	}
+
+	referencedChunks := make(map[string]bool, len(chunks))
+	sessionActive := make(map[string]struct{})
 	for _, dependency := range value.SessionViews {
 		body, err := s.loadObjectUnlocked(ObjectSessionView, dependency.Digest)
 		if err != nil {
@@ -527,14 +568,131 @@ func (s *Store) verifyManifestObjects(value memory.GenerationManifest) error {
 		if err := decodeCanonicalJSON(body, &view); err != nil || view.Provider != dependency.Provider || view.SessionID != dependency.SessionID {
 			return errors.Join(errors.New("SessionView dependency identity mismatch"), err)
 		}
+		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
+			return errors.New("SessionView source record does not resolve uniquely through manifest")
+		}
+		sourceRecords[view.SourceRecordDigest] = true
+		sessionRevisions := make(map[string]struct{})
+		for _, chunkDigest := range view.ObservationChunkDigests {
+			records, exists := chunks[chunkDigest]
+			if !exists || referencedChunks[chunkDigest] {
+				return errors.New("SessionView observation chunk does not resolve uniquely through manifest")
+			}
+			referencedChunks[chunkDigest] = true
+			for _, record := range records {
+				if record.Key.Provider != view.Provider || record.Key.SessionID != view.SessionID {
+					return errors.New("SessionView observation chunk belongs to a different session")
+				}
+				sessionRevisions[record.RevisionID] = struct{}{}
+			}
+		}
+		for _, revisionID := range view.ActiveRevisionIDs {
+			if _, exists := sessionRevisions[revisionID]; !exists {
+				return errors.New("SessionView active revision is absent from its observation chunks")
+			}
+			if _, duplicate := sessionActive[revisionID]; duplicate {
+				return errors.New("active revision occurs in multiple SessionViews")
+			}
+			sessionActive[revisionID] = struct{}{}
+		}
 	}
-	if _, err := s.loadObjectUnlocked(ObjectProbeState, value.ProbeStateDigest); err != nil {
+	for digest, used := range sourceRecords {
+		if !used {
+			return fmt.Errorf("manifest source record %s is not referenced by a SessionView", digest)
+		}
+	}
+	for digest := range chunks {
+		if !referencedChunks[digest] {
+			return fmt.Errorf("manifest observation chunk %s is not referenced by a SessionView", digest)
+		}
+	}
+
+	probeBody, err := s.loadObjectUnlocked(ObjectProbeState, value.ProbeStateDigest)
+	if err != nil {
 		return fmt.Errorf("verify ProjectProbeState: %w", err)
 	}
-	if _, err := s.loadObjectUnlocked(ObjectProjectView, value.ProjectViewDigest); err != nil {
+	var probe memory.ProjectProbeState
+	if err := decodeCanonicalJSON(probeBody, &probe); err != nil {
+		return fmt.Errorf("decode ProjectProbeState: %w", err)
+	}
+	projectBody, err := s.loadObjectUnlocked(ObjectProjectView, value.ProjectViewDigest)
+	if err != nil {
 		return fmt.Errorf("verify ProjectView: %w", err)
 	}
+	var projectView memory.ProjectView
+	if err := decodeCanonicalJSON(projectBody, &projectView); err != nil {
+		return fmt.Errorf("decode ProjectView: %w", err)
+	}
+	if !reflect.DeepEqual(projectView.SessionViewDependencies, value.SessionViews) {
+		return errors.New("ProjectView ordered SessionView dependencies do not match manifest")
+	}
+	if projectView.ProbeStateDigest != value.ProbeStateDigest || probe.Digest != value.ProbeStateDigest {
+		return errors.New("ProjectView probe dependency does not match manifest")
+	}
+
+	active := make(map[string]struct{}, len(value.ActiveRevisions))
+	classifications := make(map[string]string, len(revisions))
+	for keyDigest, revisionID := range value.ActiveRevisions {
+		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
+			return errors.New("manifest active revision does not resolve to its observation key")
+		}
+		classifications[revisionID] = "active"
+		active[revisionID] = struct{}{}
+	}
+	for previous, successor := range value.SupersededRevisions {
+		if _, exists := revisions[previous]; !exists {
+			return errors.New("manifest superseded predecessor does not resolve")
+		}
+		if _, exists := revisions[successor]; !exists || revisionKeys[previous] != revisionKeys[successor] {
+			return errors.New("manifest superseded successor does not resolve to the same observation key")
+		}
+		if _, classified := classifications[previous]; classified {
+			return errors.New("observation revision has multiple manifest classifications")
+		}
+		classifications[previous] = "superseded"
+	}
+	for keyDigest, revisionID := range value.WithdrawnRevisions {
+		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
+			return errors.New("manifest withdrawn revision does not resolve to its observation key")
+		}
+		if _, classified := classifications[revisionID]; classified {
+			return errors.New("observation revision has multiple manifest classifications")
+		}
+		classifications[revisionID] = "withdrawn"
+	}
+	for revisionID := range revisions {
+		if _, classified := classifications[revisionID]; !classified {
+			return fmt.Errorf("observation revision %s has no manifest classification", revisionID)
+		}
+	}
+	if !equalDigestSet(active, sessionActive) || !equalDigestSliceSet(projectView.ObservationRevisionIDs, active) {
+		return errors.New("active revision sets disagree across manifest, SessionViews, and ProjectView")
+	}
 	return nil
+}
+
+func equalDigestSet(first, second map[string]struct{}) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for digest := range first {
+		if _, exists := second[digest]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func equalDigestSliceSet(values []string, expected map[string]struct{}) bool {
+	if len(values) != len(expected) {
+		return false
+	}
+	for _, digest := range values {
+		if _, exists := expected[digest]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) loadObjectUnlocked(kind ObjectKind, digest string) ([]byte, error) {

@@ -3,6 +3,8 @@ package memorystore
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
@@ -148,7 +150,7 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 		ProbeCheck:        memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: testEndedAt, StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}},
 		ProjectViewDigest: project.Digest,
 		ActiveRevisions: map[string]string{
-			prefixedDigest("observation-key"): observation.RevisionID,
+			observationKeyDigest(t, observation.Key): observation.RevisionID,
 		},
 		SupersededRevisions: map[string]string{},
 		WithdrawnRevisions:  map[string]string{},
@@ -157,6 +159,15 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 		t.Fatalf("fixture manifest is invalid: %v", err)
 	}
 	return storedFixture{observation: observation, session: session, probe: probe, project: project, manifest: manifest}
+}
+
+func observationKeyDigest(t *testing.T, key memory.ObservationKey) string {
+	t.Helper()
+	digest, err := memory.Digest(key)
+	if err != nil {
+		t.Fatalf("digest observation key: %v", err)
+	}
+	return digest
 }
 
 func prefixedDigest(seed string) string {
@@ -170,4 +181,16 @@ func hexDigest(seed string) string {
 
 func digestLeaf(digest, suffix string) string {
 	return digest[len("sha256:"):] + suffix
+}
+
+func writeCanonicalJSONForTest(t *testing.T, path string, value any, mode os.FileMode) {
+	t.Helper()
+	body, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal test JSON: %v", err)
+	}
+	body = append(body, '\n')
+	if err := os.WriteFile(path, body, mode); err != nil {
+		t.Fatalf("write test JSON: %v", err)
+	}
 }

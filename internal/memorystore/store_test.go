@@ -176,6 +176,67 @@ func TestStoreAcceptsExactReplayAndRejectsDifferentBytesAtDigest(t *testing.T) {
 	}
 }
 
+func TestStoreNoReplaceCollisionNeverOverwritesWinner(t *testing.T) {
+	t.Run("content addressed object", func(t *testing.T) {
+		dataRoot := t.TempDir()
+		store, err := Open(dataRoot, testProjectID)
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		defer store.Close()
+		session := validSessionView(t, prefixedDigest("chunk"))
+		destination := filepath.Join(store.memory.Path, "sessions", digestLeaf(session.Digest, ".json"))
+		winner := []byte("WINNER-CONTENT")
+		var publish sync.Once
+		store.objectCheckpoint = func() error {
+			publish.Do(func() {
+				if err := os.WriteFile(destination, winner, 0o600); err != nil {
+					t.Errorf("publish racing object winner: %v", err)
+				}
+			})
+			return nil
+		}
+		if _, err := store.PutSessionView(session); !errors.Is(err, ErrImmutableConflict) {
+			t.Fatalf("collision error = %v, want immutable conflict", err)
+		}
+		got, err := os.ReadFile(destination)
+		if err != nil || !bytes.Equal(got, winner) {
+			t.Fatalf("racing object winner was overwritten: body=%q err=%v", got, err)
+		}
+	})
+
+	t.Run("generation object", func(t *testing.T) {
+		dataRoot := t.TempDir()
+		store, err := Open(dataRoot, testProjectID)
+		if err != nil {
+			t.Fatalf("open store: %v", err)
+		}
+		defer store.Close()
+		fixture := buildStoredFixture(t, store, "generation-race")
+		destination := filepath.Join(store.memory.Path, "generations", fixture.manifest.GenerationID+".json")
+		winner := []byte("GENERATION-WINNER")
+		var publish sync.Once
+		store.objectCheckpoint = func() error {
+			publish.Do(func() {
+				if err := os.WriteFile(destination, winner, 0o600); err != nil {
+					t.Errorf("publish racing generation winner: %v", err)
+				}
+			})
+			return nil
+		}
+		if _, err := store.PrepareGeneration(fixture.manifest); !errors.Is(err, ErrImmutableConflict) {
+			t.Fatalf("generation collision error = %v, want immutable conflict", err)
+		}
+		got, err := os.ReadFile(destination)
+		if err != nil || !bytes.Equal(got, winner) {
+			t.Fatalf("racing generation winner was overwritten: body=%q err=%v", got, err)
+		}
+		if _, err := os.Lstat(filepath.Join(store.memory.Path, "manifest.json")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generation collision committed manifest.json: %v", err)
+		}
+	})
+}
+
 func TestStoreRejectsInvalidOrCrossProjectRecords(t *testing.T) {
 	store, err := Open(t.TempDir(), testProjectID)
 	if err != nil {
@@ -203,37 +264,26 @@ func TestStoreRejectsInvalidOrCrossProjectRecords(t *testing.T) {
 }
 
 func TestStoreInterruptedObjectWriteLeavesNoObjectOrTemporary(t *testing.T) {
-	for failAt := 1; failAt <= 3; failAt++ {
-		t.Run(string(rune('0'+failAt)), func(t *testing.T) {
-			dataRoot := t.TempDir()
-			store, err := Open(dataRoot, testProjectID)
-			if err != nil {
-				t.Fatalf("open store: %v", err)
-			}
-			defer store.Close()
-			var calls int
-			store.objectCheckpoint = func() error {
-				calls++
-				if calls == failAt {
-					return errInjectedCrash
-				}
-				return nil
-			}
-			session := validSessionView(t, prefixedDigest("chunk"))
-			if _, err := store.PutSessionView(session); !errors.Is(err, errInjectedCrash) {
-				t.Fatalf("checkpoint failure = %v, want injected crash", err)
-			}
-			sessions := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "sessions")
-			entries, err := os.ReadDir(sessions)
-			if err != nil {
-				t.Fatalf("read sessions directory: %v", err)
-			}
-			for _, entry := range entries {
-				if strings.HasPrefix(entry.Name(), ".session-reviewer-") || strings.HasSuffix(entry.Name(), ".json") {
-					t.Fatalf("interrupted write left artifact %q", entry.Name())
-				}
-			}
-		})
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	store.objectCheckpoint = func() error { return errInjectedCrash }
+	session := validSessionView(t, prefixedDigest("chunk"))
+	if _, err := store.PutSessionView(session); !errors.Is(err, errInjectedCrash) {
+		t.Fatalf("before-publish failure = %v, want injected crash", err)
+	}
+	sessions := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "sessions")
+	entries, err := os.ReadDir(sessions)
+	if err != nil {
+		t.Fatalf("read sessions directory: %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".session-reviewer-") || strings.HasSuffix(entry.Name(), ".json") {
+			t.Fatalf("interrupted write left artifact %q", entry.Name())
+		}
 	}
 }
 
@@ -286,6 +336,153 @@ func TestPreparedGenerationRejectsCorruptManifestBackupAndDuplicateJSON(t *testi
 			t.Fatal("duplicate object fields were accepted")
 		}
 	})
+}
+
+func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *Store, *storedFixture)
+	}{
+		{
+			name: "session source record absent from manifest",
+			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.SourceRecordDigests[0] = prefixedDigest("other-source-record")
+			},
+		},
+		{
+			name: "session chunk absent from manifest",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				other := fixture.observation
+				other.Key.Sequence++
+				other.Object = "other focused tests"
+				other.RevisionID = memory.ObservationRevisionID(other)
+				digest, err := store.PutObservationChunk([]memory.ObservationRevision{other})
+				if err != nil {
+					t.Fatalf("put unrelated manifest chunk: %v", err)
+				}
+				fixture.manifest.ObservationChunkDigests[0] = digest
+			},
+		},
+		{
+			name: "session active revision absent from its chunks",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				missing := prefixedDigest("missing-session-revision")
+				session := fixture.session
+				session.ActiveRevisionIDs = []string{missing}
+				session.Digest, _ = memory.SessionViewDigest(session)
+				if _, err := store.PutSessionView(session); err != nil {
+					t.Fatalf("put mismatched SessionView: %v", err)
+				}
+				dependency := memory.SessionViewDependency{Provider: session.Provider, SessionID: session.SessionID, Digest: session.Digest}
+				fixture.manifest.SessionViews = []memory.SessionViewDependency{dependency}
+				fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): missing}
+				projectView := fixture.project
+				projectView.SessionViewDependencies = []memory.SessionViewDependency{dependency}
+				projectView.ObservationRevisionIDs = []string{missing}
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatalf("put mismatched ProjectView: %v", err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
+			},
+		},
+		{
+			name: "project ordered session dependencies mismatch manifest",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				projectView := fixture.project
+				projectView.SessionViewDependencies = []memory.SessionViewDependency{{Provider: "codex", SessionID: "other-session", Digest: prefixedDigest("other-session-view")}}
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatalf("put project dependency mismatch: %v", err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
+			},
+		},
+		{
+			name: "project probe digest mismatch manifest",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				projectView := fixture.project
+				projectView.ProbeStateDigest = prefixedDigest("other-probe")
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatalf("put project probe mismatch: %v", err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
+			},
+		},
+		{
+			name: "active key does not classify its observation",
+			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.ActiveRevisions = map[string]string{prefixedDigest("wrong-observation-key"): fixture.observation.RevisionID}
+			},
+		},
+		{
+			name: "active revision is missing",
+			mutate: func(t *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): prefixedDigest("missing-active")}
+			},
+		},
+		{
+			name: "superseded predecessor is missing",
+			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.SupersededRevisions = map[string]string{prefixedDigest("missing-predecessor"): fixture.observation.RevisionID}
+			},
+		},
+		{
+			name: "withdrawn revision is missing",
+			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.WithdrawnRevisions = map[string]string{prefixedDigest("withdrawn-key"): prefixedDigest("missing-withdrawn")}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			store, err := Open(dataRoot, testProjectID)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			defer store.Close()
+			fixture := buildStoredFixture(t, store, "generation-1")
+			test.mutate(t, store, &fixture)
+			if err := memory.ValidateGenerationManifest(fixture.manifest); err != nil {
+				t.Fatalf("fixture must pass Task-1 validation: %v", err)
+			}
+			if _, err := store.PrepareGeneration(fixture.manifest); err == nil {
+				t.Fatal("broken transitive graph was prepared")
+			}
+			manifestPath := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "manifest.json")
+			if _, err := os.Lstat(manifestPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rejected graph changed manifest.json: %v", err)
+			}
+		})
+	}
+}
+
+func TestPreparedGenerationLoadRejectsBrokenTransitiveGraph(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-load-broken")
+	fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): prefixedDigest("missing-on-load")}
+	if err := memory.ValidateGenerationManifest(fixture.manifest); err != nil {
+		t.Fatalf("fixture must pass Task-1 validation: %v", err)
+	}
+	manifestDigest, err := memory.Digest(fixture.manifest)
+	if err != nil {
+		t.Fatalf("digest broken manifest: %v", err)
+	}
+	prepared := Prepared{GenerationID: fixture.manifest.GenerationID, ManifestDigest: manifestDigest, ProjectViewDigest: fixture.manifest.ProjectViewDigest}
+	writeCanonicalJSONForTest(t, filepath.Join(store.memory.Path, "generations", fixture.manifest.GenerationID+".json"), fixture.manifest, 0o600)
+	writeCanonicalJSONForTest(t, filepath.Join(store.memory.Path, "manifest.json"), prepared, 0o600)
+
+	if _, _, err := store.LoadPrepared(); err == nil {
+		t.Fatal("LoadPrepared accepted a broken transitive graph")
+	}
 }
 
 func TestPreparedGenerationConcurrentPreparationHasOneWinner(t *testing.T) {
@@ -381,6 +578,48 @@ func TestPreparedGenerationRestartAtEveryManifestCheckpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPreparedGenerationRestartRejectsWeakModeExactOrphan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits are not authoritative on Windows")
+	}
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	fixture := buildStoredFixture(t, store, "generation-weak-orphan")
+	generationPath := filepath.Join(store.memory.Path, "generations", fixture.manifest.GenerationID+".json")
+	writeCanonicalJSONForTest(t, generationPath, fixture.manifest, 0o600)
+	if err := os.Chmod(generationPath, 0o644); err != nil {
+		t.Fatalf("weaken orphan generation mode: %v", err)
+	}
+	before, err := os.ReadFile(generationPath)
+	if err != nil {
+		t.Fatalf("read orphan generation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close pre-restart store: %v", err)
+	}
+
+	restarted, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatalf("restart store: %v", err)
+	}
+	defer restarted.Close()
+	if _, err := restarted.PrepareGeneration(fixture.manifest); err == nil {
+		t.Fatal("weak-mode orphan generation was prepared")
+	}
+	manifestPath := filepath.Join(restarted.memory.Path, "manifest.json")
+	if _, err := os.Lstat(manifestPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("weak-mode orphan changed manifest.json: %v", err)
+	}
+	after, err := os.ReadFile(generationPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("weak-mode orphan was changed: body_equal=%v err=%v", bytes.Equal(after, before), err)
+	}
+	assertMode(t, generationPath, 0o644)
 }
 
 var errInjectedCrash = errors.New("injected crash")
