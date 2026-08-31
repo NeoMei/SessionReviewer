@@ -1181,10 +1181,18 @@ func validateSafeText(p Proposal, packet evidence.Packet) error {
 	// (IDs, hashes, timestamps, and enums) are validated by their dedicated
 	// shape and semantic checks; treating them as prose creates false positives
 	// for valid high-entropy hashes.
-	values := []string{packet.CWD}
-	for _, item := range packet.Events {
-		values = append(values, item.ToolName, item.Summary)
+	if err := redactionFindingError("packet.cwd", packet.CWD); err != nil {
+		return err
 	}
+	for index, item := range packet.Events {
+		if err := redactionFindingError(fmt.Sprintf("packet.events[%d].tool_name", index), item.ToolName); err != nil {
+			return err
+		}
+		if err := redactionFindingError(fmt.Sprintf("packet.events[%d].summary", index), item.Summary); err != nil {
+			return err
+		}
+	}
+	values := []string{}
 	for _, decision := range p.NewDecisions {
 		values = appendDecisionText(values, decision)
 	}
@@ -1206,13 +1214,24 @@ func validateSafeText(p Proposal, packet evidence.Packet) error {
 	values = appendCurrentStatePatchText(values, p.CurrentStatePatch)
 	values = appendSessionReportText(values, p.SessionReport)
 
-	redactor := redact.Default()
-	for _, value := range values {
-		if result := redactor.Text(value); len(result.Findings) != 0 {
-			return fmt.Errorf("proposal or packet text contains redaction findings")
+	for index, value := range values {
+		if err := redactionFindingError(fmt.Sprintf("proposal.text[%d]", index), value); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func redactionFindingError(location, value string) error {
+	findings := redact.Default().Text(value).Findings
+	if len(findings) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(findings))
+	for _, finding := range findings {
+		parts = append(parts, fmt.Sprintf("%s=%d", finding.Rule, finding.Count))
+	}
+	return fmt.Errorf("redaction findings in %s: %s", location, strings.Join(parts, ","))
 }
 
 func appendDecisionText(values []string, decision ledger.Decision) []string {
