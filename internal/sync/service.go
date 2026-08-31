@@ -940,7 +940,7 @@ func (engine *Engine) alignCompactV2Revisions(ctx context.Context) ([]Operation,
 		if err != nil {
 			return nil, false, err
 		}
-		if len(redact.Default().Text(string(rendered)).Findings) != 0 {
+		if documentSensitive(accepted) {
 			return nil, false, ErrSensitiveContent
 		}
 		switch id {
@@ -1488,8 +1488,12 @@ func candidateSensitive(candidate Candidate) bool {
 	if !candidate.Present {
 		return false
 	}
-	rendered, err := candidate.Document.Render()
-	return err != nil || len(redact.Default().Text(string(rendered)).Findings) != 0
+	return documentSensitive(candidate.Document)
+}
+
+func documentSensitive(document syncdoc.Document) bool {
+	source, err := document.SensitiveScanSource()
+	return err != nil || len(redact.Default().Text(string(source)).Findings) != 0
 }
 
 func acceptedRelativePath(document syncdoc.Document, projectCandidate, vaultCandidate Candidate, base BaseRecord) string {

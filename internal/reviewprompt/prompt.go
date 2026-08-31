@@ -292,7 +292,7 @@ func Build(input Input) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: encode accepted context", ErrInvalidInput)
 	}
-	if len(redact.Default().Text(string(contextJSON)).Findings) != 0 {
+	if hasFindingOtherThan(string(contextJSON), redact.RuleHighEntropy) {
 		return Bundle{}, ErrUnsafeInput
 	}
 	if len(packetJSON) > MaxPacketDataBytes || len(contextJSON) > MaxAcceptedContextBytes ||
@@ -526,7 +526,7 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 // recognition. Keep this explicit traversal aligned with acceptedContext so a
 // newly allowlisted string cannot silently skip the raw boundary.
 func validateAcceptedContextStrings(context acceptedContext) error {
-	for _, value := range acceptedContextStrings(context) {
+	for _, value := range acceptedContextHumanStrings(context) {
 		if !utf8.ValidString(value) {
 			return ErrInvalidInput
 		}
@@ -534,13 +534,19 @@ func validateAcceptedContextStrings(context acceptedContext) error {
 			return ErrUnsafeInput
 		}
 	}
+	for _, value := range acceptedContextIdentityStrings(context) {
+		if !utf8.ValidString(value) {
+			return ErrInvalidInput
+		}
+		if hasFindingOtherThan(value, redact.RuleHighEntropy) {
+			return ErrUnsafeInput
+		}
+	}
 	return nil
 }
 
-func acceptedContextStrings(context acceptedContext) []string {
+func acceptedContextHumanStrings(context acceptedContext) []string {
 	values := []string{
-		context.ProjectID,
-		context.CurrentState.ProjectID,
 		context.CurrentState.Goal,
 		context.CurrentState.LastVerified,
 		context.CurrentState.Branch,
@@ -551,57 +557,83 @@ func acceptedContextStrings(context acceptedContext) []string {
 	}
 	values = append(values, context.CurrentState.Blockers...)
 	values = append(values, context.CurrentState.OpenRisks...)
-	values = append(values, context.CurrentState.SourceSessions...)
 	for _, risk := range context.Risks {
-		values = append(values, risk.ID, risk.Title, risk.Status, risk.Detail)
+		values = append(values, risk.Title, risk.Status, risk.Detail)
 	}
 	for _, decision := range context.Decisions {
 		values = append(values,
-			decision.ID, decision.ProjectID, decision.OccurredAt, decision.Title, decision.Status,
+			decision.OccurredAt, decision.Title, decision.Status,
 			decision.Context, decision.Rationale, decision.Consequences, decision.ReevaluateWhen,
 		)
 		values = append(values, decision.Tags...)
-		values = append(values, decision.Supersedes...)
-		values = append(values, decision.SourceSessions...)
 		values = append(values, decision.Alternatives...)
 		values = append(values, decision.RejectedPaths...)
 	}
 	for _, loop := range context.OpenLoops {
 		values = append(values,
-			loop.ID, loop.ProjectID, loop.Title, loop.Status, loop.AcceptedDetail,
+			loop.Title, loop.Status, loop.AcceptedDetail,
 			loop.Question, loop.Blocker, loop.NextExperiment, loop.CompletionCriterion,
 		)
 		values = append(values, loop.Tags...)
-		values = append(values, loop.SourceSessions...)
 		values = append(values, loop.Attempts...)
 	}
 	for _, event := range context.Timeline {
 		values = append(values,
-			event.ID, event.OccurredAt, string(event.Class), event.Title, event.Meaning,
+			event.OccurredAt, string(event.Class), event.Title, event.Meaning,
 			event.Summary, event.Why, event.Next,
 		)
 		values = append(values, event.Changes...)
 		values = append(values, event.Results...)
-		values = append(values, event.DecisionIDs...)
-		values = append(values, event.OpenLoopIDs...)
 	}
 	for _, report := range context.Sessions {
-		values = append(values,
-			report.ID, report.ProjectID, report.SessionID, report.InitialGoal,
-			report.PreviousSessionID, report.NextSessionID,
-		)
+		values = append(values, report.InitialGoal)
 		values = append(values, report.GoalChanges...)
 		for _, phase := range report.Phases {
 			values = append(values, phase.Title, phase.Summary)
 		}
 		values = append(values, report.Commits...)
 		values = append(values, report.Verification...)
+	}
+	return values
+}
+
+func acceptedContextIdentityStrings(context acceptedContext) []string {
+	values := []string{context.ProjectID, context.CurrentState.ProjectID}
+	values = append(values, context.CurrentState.SourceSessions...)
+	for _, risk := range context.Risks {
+		values = append(values, risk.ID)
+	}
+	for _, decision := range context.Decisions {
+		values = append(values, decision.ID, decision.ProjectID)
+		values = append(values, decision.Supersedes...)
+		values = append(values, decision.SourceSessions...)
+	}
+	for _, loop := range context.OpenLoops {
+		values = append(values, loop.ID, loop.ProjectID)
+		values = append(values, loop.SourceSessions...)
+	}
+	for _, event := range context.Timeline {
+		values = append(values, event.ID)
+		values = append(values, event.DecisionIDs...)
+		values = append(values, event.OpenLoopIDs...)
+	}
+	for _, report := range context.Sessions {
+		values = append(values, report.ID, report.ProjectID, report.SessionID, report.PreviousSessionID, report.NextSessionID)
 		values = append(values, report.DecisionsAdded...)
 		values = append(values, report.DecisionsRevised...)
 		values = append(values, report.OpenLoopsCreated...)
 		values = append(values, report.OpenLoopsClosed...)
 	}
 	return values
+}
+
+func hasFindingOtherThan(value, allowedRule string) bool {
+	for _, finding := range redact.Default().Text(value).Findings {
+		if finding.Rule != allowedRule {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeForbiddenPath(value, goos string) (string, bool) {

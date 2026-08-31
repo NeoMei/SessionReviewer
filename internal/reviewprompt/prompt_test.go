@@ -164,6 +164,28 @@ func TestBuildUsesAcceptedHumanEditsInProposalContext(t *testing.T) {
 	}
 }
 
+func TestBuildAllowsValidatedHighEntropyIdentityOnlyInIdentityFields(t *testing.T) {
+	const longID = "timeline-codegraph-cutover-finally-approved"
+
+	identity := fixtureInput()
+	identity.Accepted.Events[0].ID = longID
+	identity.Accepted.Machine.LegacyCompatibility.Timeline[0].ID = longID
+	bundle, err := reviewprompt.Build(identity)
+	if err != nil {
+		t.Fatalf("validated timeline identity was rejected: %v", err)
+	}
+	acceptedData := between(t, string(bundle.Prompt), "BEGIN_UNTRUSTED_ACCEPTED_CONTEXT_DATA_V1", "END_UNTRUSTED_ACCEPTED_CONTEXT_DATA_V1")
+	if !strings.Contains(acceptedData, `"id":"`+longID+`"`) {
+		t.Fatal("validated timeline identity was omitted from accepted context")
+	}
+
+	human := fixtureInput()
+	human.Accepted.Events[0].Summary = longID
+	if bundle, err := reviewprompt.Build(human); bundle.Prompt != nil || !errors.Is(err, reviewprompt.ErrUnsafeInput) {
+		t.Fatalf("high-entropy human summary was accepted: prompt=%q err=%v", bundle.Prompt, err)
+	}
+}
+
 func TestBuildRejectsOversizedOrUnsafeIncludedData(t *testing.T) {
 	t.Run("prompt bound", func(t *testing.T) {
 		input := fixtureInput()

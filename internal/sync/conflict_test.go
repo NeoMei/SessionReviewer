@@ -565,6 +565,52 @@ func TestRenderConflictRejectsSensitiveRecordWithoutEcho(t *testing.T) {
 	}
 }
 
+func TestSensitiveConflictCandidateUsesValidatedV2MarkerBoundary(t *testing.T) {
+	const (
+		oldID  = "timeline-trust-chain"
+		longID = "timeline-codegraph-cutover-finally-approved"
+	)
+	base := renderDocument(t, v2HistoryWithTwoEvents(t))
+	withLongMarker := bytes.Replace(base,
+		[]byte("<!-- session-reviewer:event id=\""+oldID+"\" -->"),
+		[]byte("<!-- session-reviewer:event id=\""+longID+"\" -->"), 1)
+	if bytes.Equal(base, withLongMarker) {
+		t.Fatal("validated marker fixture was not changed")
+	}
+	record := ConflictRecord{
+		RelativePath: "项目历史.md", ProjectPath: "项目历史.md", Project: withLongMarker,
+	}
+	if _, _, sensitive := sensitiveConflictCandidate(record); sensitive {
+		t.Fatal("validated v2 marker identity made the conflict candidate sensitive")
+	}
+
+	withLongHumanText := bytes.Replace(base, []byte("修复 receipt 信任边界。"), []byte("修复 receipt 信任边界。 "+longID), 1)
+	record.Project = withLongHumanText
+	if _, _, sensitive := sensitiveConflictCandidate(record); !sensitive {
+		t.Fatal("high-entropy human text in a conflict candidate was not sensitive")
+	}
+}
+
+func TestValidateSelectedDocumentUsesValidatedV2MarkerBoundary(t *testing.T) {
+	const longID = "timeline-codegraph-cutover-finally-approved"
+	base := renderDocument(t, v2HistoryWithTwoEvents(t))
+	withLongMarker := bytes.Replace(base,
+		[]byte("<!-- session-reviewer:event id=\"timeline-trust-chain\" -->"),
+		[]byte("<!-- session-reviewer:event id=\""+longID+"\" -->"), 1)
+	document, err := syncdoc.Parse("项目历史.md", withLongMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := document.Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := ConflictRecord{EntityID: identity.ID, ProjectID: identity.ProjectID}
+	if _, err := validateSelectedDocument(record, &document, identity, document); err != nil {
+		t.Fatalf("validated v2 marker identity blocked the selected document: %v", err)
+	}
+}
+
 func TestSelectResolutionRendersLiveCandidateAndDoesNotTrustClaimedHash(t *testing.T) {
 	t.Parallel()
 

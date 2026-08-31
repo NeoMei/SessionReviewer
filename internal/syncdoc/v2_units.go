@@ -92,6 +92,48 @@ func buildV2DocumentState(document Document, source []byte, spans []reviewv2.Mar
 	return state, nil
 }
 
+// SensitiveScanSource returns the rendered document with only authoritative
+// compact-v2 marker identities replaced by a low-entropy placeholder. The
+// complete document is parsed before any replacement, so marker-looking text
+// in ordinary Markdown or fenced code remains visible to the sensitive-content
+// scanner.
+func (d Document) SensitiveScanSource() ([]byte, error) {
+	rendered, err := d.Render()
+	if err != nil {
+		return nil, err
+	}
+	normalized, spans, entityType, err := validatedV2Source(d.frontmatter, rendered)
+	if err != nil {
+		return nil, err
+	}
+	if entityType == "" || len(spans) == 0 {
+		return normalized, nil
+	}
+
+	var out bytes.Buffer
+	previous := 0
+	for _, span := range spans {
+		if span.Start < previous || span.Start < 0 || span.End <= span.Start || span.End > len(normalized) {
+			return nil, invalidDocument("invalid compact review marker scan span")
+		}
+		lineEndRelative := bytes.IndexByte(normalized[span.Start:span.End], '\n')
+		if lineEndRelative < 0 {
+			return nil, invalidDocument("compact review marker opening line is incomplete")
+		}
+		lineEnd := span.Start + lineEndRelative
+		expected := []byte(fmt.Sprintf("<!-- session-reviewer:%s id=\"%s\" -->", span.Kind, span.ID))
+		if !bytes.Equal(normalized[span.Start:lineEnd], expected) {
+			return nil, invalidDocument("compact review marker opening line changed after validation")
+		}
+		out.Write(normalized[previous:span.Start])
+		fmt.Fprintf(&out, "<!-- session-reviewer:%s id=\"validated-marker-id\" -->", span.Kind)
+		out.Write(normalized[lineEnd:span.End])
+		previous = span.End
+	}
+	out.Write(normalized[previous:])
+	return out.Bytes(), nil
+}
+
 func (d Document) withV2SemanticUnits(units UnitSet) (Document, error) {
 	entityType, ok := d.v2EntityType()
 	if !ok || d.v2 == nil || d.v2.entityType != entityType {

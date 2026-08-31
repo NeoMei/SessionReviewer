@@ -73,6 +73,92 @@ func TestEngineRecoversInterruptedTwoSideWriteFromContentFreeJournal(t *testing.
 	}
 }
 
+func TestCandidateSensitiveUsesValidatedV2MarkerBoundary(t *testing.T) {
+	tests := []struct {
+		name       string
+		relative   string
+		document   syncdoc.Document
+		markerKind string
+		oldID      string
+		longID     string
+		bodyNeedle string
+	}{
+		{
+			name:       "history event",
+			relative:   "项目历史.md",
+			document:   v2HistoryWithTwoEvents(t),
+			markerKind: "event",
+			oldID:      "timeline-trust-chain",
+			longID:     "timeline-codegraph-cutover-finally-approved",
+			bodyNeedle: "修复 receipt 信任边界。",
+		},
+		{
+			name:       "review decision",
+			relative:   "项目回顾.md",
+			document:   v2ReviewWithTwoDecisions(t),
+			markerKind: "decision",
+			oldID:      "decision-local-cli",
+			longID:     "decision-codegraph-source-transaction-finally-approved",
+			bodyNeedle: "原始会话不上传。",
+		},
+		{
+			name:       "review risk",
+			relative:   "项目回顾.md",
+			document:   v2ReviewWithTwoDecisions(t),
+			markerKind: "risk",
+			oldID:      "risk-installer-permission",
+			longID:     "risk-codegraph-q7vx2pm9lk4nz8rc1ya6wt3hu5jd0sf7",
+			bodyNeedle: "Windows 路径与中文目录需要真实验证。",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := renderDocument(t, test.document)
+			oldMarker := []byte("<!-- session-reviewer:" + test.markerKind + " id=\"" + test.oldID + "\" -->")
+			longMarker := []byte("<!-- session-reviewer:" + test.markerKind + " id=\"" + test.longID + "\" -->")
+			withLongMarker := bytes.Replace(base, oldMarker, longMarker, 1)
+			if bytes.Equal(base, withLongMarker) {
+				t.Fatal("validated marker fixture was not changed")
+			}
+			markerDocument, err := syncdoc.Parse(test.relative, withLongMarker)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if candidateSensitive(Candidate{Present: true, RelativePath: test.relative, Document: markerDocument}) {
+				t.Fatalf("validated %s marker ID was classified as sensitive", test.markerKind)
+			}
+
+			withLongHumanText := bytes.Replace(base, []byte(test.bodyNeedle), []byte(test.bodyNeedle+" "+test.longID), 1)
+			if bytes.Equal(base, withLongHumanText) {
+				t.Fatal("human-text fixture was not changed")
+			}
+			humanDocument, err := syncdoc.Parse(test.relative, withLongHumanText)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !candidateSensitive(Candidate{Present: true, RelativePath: test.relative, Document: humanDocument}) {
+				t.Fatalf("high-entropy value in %s human text was not classified as sensitive", test.markerKind)
+			}
+		})
+	}
+
+	t.Run("marker-looking comment in fenced code remains human content", func(t *testing.T) {
+		const longID = "decision-codegraph-source-transaction-finally-approved"
+		base := renderDocument(t, v2ReviewWithTwoDecisions(t))
+		withLongFakeMarker := bytes.Replace(base, []byte("decision-in-fence"), []byte(longID), 1)
+		if bytes.Equal(base, withLongFakeMarker) {
+			t.Fatal("fenced marker fixture was not changed")
+		}
+		document, err := syncdoc.Parse("项目回顾.md", withLongFakeMarker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !candidateSensitive(Candidate{Present: true, RelativePath: "项目回顾.md", Document: document}) {
+			t.Fatal("high-entropy marker-looking fenced content was trusted as machine identity")
+		}
+	})
+}
+
 func TestReconcileDryRunPlansMigrationAndRealSyncConvergesV2(t *testing.T) {
 	fixture := newEngineFixture(t)
 	completeLegacyFixtureForMigration(t, fixture)
