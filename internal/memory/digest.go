@@ -24,6 +24,12 @@ var unorderedJSONArrays = map[string]struct{}{
 	"version_files":             {},
 }
 
+var unorderedJSONObjects = map[string]struct{}{
+	"active_revisions":     {},
+	"superseded_revisions": {},
+	"withdrawn_revisions":  {},
+}
+
 // Digest returns a deterministic digest of a normalized defensive JSON copy.
 // Ordered arrays, including SessionView dependencies, retain caller order.
 func Digest(value any) (string, error) {
@@ -82,6 +88,116 @@ func ObservationRevisionID(value ObservationRevision) string {
 		return ""
 	}
 	return digest
+}
+
+type SessionViewIdentity struct {
+	SchemaVersion           int                `json:"schema_version"`
+	ProjectID               string             `json:"project_id"`
+	Provider                string             `json:"provider"`
+	SessionID               string             `json:"session_id"`
+	SourceRecordDigest      string             `json:"source_record_digest"`
+	StartedAt               string             `json:"started_at"`
+	EndedAt                 string             `json:"ended_at"`
+	TerminalState           TerminalState      `json:"terminal_state"`
+	SourceAvailability      SourceAvailability `json:"source_availability"`
+	ActiveRevisionIDs       []string           `json:"active_revision_ids"`
+	ObservationChunkDigests []string           `json:"observation_chunk_digests"`
+	DerivedRecords          []DerivedRecord    `json:"derived_records"`
+	Diagnostics             []Diagnostic       `json:"diagnostics"`
+	DependencyDigest        string             `json:"dependency_digest"`
+	MaterializerVersion     string             `json:"materializer_version"`
+}
+
+type ProjectProbeStateIdentity struct {
+	SchemaVersion           int          `json:"schema_version"`
+	ProjectID               string       `json:"project_id"`
+	CanonicalRoot           string       `json:"canonical_root"`
+	Branch                  string       `json:"branch,omitempty"`
+	Head                    string       `json:"head,omitempty"`
+	DirtyPathCount          int          `json:"dirty_path_count"`
+	RemoteIdentityHashes    []string     `json:"remote_identity_hashes"`
+	VersionFiles            []ProbeFile  `json:"version_files"`
+	RequiredProjectionFiles []ProbeFile  `json:"required_projection_files"`
+	ProbeVersion            string       `json:"probe_version"`
+	Diagnostics             []Diagnostic `json:"diagnostics"`
+}
+
+type ProjectViewIdentity struct {
+	SchemaVersion           int                     `json:"schema_version"`
+	ProjectID               string                  `json:"project_id"`
+	Generation              int                     `json:"generation"`
+	StartedAt               string                  `json:"started_at"`
+	EndedAt                 string                  `json:"ended_at"`
+	SourceSessions          int                     `json:"source_sessions"`
+	TerminalCounts          TerminalCounts          `json:"terminal_counts"`
+	SessionViewDependencies []SessionViewDependency `json:"session_view_dependencies"`
+	ObservationRevisionIDs  []string                `json:"observation_revision_ids"`
+	ProbeStateDigest        string                  `json:"probe_state_digest"`
+	LiveState               StateSnapshot           `json:"live_state"`
+	WitnessedState          []DerivedRecord         `json:"witnessed_state"`
+	DerivedRecords          []DerivedRecord         `json:"derived_records"`
+	AssociatedUsage         []AssociatedUsage       `json:"associated_usage"`
+	PreviousViewDigest      string                  `json:"previous_view_digest,omitempty"`
+	DependencyDigest        string                  `json:"dependency_digest"`
+	ReducerVersion          string                  `json:"reducer_version"`
+}
+
+func SessionViewDigest(value SessionView) (string, error) {
+	return Digest(SessionViewIdentity{
+		SchemaVersion:           value.SchemaVersion,
+		ProjectID:               value.ProjectID,
+		Provider:                value.Provider,
+		SessionID:               value.SessionID,
+		SourceRecordDigest:      value.SourceRecordDigest,
+		StartedAt:               value.StartedAt,
+		EndedAt:                 value.EndedAt,
+		TerminalState:           value.TerminalState,
+		SourceAvailability:      value.SourceAvailability,
+		ActiveRevisionIDs:       value.ActiveRevisionIDs,
+		ObservationChunkDigests: value.ObservationChunkDigests,
+		DerivedRecords:          value.DerivedRecords,
+		Diagnostics:             value.Diagnostics,
+		DependencyDigest:        value.DependencyDigest,
+		MaterializerVersion:     value.MaterializerVersion,
+	})
+}
+
+func ProjectProbeStateDigest(value ProjectProbeState) (string, error) {
+	return Digest(ProjectProbeStateIdentity{
+		SchemaVersion:           value.SchemaVersion,
+		ProjectID:               value.ProjectID,
+		CanonicalRoot:           value.CanonicalRoot,
+		Branch:                  value.Branch,
+		Head:                    value.Head,
+		DirtyPathCount:          value.DirtyPathCount,
+		RemoteIdentityHashes:    value.RemoteIdentityHashes,
+		VersionFiles:            value.VersionFiles,
+		RequiredProjectionFiles: value.RequiredProjectionFiles,
+		ProbeVersion:            value.ProbeVersion,
+		Diagnostics:             value.Diagnostics,
+	})
+}
+
+func ProjectViewDigest(value ProjectView) (string, error) {
+	return Digest(ProjectViewIdentity{
+		SchemaVersion:           value.SchemaVersion,
+		ProjectID:               value.ProjectID,
+		Generation:              value.Generation,
+		StartedAt:               value.StartedAt,
+		EndedAt:                 value.EndedAt,
+		SourceSessions:          value.SourceSessions,
+		TerminalCounts:          value.TerminalCounts,
+		SessionViewDependencies: value.SessionViewDependencies,
+		ObservationRevisionIDs:  value.ObservationRevisionIDs,
+		ProbeStateDigest:        value.ProbeStateDigest,
+		LiveState:               value.LiveState,
+		WitnessedState:          value.WitnessedState,
+		DerivedRecords:          value.DerivedRecords,
+		AssociatedUsage:         value.AssociatedUsage,
+		PreviousViewDigest:      value.PreviousViewDigest,
+		DependencyDigest:        value.DependencyDigest,
+		ReducerVersion:          value.ReducerVersion,
+	})
 }
 
 type digestVisit struct {
@@ -176,6 +292,14 @@ func validateDigestValue(value reflect.Value, visiting map[digestVisit]bool) err
 
 func normalizeJSONValue(value any, field string) (any, error) {
 	switch current := value.(type) {
+	case nil:
+		if _, unordered := unorderedJSONArrays[field]; unordered {
+			return []any{}, nil
+		}
+		if _, unordered := unorderedJSONObjects[field]; unordered {
+			return map[string]any{}, nil
+		}
+		return nil, nil
 	case map[string]any:
 		copyMap := make(map[string]any, len(current))
 		for name, child := range current {

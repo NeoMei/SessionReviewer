@@ -57,8 +57,8 @@ func TestDigestPreservesOrderedSessionViewDependencies(t *testing.T) {
 func TestDigestNormalizesSemanticallyUnorderedProjectCollections(t *testing.T) {
 	first := validProjectView()
 	first.AssociatedUsage = []AssociatedUsage{
-		{Provider: "codex", SessionID: "s2", UsageRecordDigest: objectDigest("9"), TotalTokens: 2},
-		{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2"), TotalTokens: 10},
+		{Provider: "codex", SessionID: "s2", UsageRecordDigest: objectDigest("9")},
+		{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2")},
 	}
 	second := first
 	second.AssociatedUsage = append([]AssociatedUsage(nil), first.AssociatedUsage...)
@@ -115,4 +115,127 @@ func TestObservationRevisionIDExcludesStoredRevisionIDAndIncludesRequiredIdentit
 			t.Fatalf("mutation %d did not change revision identity", index)
 		}
 	}
+}
+
+func TestTypedSelfDigestsExcludeStoredDigestAndNormalizeNilEmptySets(t *testing.T) {
+	for name, typeOf := range map[string]reflect.Type{
+		"SessionView":       reflect.TypeOf(SessionViewIdentity{}),
+		"ProjectProbeState": reflect.TypeOf(ProjectProbeStateIdentity{}),
+		"ProjectView":       reflect.TypeOf(ProjectViewIdentity{}),
+	} {
+		if _, exists := typeOf.FieldByName("Digest"); exists {
+			t.Fatalf("%s identity DTO contains stored Digest", name)
+		}
+	}
+
+	session := validSessionView()
+	sessionDigest, err := SessionViewDigest(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.Digest = objectDigest("f")
+	if got, err := SessionViewDigest(session); err != nil || got != sessionDigest {
+		t.Fatalf("stored SessionView digest affected identity: %q %v", got, err)
+	}
+	session.ActiveRevisionIDs = nil
+	nilDigest, err := SessionViewDigest(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.ActiveRevisionIDs = []string{}
+	emptyDigest, err := SessionViewDigest(session)
+	if err != nil || nilDigest != emptyDigest {
+		t.Fatalf("nil and empty active revision sets differ: %q %q %v", nilDigest, emptyDigest, err)
+	}
+
+	probe := validProbeState()
+	probeDigest, err := ProjectProbeStateDigest(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.Digest = objectDigest("f")
+	if got, err := ProjectProbeStateDigest(probe); err != nil || got != probeDigest {
+		t.Fatalf("stored ProjectProbeState digest affected identity: %q %v", got, err)
+	}
+	probe.RemoteIdentityHashes = nil
+	nilDigest, err = ProjectProbeStateDigest(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe.RemoteIdentityHashes = []string{}
+	emptyDigest, err = ProjectProbeStateDigest(probe)
+	if err != nil || nilDigest != emptyDigest {
+		t.Fatalf("nil and empty remote identity sets differ: %q %q %v", nilDigest, emptyDigest, err)
+	}
+
+	project := validProjectView()
+	projectDigest, err := ProjectViewDigest(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project.Digest = objectDigest("f")
+	if got, err := ProjectViewDigest(project); err != nil || got != projectDigest {
+		t.Fatalf("stored ProjectView digest affected identity: %q %v", got, err)
+	}
+	project.AssociatedUsage = nil
+	nilDigest, err = ProjectViewDigest(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project.AssociatedUsage = []AssociatedUsage{}
+	emptyDigest, err = ProjectViewDigest(project)
+	if err != nil || nilDigest != emptyDigest {
+		t.Fatalf("nil and empty associated usage sets differ: %q %q %v", nilDigest, emptyDigest, err)
+	}
+
+	manifest := validGenerationManifest()
+	manifest.ActiveRevisions = nil
+	manifest.SupersededRevisions = nil
+	manifest.WithdrawnRevisions = nil
+	nilDigest, err = Digest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.ActiveRevisions = map[string]string{}
+	manifest.SupersededRevisions = map[string]string{}
+	manifest.WithdrawnRevisions = map[string]string{}
+	emptyDigest, err = Digest(manifest)
+	if err != nil || nilDigest != emptyDigest {
+		t.Fatalf("nil and empty revision maps differ: %q %q %v", nilDigest, emptyDigest, err)
+	}
+}
+
+func TestValidatorsRejectTamperedCanonicalSelfDigests(t *testing.T) {
+	t.Run("SessionView", func(t *testing.T) {
+		value := validSessionView()
+		if err := ValidateSessionView(value); err != nil {
+			t.Fatal(err)
+		}
+		value.MaterializerVersion = "session-view-v2"
+		if err := ValidateSessionView(value); err == nil {
+			t.Fatal("SessionView accepted content changed without a new self digest")
+		}
+	})
+
+	t.Run("ProjectProbeState", func(t *testing.T) {
+		value := validProbeState()
+		if err := ValidateProjectProbeState(value); err != nil {
+			t.Fatal(err)
+		}
+		value.Branch = "release"
+		if err := ValidateProjectProbeState(value); err == nil {
+			t.Fatal("ProjectProbeState accepted content changed without a new self digest")
+		}
+	})
+
+	t.Run("ProjectView", func(t *testing.T) {
+		value := validProjectView()
+		if err := ValidateProjectView(value); err != nil {
+			t.Fatal(err)
+		}
+		value.ReducerVersion = "project-view-v2"
+		if err := ValidateProjectView(value); err == nil {
+			t.Fatal("ProjectView accepted content changed without a new self digest")
+		}
+	})
 }

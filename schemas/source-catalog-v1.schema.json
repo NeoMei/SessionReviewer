@@ -7,7 +7,7 @@
   "required": ["schema_version", "provider", "session_id", "source_identity", "started_at", "ended_at", "frozen_boundary", "availability", "usage", "project_ids"],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
-    "provider": { "$ref": "#/$defs/safe_id" },
+    "provider": { "type": "string", "const": "codex" },
     "session_id": { "$ref": "#/$defs/safe_id" },
     "source_identity": { "$ref": "#/$defs/safe_id" },
     "started_at": { "$ref": "#/$defs/timestamp" },
@@ -47,11 +47,28 @@
     "frozen_boundary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["jsonl_line", "byte_offset", "source_hash"],
+      "required": ["source_location", "source_hash"],
       "properties": {
-        "jsonl_line": { "$ref": "#/$defs/nonnegative_integer" },
-        "byte_offset": { "$ref": "#/$defs/nonnegative_integer" },
+        "source_location": { "$ref": "#/$defs/source_location" },
         "source_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "source_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "jsonl"],
+      "properties": {
+        "kind": { "type": "string", "const": "jsonl" },
+        "jsonl": { "$ref": "#/$defs/jsonl_location" }
+      }
+    },
+    "jsonl_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "byte_offset"],
+      "properties": {
+        "line": { "$ref": "#/$defs/nonnegative_integer" },
+        "byte_offset": { "$ref": "#/$defs/nonnegative_integer" }
       }
     },
     "model_usage": {

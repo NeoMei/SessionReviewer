@@ -27,9 +27,25 @@ var (
 		"analysis": {}, "decision": {}, "intent": {}, "rationale": {},
 		"recommendation": {}, "semantic": {}, "summary": {},
 	}
+	directObservationKinds = map[string]struct{}{
+		"artifact": {}, "branch": {}, "build": {}, "command": {},
+		"commit": {}, "deployment": {}, "error": {}, "file": {},
+		"git_status": {}, "lint": {}, "release": {}, "request": {},
+		"sync": {}, "tag": {}, "test": {}, "tool": {},
+		"verification": {}, "version": {},
+	}
+	observationFieldNames = map[string]struct{}{
+		"artifact_id": {}, "branch": {}, "command_signature": {}, "component": {},
+		"duration_ms": {}, "error_signature": {}, "exit_code": {}, "failed": {},
+		"file_hash": {}, "git_head": {}, "model": {}, "passed": {},
+		"path": {}, "remote_hash": {}, "release_id": {}, "skipped": {},
+		"status": {}, "tag": {}, "target": {}, "tool_id": {}, "version": {},
+	}
 	rawConversationFields = map[string]struct{}{
-		"assistant_message": {}, "full_transcript": {}, "prompt": {},
-		"raw_tool_output": {}, "tool_output": {}, "transcript": {}, "user_message": {},
+		"analysis": {}, "assistant_message": {}, "decision": {}, "full_transcript": {},
+		"intent": {}, "prompt": {}, "rationale": {}, "raw_tool_output": {},
+		"recommendation": {}, "semantic": {}, "summary": {}, "tool_output": {},
+		"transcript": {}, "user_message": {},
 	}
 )
 
@@ -50,10 +66,23 @@ const (
 	SourceUnavailable SourceAvailability = "source_unavailable"
 )
 
+type SourceLocationKind string
+
+const SourceLocationJSONL SourceLocationKind = "jsonl"
+
+type JSONLSourceLocation struct {
+	Line       int   `json:"line"`
+	ByteOffset int64 `json:"byte_offset"`
+}
+
+type SourceLocation struct {
+	Kind  SourceLocationKind   `json:"kind"`
+	JSONL *JSONLSourceLocation `json:"jsonl,omitempty"`
+}
+
 type FrozenBoundary struct {
-	JSONLLine  int    `json:"jsonl_line"`
-	ByteOffset int64  `json:"byte_offset"`
-	SourceHash string `json:"source_hash"`
+	Location   SourceLocation `json:"source_location"`
+	SourceHash string         `json:"source_hash"`
 }
 
 type SourceRecord struct {
@@ -70,12 +99,11 @@ type SourceRecord struct {
 }
 
 type SourceRef struct {
-	Provider       string `json:"provider"`
-	SessionID      string `json:"session_id"`
-	SourceIdentity string `json:"source_identity"`
-	JSONLLine      int    `json:"jsonl_line"`
-	ByteOffset     int64  `json:"byte_offset"`
-	SourceHash     string `json:"source_hash"`
+	Provider       string         `json:"provider"`
+	SessionID      string         `json:"session_id"`
+	SourceIdentity string         `json:"source_identity"`
+	Location       SourceLocation `json:"source_location"`
+	SourceHash     string         `json:"source_hash"`
 }
 
 type ObservationKey struct {
@@ -193,7 +221,6 @@ type AssociatedUsage struct {
 	SessionID         string `json:"session_id"`
 	UsageRecordDigest string `json:"usage_record_digest"`
 	Shared            bool   `json:"shared"`
-	TotalTokens       int64  `json:"total_tokens"`
 }
 
 type ProjectView struct {
@@ -243,7 +270,10 @@ func ValidateSourceRecord(value SourceRecord) error {
 	if err := validateTimeRange(value.StartedAt, value.EndedAt); err != nil {
 		return err
 	}
-	if value.FrozenBoundary.JSONLLine < 0 || value.FrozenBoundary.JSONLLine > maxSafeInteger || value.FrozenBoundary.ByteOffset < 0 || value.FrozenBoundary.ByteOffset > maxSafeInteger || !sha256Pattern.MatchString(value.FrozenBoundary.SourceHash) {
+	if err := validateSourceLocation(value.Provider, value.FrozenBoundary.Location); err != nil {
+		return fmt.Errorf("invalid frozen source boundary: %w", err)
+	}
+	if !sha256Pattern.MatchString(value.FrozenBoundary.SourceHash) {
 		return errors.New("invalid frozen source boundary")
 	}
 	if !validSourceAvailability(value.Availability) {
@@ -278,11 +308,11 @@ func ValidateObservationRevision(value ObservationRevision) error {
 		return fmt.Errorf("invalid observation timestamp: %w", err)
 	}
 	for name, text := range map[string]string{"operation": value.Operation, "object": value.Object, "outcome": value.Outcome} {
-		if err := validateBoundedText(name, text, 512, true); err != nil {
+		if err := validateStructuredText(name, text, 512, true); err != nil {
 			return err
 		}
 	}
-	if err := validateFields(value.Fields); err != nil {
+	if err := validateObservationFields(value.Fields); err != nil {
 		return err
 	}
 	if err := validateBoundedText("excerpt", value.Excerpt, maxExcerptBytes, true); err != nil {
@@ -323,11 +353,18 @@ func ValidateSessionView(value SessionView) error {
 	if err := validateDerivedRecords(value.DerivedRecords); err != nil {
 		return err
 	}
+	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ActiveRevisionIDs, "active revision"); err != nil {
+		return err
+	}
 	if err := validateDiagnostics(value.Diagnostics); err != nil {
 		return err
 	}
 	if !safeIDPattern.MatchString(value.MaterializerVersion) {
 		return errors.New("invalid materializer version")
+	}
+	want, err := SessionViewDigest(value)
+	if err != nil || value.Digest != want {
+		return errors.New("SessionView self digest does not match canonical identity")
 	}
 	return nil
 }
@@ -360,7 +397,14 @@ func ValidateProjectProbeState(value ProjectProbeState) error {
 	if err := validateProbeFiles(value.RequiredProjectionFiles); err != nil {
 		return fmt.Errorf("invalid required projection files: %w", err)
 	}
-	return validateDiagnostics(value.Diagnostics)
+	if err := validateDiagnostics(value.Diagnostics); err != nil {
+		return err
+	}
+	want, err := ProjectProbeStateDigest(value)
+	if err != nil || value.Digest != want {
+		return errors.New("ProjectProbeState self digest does not match canonical identity")
+	}
+	return nil
 }
 
 func ValidateProbeCheck(value ProbeCheck) error {
@@ -410,6 +454,12 @@ func ValidateProjectView(value ProjectView) error {
 	if err := validateDerivedRecords(value.DerivedRecords); err != nil {
 		return err
 	}
+	if err := validateDerivedDependencyClosure(value.WitnessedState, value.ObservationRevisionIDs, "selected observation"); err != nil {
+		return err
+	}
+	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ObservationRevisionIDs, "selected observation"); err != nil {
+		return err
+	}
 	witnessedIDs := make(map[string]struct{}, len(value.WitnessedState))
 	for _, record := range value.WitnessedState {
 		witnessedIDs[record.ID] = struct{}{}
@@ -424,6 +474,10 @@ func ValidateProjectView(value ProjectView) error {
 	}
 	if !safeIDPattern.MatchString(value.ReducerVersion) {
 		return errors.New("invalid reducer version")
+	}
+	want, err := ProjectViewDigest(value)
+	if err != nil || value.Digest != want {
+		return errors.New("ProjectView self digest does not match canonical identity")
 	}
 	return nil
 }
@@ -514,25 +568,44 @@ func validateObservationKey(value ObservationKey) error {
 	if value.Sequence < 0 || value.Sequence > maxSafeInteger || !safeIDPattern.MatchString(value.ProjectID) || !fieldNamePattern.MatchString(value.Kind) {
 		return errors.New("invalid observation key")
 	}
-	if _, forbidden := semanticOnlyKinds[value.Kind]; forbidden {
-		return fmt.Errorf("semantic-only observation kind %q is forbidden", value.Kind)
+	if _, observed := directObservationKinds[value.Kind]; !observed {
+		return fmt.Errorf("observation kind %q is not directly observed", value.Kind)
 	}
-	return validateBoundedText("observation subject", value.Subject, 256, false)
+	return validateStructuredText("observation subject", value.Subject, 256, false)
 }
 
 func validateSourceRef(value SourceRef) error {
 	if err := validateSourceIdentity(value.Provider, value.SessionID, value.SourceIdentity); err != nil {
 		return err
 	}
-	if value.JSONLLine < 0 || value.JSONLLine > maxSafeInteger || value.ByteOffset < 0 || value.ByteOffset > maxSafeInteger || !sha256Pattern.MatchString(value.SourceHash) {
+	if err := validateSourceLocation(value.Provider, value.Location); err != nil {
+		return err
+	}
+	if !sha256Pattern.MatchString(value.SourceHash) {
 		return errors.New("invalid source reference")
 	}
 	return nil
 }
 
 func validateSourceIdentity(provider, sessionID, sourceIdentity string) error {
+	if provider != "codex" {
+		return fmt.Errorf("unsupported provider %q for private schema v1", provider)
+	}
 	if !safeIDPattern.MatchString(provider) || !safeIDPattern.MatchString(sessionID) || !safeIDPattern.MatchString(sourceIdentity) {
 		return errors.New("invalid provider/session/source identity")
+	}
+	return nil
+}
+
+func validateSourceLocation(provider string, value SourceLocation) error {
+	if provider != "codex" {
+		return fmt.Errorf("unsupported provider %q for source location v1", provider)
+	}
+	if value.Kind != SourceLocationJSONL || value.JSONL == nil {
+		return errors.New("Codex v1 requires an exact JSONL source location")
+	}
+	if value.JSONL.Line < 0 || value.JSONL.Line > maxSafeInteger || value.JSONL.ByteOffset < 0 || value.JSONL.ByteOffset > maxSafeInteger {
+		return errors.New("invalid JSONL source coordinates")
 	}
 	return nil
 }
@@ -581,8 +654,20 @@ func validateFields(fields map[string]string) error {
 		if _, forbidden := rawConversationFields[name]; forbidden {
 			return fmt.Errorf("raw conversation field %q is forbidden", name)
 		}
-		if err := validateBoundedText("field value", value, 512, true); err != nil {
+		if err := validateStructuredText("field value", value, 512, true); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateObservationFields(fields map[string]string) error {
+	if err := validateFields(fields); err != nil {
+		return err
+	}
+	for name := range fields {
+		if _, allowed := observationFieldNames[name]; !allowed {
+			return fmt.Errorf("observation field %q is not a structured observed field", name)
 		}
 	}
 	return nil
@@ -617,6 +702,21 @@ func validateDerivedRecords(records []DerivedRecord) error {
 		}
 		if err := validateFields(record.Fields); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func validateDerivedDependencyClosure(records []DerivedRecord, selected []string, selectedName string) error {
+	allowed := make(map[string]struct{}, len(selected))
+	for _, revisionID := range selected {
+		allowed[revisionID] = struct{}{}
+	}
+	for _, record := range records {
+		for _, dependency := range record.DependencyRevisionIDs {
+			if _, exists := allowed[dependency]; !exists {
+				return fmt.Errorf("derived record %q dependency is not an enclosing %s", record.ID, selectedName)
+			}
 		}
 	}
 	return nil
@@ -666,7 +766,7 @@ func validateSessionDependencies(values []SessionViewDependency, maximum int) er
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid SessionView dependency")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -697,7 +797,7 @@ func validateAssociatedUsage(values []AssociatedUsage) error {
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
-		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) || value.TotalTokens < 0 || value.TotalTokens > maxSafeInteger {
+		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
 			return errors.New("invalid associated usage row")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -746,6 +846,18 @@ func validateUniqueDigests(name string, values []string, maximum int) error {
 func validateBoundedText(name, value string, maximum int, optional bool) error {
 	if !utf8.ValidString(value) || (!optional && value == "") || len(value) > maximum {
 		return fmt.Errorf("invalid or oversized %s", name)
+	}
+	return nil
+}
+
+func validateStructuredText(name, value string, maximum int, optional bool) error {
+	if err := validateBoundedText(name, value, maximum, optional); err != nil {
+		return err
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return fmt.Errorf("%s must be structured single-line text", name)
+		}
 	}
 	return nil
 }

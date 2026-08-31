@@ -83,7 +83,7 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "digest"],
       "properties": {
-        "provider": { "$ref": "#/$defs/safe_id" },
+        "provider": { "type": "string", "const": "codex" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "digest": { "$ref": "#/$defs/digest" }
       }
@@ -116,13 +116,12 @@
     "associated_usage": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider", "session_id", "usage_record_digest", "shared", "total_tokens"],
+      "required": ["provider", "session_id", "usage_record_digest", "shared"],
       "properties": {
-        "provider": { "$ref": "#/$defs/safe_id" },
+        "provider": { "type": "string", "const": "codex" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "usage_record_digest": { "$ref": "#/$defs/digest" },
-        "shared": { "type": "boolean" },
-        "total_tokens": { "$ref": "#/$defs/nonnegative_integer" }
+        "shared": { "type": "boolean" }
       }
     }
   }

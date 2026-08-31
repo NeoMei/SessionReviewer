@@ -9,7 +9,7 @@
     "schema_version": { "type": "integer", "const": 1 },
     "digest": { "$ref": "#/$defs/digest" },
     "project_id": { "$ref": "#/$defs/safe_id" },
-    "provider": { "$ref": "#/$defs/safe_id" },
+    "provider": { "type": "string", "const": "codex" },
     "session_id": { "$ref": "#/$defs/safe_id" },
     "source_record_digest": { "$ref": "#/$defs/digest" },
     "started_at": { "$ref": "#/$defs/timestamp" },

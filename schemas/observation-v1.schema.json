@@ -32,7 +32,7 @@
       "maxLength": 64,
       "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
     },
-    "bounded_text": { "type": "string", "maxLength": 512 },
+    "bounded_text": { "type": "string", "maxLength": 512, "pattern": "^[^\\r\\n]*$" },
     "timestamp": {
       "type": "string",
       "minLength": 20,
@@ -51,34 +51,71 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "source_identity", "sequence", "project_id", "kind", "subject"],
       "properties": {
-        "provider": { "$ref": "#/$defs/safe_id" },
+        "provider": { "type": "string", "const": "codex" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
         "sequence": { "$ref": "#/$defs/nonnegative_integer" },
         "project_id": { "$ref": "#/$defs/safe_id" },
-        "kind": { "$ref": "#/$defs/field_name" },
-        "subject": { "type": "string", "minLength": 1, "maxLength": 256 }
+        "kind": { "type": "string", "enum": ["artifact", "branch", "build", "command", "commit", "deployment", "error", "file", "git_status", "lint", "release", "request", "sync", "tag", "test", "tool", "verification", "version"] },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[^\\r\\n]*$" }
       }
     },
     "source_ref": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["provider", "session_id", "source_identity", "jsonl_line", "byte_offset", "source_hash"],
+      "required": ["provider", "session_id", "source_identity", "source_location", "source_hash"],
       "properties": {
-        "provider": { "$ref": "#/$defs/safe_id" },
+        "provider": { "type": "string", "const": "codex" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
-        "jsonl_line": { "$ref": "#/$defs/nonnegative_integer" },
-        "byte_offset": { "$ref": "#/$defs/nonnegative_integer" },
+        "source_location": { "$ref": "#/$defs/source_location" },
         "source_hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "source_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "jsonl"],
+      "properties": {
+        "kind": { "type": "string", "const": "jsonl" },
+        "jsonl": { "$ref": "#/$defs/jsonl_location" }
+      }
+    },
+    "jsonl_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "byte_offset"],
+      "properties": {
+        "line": { "$ref": "#/$defs/nonnegative_integer" },
+        "byte_offset": { "$ref": "#/$defs/nonnegative_integer" }
       }
     },
     "fields": {
       "type": "object",
       "additionalProperties": false,
       "maxProperties": 64,
-      "patternProperties": {
-        "^[a-z0-9][a-z0-9._-]{0,63}$": { "type": "string", "maxLength": 512 }
+      "properties": {
+        "artifact_id": { "$ref": "#/$defs/bounded_text" },
+        "branch": { "$ref": "#/$defs/bounded_text" },
+        "command_signature": { "$ref": "#/$defs/bounded_text" },
+        "component": { "$ref": "#/$defs/bounded_text" },
+        "duration_ms": { "$ref": "#/$defs/bounded_text" },
+        "error_signature": { "$ref": "#/$defs/bounded_text" },
+        "exit_code": { "$ref": "#/$defs/bounded_text" },
+        "failed": { "$ref": "#/$defs/bounded_text" },
+        "file_hash": { "$ref": "#/$defs/bounded_text" },
+        "git_head": { "$ref": "#/$defs/bounded_text" },
+        "model": { "$ref": "#/$defs/bounded_text" },
+        "passed": { "$ref": "#/$defs/bounded_text" },
+        "path": { "$ref": "#/$defs/bounded_text" },
+        "remote_hash": { "$ref": "#/$defs/bounded_text" },
+        "release_id": { "$ref": "#/$defs/bounded_text" },
+        "skipped": { "$ref": "#/$defs/bounded_text" },
+        "status": { "$ref": "#/$defs/bounded_text" },
+        "tag": { "$ref": "#/$defs/bounded_text" },
+        "target": { "$ref": "#/$defs/bounded_text" },
+        "tool_id": { "$ref": "#/$defs/bounded_text" },
+        "version": { "$ref": "#/$defs/bounded_text" }
       }
     }
   }

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -29,6 +30,46 @@ func TestPrivateWireSchemasRejectSemanticAndRawConversationFields(t *testing.T) 
 	for _, forbidden := range []string{"rationale", "intent", "full_transcript", "raw_tool_output"} {
 		assertSchemaRejectsUnknownProperty(t, "../../schemas/observation-v1.schema.json", forbidden)
 	}
+}
+
+func TestObservationPrivacyContractAllowsOnlyDirectObservedStructuredPayloads(t *testing.T) {
+	for _, kind := range []string{"conversation", "rationale", "summary"} {
+		t.Run("kind "+kind, func(t *testing.T) {
+			value := validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"})
+			value.Key.Kind = kind
+			value.RevisionID = ObservationRevisionID(value)
+			if err := ValidateObservationRevision(value); err == nil {
+				t.Fatalf("unobserved kind %q accepted", kind)
+			}
+			assertObservationSchemaRejectsMutation(t, func(object map[string]any) {
+				object["key"].(map[string]any)["kind"] = kind
+			})
+		})
+	}
+
+	for _, field := range []string{"raw_tool_output", "full_transcript", "rationale", "summary"} {
+		t.Run("field "+field, func(t *testing.T) {
+			value := validObservation(validObservationKey(), "adapter-1", map[string]string{field: "payload"})
+			if err := ValidateObservationRevision(value); err == nil {
+				t.Fatalf("raw or semantic field %q accepted", field)
+			}
+			assertObservationSchemaRejectsMutation(t, func(object map[string]any) {
+				object["fields"] = map[string]any{field: "payload"}
+			})
+		})
+	}
+
+	t.Run("free text outside excerpt", func(t *testing.T) {
+		value := validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"})
+		value.Operation = "go test\ncomplete raw output"
+		value.RevisionID = ObservationRevisionID(value)
+		if err := ValidateObservationRevision(value); err == nil {
+			t.Fatal("free text outside bounded excerpt accepted")
+		}
+		assertObservationSchemaRejectsMutation(t, func(object map[string]any) {
+			object["operation"] = "go test\ncomplete raw output"
+		})
+	})
 }
 
 func TestPrivateWireSchemasAcceptMatchingVersionOneFixtures(t *testing.T) {
@@ -69,7 +110,7 @@ func TestValidationRejectsSemanticRawDuplicateAndImpossibleContracts(t *testing.
 				value.RevisionID = ObservationRevisionID(value)
 				return ValidateObservationRevision(value)
 			},
-			want: "semantic",
+			want: "not directly observed",
 		},
 		{
 			name: "raw conversation field",
@@ -148,6 +189,134 @@ func TestSourceRecordOwnsOneValidatedUsageAtFrozenBoundary(t *testing.T) {
 	}
 }
 
+func TestCodexV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
+	t.Run("wire envelope has no flat coordinates", func(t *testing.T) {
+		body, err := json.Marshal(validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"}).Ref)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var object map[string]any
+		if err := json.Unmarshal(body, &object); err != nil {
+			t.Fatal(err)
+		}
+		if object["jsonl_line"] != nil || object["byte_offset"] != nil {
+			t.Fatalf("SourceRef retained flat JSONL coordinates: %s", body)
+		}
+		location, ok := object["source_location"].(map[string]any)
+		if !ok || location["kind"] != "jsonl" {
+			t.Fatalf("SourceRef lacks JSONL discriminator: %s", body)
+		}
+		jsonl, ok := location["jsonl"].(map[string]any)
+		if !ok || jsonl["line"] != float64(9) || jsonl["byte_offset"] != float64(128) || len(jsonl) != 2 {
+			t.Fatalf("SourceRef JSONL variant is not exact: %s", body)
+		}
+	})
+
+	for name, mutate := range map[string]func(*ObservationRevision){
+		"unsupported provider": func(value *ObservationRevision) {
+			value.Key.Provider = "claude"
+			value.Ref.Provider = "claude"
+		},
+		"wrong discriminator": func(value *ObservationRevision) {
+			value.Ref.Location.Kind = "stream"
+		},
+		"missing JSONL payload": func(value *ObservationRevision) {
+			value.Ref.Location.JSONL = nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"})
+			mutate(&value)
+			value.RevisionID = ObservationRevisionID(value)
+			if err := ValidateObservationRevision(value); err == nil {
+				t.Fatalf("mismatched provider/location shape %q accepted", name)
+			}
+		})
+	}
+
+	t.Run("observation schema mismatches", func(t *testing.T) {
+		for _, mutate := range []func(map[string]any){
+			func(object map[string]any) { object["key"].(map[string]any)["provider"] = "claude" },
+			func(object map[string]any) { object["source_ref"].(map[string]any)["provider"] = "claude" },
+			func(object map[string]any) {
+				object["source_ref"].(map[string]any)["source_location"].(map[string]any)["kind"] = "stream"
+			},
+			func(object map[string]any) {
+				delete(object["source_ref"].(map[string]any)["source_location"].(map[string]any), "jsonl")
+			},
+		} {
+			assertObservationSchemaRejectsMutation(t, mutate)
+		}
+	})
+
+	t.Run("source catalog schema mismatch", func(t *testing.T) {
+		body, err := json.Marshal(validSourceRecord())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var object map[string]any
+		if err := json.Unmarshal(body, &object); err != nil {
+			t.Fatal(err)
+		}
+		object["frozen_boundary"].(map[string]any)["source_location"].(map[string]any)["kind"] = "stream"
+		body, err = json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateJSONSchemaFixture("../../schemas/source-catalog-v1.schema.json", body); err == nil {
+			t.Fatalf("SourceCatalog schema accepted mismatched location: %s", body)
+		}
+	})
+
+	t.Run("derived provider references do not claim another adapter", func(t *testing.T) {
+		view := validProjectView()
+		view.SessionViewDependencies[0].Provider = "claude"
+		view.AssociatedUsage[0].Provider = "claude"
+		view.Digest = mustProjectViewDigest(view)
+		if err := ValidateProjectView(view); err == nil {
+			t.Fatal("ProjectView accepted a provider without a v1 adapter")
+		}
+
+		manifest := validGenerationManifest()
+		manifest.SessionViews[0].Provider = "claude"
+		if err := ValidateGenerationManifest(manifest); err == nil {
+			t.Fatal("GenerationManifest accepted a provider without a v1 adapter")
+		}
+	})
+}
+
+func TestAssociatedUsageReferencesSourceCatalogWithoutCopiedTotals(t *testing.T) {
+	t.Run("Go wire record", func(t *testing.T) {
+		body, err := json.Marshal(validProjectView().AssociatedUsage[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(body, []byte(`"total_tokens"`)) {
+			t.Fatalf("AssociatedUsage copied SourceCatalog totals: %s", body)
+		}
+	})
+
+	t.Run("project schema", func(t *testing.T) {
+		body, err := json.Marshal(validProjectView())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var object map[string]any
+		if err := json.Unmarshal(body, &object); err != nil {
+			t.Fatal(err)
+		}
+		usage := object["associated_usage"].([]any)[0].(map[string]any)
+		usage["total_tokens"] = float64(10)
+		body, err = json.Marshal(object)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateJSONSchemaFixture("../../schemas/project-view-v1.schema.json", body); err == nil {
+			t.Fatalf("ProjectView schema accepted copied SourceCatalog totals: %s", body)
+		}
+	})
+}
+
 func TestProjectProbeStateHasNoWallClockTimeButProbeCheckDoes(t *testing.T) {
 	stateType := reflect.TypeOf(ProjectProbeState{})
 	if _, ok := stateType.FieldByName("CheckedAt"); ok {
@@ -196,6 +365,37 @@ func TestGenerationManifestReconcilesFrozenSourcesWithSessionViews(t *testing.T)
 	}
 }
 
+func TestDerivedDependenciesMustBelongToEnclosingSelectedEvidence(t *testing.T) {
+	inactive := map[string]string{
+		"unknown":    revisionDigest("2"),
+		"superseded": revisionDigest("3"),
+		"withdrawn":  revisionDigest("4"),
+	}
+	for state, revisionID := range inactive {
+		t.Run("SessionView "+state, func(t *testing.T) {
+			value := validSessionView()
+			value.DerivedRecords[0].DependencyRevisionIDs = []string{revisionID}
+			if err := ValidateSessionView(value); err == nil || !strings.Contains(err.Error(), "active revision") {
+				t.Fatalf("%s dependency accepted or misclassified: %v", state, err)
+			}
+		})
+
+		t.Run("ProjectView "+state, func(t *testing.T) {
+			value := validProjectView()
+			if state == "unknown" {
+				value.WitnessedState[0].DependencyRevisionIDs = []string{revisionID}
+			} else {
+				value.DerivedRecords = []DerivedRecord{validDerivedRecord()}
+				value.DerivedRecords[0].ID = "derived-" + state
+				value.DerivedRecords[0].DependencyRevisionIDs = []string{revisionID}
+			}
+			if err := ValidateProjectView(value); err == nil || !strings.Contains(err.Error(), "selected observation") {
+				t.Fatalf("%s dependency accepted or misclassified: %v", state, err)
+			}
+		})
+	}
+}
+
 func validSourceRecord() SourceRecord {
 	return SourceRecord{
 		SchemaVersion:  MemorySchemaVersion,
@@ -204,7 +404,7 @@ func validSourceRecord() SourceRecord {
 		SourceIdentity: "src1",
 		StartedAt:      "2026-08-31T10:00:00Z",
 		EndedAt:        "2026-08-31T10:00:01Z",
-		FrozenBoundary: FrozenBoundary{JSONLLine: 9, ByteOffset: 128, SourceHash: strings.Repeat("a", 64)},
+		FrozenBoundary: FrozenBoundary{Location: SourceLocation{Kind: SourceLocationJSONL, JSONL: &JSONLSourceLocation{Line: 9, ByteOffset: 128}}, SourceHash: strings.Repeat("a", 64)},
 		Availability:   SourceAvailable,
 		Usage: accounting.SessionUsage{
 			StartedAt:  "2026-08-31T10:00:00Z",
@@ -232,7 +432,7 @@ func validObservation(key ObservationKey, adapterVersion string, fields map[stri
 	value := ObservationRevision{
 		SchemaVersion:  MemorySchemaVersion,
 		Key:            key,
-		Ref:            SourceRef{Provider: key.Provider, SessionID: key.SessionID, SourceIdentity: key.SourceIdentity, JSONLLine: 9, ByteOffset: 128, SourceHash: strings.Repeat("a", 64)},
+		Ref:            SourceRef{Provider: key.Provider, SessionID: key.SessionID, SourceIdentity: key.SourceIdentity, Location: SourceLocation{Kind: SourceLocationJSONL, JSONL: &JSONLSourceLocation{Line: 9, ByteOffset: 128}}, SourceHash: strings.Repeat("a", 64)},
 		Timestamp:      "2026-08-31T10:00:00.123456789Z",
 		Operation:      "go test",
 		Object:         "./internal/memory",
@@ -260,9 +460,8 @@ func validDerivedRecord() DerivedRecord {
 }
 
 func validSessionView() SessionView {
-	return SessionView{
+	value := SessionView{
 		SchemaVersion:           MemorySchemaVersion,
-		Digest:                  objectDigest("1"),
 		ProjectID:               "project-a",
 		Provider:                "codex",
 		SessionID:               "s1",
@@ -278,12 +477,13 @@ func validSessionView() SessionView {
 		DependencyDigest:        objectDigest("4"),
 		MaterializerVersion:     "session-view-v1",
 	}
+	value.Digest = mustSessionViewDigest(value)
+	return value
 }
 
 func validProbeState() ProjectProbeState {
-	return ProjectProbeState{
+	value := ProjectProbeState{
 		SchemaVersion:           MemorySchemaVersion,
-		Digest:                  objectDigest("5"),
 		ProjectID:               "project-a",
 		CanonicalRoot:           "/workspace/project-a",
 		Branch:                  "main",
@@ -295,6 +495,8 @@ func validProbeState() ProjectProbeState {
 		ProbeVersion:            "project-probe-v1",
 		Diagnostics:             []Diagnostic{},
 	}
+	value.Digest = mustProjectProbeStateDigest(value)
+	return value
 }
 
 func validProbeCheck() ProbeCheck {
@@ -302,9 +504,8 @@ func validProbeCheck() ProbeCheck {
 }
 
 func validProjectView() ProjectView {
-	return ProjectView{
+	value := ProjectView{
 		SchemaVersion:           MemorySchemaVersion,
-		Digest:                  objectDigest("7"),
 		ProjectID:               "project-a",
 		Generation:              1,
 		StartedAt:               "2026-08-31T10:00:00Z",
@@ -317,10 +518,36 @@ func validProjectView() ProjectView {
 		LiveState:               StateSnapshot{Branch: "main", Head: strings.Repeat("b", 40), DirtyPathCount: 0},
 		WitnessedState:          []DerivedRecord{validDerivedRecord()},
 		DerivedRecords:          []DerivedRecord{},
-		AssociatedUsage:         []AssociatedUsage{{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2"), Shared: false, TotalTokens: 10}},
+		AssociatedUsage:         []AssociatedUsage{{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2"), Shared: false}},
 		DependencyDigest:        objectDigest("8"),
 		ReducerVersion:          "project-view-v1",
 	}
+	value.Digest = mustProjectViewDigest(value)
+	return value
+}
+
+func mustSessionViewDigest(value SessionView) string {
+	digest, err := SessionViewDigest(value)
+	if err != nil {
+		panic(err)
+	}
+	return digest
+}
+
+func mustProjectProbeStateDigest(value ProjectProbeState) string {
+	digest, err := ProjectProbeStateDigest(value)
+	if err != nil {
+		panic(err)
+	}
+	return digest
+}
+
+func mustProjectViewDigest(value ProjectView) string {
+	digest, err := ProjectViewDigest(value)
+	if err != nil {
+		panic(err)
+	}
+	return digest
 }
 
 func validGenerationManifest() GenerationManifest {
@@ -371,6 +598,27 @@ func assertSchemaRejectsUnknownProperty(t *testing.T, path, property string) {
 	}
 	if err := validateJSONSchemaFixture(path, body); err == nil || !strings.Contains(err.Error(), "unknown property") {
 		t.Fatalf("schema accepted unknown property %q or misclassified it: %v", property, err)
+	}
+}
+
+func assertObservationSchemaRejectsMutation(t *testing.T, mutate func(map[string]any)) {
+	t.Helper()
+	fixture := validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"})
+	body, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(body, &object); err != nil {
+		t.Fatal(err)
+	}
+	mutate(object)
+	body, err = json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/observation-v1.schema.json", body); err == nil {
+		t.Fatalf("observation schema accepted mutated payload: %s", body)
 	}
 }
 
