@@ -317,6 +317,101 @@ func TestAssociatedUsageReferencesSourceCatalogWithoutCopiedTotals(t *testing.T)
 	})
 }
 
+func TestSessionViewCarriesOnlyCompactDependencyBoundObservationSummaries(t *testing.T) {
+	view := validSessionView()
+	if err := ValidateSessionView(view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.ObservationSummaries) != 1 || view.ObservationSummaries[0].RevisionID != view.ActiveRevisionIDs[0] {
+		t.Fatalf("summary dependency mismatch: %+v", view)
+	}
+	body, err := json.Marshal(view.ObservationSummaries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"source_ref", "source_hash", "adapter_id", "adapter_version", "total_tokens", "raw_tool_output", "assistant_message", "transcript"} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Fatalf("summary copied forbidden field %q: %s", forbidden, body)
+		}
+	}
+}
+
+func TestSessionViewRejectsUnauthenticatedUsageAndSummaryDependencyMismatches(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*SessionView)
+	}{
+		{name: "usage differs from catalog source", run: func(value *SessionView) { value.UsageRecordDigest = objectDigest("9") }},
+		{name: "missing summary", run: func(value *SessionView) { value.ObservationSummaries = nil }},
+		{name: "extra summary", run: func(value *SessionView) {
+			value.ObservationSummaries = append(value.ObservationSummaries, value.ObservationSummaries[0])
+		}},
+		{name: "summary revision order mismatch", run: func(value *SessionView) { value.ObservationSummaries[0].RevisionID = revisionDigest("2") }},
+		{name: "duplicate stable observation key", run: func(value *SessionView) {
+			duplicate := value.ObservationSummaries[0]
+			duplicate.RevisionID = revisionDigest("2")
+			value.ActiveRevisionIDs = append(value.ActiveRevisionIDs, duplicate.RevisionID)
+			value.ObservationSummaries = append(value.ObservationSummaries, duplicate)
+		}},
+		{name: "noncanonical summary and revision order", run: func(value *SessionView) {
+			later := value.ObservationSummaries[0]
+			later.RevisionID = revisionDigest("2")
+			later.Sequence++
+			later.Subject = "go-test-later"
+			value.ActiveRevisionIDs = []string{later.RevisionID, value.ActiveRevisionIDs[0]}
+			value.ObservationSummaries = []ObservationSummary{later, value.ObservationSummaries[0]}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := validSessionView()
+			test.run(&value)
+			value.Digest = mustSessionViewDigest(value)
+			if err := ValidateSessionView(value); err == nil {
+				t.Fatalf("invalid SessionView accepted: %+v", value)
+			}
+		})
+	}
+}
+
+func TestSessionViewSchemaRejectsMissingOrForbiddenSummaryContent(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"missing usage digest": func(object map[string]any) { delete(object, "usage_record_digest") },
+		"missing summaries":    func(object map[string]any) { delete(object, "observation_summaries") },
+		"source reference": func(object map[string]any) {
+			object["observation_summaries"].([]any)[0].(map[string]any)["source_ref"] = map[string]any{"provider": "codex"}
+		},
+		"usage totals": func(object map[string]any) {
+			object["observation_summaries"].([]any)[0].(map[string]any)["total_tokens"] = float64(10)
+		},
+		"raw output": func(object map[string]any) {
+			object["observation_summaries"].([]any)[0].(map[string]any)["raw_tool_output"] = "complete output"
+		},
+		"assistant text": func(object map[string]any) {
+			object["observation_summaries"].([]any)[0].(map[string]any)["assistant_message"] = "complete message"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			body, err := json.Marshal(validSessionView())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var object map[string]any
+			if err := json.Unmarshal(body, &object); err != nil {
+				t.Fatal(err)
+			}
+			mutate(object)
+			body, err = json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateJSONSchemaFixture("../../schemas/session-view-v1.schema.json", body); err == nil {
+				t.Fatalf("SessionView schema accepted %s: %s", name, body)
+			}
+		})
+	}
+}
+
 func TestProjectProbeStateHasNoWallClockTimeButProbeCheckDoes(t *testing.T) {
 	stateType := reflect.TypeOf(ProjectProbeState{})
 	if _, ok := stateType.FieldByName("CheckedAt"); ok {
@@ -459,6 +554,21 @@ func validDerivedRecord() DerivedRecord {
 	}
 }
 
+func validObservationSummary() ObservationSummary {
+	return ObservationSummary{
+		RevisionID: revisionDigest("1"),
+		Sequence:   7,
+		Kind:       "verification",
+		Subject:    "go-test",
+		OccurredAt: "2026-08-31T10:00:00.123456789Z",
+		Operation:  "verification",
+		Object:     "package",
+		Outcome:    "passed",
+		Fields:     map[string]string{"component": "package", "status": "test"},
+		Excerpt:    "ok internal/memory",
+	}
+}
+
 func validSessionView() SessionView {
 	value := SessionView{
 		SchemaVersion:           MemorySchemaVersion,
@@ -466,11 +576,13 @@ func validSessionView() SessionView {
 		Provider:                "codex",
 		SessionID:               "s1",
 		SourceRecordDigest:      objectDigest("2"),
+		UsageRecordDigest:       objectDigest("2"),
 		StartedAt:               "2026-08-31T10:00:00Z",
 		EndedAt:                 "2026-08-31T10:00:01Z",
 		TerminalState:           Indexed,
 		SourceAvailability:      SourceAvailable,
 		ActiveRevisionIDs:       []string{revisionDigest("1")},
+		ObservationSummaries:    []ObservationSummary{validObservationSummary()},
 		ObservationChunkDigests: []string{objectDigest("3")},
 		DerivedRecords:          []DerivedRecord{validDerivedRecord()},
 		Diagnostics:             []Diagnostic{},

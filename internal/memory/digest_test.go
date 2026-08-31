@@ -54,6 +54,39 @@ func TestDigestPreservesOrderedSessionViewDependencies(t *testing.T) {
 	}
 }
 
+func TestSessionViewDigestIncludesUsageAndObservationSummaryContentWithoutAliasing(t *testing.T) {
+	base := validSessionView()
+	originalFields := map[string]string{"component": base.ObservationSummaries[0].Fields["component"], "status": base.ObservationSummaries[0].Fields["status"]}
+	baseDigest, err := SessionViewDigest(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	changedSummary := base
+	changedSummary.ObservationSummaries = append([]ObservationSummary(nil), base.ObservationSummaries...)
+	changedSummary.ObservationSummaries[0].Fields = map[string]string{"component": "package", "status": "build"}
+	summaryDigest, err := SessionViewDigest(changedSummary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryDigest == baseDigest {
+		t.Fatal("observation summary content did not affect SessionView identity")
+	}
+	if !reflect.DeepEqual(base.ObservationSummaries[0].Fields, originalFields) {
+		t.Fatalf("SessionViewDigest aliased or mutated caller fields: %v", base.ObservationSummaries[0].Fields)
+	}
+
+	changedUsage := base
+	changedUsage.UsageRecordDigest = objectDigest("9")
+	usageDigest, err := SessionViewDigest(changedUsage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usageDigest == baseDigest {
+		t.Fatal("usage record digest did not affect SessionView identity")
+	}
+}
+
 func TestDigestNormalizesSemanticallyUnorderedProjectCollections(t *testing.T) {
 	first := validProjectView()
 	first.AssociatedUsage = []AssociatedUsage{

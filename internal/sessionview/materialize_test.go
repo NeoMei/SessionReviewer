@@ -56,9 +56,44 @@ func TestMaterializeSortsAndDeduplicatesOnlyExactRevisionIdentity(t *testing.T) 
 	if !contains(view.ActiveRevisionIDs[:2], second.RevisionID) || !contains(view.ActiveRevisionIDs[:2], tied.RevisionID) {
 		t.Fatalf("typed facts sharing a subject were collapsed: %v", view.ActiveRevisionIDs)
 	}
-	if len(view.ObservationChunkDigests) != 2 || view.ObservationChunkDigests[0] >= view.ObservationChunkDigests[1] ||
-		!contains(view.ObservationChunkDigests, testDigest(t, "chunk-a")) || !contains(view.ObservationChunkDigests, testDigest(t, "chunk-b")) {
-		t.Fatalf("chunk digests were not sorted and exactly deduplicated: %v", view.ObservationChunkDigests)
+	wantChunks := []string{testDigest(t, "chunk-b"), testDigest(t, "chunk-a")}
+	if fmt.Sprint(view.ObservationChunkDigests) != fmt.Sprint(wantChunks) {
+		t.Fatalf("chunk digests=%v want first-seen order %v", view.ObservationChunkDigests, wantChunks)
+	}
+}
+
+func TestMaterializeCarriesCompactTypedSummariesForProjectReduction(t *testing.T) {
+	input := fixtureInput(t, nil)
+	view, _, err := Materialize(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.ObservationSummaries) != len(view.ActiveRevisionIDs) || len(view.ObservationSummaries) != 2 {
+		t.Fatalf("summary coverage=%d active=%d", len(view.ObservationSummaries), len(view.ActiveRevisionIDs))
+	}
+	for index, summary := range view.ObservationSummaries {
+		if summary.RevisionID != view.ActiveRevisionIDs[index] {
+			t.Fatalf("summary %d dependency=%s active=%s", index, summary.RevisionID, view.ActiveRevisionIDs[index])
+		}
+	}
+	request := view.ObservationSummaries[0]
+	if request.Sequence != 1 || request.Kind != "request" || request.Subject != "request-1" || request.OccurredAt != "2026-08-31T10:00:01Z" ||
+		request.Operation != "user_request" || request.Excerpt != "review the project" {
+		t.Fatalf("request summary lost typed content: %+v", request)
+	}
+	verification := view.ObservationSummaries[1]
+	if verification.Sequence != 10 || verification.Kind != "verification" || verification.Operation != "verification" ||
+		verification.Object != "package" || verification.Outcome != "passed" || verification.Fields["component"] != "package" || verification.Fields["status"] != "test" {
+		t.Fatalf("verification summary lost typed content: %+v", verification)
+	}
+	body, err := json.Marshal(view.ObservationSummaries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"source_ref", "source_hash", "source_location", "adapter_id", "adapter_version", "total_tokens", "raw_tool_output", "assistant_message", "transcript"} {
+		if bytes.Contains(body, []byte(forbidden)) {
+			t.Fatalf("summary copied forbidden content %q: %s", forbidden, body)
+		}
 	}
 }
 
@@ -113,7 +148,8 @@ func TestMaterializeMissingSourcePreservesPriorFactsWithoutClaimingFreshness(t *
 	}
 	if fmt.Sprint(missing.ActiveRevisionIDs) != fmt.Sprint(prior.ActiveRevisionIDs) ||
 		fmt.Sprint(missing.ObservationChunkDigests) != fmt.Sprint(prior.ObservationChunkDigests) ||
-		fmt.Sprint(missing.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) {
+		fmt.Sprint(missing.ObservationSummaries) != fmt.Sprint(prior.ObservationSummaries) ||
+		fmt.Sprint(missing.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) || missing.SourceRecordDigest != prior.SourceRecordDigest || missing.UsageRecordDigest != prior.UsageRecordDigest {
 		t.Fatalf("missing source discarded retained facts\nprior=%+v\nmissing=%+v", prior, missing)
 	}
 }
@@ -136,6 +172,7 @@ func TestMaterializeAssignsExactlyOneRequestedTerminalState(t *testing.T) {
 			if state == memory.Missing {
 				input.Source.Availability = memory.SourceUnavailable
 				input.SourceRecordDigest = mustDigest(t, input.Source)
+				input.UsageRecordDigest = input.SourceRecordDigest
 				input.Observations = nil
 				input.ObservationChunkDigests = nil
 			}
@@ -242,16 +279,65 @@ func TestMaterializeReferencesSharedCatalogUsageWithoutCopyingTotals(t *testing.
 			t.Fatalf("SessionView copied SourceCatalog usage field %q: %s", forbidden, body)
 		}
 	}
-	if view.SourceRecordDigest != input.UsageRecordDigest {
-		t.Fatalf("usage reference=%q want catalog digest %q", view.SourceRecordDigest, input.UsageRecordDigest)
+	if view.UsageRecordDigest != input.UsageRecordDigest || view.UsageRecordDigest != view.SourceRecordDigest {
+		t.Fatalf("usage reference=%q source=%q want authenticated catalog digest %q", view.UsageRecordDigest, view.SourceRecordDigest, input.UsageRecordDigest)
+	}
+
+	unauthenticated := input
+	unauthenticated.UsageRecordDigest = testDigest(t, "unrelated-usage-record")
+	if _, _, err := Materialize(unauthenticated); err == nil {
+		t.Fatal("materializer accepted a usage digest not authenticated by SourceCatalog")
 	}
 
 	changedUsage := input
 	changedUsage.Previous = &view
-	changedUsage.UsageRecordDigest = testDigest(t, "new-usage-record")
+	changedUsage.Source.Usage.Models[0].TokenUsage.InputTokens++
+	changedUsage.Source.Usage.Models[0].TokenUsage.TotalTokens++
+	changedUsage.Source.Usage.TotalTokens++
+	changedUsage.SourceRecordDigest = mustDigest(t, changedUsage.Source)
+	changedUsage.UsageRecordDigest = changedUsage.SourceRecordDigest
 	changedView, changed, err := Materialize(changedUsage)
-	if err != nil || !changed || changedView.DependencyDigest == view.DependencyDigest {
-		t.Fatalf("usage digest did not invalidate view: changed=%v err=%v", changed, err)
+	if err != nil || !changed || changedView.DependencyDigest == view.DependencyDigest || changedView.UsageRecordDigest == view.UsageRecordDigest {
+		t.Fatalf("authenticated usage successor did not invalidate view: changed=%v err=%v", changed, err)
+	}
+}
+
+func TestMaterializeRejectsTwoActiveRevisionsForOneStableObservationKey(t *testing.T) {
+	input := fixtureInput(t, nil)
+	replacement := input.Observations[0]
+	replacement.AdapterVersion = "v2"
+	replacement.Outcome = "failed"
+	replacement.Fields = map[string]string{"component": "package", "status": "test", "failed": "true"}
+	replacement.RevisionID = memory.ObservationRevisionID(replacement)
+	if replacement.RevisionID == input.Observations[0].RevisionID {
+		t.Fatal("fixture did not create a successor revision")
+	}
+	input.Observations = append(input.Observations, replacement)
+	if _, _, err := Materialize(input); err == nil {
+		t.Fatal("materializer accepted multiple active revisions for one stable ObservationKey")
+	}
+}
+
+func TestMaterializeSummaryFieldsDoNotAliasInputOrPreviousView(t *testing.T) {
+	input := fixtureInput(t, nil)
+	first, _, err := Materialize(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Observations[0].Fields["component"] = "mutated-input"
+	if got := summaryByRevision(t, first, input.Observations[0].RevisionID).Fields["component"]; got != "package" {
+		t.Fatalf("materialized summary aliased observation fields: %q", got)
+	}
+
+	unchanged := fixtureInput(t, &first)
+	second, changed, err := Materialize(unchanged)
+	if err != nil || changed {
+		t.Fatalf("unchanged materialization changed=%v err=%v", changed, err)
+	}
+	secondSummary := summaryByRevision(t, second, unchanged.Observations[0].RevisionID)
+	secondSummary.Fields["component"] = "mutated-output"
+	if summaryByRevision(t, first, unchanged.Observations[0].RevisionID).Fields["component"] == "mutated-output" {
+		t.Fatal("unchanged result aliased previous SessionView summary fields")
 	}
 }
 
@@ -380,4 +466,15 @@ func contains(values []string, wanted string) bool {
 		}
 	}
 	return false
+}
+
+func summaryByRevision(t *testing.T, view memory.SessionView, revisionID string) memory.ObservationSummary {
+	t.Helper()
+	for _, summary := range view.ObservationSummaries {
+		if summary.RevisionID == revisionID {
+			return summary
+		}
+	}
+	t.Fatalf("summary %s not found: %+v", revisionID, view.ObservationSummaries)
+	return memory.ObservationSummary{}
 }

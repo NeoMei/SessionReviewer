@@ -369,6 +369,7 @@ func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
 				missing := prefixedDigest("missing-session-revision")
 				session := fixture.session
 				session.ActiveRevisionIDs = []string{missing}
+				session.ObservationSummaries[0].RevisionID = missing
 				session.Digest, _ = memory.SessionViewDigest(session)
 				if _, err := store.PutSessionView(session); err != nil {
 					t.Fatalf("put mismatched SessionView: %v", err)
@@ -640,10 +641,17 @@ func validSessionView(t *testing.T, chunkDigest string) memory.SessionView {
 	observation := validObservation()
 	value := memory.SessionView{
 		SchemaVersion: memory.MemorySchemaVersion, ProjectID: testProjectID, Provider: "codex", SessionID: "session-1",
-		SourceRecordDigest: prefixedDigest("source-record"), StartedAt: testStartedAt, EndedAt: testEndedAt,
+		SourceRecordDigest: prefixedDigest("source-record"), UsageRecordDigest: prefixedDigest("source-record"), StartedAt: testStartedAt, EndedAt: testEndedAt,
 		TerminalState: memory.Indexed, SourceAvailability: memory.SourceAvailable,
-		ActiveRevisionIDs: []string{observation.RevisionID}, ObservationChunkDigests: []string{chunkDigest},
-		DerivedRecords: []memory.DerivedRecord{}, Diagnostics: []memory.Diagnostic{}, DependencyDigest: prefixedDigest("dependency"), MaterializerVersion: "v1",
+		ActiveRevisionIDs: []string{observation.RevisionID},
+		ObservationSummaries: []memory.ObservationSummary{{
+			RevisionID: observation.RevisionID, Sequence: observation.Key.Sequence,
+			Kind: observation.Key.Kind, Subject: observation.Key.Subject, OccurredAt: observation.Timestamp,
+			Operation: observation.Operation, Object: observation.Object, Outcome: observation.Outcome,
+			Fields: map[string]string{"passed": "1"},
+		}},
+		ObservationChunkDigests: []string{chunkDigest},
+		DerivedRecords:          []memory.DerivedRecord{}, Diagnostics: []memory.Diagnostic{}, DependencyDigest: prefixedDigest("dependency"), MaterializerVersion: "v1",
 	}
 	var err error
 	value.Digest, err = memory.SessionViewDigest(value)

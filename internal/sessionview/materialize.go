@@ -48,14 +48,20 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 	observations = deduplicateRevisions(observations)
 
 	activeRevisionIDs := revisionIDs(observations)
-	chunkDigests := sortedUniqueStrings(input.ObservationChunkDigests)
+	observationSummaries := summarizeObservations(observations)
+	chunkDigests := firstSeenUniqueStrings(input.ObservationChunkDigests)
 	derivedRecords := deriveRecoveryLinks(observations)
 	diagnostics := sortedUniqueDiagnostics(input.Diagnostics)
+	sourceRecordDigest := input.SourceRecordDigest
+	usageRecordDigest := input.UsageRecordDigest
 	if input.TerminalState == memory.Missing && input.Previous != nil {
 		activeRevisionIDs = append([]string(nil), input.Previous.ActiveRevisionIDs...)
+		observationSummaries = cloneObservationSummaries(input.Previous.ObservationSummaries)
 		chunkDigests = append([]string(nil), input.Previous.ObservationChunkDigests...)
 		derivedRecords = cloneDerivedRecords(input.Previous.DerivedRecords)
 		diagnostics = sortedUniqueDiagnostics(append(append([]memory.Diagnostic(nil), input.Previous.Diagnostics...), diagnostics...))
+		sourceRecordDigest = input.Previous.SourceRecordDigest
+		usageRecordDigest = input.Previous.UsageRecordDigest
 	}
 
 	availabilityDigest, err := memory.Digest(struct {
@@ -80,7 +86,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		MaterializerVersion      string   `json:"materializer_version"`
 	}{
 		ActiveRevisionIDs: activeRevisionIDs, SourceAvailabilityDigest: availabilityDigest,
-		UsageRecordDigest: input.UsageRecordDigest, MaterializerVersion: MaterializerVersion,
+		UsageRecordDigest: usageRecordDigest, MaterializerVersion: MaterializerVersion,
 	})
 	if err != nil {
 		return memory.SessionView{}, false, fmt.Errorf("digest SessionView dependencies: %w", err)
@@ -91,12 +97,14 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		ProjectID:               input.ProjectID,
 		Provider:                input.Source.Provider,
 		SessionID:               input.Source.SessionID,
-		SourceRecordDigest:      input.SourceRecordDigest,
+		SourceRecordDigest:      sourceRecordDigest,
+		UsageRecordDigest:       usageRecordDigest,
 		StartedAt:               input.Source.StartedAt,
 		EndedAt:                 input.Source.EndedAt,
 		TerminalState:           input.TerminalState,
 		SourceAvailability:      input.Source.Availability,
 		ActiveRevisionIDs:       activeRevisionIDs,
+		ObservationSummaries:    observationSummaries,
 		ObservationChunkDigests: chunkDigests,
 		DerivedRecords:          derivedRecords,
 		Diagnostics:             diagnostics,
@@ -129,6 +137,10 @@ func validateInput(input Input) error {
 	}
 	if !isDigest(input.UsageRecordDigest) {
 		return errors.New("invalid usage record digest")
+	}
+	if input.UsageRecordDigest != input.SourceRecordDigest &&
+		!(input.TerminalState == memory.Missing && input.Previous != nil && input.UsageRecordDigest == input.Previous.UsageRecordDigest) {
+		return errors.New("usage record digest is not authenticated by source catalog record")
 	}
 	if !containsString(input.Source.ProjectIDs, input.ProjectID) {
 		return errors.New("source is not associated with target project")
@@ -194,6 +206,25 @@ func revisionIDs(values []memory.ObservationRevision) []string {
 	return result
 }
 
+func summarizeObservations(values []memory.ObservationRevision) []memory.ObservationSummary {
+	result := make([]memory.ObservationSummary, len(values))
+	for index, value := range values {
+		result[index] = memory.ObservationSummary{
+			RevisionID: value.RevisionID,
+			Sequence:   value.Key.Sequence,
+			Kind:       value.Key.Kind,
+			Subject:    value.Key.Subject,
+			OccurredAt: value.Timestamp,
+			Operation:  value.Operation,
+			Object:     value.Object,
+			Outcome:    value.Outcome,
+			Fields:     cloneFields(value.Fields),
+			Excerpt:    value.Excerpt,
+		}
+	}
+	return result
+}
+
 func deriveRecoveryLinks(observations []memory.ObservationRevision) []memory.DerivedRecord {
 	pending := make(map[string][]memory.ObservationRevision)
 	var result []memory.DerivedRecord
@@ -253,18 +284,17 @@ func recoveryRecord(failure, success memory.ObservationRevision, operation, comp
 	}
 }
 
-func sortedUniqueStrings(values []string) []string {
-	result := append([]string(nil), values...)
-	sort.Strings(result)
-	write := 0
-	for _, value := range result {
-		if write > 0 && result[write-1] == value {
+func firstSeenUniqueStrings(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, duplicate := seen[value]; duplicate {
 			continue
 		}
-		result[write] = value
-		write++
+		seen[value] = struct{}{}
+		result = append(result, value)
 	}
-	return result[:write]
+	return result
 }
 
 func sortedUniqueDiagnostics(values []memory.Diagnostic) []memory.Diagnostic {
@@ -303,8 +333,32 @@ func cloneDerivedRecords(values []memory.DerivedRecord) []memory.DerivedRecord {
 	return result
 }
 
+func cloneObservationSummaries(values []memory.ObservationSummary) []memory.ObservationSummary {
+	if values == nil {
+		return nil
+	}
+	result := make([]memory.ObservationSummary, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Fields = cloneFields(value.Fields)
+	}
+	return result
+}
+
+func cloneFields(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
 func cloneSessionView(value memory.SessionView) memory.SessionView {
 	value.ActiveRevisionIDs = append([]string(nil), value.ActiveRevisionIDs...)
+	value.ObservationSummaries = cloneObservationSummaries(value.ObservationSummaries)
 	value.ObservationChunkDigests = append([]string(nil), value.ObservationChunkDigests...)
 	value.DerivedRecords = cloneDerivedRecords(value.DerivedRecords)
 	value.Diagnostics = append([]memory.Diagnostic(nil), value.Diagnostics...)

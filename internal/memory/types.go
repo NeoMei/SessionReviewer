@@ -148,23 +148,41 @@ type DerivedRecord struct {
 	Fields                map[string]string `json:"fields,omitempty"`
 }
 
+// ObservationSummary is compact, dependency-bound materialized data for view
+// reduction. It deliberately excludes source coordinates, adapter identity,
+// usage payloads, and complete conversation or tool output.
+type ObservationSummary struct {
+	RevisionID string            `json:"revision_id"`
+	Sequence   int               `json:"sequence"`
+	Kind       string            `json:"kind"`
+	Subject    string            `json:"subject"`
+	OccurredAt string            `json:"occurred_at"`
+	Operation  string            `json:"operation,omitempty"`
+	Object     string            `json:"object,omitempty"`
+	Outcome    string            `json:"outcome,omitempty"`
+	Fields     map[string]string `json:"fields,omitempty"`
+	Excerpt    string            `json:"excerpt,omitempty"`
+}
+
 type SessionView struct {
-	SchemaVersion           int                `json:"schema_version"`
-	Digest                  string             `json:"digest"`
-	ProjectID               string             `json:"project_id"`
-	Provider                string             `json:"provider"`
-	SessionID               string             `json:"session_id"`
-	SourceRecordDigest      string             `json:"source_record_digest"`
-	StartedAt               string             `json:"started_at"`
-	EndedAt                 string             `json:"ended_at"`
-	TerminalState           TerminalState      `json:"terminal_state"`
-	SourceAvailability      SourceAvailability `json:"source_availability"`
-	ActiveRevisionIDs       []string           `json:"active_revision_ids"`
-	ObservationChunkDigests []string           `json:"observation_chunk_digests"`
-	DerivedRecords          []DerivedRecord    `json:"derived_records"`
-	Diagnostics             []Diagnostic       `json:"diagnostics"`
-	DependencyDigest        string             `json:"dependency_digest"`
-	MaterializerVersion     string             `json:"materializer_version"`
+	SchemaVersion           int                  `json:"schema_version"`
+	Digest                  string               `json:"digest"`
+	ProjectID               string               `json:"project_id"`
+	Provider                string               `json:"provider"`
+	SessionID               string               `json:"session_id"`
+	SourceRecordDigest      string               `json:"source_record_digest"`
+	UsageRecordDigest       string               `json:"usage_record_digest"`
+	StartedAt               string               `json:"started_at"`
+	EndedAt                 string               `json:"ended_at"`
+	TerminalState           TerminalState        `json:"terminal_state"`
+	SourceAvailability      SourceAvailability   `json:"source_availability"`
+	ActiveRevisionIDs       []string             `json:"active_revision_ids"`
+	ObservationSummaries    []ObservationSummary `json:"observation_summaries"`
+	ObservationChunkDigests []string             `json:"observation_chunk_digests"`
+	DerivedRecords          []DerivedRecord      `json:"derived_records"`
+	Diagnostics             []Diagnostic         `json:"diagnostics"`
+	DependencyDigest        string               `json:"dependency_digest"`
+	MaterializerVersion     string               `json:"materializer_version"`
 }
 
 type ProbeFile struct {
@@ -332,8 +350,11 @@ func ValidateSessionView(value SessionView) error {
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
-	if !validDigest(value.Digest) || !validDigest(value.SourceRecordDigest) || !validDigest(value.DependencyDigest) {
+	if !validDigest(value.Digest) || !validDigest(value.SourceRecordDigest) || !validDigest(value.UsageRecordDigest) || !validDigest(value.DependencyDigest) {
 		return errors.New("invalid SessionView digest")
+	}
+	if value.UsageRecordDigest != value.SourceRecordDigest {
+		return errors.New("SessionView usage record is not authenticated by source catalog record")
 	}
 	if err := validateSourceIdentity(value.Provider, value.SessionID, "source"); err != nil {
 		return err
@@ -345,6 +366,9 @@ func ValidateSessionView(value SessionView) error {
 		return err
 	}
 	if err := validateUniqueDigests("active revision", value.ActiveRevisionIDs, 65536); err != nil {
+		return err
+	}
+	if err := validateObservationSummaries(value.ObservationSummaries, value.ActiveRevisionIDs); err != nil {
 		return err
 	}
 	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536); err != nil {
@@ -365,6 +389,53 @@ func ValidateSessionView(value SessionView) error {
 	want, err := SessionViewDigest(value)
 	if err != nil || value.Digest != want {
 		return errors.New("SessionView self digest does not match canonical identity")
+	}
+	return nil
+}
+
+func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs []string) error {
+	if len(values) != len(activeRevisionIDs) {
+		return errors.New("observation summary count does not match active revisions")
+	}
+	stableKeys := make(map[string]struct{}, len(values))
+	for index, value := range values {
+		if value.RevisionID != activeRevisionIDs[index] || !validDigest(value.RevisionID) {
+			return errors.New("observation summary revision does not match active revision order")
+		}
+		if value.Sequence < 0 || value.Sequence > maxSafeInteger || !fieldNamePattern.MatchString(value.Kind) {
+			return errors.New("invalid observation summary identity")
+		}
+		if _, observed := directObservationKinds[value.Kind]; !observed {
+			return fmt.Errorf("observation summary kind %q is not directly observed", value.Kind)
+		}
+		if err := validateStructuredText("observation summary subject", value.Subject, 256, false); err != nil {
+			return err
+		}
+		if err := validateTimestamp(value.OccurredAt, false); err != nil {
+			return fmt.Errorf("invalid observation summary time: %w", err)
+		}
+		for name, text := range map[string]string{"operation": value.Operation, "object": value.Object, "outcome": value.Outcome} {
+			if err := validateStructuredText(name, text, 512, true); err != nil {
+				return err
+			}
+		}
+		if err := validateObservationFields(value.Fields); err != nil {
+			return err
+		}
+		if err := validateBoundedText("excerpt", value.Excerpt, maxExcerptBytes, true); err != nil {
+			return err
+		}
+		if index > 0 {
+			previous := values[index-1]
+			if previous.Sequence > value.Sequence || (previous.Sequence == value.Sequence && previous.RevisionID >= value.RevisionID) {
+				return errors.New("observation summaries are not in canonical sequence and revision order")
+			}
+		}
+		stableKey := fmt.Sprintf("%d\x00%s\x00%s", value.Sequence, value.Kind, value.Subject)
+		if _, duplicate := stableKeys[stableKey]; duplicate {
+			return errors.New("multiple active revisions share one stable observation key")
+		}
+		stableKeys[stableKey] = struct{}{}
 	}
 	return nil
 }

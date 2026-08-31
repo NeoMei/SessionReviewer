@@ -91,21 +91,23 @@ func ObservationRevisionID(value ObservationRevision) string {
 }
 
 type SessionViewIdentity struct {
-	SchemaVersion           int                `json:"schema_version"`
-	ProjectID               string             `json:"project_id"`
-	Provider                string             `json:"provider"`
-	SessionID               string             `json:"session_id"`
-	SourceRecordDigest      string             `json:"source_record_digest"`
-	StartedAt               string             `json:"started_at"`
-	EndedAt                 string             `json:"ended_at"`
-	TerminalState           TerminalState      `json:"terminal_state"`
-	SourceAvailability      SourceAvailability `json:"source_availability"`
-	ActiveRevisionIDs       []string           `json:"active_revision_ids"`
-	ObservationChunkDigests []string           `json:"observation_chunk_digests"`
-	DerivedRecords          []DerivedRecord    `json:"derived_records"`
-	Diagnostics             []Diagnostic       `json:"diagnostics"`
-	DependencyDigest        string             `json:"dependency_digest"`
-	MaterializerVersion     string             `json:"materializer_version"`
+	SchemaVersion           int                  `json:"schema_version"`
+	ProjectID               string               `json:"project_id"`
+	Provider                string               `json:"provider"`
+	SessionID               string               `json:"session_id"`
+	SourceRecordDigest      string               `json:"source_record_digest"`
+	UsageRecordDigest       string               `json:"usage_record_digest"`
+	StartedAt               string               `json:"started_at"`
+	EndedAt                 string               `json:"ended_at"`
+	TerminalState           TerminalState        `json:"terminal_state"`
+	SourceAvailability      SourceAvailability   `json:"source_availability"`
+	ActiveRevisionIDs       []string             `json:"active_revision_ids"`
+	ObservationSummaries    []ObservationSummary `json:"observation_summaries"`
+	ObservationChunkDigests []string             `json:"observation_chunk_digests"`
+	DerivedRecords          []DerivedRecord      `json:"derived_records"`
+	Diagnostics             []Diagnostic         `json:"diagnostics"`
+	DependencyDigest        string               `json:"dependency_digest"`
+	MaterializerVersion     string               `json:"materializer_version"`
 }
 
 type ProjectProbeStateIdentity struct {
@@ -149,11 +151,13 @@ func SessionViewDigest(value SessionView) (string, error) {
 		Provider:                value.Provider,
 		SessionID:               value.SessionID,
 		SourceRecordDigest:      value.SourceRecordDigest,
+		UsageRecordDigest:       value.UsageRecordDigest,
 		StartedAt:               value.StartedAt,
 		EndedAt:                 value.EndedAt,
 		TerminalState:           value.TerminalState,
 		SourceAvailability:      value.SourceAvailability,
 		ActiveRevisionIDs:       value.ActiveRevisionIDs,
+		ObservationSummaries:    value.ObservationSummaries,
 		ObservationChunkDigests: value.ObservationChunkDigests,
 		DerivedRecords:          value.DerivedRecords,
 		Diagnostics:             value.Diagnostics,
