@@ -1214,10 +1214,11 @@ func TestDetachedReviewLauncherHandlesSuccessBadByteEOFAndTimeout(t *testing.T) 
 		maxRun time.Duration
 	}{
 		{jobID: "job-handshake-success", ok: true, maxRun: 2 * time.Second},
+		{jobID: "job-handshake-delayed", ok: true, maxRun: 6 * time.Second},
 		{jobID: "job-handshake-bad", maxRun: 2 * time.Second},
 		{jobID: "job-handshake-busy", maxRun: 2 * time.Second},
 		{jobID: "job-handshake-eof", maxRun: 2 * time.Second},
-		{jobID: "job-handshake-timeout", maxRun: 5 * time.Second},
+		{jobID: "job-handshake-timeout", maxRun: 12 * time.Second},
 	}
 	for _, test := range tests {
 		t.Run(test.jobID, func(t *testing.T) {
@@ -1290,8 +1291,9 @@ func main() {
 	if path := os.Getenv("SESSIONREVIEWER_DETACHED_TEST_PID_FILE"); path != "" { os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600) }
   os.Stdout.WriteString("stdout-canary")
   os.Stderr.WriteString("stderr-canary")
-  if strings.HasSuffix(job, "timeout") { time.Sleep(10*time.Second); return }
-  if strings.HasSuffix(job, "eof") { return }
+	if strings.HasSuffix(job, "timeout") { time.Sleep(10*time.Second); return }
+	if strings.HasSuffix(job, "delayed") { time.Sleep(4*time.Second) }
+	if strings.HasSuffix(job, "eof") { return }
   value, _ := strconv.ParseUint(handle, 10, 64)
   file := os.NewFile(uintptr(value), "handshake")
   if file == nil { os.Exit(3) }

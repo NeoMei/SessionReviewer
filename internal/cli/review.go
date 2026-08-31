@@ -1029,7 +1029,7 @@ func launchDetachedReviewWorker(request reviewLaunchRequest) error {
 	}
 	_ = child.Close()
 	_ = cleanup()
-	response, readErr := readDetachedReviewHandshake(parent, 3*time.Second)
+	response, readErr := readDetachedReviewHandshake(parent, 10*time.Second)
 	if readErr != nil || response != 1 {
 		terminateDetachedReviewProcess(command)
 		if readErr != nil {

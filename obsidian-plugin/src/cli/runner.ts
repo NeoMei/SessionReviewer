@@ -171,8 +171,9 @@ export class CliRunner {
 
   private async run(args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
     if (!allowedArgs(args)) throw new Error("command is not allowed");
+    const timeout = args[0] === "review" && (args[1] === "start" || args[1] === "retry") ? 20_000 : 10_000;
     return new Promise((resolve, reject) => {
-      this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
+      this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
         if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { stdout: stdout || (error as { stdout?: unknown }).stdout }));
         else resolve({ stdout, stderr });
       });

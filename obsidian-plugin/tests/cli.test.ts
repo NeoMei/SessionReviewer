@@ -77,7 +77,7 @@ describe("CLI runner", () => {
     expect(execFile).toHaveBeenLastCalledWith(
       "/usr/local/bin/session-reviewer",
       ["review", "start", "--project-id", "project-0123456789abcdef", "--agent-executable", "/usr/local/bin/codex", "--json"],
-      expect.anything(),
+      expect.objectContaining({ timeout: 20_000 }),
       expect.any(Function)
     );
     await runner.cancelReview("job-abc.def_1");
@@ -91,7 +91,7 @@ describe("CLI runner", () => {
     expect(execFile).toHaveBeenLastCalledWith(
       "/usr/local/bin/session-reviewer",
       ["review", "retry", "--job-id", "job-abc.def_1", "--agent-executable", "/usr/local/bin/codex", "--expected-attempt", "2", "--expected-revision", "7", "--json"],
-      expect.anything(),
+      expect.objectContaining({ timeout: 20_000 }),
       expect.any(Function)
     );
     await runner.syncProject("project-0123456789abcdef");
