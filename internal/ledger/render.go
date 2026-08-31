@@ -695,7 +695,7 @@ func renderProjectAccountingDocument(state State) (Document, bool, error) {
 	if err != nil {
 		return Document{}, false, err
 	}
-	if err := doc.UpsertSection("Project accounting", projectAccountingMarkdown(summary)); err != nil {
+	if err := doc.UpsertSection("Project accounting", projectAccountingMarkdown(summary, accounting.SessionsPricingComplete(sessions))); err != nil {
 		return Document{}, false, err
 	}
 	return doc, true, nil
@@ -706,18 +706,36 @@ func sessionAccountingMarkdown(value *accounting.SessionAccounting) string {
 		return ""
 	}
 	var out strings.Builder
-	fmt.Fprintf(&out, "- Duration: %s (%d ms)\n- Total tokens: %d\n- Total cost: $%.9f USD\n", accounting.FormatDurationMS(value.DurationMS), value.DurationMS, value.TotalTokens, value.TotalCostUSD)
+	fmt.Fprintf(&out, "- Duration: %s (%d ms)\n- Total tokens: %d\n", accounting.FormatDurationMS(value.DurationMS), value.DurationMS, value.TotalTokens)
+	if accounting.SessionPricingComplete(value) {
+		fmt.Fprintf(&out, "- Total cost: $%.9f USD\n", value.TotalCostUSD)
+	} else {
+		out.WriteString("- Total cost: unavailable (pricing unavailable)\n")
+	}
 	for _, model := range value.Models {
-		fmt.Fprintf(&out, "- `%s`: %d tokens; $%.9f USD; rates per 1M input/cached/cache-write/output = %.6f/%.6f/%.6f/%.6f USD; as of %s; source %s\n", model.Model, model.TotalTokens, model.CostUSD, model.Pricing.InputPerMillion, model.Pricing.CachedInputPerMillion, model.Pricing.CacheWriteInputPerMillion, model.Pricing.OutputPerMillion, model.Pricing.AsOf, model.Pricing.Source)
+		if model.Pricing == (accounting.Pricing{}) {
+			fmt.Fprintf(&out, "- `%s`: %d tokens; cost unavailable (pricing unavailable)\n", model.Model, model.TotalTokens)
+		} else {
+			fmt.Fprintf(&out, "- `%s`: %d tokens; $%.9f USD; rates per 1M input/cached/cache-write/output = %.6f/%.6f/%.6f/%.6f USD; as of %s; source %s\n", model.Model, model.TotalTokens, model.CostUSD, model.Pricing.InputPerMillion, model.Pricing.CachedInputPerMillion, model.Pricing.CacheWriteInputPerMillion, model.Pricing.OutputPerMillion, model.Pricing.AsOf, model.Pricing.Source)
+		}
 	}
 	return strings.TrimSuffix(out.String(), "\n")
 }
 
-func projectAccountingMarkdown(value accounting.ProjectSummary) string {
+func projectAccountingMarkdown(value accounting.ProjectSummary, pricingComplete bool) string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "- Total session duration: %s (%d ms)\n- Total tokens: %d\n- Total cost: $%.9f USD\n", accounting.FormatDurationMS(value.TotalDurationMS), value.TotalDurationMS, value.TotalTokens, value.TotalCostUSD)
+	fmt.Fprintf(&out, "- Total session duration: %s (%d ms)\n- Total tokens: %d\n", accounting.FormatDurationMS(value.TotalDurationMS), value.TotalDurationMS, value.TotalTokens)
+	if pricingComplete {
+		fmt.Fprintf(&out, "- Total cost: $%.9f USD\n", value.TotalCostUSD)
+	} else {
+		out.WriteString("- Total cost: unavailable (one or more model prices are unavailable)\n")
+	}
 	for _, model := range value.Models {
-		fmt.Fprintf(&out, "- `%s`: %d tokens (%.4f%%); $%.9f USD (%.4f%% of cost)\n", model.Model, model.TotalTokens, model.TokenSharePct, model.TotalCostUSD, model.CostSharePct)
+		if pricingComplete {
+			fmt.Fprintf(&out, "- `%s`: %d tokens (%.4f%%); $%.9f USD (%.4f%% of cost)\n", model.Model, model.TotalTokens, model.TokenSharePct, model.TotalCostUSD, model.CostSharePct)
+		} else {
+			fmt.Fprintf(&out, "- `%s`: %d tokens (%.4f%%); project cost unavailable\n", model.Model, model.TotalTokens, model.TokenSharePct)
+		}
 	}
 	return strings.TrimSuffix(out.String(), "\n")
 }

@@ -2695,3 +2695,24 @@ func TestWorkerHostEnrichesSourceAccountingAndKeepsUnknownReviewModelUnpriced(t 
 		t.Fatalf("source machine accounting = %#v", projected.Machine)
 	}
 }
+
+func TestEnrichSourceAccountingKeepsUnknownSourceModelUnpriced(t *testing.T) {
+	usage := &accounting.SessionUsage{
+		StartedAt: "2026-08-31T01:00:00Z", EndedAt: "2026-08-31T01:00:01Z", DurationMS: 1000,
+		Models: []accounting.ModelUsage{{
+			Model:      "unpriced-source-model",
+			TokenUsage: accounting.TokenUsage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+		}},
+		TotalTokens: 12,
+	}
+	draft := proposal.Proposal{}
+
+	if err := enrichSourceAccounting(&draft, usage, fixtureTime(0), workerPrices{}); err != nil {
+		t.Fatalf("enrichSourceAccounting() rejected unknown pricing: %v", err)
+	}
+	report := draft.SessionReport.Accounting
+	if report == nil || report.TotalTokens != 12 || report.TotalCostUSD != 0 || len(report.Models) != 1 ||
+		report.Models[0].ModelUsage != usage.Models[0] || report.Models[0].Pricing != (accounting.Pricing{}) || report.Models[0].CostUSD != 0 {
+		t.Fatalf("unpriced source accounting = %#v", report)
+	}
+}

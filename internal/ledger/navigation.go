@@ -146,7 +146,7 @@ func RenderDerivedArtifacts(state State) ([]DerivedArtifact, error) {
 	if err != nil {
 		return nil, err
 	}
-	summary, err := aggregateNavigationAccounting(state)
+	summary, pricingComplete, err := aggregateNavigationAccounting(state)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func RenderDerivedArtifacts(state State) ([]DerivedArtifact, error) {
 		return nil, err
 	}
 	prependGeneratedSection(&overview, "项目导航", renderOverviewNavigation(state, mermaid, summary))
-	if err := overview.UpsertSection("Project accounting", GeneratedMarkerPrefix+"Project accounting -->\n\n"+projectAccountingMarkdown(summary)); err != nil {
+	if err := overview.UpsertSection("Project accounting", GeneratedMarkerPrefix+"Project accounting -->\n\n"+projectAccountingMarkdown(summary, pricingComplete)); err != nil {
 		return nil, err
 	}
 	if err := appendNavigationDocument(&artifacts, state.documents.overview.RelativePath, "project-overview", overview, state.documents.overview.Perm); err != nil {
@@ -373,7 +373,12 @@ func renderSessionIndex(state State) []byte {
 		}
 		fmt.Fprintf(&out, "- [%s · %s](<%s>) — 目标：%s；最近阶段：%s", markdownNavigationText(date), markdownNavigationText(item.InitialGoal), navigationDocumentLink(state.documents.sessions[item.ID], item.ID), markdownNavigationText(summarizeNavigation(item.InitialGoal, 80)), markdownNavigationText(summarizeNavigation(phase, navigationSummaryRuneLimit)))
 		if item.Accounting != nil {
-			fmt.Fprintf(&out, "；耗时：%s；Token：%s；成本：$%.9f USD", accounting.FormatDurationMS(item.Accounting.DurationMS), formatNavigationInt(item.Accounting.TotalTokens), item.Accounting.TotalCostUSD)
+			fmt.Fprintf(&out, "；耗时：%s；Token：%s", accounting.FormatDurationMS(item.Accounting.DurationMS), formatNavigationInt(item.Accounting.TotalTokens))
+			if accounting.SessionPricingComplete(item.Accounting) {
+				fmt.Fprintf(&out, "；成本：$%.9f USD", item.Accounting.TotalCostUSD)
+			} else {
+				out.WriteString("；成本：费用暂不可用")
+			}
 		}
 		out.WriteByte('\n')
 	}
@@ -400,17 +405,22 @@ func renderSessionQuick(item SessionReport) string {
 	}
 	usage := "- **耗时 / Token / 成本：** 尚未记录"
 	if item.Accounting != nil {
-		usage = fmt.Sprintf("- **耗时 / Token / 成本：** %s / %s / $%.9f USD", accounting.FormatDurationMS(item.Accounting.DurationMS), formatNavigationInt(item.Accounting.TotalTokens), item.Accounting.TotalCostUSD)
+		cost := fmt.Sprintf("$%.9f USD", item.Accounting.TotalCostUSD)
+		if !accounting.SessionPricingComplete(item.Accounting) {
+			cost = "费用暂不可用"
+		}
+		usage = fmt.Sprintf("- **耗时 / Token / 成本：** %s / %s / %s", accounting.FormatDurationMS(item.Accounting.DurationMS), formatNavigationInt(item.Accounting.TotalTokens), cost)
 	}
 	return fmt.Sprintf("- **初始目标：** %s\n- **最近阶段：** %s\n- **验证摘要：** %s\n%s", markdownNavigationText(item.InitialGoal), markdownNavigationText(phase), markdownNavigationText(verification), usage)
 }
 
-func aggregateNavigationAccounting(state State) (accounting.ProjectSummary, error) {
+func aggregateNavigationAccounting(state State) (accounting.ProjectSummary, bool, error) {
 	values := make([]*accounting.SessionAccounting, 0, len(state.Sessions))
 	for _, session := range state.Sessions {
 		values = append(values, session.Accounting)
 	}
-	return accounting.Aggregate(values)
+	summary, err := accounting.Aggregate(values)
+	return summary, accounting.SessionsPricingComplete(values), err
 }
 
 func writeRecentTimeline(out *strings.Builder, timeline []TimelineEvent) {

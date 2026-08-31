@@ -382,7 +382,7 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 	if !reflect.DeepEqual(capture.Args, wantArgs) {
 		t.Fatalf("args=%q want=%q", capture.Args, wantArgs)
 	}
-	if capture.Stdin != "PROMPT_ONLY_ON_STDIN" || strings.Contains(strings.Join(capture.Args, "\x00"), capture.Stdin) {
+	if !strings.HasPrefix(capture.Stdin, "PROMPT_ONLY_ON_STDIN") || !strings.Contains(capture.Stdin, "CODEX TRANSPORT ENVELOPE") || strings.Contains(strings.Join(capture.Args, "\x00"), capture.Stdin) {
 		t.Fatalf("prompt placement args=%q stdin=%q", capture.Args, capture.Stdin)
 	}
 	for _, root := range request.ForbiddenRoots {
@@ -391,7 +391,16 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 			t.Fatalf("adapter-private %s root leaked into Agent input", root.Kind)
 		}
 	}
-	if capture.Schema != string(schemaFixture) || (runtime.GOOS != "windows" && capture.SchemaMode != 0o600) || capture.SchemaPath != "proposal-schema.json" {
+	var transportSchema struct {
+		Type                 string                       `json:"type"`
+		AdditionalProperties *bool                        `json:"additionalProperties"`
+		Required             []string                     `json:"required"`
+		Properties           map[string]map[string]string `json:"properties"`
+	}
+	transportErr := json.Unmarshal([]byte(capture.Schema), &transportSchema)
+	if transportErr != nil || transportSchema.Type != "object" || transportSchema.AdditionalProperties == nil || *transportSchema.AdditionalProperties ||
+		!reflect.DeepEqual(transportSchema.Required, []string{"proposal"}) || !reflect.DeepEqual(transportSchema.Properties, map[string]map[string]string{"proposal": {"type": "string"}}) ||
+		(runtime.GOOS != "windows" && capture.SchemaMode != 0o600) || capture.SchemaPath != "proposal-schema.json" {
 		t.Fatalf("schema capture path=%q mode=%#o bytes=%d", capture.SchemaPath, capture.SchemaMode, len(capture.Schema))
 	}
 	if runtime.GOOS != "windows" && capture.CWDMode != 0o700 {
@@ -419,6 +428,18 @@ func TestGenerateProposalAvoidsCodexDiagnosticItemsFromRedundantDisableFlags(t *
 	}
 	if !bytes.Equal(result.Proposal, mustRead(t, proposalFixture)) {
 		t.Fatal("proposal bytes changed")
+	}
+}
+
+func TestGenerateProposalUsesStrictTransportEnvelopeAndReturnsInnerProposal(t *testing.T) {
+	adapter := containedRunnerForTest(t)
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "require-transport-envelope")
+	result, err := adapter.GenerateProposal(context.Background(), validRequest(t, []byte("prompt")))
+	if err != nil {
+		t.Fatalf("strict transport envelope failed: %v (cause: %v)", err, errors.Unwrap(err))
+	}
+	if !bytes.Equal(result.Proposal, mustRead(t, proposalFixture)) {
+		t.Fatal("transport envelope was not removed before proposal handoff")
 	}
 }
 

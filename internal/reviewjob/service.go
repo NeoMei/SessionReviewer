@@ -991,12 +991,13 @@ func enrichSourceAccounting(draft *proposal.Proposal, usage *accounting.SessionU
 		Models: make([]accounting.ModelAccounting, 0, len(usage.Models)), TotalTokens: usage.TotalTokens,
 	}
 	for _, model := range usage.Models {
-		if resolver == nil {
-			return fmt.Errorf("source model %q lacks trusted pricing", model.Model)
+		pricing, found := accounting.Pricing{}, false
+		if resolver != nil {
+			pricing, found = resolver.Resolve(model.Model, at)
 		}
-		pricing, found := resolver.Resolve(model.Model, at)
 		if !found {
-			return fmt.Errorf("source model %q lacks trusted pricing", model.Model)
+			report.Models = append(report.Models, accounting.ModelAccounting{ModelUsage: model})
+			continue
 		}
 		cost, err := accounting.PriceUsage(model.TokenUsage, pricing)
 		if err != nil {

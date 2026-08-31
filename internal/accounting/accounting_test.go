@@ -38,6 +38,36 @@ func TestPriceUsageAppliesEachRateOnceAndDoesNotChargeReasoningTwice(t *testing.
 	}
 }
 
+func TestValidateSessionAccountingPreservesUsageWhenPricingIsUnknown(t *testing.T) {
+	usage := &SessionUsage{
+		StartedAt:  "2026-08-31T01:00:00Z",
+		EndedAt:    "2026-08-31T01:00:01Z",
+		DurationMS: 1000,
+		Models: []ModelUsage{{
+			Model: "unpriced-model",
+			TokenUsage: TokenUsage{
+				InputTokens: 10, OutputTokens: 2, TotalTokens: 12,
+			},
+		}},
+		TotalTokens: 12,
+	}
+	report := &SessionAccounting{
+		StartedAt: usage.StartedAt, EndedAt: usage.EndedAt, DurationMS: usage.DurationMS,
+		Models: []ModelAccounting{{ModelUsage: usage.Models[0]}}, TotalTokens: usage.TotalTokens,
+	}
+
+	if err := ValidateSessionAccounting(report, usage); err != nil {
+		t.Fatalf("unknown pricing rejected actual usage: %v", err)
+	}
+	if SessionPricingComplete(report) {
+		t.Fatal("unknown pricing reported as complete")
+	}
+	report.Models[0].CostUSD = 0.01
+	if err := ValidateSessionAccounting(report, usage); err == nil {
+		t.Fatal("unknown pricing accepted an invented cost")
+	}
+}
+
 func TestPriceUsageRejectsUnsafeUsagePricingAndArithmetic(t *testing.T) {
 	validUsage := TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}
 	validPricing := Pricing{Currency: "USD", InputPerMillion: 1, OutputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "2026-08-29"}

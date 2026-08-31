@@ -382,6 +382,15 @@ func runExecMode(mode string) {
 			return
 		}
 		writeSuccess(validProposal(), validUsage())
+	case "require-transport-envelope":
+		if !hasStrictTransportEnvelopeSchema() {
+			writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
+			writeEvent(map[string]any{"type": "turn.started"})
+			writeEvent(map[string]any{"type": "error", "message": "invalid_json_schema"})
+			writeEvent(map[string]any{"type": "turn.failed", "error": map[string]any{"message": "invalid_json_schema"}})
+			return
+		}
+		writeSuccess(validProposal(), validUsage())
 	case "success-stderr-model":
 		fmt.Fprintln(os.Stderr, "configured/default model: invented-stderr-model")
 		writeSuccess(validProposal(), validUsage())
@@ -503,8 +512,34 @@ func writeSuccess(proposal string, usage map[string]int64) {
 	writeAgentAndUsage(proposal, usage)
 }
 
+func hasStrictTransportEnvelopeSchema() bool {
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] != "--output-schema" {
+			continue
+		}
+		body, err := os.ReadFile(os.Args[index+1])
+		if err != nil {
+			return false
+		}
+		var schema struct {
+			Type                 string   `json:"type"`
+			AdditionalProperties *bool    `json:"additionalProperties"`
+			Required             []string `json:"required"`
+			Properties           map[string]struct {
+				Type string `json:"type"`
+			} `json:"properties"`
+		}
+		if json.Unmarshal(body, &schema) != nil || schema.Type != "object" || schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Required) != 1 || schema.Required[0] != "proposal" {
+			return false
+		}
+		return len(schema.Properties) == 1 && schema.Properties["proposal"].Type == "string"
+	}
+	return false
+}
+
 func writeAgentAndUsage(proposal string, usage map[string]int64) {
-	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": proposal}})
+	envelope, _ := json.Marshal(map[string]string{"proposal": proposal})
+	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": string(envelope)}})
 	writeEvent(map[string]any{"type": "turn.completed", "usage": usage})
 }
 
