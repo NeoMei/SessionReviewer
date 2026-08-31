@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/session-view-v1.schema.json",
+  "title": "SessionReviewer private SessionView v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "digest", "project_id", "provider", "session_id", "source_record_digest", "started_at", "ended_at", "terminal_state", "source_availability", "active_revision_ids", "observation_chunk_digests", "derived_records", "diagnostics", "dependency_digest", "materializer_version"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/safe_id" },
+    "provider": { "$ref": "#/$defs/safe_id" },
+    "session_id": { "$ref": "#/$defs/safe_id" },
+    "source_record_digest": { "$ref": "#/$defs/digest" },
+    "started_at": { "$ref": "#/$defs/timestamp" },
+    "ended_at": { "$ref": "#/$defs/timestamp" },
+    "terminal_state": { "type": "string", "enum": ["indexed", "unsupported", "missing", "unreadable", "ambiguous"] },
+    "source_availability": { "type": "string", "enum": ["available", "source_unavailable"] },
+    "active_revision_ids": { "$ref": "#/$defs/digest_set" },
+    "observation_chunk_digests": { "$ref": "#/$defs/digest_set" },
+    "derived_records": {
+      "type": "array",
+      "maxItems": 65536,
+      "items": { "$ref": "#/$defs/derived_record" }
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/diagnostic" }
+    },
+    "dependency_digest": { "$ref": "#/$defs/digest" },
+    "materializer_version": { "$ref": "#/$defs/safe_id" }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": { "type": "string", "minLength": 20, "maxLength": 35, "format": "date-time" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "digest_set": {
+      "type": "array",
+      "maxItems": 65536,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/digest" }
+    },
+    "fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 64,
+      "patternProperties": {
+        "^[a-z0-9][a-z0-9._-]{0,63}$": { "type": "string", "maxLength": 512 }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": { "$ref": "#/$defs/safe_id" },
+        "path": { "type": "string", "maxLength": 1024 },
+        "detail_hash": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "derived_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "subject", "dependency_revision_ids", "rule_id", "rule_version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/safe_id" },
+        "kind": { "$ref": "#/$defs/safe_id" },
+        "subject": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "dependency_revision_ids": { "$ref": "#/$defs/digest_set" },
+        "rule_id": { "$ref": "#/$defs/safe_id" },
+        "rule_version": { "$ref": "#/$defs/safe_id" },
+        "fields": { "$ref": "#/$defs/fields" }
+      }
+    }
+  }
+}
