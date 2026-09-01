@@ -15,7 +15,10 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memory"
 )
 
-const ReducerVersion = "project-view-v1"
+const (
+	ReducerVersion    = "project-view-v1"
+	maxProjectRecords = 65536
+)
 
 // Input contains the complete, generation-frozen reducer boundary. ReferenceTime
 // is an explicit UTC RFC3339 timestamp used only by documented recency buckets.
@@ -70,25 +73,52 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 	if err != nil {
 		return memory.ProjectView{}, false, err
 	}
+	witnessed, err := deriveWitnessedState(events, maxProjectRecords)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	remaining := maxProjectRecords - len(witnessed)
+	derived := make([]memory.DerivedRecord, 0, minInt(len(events), remaining))
+	appendPhase := func(records []memory.DerivedRecord) {
+		derived = append(derived, records...)
+		remaining -= len(records)
+	}
+
+	eventRecords, err := deriveEventReferences(events, remaining)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	appendPhase(eventRecords)
+	sessionRecords, representedRecoveries, err := copySessionDerivedRecords(views, remaining)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	appendPhase(sessionRecords)
+	crossSessionRecoveries, err := deriveRecoveryLinks(events, views, representedRecoveries, remaining)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	appendPhase(crossSessionRecoveries)
+	phaseBoundaries, err := derivePhaseBoundaries(events, remaining)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	appendPhase(phaseBoundaries)
+	moduleRankings, err := rankModules(events, referenceTime, remaining)
+	if err != nil {
+		return memory.ProjectView{}, false, err
+	}
+	appendPhase(moduleRankings)
+
 	dependencyDigest, err := memory.Digest(struct {
 		SessionViews   []memory.SessionViewDependency `json:"session_views"`
 		ProbeState     string                         `json:"probe_state_digest"`
 		Usage          []memory.AssociatedUsage       `json:"associated_usage"`
 		ReducerVersion string                         `json:"reducer_version"`
-		ReferenceTime  string                         `json:"reference_time"`
-	}{dependencies, input.ProbeState.Digest, usage, input.ReducerVersion, input.ReferenceTime})
+		ModuleRankings []memory.DerivedRecord         `json:"module_rankings"`
+	}{dependencies, input.ProbeState.Digest, usage, input.ReducerVersion, moduleRankings})
 	if err != nil {
 		return memory.ProjectView{}, false, fmt.Errorf("digest ProjectView dependencies: %w", err)
-	}
-
-	witnessed := deriveWitnessedState(events)
-	derived := make([]memory.DerivedRecord, 0, len(events)+len(events)/2)
-	derived = append(derived, deriveEventReferences(events)...)
-	derived = append(derived, deriveRecoveryLinks(events, views)...)
-	derived = append(derived, derivePhaseBoundaries(events)...)
-	derived = append(derived, rankModules(events, referenceTime)...)
-	if len(derived) > 65536 {
-		return memory.ProjectView{}, false, errors.New("ProjectView derived record limit exceeded")
 	}
 
 	generation := 1
@@ -190,6 +220,7 @@ func validateInputEnvelope(input Input) (time.Time, error) {
 }
 
 func validateViews(projectID string, views []memory.SessionView, referenceTime time.Time) error {
+	physicalSources := make(map[string]string, len(views))
 	for index, view := range views {
 		if err := memory.ValidateSessionView(view); err != nil {
 			return fmt.Errorf("validate SessionView %d: %w", index, err)
@@ -200,6 +231,11 @@ func validateViews(projectID string, views []memory.SessionView, referenceTime t
 		if index > 0 && views[index-1].Provider == view.Provider && views[index-1].SessionID == view.SessionID {
 			return fmt.Errorf("duplicate SessionView identity %s/%s", view.Provider, view.SessionID)
 		}
+		physicalKey := view.Provider + "\x00" + view.SourceIdentity
+		if previousSession, duplicate := physicalSources[physicalKey]; duplicate {
+			return fmt.Errorf("physical source identity %s/%s is shared by Sessions %s and %s", view.Provider, view.SourceIdentity, previousSession, view.SessionID)
+		}
+		physicalSources[physicalKey] = view.SessionID
 		startedAt, _ := time.Parse(time.RFC3339Nano, view.StartedAt)
 		endedAt, err := time.Parse(time.RFC3339Nano, view.EndedAt)
 		if err != nil || endedAt.After(referenceTime) {
@@ -241,10 +277,20 @@ func reconcileUsage(views []memory.SessionView, supplied []memory.AssociatedUsag
 }
 
 func collectEvents(views []memory.SessionView) ([]event, []string, error) {
-	var events []event
-	seen := make(map[string]string)
+	total := 0
+	for _, view := range views {
+		if err := ensureRecordCapacity(total, len(view.ObservationSummaries)); err != nil {
+			return nil, nil, fmt.Errorf("observation event limit exceeded: %w", err)
+		}
+		total += len(view.ObservationSummaries)
+	}
+	events := make([]event, 0, total)
+	seen := make(map[string]string, total)
 	for _, view := range views {
 		for _, summary := range view.ObservationSummaries {
+			if len(events) >= maxProjectRecords {
+				return nil, nil, errors.New("observation event limit exceeded during collection")
+			}
 			provenance := view.Provider + "\x00" + view.SessionID
 			if previous, duplicate := seen[summary.RevisionID]; duplicate {
 				return nil, nil, fmt.Errorf("observation revision %s appears in both %s and %s", summary.RevisionID, previous, provenance)
@@ -273,7 +319,10 @@ func collectEvents(views []memory.SessionView) ([]event, []string, error) {
 	return events, revisions, nil
 }
 
-func deriveEventReferences(events []event) []memory.DerivedRecord {
+func deriveEventReferences(events []event, limit int) ([]memory.DerivedRecord, error) {
+	if err := ensureRecordCapacity(0, len(events), limit); err != nil {
+		return nil, fmt.Errorf("event reference limit exceeded: %w", err)
+	}
 	result := make([]memory.DerivedRecord, 0, len(events))
 	for _, item := range events {
 		fields := map[string]string{
@@ -294,15 +343,18 @@ func deriveEventReferences(events []event) []memory.DerivedRecord {
 			RuleID: "typed-event-order", RuleVersion: ReducerVersion, Fields: fields,
 		})
 	}
-	return result
+	return result, nil
 }
 
-func deriveWitnessedState(events []event) []memory.DerivedRecord {
+func deriveWitnessedState(events []event, limit int) ([]memory.DerivedRecord, error) {
 	latest := make(map[string]memory.DerivedRecord)
 	order := make([]string, 0)
 	for _, item := range events {
 		for _, witnessed := range witnessedValues(item.summary) {
 			if _, exists := latest[witnessed.key]; !exists {
+				if err := ensureRecordCapacity(len(latest), 1, limit); err != nil {
+					return nil, fmt.Errorf("witnessed state limit exceeded: %w", err)
+				}
 				order = append(order, witnessed.key)
 			}
 			witnessed.fields["value"] = witnessed.value
@@ -322,7 +374,7 @@ func deriveWitnessedState(events []event) []memory.DerivedRecord {
 	for _, key := range order {
 		result = append(result, latest[key])
 	}
-	return result
+	return result, nil
 }
 
 type witnessedFact struct {
@@ -446,4 +498,22 @@ func cloneProjectView(value memory.ProjectView) memory.ProjectView {
 	value.DerivedRecords = cloneDerivedRecords(value.DerivedRecords)
 	value.AssociatedUsage = append([]memory.AssociatedUsage(nil), value.AssociatedUsage...)
 	return value
+}
+
+func ensureRecordCapacity(current, incoming int, limits ...int) error {
+	limit := maxProjectRecords
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
+	if current < 0 || incoming < 0 || current > limit || incoming > limit-current {
+		return fmt.Errorf("record limit %d exceeded", limit)
+	}
+	return nil
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
 }

@@ -1,6 +1,7 @@
 package projectview
 
 import (
+	"fmt"
 	"path"
 	"sort"
 	"strconv"
@@ -20,7 +21,7 @@ type moduleStats struct {
 	seenDeps      map[string]struct{}
 }
 
-func rankModules(events []event, reference time.Time) []memory.DerivedRecord {
+func rankModules(events []event, reference time.Time, limit int) ([]memory.DerivedRecord, error) {
 	modules := make(map[string]*moduleStats)
 	for _, item := range events {
 		if item.summary.Kind != "file" {
@@ -35,11 +36,16 @@ func rankModules(events []event, reference time.Time) []memory.DerivedRecord {
 		}
 		stats := modules[modulePath]
 		if stats == nil {
+			if err := ensureRecordCapacity(len(modules), 1, limit); err != nil {
+				return nil, fmt.Errorf("module ranking limit exceeded: %w", err)
+			}
 			stats = &moduleStats{path: modulePath, sessions: make(map[string]struct{}), seenDeps: make(map[string]struct{})}
 			modules[modulePath] = stats
 		}
 		stats.sessions[item.provider+"\x00"+item.sessionID] = struct{}{}
-		stats.changes++
+		if item.summary.Operation == "file_change" && item.summary.Outcome == "success" {
+			stats.changes++
+		}
 		if item.time.After(stats.latest) {
 			stats.latest = item.time
 		}
@@ -90,10 +96,11 @@ func rankModules(events []event, reference time.Time) []memory.DerivedRecord {
 				"path": value.stats.path, "rank": strconv.Itoa(index + 1), "score": strconv.Itoa(value.score),
 				"session_coverage": strconv.Itoa(len(value.stats.sessions)), "verification_count": strconv.Itoa(value.stats.verifications),
 				"change_count": strconv.Itoa(value.stats.changes), "recency_bucket": strconv.Itoa(value.bucket),
+				"latest_observed_at": value.stats.latest.UTC().Format(time.RFC3339Nano),
 			},
 		})
 	}
-	return result
+	return result, nil
 }
 
 func (stats *moduleStats) addDependency(revisionID string) {
