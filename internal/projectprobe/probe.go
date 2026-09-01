@@ -18,6 +18,8 @@ import (
 
 const ProbeVersion = "project-probe-v1"
 
+var errProjectIdentityChanged = errors.New("project identity changed during probe")
+
 type Options struct {
 	Binding                 projectidentity.Binding
 	VersionFiles            []string
@@ -69,7 +71,7 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 		Diagnostics:             []memory.Diagnostic{},
 	}
 
-	topLevel, err := runApprovedGit(ctx, runner, "git", "rev-parse", "--show-toplevel")
+	topLevel, err := runProjectGit(ctx, options.Binding, runner, "rev-parse", "--show-toplevel")
 	if err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, fmt.Errorf("authenticate Git top-level: %w", preserveCancellation(ctx, err))
 	}
@@ -77,56 +79,92 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 	if err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, errors.New("authenticate Git top-level: malformed output")
 	}
+	if err := acceptProjectIdentity(options.Binding); err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
 	if err := authenticateGitTopLevel(topLevelPath, options.Binding.RootIdentity); err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 	}
+	if err := acceptProjectIdentity(options.Binding); err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
 
-	branchOutput, branchErr := runApprovedGit(ctx, runner, "git", "symbolic-ref", "--short", "-q", "HEAD")
+	branchOutput, branchErr := runProjectGit(ctx, options.Binding, runner, "symbolic-ref", "--short", "-q", "HEAD")
 	if branchErr != nil {
+		if errors.Is(branchErr, errProjectIdentityChanged) {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, branchErr
+		}
 		if err := ctx.Err(); err != nil {
 			return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 		}
 		state.Diagnostics = append(state.Diagnostics, diagnostic("git_branch_unavailable", "", nil))
-	} else if branch, parseErr := parseBranch(branchOutput); parseErr != nil {
-		state.Diagnostics = append(state.Diagnostics, diagnostic("git_branch_malformed", "", branchOutput))
 	} else {
-		state.Branch = branch
+		branch, parseErr := parseBranch(branchOutput)
+		if authErr := acceptProjectIdentity(options.Binding); authErr != nil {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, authErr
+		}
+		if parseErr != nil {
+			state.Diagnostics = append(state.Diagnostics, diagnostic("git_branch_malformed", "", branchOutput))
+		} else {
+			state.Branch = branch
+		}
 	}
 
-	headOutput, headErr := runApprovedGit(ctx, runner, "git", "rev-parse", "HEAD")
+	headOutput, headErr := runProjectGit(ctx, options.Binding, runner, "rev-parse", "HEAD")
 	if headErr != nil {
+		if errors.Is(headErr, errProjectIdentityChanged) {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, headErr
+		}
 		if err := ctx.Err(); err != nil {
 			return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 		}
 		state.Diagnostics = append(state.Diagnostics, diagnostic("git_head_unavailable", "", nil))
-	} else if head, parseErr := parseHead(headOutput); parseErr != nil {
-		state.Diagnostics = append(state.Diagnostics, diagnostic("git_head_malformed", "", headOutput))
 	} else {
-		state.Head = head
+		head, parseErr := parseHead(headOutput)
+		if authErr := acceptProjectIdentity(options.Binding); authErr != nil {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, authErr
+		}
+		if parseErr != nil {
+			state.Diagnostics = append(state.Diagnostics, diagnostic("git_head_malformed", "", headOutput))
+		} else {
+			state.Head = head
+		}
 	}
 
-	statusOutput, statusErr := runApprovedGit(ctx, runner, "git", "status", "--porcelain=v1", "-z")
+	statusOutput, statusErr := runProjectGit(ctx, options.Binding, runner, "status", "--porcelain=v1", "-z")
 	if statusErr != nil {
+		if errors.Is(statusErr, errProjectIdentityChanged) {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, statusErr
+		}
 		if err := ctx.Err(); err != nil {
 			return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 		}
 		state.Diagnostics = append(state.Diagnostics, diagnostic("git_status_unavailable", "", nil))
 	} else {
 		count, malformed := parseStatus(statusOutput)
+		if authErr := acceptProjectIdentity(options.Binding); authErr != nil {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, authErr
+		}
 		state.DirtyPathCount = count
 		if malformed {
 			state.Diagnostics = append(state.Diagnostics, diagnostic("git_status_malformed", "", statusOutput))
 		}
 	}
 
-	remoteOutput, remoteErr := runApprovedGit(ctx, runner, "git", "remote", "get-url", "--all", "origin")
+	remoteOutput, remoteErr := runProjectGit(ctx, options.Binding, runner, "remote", "get-url", "--all", "origin")
 	if remoteErr != nil {
+		if errors.Is(remoteErr, errProjectIdentityChanged) {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, remoteErr
+		}
 		if err := ctx.Err(); err != nil {
 			return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 		}
 		state.Diagnostics = append(state.Diagnostics, diagnostic("git_remote_unavailable", "", nil))
 	} else {
 		remotes, malformed, excess := parseRemoteIdentities(remoteOutput)
+		if authErr := acceptProjectIdentity(options.Binding); authErr != nil {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, authErr
+		}
 		state.RemoteIdentityHashes = remotes
 		if malformed {
 			state.Diagnostics = append(state.Diagnostics, diagnostic("git_remote_malformed", "", remoteOutput))
@@ -136,11 +174,11 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 		}
 	}
 
-	state.VersionFiles, state.Diagnostics, err = probeFiles(ctx, directory, versionPaths, state.Diagnostics)
+	state.VersionFiles, state.Diagnostics, err = probeFilePhase(ctx, options.Binding, directory, versionPaths, state.Diagnostics)
 	if err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 	}
-	state.RequiredProjectionFiles, state.Diagnostics, err = probeFiles(ctx, directory, requiredPaths, state.Diagnostics)
+	state.RequiredProjectionFiles, state.Diagnostics, err = probeFilePhase(ctx, options.Binding, directory, requiredPaths, state.Diagnostics)
 	if err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 	}
@@ -172,7 +210,45 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 	if err := memory.ValidateProbeCheck(check); err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, fmt.Errorf("invalid probe check: %w", err)
 	}
+	if err := acceptProjectIdentity(options.Binding); err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
 	return cloneState(state), check, nil
+}
+
+func runProjectGit(ctx context.Context, binding projectidentity.Binding, runner func(context.Context, string, ...string) ([]byte, error), args ...string) ([]byte, error) {
+	guardedRunner := func(runContext context.Context, executable string, runArgs ...string) ([]byte, error) {
+		if runner == nil {
+			return nil, errors.New("Git runner is required")
+		}
+		if err := acceptProjectIdentity(binding); err != nil {
+			return nil, err
+		}
+		output, runErr := runner(runContext, executable, runArgs...)
+		if err := acceptProjectIdentity(binding); err != nil {
+			return nil, err
+		}
+		return output, runErr
+	}
+	return runApprovedGit(ctx, guardedRunner, "git", args...)
+}
+
+func acceptProjectIdentity(binding projectidentity.Binding) error {
+	if err := projectidentity.Reauthenticate(binding); err != nil {
+		return fmt.Errorf("%w: %v", errProjectIdentityChanged, err)
+	}
+	return nil
+}
+
+func probeFilePhase(ctx context.Context, binding projectidentity.Binding, directory *pathguard.Directory, paths []string, diagnostics []memory.Diagnostic) ([]memory.ProbeFile, []memory.Diagnostic, error) {
+	if err := acceptProjectIdentity(binding); err != nil {
+		return nil, nil, err
+	}
+	files, nextDiagnostics, probeErr := probeFiles(ctx, directory, paths, diagnostics)
+	if err := acceptProjectIdentity(binding); err != nil {
+		return nil, nil, err
+	}
+	return files, nextDiagnostics, probeErr
 }
 
 func authenticateBinding(binding projectidentity.Binding) (*pathguard.Directory, error) {

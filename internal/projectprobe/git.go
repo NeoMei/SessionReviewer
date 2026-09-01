@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -15,11 +16,13 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/platform"
 )
 
 const (
@@ -31,7 +34,6 @@ var (
 	gitHeadPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	scpRemote      = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$`)
 	windowsDrive   = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
-	windowsUNCHost = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,253}$`)
 	approvedGit    = map[string]struct{}{
 		gitCallKey("rev-parse", "--show-toplevel"):          {},
 		gitCallKey("symbolic-ref", "--short", "-q", "HEAD"): {},
@@ -336,12 +338,12 @@ func validRemote(value string) bool {
 		return false
 	}
 	for _, character := range value {
-		if character <= 0x20 || character == 0x7f {
+		if character < 0x20 || character == 0x7f {
 			return false
 		}
 	}
 	if scpRemote.MatchString(value) {
-		return true
+		return validSCPRemote(value)
 	}
 	if windowsDrive.MatchString(value) {
 		return validWindowsDriveRemote(value)
@@ -356,18 +358,112 @@ func validRemote(value string) bool {
 	if err != nil {
 		return false
 	}
-	if parsed.Scheme != "" {
-		switch parsed.Scheme {
-		case "https", "http", "ssh", "git", "file":
-		default:
+	return validURLRemote(value, parsed)
+}
+
+func validSCPRemote(value string) bool {
+	at := strings.IndexByte(value, '@')
+	colon := strings.IndexByte(value, ':')
+	if at <= 0 || colon <= at+1 || strings.IndexByte(value[at+1:], '@') >= 0 {
+		return false
+	}
+	user := value[:at]
+	host := value[at+1 : colon]
+	remotePath := value[colon+1:]
+	if !asciiIdentity(user) || !validASCIIHost(host) || remotePath == "" {
+		return false
+	}
+	for _, component := range strings.Split(remotePath, "/") {
+		if component == "" || component == "." || component == ".." {
 			return false
 		}
-		return parsed.User == nil && parsed.Opaque == "" && (parsed.Host != "" || (parsed.Scheme == "file" && strings.HasPrefix(parsed.Path, "/")))
 	}
-	return false
+	return true
+}
+
+func validURLRemote(raw string, parsed *url.URL) bool {
+	if parsed == nil || parsed.Scheme == "" || parsed.User != nil || parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" || strings.Contains(raw, "#") {
+		return false
+	}
+	switch parsed.Scheme {
+	case "file":
+		return validFileURLRemote(raw, parsed)
+	case "https", "http", "ssh", "git":
+	default:
+		return false
+	}
+	if parsed.Host == "" || !asciiOnly(parsed.Host) || !validASCIIHost(parsed.Hostname()) || strings.HasSuffix(parsed.Host, ":") {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || value == 0 {
+			return false
+		}
+	}
+	return parsed.Path == "" || strings.HasPrefix(parsed.Path, "/")
+}
+
+func validFileURLRemote(raw string, parsed *url.URL) bool {
+	if !strings.HasPrefix(raw, "file:///") || parsed.Host != "" || parsed.RawPath != "" || !strings.HasPrefix(parsed.Path, "/") {
+		return false
+	}
+	if len(parsed.Path) >= 4 && parsed.Path[0] == '/' && windowsDrive.MatchString(parsed.Path[1:]) {
+		return validWindowsDriveRemote(parsed.Path[1:])
+	}
+	return path.Clean(parsed.Path) == parsed.Path && !strings.HasPrefix(parsed.Path, "//")
+}
+
+func validASCIIHost(host string) bool {
+	if host == "" || len(host) > 253 || !asciiOnly(host) {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || !asciiAlphaNumeric(label[0]) || !asciiAlphaNumeric(label[len(label)-1]) {
+			return false
+		}
+		for index := 1; index < len(label)-1; index++ {
+			if !asciiAlphaNumeric(label[index]) && label[index] != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func asciiIdentity(value string) bool {
+	if value == "" || len(value) > 128 {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}
+
+func asciiOnly(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validWindowsDriveRemote(value string) bool {
+	if mixedPathSeparators(value) {
+		return false
+	}
 	normalized := strings.ReplaceAll(value, `\`, "/")
 	if len(normalized) < 4 || normalized[1] != ':' || normalized[2] != '/' || path.Clean(normalized[2:]) != normalized[2:] {
 		return false
@@ -376,21 +472,37 @@ func validWindowsDriveRemote(value string) bool {
 }
 
 func validWindowsUNCRemote(value string) bool {
+	if mixedPathSeparators(value) {
+		return false
+	}
 	normalized := strings.ReplaceAll(value, `\`, "/")
 	if !strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "///") {
 		return false
 	}
 	components := strings.Split(strings.TrimPrefix(normalized, "//"), "/")
-	return len(components) >= 2 && windowsUNCHost.MatchString(components[0]) && validWindowsLocalComponents(components)
+	return len(components) >= 2 && validASCIIHost(components[0]) && validWindowsLocalComponents(components)
 }
 
 func validWindowsLocalComponents(components []string) bool {
 	for _, component := range components {
-		if component == "" || component == "." || component == ".." || strings.ContainsAny(component, `<>:"|?*`) {
+		if component == "" || component == "." || component == ".." || !asciiOnlyWindowsComponent(component) || strings.HasSuffix(component, " ") || strings.HasSuffix(component, ".") || strings.ContainsAny(component, `<>:"|?*`) || platform.IsWindowsReservedName(component) {
 			return false
 		}
 	}
 	return len(components) > 0
+}
+
+func mixedPathSeparators(value string) bool {
+	return strings.Contains(value, "/") && strings.Contains(value, `\`)
+}
+
+func asciiOnlyWindowsComponent(value string) bool {
+	for index := 0; index < len(value); index++ {
+		if value[index] < 0x20 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func parseStatus(output []byte) (int, bool) {

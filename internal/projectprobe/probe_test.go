@@ -305,6 +305,36 @@ func TestRunRejectsGitCommonDirectoryReplacementBeforeAndAfterProbe(t *testing.T
 	}
 }
 
+func TestRunRejectsCommonDirectorySwapAtCommandBoundaryBeforeUsingOutput(t *testing.T) {
+	root, binding := newBinding(t)
+	runner := successfulRunner(root)
+	originalGit := filepath.Join(root, ".git")
+	movedGit := filepath.Join(root, ".git-command-original")
+	runner.after = func(call []string) {
+		if reflect.DeepEqual(call, approvedGitCalls[2]) {
+			if err := os.Rename(originalGit, movedGit); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(originalGit, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	state, check, err := Run(context.Background(), Options{Binding: binding, Now: time.Now, RunGit: runner.run})
+	if err == nil || !reflect.DeepEqual(state, memory.ProjectProbeState{}) || !reflect.DeepEqual(check, memory.ProbeCheck{}) {
+		t.Fatalf("command-boundary identity swap returned contaminated state: state=%+v check=%+v err=%v", state, check, err)
+	}
+	if len(runner.calls) != 3 {
+		t.Fatalf("probe accepted swapped HEAD output and continued: calls=%q", runner.calls)
+	}
+	if removeErr := os.Remove(originalGit); removeErr != nil {
+		t.Fatal(removeErr)
+	}
+	if renameErr := os.Rename(movedGit, originalGit); renameErr != nil {
+		t.Fatal(renameErr)
+	}
+}
+
 func TestRunRejectsUnsafeOrAliasedDeclaredPathsBeforeExecutingGit(t *testing.T) {
 	root, binding := newBinding(t)
 	tests := []struct {
@@ -470,7 +500,7 @@ func TestRunBoundsRemoteIdentitiesAtMemoryMaximum(t *testing.T) {
 }
 
 func TestWindowsLocalRemoteGrammarIsStrictAndHashedOnly(t *testing.T) {
-	valid := []string{`C:/Repos/Owner/repo.git`, `D:\Repos\Owner\repo.git`, `//server/share`, `//server/share/repo.git`, `\\server\share\other.git`}
+	valid := []string{`C:/Repos/Owner/repo.git`, `D:\Repos\Owner\repo.git`, `//server/share`, `//server/C$/repo.git`, `//server/share/repo.git`, `\\server\share\other.git`}
 	hashes, malformed, excess := parseRemoteIdentities([]byte(strings.Join(valid, "\n") + "\n"))
 	if malformed || excess || len(hashes) != len(valid) {
 		t.Fatalf("strict Windows local remotes rejected: hashes=%v malformed=%v excess=%v", hashes, malformed, excess)
@@ -480,9 +510,64 @@ func TestWindowsLocalRemoteGrammarIsStrictAndHashedOnly(t *testing.T) {
 			t.Fatal("raw Windows remote escaped hashing")
 		}
 	}
-	for _, invalid := range []string{`relative/repo.git`, `C:relative\repo.git`, `//server`, `\\server`, `//user@server/share`, `https://token@example.invalid/repo.git`, `https://user:secret@example.invalid/repo.git`} {
+	for _, invalid := range []string{
+		`relative/repo.git`, `C:relative\repo.git`, `//server`, `\\server`, `//user@server/share`,
+		`C:/repo/./child`, `C:/repo/../child`, `C:/repo/name./child`, `C:/repo/name /child`,
+		`C:/repo/CON`, `C:/repo/con.txt`, `C:/repo/LPT1.log`, `C:/repo/COM¹.txt`,
+		`C:/repo/file:stream`, `C:/repo\mixed`, `\\server/share\mixed`, `C:/répo/child`,
+		`https://token@example.invalid/repo.git`, `https://user:secret@example.invalid/repo.git`,
+	} {
 		if validRemote(invalid) {
 			t.Fatalf("relative, confusable, or credential-bearing remote accepted: %q", invalid)
+		}
+	}
+}
+
+func TestURLRemoteGrammarRejectsMetadataAndInvalidHostLabelsBeforeHashing(t *testing.T) {
+	valid := []string{
+		`https://example.com/owner/repo.git`,
+		`ssh://example.com/owner/repo.git`,
+		`git://192.0.2.1/owner/repo.git`,
+		`https://xn--bcher-kva.example/repo.git`,
+		`https://[2001:db8::1]/repo.git`,
+		`file:///tmp/repo.git`,
+		`file:///C:/Repos/repo.git`,
+		`git@example.com:owner/repo.git`,
+	}
+	for _, remote := range valid {
+		if !validRemote(remote) {
+			t.Fatalf("strict URL or SCP remote rejected: %q", remote)
+		}
+	}
+	longLabel := strings.Repeat("a", 64)
+	invalid := []string{
+		`https://user@example.com/repo.git`,
+		`https://user:secret@example.com/repo.git`,
+		`https://example.com/repo.git?token=secret`,
+		`https://example.com/repo.git?`,
+		`https://example.com/repo.git#fragment`,
+		`ssh:example.com/repo.git`,
+		`https://例子.测试/repo.git`,
+		`https://-bad.example/repo.git`,
+		`https://bad-.example/repo.git`,
+		`https://bad_label.example/repo.git`,
+		`https://example..com/repo.git`,
+		`https://example.com./repo.git`,
+		`https://` + longLabel + `.example/repo.git`,
+		`https://[example.com]/repo.git`,
+		`https:///repo.git`,
+		`file://server/share/repo.git`,
+		`file:relative/repo.git`,
+		`file:///tmp\repo.git`,
+		`file:///C:\Repos\repo.git`,
+		`file:///tmp/repo.git?ignored=1`,
+		`git:password@example.com:owner/repo.git`,
+		`gït@example.com:owner/repo.git`,
+		`git@@example.com:owner/repo.git`,
+	}
+	for _, remote := range invalid {
+		if validRemote(remote) {
+			t.Fatalf("ambiguous URL/SCP metadata reached hashing: %q", remote)
 		}
 	}
 }
