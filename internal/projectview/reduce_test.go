@@ -162,16 +162,66 @@ func TestReduceDerivesOnlyCompatibleLaterCrossSessionRecovery(t *testing.T) {
 		{sequence: 1, kind: "verification", subject: "f", occurredAt: "2026-08-03T10:00:00Z", operation: "verification", outcome: "failed", fields: map[string]string{"component": "package"}},
 		{sequence: 2, kind: "verification", subject: "p", occurredAt: "2026-08-03T10:01:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"component": "package"}},
 	})
-	within.DerivedRecords = []memory.DerivedRecord{{
-		ID: "session-recovery", Kind: "recovery_link", Subject: "verification:package", OccurredAt: within.ObservationSummaries[1].OccurredAt,
-		DependencyRevisionIDs: []string{within.ObservationSummaries[0].RevisionID, within.ObservationSummaries[1].RevisionID},
-		RuleID:                "matching-operation-component", RuleVersion: "session-view-v1", Fields: map[string]string{"operation": "verification", "component": "package", "outcome": "recovered"},
-	}}
-	within.Digest = mustSessionDigest(t, within)
+	attachSessionRecovery(t, &within, 0, 1)
 	got = reduceFixture(t, []memory.SessionView{within}, "2026-09-01T00:00:00Z", nil)
 	links := recordsOfKind(got.DerivedRecords, "recovery_link")
 	if len(links) != 1 || !reflect.DeepEqual(links[0], within.DerivedRecords[0]) {
 		t.Fatalf("SessionView recovery was lost or rewritten: got=%+v want=%+v", links, within.DerivedRecords)
+	}
+}
+
+func TestReduceRejectsUninterpretableSessionDerivedRecords(t *testing.T) {
+	base := viewFixture(t, "s1", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "verification", outcome: "failed", fields: map[string]string{"status": "test", "component": "package"}},
+		{sequence: 2, kind: "verification", subject: "success", occurredAt: "2026-08-01T00:01:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"status": "test", "component": "package"}},
+	})
+	attachSessionRecovery(t, &base, 0, 1)
+
+	tests := []struct {
+		name string
+		edit func(*memory.SessionView)
+	}{
+		{name: "unknown derived type", edit: func(view *memory.SessionView) { view.DerivedRecords[0].Kind = "module_rank" }},
+		{name: "extra field", edit: func(view *memory.SessionView) { view.DerivedRecords[0].Fields["unexpected"] = "value" }},
+		{name: "wrong dependency order", edit: func(view *memory.SessionView) {
+			view.DerivedRecords[0].DependencyRevisionIDs[0], view.DerivedRecords[0].DependencyRevisionIDs[1] = view.DerivedRecords[0].DependencyRevisionIDs[1], view.DerivedRecords[0].DependencyRevisionIDs[0]
+		}},
+		{name: "cross kind pair", edit: func(view *memory.SessionView) { view.ObservationSummaries[1].Kind = "build" }},
+		{name: "missing dependency", edit: func(view *memory.SessionView) {
+			view.DerivedRecords[0].DependencyRevisionIDs[1] = digestFor("missing-revision")
+		}},
+		{name: "unsupported rule", edit: func(view *memory.SessionView) { view.DerivedRecords[0].RuleID = "other-rule" }},
+		{name: "unsupported rule version", edit: func(view *memory.SessionView) { view.DerivedRecords[0].RuleVersion = "session-view-v2" }},
+		{name: "wrong occurrence time", edit: func(view *memory.SessionView) {
+			view.DerivedRecords[0].OccurredAt = view.ObservationSummaries[0].OccurredAt
+		}},
+		{name: "wrong subject", edit: func(view *memory.SessionView) { view.DerivedRecords[0].Subject = "test:other" }},
+		{name: "wrong field value", edit: func(view *memory.SessionView) { view.DerivedRecords[0].Fields["outcome"] = "success" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			view := cloneSessionViewFixture(base)
+			test.edit(&view)
+			view.Digest = mustSessionDigest(t, view)
+			input := inputFixture(t, []memory.SessionView{view}, "2026-09-01T00:00:00Z", nil)
+			if got, changed, err := Reduce(input); err == nil || changed || got.Digest != "" {
+				t.Fatalf("invalid SessionView derived record accepted: changed=%v err=%v view=%+v", changed, err, got)
+			}
+		})
+	}
+}
+
+func TestReduceRecoveryFallsBackFromWhitespaceStatusToOperation(t *testing.T) {
+	s1 := viewFixture(t, "s1", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{{
+		sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "test", outcome: "failed", fields: map[string]string{"status": "   ", "component": "package"},
+	}})
+	s2 := viewFixture(t, "s2", memory.Indexed, "2026-08-02T00:00:00Z", []summarySpec{{
+		sequence: 1, kind: "verification", subject: "success", occurredAt: "2026-08-02T00:00:00Z", operation: "test", outcome: "passed", fields: map[string]string{"status": " ", "component": "package"},
+	}})
+	got := reduceFixture(t, []memory.SessionView{s1, s2}, "2026-09-01T00:00:00Z", nil)
+	recoveries := recordsOfKind(got.DerivedRecords, "recovery_link")
+	if len(recoveries) != 1 || recoveries[0].Fields["operation"] != "test" {
+		t.Fatalf("whitespace status blocked operation fallback: %+v", recoveries)
 	}
 }
 
@@ -312,12 +362,7 @@ func TestReduceDoesNotRecoverAgainAfterSessionViewAlreadyConsumedFailure(t *test
 		{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "verification", outcome: "failed", fields: map[string]string{"component": "package"}},
 		{sequence: 2, kind: "verification", subject: "success", occurredAt: "2026-08-01T00:01:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"component": "package"}},
 	})
-	s1.DerivedRecords = []memory.DerivedRecord{{
-		ID: "session-recovery", Kind: "recovery_link", Subject: "verification:package", OccurredAt: s1.ObservationSummaries[1].OccurredAt,
-		DependencyRevisionIDs: []string{s1.ObservationSummaries[0].RevisionID, s1.ObservationSummaries[1].RevisionID},
-		RuleID:                "matching-operation-component", RuleVersion: "session-view-v1", Fields: map[string]string{"operation": "verification", "component": "package", "outcome": "recovered"},
-	}}
-	s1.Digest = mustSessionDigest(t, s1)
+	attachSessionRecovery(t, &s1, 0, 1)
 	s2 := viewFixture(t, "s2", memory.Indexed, "2026-08-02T00:00:00Z", []summarySpec{{sequence: 1, kind: "verification", subject: "later", occurredAt: "2026-08-02T00:00:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"component": "package"}}})
 	got := reduceFixture(t, []memory.SessionView{s1, s2}, "2026-09-01T00:00:00Z", nil)
 	recoveries := recordsOfKind(got.DerivedRecords, "recovery_link")
@@ -466,9 +511,12 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 		t.Fatalf("witness phase exceeded zero budget: records=%d err=%v", len(records), err)
 	}
 
-	sessionDerived := memory.DerivedRecord{ID: "session-derived", Kind: "recovery_link", Subject: "test:a.go", OccurredAt: item.summary.OccurredAt,
-		DependencyRevisionIDs: []string{item.summary.RevisionID}, RuleID: "session-rule", RuleVersion: "session-view-v1"}
-	if records, _, err := copySessionDerivedRecords([]memory.SessionView{{Provider: "codex", SessionID: "s1", DerivedRecords: []memory.DerivedRecord{sessionDerived}}}, 0); err == nil || records != nil {
+	boundedView := viewFixture(t, "bounded", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "f", occurredAt: "2026-08-01T00:00:00Z", operation: "test", outcome: "failed", fields: map[string]string{"component": "a.go"}},
+		{sequence: 2, kind: "verification", subject: "s", occurredAt: "2026-08-01T00:01:00Z", operation: "test", outcome: "passed", fields: map[string]string{"component": "a.go"}},
+	})
+	attachSessionRecovery(t, &boundedView, 0, 1)
+	if records, _, err := copySessionDerivedRecords([]memory.SessionView{boundedView}, 0); err == nil || records != nil {
 		t.Fatalf("Session-derived phase exceeded zero budget: records=%d err=%v", len(records), err)
 	}
 
@@ -483,7 +531,7 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 	success.summary.Outcome = "passed"
 	success.summary.OccurredAt = "2026-08-02T00:00:00Z"
 	success.time = mustTime(t, success.summary.OccurredAt)
-	if records, err := deriveRecoveryLinks([]event{failure, success}, nil, nil, 0); err == nil || records != nil {
+	if records, err := deriveRecoveryLinks([]event{failure, success}, nil, 0); err == nil || records != nil {
 		t.Fatalf("recovery phase exceeded zero budget: records=%d err=%v", len(records), err)
 	}
 }
@@ -574,6 +622,49 @@ func reduceFixture(t *testing.T, views []memory.SessionView, reference string, p
 		t.Fatalf("Reduce fixture changed=%v err=%v", changed, err)
 	}
 	return view
+}
+
+func attachSessionRecovery(t *testing.T, view *memory.SessionView, failureIndex, successIndex int) {
+	t.Helper()
+	failure := view.ObservationSummaries[failureIndex]
+	success := view.ObservationSummaries[successIndex]
+	operationValue := failure.Fields["status"]
+	if strings.TrimSpace(operationValue) == "" {
+		operationValue = failure.Operation
+	}
+	operation := strings.ToLower(strings.Join(strings.Fields(operationValue), " "))
+	component := strings.ToLower(strings.Join(strings.Fields(failure.Fields["component"]), " "))
+	identityDigest, err := memory.Digest(struct {
+		Failure string `json:"failure"`
+		Success string `json:"success"`
+		Rule    string `json:"rule"`
+	}{Failure: failure.RevisionID, Success: success.RevisionID, Rule: "matching-operation-component"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.DerivedRecords = []memory.DerivedRecord{{
+		ID: "recovery-" + strings.TrimPrefix(identityDigest, "sha256:")[:32], Kind: "recovery_link", Subject: operation + ":" + component,
+		OccurredAt: success.OccurredAt, DependencyRevisionIDs: []string{failure.RevisionID, success.RevisionID},
+		RuleID: "matching-operation-component", RuleVersion: "session-view-v1",
+		Fields: map[string]string{"operation": operation, "component": component, "outcome": "recovered"},
+	}}
+	view.Digest = mustSessionDigest(t, *view)
+}
+
+func cloneSessionViewFixture(value memory.SessionView) memory.SessionView {
+	value.ActiveRevisionIDs = append([]string(nil), value.ActiveRevisionIDs...)
+	value.ObservationChunkDigests = append([]string(nil), value.ObservationChunkDigests...)
+	value.ObservationSummaries = append([]memory.ObservationSummary(nil), value.ObservationSummaries...)
+	for index := range value.ObservationSummaries {
+		value.ObservationSummaries[index].Fields = cloneMap(value.ObservationSummaries[index].Fields)
+	}
+	value.DerivedRecords = append([]memory.DerivedRecord(nil), value.DerivedRecords...)
+	for index := range value.DerivedRecords {
+		value.DerivedRecords[index].DependencyRevisionIDs = append([]string(nil), value.DerivedRecords[index].DependencyRevisionIDs...)
+		value.DerivedRecords[index].Fields = cloneMap(value.DerivedRecords[index].Fields)
+	}
+	value.Diagnostics = append([]memory.Diagnostic(nil), value.Diagnostics...)
+	return value
 }
 
 func mustSessionDigest(t *testing.T, view memory.SessionView) string {

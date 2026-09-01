@@ -94,7 +94,7 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 		return memory.ProjectView{}, false, err
 	}
 	appendPhase(sessionRecords)
-	crossSessionRecoveries, err := deriveRecoveryLinks(events, views, representedRecoveries, remaining)
+	crossSessionRecoveries, err := deriveRecoveryLinks(events, representedRecoveries, remaining)
 	if err != nil {
 		return memory.ProjectView{}, false, err
 	}

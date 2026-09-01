@@ -8,7 +8,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 )
+
+const sessionRecoveryRuleID = "matching-operation-component"
 
 type recoveryKey struct {
 	kind      string
@@ -29,6 +32,9 @@ func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.
 	representedRecoveries := make(map[string]struct{})
 	for _, view := range views {
 		for _, record := range view.DerivedRecords {
+			if err := validateSessionRecoveryRecord(view, record); err != nil {
+				return nil, nil, fmt.Errorf("validate SessionView %s/%s derived record %s: %w", view.Provider, view.SessionID, record.ID, err)
+			}
 			digest, err := memory.Digest(record)
 			if err != nil {
 				return nil, nil, fmt.Errorf("digest SessionView derived record %s: %w", record.ID, err)
@@ -48,9 +54,7 @@ func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.
 				occurredAt, _ = time.Parse(time.RFC3339Nano, record.OccurredAt)
 			}
 			items = append(items, sessionDerivedRecord{provider: view.Provider, sessionID: view.SessionID, record: cloneDerivedRecords([]memory.DerivedRecord{record})[0], time: occurredAt})
-			if record.Kind == "recovery_link" && len(record.DependencyRevisionIDs) == 2 {
-				representedRecoveries[record.DependencyRevisionIDs[0]+"\x00"+record.DependencyRevisionIDs[1]] = struct{}{}
-			}
+			representedRecoveries[record.DependencyRevisionIDs[0]+"\x00"+record.DependencyRevisionIDs[1]] = struct{}{}
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -72,17 +76,110 @@ func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.
 	return result, representedRecoveries, nil
 }
 
-func deriveRecoveryLinks(events []event, views []memory.SessionView, represented map[string]struct{}, limit int) ([]memory.DerivedRecord, error) {
+func validateSessionRecoveryRecord(view memory.SessionView, record memory.DerivedRecord) error {
+	if record.Kind != "recovery_link" {
+		return fmt.Errorf("unsupported derived kind %q", record.Kind)
+	}
+	if record.RuleID != sessionRecoveryRuleID {
+		return fmt.Errorf("unsupported recovery rule %q", record.RuleID)
+	}
+	if record.RuleVersion != sessionview.MaterializerVersion {
+		return fmt.Errorf("unsupported recovery rule version %q", record.RuleVersion)
+	}
+	if len(record.DependencyRevisionIDs) != 2 || record.DependencyRevisionIDs[0] == record.DependencyRevisionIDs[1] {
+		return fmt.Errorf("recovery dependencies must be exactly two distinct revision IDs")
+	}
+
+	active := make(map[string]struct{}, len(view.ActiveRevisionIDs))
+	for _, revisionID := range view.ActiveRevisionIDs {
+		active[revisionID] = struct{}{}
+	}
+	summaries := make(map[string]memory.ObservationSummary, len(view.ObservationSummaries))
+	for _, summary := range view.ObservationSummaries {
+		summaries[summary.RevisionID] = summary
+	}
+	dependencies := make([]memory.ObservationSummary, 2)
+	for index, revisionID := range record.DependencyRevisionIDs {
+		if _, present := active[revisionID]; !present {
+			return fmt.Errorf("dependency %s is not active", revisionID)
+		}
+		summary, present := summaries[revisionID]
+		if !present {
+			return fmt.Errorf("dependency %s has no observation summary", revisionID)
+		}
+		dependencies[index] = summary
+	}
+	failure, success := dependencies[0], dependencies[1]
+	if failure.Sequence >= success.Sequence {
+		return fmt.Errorf("recovery dependencies are not ordered failure before success")
+	}
+	failureKey := recoveryIdentity(failure)
+	successKey := recoveryIdentity(success)
+	if failureKey.operation == "" || failureKey.component == "" || failureKey.kind == "" || failureKey != successKey {
+		return fmt.Errorf("recovery dependencies do not have matching operation, component, and kind")
+	}
+	if normalizedOutcome(failure.Outcome) != "failure" || normalizedOutcome(success.Outcome) != "success" {
+		return fmt.Errorf("recovery dependencies are not a compatible failure and success")
+	}
+
+	expected, err := sessionRecoveryRecord(failure, success, failureKey)
+	if err != nil {
+		return err
+	}
+	if record.ID != expected.ID {
+		return fmt.Errorf("recovery ID does not match its dependencies")
+	}
+	if record.Subject != expected.Subject {
+		return fmt.Errorf("recovery subject does not match its dependencies")
+	}
+	if record.OccurredAt != expected.OccurredAt {
+		return fmt.Errorf("recovery occurrence time does not match success time")
+	}
+	if len(record.Fields) != len(expected.Fields) {
+		return fmt.Errorf("recovery fields must contain only operation, component, and outcome")
+	}
+	for key, expectedValue := range expected.Fields {
+		if value, present := record.Fields[key]; !present || value != expectedValue {
+			return fmt.Errorf("recovery field %s does not match its dependencies", key)
+		}
+	}
+	return nil
+}
+
+func sessionRecoveryRecord(failure, success memory.ObservationSummary, key recoveryKey) (memory.DerivedRecord, error) {
+	identityDigest, err := memory.Digest(struct {
+		Failure string `json:"failure"`
+		Success string `json:"success"`
+		Rule    string `json:"rule"`
+	}{Failure: failure.RevisionID, Success: success.RevisionID, Rule: sessionRecoveryRuleID})
+	if err != nil {
+		return memory.DerivedRecord{}, fmt.Errorf("digest SessionView recovery identity: %w", err)
+	}
+	digestValue := strings.TrimPrefix(identityDigest, "sha256:")
+	subject := key.operation + ":" + key.component
+	if len(subject) > 256 || utf8.RuneCountInString(subject) > 256 {
+		subject = "recovery:" + digestValue[:16]
+	}
+	return memory.DerivedRecord{
+		ID:                    "recovery-" + digestValue[:32],
+		Kind:                  "recovery_link",
+		Subject:               subject,
+		OccurredAt:            success.OccurredAt,
+		DependencyRevisionIDs: []string{failure.RevisionID, success.RevisionID},
+		RuleID:                sessionRecoveryRuleID,
+		RuleVersion:           sessionview.MaterializerVersion,
+		Fields: map[string]string{
+			"operation": key.operation,
+			"component": key.component,
+			"outcome":   "recovered",
+		},
+	}, nil
+}
+
+func deriveRecoveryLinks(events []event, represented map[string]struct{}, limit int) ([]memory.DerivedRecord, error) {
 	existing := make(map[string]struct{}, len(represented))
 	for pair := range represented {
 		existing[pair] = struct{}{}
-	}
-	for _, view := range views {
-		for _, record := range view.DerivedRecords {
-			if record.Kind == "recovery_link" && len(record.DependencyRevisionIDs) == 2 {
-				existing[record.DependencyRevisionIDs[0]+"\x00"+record.DependencyRevisionIDs[1]] = struct{}{}
-			}
-		}
 	}
 	pending := make(map[recoveryKey][]event)
 	var result []memory.DerivedRecord
@@ -117,12 +214,18 @@ func deriveRecoveryLinks(events []event, views []memory.SessionView, represented
 
 func recoveryIdentity(summary memory.ObservationSummary) recoveryKey {
 	component := normalizeIdentity(summary.Fields["component"])
-	operationValue := summary.Fields["status"]
-	if operationValue == "" {
-		operationValue = summary.Operation
-	}
+	operationValue := firstNonBlank(summary.Fields["status"], summary.Operation)
 	operation := normalizeIdentity(operationValue)
 	return recoveryKey{kind: recoveryFactClass(summary.Kind), operation: operation, component: component}
+}
+
+func firstNonBlank(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func recoveryFactClass(kind string) string {
