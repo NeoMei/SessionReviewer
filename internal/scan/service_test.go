@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -41,6 +42,7 @@ type fakeSourceSpec struct {
 	report       source.DecodeReport
 	freezeErr    error
 	decodeErr    error
+	skipCatalog  bool
 	wait         <-chan struct{}
 }
 
@@ -119,9 +121,25 @@ func (adapter *fakeAdapter) Decode(ctx context.Context, boundary source.Boundary
 	if spec.decodeErr != nil {
 		return spec.report, spec.decodeErr
 	}
-	digest, err := adapter.catalog.UpsertSource(spec.record)
-	if err != nil {
-		return source.DecodeReport{}, err
+	digest := spec.report.CatalogRecordDigest
+	if !spec.skipCatalog {
+		var err error
+		if spec.report.BoundaryRelation == source.BoundaryReplacement {
+			existing, found, getErr := adapter.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
+			if getErr != nil || !found {
+				return source.DecodeReport{}, errors.Join(errors.New("replacement baseline missing"), getErr)
+			}
+			expected, digestErr := memory.Digest(existing)
+			if digestErr != nil {
+				return source.DecodeReport{}, digestErr
+			}
+			digest, err = adapter.catalog.ReplaceSource(expected, spec.record)
+		} else {
+			digest, err = adapter.catalog.UpsertSource(spec.record)
+		}
+		if err != nil {
+			return source.DecodeReport{}, err
+		}
 	}
 	report := spec.report
 	report.CatalogRecordDigest = digest
@@ -223,7 +241,7 @@ func (h scanHarness) addSource(index int, state memory.TerminalState, projects .
 		Fields: map[string]string{"path": "file-" + strconv.Itoa(index)}, AdapterID: "fake-codex", AdapterVersion: "v1",
 	}
 	observation.RevisionID = memory.ObservationRevisionID(observation)
-	spec := &fakeSourceSpec{candidate: candidate, boundary: boundary, record: record, observations: []memory.ObservationRevision{observation}, report: source.DecodeReport{TerminalState: state}}
+	spec := &fakeSourceSpec{candidate: candidate, boundary: boundary, record: record, observations: []memory.ObservationRevision{observation}, report: source.DecodeReport{BoundaryRelation: source.BoundaryInitial, TerminalState: state}}
 	h.adapter.sources[sessionID] = spec
 	return spec
 }
@@ -362,7 +380,8 @@ func TestRunScopesTerminalIssuesThroughPriorCatalogAssociation(t *testing.T) {
 		if err := decodeExactJSON(body, &view); err != nil {
 			t.Fatalf("decode issue SessionView: %v", err)
 		}
-		if view.TerminalState != memory.Missing || view.SourceAvailability != memory.SourceUnavailable || len(view.ActiveRevisionIDs) != 1 {
+		wantState := map[string]memory.TerminalState{"session-1": memory.Missing, "session-2": memory.Unreadable, "session-3": memory.Ambiguous}[view.SessionID]
+		if view.TerminalState != wantState || view.SourceAvailability != memory.SourceUnavailable || len(view.ActiveRevisionIDs) != 1 {
 			t.Fatalf("issue did not preserve prior facts honestly: %+v", view)
 		}
 		if containsBytes(body, []byte("/private/")) || containsBytes(body, []byte("canary")) {
@@ -420,6 +439,7 @@ func TestRunAdvancesSupersededAndWithdrawnRevisionsThenReusesUnchangedGeneration
 	added.Fields = map[string]string{"path": "added-file"}
 	added.RevisionID = memory.ObservationRevisionID(added)
 	spec.observations = []memory.ObservationRevision{successor, added}
+	spec.report.BoundaryRelation = source.BoundaryAppend
 	spec.boundary.Frozen.Location.JSONL = &memory.JSONLSourceLocation{Line: 5, ByteOffset: 300}
 	spec.boundary.Frozen.SourceHash = scanHex("boundary-successor")
 	spec.record.FrozenBoundary = spec.boundary.Frozen
@@ -461,10 +481,148 @@ func TestRunAdvancesSupersededAndWithdrawnRevisionsThenReusesUnchangedGeneration
 	}
 }
 
+func TestRunAppendReusesOldChunksAndPersistsOnlyNewSuffixRevision(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	oldSecond := spec.observations[0]
+	oldSecond.Key.Sequence = 3
+	oldSecond.Key.Subject = "old-second"
+	oldSecond.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: 3, ByteOffset: 80}
+	oldSecond.Ref.SourceHash = scanHex("old-second")
+	oldSecond.Object = "old-second"
+	oldSecond.Fields = map[string]string{"path": "old-second"}
+	oldSecond.RevisionID = memory.ObservationRevisionID(oldSecond)
+	spec.observations = append(spec.observations, oldSecond)
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatalf("prepare append baseline: %v", err)
+	}
+	_, firstManifest, err := harness.store.LoadPrepared()
+	if err != nil || len(firstManifest.ObservationChunkDigests) != 1 {
+		t.Fatalf("append baseline chunks=%v err=%v", firstManifest.ObservationChunkDigests, err)
+	}
+	oldChunk := firstManifest.ObservationChunkDigests[0]
+
+	newSuffix := oldSecond
+	newSuffix.Key.Sequence = 4
+	newSuffix.Key.Subject = "new-suffix"
+	newSuffix.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: 4, ByteOffset: 120}
+	newSuffix.Ref.SourceHash = scanHex("new-suffix")
+	newSuffix.Object = "new-suffix"
+	newSuffix.Fields = map[string]string{"path": "new-suffix"}
+	newSuffix.RevisionID = memory.ObservationRevisionID(newSuffix)
+	spec.observations = []memory.ObservationRevision{spec.observations[0], oldSecond, newSuffix}
+	spec.report.BoundaryRelation = source.BoundaryAppend
+	spec.boundary.Frozen.Location.JSONL = &memory.JSONLSourceLocation{Line: 5, ByteOffset: 300}
+	spec.boundary.Frozen.SourceHash = scanHex("append-successor-boundary")
+	spec.record.FrozenBoundary = spec.boundary.Frozen
+	spec.record.EndedAt = "2026-08-31T10:02:00Z"
+	spec.record.Usage.EndedAt = spec.record.EndedAt
+	spec.record.Usage.DurationMS = 120_000
+
+	second, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatalf("run real append: %v", err)
+	}
+	if second.GenerationID == first.GenerationID {
+		t.Fatal("append reused baseline generation")
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil || len(manifest.ObservationChunkDigests) != 2 {
+		t.Fatalf("append successor chunks=%v err=%v", manifest.ObservationChunkDigests, err)
+	}
+	viewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, manifest.SessionViews[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view memory.SessionView
+	if err := decodeExactJSON(viewBody, &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.ActiveRevisionIDs) != 3 || len(view.ObservationChunkDigests) != 2 || view.ObservationChunkDigests[0] != oldChunk {
+		t.Fatalf("append view did not retain full active set and ordered old chunk: %+v", view)
+	}
+	seen := map[string]string{}
+	for _, digest := range manifest.ObservationChunkDigests {
+		body, err := harness.store.LoadObject(memorystore.ObjectObservationChunk, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		revisions, err := decodeObservationChunk(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, revision := range revisions {
+			if prior, duplicate := seen[revision.RevisionID]; duplicate {
+				t.Fatalf("revision %s duplicated in chunks %s and %s", revision.RevisionID, prior, digest)
+			}
+			seen[revision.RevisionID] = digest
+		}
+	}
+	if len(seen) != 3 || seen[newSuffix.RevisionID] == oldChunk {
+		t.Fatalf("append persisted wrong revision set: %v", seen)
+	}
+}
+
+func TestRunReplacementRebuildsActiveViewForInteriorMutation(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	removed := spec.observations[0]
+	removed.Key.Sequence = 3
+	removed.Key.Subject = "removed-by-mutation"
+	removed.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: 3, ByteOffset: 80}
+	removed.Ref.SourceHash = scanHex("removed-by-mutation")
+	removed.Object = "removed-by-mutation"
+	removed.Fields = map[string]string{"path": "removed-by-mutation"}
+	removed.RevisionID = memory.ObservationRevisionID(removed)
+	spec.observations = append(spec.observations, removed)
+	if _, err := Run(context.Background(), harness.options); err != nil {
+		t.Fatal(err)
+	}
+	_, baseline, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stableKey := observationKeyDigestForScan(t, spec.observations[0].Key)
+	removedKey := observationKeyDigestForScan(t, removed.Key)
+	oldActive := baseline.ActiveRevisions[stableKey]
+	oldRemoved := baseline.ActiveRevisions[removedKey]
+
+	replacement := spec.observations[0]
+	replacement.Outcome = "corrected-after-interior-mutation"
+	replacement.RevisionID = memory.ObservationRevisionID(replacement)
+	spec.observations = []memory.ObservationRevision{replacement}
+	spec.report.BoundaryRelation = source.BoundaryReplacement
+	spec.boundary.Frozen.SourceHash = scanHex("same-coordinate-interior-mutation")
+	spec.record.FrozenBoundary = spec.boundary.Frozen
+
+	if _, err := Run(context.Background(), harness.options); err != nil {
+		t.Fatalf("run interior replacement: %v", err)
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.ActiveRevisions[stableKey] != replacement.RevisionID || manifest.SupersededRevisions[oldActive] != replacement.RevisionID || manifest.WithdrawnRevisions[removedKey] != oldRemoved {
+		t.Fatalf("replacement lineage active=%v superseded=%v withdrawn=%v", manifest.ActiveRevisions, manifest.SupersededRevisions, manifest.WithdrawnRevisions)
+	}
+	viewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, manifest.SessionViews[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view memory.SessionView
+	if err := decodeExactJSON(viewBody, &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.ActiveRevisionIDs) != 1 || view.ActiveRevisionIDs[0] != replacement.RevisionID {
+		t.Fatalf("replacement retained stale active facts: %+v", view.ActiveRevisionIDs)
+	}
+}
+
 func TestRunIsolatesOneDecodeFailureAndContinuesLaterSources(t *testing.T) {
 	harness := newScanHarness(t)
 	failed := harness.addSource(1, memory.Indexed, scanTestProject)
-	failed.decodeErr = errors.New("source-local-decode-canary")
+	failed.decodeErr = source.NewLocalError(source.LocalDecode, errors.New("source-local-decode-canary"))
 	if _, err := harness.catalog.UpsertSource(failed.record); err != nil {
 		t.Fatalf("pre-associate failing source: %v", err)
 	}
@@ -483,6 +641,58 @@ func TestRunIsolatesOneDecodeFailureAndContinuesLaterSources(t *testing.T) {
 	sort.Strings(decoded)
 	if len(decoded) != 2 || decoded[0] != "session-1" || decoded[1] != "session-2" {
 		t.Fatalf("later source did not run after failure: %v", decoded)
+	}
+}
+
+func TestRunFailsClosedOnUnknownDecodeErrorWithoutAdvancingPrepared(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	baseline, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatalf("prepare unknown-error baseline: %v", err)
+	}
+	spec.decodeErr = errors.New("adapter-contract-canary")
+	spec.boundary.Frozen.SourceHash = scanHex("unknown-error-successor")
+	spec.record.FrozenBoundary = spec.boundary.Frozen
+
+	result, runErr := Run(context.Background(), harness.options)
+	if runErr == nil || result.Prepared || result.State != Failed {
+		t.Fatalf("unknown Decode error was downgraded: result=%+v err=%v", result, runErr)
+	}
+	prepared, manifest, loadErr := harness.store.LoadPrepared()
+	if loadErr != nil || prepared.GenerationID != baseline.GenerationID || manifest.GenerationID != baseline.GenerationID {
+		t.Fatalf("unknown Decode error changed prepared generation: prepared=%#v manifest=%#v err=%v", prepared, manifest, loadErr)
+	}
+}
+
+func TestRunFailsClosedOnUnknownFreezeAndCatalogAssociationErrors(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*fakeSourceSpec)
+	}{
+		{name: "unknown-freeze", mutate: func(spec *fakeSourceSpec) {
+			spec.freezeErr = errors.New("freeze-integrity-canary")
+		}},
+		{name: "missing-catalog-record", mutate: func(spec *fakeSourceSpec) {
+			spec.skipCatalog = true
+		}},
+		{name: "target-observation-without-target-association", mutate: func(spec *fakeSourceSpec) {
+			spec.record.ProjectIDs = []string{scanTestForeign}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newScanHarness(t)
+			bad := harness.addSource(1, memory.Indexed, scanTestProject)
+			test.mutate(bad)
+			harness.addSource(2, memory.Indexed, scanTestProject)
+			result, err := Run(context.Background(), harness.options)
+			if err == nil || result.Prepared || result.State != Failed {
+				t.Fatalf("integrity error was downgraded: result=%+v err=%v", result, err)
+			}
+			if _, _, loadErr := harness.store.LoadPrepared(); !errors.Is(loadErr, memorystore.ErrNoPreparedGeneration) {
+				t.Fatalf("integrity error prepared partial generation: %v", loadErr)
+			}
+		})
 	}
 }
 
@@ -595,6 +805,74 @@ func TestRunFreezesOneReferenceTimeForProbeReductionAndManifest(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("scan sampled wall clock %d times, want one frozen reference", calls)
+	}
+}
+
+func TestRunGlobalObservationBudgetFailsWithoutPreparedGeneration(t *testing.T) {
+	harness := newScanHarness(t)
+	for sourceIndex := 1; sourceIndex <= 2; sourceIndex++ {
+		spec := harness.addSource(sourceIndex, memory.Indexed, scanTestProject)
+		base := spec.observations[0]
+		spec.observations = make([]memory.ObservationRevision, 32769)
+		for index := range spec.observations {
+			observation := base
+			observation.Key.Sequence = sourceIndex*100000 + index
+			observation.Key.Subject = fmt.Sprintf("budget-%d-%d", sourceIndex, index)
+			observation.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: index + 2, ByteOffset: int64(index * 10)}
+			observation.Ref.SourceHash = scanHex(observation.Key.Subject)
+			observation.Object = observation.Key.Subject
+			observation.Fields = map[string]string{"path": observation.Key.Subject}
+			observation.RevisionID = memory.ObservationRevisionID(observation)
+			spec.observations[index] = observation
+		}
+	}
+
+	result, err := Run(context.Background(), harness.options)
+	if err == nil || !errors.Is(err, ErrObservationBudget) || result.Prepared || result.State != Failed {
+		t.Fatalf("global observation budget result=%+v err=%v", result, err)
+	}
+	if _, _, loadErr := harness.store.LoadPrepared(); !errors.Is(loadErr, memorystore.ErrNoPreparedGeneration) {
+		t.Fatalf("observation budget prepared a partial generation: %v", loadErr)
+	}
+}
+
+func TestRunCancellationAfterReduceCannotPersistOrAdvanceSuccessor(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	baseline, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.report.BoundaryRelation = source.BoundaryAppend
+	appended := spec.observations[0]
+	appended.Key.Sequence = 3
+	appended.Key.Subject = "cancel-after-reduce"
+	appended.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: 3, ByteOffset: 80}
+	appended.Ref.SourceHash = scanHex("cancel-after-reduce")
+	appended.Object = "cancel-after-reduce"
+	appended.Fields = map[string]string{"path": "cancel-after-reduce"}
+	appended.RevisionID = memory.ObservationRevisionID(appended)
+	spec.observations = append(spec.observations, appended)
+	spec.boundary.Frozen.Location.JSONL = &memory.JSONLSourceLocation{Line: 4, ByteOffset: 160}
+	spec.boundary.Frozen.SourceHash = scanHex("cancel-after-reduce-boundary")
+	spec.record.FrozenBoundary = spec.boundary.Frozen
+	spec.record.EndedAt = "2026-08-31T10:02:00Z"
+	spec.record.Usage.EndedAt = spec.record.EndedAt
+	spec.record.Usage.DurationMS = 120_000
+
+	ctx, cancel := context.WithCancel(context.Background())
+	harness.options.Reduce = func(input projectview.Input) (memory.ProjectView, bool, error) {
+		view, changed, err := projectview.Reduce(input)
+		cancel()
+		return view, changed, err
+	}
+	result, runErr := Run(ctx, harness.options)
+	if !errors.Is(runErr, context.Canceled) || result.Prepared || result.State != Failed {
+		t.Fatalf("late cancellation result=%+v err=%v", result, runErr)
+	}
+	prepared, manifest, loadErr := harness.store.LoadPrepared()
+	if loadErr != nil || prepared.GenerationID != baseline.GenerationID || manifest.GenerationID != baseline.GenerationID {
+		t.Fatalf("late cancellation advanced prepared: prepared=%#v manifest=%#v err=%v", prepared, manifest, loadErr)
 	}
 }
 

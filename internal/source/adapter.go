@@ -92,6 +92,7 @@ type QuarantinedRevision struct {
 }
 
 type DecodeReport struct {
+	BoundaryRelation    BoundaryRelation
 	TerminalState       memory.TerminalState
 	MalformedLines      int
 	UnsupportedRecords  int
@@ -102,6 +103,15 @@ type DecodeReport struct {
 	Quarantined         []QuarantinedRevision
 	Supersessions       []RevisionSupersession
 }
+
+type BoundaryRelation string
+
+const (
+	BoundaryInitial     BoundaryRelation = "initial"
+	BoundaryUnchanged   BoundaryRelation = "unchanged"
+	BoundaryAppend      BoundaryRelation = "append"
+	BoundaryReplacement BoundaryRelation = "replacement"
+)
 
 func ValidateReadLimit(limit int64) error {
 	if limit < 1 || limit > MaxReadBytes {

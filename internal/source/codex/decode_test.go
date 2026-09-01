@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -255,6 +256,43 @@ func TestDecodeRejectsBoundaryMetadataChangedAfterFreeze(t *testing.T) {
 	boundary.Candidate.InitialCWD = fixture.projectB
 	if _, err := adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil }); err == nil {
 		t.Fatal("Decode accepted boundary metadata changed after freeze")
+	} else {
+		var local *source.LocalError
+		if errors.As(err, &local) {
+			t.Fatalf("adapter contract error was classified source-local: %v", err)
+		}
+	}
+}
+
+func TestDecodeClassifiesFrozenSourceTruncationButNotVisitorFailureAsLocal(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, boundary.Frozen.Location.JSONL.ByteOffset/2); err != nil {
+		t.Fatal(err)
+	}
+	_, err = adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil })
+	var local *source.LocalError
+	if !errors.As(err, &local) || local.Code != source.LocalChanged {
+		t.Fatalf("frozen truncation error=%v local=%#v", err, local)
+	}
+
+	fixture = newAdapterFixture(t)
+	fixture.installFixture(t, "session-project-a.jsonl")
+	adapter = fixture.adapter(t, "v1")
+	boundary, err = adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	visitorErr := errors.New("visitor-integrity-canary")
+	_, err = adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return visitorErr })
+	local = nil
+	if !errors.Is(err, visitorErr) || errors.As(err, &local) {
+		t.Fatalf("visitor error was swallowed or classified local: err=%v local=%#v", err, local)
 	}
 }
 

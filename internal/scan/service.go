@@ -39,6 +39,8 @@ const (
 	scanLockPoll        = 20 * time.Millisecond
 )
 
+var ErrObservationBudget = errors.New("project observation budget exceeded")
+
 var scanIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 type MaterializeFunc func(sessionview.Input) (memory.SessionView, bool, error)
@@ -124,12 +126,18 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("discover source sessions: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	tasks, issueSources, err := freezeDiscovery(ctx, options, discovery)
 	if err != nil {
 		return result, err
 	}
 	decoded, err := decodeFrozen(ctx, options, tasks)
 	if err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
 		return result, err
 	}
 	terminals, err := collectTerminals(ctx, options, decoded, issueSources, previous)
@@ -164,8 +172,14 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		if err != nil {
 			return result, fmt.Errorf("materialize SessionView %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
 		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		if _, err := options.Store.PutSessionView(view); err != nil {
 			return result, fmt.Errorf("persist SessionView %s/%s: %w", view.Provider, view.SessionID, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
 		}
 		views = append(views, view)
 		sourceDigests = append(sourceDigests, view.SourceRecordDigest)
@@ -177,6 +191,9 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		return result, errors.New("source and terminal Session counts do not reconcile")
 	}
 
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	probeOptions := options.ProbeOptions
 	probeOptions.Binding = options.Binding
 	probeOptions.Now = frozenNow
@@ -184,13 +201,22 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("probe project state: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if _, err := options.Store.PutProbeState(probeState); err != nil {
 		return result, fmt.Errorf("persist project probe: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	var previousProject *memory.ProjectView
 	if previous.project != nil {
 		copy := *previous.project
 		previousProject = &copy
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 	projectView, _, err := options.Reduce(projectview.Input{
 		ProjectID: options.ProjectID, SessionViews: views, ProbeState: probeState,
@@ -200,11 +226,17 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return result, fmt.Errorf("reduce ProjectView: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if projectView.SourceSessions != result.SourceSessions || terminalTotal(projectView.TerminalCounts) != result.TerminalSessions {
 		return result, errors.New("ProjectView terminal counts do not reconcile with scan")
 	}
 	if _, err := options.Store.PutProjectView(projectView); err != nil {
 		return result, fmt.Errorf("persist ProjectView: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 
 	active, superseded, withdrawn, err := classifyRevisions(views, terminals, previous)
@@ -229,6 +261,9 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	}
 	if err := memory.ValidateGenerationManifest(manifest); err != nil {
 		return result, fmt.Errorf("validate complete generation: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
 	}
 
 	prepared, err := prepareOrAdvance(options.Store, previous, manifest)
@@ -346,7 +381,12 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 		}
 		boundary, err := options.Adapter.Freeze(ctx, candidates[key])
 		if err != nil {
-			issues[key] = source.Issue{Provider: candidates[key].Provider, SessionID: candidates[key].SessionID, Code: "freeze_failed", TerminalState: memory.Unreadable}
+			var local *source.LocalError
+			if !errors.As(err, &local) {
+				return nil, nil, fmt.Errorf("freeze source %s/%s: %w", candidates[key].Provider, candidates[key].SessionID, err)
+			}
+			state := terminalStateForLocalError(local.Code)
+			issues[key] = source.Issue{Provider: candidates[key].Provider, SessionID: candidates[key].SessionID, Code: string(local.Code), TerminalState: state}
 			continue
 		}
 		if boundary.TerminalState != memory.Indexed {
@@ -379,6 +419,8 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 }
 
 func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]decodedTask, error) {
+	decodeContext, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	workers := options.Workers
 	if workers > 4 {
 		workers = 4
@@ -391,20 +433,24 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 	}
 	results := make([]decodedTask, len(tasks))
 	var next atomic.Int64
+	var retained atomic.Int64
 	var wait sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			for {
+				if decodeContext.Err() != nil {
+					return
+				}
 				index := int(next.Add(1) - 1)
 				if index >= len(tasks) {
 					return
 				}
 				task := tasks[index]
 				result := decodedTask{task: task}
-				result.report, result.err = options.Adapter.Decode(ctx, task.boundary, func(observation memory.ObservationRevision) error {
-					if err := ctx.Err(); err != nil {
+				result.report, result.err = options.Adapter.Decode(decodeContext, task.boundary, func(observation memory.ObservationRevision) error {
+					if err := decodeContext.Err(); err != nil {
 						return err
 					}
 					if err := memory.ValidateObservationRevision(observation); err != nil {
@@ -414,16 +460,28 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 						return nil
 					}
 					if len(result.observations) >= maxSourceRevisions {
-						return errors.New("source observation limit exceeded")
+						cancel(ErrObservationBudget)
+						return ErrObservationBudget
+					}
+					if retained.Add(1) > maxSourceRevisions {
+						retained.Add(-1)
+						cancel(ErrObservationBudget)
+						return ErrObservationBudget
 					}
 					result.observations = append(result.observations, observation)
 					return nil
 				})
 				results[index] = result
+				if decodeContext.Err() != nil {
+					return
+				}
 			}
 		}()
 	}
 	wait.Wait()
+	if cause := context.Cause(decodeContext); cause != nil {
+		return nil, cause
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -437,19 +495,36 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			return nil, err
 		}
 		if item.err != nil {
-			issues = append(issues, source.Issue{Provider: item.task.boundary.Candidate.Provider, SessionID: item.task.boundary.Candidate.SessionID, Code: "decode_failed", TerminalState: memory.Unreadable})
+			var local *source.LocalError
+			if !errors.As(item.err, &local) {
+				return nil, fmt.Errorf("decode source %s/%s: %w", item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID, item.err)
+			}
+			state := terminalStateForLocalError(local.Code)
+			issues = append(issues, source.Issue{Provider: item.task.boundary.Candidate.Provider, SessionID: item.task.boundary.Candidate.SessionID, Code: string(local.Code), TerminalState: state})
 			continue
 		}
 		record, found, err := options.Catalog.GetSource(item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID)
 		if err != nil {
 			return nil, fmt.Errorf("read decoded source catalog record: %w", err)
 		}
-		if !found || !containsProject(record.ProjectIDs, options.ProjectID) {
-			continue
+		if !found {
+			return nil, fmt.Errorf("decoded source %s/%s did not publish an authenticated catalog record", item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		digest, err := memory.Digest(record)
 		if err != nil || digest != item.report.CatalogRecordDigest {
 			return nil, errors.New("decoded source catalog digest does not match authenticated record")
+		}
+		if !sameStringSet(record.ProjectIDs, item.report.ProjectIDs) {
+			return nil, errors.New("decoded source project associations do not match authenticated catalog record")
+		}
+		if !containsProject(record.ProjectIDs, options.ProjectID) {
+			if len(item.observations) != 0 || containsProject(item.report.ProjectIDs, options.ProjectID) {
+				return nil, projectidentity.ErrAssociationRequired
+			}
+			continue
 		}
 		state := item.report.TerminalState
 		if state == "" {
@@ -462,11 +537,33 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		if item.report.UnsupportedRecords > 0 {
 			diagnostics = append(diagnostics, memory.Diagnostic{Code: "unsupported_source_records"})
 		}
+		switch item.report.BoundaryRelation {
+		case source.BoundaryInitial, source.BoundaryUnchanged, source.BoundaryAppend, source.BoundaryReplacement:
+		default:
+			return nil, fmt.Errorf("decoded source %s/%s has invalid boundary relation %q", record.Provider, record.SessionID, item.report.BoundaryRelation)
+		}
 		chunkDigests := previousChunks(previous, record.Provider, record.SessionID)
-		if len(item.observations) > 0 {
-			chunk, err := options.Store.PutObservationChunk(item.observations)
+		newObservations := make([]memory.ObservationRevision, 0, len(item.observations))
+		currentIDs := make(map[string]struct{}, len(item.observations))
+		for _, observation := range item.observations {
+			if _, duplicate := currentIDs[observation.RevisionID]; duplicate {
+				return nil, fmt.Errorf("decoded source %s/%s emitted duplicate revision %s", record.Provider, record.SessionID, observation.RevisionID)
+			}
+			currentIDs[observation.RevisionID] = struct{}{}
+			if _, alreadyStored := previous.revisions[observation.RevisionID]; !alreadyStored {
+				newObservations = append(newObservations, observation)
+			}
+		}
+		if len(newObservations) > 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			chunk, err := options.Store.PutObservationChunk(newObservations)
 			if err != nil {
 				return nil, fmt.Errorf("persist observation chunk %s/%s: %w", record.Provider, record.SessionID, err)
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
 			chunkDigests = appendUnique(chunkDigests, chunk)
 		}
@@ -479,6 +576,9 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		})
 	}
 	for _, issue := range issues {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		record, found, err := options.Catalog.GetSource(issue.Provider, issue.SessionID)
 		if err != nil {
 			return nil, fmt.Errorf("read issue source catalog record: %w", err)
@@ -486,13 +586,19 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		if !found || !containsProject(record.ProjectIDs, options.ProjectID) {
 			continue
 		}
+		if issue.TerminalState != memory.Missing && issue.TerminalState != memory.Unreadable && issue.TerminalState != memory.Ambiguous {
+			return nil, fmt.Errorf("issue source %s/%s has incompatible unavailable terminal state %q", issue.Provider, issue.SessionID, issue.TerminalState)
+		}
 		record.Availability = memory.SourceUnavailable
 		digest, err := options.Catalog.UpsertSource(record)
 		if err != nil {
 			return nil, fmt.Errorf("mark issue source unavailable: %w", err)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		terminals = append(terminals, terminalSource{
-			record: record, recordDigest: digest, state: memory.Missing,
+			record: record, recordDigest: digest, state: issue.TerminalState,
 			diagnostics: []memory.Diagnostic{{Code: terminalIssueCode(issue.TerminalState)}},
 			issue:       true, shared: len(record.ProjectIDs) > 1,
 		})
@@ -675,6 +781,17 @@ func terminalIssueCode(state memory.TerminalState) string {
 	}
 }
 
+func terminalStateForLocalError(code source.LocalErrorCode) memory.TerminalState {
+	switch code {
+	case source.LocalUnavailable:
+		return memory.Missing
+	case source.LocalChanged:
+		return memory.Ambiguous
+	default:
+		return memory.Unreadable
+	}
+}
+
 func containsProject(values []string, projectID string) bool {
 	for _, value := range values {
 		if value == projectID {
@@ -682,6 +799,22 @@ func containsProject(values []string, projectID string) bool {
 		}
 	}
 	return false
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	a := append([]string(nil), left...)
+	b := append([]string(nil), right...)
+	sort.Strings(a)
+	sort.Strings(b)
+	for index := range a {
+		if a[index] != b[index] {
+			return false
+		}
+	}
+	return true
 }
 
 func sourceKey(provider, sessionID string) string { return provider + "\x00" + sessionID }

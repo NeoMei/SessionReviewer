@@ -461,6 +461,10 @@ func TestSessionViewRejectsImpossibleTerminalAvailabilityAfterDigestRecompute(t 
 			value.TerminalState = Indexed
 			value.SourceAvailability = SourceUnavailable
 		},
+		"unsupported unavailable": func(value *SessionView) {
+			value.TerminalState = Unsupported
+			value.SourceAvailability = SourceUnavailable
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			value := validSessionView()
@@ -475,6 +479,27 @@ func TestSessionViewRejectsImpossibleTerminalAvailabilityAfterDigestRecompute(t 
 			}
 			if err := validateJSONSchemaFixture("../../schemas/session-view-v1.schema.json", body); err == nil {
 				t.Fatalf("schema accepted impossible recomputed pair: %s", body)
+			}
+		})
+	}
+}
+
+func TestSessionViewAcceptsUnavailableUnreadableAndAmbiguousTerminalStates(t *testing.T) {
+	for _, state := range []TerminalState{Unreadable, Ambiguous} {
+		t.Run(string(state), func(t *testing.T) {
+			value := validSessionView()
+			value.TerminalState = state
+			value.SourceAvailability = SourceUnavailable
+			value.Digest = mustSessionViewDigest(value)
+			if err := ValidateSessionView(value); err != nil {
+				t.Fatalf("runtime rejected unavailable %s SessionView: %v", state, err)
+			}
+			body, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateJSONSchemaFixture("../../schemas/session-view-v1.schema.json", body); err != nil {
+				t.Fatalf("schema rejected unavailable %s SessionView: %v", state, err)
 			}
 		})
 	}

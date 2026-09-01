@@ -189,6 +189,40 @@ func TestMaterializeMissingSourcePreservesPriorFactsWithoutClaimingFreshness(t *
 	}
 }
 
+func TestMaterializeEveryUnavailableTerminalPreservesPriorFactsAndExactState(t *testing.T) {
+	for _, state := range []memory.TerminalState{memory.Missing, memory.Unreadable, memory.Ambiguous} {
+		t.Run(string(state), func(t *testing.T) {
+			input := fixtureInput(t, nil)
+			prior, _, err := Materialize(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input.Previous = &prior
+			input.Source.Availability = memory.SourceUnavailable
+			input.SourceRecordDigest = mustDigest(t, input.Source)
+			input.TerminalState = state
+			input.Observations = nil
+			input.ObservationChunkDigests = nil
+			input.Diagnostics = []memory.Diagnostic{{Code: "source_" + string(state)}}
+
+			view, changed, err := Materialize(input)
+			if err != nil || !changed {
+				t.Fatalf("materialize unavailable %s changed=%v err=%v", state, changed, err)
+			}
+			if view.TerminalState != state || view.SourceAvailability != memory.SourceUnavailable {
+				t.Fatalf("unavailable terminal changed state: %+v", view)
+			}
+			if fmt.Sprint(view.ActiveRevisionIDs) != fmt.Sprint(prior.ActiveRevisionIDs) ||
+				fmt.Sprint(view.ObservationChunkDigests) != fmt.Sprint(prior.ObservationChunkDigests) ||
+				fmt.Sprint(view.ObservationSummaries) != fmt.Sprint(prior.ObservationSummaries) ||
+				fmt.Sprint(view.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) ||
+				view.SourceRecordDigest != prior.SourceRecordDigest || view.UsageRecordDigest != prior.UsageRecordDigest {
+				t.Fatalf("unavailable %s discarded prior facts\nprior=%+v\nview=%+v", state, prior, view)
+			}
+		})
+	}
+}
+
 func TestMaterializeMissingSourceRejectsFreshObservationClaims(t *testing.T) {
 	input := fixtureInput(t, nil)
 	input.Source.Availability = memory.SourceUnavailable

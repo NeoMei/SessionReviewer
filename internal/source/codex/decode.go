@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -136,7 +138,17 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		StartedAt: usage.StartedAt, EndedAt: usage.EndedAt, FrozenBoundary: boundary.Frozen,
 		Availability: memory.SourceAvailable, Usage: *usage, ProjectIDs: append([]string(nil), decoder.report.ProjectIDs...),
 	}
-	digest, err := a.catalog.UpsertSource(record)
+	relation, expectedDigest, err := a.classifyBoundaryRelation(files, frozen, record)
+	if err != nil {
+		return decoder.report, fmt.Errorf("classify Codex source boundary: %w", err)
+	}
+	decoder.report.BoundaryRelation = relation
+	var digest string
+	if relation == source.BoundaryReplacement {
+		digest, err = a.catalog.ReplaceSource(expectedDigest, record)
+	} else {
+		digest, err = a.catalog.UpsertSource(record)
+	}
 	if err != nil {
 		return decoder.report, fmt.Errorf("update Codex source catalog: %w", err)
 	}
@@ -148,6 +160,73 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		decoder.report.EmittedRevisions++
 	}
 	return decoder.report, nil
+}
+
+func (a *adapter) classifyBoundaryRelation(files []*os.File, frozen frozenSource, incoming memory.SourceRecord) (source.BoundaryRelation, string, error) {
+	existing, found, err := a.catalog.GetSource(incoming.Provider, incoming.SessionID)
+	if err != nil {
+		return "", "", err
+	}
+	if !found {
+		return source.BoundaryInitial, "", nil
+	}
+	expectedDigest, err := memory.Digest(existing)
+	if err != nil {
+		return "", "", err
+	}
+	if existing.SourceIdentity != incoming.SourceIdentity || existing.StartedAt != incoming.StartedAt {
+		return source.BoundaryUnchanged, expectedDigest, nil
+	}
+	oldLocation, newLocation := existing.FrozenBoundary.Location.JSONL, incoming.FrozenBoundary.Location.JSONL
+	if oldLocation == nil || newLocation == nil {
+		return "", "", errors.New("Codex catalog boundary is not JSONL")
+	}
+	if oldLocation.Line == newLocation.Line && oldLocation.ByteOffset == newLocation.ByteOffset {
+		if existing.FrozenBoundary.SourceHash == incoming.FrozenBoundary.SourceHash {
+			return source.BoundaryUnchanged, expectedDigest, nil
+		}
+		return source.BoundaryReplacement, expectedDigest, nil
+	}
+	if newLocation.Line < oldLocation.Line || newLocation.ByteOffset < oldLocation.ByteOffset {
+		return source.BoundaryReplacement, expectedDigest, nil
+	}
+	prefixHash, err := hashLogicalPrefix(files, frozen.segments, oldLocation.ByteOffset)
+	if err != nil {
+		return "", "", err
+	}
+	if prefixHash == existing.FrozenBoundary.SourceHash {
+		return source.BoundaryAppend, expectedDigest, nil
+	}
+	return source.BoundaryReplacement, expectedDigest, nil
+}
+
+func hashLogicalPrefix(files []*os.File, segments []frozenSegment, limit int64) (string, error) {
+	if limit < 0 || len(files) != len(segments) {
+		return "", errors.New("invalid Codex logical prefix")
+	}
+	hash := sha256.New()
+	remaining := limit
+	for index, segment := range segments {
+		if remaining == 0 {
+			break
+		}
+		amount := segment.size
+		if amount > remaining {
+			amount = remaining
+		}
+		if _, err := io.Copy(hash, io.NewSectionReader(files[index], 0, amount)); err != nil {
+			return "", err
+		}
+		remaining -= amount
+		if amount == segment.size && segment.needsNewline && remaining > 0 {
+			_, _ = hash.Write([]byte{'\n'})
+			remaining--
+		}
+	}
+	if remaining != 0 {
+		return "", errors.New("Codex logical prefix exceeds frozen source")
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (d *recordDecoder) add(record session.Record) error {

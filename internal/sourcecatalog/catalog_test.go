@@ -120,6 +120,80 @@ func TestCatalogConflictingSourceIdentityDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestCatalogReplaceSourceCASAllowsAuthenticatedTruncationAndInteriorMutation(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	original := sourceRecord("s1", []string{"project-a"}, 10)
+	originalDigest, err := catalog.UpsertSource(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	truncated := sourceRecord("s1", []string{"project-a"}, 5)
+	truncated.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 5, ByteOffset: 64}
+	truncated.FrozenBoundary.SourceHash = strings.Repeat("b", 64)
+	truncated.EndedAt = "2026-08-31T10:00:00.5Z"
+	truncated.Usage.EndedAt = truncated.EndedAt
+	truncated.Usage.DurationMS = 500
+	replacementDigest, err := catalog.ReplaceSource(originalDigest, truncated)
+	if err != nil || replacementDigest == originalDigest {
+		t.Fatalf("replace truncation digest=%q err=%v", replacementDigest, err)
+	}
+	got, found, err := catalog.GetSource("codex", "s1")
+	if err != nil || !found || !reflect.DeepEqual(got, truncated) {
+		t.Fatalf("truncation replacement=%+v found=%v err=%v", got, found, err)
+	}
+	appended := truncated
+	appended.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 6, ByteOffset: 96}
+	appended.FrozenBoundary.SourceHash = strings.Repeat("d", 64)
+	if _, err := catalog.ReplaceSource(replacementDigest, appended); !errors.Is(err, projectidentity.ErrAssociationRequired) {
+		t.Fatalf("replacement API accepted monotonic append: %v", err)
+	}
+
+	interior := truncated
+	interior.FrozenBoundary.SourceHash = strings.Repeat("c", 64)
+	if _, err := catalog.ReplaceSource(originalDigest, interior); !errors.Is(err, ErrCASConflict) {
+		t.Fatalf("stale replacement error=%v want ErrCASConflict", err)
+	}
+	still, _, err := catalog.GetSource("codex", "s1")
+	if err != nil || !reflect.DeepEqual(still, truncated) {
+		t.Fatalf("stale replacement mutated catalog: %+v err=%v", still, err)
+	}
+}
+
+func TestCatalogReplaceSourceConcurrentStaleCallersHaveOneWinner(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	original := sourceRecord("s1", []string{"project-a"}, 10)
+	expected, err := catalog.UpsertSource(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for _, hash := range []string{"b", "c"} {
+		replacement := original
+		replacement.FrozenBoundary.SourceHash = strings.Repeat(hash, 64)
+		go func() {
+			_, err := catalog.ReplaceSource(expected, replacement)
+			results <- err
+		}()
+	}
+	winners, stale := 0, 0
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, ErrCASConflict):
+			stale++
+		default:
+			t.Fatalf("unexpected concurrent replacement error: %v", err)
+		}
+	}
+	if winners != 1 || stale != 1 {
+		t.Fatalf("replacement winners=%d stale=%d", winners, stale)
+	}
+}
+
 func TestCatalogRejectsRedirectedNamespaceWithoutWritingOutside(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("ordinary symlink setup requires Windows privileges; pathguard has Windows reparse tests")

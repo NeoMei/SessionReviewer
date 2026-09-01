@@ -35,6 +35,8 @@ const (
 	catalogLockTimeout               = 5 * time.Second
 )
 
+var ErrCASConflict = errors.New("source catalog compare-and-swap conflict")
+
 type Catalog struct {
 	mu                 sync.RWMutex
 	data               *pathguard.Directory
@@ -138,6 +140,75 @@ func (c *Catalog) UpsertSource(record memory.SourceRecord) (string, error) {
 		stored, present, storedBody, err := c.readLeaf(leaf)
 		if err != nil || !present || !bytes.Equal(storedBody, newBody) || !reflect.DeepEqual(stored, merged) {
 			return errors.Join(errors.New("source catalog canonical re-read failed"), err)
+		}
+		return nil
+	})
+	return digest, err
+}
+
+// ReplaceSource replaces one authenticated logical source only when the live
+// record still has expectedDigest. It is reserved for truncation or interior
+// mutation; monotonic appends must continue through UpsertSource.
+func (c *Catalog) ReplaceSource(expectedDigest string, record memory.SourceRecord) (string, error) {
+	record = cloneRecord(record)
+	sort.Strings(record.ProjectIDs)
+	record.ProjectIDs = distinct(record.ProjectIDs)
+	if err := memory.ValidateSourceRecord(record); err != nil {
+		return "", fmt.Errorf("invalid source replacement: %w", err)
+	}
+	var digest string
+	err := c.withWriteLock(func() error {
+		leaf := sourceLeaf(record.Provider, record.SessionID)
+		existing, found, body, err := c.readLeaf(leaf)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrCASConflict
+		}
+		currentDigest, err := memory.Digest(existing)
+		if err != nil {
+			return err
+		}
+		if currentDigest != expectedDigest {
+			return ErrCASConflict
+		}
+		if existing.Provider != record.Provider || existing.SessionID != record.SessionID ||
+			existing.SourceIdentity != record.SourceIdentity || existing.StartedAt != record.StartedAt {
+			return projectidentity.ErrAssociationRequired
+		}
+		existingLocation, replacementLocation := existing.FrozenBoundary.Location.JSONL, record.FrozenBoundary.Location.JSONL
+		if existingLocation == nil || replacementLocation == nil || replacementLocation.Line > existingLocation.Line || replacementLocation.ByteOffset > existingLocation.ByteOffset {
+			return projectidentity.ErrAssociationRequired
+		}
+		newBody, err := marshalCanonical(record)
+		if err != nil {
+			return err
+		}
+		digest, err = memory.Digest(record)
+		if err != nil {
+			return err
+		}
+		if bytes.Equal(body, newBody) {
+			return nil
+		}
+		checkpoint := func() error { return c.verifyLiveRoot() }
+		rollbackCheckpoint := func() error {
+			if err := c.verifyLiveRoot(); err != nil {
+				return err
+			}
+			_, present, current, err := c.readLeaf(leaf)
+			if err != nil || !present || !bytes.Equal(current, body) {
+				return errors.Join(ErrCASConflict, err)
+			}
+			return nil
+		}
+		if err := atomicfile.WriteRootFileCheckedWithRollbackCheckpoint(c.root.Root, leaf, newBody, privateFileMode, checkpoint, rollbackCheckpoint); err != nil {
+			return err
+		}
+		stored, present, storedBody, err := c.readLeaf(leaf)
+		if err != nil || !present || !bytes.Equal(storedBody, newBody) || !reflect.DeepEqual(stored, record) {
+			return errors.Join(errors.New("source catalog replacement canonical re-read failed"), err)
 		}
 		return nil
 	})

@@ -27,11 +27,12 @@ import (
 )
 
 const (
-	privateDirectoryMode fs.FileMode = 0o700
-	privateFileMode      fs.FileMode = 0o600
-	maxObjectBytes                   = 64 << 20
-	maxManifestBytes                 = 16 << 20
-	storeLockTimeout                 = 5 * time.Second
+	privateDirectoryMode       fs.FileMode = 0o700
+	privateFileMode            fs.FileMode = 0o600
+	maxObjectBytes                         = 64 << 20
+	maxManifestBytes                       = 16 << 20
+	storeLockTimeout                       = 5 * time.Second
+	preparedAdvanceJournalLeaf             = "prepared-advance-v1.json"
 
 	// WriteRootFileChecked has three checkpoints when publishing a previously
 	// absent destination: before temporary creation, before publication, and
@@ -63,6 +64,13 @@ type Prepared struct {
 	GenerationID      string `json:"generation_id"`
 	ManifestDigest    string `json:"manifest_digest"`
 	ProjectViewDigest string `json:"project_view_digest"`
+}
+
+type preparedAdvanceJournal struct {
+	Version   int      `json:"version"`
+	ProjectID string   `json:"project_id"`
+	Expected  Prepared `json:"expected"`
+	Successor Prepared `json:"successor"`
 }
 
 // Store owns pinned handles to an absolute SessionReviewer data root and one
@@ -131,9 +139,13 @@ func Open(dataRoot, projectID string) (*Store, error) {
 		return nil, errors.New("project memory root escaped SessionReviewer data root")
 	}
 
+	store := &Store{data: data, memory: memoryDirectory, projectID: projectID}
+	if err := store.withStoreLock(store.reconcilePreparedAdvanceUnlocked); err != nil {
+		return nil, fmt.Errorf("recover prepared generation: %w", err)
+	}
 	closeData = false
 	closeMemory = false
-	return &Store{data: data, memory: memoryDirectory, projectID: projectID}, nil
+	return store, nil
 }
 
 func (s *Store) PutObservationChunk(records []memory.ObservationRevision) (string, error) {
@@ -324,6 +336,11 @@ func (s *Store) AdvancePrepared(expected Prepared, successor memory.GenerationMa
 		if err := s.writeGenerationUnlocked(successor, artifacts); err != nil {
 			return err
 		}
+		journal := preparedAdvanceJournal{Version: 1, ProjectID: s.projectID, Expected: expected, Successor: artifacts.prepared}
+		journalBody, err := marshalCanonical(journal)
+		if err != nil {
+			return err
+		}
 
 		root, err := s.reopenMemory()
 		if err != nil {
@@ -336,22 +353,34 @@ func (s *Store) AdvancePrepared(expected Prepared, successor memory.GenerationMa
 		if err := requirePreparedPointerBytes(root, expectedBody); err != nil {
 			return err
 		}
+		if err := atomicfile.WriteRootFileCreateIfAbsent(root.Root, preparedAdvanceJournalLeaf, journalBody, privateFileMode, nil); err != nil {
+			return fmt.Errorf("write prepared advance journal: %w", err)
+		}
+		if err := s.runManifestCheckpoint(); err != nil {
+			return err
+		}
 		checkpoint := func() error {
 			body, found, readErr := root.ReadRegular("manifest.json", maxManifestBytes)
 			if readErr != nil || !found || (!bytes.Equal(body, expectedBody) && !bytes.Equal(body, artifacts.pointerBody)) {
 				return errors.Join(ErrPreparedGeneration, readErr)
 			}
-			if s.manifestCheckpoint != nil {
-				return s.manifestCheckpoint()
-			}
-			return nil
+			return s.runManifestCheckpoint()
 		}
 		if err := atomicfile.WriteRootFileChecked(root.Root, "manifest.json", artifacts.pointerBody, privateFileMode, checkpoint); err != nil {
 			return fmt.Errorf("advance prepared generation: %w", err)
 		}
-		loaded, loadedManifest, err := s.loadPreparedUnlocked()
+		if err := s.runManifestCheckpoint(); err != nil {
+			return err
+		}
+		loaded, loadedManifest, err := s.loadPreparedRawUnlocked()
 		if err != nil || loaded != artifacts.prepared || !equalManifest(loadedManifest, successor) {
 			return errors.Join(errors.New("advanced generation canonical re-read failed"), err)
+		}
+		if err := atomicfile.RemoveRoot(root.Root, preparedAdvanceJournalLeaf); err != nil {
+			return fmt.Errorf("remove prepared advance journal: %w", err)
+		}
+		if err := s.runManifestCheckpoint(); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -359,6 +388,13 @@ func (s *Store) AdvancePrepared(expected Prepared, successor memory.GenerationMa
 		return Prepared{}, err
 	}
 	return artifacts.prepared, nil
+}
+
+func (s *Store) runManifestCheckpoint() error {
+	if s.manifestCheckpoint != nil {
+		return s.manifestCheckpoint()
+	}
+	return nil
 }
 
 type preparationArtifacts struct {
@@ -457,15 +493,24 @@ func requirePreparedPointerBytes(root *pathguard.Directory, expected []byte) err
 // LoadPrepared returns both the durable prepared pointer and its fully
 // validated immutable generation manifest.
 func (s *Store) LoadPrepared() (Prepared, memory.GenerationManifest, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if err := s.requireOpenLocked(); err != nil {
-		return Prepared{}, memory.GenerationManifest{}, err
-	}
-	return s.loadPreparedUnlocked()
+	var prepared Prepared
+	var manifest memory.GenerationManifest
+	err := s.withStoreLock(func() error {
+		var err error
+		prepared, manifest, err = s.loadPreparedUnlocked()
+		return err
+	})
+	return prepared, manifest, err
 }
 
 func (s *Store) loadPreparedUnlocked() (Prepared, memory.GenerationManifest, error) {
+	if err := s.reconcilePreparedAdvanceUnlocked(); err != nil {
+		return Prepared{}, memory.GenerationManifest{}, err
+	}
+	return s.loadPreparedRawUnlocked()
+}
+
+func (s *Store) loadPreparedRawUnlocked() (Prepared, memory.GenerationManifest, error) {
 	root, err := s.reopenMemory()
 	if err != nil {
 		return Prepared{}, memory.GenerationManifest{}, err
@@ -1022,6 +1067,123 @@ func validatePrepared(value Prepared) error {
 		return errors.New("prepared pointer is invalid")
 	}
 	return nil
+}
+
+func (s *Store) reconcilePreparedAdvanceUnlocked() error {
+	root, err := s.reopenMemory()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	journalBody, journalFound, err := root.ReadRegular(preparedAdvanceJournalLeaf, maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("read prepared advance journal: %w", err)
+	}
+	backupLeaf := atomicfile.BackupPath("manifest.json")
+	backupBody, backupFound, err := root.ReadRegular(backupLeaf, maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("read prepared rollback backup: %w", err)
+	}
+	manifestBody, manifestFound, err := root.ReadRegular("manifest.json", maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("read prepared pointer during recovery: %w", err)
+	}
+	if !journalFound {
+		if !backupFound {
+			return nil
+		}
+		if !manifestFound || !bytes.Equal(manifestBody, backupBody) {
+			return errors.New("prepared manifest rollback backup requires journal recovery")
+		}
+		if err := requirePrivateRegular(root.Root, "manifest.json"); err != nil {
+			return err
+		}
+		if err := requirePrivateRegular(root.Root, backupLeaf); err != nil {
+			return err
+		}
+		if err := atomicfile.RemoveRoot(root.Root, backupLeaf); err != nil {
+			return fmt.Errorf("remove stale prepared rollback alias: %w", err)
+		}
+		return nil
+	}
+	if err := requirePrivateRegular(root.Root, preparedAdvanceJournalLeaf); err != nil {
+		return err
+	}
+	var journal preparedAdvanceJournal
+	if err := decodeCanonicalJSON(journalBody, &journal); err != nil {
+		return fmt.Errorf("decode prepared advance journal: %w", err)
+	}
+	if journal.Version != 1 || journal.ProjectID != s.projectID || journal.Expected == journal.Successor {
+		return errors.New("prepared advance journal identity is invalid")
+	}
+	if _, err := s.validatePreparedTarget(journal.Expected); err != nil {
+		return fmt.Errorf("validate expected prepared generation: %w", err)
+	}
+	if _, err := s.validatePreparedTarget(journal.Successor); err != nil {
+		return fmt.Errorf("validate successor prepared generation: %w", err)
+	}
+	expectedBody, err := marshalCanonical(journal.Expected)
+	if err != nil {
+		return err
+	}
+	successorBody, err := marshalCanonical(journal.Successor)
+	if err != nil {
+		return err
+	}
+	if manifestFound {
+		if err := requirePrivateRegular(root.Root, "manifest.json"); err != nil {
+			return err
+		}
+	}
+	selectedBody := manifestBody
+	if !manifestFound {
+		if !backupFound || !bytes.Equal(backupBody, expectedBody) {
+			return errors.New("prepared advance lost both pointer and expected rollback state")
+		}
+		selectedBody = expectedBody
+		if err := atomicfile.WriteRootFile(root.Root, "manifest.json", selectedBody, privateFileMode); err != nil {
+			return fmt.Errorf("restore expected prepared pointer: %w", err)
+		}
+	} else if !bytes.Equal(manifestBody, expectedBody) && !bytes.Equal(manifestBody, successorBody) {
+		return errors.New("prepared pointer matches neither journal generation")
+	}
+	if backupFound {
+		if !bytes.Equal(backupBody, expectedBody) {
+			return errors.New("prepared rollback backup does not match journal expected pointer")
+		}
+		if err := requirePrivateRegular(root.Root, backupLeaf); err != nil {
+			return err
+		}
+		if err := atomicfile.RemoveRoot(root.Root, backupLeaf); err != nil {
+			return fmt.Errorf("remove recovered prepared rollback backup: %w", err)
+		}
+	}
+	verified, found, err := root.ReadRegular("manifest.json", maxManifestBytes)
+	if err != nil || !found || !bytes.Equal(verified, selectedBody) {
+		return errors.Join(errors.New("recovered prepared pointer verification failed"), err)
+	}
+	if err := atomicfile.RemoveRoot(root.Root, preparedAdvanceJournalLeaf); err != nil {
+		return fmt.Errorf("remove recovered prepared advance journal: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) validatePreparedTarget(prepared Prepared) (memory.GenerationManifest, error) {
+	if err := validatePrepared(prepared); err != nil {
+		return memory.GenerationManifest{}, err
+	}
+	manifest, err := s.loadGeneration(prepared.GenerationID)
+	if err != nil {
+		return memory.GenerationManifest{}, err
+	}
+	digest, err := memory.Digest(manifest)
+	if err != nil || digest != prepared.ManifestDigest || manifest.ProjectViewDigest != prepared.ProjectViewDigest {
+		return memory.GenerationManifest{}, errors.Join(errors.New("prepared target does not match immutable generation"), err)
+	}
+	if err := s.reconcileGenerationGraph(manifest); err != nil {
+		return memory.GenerationManifest{}, err
+	}
+	return manifest, nil
 }
 
 func rejectManifestBackup(root *pathguard.Directory) error {

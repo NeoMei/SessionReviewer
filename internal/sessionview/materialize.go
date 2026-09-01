@@ -54,7 +54,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 	diagnostics := sortedUniqueDiagnostics(input.Diagnostics)
 	sourceRecordDigest := input.SourceRecordDigest
 	usageRecordDigest := input.UsageRecordDigest
-	if input.TerminalState == memory.Missing && input.Previous != nil {
+	if input.Source.Availability == memory.SourceUnavailable && input.Previous != nil {
 		activeRevisionIDs = append([]string(nil), input.Previous.ActiveRevisionIDs...)
 		observationSummaries = cloneObservationSummaries(input.Previous.ObservationSummaries)
 		chunkDigests = append([]string(nil), input.Previous.ObservationChunkDigests...)
@@ -140,7 +140,7 @@ func validateInput(input Input) error {
 		return errors.New("invalid usage record digest")
 	}
 	if input.UsageRecordDigest != input.SourceRecordDigest &&
-		!(input.TerminalState == memory.Missing && input.Previous != nil && input.UsageRecordDigest == input.Previous.UsageRecordDigest) {
+		!(input.Source.Availability == memory.SourceUnavailable && input.Previous != nil && input.UsageRecordDigest == input.Previous.UsageRecordDigest) {
 		return errors.New("usage record digest is not authenticated by source catalog record")
 	}
 	if !containsString(input.Source.ProjectIDs, input.ProjectID) {
@@ -152,11 +152,14 @@ func validateInput(input Input) error {
 	if input.TerminalState == memory.Missing && input.Source.Availability != memory.SourceUnavailable {
 		return errors.New("missing source must be unavailable")
 	}
-	if input.TerminalState == memory.Missing && (len(input.Observations) != 0 || len(input.ObservationChunkDigests) != 0) {
-		return errors.New("missing source cannot claim fresh observations")
+	if (input.TerminalState == memory.Indexed || input.TerminalState == memory.Unsupported) && input.Source.Availability != memory.SourceAvailable {
+		return errors.New("indexed and unsupported sources must be available")
 	}
-	if input.Source.Availability == memory.SourceUnavailable && input.TerminalState != memory.Missing {
-		return errors.New("unavailable source must use missing terminal state")
+	if input.Source.Availability == memory.SourceUnavailable && input.TerminalState != memory.Missing && input.TerminalState != memory.Unreadable && input.TerminalState != memory.Ambiguous {
+		return errors.New("unavailable source has an incompatible terminal state")
+	}
+	if input.Source.Availability == memory.SourceUnavailable && (len(input.Observations) != 0 || len(input.ObservationChunkDigests) != 0) {
+		return errors.New("unavailable source cannot claim fresh observations")
 	}
 	if len(input.Observations) > 65536 || len(input.ObservationChunkDigests) > 65536 {
 		return errors.New("too many SessionView dependencies")

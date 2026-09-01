@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -765,6 +767,87 @@ func TestAdvancePreparedCrashAtEveryManifestCheckpointLeavesReadableGeneration(t
 			}
 		})
 	}
+}
+
+func TestAdvancePreparedRecoversEveryRealProcessCrashCheckpoint(t *testing.T) {
+	if runtime.GOOS == "js" {
+		t.Skip("subprocess crash helper is unavailable")
+	}
+	for crashAt := 1; crashAt <= 7; crashAt++ {
+		t.Run(fmt.Sprintf("checkpoint-%d", crashAt), func(t *testing.T) {
+			dataRoot, store, fixture := preparedStore(t)
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			successorID := fmt.Sprintf("generation-process-%d", crashAt)
+			command := exec.Command(os.Args[0], "-test.run=^TestAdvancePreparedProcessCrashHelper$")
+			command.Env = append(os.Environ(),
+				"SR_ADVANCE_CRASH_HELPER=1",
+				"SR_ADVANCE_DATA_ROOT="+dataRoot,
+				"SR_ADVANCE_CRASH_AT="+strconv.Itoa(crashAt),
+				"SR_ADVANCE_SUCCESSOR="+successorID,
+			)
+			err := command.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 91 {
+				t.Fatalf("checkpoint %d helper exit=%v", crashAt, err)
+			}
+
+			restarted, err := Open(dataRoot, testProjectID)
+			if err != nil {
+				t.Fatalf("checkpoint %d reopen: %v", crashAt, err)
+			}
+			defer restarted.Close()
+			prepared, manifest, err := restarted.LoadPrepared()
+			if err != nil || prepared.GenerationID != manifest.GenerationID ||
+				(manifest.GenerationID != fixture.manifest.GenerationID && manifest.GenerationID != successorID) {
+				t.Fatalf("checkpoint %d recovered torn generation: prepared=%#v manifest=%#v err=%v", crashAt, prepared, manifest, err)
+			}
+			memoryRoot := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1")
+			for _, stale := range []string{"prepared-advance-v1.json", atomicfile.BackupPath("manifest.json")} {
+				if _, err := os.Lstat(filepath.Join(memoryRoot, stale)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("checkpoint %d left stale recovery state %s: %v", crashAt, stale, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(memoryRoot, "generations", fixture.manifest.GenerationID+".json")); err != nil {
+				t.Fatalf("checkpoint %d lost old immutable generation: %v", crashAt, err)
+			}
+		})
+	}
+}
+
+func TestAdvancePreparedProcessCrashHelper(t *testing.T) {
+	if os.Getenv("SR_ADVANCE_CRASH_HELPER") != "1" {
+		return
+	}
+	dataRoot := os.Getenv("SR_ADVANCE_DATA_ROOT")
+	crashAt, err := strconv.Atoi(os.Getenv("SR_ADVANCE_CRASH_AT"))
+	if err != nil {
+		os.Exit(92)
+	}
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		os.Exit(93)
+	}
+	expected, baseline, err := store.LoadPrepared()
+	if err != nil {
+		os.Exit(94)
+	}
+	successor := baseline
+	successor.GenerationID = os.Getenv("SR_ADVANCE_SUCCESSOR")
+	successor.CreatedAt = "2026-08-31T10:02:00Z"
+	calls := 0
+	store.manifestCheckpoint = func() error {
+		calls++
+		if calls == crashAt {
+			os.Exit(91)
+		}
+		return nil
+	}
+	if _, err := store.AdvancePrepared(expected, successor); err != nil {
+		os.Exit(95)
+	}
+	os.Exit(0)
 }
 
 var errInjectedCrash = errors.New("injected crash")

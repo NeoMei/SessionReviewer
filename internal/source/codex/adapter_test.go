@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -400,6 +402,90 @@ func TestDecodeOlderFrozenBoundaryAfterAppendReadsOnlyAuthenticatedPrefix(t *tes
 		if observation.Key.Subject == "appended-must-not-decode" || observation.Key.Sequence > boundary.Frozen.Location.JSONL.Line {
 			t.Fatalf("old boundary decoded appended suffix: %+v", observation)
 		}
+	}
+}
+
+func TestDecodeClassifiesCatalogAppendTruncationAndInteriorMutation(t *testing.T) {
+	t.Run("append", func(t *testing.T) {
+		fixture := newAdapterFixture(t)
+		path := fixture.installFixture(t, "session-project-a.jsonl")
+		adapter := fixture.adapter(t, "v1")
+		first := discoverCandidate(t, adapter, "session-project-a")
+		boundary, err := adapter.Freeze(context.Background(), first)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decodeBoundary(t, adapter, boundary)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := file.WriteString("{\"timestamp\":\"2026-08-31T10:00:11Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			t.Fatal(errors.Join(writeErr, closeErr))
+		}
+		boundary, err = adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, report := decodeBoundary(t, adapter, boundary)
+		if report.BoundaryRelation != source.BoundaryAppend {
+			t.Fatalf("append relation=%q", report.BoundaryRelation)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{name: "truncation", mutate: func(t *testing.T, path string) {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			lines := strings.SplitAfter(string(body), "\n")
+			if err := os.WriteFile(path, []byte(strings.Join(lines[:10], "")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "same-coordinate-interior", mutate: func(t *testing.T, path string) {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := bytes.Replace(body, []byte("## main...origin/main"), []byte("## devx...origin/devx"), 1)
+			if len(changed) != len(body) || bytes.Equal(changed, body) {
+				t.Fatal("interior fixture mutation did not preserve coordinates")
+			}
+			if err := os.WriteFile(path, changed, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newAdapterFixture(t)
+			path := fixture.installFixture(t, "session-project-a.jsonl")
+			adapter := fixture.adapter(t, "v1")
+			boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decodeBoundary(t, adapter, boundary)
+			test.mutate(t, path)
+			boundary, err = adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, report := decodeBoundary(t, adapter, boundary)
+			if report.BoundaryRelation != source.BoundaryReplacement {
+				t.Fatalf("mutation relation=%q", report.BoundaryRelation)
+			}
+			stored, found, err := fixture.catalog.GetSource("codex", "session-project-a")
+			if err != nil || !found || !reflect.DeepEqual(stored.FrozenBoundary, boundary.Frozen) {
+				t.Fatalf("replacement catalog boundary=%+v found=%v err=%v want=%+v", stored.FrozenBoundary, found, err, boundary.Frozen)
+			}
+		})
 	}
 }
 

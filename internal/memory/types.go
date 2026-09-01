@@ -363,7 +363,7 @@ func ValidateSessionView(value SessionView) error {
 	if !safeIDPattern.MatchString(value.ProjectID) || !validTerminalState(value.TerminalState) || !validSourceAvailability(value.SourceAvailability) {
 		return errors.New("invalid SessionView identity or state")
 	}
-	if (value.TerminalState == Missing) != (value.SourceAvailability == SourceUnavailable) {
+	if !validTerminalAvailability(value.TerminalState, value.SourceAvailability) {
 		return errors.New("SessionView terminal state and source availability disagree")
 	}
 	if err := validateTimeRange(value.StartedAt, value.EndedAt); err != nil {
@@ -952,4 +952,14 @@ func validTerminalState(value TerminalState) bool {
 
 func validSourceAvailability(value SourceAvailability) bool {
 	return value == SourceAvailable || value == SourceUnavailable
+}
+
+func validTerminalAvailability(state TerminalState, availability SourceAvailability) bool {
+	if state == Missing {
+		return availability == SourceUnavailable
+	}
+	if state == Indexed || state == Unsupported {
+		return availability == SourceAvailable
+	}
+	return state == Unreadable || state == Ambiguous
 }

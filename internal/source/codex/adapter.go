@@ -36,6 +36,7 @@ const (
 )
 
 var (
+	errFrozenSourceChanged = errors.New("frozen Codex source changed")
 	adapterIdentityPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 	lowercaseSHA256        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
@@ -329,10 +330,16 @@ func (a *adapter) Read(ctx context.Context, ref memory.SourceRef, limit int64) (
 func (a *adapter) openFrozenPrefix(ctx context.Context, frozen frozenSource) ([]*os.File, error) {
 	files, err := session.OpenCandidates(a.sessionsRoot, frozen.candidate)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+			return nil, source.NewLocalError(source.LocalUnavailable, err)
+		}
 		return nil, err
 	}
 	if err := a.verifyExactFrozen(ctx, files, frozen); err != nil {
 		closeFiles(files)
+		if errors.Is(err, errFrozenSourceChanged) {
+			return nil, source.NewLocalError(source.LocalChanged, err)
+		}
 		return nil, err
 	}
 	return files, nil
@@ -340,7 +347,7 @@ func (a *adapter) openFrozenPrefix(ctx context.Context, frozen frozenSource) ([]
 
 func (a *adapter) verifyExactFrozen(ctx context.Context, files []*os.File, frozen frozenSource) error {
 	if len(files) != len(frozen.segments) {
-		return errors.New("frozen Codex segment count changed")
+		return fmt.Errorf("%w: segment count", errFrozenSourceChanged)
 	}
 	overall := sha256.New()
 	for index, file := range files {
@@ -349,8 +356,11 @@ func (a *adapter) verifyExactFrozen(ctx context.Context, files []*os.File, froze
 		}
 		segment := frozen.segments[index]
 		info, err := file.Stat()
-		if err != nil || info.Size() < segment.size {
-			return errors.Join(errors.New("frozen Codex segment was truncated"), err)
+		if err != nil {
+			return err
+		}
+		if info.Size() < segment.size {
+			return fmt.Errorf("%w: segment was truncated", errFrozenSourceChanged)
 		}
 		identity, err := pathguard.PhysicalFileIdentity(file)
 		if err != nil || identity != segment.identity {
@@ -361,14 +371,14 @@ func (a *adapter) verifyExactFrozen(ctx context.Context, files []*os.File, froze
 			return err
 		}
 		if hex.EncodeToString(segmentHash.Sum(nil)) != segment.hash {
-			return errors.New("frozen Codex segment hash changed")
+			return fmt.Errorf("%w: segment hash", errFrozenSourceChanged)
 		}
 		if segment.needsNewline {
 			_, _ = overall.Write([]byte{'\n'})
 		}
 	}
 	if hex.EncodeToString(overall.Sum(nil)) != frozen.boundary.Frozen.SourceHash {
-		return errors.New("frozen Codex logical source hash changed")
+		return fmt.Errorf("%w: logical hash", errFrozenSourceChanged)
 	}
 	return nil
 }
