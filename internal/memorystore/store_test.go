@@ -223,6 +223,29 @@ func TestReconcileGenerationMatchesPermutedSessionLineagesByIdentity(t *testing.
 	}
 }
 
+func TestStoredProjectViewRejectsCoverageForgeryAtOriginalAddress(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-coverage-forgery")
+	original := fixture.project
+	forged := original
+	forged.AggregationCoverage.EventReferences.Dropped--
+	forged.AggregationCoverage.EventReferences.Collapsed++
+	forged.AggregationCoverage.EventReferences.Truncated = false
+	forged.Digest = original.Digest
+	body, err := marshalCanonical(forged)
+	if err != nil {
+		t.Fatalf("encode forged ProjectView: %v", err)
+	}
+	if err := validateObjectBytes(ObjectProjectView, original.Digest, body, testProjectID); err == nil {
+		t.Fatal("store accepted arithmetic-consistent coverage forgery at the original object address")
+	}
+}
+
 func buildPermutedLineageManifest(t *testing.T, store *Store, fixture storedFixture) memory.GenerationManifest {
 	t.Helper()
 	secondSession, secondLineage := addStoredSessionFixture(t, store, fixture, "session-2", "source-2")

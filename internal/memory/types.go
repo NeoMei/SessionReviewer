@@ -270,9 +270,15 @@ type AssociatedUsage struct {
 
 // AggregationChannelCoverage describes one bounded ProjectView aggregation
 // channel without copying the authoritative per-Session facts. Seen counts
-// candidate inputs, Emitted counts durable selections, Collapsed counts inputs
-// folded into an existing selection, Dropped counts inputs omitted at a bound,
-// and Evicted counts bounded candidates displaced by a later candidate.
+// candidates that received a selection decision, Emitted counts durable
+// selections, Collapsed counts inputs folded into an existing selection,
+// Dropped counts inputs omitted at a bound, and Evicted counts bounded
+// candidates displaced by a later candidate. The cross-Session recovery
+// channel counts decided candidates only: failures rejected at the pending
+// bound and failures later matched by a cross-Session success increment Seen,
+// while a failure admitted to the pending set but never matched does not,
+// because no selection decision was made for it; its authoritative facts
+// remain in the source SessionView and SessionLineage.
 type AggregationChannelCoverage struct {
 	Seen      int  `json:"seen"`
 	Emitted   int  `json:"emitted"`

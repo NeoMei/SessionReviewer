@@ -414,6 +414,30 @@ func TestReduceDoesNotRecoverAgainAfterSessionViewAlreadyConsumedFailure(t *test
 	}
 }
 
+func TestCrossSessionRecoveryCoverageCountsDecisionsNotUnmatchedPending(t *testing.T) {
+	unmatchedFailure := viewFixture(t, "s1", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "verification", outcome: "failed", fields: map[string]string{"component": "package"}},
+	})
+	quietSuccess := viewFixture(t, "s2", memory.Indexed, "2026-08-02T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "other", occurredAt: "2026-08-02T00:00:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"component": "other-package"}},
+	})
+	unmatched := reduceFixture(t, []memory.SessionView{unmatchedFailure, quietSuccess}, "2026-09-01T00:00:00Z", nil)
+	if unmatched.AggregationCoverage.CrossSessionRecoveries != (memory.AggregationChannelCoverage{}) {
+		t.Fatalf("unmatched pending failure consumed cross-Session coverage: %+v", unmatched.AggregationCoverage.CrossSessionRecoveries)
+	}
+
+	matchedFailure := viewFixture(t, "s1", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "verification", outcome: "failed", fields: map[string]string{"component": "package"}},
+	})
+	matchedSuccess := viewFixture(t, "s2", memory.Indexed, "2026-08-02T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "success", occurredAt: "2026-08-02T00:00:00Z", operation: "verification", outcome: "passed", fields: map[string]string{"component": "package"}},
+	})
+	matched := reduceFixture(t, []memory.SessionView{matchedFailure, matchedSuccess}, "2026-09-01T00:00:00Z", nil)
+	if want := (memory.AggregationChannelCoverage{Seen: 1, Emitted: 1}); matched.AggregationCoverage.CrossSessionRecoveries != want {
+		t.Fatalf("matched cross-Session recovery coverage=%+v want %+v", matched.AggregationCoverage.CrossSessionRecoveries, want)
+	}
+}
+
 func TestReduceRecomputesOutputInsteadOfTrustingForgedPreviousDependencyDigest(t *testing.T) {
 	s1 := viewFixture(t, "s1", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{{sequence: 1, kind: "file", subject: "a", occurredAt: "2026-08-01T00:00:00Z", fields: map[string]string{"path": "a.go"}}})
 	previous := reduceFixture(t, []memory.SessionView{s1}, "2026-09-01T00:00:00Z", nil)

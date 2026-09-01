@@ -156,23 +156,24 @@ type ProjectProbeStateIdentity struct {
 }
 
 type ProjectViewIdentity struct {
-	SchemaVersion           int                     `json:"schema_version"`
-	ProjectID               string                  `json:"project_id"`
-	Generation              int                     `json:"generation"`
-	StartedAt               string                  `json:"started_at"`
-	EndedAt                 string                  `json:"ended_at"`
-	SourceSessions          int                     `json:"source_sessions"`
-	TerminalCounts          TerminalCounts          `json:"terminal_counts"`
-	SessionViewDependencies []SessionViewDependency `json:"session_view_dependencies"`
-	ObservationRevisionIDs  []string                `json:"observation_revision_ids"`
-	ProbeStateDigest        string                  `json:"probe_state_digest"`
-	LiveState               StateSnapshot           `json:"live_state"`
-	WitnessedState          []DerivedRecord         `json:"witnessed_state"`
-	DerivedRecords          []DerivedRecord         `json:"derived_records"`
-	AssociatedUsage         []AssociatedUsage       `json:"associated_usage"`
-	PreviousViewDigest      string                  `json:"previous_view_digest,omitempty"`
-	DependencyDigest        string                  `json:"dependency_digest"`
-	ReducerVersion          string                  `json:"reducer_version"`
+	SchemaVersion           int                        `json:"schema_version"`
+	ProjectID               string                     `json:"project_id"`
+	Generation              int                        `json:"generation"`
+	StartedAt               string                     `json:"started_at"`
+	EndedAt                 string                     `json:"ended_at"`
+	SourceSessions          int                        `json:"source_sessions"`
+	TerminalCounts          TerminalCounts             `json:"terminal_counts"`
+	SessionViewDependencies []SessionViewDependency    `json:"session_view_dependencies"`
+	ObservationRevisionIDs  []string                   `json:"observation_revision_ids"`
+	AggregationCoverage     ProjectAggregationCoverage `json:"aggregation_coverage"`
+	ProbeStateDigest        string                     `json:"probe_state_digest"`
+	LiveState               StateSnapshot              `json:"live_state"`
+	WitnessedState          []DerivedRecord            `json:"witnessed_state"`
+	DerivedRecords          []DerivedRecord            `json:"derived_records"`
+	AssociatedUsage         []AssociatedUsage          `json:"associated_usage"`
+	PreviousViewDigest      string                     `json:"previous_view_digest,omitempty"`
+	DependencyDigest        string                     `json:"dependency_digest"`
+	ReducerVersion          string                     `json:"reducer_version"`
 }
 
 func SessionViewDigest(value SessionView) (string, error) {
@@ -255,6 +256,7 @@ func ProjectViewDigestContext(ctx context.Context, value ProjectView) (string, e
 		TerminalCounts:          value.TerminalCounts,
 		SessionViewDependencies: value.SessionViewDependencies,
 		ObservationRevisionIDs:  value.ObservationRevisionIDs,
+		AggregationCoverage:     value.AggregationCoverage,
 		ProbeStateDigest:        value.ProbeStateDigest,
 		LiveState:               value.LiveState,
 		WitnessedState:          value.WitnessedState,

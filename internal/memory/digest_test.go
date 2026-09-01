@@ -256,6 +256,48 @@ func TestTypedSelfDigestsExcludeStoredDigestAndNormalizeNilEmptySets(t *testing.
 	}
 }
 
+func TestProjectViewDigestBindsArithmeticConsistentCoverageForgery(t *testing.T) {
+	base := validProjectView()
+	if err := ValidateProjectView(base); err != nil {
+		t.Fatalf("base fixture must be valid: %v", err)
+	}
+	originalDigest := base.Digest
+	tests := []struct {
+		name   string
+		mutate func(*ProjectView)
+	}{
+		{
+			name: "dropped reclassified as collapsed clears truncation",
+			mutate: func(value *ProjectView) {
+				value.AggregationCoverage.EventReferences.Dropped--
+				value.AggregationCoverage.EventReferences.Collapsed++
+				value.AggregationCoverage.EventReferences.Truncated = false
+			},
+		},
+		{
+			name: "seen and dropped inflated together",
+			mutate: func(value *ProjectView) {
+				value.AggregationCoverage.ObservationSummariesSeen++
+				value.AggregationCoverage.EventReferences.Seen++
+				value.AggregationCoverage.EventReferences.Dropped++
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			forged := validProjectView()
+			test.mutate(&forged)
+			forged.Digest = originalDigest
+			if got, err := ProjectViewDigest(forged); err != nil || got == originalDigest {
+				t.Fatalf("arithmetic-consistent coverage forgery kept the canonical identity digest: %q %v", got, err)
+			}
+			if err := ValidateProjectView(forged); err == nil {
+				t.Fatal("forged ProjectView stayed valid at its original content address")
+			}
+		})
+	}
+}
+
 func TestValidatorsRejectTamperedCanonicalSelfDigests(t *testing.T) {
 	t.Run("SessionView", func(t *testing.T) {
 		value := validSessionView()
