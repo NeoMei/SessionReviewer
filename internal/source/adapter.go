@@ -28,11 +28,21 @@ type Adapter interface {
 // Candidate identifies one logical provider Session. Handle is opaque outside
 // the adapter that returned it.
 type Candidate struct {
-	Provider   string
-	SessionID  string
-	StartedAt  string
-	InitialCWD string
-	Handle     string
+	Provider        string
+	SessionID       string
+	StartedAt       string
+	InitialCWD      string
+	Handle          string
+	CatalogBaseline CatalogBaselineSnapshot
+}
+
+// CatalogBaselineSnapshot is content-free and bound to the adapter's opaque
+// Handle. PriorSource is a defensive copy captured during Discover; nil means
+// the source was absent and ExpectedDigest must be empty.
+type CatalogBaselineSnapshot struct {
+	Handle         string
+	ExpectedDigest string
+	PriorSource    *memory.SourceRecord
 }
 
 type Discovery struct {

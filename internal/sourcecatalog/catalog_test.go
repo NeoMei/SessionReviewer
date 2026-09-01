@@ -206,7 +206,7 @@ func TestOpenRecoversBoundedBatchJournalLargerThanSingleRecordLimit(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		journal.Entries = append(journal.Entries, batchJournalEntry{Leaf: sourceLeaf(record.Provider, record.SessionID), Desired: record, Digest: digest})
+		journal.Entries = append(journal.Entries, batchJournalEntry{Leaf: sourceLeaf(record.Provider, record.SessionID), Relation: source.BoundaryInitial, Desired: record, Digest: digest})
 	}
 	body, err := marshalCanonical(journal)
 	if err != nil {
@@ -226,6 +226,102 @@ func TestOpenRecoversBoundedBatchJournalLargerThanSingleRecordLimit(t *testing.T
 	records, err := reopened.ListCandidates()
 	if err != nil || len(records) != 10 {
 		t.Fatalf("recovered records=%d err=%v", len(records), err)
+	}
+}
+
+func TestOpenRejectsSemanticallyInvalidJournalBeforeMutatingAnyRecord(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*batchJournalEntry)
+	}{
+		{name: "association-shrink", mutate: func(entry *batchJournalEntry) { entry.Desired.ProjectIDs = []string{"project-a"} }},
+		{name: "wrong-relation", mutate: func(entry *batchJournalEntry) { entry.Relation = source.BoundaryUnchanged }},
+		{name: "missing-predecessor-body", mutate: func(entry *batchJournalEntry) { entry.Old = nil }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			catalog := openCatalog(t, dataRoot)
+			old1 := sourceRecord("s1", []string{"project-a"}, 10)
+			old2 := sourceRecord("s2", []string{"project-a", "project-b"}, 10)
+			for _, record := range []memory.SourceRecord{old1, old2} {
+				if _, err := catalog.UpsertSource(record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := catalog.Close(); err != nil {
+				t.Fatal(err)
+			}
+			entries := make([]batchJournalEntry, 0, 2)
+			for _, old := range []memory.SourceRecord{old1, old2} {
+				oldDigest, err := memory.Digest(old)
+				if err != nil {
+					t.Fatal(err)
+				}
+				desired := old
+				desired.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 10, ByteOffset: 160}
+				desired.FrozenBoundary.SourceHash = strings.Repeat("b", 64)
+				desiredDigest, err := memory.Digest(desired)
+				if err != nil {
+					t.Fatal(err)
+				}
+				predecessor := old
+				entries = append(entries, batchJournalEntry{Leaf: sourceLeaf(old.Provider, old.SessionID), Relation: source.BoundaryAppend, Old: &predecessor, OldDigest: oldDigest, Desired: desired, Digest: desiredDigest})
+			}
+			test.mutate(&entries[1])
+			entries[1].Digest, _ = memory.Digest(entries[1].Desired)
+			journalBody, err := marshalCanonical(batchJournal{Version: 1, Entries: entries})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dataRoot, "source-catalog", batchJournalLeaf), journalBody, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			firstPath := filepath.Join(dataRoot, "source-catalog", sourceLeaf(old1.Provider, old1.SessionID))
+			before, err := os.ReadFile(firstPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recovered, err := Open(dataRoot); err == nil {
+				_ = recovered.Close()
+				t.Fatal("semantically invalid journal recovered")
+			}
+			after, err := os.ReadFile(firstPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("invalid later journal entry mutated earlier source")
+			}
+		})
+	}
+}
+
+func TestOpenRejectsJournalWhoseRequiredPredecessorIsMissing(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	old := sourceRecord("missing-old", []string{"project-a"}, 10)
+	oldDigest, _ := memory.Digest(old)
+	desired := old
+	desired.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 10, ByteOffset: 160}
+	desired.FrozenBoundary.SourceHash = strings.Repeat("b", 64)
+	desiredDigest, _ := memory.Digest(desired)
+	journal := batchJournal{Version: 1, Entries: []batchJournalEntry{{Leaf: sourceLeaf(old.Provider, old.SessionID), Relation: source.BoundaryAppend, Old: &old, OldDigest: oldDigest, Desired: desired, Digest: desiredDigest}}}
+	body, err := marshalCanonical(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "source-catalog", batchJournalLeaf), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if recovered, err := Open(dataRoot); err == nil {
+		_ = recovered.Close()
+		t.Fatal("missing required predecessor was accepted")
+	}
+	if _, err := os.Stat(filepath.Join(dataRoot, "source-catalog", sourceLeaf(old.Provider, old.SessionID))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("recovery invented missing predecessor state: %v", err)
 	}
 }
 
@@ -265,6 +361,133 @@ func TestApplyBatchCrashHelper(t *testing.T) {
 		mutations = append(mutations, BatchMutation{Relation: source.BoundaryAppend, ExpectedDigest: expected, Desired: desired})
 	}
 	_, _ = catalog.ApplyBatch(mutations)
+}
+
+func TestJournalHardLinkCrashRecoversOrphanTempAndFullBatch(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	for _, id := range []string{"s1", "s2"} {
+		if _, err := catalog.UpsertSource(sourceRecord(id, []string{"project-a"}, 10)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestJournalHardLinkCrashHelper$")
+	command.Env = append(os.Environ(), "SR_CATALOG_LINK_CRASH_ROOT="+dataRoot)
+	if err := command.Run(); err == nil {
+		t.Fatal("hard-link crash helper exited successfully")
+	}
+	if temps := catalogTemporaryNames(t, dataRoot); len(temps) != 1 {
+		t.Fatalf("crash temps=%v want one hard-link orphan", temps)
+	}
+	reopened, err := Open(dataRoot)
+	if err != nil {
+		t.Fatalf("reopen hard-link crash: %v", err)
+	}
+	defer reopened.Close()
+	records, err := reopened.ListCandidates()
+	if err != nil || len(records) != 2 {
+		t.Fatalf("ListCandidates records=%+v err=%v", records, err)
+	}
+	for _, record := range records {
+		if record.FrozenBoundary.Location.JSONL.Line != 11 {
+			t.Fatalf("record did not recover full batch: %+v", record)
+		}
+	}
+	if temps := catalogTemporaryNames(t, dataRoot); len(temps) != 0 {
+		t.Fatalf("orphan temps remain: %v", temps)
+	}
+}
+
+func TestJournalHardLinkCrashHelper(t *testing.T) {
+	dataRoot := os.Getenv("SR_CATALOG_LINK_CRASH_ROOT")
+	if dataRoot == "" {
+		t.Skip("subprocess helper")
+	}
+	catalog, err := Open(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.afterJournalLink = func() error { os.Exit(72); return nil }
+	mutations := make([]BatchMutation, 0, 2)
+	for _, id := range []string{"s1", "s2"} {
+		old, found, err := catalog.GetSource("codex", id)
+		if err != nil || !found {
+			t.Fatal(err)
+		}
+		expected, _ := memory.Digest(old)
+		desired := old
+		desired.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 11, ByteOffset: 160}
+		desired.FrozenBoundary.SourceHash = strings.Repeat("d", 64)
+		mutations = append(mutations, BatchMutation{Relation: source.BoundaryAppend, ExpectedDigest: expected, Desired: desired})
+	}
+	_, _ = catalog.ApplyBatch(mutations)
+}
+
+func TestOpenFailsClosedOnMaliciousCatalogTemp(t *testing.T) {
+	for _, kind := range []string{"arbitrary", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			if kind == "symlink" && runtime.GOOS == "windows" {
+				t.Skip("symlink setup requires privileges")
+			}
+			dataRoot := t.TempDir()
+			catalog := openCatalog(t, dataRoot)
+			if err := catalog.Close(); err != nil {
+				t.Fatal(err)
+			}
+			name := ".session-reviewer-" + strings.Repeat("a", 32)
+			path := filepath.Join(dataRoot, "source-catalog", name)
+			var err error
+			if kind == "symlink" {
+				err = os.Symlink(filepath.Join(dataRoot, "outside"), path)
+			} else {
+				err = os.WriteFile(path, []byte("not canonical catalog state"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reopened, err := Open(dataRoot); err == nil {
+				_ = reopened.Close()
+				t.Fatalf("malicious %s temp accepted", kind)
+			}
+			if _, err := os.Lstat(path); err != nil {
+				t.Fatalf("malicious temp was removed instead of failing closed: %v", err)
+			}
+		})
+	}
+}
+
+func TestAtomicTempNameAcceptsOnlyWriterFormat(t *testing.T) {
+	if !isAtomicTempName(".session-reviewer-" + strings.Repeat("a", 32)) {
+		t.Fatal("writer temporary name rejected")
+	}
+	for _, name := range []string{
+		".session-reviewer-" + strings.Repeat("A", 32),
+		".session-reviewer-" + strings.Repeat("g", 32),
+		".session-reviewer-" + strings.Repeat("a", 31),
+		"other-" + strings.Repeat("a", 32),
+	} {
+		if isAtomicTempName(name) {
+			t.Fatalf("non-writer temporary name accepted: %q", name)
+		}
+	}
+}
+
+func catalogTemporaryNames(t *testing.T, dataRoot string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(dataRoot, "source-catalog"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".session-reviewer-") && len(entry.Name()) == len(".session-reviewer-")+32 {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
 }
 
 func TestCatalogStoresSharedSessionUsageOnce(t *testing.T) {

@@ -80,7 +80,7 @@ func (adapter *fakeAdapter) Freeze(ctx context.Context, candidate source.Candida
 		return source.Boundary{}, err
 	}
 	spec := adapter.sources[candidate.SessionID]
-	if spec == nil || spec.candidate != candidate {
+	if spec == nil || !reflect.DeepEqual(spec.candidate, candidate) {
 		return source.Boundary{}, errors.New("unknown fake candidate")
 	}
 	if spec.freezeErr == nil {

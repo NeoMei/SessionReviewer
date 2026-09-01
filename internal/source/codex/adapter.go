@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -20,6 +21,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
@@ -60,7 +62,7 @@ type adapter struct {
 
 	mu             sync.RWMutex
 	discovery      uint64
-	candidates     map[string]session.Candidate
+	candidates     map[string]discoveredCandidate
 	frozen         map[string]frozenSource
 	frozenBySource map[string][]string
 }
@@ -72,6 +74,11 @@ type frozenSource struct {
 	priorCatalog       memory.SourceRecord
 	priorCatalogFound  bool
 	priorCatalogDigest string
+}
+
+type discoveredCandidate struct {
+	resolved session.Candidate
+	baseline source.CatalogBaselineSnapshot
 }
 
 type frozenSegment struct {
@@ -138,7 +145,7 @@ func New(options AdapterOptions) (source.Adapter, error) {
 		redactor:       *options.Redactor,
 		version:        options.AdapterVersion,
 		supersedes:     supersedes,
-		candidates:     make(map[string]session.Candidate),
+		candidates:     make(map[string]discoveredCandidate),
 		frozen:         make(map[string]frozenSource),
 		frozenBySource: make(map[string][]string),
 	}, nil
@@ -171,6 +178,17 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+
+	keys := make([]sourcecatalog.SnapshotKey, 0, len(ids))
+	for _, id := range ids {
+		if id != "" {
+			keys = append(keys, sourcecatalog.SnapshotKey{Provider: providerCodex, SessionID: id})
+		}
+	}
+	baselines, err := a.catalog.SnapshotSources(keys)
+	if err != nil {
+		return source.Discovery{}, fmt.Errorf("snapshot Codex catalog baselines: %w", err)
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -216,7 +234,15 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 			Provider: providerCodex, SessionID: id, StartedAt: startedAt,
 			InitialCWD: resolved.CWD, Handle: handle,
 		}
-		a.candidates[handle] = resolved
+		snapshot := baselines[sourcecatalog.SnapshotKey{Provider: providerCodex, SessionID: id}]
+		baselineHandle := opaqueHandle("catalog-baseline", handle, snapshot.Digest)
+		baseline := source.CatalogBaselineSnapshot{Handle: baselineHandle, ExpectedDigest: snapshot.Digest}
+		if snapshot.Found {
+			prior := cloneSourceRecord(snapshot.Record)
+			baseline.PriorSource = &prior
+		}
+		candidate.CatalogBaseline = cloneCatalogBaseline(baseline)
+		a.candidates[handle] = discoveredCandidate{resolved: resolved, baseline: cloneCatalogBaseline(baseline)}
 		result.Candidates = append(result.Candidates, candidate)
 	}
 	sort.Slice(result.Issues, func(i, j int) bool {
@@ -244,10 +270,11 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		return source.Boundary{}, err
 	}
 	a.mu.RLock()
-	resolved, found := a.candidates[candidate.Handle]
+	discovered, found := a.candidates[candidate.Handle]
 	a.mu.RUnlock()
+	resolved := discovered.resolved
 	if !found || candidate.Provider != providerCodex || candidate.SessionID != resolved.ID || candidate.InitialCWD != resolved.CWD ||
-		candidate.StartedAt != candidateStartedAt(resolved) {
+		candidate.StartedAt != candidateStartedAt(resolved) || !sameCatalogBaseline(candidate.CatalogBaseline, discovered.baseline) {
 		return source.Boundary{}, errors.New("candidate was not returned by this Codex adapter")
 	}
 	files, err := session.OpenCandidates(a.sessionsRoot, resolved)
@@ -284,16 +311,9 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		},
 		Segments: segmentBoundaries, TerminalState: memory.Indexed, Handle: boundaryHandle,
 	}
-	prior, priorFound, err := a.catalog.GetSource(providerCodex, candidate.SessionID)
-	if err != nil {
-		return source.Boundary{}, fmt.Errorf("read frozen source catalog baseline: %w", err)
-	}
-	priorDigest := ""
+	prior, priorFound, priorDigest := memory.SourceRecord{}, discovered.baseline.PriorSource != nil, discovered.baseline.ExpectedDigest
 	if priorFound {
-		priorDigest, err = memory.Digest(prior)
-		if err != nil {
-			return source.Boundary{}, err
-		}
+		prior = cloneSourceRecord(*discovered.baseline.PriorSource)
 	}
 	frozen := frozenSource{boundary: cloneBoundary(boundary), candidate: resolved, segments: segments, priorCatalog: prior, priorCatalogFound: priorFound, priorCatalogDigest: priorDigest}
 	key := frozenSourceKey(providerCodex, candidate.SessionID, sourceIdentity)
@@ -580,7 +600,7 @@ func candidateStartedAt(candidate session.Candidate) string {
 }
 
 func sameBoundary(value, frozen source.Boundary) bool {
-	if value.Candidate != frozen.Candidate || value.SourceIdentity != frozen.SourceIdentity ||
+	if !sameSourceCandidate(value.Candidate, frozen.Candidate) || value.SourceIdentity != frozen.SourceIdentity ||
 		value.TerminalState != frozen.TerminalState || value.Handle != frozen.Handle ||
 		value.Frozen.SourceHash != frozen.Frozen.SourceHash || value.Frozen.Location.Kind != frozen.Frozen.Location.Kind ||
 		len(value.Segments) != len(frozen.Segments) || len(value.Issues) != len(frozen.Issues) {
@@ -613,9 +633,32 @@ func appendUnique(values []string, value string) []string {
 }
 
 func cloneBoundary(value source.Boundary) source.Boundary {
+	value.Candidate.CatalogBaseline = cloneCatalogBaseline(value.Candidate.CatalogBaseline)
 	value.Segments = append([]source.SegmentBoundary(nil), value.Segments...)
 	value.Issues = append([]source.Issue(nil), value.Issues...)
 	return value
+}
+
+func cloneSourceRecord(value memory.SourceRecord) memory.SourceRecord {
+	value.ProjectIDs = append([]string(nil), value.ProjectIDs...)
+	value.Usage.Models = append([]accounting.ModelUsage(nil), value.Usage.Models...)
+	return value
+}
+
+func cloneCatalogBaseline(value source.CatalogBaselineSnapshot) source.CatalogBaselineSnapshot {
+	if value.PriorSource != nil {
+		prior := cloneSourceRecord(*value.PriorSource)
+		value.PriorSource = &prior
+	}
+	return value
+}
+
+func sameCatalogBaseline(left, right source.CatalogBaselineSnapshot) bool {
+	return left.Handle == right.Handle && left.ExpectedDigest == right.ExpectedDigest && reflect.DeepEqual(left.PriorSource, right.PriorSource)
+}
+
+func sameSourceCandidate(left, right source.Candidate) bool {
+	return left.Provider == right.Provider && left.SessionID == right.SessionID && left.StartedAt == right.StartedAt && left.InitialCWD == right.InitialCWD && left.Handle == right.Handle && sameCatalogBaseline(left.CatalogBaseline, right.CatalogBaseline)
 }
 
 func closeFiles(files []*os.File) {

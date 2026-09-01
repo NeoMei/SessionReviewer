@@ -544,6 +544,71 @@ func TestFrozenDecodeProposalKeepsPriorCatalogCASWhenNewerAppendPublishes(t *tes
 	}
 }
 
+func TestDiscoverSnapshotsCatalogBaselineBeforeLaterFreeze(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	initial := discoverCandidate(t, adapter, "session-project-a")
+	initialBoundary, err := adapter.Freeze(context.Background(), initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, initialReport := decodeBoundary(t, adapter, initialBoundary)
+	publishDecodeProposal(t, fixture.catalog, initialReport)
+	oldDigest := initialReport.ProposedSource
+	expectedOld, err := memory.Digest(oldDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	staleCandidate := discoverCandidate(t, adapter, "session-project-a")
+	if staleCandidate.CatalogBaseline.ExpectedDigest != expectedOld || staleCandidate.CatalogBaseline.PriorSource == nil {
+		t.Fatalf("Discover baseline=%+v want digest %q and prior record", staleCandidate.CatalogBaseline, expectedOld)
+	}
+	originalBody, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.WriteString("{\"timestamp\":\"2026-08-31T10:00:11Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	newerAdapter := fixture.adapter(t, "v1")
+	newerBoundary, err := newerAdapter.Freeze(context.Background(), discoverCandidate(t, newerAdapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, newerReport := decodeBoundary(t, newerAdapter, newerBoundary)
+	if newerReport.BoundaryRelation != source.BoundaryAppend {
+		t.Fatalf("newer relation=%q", newerReport.BoundaryRelation)
+	}
+	publishDecodeProposal(t, fixture.catalog, newerReport)
+	newer := newerReport.ProposedSource
+	if err := os.WriteFile(path, originalBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	staleBoundary, err := adapter.Freeze(context.Background(), staleCandidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, staleReport := decodeBoundary(t, adapter, staleBoundary)
+	if staleReport.BoundaryRelation != source.BoundaryUnchanged || staleReport.ExpectedCatalogDigest != expectedOld {
+		t.Fatalf("stale report relation=%q expected=%q want unchanged/%q", staleReport.BoundaryRelation, staleReport.ExpectedCatalogDigest, expectedOld)
+	}
+	if _, err := fixture.catalog.ApplyBatch([]sourcecatalog.BatchMutation{{Relation: staleReport.BoundaryRelation, ExpectedDigest: staleReport.ExpectedCatalogDigest, Desired: staleReport.ProposedSource}}); !errors.Is(err, sourcecatalog.ErrCASConflict) {
+		t.Fatalf("stale Discover proposal rolled catalog back: %v", err)
+	}
+	stored, _, err := fixture.catalog.GetSource("codex", "session-project-a")
+	if err != nil || !reflect.DeepEqual(stored.FrozenBoundary, newer.FrozenBoundary) {
+		t.Fatalf("newer boundary lost: %+v err=%v", stored.FrozenBoundary, err)
+	}
+}
+
 func TestMissingAndDuplicateSegmentsBecomeTerminalIssues(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	duplicate := func(path string) {

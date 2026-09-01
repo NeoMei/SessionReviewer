@@ -82,7 +82,27 @@ func WriteRootFileCheckedWithRollbackCheckpoint(parent *os.Root, leaf string, da
 // ever replacing an existing destination. beforePublish runs after the
 // temporary file is durable and immediately before the no-replace link.
 func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm fs.FileMode, beforePublish func() error) error {
-	return WriteRootFileCreateIfAbsentPrepared(parent, leaf, data, perm, nil, beforePublish)
+	return WriteRootFileCreateIfAbsentWithPostLinkCheckpoint(parent, leaf, data, perm, beforePublish, nil)
+}
+
+// WriteRootFileCreateIfAbsentWithPostLinkCheckpoint exposes the only
+// non-atomic namespace window of no-replace publication to crash-recovering
+// callers: after the destination hard link exists and before its temporary
+// alias is removed.
+func WriteRootFileCreateIfAbsentWithPostLinkCheckpoint(parent *os.Root, leaf string, data []byte, perm fs.FileMode, beforePublish, afterLink func() error) error {
+	ops := defaultDurabilityOps()
+	ops.publish = func(root *os.Root, temporary, destination string) error {
+		if err := root.Link(temporary, destination); err != nil {
+			return err
+		}
+		if afterLink != nil {
+			if err := afterLink(); err != nil {
+				return err
+			}
+		}
+		return root.Remove(temporary)
+	}
+	return writeRootFileCreateIfAbsentPreparedWithOps(parent, leaf, data, perm, nil, beforePublish, nil, ops)
 }
 
 // WriteRootFileCreateIfAbsentPrepared applies prepare to the unpublished
