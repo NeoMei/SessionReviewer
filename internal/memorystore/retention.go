@@ -75,6 +75,7 @@ var retentionFullSnapshotCheckpoint func()
 var retentionCandidateRevalidationCheckpoint func()
 var retentionTraversalCheckpoint func()
 var retentionPinnedManifestReadCheckpoint func(string)
+var retentionSortCheckpoint func(string)
 
 // ReportRetention is read-only. External generation pins are opaque generation
 // IDs supplied by later gates; each is validated against a complete immutable
@@ -496,7 +497,10 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 			return retentionSnapshot{}, fmt.Errorf("cleanup accounting: %w", err)
 		}
 	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].relative < candidates[j].relative })
+	candidates, err = sortRetentionCandidatesContext(ctx, candidates)
+	if err != nil {
+		return retentionSnapshot{}, err
+	}
 	anchors := retentionAnchors{
 		root: rootAnchor, generationRoots: make(map[string]retentionFile, len(pins)+1),
 		externalPins: make(map[string]struct{}, len(pins)), namespaces: cloneRetentionFacts(namespaceFacts),
@@ -849,8 +853,79 @@ func readRetentionEntries(ctx context.Context, root *os.Root, limit int) ([]fs.D
 	if !sameRetentionMetadata(before, afterOpen) || !sameRetentionMetadata(before, afterName) {
 		return nil, errors.New("retention directory changed while enumerating")
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	return entries, nil
+	return sortRetentionDirectoryEntriesContext(ctx, entries)
+}
+
+func sortRetentionCandidatesContext(ctx context.Context, values []retentionFile) ([]retentionFile, error) {
+	return mergeSortRetentionContext(ctx, values, "candidate_sort", func(left, right retentionFile) bool {
+		return left.relative < right.relative
+	})
+}
+
+func sortRetentionDirectoryEntriesContext(ctx context.Context, values []fs.DirEntry) ([]fs.DirEntry, error) {
+	return mergeSortRetentionContext(ctx, values, "directory_entry_sort", func(left, right fs.DirEntry) bool {
+		return left.Name() < right.Name()
+	})
+}
+
+func mergeSortRetentionContext[T any](ctx context.Context, values []T, phase string, less func(T, T) bool) ([]T, error) {
+	if err := retentionSortContextCause(ctx, phase); err != nil {
+		return nil, err
+	}
+	current := make([]T, len(values))
+	for offset := 0; offset < len(values); offset += 256 {
+		if err := retentionSortContextCause(ctx, phase); err != nil {
+			return nil, err
+		}
+		end := min(len(values), offset+256)
+		copy(current[offset:end], values[offset:end])
+	}
+	if len(current) < 2 {
+		return current, nil
+	}
+	next := make([]T, len(current))
+	for width := 1; width < len(current); width *= 2 {
+		for start := 0; start < len(current); start += 2 * width {
+			middle := min(start+width, len(current))
+			end := min(start+2*width, len(current))
+			left, right, output := start, middle, start
+			for left < middle && right < end {
+				if err := retentionSortContextCause(ctx, phase); err != nil {
+					return nil, err
+				}
+				if less(current[right], current[left]) {
+					next[output], right = current[right], right+1
+				} else {
+					next[output], left = current[left], left+1
+				}
+				output++
+			}
+			for left < middle {
+				if err := retentionSortContextCause(ctx, phase); err != nil {
+					return nil, err
+				}
+				next[output], left, output = current[left], left+1, output+1
+			}
+			for right < end {
+				if err := retentionSortContextCause(ctx, phase); err != nil {
+					return nil, err
+				}
+				next[output], right, output = current[right], right+1, output+1
+			}
+		}
+		current, next = next, current
+	}
+	if err := retentionSortContextCause(ctx, phase); err != nil {
+		return nil, err
+	}
+	return current, nil
+}
+
+func retentionSortContextCause(ctx context.Context, phase string) error {
+	if retentionSortCheckpoint != nil {
+		retentionSortCheckpoint(phase)
+	}
+	return retentionContextCause(ctx)
 }
 
 func readRetentionFile(ctx context.Context, directory *pathguard.Directory, leaf string, maximum int64) (retentionFile, error) {

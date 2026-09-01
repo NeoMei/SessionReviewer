@@ -65,6 +65,130 @@ func TestReconcileGenerationGraphContextCancelsDuringLoadedGraphWork(t *testing.
 	})
 }
 
+func TestContextGraphStructuralComparisonsCancelByPhase(t *testing.T) {
+	const entries = 100_000
+	dependencies := make([]memory.SessionViewDependency, entries)
+	digests := make([]string, entries)
+	digestSet := make(map[string]struct{}, entries)
+	for index := 0; index < entries; index++ {
+		digest := fmt.Sprintf("digest-%06d", index)
+		dependencies[index] = memory.SessionViewDependency{Provider: "codex", SessionID: fmt.Sprintf("session-%06d", index), Digest: digest}
+		digests[index] = digest
+		digestSet[digest] = struct{}{}
+	}
+
+	tests := []struct {
+		name  string
+		phase string
+		run   func(context.Context) (bool, error)
+	}{
+		{
+			name: "dependency structural compare", phase: "dependency_structural_compare",
+			run: func(ctx context.Context) (bool, error) {
+				return equalSessionViewDependenciesContext(ctx, dependencies, append([]memory.SessionViewDependency(nil), dependencies...))
+			},
+		},
+		{
+			name: "revision set compare", phase: "revision_set_compare",
+			run: func(ctx context.Context) (bool, error) {
+				copySet := make(map[string]struct{}, len(digestSet))
+				for digest := range digestSet {
+					copySet[digest] = struct{}{}
+				}
+				return equalDigestSetContext(ctx, digestSet, copySet)
+			},
+		},
+		{
+			name: "digest slice set compare", phase: "digest_slice_set_compare",
+			run: func(ctx context.Context) (bool, error) {
+				return equalDigestSliceSetContext(ctx, digests, digestSet)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cause := errors.New("cancel " + test.name)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			calls := 0
+			storeContextCheckpoint = func(phase string) {
+				if phase == test.phase {
+					calls++
+					if calls == 32 {
+						cancel(cause)
+					}
+				}
+			}
+			t.Cleanup(func() { storeContextCheckpoint = nil })
+			matches, err := test.run(ctx)
+			if matches || !errors.Is(err, cause) {
+				t.Fatalf("comparison matches=%t err=%v want cancellation cause", matches, err)
+			}
+			if calls != 32 {
+				t.Fatalf("comparison checkpoints=%d want 32", calls)
+			}
+			storeContextCheckpoint = nil
+		})
+	}
+}
+
+func TestReconcileStructuralMismatchErrorsRemainExact(t *testing.T) {
+	const dependencyError = "ProjectView ordered SessionView dependencies do not match manifest"
+	const activeError = "active revision sets disagree across manifest, SessionViews, and ProjectView"
+	tests := []struct {
+		name   string
+		want   string
+		mutate func(*testing.T, *Store, *storedFixture)
+	}{
+		{
+			name: "dependency mismatch", want: dependencyError,
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				projectView := fixture.project
+				projectView.SessionViewDependencies = []memory.SessionViewDependency{{Provider: "codex", SessionID: "other-session", Digest: prefixedDigest("other-session")}}
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
+			},
+		},
+		{
+			name: "revision set mismatch", want: activeError,
+			mutate: func(t *testing.T, _ *Store, fixture *storedFixture) {
+				key := observationKeyDigest(t, fixture.observation.Key)
+				fixture.manifest.ActiveRevisions = map[string]string{}
+				fixture.manifest.WithdrawnRevisions = map[string]string{key: fixture.observation.RevisionID}
+			},
+		},
+		{
+			name: "digest slice set mismatch", want: activeError,
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				projectView := fixture.project
+				projectView.ObservationRevisionIDs = []string{}
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			store, err := Open(dataRoot, testProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			fixture := buildStoredFixture(t, store, "generation-structural-mismatch")
+			test.mutate(t, store, &fixture)
+			if err := store.reconcileGenerationGraphContext(context.Background(), fixture.manifest); err == nil || err.Error() != test.want {
+				t.Fatalf("reconcile error=%v want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestStoreCreatesPrivateRootedLayoutAndRoundTripsCanonicalObjects(t *testing.T) {
 	dataRoot := t.TempDir()
 	store, err := Open(dataRoot, testProjectID)

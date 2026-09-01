@@ -344,7 +344,6 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	io/fs
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	os
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	path/filepath
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	regexp
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	runtime
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	sort

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,122 @@ import (
 )
 
 var retentionNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+func TestRetentionSortsCancelMidSortWithoutMutatingInputs(t *testing.T) {
+	const entries = 100_000
+	candidates := make([]retentionFile, entries)
+	directoryEntries := make([]fs.DirEntry, entries)
+	for index := 0; index < entries; index++ {
+		name := fmt.Sprintf("entry-%06d", entries-index)
+		candidates[index] = retentionFile{relative: "cache/" + name}
+		directoryEntries[index] = retentionSortDirEntry{name: name}
+	}
+
+	tests := []struct {
+		name  string
+		phase string
+		run   func(context.Context) error
+	}{
+		{
+			name: "candidate sort", phase: "candidate_sort",
+			run: func(ctx context.Context) error {
+				before := append([]retentionFile(nil), candidates...)
+				sorted, err := sortRetentionCandidatesContext(ctx, candidates)
+				if sorted != nil {
+					t.Fatal("cancelled candidate sort returned a result")
+				}
+				for index := range candidates {
+					if candidates[index].relative != before[index].relative {
+						t.Fatalf("cancelled candidate sort mutated input at %d", index)
+					}
+				}
+				return err
+			},
+		},
+		{
+			name: "directory entry sort", phase: "directory_entry_sort",
+			run: func(ctx context.Context) error {
+				before := append([]fs.DirEntry(nil), directoryEntries...)
+				sorted, err := sortRetentionDirectoryEntriesContext(ctx, directoryEntries)
+				if sorted != nil {
+					t.Fatal("cancelled directory sort returned a result")
+				}
+				for index := range directoryEntries {
+					if directoryEntries[index].Name() != before[index].Name() {
+						t.Fatalf("cancelled directory sort mutated input at %d", index)
+					}
+				}
+				return err
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cause := errors.New("cancel " + test.name)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			calls := 0
+			retentionSortCheckpoint = func(phase string) {
+				if phase == test.phase {
+					calls++
+					if calls == 1024 {
+						cancel(cause)
+					}
+				}
+			}
+			t.Cleanup(func() { retentionSortCheckpoint = nil })
+			if err := test.run(ctx); !errors.Is(err, cause) {
+				t.Fatalf("sort error=%v want cause", err)
+			}
+			if calls != 1024 {
+				t.Fatalf("sort checkpoints=%d want 1024", calls)
+			}
+			retentionSortCheckpoint = nil
+		})
+	}
+}
+
+func TestRetentionContextSortsMatchLegacyOrder(t *testing.T) {
+	random := rand.New(rand.NewSource(20260901))
+	for iteration := 0; iteration < 64; iteration++ {
+		count := 1 + random.Intn(4096)
+		permutation := random.Perm(count)
+		candidates := make([]retentionFile, count)
+		entries := make([]fs.DirEntry, count)
+		for index, value := range permutation {
+			name := fmt.Sprintf("entry-%08d", value)
+			candidates[index] = retentionFile{relative: "cache/" + name}
+			entries[index] = retentionSortDirEntry{name: name}
+		}
+
+		wantCandidates := append([]retentionFile(nil), candidates...)
+		sort.Slice(wantCandidates, func(i, j int) bool { return wantCandidates[i].relative < wantCandidates[j].relative })
+		gotCandidates, err := sortRetentionCandidatesContext(context.Background(), candidates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantEntries := append([]fs.DirEntry(nil), entries...)
+		sort.Slice(wantEntries, func(i, j int) bool { return wantEntries[i].Name() < wantEntries[j].Name() })
+		gotEntries, err := sortRetentionDirectoryEntriesContext(context.Background(), entries)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for index := 0; index < count; index++ {
+			if gotCandidates[index].relative != wantCandidates[index].relative {
+				t.Fatalf("iteration %d candidate %d=%q want %q", iteration, index, gotCandidates[index].relative, wantCandidates[index].relative)
+			}
+			if gotEntries[index].Name() != wantEntries[index].Name() {
+				t.Fatalf("iteration %d entry %d=%q want %q", iteration, index, gotEntries[index].Name(), wantEntries[index].Name())
+			}
+		}
+	}
+}
+
+type retentionSortDirEntry struct{ name string }
+
+func (entry retentionSortDirEntry) Name() string         { return entry.name }
+func (retentionSortDirEntry) IsDir() bool                { return false }
+func (retentionSortDirEntry) Type() fs.FileMode          { return 0 }
+func (retentionSortDirEntry) Info() (fs.FileInfo, error) { return nil, nil }
 
 func TestRetentionReportsExactReachableGraphAndDryRunDoesNotMutate(t *testing.T) {
 	dataRoot, store, fixture := newRetentionStore(t, "generation-1")

@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -52,7 +51,8 @@ var (
 	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 	// storeContextCheckpoint is a deterministic test seam for proving that
-	// retention cancellation is observed inside large decode/validation work.
+	// cancellation is observed inside large decode, validation, and structural
+	// graph-comparison work.
 	storeContextCheckpoint func(string)
 )
 
@@ -924,7 +924,11 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 	if err := decodeCanonicalJSONContext(ctx, projectBody, &projectView); err != nil {
 		return fmt.Errorf("decode ProjectView: %w", err)
 	}
-	if !reflect.DeepEqual(projectView.SessionViewDependencies, value.SessionViews) {
+	dependenciesMatch, err := equalSessionViewDependenciesContext(ctx, projectView.SessionViewDependencies, value.SessionViews)
+	if err != nil {
+		return err
+	}
+	if !dependenciesMatch {
 		return errors.New("ProjectView ordered SessionView dependencies do not match manifest")
 	}
 	if projectView.ProbeStateDigest != value.ProbeStateDigest || probe.Digest != value.ProbeStateDigest {
@@ -978,34 +982,95 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 			return fmt.Errorf("observation revision %s has no manifest classification", revisionID)
 		}
 	}
-	if !equalDigestSet(active, sessionActive) || !equalDigestSliceSet(projectView.ObservationRevisionIDs, active) {
+	revisionSetsMatch, err := equalDigestSetContext(ctx, active, sessionActive)
+	if err != nil {
+		return err
+	}
+	if !revisionSetsMatch {
+		return errors.New("active revision sets disagree across manifest, SessionViews, and ProjectView")
+	}
+	digestSliceMatches, err := equalDigestSliceSetContext(ctx, projectView.ObservationRevisionIDs, active)
+	if err != nil {
+		return err
+	}
+	if !digestSliceMatches {
 		return errors.New("active revision sets disagree across manifest, SessionViews, and ProjectView")
 	}
 	return nil
 }
 
-func equalDigestSet(first, second map[string]struct{}) bool {
-	if len(first) != len(second) {
-		return false
+const graphComparisonCheckpointInterval = 256
+
+func equalSessionViewDependenciesContext(ctx context.Context, first, second []memory.SessionViewDependency) (bool, error) {
+	if err := graphComparisonCheckpoint(ctx, "dependency_structural_compare", 0); err != nil {
+		return false, err
 	}
-	for digest := range first {
-		if _, exists := second[digest]; !exists {
-			return false
+	if len(first) != len(second) {
+		return false, nil
+	}
+	for index := range first {
+		if err := graphComparisonCheckpoint(ctx, "dependency_structural_compare", index); err != nil {
+			return false, err
+		}
+		if first[index].Provider != second[index].Provider || first[index].SessionID != second[index].SessionID || first[index].Digest != second[index].Digest {
+			return false, nil
 		}
 	}
-	return true
+	if err := storeCheckpoint(ctx, "dependency_structural_compare"); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func equalDigestSliceSet(values []string, expected map[string]struct{}) bool {
-	if len(values) != len(expected) {
-		return false
+func equalDigestSetContext(ctx context.Context, first, second map[string]struct{}) (bool, error) {
+	if err := graphComparisonCheckpoint(ctx, "revision_set_compare", 0); err != nil {
+		return false, err
 	}
-	for _, digest := range values {
+	if len(first) != len(second) {
+		return false, nil
+	}
+	index := 0
+	for digest := range first {
+		if err := graphComparisonCheckpoint(ctx, "revision_set_compare", index); err != nil {
+			return false, err
+		}
+		if _, exists := second[digest]; !exists {
+			return false, nil
+		}
+		index++
+	}
+	if err := storeCheckpoint(ctx, "revision_set_compare"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func equalDigestSliceSetContext(ctx context.Context, values []string, expected map[string]struct{}) (bool, error) {
+	if err := graphComparisonCheckpoint(ctx, "digest_slice_set_compare", 0); err != nil {
+		return false, err
+	}
+	if len(values) != len(expected) {
+		return false, nil
+	}
+	for index, digest := range values {
+		if err := graphComparisonCheckpoint(ctx, "digest_slice_set_compare", index); err != nil {
+			return false, err
+		}
 		if _, exists := expected[digest]; !exists {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	if err := storeCheckpoint(ctx, "digest_slice_set_compare"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func graphComparisonCheckpoint(ctx context.Context, phase string, index int) error {
+	if index%graphComparisonCheckpointInterval != 0 {
+		return nil
+	}
+	return storeCheckpoint(ctx, phase)
 }
 
 func (s *Store) loadObjectUnlocked(kind ObjectKind, digest string) ([]byte, error) {

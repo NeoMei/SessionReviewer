@@ -71,7 +71,6 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=2
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memorystore/store.go	(*Store).reconcileGenerationGraphContext	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	patchAcceptedHistory	reflect.DeepEqual	occurrence=1
@@ -111,7 +110,6 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	in
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/ledger/render.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/canonical.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/digest.go	reflect	alias=reflect
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memorystore/store.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/accepted_patch.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/history_markdown.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/ledger_json.go	reflect	alias=reflect
