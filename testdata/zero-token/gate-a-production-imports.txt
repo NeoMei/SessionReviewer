@@ -1,169 +1,169 @@
-bufio
-bytes
-cmp
-context
-crypto
-crypto/cipher
-crypto/fips140
-crypto/internal/boring
-crypto/internal/boring/sig
-crypto/internal/constanttime
-crypto/internal/entropy/v1.0.0
-crypto/internal/fips140
-crypto/internal/fips140/aes
-crypto/internal/fips140/aes/gcm
-crypto/internal/fips140/alias
-crypto/internal/fips140/check
-crypto/internal/fips140/drbg
-crypto/internal/fips140/hmac
-crypto/internal/fips140/sha256
-crypto/internal/fips140/sha3
-crypto/internal/fips140/sha512
-crypto/internal/fips140/subtle
-crypto/internal/fips140deps/byteorder
-crypto/internal/fips140deps/cpu
-crypto/internal/fips140deps/godebug
-crypto/internal/fips140deps/time
-crypto/internal/fips140only
-crypto/internal/impl
-crypto/internal/rand
-crypto/internal/randutil
-crypto/internal/sysrand
-crypto/rand
-crypto/sha256
-crypto/subtle
-encoding
-encoding/base64
-encoding/binary
-encoding/hex
-encoding/json
-errors
-fmt
-github.com/neomei/SessionReviewer/internal/accounting
-github.com/neomei/SessionReviewer/internal/atomicfile
-github.com/neomei/SessionReviewer/internal/config
-github.com/neomei/SessionReviewer/internal/ledger
-github.com/neomei/SessionReviewer/internal/memory
-github.com/neomei/SessionReviewer/internal/memorystore
-github.com/neomei/SessionReviewer/internal/pathguard
-github.com/neomei/SessionReviewer/internal/platform
-github.com/neomei/SessionReviewer/internal/project
-github.com/neomei/SessionReviewer/internal/projectidentity
-github.com/neomei/SessionReviewer/internal/projectprobe
-github.com/neomei/SessionReviewer/internal/projectview
-github.com/neomei/SessionReviewer/internal/redact
-github.com/neomei/SessionReviewer/internal/reviewv2
-github.com/neomei/SessionReviewer/internal/scan
-github.com/neomei/SessionReviewer/internal/session
-github.com/neomei/SessionReviewer/internal/sessionview
-github.com/neomei/SessionReviewer/internal/source
-github.com/neomei/SessionReviewer/internal/source/codex
-github.com/neomei/SessionReviewer/internal/sourcecatalog
-github.com/neomei/SessionReviewer/internal/syncdoc
-github.com/neomei/SessionReviewer/internal/winsecurity
-github.com/pelletier/go-toml/v2
-github.com/pelletier/go-toml/v2/internal/parserbridge
-github.com/pelletier/go-toml/v2/internal/tracker
-github.com/pelletier/go-toml/v2/unstable
-github.com/yuin/goldmark
-github.com/yuin/goldmark/ast
-github.com/yuin/goldmark/parser
-github.com/yuin/goldmark/renderer
-github.com/yuin/goldmark/renderer/html
-github.com/yuin/goldmark/text
-github.com/yuin/goldmark/util
-golang.org/x/sys/unix
-golang.org/x/sys/windows
-golang.org/x/text/cases
-golang.org/x/text/internal
-golang.org/x/text/internal/language
-golang.org/x/text/internal/language/compact
-golang.org/x/text/internal/tag
-golang.org/x/text/language
-golang.org/x/text/transform
-golang.org/x/text/unicode/norm
-gopkg.in/yaml.v3
-hash
-html
-internal/abi
-internal/asan
-internal/bisect
-internal/bytealg
-internal/byteorder
-internal/chacha8rand
-internal/coverage/rtcov
-internal/cpu
-internal/filepathlite
-internal/fmtsort
-internal/goarch
-internal/godebug
-internal/godebugs
-internal/goexperiment
-internal/goos
-internal/msan
-internal/nettrace
-internal/oserror
-internal/poll
-internal/profilerecord
-internal/race
-internal/reflectlite
-internal/routebsd
-internal/runtime/atomic
-internal/runtime/cgroup
-internal/runtime/exithook
-internal/runtime/gc
-internal/runtime/gc/scan
-internal/runtime/maps
-internal/runtime/math
-internal/runtime/pprof/label
-internal/runtime/sys
-internal/runtime/syscall/linux
-internal/runtime/syscall/windows
-internal/singleflight
-internal/strconv
-internal/stringslite
-internal/sync
-internal/synctest
-internal/syscall/execenv
-internal/syscall/unix
-internal/syscall/windows
-internal/syscall/windows/registry
-internal/syscall/windows/sysdll
-internal/testlog
-internal/trace/tracev2
-internal/unsafeheader
-io
-io/fs
-iter
-math
-math/big
-math/bits
-math/rand
-math/rand/v2
-net
-net/netip
-net/url
-os
-os/exec
-path
-path/filepath
-reflect
-regexp
-regexp/syntax
-runtime
-slices
-sort
-strconv
-strings
-structs
-sync
-sync/atomic
-syscall
-time
-unicode
-unicode/utf16
-unicode/utf8
-unique
-unsafe
-vendor/golang.org/x/net/dns/dnsmessage
-weak
+targets=darwin/amd64,darwin/arm64	PATH	internal/routebsd
+targets=darwin/amd64,darwin/arm64,linux/amd64	PATH	golang.org/x/sys/unix
+targets=darwin/amd64,darwin/arm64,linux/amd64	PATH	internal/syscall/unix
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	bufio
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	bytes
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	cmp
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	context
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/cipher
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/fips140
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/boring
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/boring/sig
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/constanttime
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/entropy/v1.0.0
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/aes
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/aes/gcm
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/alias
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/check
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/drbg
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/hmac
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/sha256
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/sha3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/sha512
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140/subtle
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140deps/byteorder
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140deps/cpu
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140deps/godebug
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140deps/time
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/fips140only
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/impl
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/rand
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/randutil
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/internal/sysrand
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/rand
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/sha256
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/subtle
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	encoding
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	encoding/base64
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	encoding/binary
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	encoding/hex
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	encoding/json
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	errors
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	fmt
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/accounting
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/atomicfile
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/config
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/ledger
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memory
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memorystore
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/pathguard
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/platform
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/project
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/projectidentity
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/projectprobe
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/projectview
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/redact
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/reviewv2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/scan
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/session
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/sessionview
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/source
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/source/codex
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/sourcecatalog
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/syncdoc
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/pelletier/go-toml/v2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/pelletier/go-toml/v2/internal/parserbridge
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/pelletier/go-toml/v2/internal/tracker
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/pelletier/go-toml/v2/unstable
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/ast
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/parser
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/renderer
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/renderer/html
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/text
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/yuin/goldmark/util
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/cases
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/internal
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/internal/language
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/internal/language/compact
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/internal/tag
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/language
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/transform
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	golang.org/x/text/unicode/norm
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	gopkg.in/yaml.v3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	hash
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	html
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/abi
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/asan
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/bisect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/bytealg
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/byteorder
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/chacha8rand
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/coverage/rtcov
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/cpu
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/filepathlite
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/fmtsort
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/goarch
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/godebug
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/godebugs
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/goexperiment
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/goos
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/msan
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/nettrace
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/oserror
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/poll
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/profilerecord
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/race
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/reflectlite
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/atomic
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/exithook
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/gc
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/gc/scan
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/maps
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/math
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/pprof/label
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/runtime/sys
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/singleflight
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/strconv
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/stringslite
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/sync
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/synctest
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/syscall/execenv
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/testlog
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/trace/tracev2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	internal/unsafeheader
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	io
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	io/fs
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	iter
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	math
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	math/big
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	math/bits
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	math/rand
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	math/rand/v2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	net
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	net/netip
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	net/url
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	os
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	os/exec
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	path
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	path/filepath
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	regexp
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	regexp/syntax
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	runtime
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	slices
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	sort
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	strconv
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	strings
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	sync
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	sync/atomic
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	syscall
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	time
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	unicode
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	unicode/utf16
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	unicode/utf8
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	unique
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	unsafe
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	vendor/golang.org/x/net/dns/dnsmessage
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	weak
+targets=linux/amd64	PATH	internal/runtime/cgroup
+targets=linux/amd64	PATH	internal/runtime/syscall/linux
+targets=windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/winsecurity
+targets=windows/amd64	PATH	golang.org/x/sys/windows
+targets=windows/amd64	PATH	internal/runtime/syscall/windows
+targets=windows/amd64	PATH	internal/syscall/windows
+targets=windows/amd64	PATH	internal/syscall/windows/registry
+targets=windows/amd64	PATH	internal/syscall/windows/sysdll
+targets=windows/amd64	PATH	structs

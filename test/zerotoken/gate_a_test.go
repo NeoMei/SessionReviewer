@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"io"
 	"io/fs"
@@ -259,7 +260,7 @@ func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 		DataRoot: harness.dataRoot, Adapter: harness.codexAdapter(t, "v1"), Catalog: harness.catalog, Store: harness.store,
 		Workers: 8, Now: func() time.Time { return gateNow }, Materialize: sessionview.Materialize,
 		Probe:        projectprobe.Run,
-		ProbeOptions: projectprobe.Options{GitExecutable: harness.gitExecutable, RunGit: harness.gitRecorder.run, VersionFiles: []string{"VERSION"}, RequiredProjectionFiles: []string{"project-fixture.md"}},
+		ProbeOptions: projectprobe.Options{GitExecutable: filepath.Join(harness.dataRoot, "GATE-A-FALLBACK-MUST-NOT-BE-USED"), RunGit: harness.gitRecorder.run, VersionFiles: []string{"VERSION"}, RequiredProjectionFiles: []string{"project-fixture.md"}},
 		Reduce:       projectview.Reduce,
 	}
 	return harness
@@ -838,36 +839,38 @@ func assertPlatformEquivalentGatePaths(t *testing.T) {
 
 func assertFrozenGateProductionDependencies(t *testing.T, repositoryRoot string) {
 	t.Helper()
-	wantPath := filepath.Join(repositoryRoot, "testdata", "zero-token", "gate-a-production-imports.txt")
-	wantBody, err := os.ReadFile(wantPath)
-	if err != nil {
-		t.Fatalf("read reviewed Gate A production imports: %v", err)
-	}
-	want := splitGateImportLines(string(wantBody))
-	wantEdgeDigestPath := filepath.Join(repositoryRoot, "testdata", "zero-token", "gate-a-production-import-edges.sha256")
-	wantEdgeDigestBody, err := os.ReadFile(wantEdgeDigestPath)
-	if err != nil {
-		t.Fatalf("read reviewed Gate A production import edges: %v", err)
-	}
-	wantEdgeDigest := strings.TrimSpace(string(wantEdgeDigestBody))
-	decodedDigest, err := hex.DecodeString(wantEdgeDigest)
-	if err != nil || len(decodedDigest) != sha256.Size || wantEdgeDigest != strings.ToLower(wantEdgeDigest) {
-		t.Fatalf("reviewed Gate A production import edge digest is invalid")
-	}
+	wantPaths := readGateReviewFixture(t, repositoryRoot, "gate-a-production-imports.txt", "PATH", 3)
+	wantEdges := readGateReviewFixture(t, repositoryRoot, "gate-a-production-import-edges.txt", "EDGE", 4)
+	wantDangerous := readGateReviewFixture(t, repositoryRoot, "gate-a-dangerous-capabilities.txt", "", 6)
 	got := loadGateProductionImportClosure(t, repositoryRoot)
-	if fmt.Sprint(got.paths) != fmt.Sprint(want) {
-		t.Fatalf("Gate A production import closure requires review: added=%v removed=%v", gateStringDifference(got.paths, want), gateStringDifference(want, got.paths))
-	}
-	if got.edgeDigest != wantEdgeDigest {
-		t.Fatalf("Gate A production import edges require review: got=%s want=%s", got.edgeDigest, wantEdgeDigest)
-	}
-	assertGateLocalEntrypoints(t, repositoryRoot)
+	assertGateReviewedRecords(t, "production import paths", got.paths, wantPaths)
+	assertGateReviewedRecords(t, "production import edges", got.edges, wantEdges)
+	gotDangerous := loadGateDangerousCapabilityRecords(t, repositoryRoot, got)
+	assertGateReviewedRecords(t, "dangerous production capabilities", gotDangerous, wantDangerous)
+	assertExactGateProcessSites(t, gotDangerous)
+}
+
+type gateTarget struct {
+	label  string
+	goos   string
+	goarch string
 }
 
 type gateDependencyClosure struct {
-	paths      []string
-	edgeDigest string
+	paths         []string
+	edges         []string
+	localFiles    map[string]map[string]bool
+	localPackages map[string]bool
 }
+
+var gateProductionTargets = []gateTarget{
+	{label: "darwin/amd64", goos: "darwin", goarch: "amd64"},
+	{label: "darwin/arm64", goos: "darwin", goarch: "arm64"},
+	{label: "linux/amd64", goos: "linux", goarch: "amd64"},
+	{label: "windows/amd64", goos: "windows", goarch: "amd64"},
+}
+
+const gateModulePath = "github.com/neomei/SessionReviewer"
 
 func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDependencyClosure {
 	t.Helper()
@@ -884,35 +887,88 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 		t.Fatal(err)
 	}
 	commandRoot := t.TempDir()
-	targets := [][2]string{{"darwin", "amd64"}, {"darwin", "arm64"}, {"linux", "amd64"}, {"windows", "amd64"}}
-	closure := make(map[string]bool)
-	edges := make(map[string]bool)
-	for _, target := range targets {
-		command := exec.Command(goExecutable, "list", "-deps", "-f", `PATH{{"\t"}}{{.ImportPath}}{{"\n"}}{{range .Imports}}EDGE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
+	pathTargets := make(map[string]map[string]bool)
+	edgeTargets := make(map[string]map[string]bool)
+	localFiles := make(map[string]map[string]bool)
+	localPackages := make(map[string]bool)
+	format := `PATH{{"\t"}}{{.ImportPath}}{{"\n"}}{{range .Imports}}EDGE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .GoFiles}}GOFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}CGOFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .SFiles}}ASMFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .SysoFiles}}ASMFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`
+	for _, target := range gateProductionTargets {
+		command := exec.Command(goExecutable, "list", "-deps", "-f", format, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
 		command.Dir = repositoryRoot
-		command.Env = gateGoListEnvironment(os.Environ(), commandRoot, target[0], target[1])
+		command.Env = gateGoListEnvironment(os.Environ(), commandRoot, target.goos, target.goarch)
 		output, err := command.Output()
 		if err != nil {
-			t.Fatalf("load Gate A production imports for %s/%s: %v", target[0], target[1], err)
+			t.Fatalf("load Gate A production imports for %s: %v", target.label, err)
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 			fields := strings.Split(line, "\t")
 			switch {
 			case len(fields) == 2 && fields[0] == "PATH" && fields[1] != "":
-				closure[fields[1]] = true
+				addGateTarget(pathTargets, fields[1], target.label)
+				if strings.HasPrefix(fields[1], gateModulePath+"/internal/") {
+					localPackages[fields[1]] = true
+				}
 			case len(fields) == 3 && fields[0] == "EDGE" && fields[1] != "" && fields[2] != "":
-				edges[fields[1]+" -> "+fields[2]] = true
+				addGateTarget(edgeTargets, fields[1]+"\x00"+fields[2], target.label)
+			case len(fields) == 3 && fields[0] == "GOFILE" && fields[1] != "" && fields[2] != "":
+				if strings.HasPrefix(fields[1], gateModulePath+"/internal/") {
+					relativePackage := strings.TrimPrefix(fields[1], gateModulePath+"/")
+					if filepath.Base(fields[2]) != fields[2] || strings.HasSuffix(fields[2], "_test.go") {
+						t.Fatalf("unsafe Gate A local source record for %s: %q", target.label, line)
+					}
+					addGateTarget(localFiles, filepath.ToSlash(filepath.Join(relativePackage, fields[2])), target.label)
+				}
+			case len(fields) == 3 && (fields[0] == "CGOFILE" || fields[0] == "ASMFILE"):
+				if strings.HasPrefix(fields[1], gateModulePath+"/internal/") {
+					t.Fatalf("unreviewed %s surface in Gate A production closure for %s: %s/%s", fields[0], target.label, fields[1], fields[2])
+				}
 			default:
-				t.Fatalf("invalid Gate A production import record for %s/%s: %q", target[0], target[1], line)
+				t.Fatalf("invalid Gate A production import record for %s: %q", target.label, line)
 			}
 		}
 	}
-	edgeLines := sortedGateKeys(edges)
-	edgeSum := sha256.Sum256([]byte(strings.Join(edgeLines, "\n") + "\n"))
 	return gateDependencyClosure{
-		paths:      sortedGateKeys(closure),
-		edgeDigest: hex.EncodeToString(edgeSum[:]),
+		paths:         gateQualifiedDependencyRecords("PATH", pathTargets),
+		edges:         gateQualifiedDependencyRecords("EDGE", edgeTargets),
+		localFiles:    localFiles,
+		localPackages: localPackages,
 	}
+}
+
+func addGateTarget(records map[string]map[string]bool, record, target string) {
+	if records[record] == nil {
+		records[record] = make(map[string]bool)
+	}
+	records[record][target] = true
+}
+
+func gateQualifiedDependencyRecords(kind string, records map[string]map[string]bool) []string {
+	result := make([]string, 0, len(records))
+	for value, targets := range records {
+		qualified := gateTargetQualifier(targets) + "\t" + kind + "\t"
+		if kind == "EDGE" {
+			from, to, found := strings.Cut(value, "\x00")
+			if !found {
+				panic("invalid Gate A edge")
+			}
+			qualified += from + "\t" + to
+		} else {
+			qualified += value
+		}
+		result = append(result, qualified)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func gateTargetQualifier(targets map[string]bool) string {
+	values := make([]string, 0, len(gateProductionTargets))
+	for _, target := range gateProductionTargets {
+		if targets[target.label] {
+			values = append(values, target.label)
+		}
+	}
+	return "targets=" + strings.Join(values, ",")
 }
 
 func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch string) []string {
@@ -936,17 +992,6 @@ func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch str
 	)
 }
 
-func splitGateImportLines(body string) []string {
-	seen := make(map[string]bool)
-	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			seen[line] = true
-		}
-	}
-	return sortedGateKeys(seen)
-}
-
 func gateStringDifference(first, second []string) []string {
 	other := make(map[string]bool, len(second))
 	for _, value := range second {
@@ -961,87 +1006,357 @@ func gateStringDifference(first, second []string) []string {
 	return result
 }
 
-func assertGateLocalEntrypoints(t *testing.T, repositoryRoot string) {
+func readGateReviewFixture(t *testing.T, repositoryRoot, name, kind string, minimumFields int) []string {
 	t.Helper()
-	queue := []string{"internal/scan", "internal/source/codex", "internal/projectprobe"}
-	seen := make(map[string]bool)
-	want := map[string]bool{
-		"internal/accounting": true, "internal/atomicfile": true, "internal/config": true,
-		"internal/ledger": true, "internal/memory": true, "internal/memorystore": true,
-		"internal/pathguard": true, "internal/platform": true, "internal/project": true,
-		"internal/projectidentity": true, "internal/projectprobe": true, "internal/projectview": true,
-		"internal/redact": true, "internal/reviewv2": true, "internal/scan": true,
-		"internal/session": true, "internal/sessionview": true, "internal/source": true,
-		"internal/source/codex": true, "internal/sourcecatalog": true, "internal/syncdoc": true,
-		"internal/winsecurity": true,
+	body, err := os.ReadFile(filepath.Join(repositoryRoot, "testdata", "zero-token", name))
+	if err != nil {
+		t.Fatalf("read reviewed Gate A fixture %s: %v", name, err)
 	}
-	for len(queue) > 0 {
-		relative := queue[0]
-		queue = queue[1:]
-		if seen[relative] {
-			continue
+	if len(body) == 0 || body[len(body)-1] != '\n' || bytes.Contains(body, []byte{'\r'}) {
+		t.Fatalf("Gate A fixture %s must be non-empty canonical LF text", name)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	seen := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		if line == "" || strings.TrimSpace(line) != line || seen[line] {
+			t.Fatalf("Gate A fixture %s contains blank, padded, or duplicate record %q", name, line)
 		}
-		seen[relative] = true
-		directory := filepath.Join(repositoryRoot, filepath.FromSlash(relative))
+		seen[line] = true
+		fields := strings.Split(line, "\t")
+		if len(fields) < minimumFields || !validGateTargetQualifier(fields[0]) || (kind != "" && fields[1] != kind) {
+			t.Fatalf("Gate A fixture %s contains non-canonical record %q", name, line)
+		}
+	}
+	canonical := append([]string(nil), lines...)
+	sort.Strings(canonical)
+	if fmt.Sprint(canonical) != fmt.Sprint(lines) {
+		t.Fatalf("Gate A fixture %s is not canonically sorted", name)
+	}
+	return lines
+}
+
+func validGateTargetQualifier(value string) bool {
+	if !strings.HasPrefix(value, "targets=") {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "targets="), ",")
+	if len(parts) == 0 || parts[0] == "" {
+		return false
+	}
+	position := make(map[string]int, len(gateProductionTargets))
+	for index, target := range gateProductionTargets {
+		position[target.label] = index
+	}
+	previous := -1
+	for _, part := range parts {
+		index, found := position[part]
+		if !found || index <= previous {
+			return false
+		}
+		previous = index
+	}
+	return true
+}
+
+func assertGateReviewedRecords(t *testing.T, label string, got, want []string) {
+	t.Helper()
+	if fmt.Sprint(got) == fmt.Sprint(want) {
+		return
+	}
+	added := gateStringDifference(got, want)
+	removed := gateStringDifference(want, got)
+	t.Fatalf("Gate A %s require human review: added(%d)=%v removed(%d)=%v", label, len(added), boundedGateRecords(added, 12), len(removed), boundedGateRecords(removed, 12))
+}
+
+func boundedGateRecords(records []string, maximum int) []string {
+	if len(records) <= maximum {
+		return records
+	}
+	return append(append([]string(nil), records[:maximum]...), fmt.Sprintf("... %d more", len(records)-maximum))
+}
+
+type gateDangerImport struct {
+	alias       string
+	path        string
+	capability  string
+	conditional bool
+}
+
+func loadGateDangerousCapabilityRecords(t *testing.T, repositoryRoot string, closure gateDependencyClosure) []string {
+	t.Helper()
+	records := make(map[string]bool)
+	packages := sortedGateKeys(closure.localPackages)
+	for _, packagePath := range packages {
+		relativePackage := strings.TrimPrefix(packagePath, gateModulePath+"/")
+		directory := filepath.Join(repositoryRoot, filepath.FromSlash(relativePackage))
 		entries, err := os.ReadDir(directory)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read Gate A local production package %s: %v", relativePackage, err)
 		}
 		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			name := entry.Name()
+			lower := strings.ToLower(name)
+			if entry.IsDir() {
 				continue
 			}
-			file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, entry.Name()), nil, 0)
+			if strings.HasSuffix(lower, ".s") || strings.HasSuffix(lower, ".syso") || strings.HasSuffix(lower, ".c") || strings.HasSuffix(lower, ".cc") || strings.HasSuffix(lower, ".cpp") {
+				t.Fatalf("unreviewed assembly/cgo surface in Gate A local closure: %s/%s", relativePackage, name)
+			}
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				t.Fatalf("Gate A local source is unavailable or redirected: %s/%s", relativePackage, name)
+			}
+			relativeFile := filepath.ToSlash(filepath.Join(relativePackage, name))
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, filepath.Join(directory, name), nil, parser.ParseComments)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("parse Gate A local source %s: %v", relativeFile, err)
 			}
-			aliases := make(map[string]string)
-			for _, importSpec := range file.Imports {
-				path, err := strconv.Unquote(importSpec.Path.Value)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if path == "net/http" || path == "net/rpc" || path == "net/smtp" || strings.Contains(path, "/internal/agent") || strings.Contains(path, "/internal/model") {
-					t.Fatalf("forbidden Gate A dependency %q", path)
-				}
-				if path == "os/exec" && relative != "internal/projectprobe" {
-					t.Fatalf("process entry point outside production ProjectProbe: package=%q", relative)
-				}
-				if path == "net" && relative != "internal/projectprobe" {
-					t.Fatalf("network-capable package outside ProjectProbe parser: package=%q", relative)
-				}
-				alias := filepath.Base(path)
-				if importSpec.Name != nil {
-					alias = importSpec.Name.Name
-				}
-				aliases[alias] = path
-				const module = "github.com/neomei/SessionReviewer/"
-				if strings.HasPrefix(path, module+"internal/") {
-					queue = append(queue, strings.TrimPrefix(path, module))
+			if ast.IsGenerated(file) {
+				t.Fatalf("unreviewed generated source in Gate A local closure: %s", relativeFile)
+			}
+			for _, group := range file.Comments {
+				for _, comment := range group.List {
+					if strings.Contains(comment.Text, "go:linkname") || strings.Contains(comment.Text, "#cgo") {
+						t.Fatalf("unreviewed linkname/cgo directive in Gate A local closure: %s", relativeFile)
+					}
 				}
 			}
-			ast.Inspect(file, func(node ast.Node) bool {
-				call, ok := node.(*ast.CallExpr)
-				if !ok {
-					return true
+			imports := gateDangerousImports(t, relativeFile, file)
+			targets := closure.localFiles[relativeFile]
+			if len(targets) == 0 {
+				for _, imported := range imports {
+					if !imported.conditional {
+						t.Fatalf("dangerous source is outside all reviewed Gate A targets: %s imports %s", relativeFile, imported.path)
+					}
 				}
-				selector, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok {
-					return true
+				continue
+			}
+			visitor := &gateDangerVisitor{
+				t: t, fileSet: fileSet, relativeFile: relativeFile, qualifier: gateTargetQualifier(targets),
+				imports: imports, records: records, function: "<package-init>",
+				literalCounts: make(map[string]int), occurrences: make(map[string]int), called: make(map[*ast.SelectorExpr]bool),
+			}
+			for _, imported := range imports {
+				if !imported.conditional {
+					visitor.recordImport(imported)
 				}
-				identifier, ok := selector.X.(*ast.Ident)
-				if !ok || aliases[identifier.Name] != "net" {
-					return true
-				}
-				if selector.Sel.Name != "ParseIP" {
-					t.Fatalf("unapproved network entrypoint %s.%s in %s", identifier.Name, selector.Sel.Name, relative)
-				}
-				return true
-			})
+			}
+			ast.Walk(visitor, file)
 		}
 	}
-	if fmt.Sprint(sortedGateKeys(seen)) != fmt.Sprint(sortedGateKeys(want)) {
-		t.Fatalf("Gate A production dependency closure changed: got=%v want=%v", sortedGateKeys(seen), sortedGateKeys(want))
+	return sortedGateKeys(records)
+}
+
+func gateDangerousImports(t *testing.T, relativeFile string, file *ast.File) map[string]gateDangerImport {
+	t.Helper()
+	result := make(map[string]gateDangerImport)
+	for _, spec := range file.Imports {
+		path, err := strconv.Unquote(spec.Path.Value)
+		if err != nil {
+			t.Fatalf("decode Gate A import in %s: %v", relativeFile, err)
+		}
+		alias := filepath.Base(path)
+		if spec.Name != nil {
+			alias = spec.Name.Name
+		}
+		if alias == "." {
+			t.Fatalf("unreviewed dot import in Gate A local closure: %s imports %s", relativeFile, path)
+		}
+		if path == "C" || path == "runtime/cgo" {
+			t.Fatalf("unreviewed cgo surface in Gate A local closure: %s", relativeFile)
+		}
+		capability, conditional, dangerous := gateDangerousImportCapability(path)
+		if !dangerous {
+			continue
+		}
+		if alias != "_" {
+			if _, duplicate := result[alias]; duplicate {
+				t.Fatalf("duplicate dangerous import alias %q in %s", alias, relativeFile)
+			}
+		}
+		result[alias] = gateDangerImport{alias: alias, path: path, capability: capability, conditional: conditional}
+	}
+	return result
+}
+
+func gateDangerousImportCapability(path string) (string, bool, bool) {
+	switch {
+	case path == "os/exec":
+		return "process", false, true
+	case path == "os":
+		return "process", true, true
+	case path == "syscall":
+		return "syscall", false, true
+	case strings.HasPrefix(path, "golang.org/x/sys/"):
+		return "xsys", false, true
+	case path == "net" || strings.HasPrefix(path, "net/"):
+		return "network", false, true
+	case path == "plugin":
+		return "plugin", false, true
+	case path == "unsafe":
+		return "unsafe", false, true
+	case path == "reflect":
+		return "reflection", false, true
+	default:
+		return "", false, false
+	}
+}
+
+type gateDangerVisitor struct {
+	t             *testing.T
+	fileSet       *token.FileSet
+	relativeFile  string
+	qualifier     string
+	imports       map[string]gateDangerImport
+	records       map[string]bool
+	function      string
+	literalCounts map[string]int
+	occurrences   map[string]int
+	called        map[*ast.SelectorExpr]bool
+}
+
+func (visitor *gateDangerVisitor) Visit(node ast.Node) ast.Visitor {
+	switch value := node.(type) {
+	case *ast.FuncDecl:
+		child := *visitor
+		child.function = gateFunctionName(visitor.fileSet, value)
+		return &child
+	case *ast.FuncLit:
+		visitor.literalCounts[visitor.function]++
+		child := *visitor
+		child.function = fmt.Sprintf("%s.func%d", visitor.function, visitor.literalCounts[visitor.function])
+		return &child
+	case *ast.CallExpr:
+		if selector, ok := value.Fun.(*ast.SelectorExpr); ok {
+			visitor.called[selector] = true
+			visitor.recordSelector(selector, "CALL")
+		}
+	case *ast.SelectorExpr:
+		if !visitor.called[value] {
+			visitor.recordSelector(value, "REF")
+		}
+	}
+	return visitor
+}
+
+func (visitor *gateDangerVisitor) recordSelector(selector *ast.SelectorExpr, kind string) {
+	if identifier, ok := selector.X.(*ast.Ident); ok {
+		if imported, found := visitor.imports[identifier.Name]; found {
+			if imported.path == "os" && !gateOSProcessSymbols[selector.Sel.Name] {
+				return
+			}
+			visitor.recordImport(imported)
+			visitor.record(kind, imported.capability, imported.path+"."+selector.Sel.Name)
+			return
+		}
+	}
+	if kind != "CALL" {
+		return
+	}
+	capabilities := gateGlobalDangerousMethods[selector.Sel.Name]
+	recordedCapabilities := make(map[string]bool, len(capabilities))
+	for _, capability := range capabilities {
+		visitor.record(kind, capability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
+		recordedCapabilities[capability] = true
+	}
+	for _, imported := range visitor.imports {
+		if !gateCapabilityMethod(imported.capability, selector.Sel.Name) {
+			continue
+		}
+		visitor.recordImport(imported)
+		if recordedCapabilities[imported.capability] {
+			continue
+		}
+		visitor.record(kind, imported.capability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
+		recordedCapabilities[imported.capability] = true
+	}
+}
+
+func (visitor *gateDangerVisitor) recordImport(imported gateDangerImport) {
+	visitor.records[strings.Join([]string{visitor.qualifier, "IMPORT", imported.capability, visitor.relativeFile, imported.path, "alias=" + imported.alias}, "\t")] = true
+}
+
+func (visitor *gateDangerVisitor) record(kind, capability, symbol string) {
+	base := strings.Join([]string{visitor.qualifier, kind, capability, visitor.relativeFile, visitor.function, symbol}, "\t")
+	visitor.occurrences[base]++
+	visitor.records[base+fmt.Sprintf("\toccurrence=%d", visitor.occurrences[base])] = true
+}
+
+var gateOSProcessSymbols = map[string]bool{
+	"StartProcess": true, "FindProcess": true, "Process": true, "ProcessState": true, "ProcAttr": true, "Signal": true,
+}
+
+var gateGlobalDangerousMethods = map[string][]string{
+	"Run": {"process"}, "Start": {"process"}, "Output": {"process"}, "CombinedOutput": {"process"},
+	"Wait": {"process-api-candidate"}, "Kill": {"process-api-candidate"}, "Signal": {"process-api-candidate"}, "Release": {"process-api-candidate"},
+	"Call": {"dynamic"}, "NewProc": {"dynamic"}, "FindProc": {"dynamic"},
+	"Dial": {"network"}, "DialContext": {"network"}, "DialTimeout": {"network"},
+	"Listen": {"network"}, "ListenPacket": {"network"}, "Accept": {"network"},
+	"Lookup": {"plugin"},
+}
+
+func gateCapabilityMethod(capability, method string) bool {
+	switch capability {
+	case "process":
+		return false
+	case "syscall", "xsys":
+		return gateStringMember(method, "Call", "NewProc", "FindProc", "Syscall", "Syscall6", "RawSyscall", "RawSyscall6")
+	case "network":
+		return gateStringMember(method, "Dial", "DialContext", "DialTimeout", "Listen", "ListenPacket", "Accept", "AcceptTCP", "AcceptUnix")
+	case "plugin":
+		return method == "Lookup"
+	case "reflection":
+		return gateStringMember(method, "Call", "CallSlice", "MakeFunc", "Method", "MethodByName", "Pointer", "UnsafePointer")
+	default:
+		return false
+	}
+}
+
+func gateStringMember(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func gateFunctionName(fileSet *token.FileSet, declaration *ast.FuncDecl) string {
+	if declaration.Recv == nil || len(declaration.Recv.List) == 0 {
+		return declaration.Name.Name
+	}
+	return "(" + gateNodeText(fileSet, declaration.Recv.List[0].Type) + ")." + declaration.Name.Name
+}
+
+func gateNodeText(fileSet *token.FileSet, node any) string {
+	var output bytes.Buffer
+	if err := printer.Fprint(&output, fileSet, node); err != nil {
+		return "<unprintable>"
+	}
+	return output.String()
+}
+
+func assertExactGateProcessSites(t *testing.T, records []string) {
+	t.Helper()
+	qualifier := "targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64"
+	want := []string{
+		qualifier + "\tCALL\tprocess\tinternal/projectprobe/git.go\tdefaultGitRunner.func1\tmethod.Run receiver=command\toccurrence=1",
+		qualifier + "\tCALL\tprocess\tinternal/projectprobe/git.go\tdefaultGitRunner.func1\tos/exec.CommandContext\toccurrence=1",
+		qualifier + "\tIMPORT\tprocess\tinternal/projectprobe/git.go\tos/exec\talias=exec",
+	}
+	var got []string
+	for _, record := range records {
+		fields := strings.Split(record, "\t")
+		if len(fields) >= 3 && fields[2] == "process" {
+			got = append(got, record)
+		}
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Gate A process implementation sites changed: got=%v want=%v", got, want)
 	}
 }
 
