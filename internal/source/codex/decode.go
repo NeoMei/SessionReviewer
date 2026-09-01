@@ -132,6 +132,18 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		return decoder.report, fmt.Errorf("validate decoded Codex accounting: %w", err)
 	}
 	projectIDs := sortedSet(decoder.projectIDs)
+	validProjectIDs := make(map[string]struct{})
+	for _, observation := range decoder.observations {
+		validProjectIDs[observation.Key.ProjectID] = struct{}{}
+	}
+	switch {
+	case len(validProjectIDs) > 1:
+		decoder.report.TerminalState = memory.Ambiguous
+	case decoder.report.MalformedLines > 0:
+		decoder.report.TerminalState = memory.Unreadable
+	case decoder.report.UnsupportedRecords > 0 && len(decoder.observations) == 1 && decoder.observations[0].Operation == "session_started":
+		decoder.report.TerminalState = memory.Unsupported
+	}
 	record := memory.SourceRecord{
 		SchemaVersion: memory.MemorySchemaVersion, Provider: providerCodex,
 		SessionID: boundary.Candidate.SessionID, SourceIdentity: boundary.SourceIdentity,

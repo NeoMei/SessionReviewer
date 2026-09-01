@@ -50,7 +50,7 @@ func TestRetentionKeepsNativeLineageAndValidatesOpaquePins(t *testing.T) {
 		t.Fatalf("advance prepared: %v", err)
 	}
 
-	report, err := store.ReportRetention(retentionNow, first.manifest.GenerationID, second.manifest.GenerationID)
+	report, err := store.ReportRetention(retentionNow)
 	if err != nil {
 		t.Fatalf("report native lineage: %v", err)
 	}
@@ -60,15 +60,49 @@ func TestRetentionKeepsNativeLineageAndValidatesOpaquePins(t *testing.T) {
 	if statErr != nil {
 		t.Fatal(statErr)
 	}
-	wantObjects++
-	wantBytes += firstInfo.Size()
-	if report.ReachableObjects != wantObjects || report.ReachableBytes != wantBytes {
-		t.Fatalf("native lineage was not retained exactly: report=%+v want=%d/%d", report, wantObjects, wantBytes)
+	if report.ReachableObjects != wantObjects || report.ReachableBytes != wantBytes || report.RetainedUnreachableObjects != 1 || report.RetainedUnreachableBytes != firstInfo.Size() {
+		t.Fatalf("orphan lineage accounting is wrong: report=%+v want reachable=%d/%d retained=1/%d", report, wantObjects, wantBytes, firstInfo.Size())
+	}
+
+	pinned, err := store.ReportRetention(retentionNow, first.manifest.GenerationID)
+	if err != nil {
+		t.Fatalf("report pinned lineage: %v", err)
+	}
+	if pinned.ReachableObjects != wantObjects+1 || pinned.ReachableBytes != wantBytes+firstInfo.Size() || pinned.RetainedUnreachableObjects != 0 || pinned.RetainedUnreachableBytes != 0 {
+		t.Fatalf("validated pin did not promote only its graph: %+v", pinned)
 	}
 
 	for _, pins := range [][]string{{"missing-generation"}, {"../escape"}, {first.manifest.GenerationID, first.manifest.GenerationID}} {
 		if _, err := store.ReportRetention(retentionNow, pins...); err == nil {
 			t.Fatalf("invalid external pins accepted: %q", pins)
+		}
+	}
+}
+
+func TestRetentionCleanupBytesCountHardlinkedStorageOnceButEveryEntryIsUnlinked(t *testing.T) {
+	dataRoot, store, _ := newRetentionStore(t, "generation-hardlinks")
+	memoryRoot := retentionMemoryRoot(dataRoot)
+	body := []byte("one-physical-candidate")
+	cache := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", body, retentionNow.Add(-8*24*time.Hour))
+	sum := sha256.Sum256(body)
+	stage := filepath.Join(memoryRoot, "staging", hex.EncodeToString(sum[:])+".stage")
+	if err := os.Link(cache, stage); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	report, err := store.ReportRetention(retentionNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.CleanupCandidates != 2 || report.CleanupBytes != int64(len(body)) {
+		t.Fatalf("hardlink accounting=%+v want entries=2 unique_bytes=%d", report, len(body))
+	}
+	if _, err := store.CleanupUnreachable(retentionNow); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{cache, stage} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("authorized hardlink entry remains %q: %v", filepath.Base(path), err)
 		}
 	}
 }
@@ -462,20 +496,21 @@ func retentionInventory(t *testing.T, root string) []retentionInventoryEntry {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return nil
-		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		body, err := os.ReadFile(path)
-		if err != nil {
-			return err
+		digest := ""
+		if info.Mode().IsRegular() {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(body)
+			digest = hex.EncodeToString(sum[:])
 		}
-		sum := sha256.Sum256(body)
 		relative, _ := filepath.Rel(root, path)
-		entries = append(entries, retentionInventoryEntry{path: filepath.ToSlash(relative), size: info.Size(), mode: info.Mode(), modified: info.ModTime(), contentSum: hex.EncodeToString(sum[:])})
+		entries = append(entries, retentionInventoryEntry{path: filepath.ToSlash(relative), size: info.Size(), mode: info.Mode(), modified: info.ModTime(), contentSum: digest})
 		return nil
 	})
 	if err != nil {

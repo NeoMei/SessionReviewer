@@ -13,11 +13,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -66,38 +67,6 @@ type gateManifest struct {
 	ReplayCases     []string `json:"replay_cases"`
 }
 
-type gateAdapter struct {
-	source.Adapter
-}
-
-func (adapter gateAdapter) Discover(ctx context.Context) (source.Discovery, error) {
-	discovery, err := adapter.Adapter.Discover(ctx)
-	if err != nil {
-		return source.Discovery{}, err
-	}
-	discovery.Issues = append(discovery.Issues, source.Issue{
-		Code: "unreadable_segment", Provider: "codex", SessionID: gateFirstSeenID,
-		Path: "/private/non-counted-canary", TerminalState: memory.Unreadable,
-	})
-	return discovery, nil
-}
-
-func (adapter gateAdapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (source.DecodeReport, error) {
-	report, err := adapter.Adapter.Decode(ctx, boundary, visit)
-	if err != nil {
-		return report, err
-	}
-	switch boundary.Candidate.SessionID {
-	case gateUnsupportedID:
-		report.TerminalState = memory.Unsupported
-	case gateMalformedID:
-		report.TerminalState = memory.Unreadable
-	case gateSharedID:
-		report.TerminalState = memory.Ambiguous
-	}
-	return report, nil
-}
-
 type gateHarness struct {
 	repositoryRoot string
 	dataRoot       string
@@ -111,7 +80,7 @@ type gateHarness struct {
 	store          *memorystore.Store
 	options        scan.Options
 	baseBodies     map[string][]byte
-	probeCalls     atomic.Int32
+	gitExecutable  string
 }
 
 func TestGateAZeroTokenCore(t *testing.T) {
@@ -120,10 +89,13 @@ func TestGateAZeroTokenCore(t *testing.T) {
 	if fixture.SchemaVersion != 1 || fixture.LogicalSessions != 154 || fixture.Terminal.Indexed != 151 || fixture.Terminal.Unsupported != 1 || fixture.Terminal.Unreadable != 1 || fixture.Terminal.Ambiguous != 1 {
 		t.Fatalf("invalid Gate A fixture contract: %+v", fixture)
 	}
+	assertGateManifestCases(t, fixture)
 	harness := newGateHarness(t, repositoryRoot)
 	projectBefore := snapshotGateTree(t, harness.projectRoot)
 	vaultBefore := snapshotGateTree(t, harness.vaultRoot)
 	assertNoForbiddenGateDependencies(t, repositoryRoot)
+	assertProductionDiscoveryExclusions(t, harness.options.Adapter)
+	assertCanceledProductionProbeIsReadOnly(t, harness)
 
 	initial := harness.run(t)
 	if initial.SourceSessions != fixture.LogicalSessions || initial.TerminalSessions != fixture.LogicalSessions || initial.IndexedSessions != fixture.Terminal.Indexed || initial.IssueSessions != 3 || initial.ReviewRunTokens != 0 || !initial.Prepared || initial.State != scan.CompletedWithIssues {
@@ -136,6 +108,8 @@ func TestGateAZeroTokenCore(t *testing.T) {
 	}
 	assertGateSharedUsage(t, initialProject)
 	assertGateExcludedCases(t, initialManifest)
+	assertGateMalformedContinuation(t, harness, initialManifest)
+	assertGateProductionProbe(t, harness, initialManifest)
 	assertGatePrivateStore(t, harness.dataRoot)
 
 	beforeAppend := snapshotGateImmutable(t, harness.dataRoot)
@@ -196,9 +170,6 @@ func TestGateAZeroTokenCore(t *testing.T) {
 
 	assertPlatformEquivalentGatePaths(t)
 	assertGatePrivateStore(t, harness.dataRoot)
-	if harness.probeCalls.Load() != 7 {
-		t.Fatalf("unexpected read-only probe count %d", harness.probeCalls.Load())
-	}
 	if _, err := os.Lstat(filepath.Join(harness.projectRoot, "PROJECT-SCRIPT-MUST-NOT-RUN")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a captured project command executed: %v", err)
 	}
@@ -230,7 +201,9 @@ func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 		}
 	}
 	writeGateFixtureFile(t, filepath.Join(harness.projectRoot, "project-fixture.md"), []byte("# project fixture\n"))
+	writeGateFixtureFile(t, filepath.Join(harness.projectRoot, "VERSION"), []byte("gate-a-v1\n"))
 	writeGateFixtureFile(t, filepath.Join(harness.vaultRoot, "vault-fixture.md"), []byte("# vault fixture\n"))
+	harness.gitExecutable = initializeGateRepository(t, harness.projectRoot)
 	harness.binding = resolveGateBinding(t, gateProjectID, harness.projectRoot)
 	harness.foreignBinding = resolveGateBinding(t, gateForeignProject, harness.foreignRoot)
 	harness.projectRoot = harness.binding.CanonicalRoot
@@ -253,7 +226,9 @@ func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 		ProjectID: gateProjectID, Binding: harness.binding, SessionsRoot: harness.sessionsRoot,
 		DataRoot: harness.dataRoot, Adapter: harness.codexAdapter(t, "v1"), Catalog: harness.catalog, Store: harness.store,
 		Workers: 8, Now: func() time.Time { return gateNow }, Materialize: sessionview.Materialize,
-		Probe: harness.readOnlyProbe, Reduce: projectview.Reduce,
+		Probe:        projectprobe.Run,
+		ProbeOptions: projectprobe.Options{GitExecutable: harness.gitExecutable, VersionFiles: []string{"VERSION"}, RequiredProjectionFiles: []string{"project-fixture.md"}},
+		Reduce:       projectview.Reduce,
 	}
 	return harness
 }
@@ -269,27 +244,7 @@ func (harness *gateHarness) codexAdapter(t *testing.T, version string, supersede
 	if err != nil {
 		t.Fatal(err)
 	}
-	return gateAdapter{Adapter: adapter}
-}
-
-func (harness *gateHarness) readOnlyProbe(ctx context.Context, options projectprobe.Options) (memory.ProjectProbeState, memory.ProbeCheck, error) {
-	if err := ctx.Err(); err != nil {
-		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
-	}
-	harness.probeCalls.Add(1)
-	state := memory.ProjectProbeState{
-		SchemaVersion: memory.MemorySchemaVersion, ProjectID: options.Binding.ProjectID,
-		CanonicalRoot: options.Binding.CanonicalRoot, Branch: "main", Head: strings.Repeat("a", 40),
-		RemoteIdentityHashes: []string{}, VersionFiles: []memory.ProbeFile{}, RequiredProjectionFiles: []memory.ProbeFile{},
-		ProbeVersion: projectprobe.ProbeVersion, Diagnostics: []memory.Diagnostic{},
-	}
-	var err error
-	state.Digest, err = memory.ProjectProbeStateDigest(state)
-	if err != nil {
-		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
-	}
-	check := memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: gateNow.Format(time.RFC3339Nano), StateDigest: state.Digest, Available: true, Diagnostics: []memory.Diagnostic{}}
-	return state, check, nil
+	return adapter
 }
 
 func (harness *gateHarness) run(t *testing.T) scan.Result {
@@ -318,7 +273,7 @@ func (harness *gateHarness) installSessions(t *testing.T) {
 		harness.baseBodies[id] = body
 		writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, id+".jsonl"), body)
 	}
-	unsupported := gateSessionBody(t, gateUnsupportedID, harness.projectRoot, harness.projectRoot, false)
+	unsupported := gateUnsupportedSessionBody(t, harness.projectRoot)
 	harness.baseBodies[gateUnsupportedID] = unsupported
 	writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, gateUnsupportedID+".jsonl"), unsupported)
 	malformed := gateSessionBody(t, gateMalformedID, harness.projectRoot, harness.projectRoot, true)
@@ -329,6 +284,26 @@ func (harness *gateHarness) installSessions(t *testing.T) {
 	writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, gateSharedID+".jsonl"), shared)
 	foreign := gateSessionBody(t, gateForeignID, harness.foreignRoot, harness.foreignRoot, false)
 	writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, gateForeignID+".jsonl"), foreign)
+	firstSeen := gateFirstSeenIssueBody(t, harness.projectRoot)
+	writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, gateFirstSeenID+"-a.jsonl"), firstSeen)
+	writeGateFixtureFile(t, filepath.Join(harness.sessionsRoot, gateFirstSeenID+"-b.jsonl"), firstSeen)
+}
+
+func gateUnsupportedSessionBody(t *testing.T, projectRoot string) []byte {
+	t.Helper()
+	base := gateSessionStart.Add(3 * time.Hour)
+	return encodeGateLines(t, []any{
+		map[string]any{"timestamp": base.Format(time.RFC3339), "type": "session_meta", "payload": map[string]any{"id": gateUnsupportedID, "cwd": projectRoot, "source": "gate-a"}},
+		map[string]any{"timestamp": base.Add(time.Second).Format(time.RFC3339), "type": "future_record", "payload": map[string]any{"schema": 99}},
+		gateTokenLine(base.Add(2*time.Second), 2),
+	}, false)
+}
+
+func gateFirstSeenIssueBody(t *testing.T, projectRoot string) []byte {
+	t.Helper()
+	return encodeGateLines(t, []any{
+		map[string]any{"timestamp": gateSessionStart.Add(5 * time.Hour).Format(time.RFC3339), "type": "session_meta", "payload": map[string]any{"id": gateFirstSeenID, "cwd": projectRoot, "source": "gate-a"}},
+	}, false)
 }
 
 func gateSessionBody(t *testing.T, sessionID, metadataRoot, workRoot string, malformed bool) []byte {
@@ -421,6 +396,15 @@ func readGateManifest(t *testing.T, path string) gateManifest {
 	return manifest
 }
 
+func assertGateManifestCases(t *testing.T, manifest gateManifest) {
+	t.Helper()
+	wantNonCounted := []string{"first_seen_unassociated_issue", "foreign_project_source"}
+	wantReplay := []string{"shared_session", "append_successor", "adapter_supersession", "withdrawal", "missing_unavailable", "unchanged", "replacement_truncation", "platform_path_equivalence"}
+	if fmt.Sprint(manifest.NonCountedCases) != fmt.Sprint(wantNonCounted) || fmt.Sprint(manifest.ReplayCases) != fmt.Sprint(wantReplay) {
+		t.Fatalf("Gate A manifest case sets changed: non_counted=%v replay=%v", manifest.NonCountedCases, manifest.ReplayCases)
+	}
+}
+
 func loadGateProjectView(t *testing.T, store *memorystore.Store, digest string) memory.ProjectView {
 	t.Helper()
 	body, err := store.LoadObject(memorystore.ObjectProjectView, digest)
@@ -432,6 +416,19 @@ func loadGateProjectView(t *testing.T, store *memorystore.Store, digest string) 
 		t.Fatal(err)
 	}
 	return view
+}
+
+func loadGateProbeState(t *testing.T, store *memorystore.Store, digest string) memory.ProjectProbeState {
+	t.Helper()
+	body, err := store.LoadObject(memorystore.ObjectProbeState, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state memory.ProjectProbeState
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatal(err)
+	}
+	return state
 }
 
 func loadGateSessionView(t *testing.T, store *memorystore.Store, manifest memory.GenerationManifest, sessionID string) memory.SessionView {
@@ -473,6 +470,90 @@ func assertGateExcludedCases(t *testing.T, manifest memory.GenerationManifest) {
 		if dependency.SessionID == gateFirstSeenID || dependency.SessionID == gateForeignID {
 			t.Fatalf("non-counted source entered target generation: %q", dependency.SessionID)
 		}
+	}
+}
+
+func assertProductionDiscoveryExclusions(t *testing.T, adapter source.Adapter) {
+	t.Helper()
+	discovery, err := adapter.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundFirstSeen, foundForeign := false, false
+	for _, issue := range discovery.Issues {
+		if issue.SessionID == gateFirstSeenID && issue.TerminalState == memory.Ambiguous {
+			foundFirstSeen = true
+		}
+	}
+	for _, candidate := range discovery.Candidates {
+		if candidate.SessionID == gateForeignID {
+			foundForeign = true
+		}
+	}
+	if !foundFirstSeen || !foundForeign {
+		t.Fatalf("production discovery did not emit declared non-counted cases: first_seen=%v foreign=%v", foundFirstSeen, foundForeign)
+	}
+}
+
+func assertGateMalformedContinuation(t *testing.T, harness *gateHarness, manifest memory.GenerationManifest) {
+	t.Helper()
+	view := loadGateSessionView(t, harness.store, manifest, gateMalformedID)
+	if view.TerminalState != memory.Unreadable || view.SourceAvailability != memory.SourceAvailable {
+		t.Fatalf("malformed terminal=%q availability=%q", view.TerminalState, view.SourceAvailability)
+	}
+	foundRequest, foundTool, foundDiagnostic := false, false, false
+	for _, observation := range view.ObservationSummaries {
+		if observation.Operation == "user_request" && observation.Subject == "user-"+gateMalformedID {
+			foundRequest = true
+		}
+		if observation.Operation == "verification" && observation.Subject == "call-"+gateMalformedID && observation.Outcome == "passed" {
+			foundTool = true
+		}
+	}
+	for _, diagnostic := range view.Diagnostics {
+		if diagnostic.Code == "malformed_source_records" {
+			foundDiagnostic = true
+		}
+	}
+	record, found, err := harness.catalog.GetSource("codex", gateMalformedID)
+	if err != nil || !found || record.Usage.TotalTokens != 3 {
+		t.Fatalf("post-malformed usage record found=%v err=%v record=%+v", found, err, record)
+	}
+	if !foundRequest || !foundTool || !foundDiagnostic || len(view.Diagnostics) > 4 {
+		t.Fatalf("post-malformed evidence request=%v tool=%v diagnostic=%v diagnostics=%d view=%+v", foundRequest, foundTool, foundDiagnostic, len(view.Diagnostics), view)
+	}
+}
+
+func assertGateProductionProbe(t *testing.T, harness *gateHarness, manifest memory.GenerationManifest) {
+	t.Helper()
+	state := loadGateProbeState(t, harness.store, manifest.ProbeStateDigest)
+	if harness.binding.CommonDirIdentity == "" || state.ProjectID != gateProjectID || state.CanonicalRoot != harness.projectRoot || state.Branch != "main" || len(state.Head) != 40 || state.DirtyPathCount != 0 || len(state.RemoteIdentityHashes) != 1 || state.ProbeVersion != projectprobe.ProbeVersion {
+		t.Fatalf("production ProjectProbe identity/Git evidence=%+v binding=%+v", state, harness.binding)
+	}
+	if !manifest.ProbeCheck.Available || manifest.ProbeCheck.StateDigest != state.Digest || len(manifest.ProbeCheck.Diagnostics) != 0 {
+		t.Fatalf("production ProjectProbe check=%+v state=%+v", manifest.ProbeCheck, state)
+	}
+	if len(state.VersionFiles) != 1 || state.VersionFiles[0].Path != "VERSION" || !state.VersionFiles[0].Exists || state.VersionFiles[0].ContentHash == "" {
+		t.Fatalf("production ProjectProbe version evidence=%+v", state.VersionFiles)
+	}
+	if len(state.RequiredProjectionFiles) != 1 || state.RequiredProjectionFiles[0].Path != "project-fixture.md" || !state.RequiredProjectionFiles[0].Exists || state.RequiredProjectionFiles[0].ContentHash == "" {
+		t.Fatalf("production ProjectProbe projection evidence=%+v", state.RequiredProjectionFiles)
+	}
+}
+
+func assertCanceledProductionProbeIsReadOnly(t *testing.T, harness *gateHarness) {
+	t.Helper()
+	before := snapshotGateTree(t, harness.projectRoot)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	options := harness.options.ProbeOptions
+	options.Binding = harness.binding
+	options.Now = func() time.Time { return gateNow }
+	if _, _, err := projectprobe.Run(ctx, options); !errors.Is(err, context.Canceled) {
+		t.Fatalf("production ProjectProbe cancellation=%v", err)
+	}
+	if after := snapshotGateTree(t, harness.projectRoot); !equalGateSnapshots(before, after) {
+		t.Fatal("canceled production ProjectProbe changed repository metadata")
 	}
 }
 
@@ -559,8 +640,18 @@ func assertPlatformEquivalentGatePaths(t *testing.T) {
 
 func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
 	t.Helper()
-	queue := []string{"internal/scan", "internal/source/codex", "internal/memorystore", "internal/sourcecatalog", "internal/sessionview", "internal/projectview"}
+	queue := []string{"internal/scan", "internal/source/codex", "internal/projectprobe"}
 	seen := make(map[string]bool)
+	want := map[string]bool{
+		"internal/accounting": true, "internal/atomicfile": true, "internal/config": true,
+		"internal/ledger": true, "internal/memory": true, "internal/memorystore": true,
+		"internal/pathguard": true, "internal/platform": true, "internal/project": true,
+		"internal/projectidentity": true, "internal/projectprobe": true, "internal/projectview": true,
+		"internal/redact": true, "internal/reviewv2": true, "internal/scan": true,
+		"internal/session": true, "internal/sessionview": true, "internal/source": true,
+		"internal/source/codex": true, "internal/sourcecatalog": true, "internal/syncdoc": true,
+		"internal/winsecurity": true,
+	}
 	for len(queue) > 0 {
 		relative := queue[0]
 		queue = queue[1:]
@@ -586,8 +677,14 @@ func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if path == "net/http" || path == "net/rpc" || strings.Contains(path, "/internal/agent") {
+				if path == "net/http" || path == "net/rpc" || path == "net/smtp" || strings.Contains(path, "/internal/agent") || strings.Contains(path, "/internal/model") {
 					t.Fatalf("forbidden Gate A dependency %q", path)
+				}
+				if path == "os/exec" && relative != "internal/projectprobe" {
+					t.Fatalf("process entry point outside production ProjectProbe: package=%q", relative)
+				}
+				if path == "net" && relative != "internal/projectprobe" {
+					t.Fatalf("network-capable package outside ProjectProbe parser: package=%q", relative)
 				}
 				const module = "github.com/neomei/SessionReviewer/"
 				if strings.HasPrefix(path, module+"internal/") {
@@ -596,6 +693,18 @@ func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
 			}
 		}
 	}
+	if fmt.Sprint(sortedGateKeys(seen)) != fmt.Sprint(sortedGateKeys(want)) {
+		t.Fatalf("Gate A production dependency closure changed: got=%v want=%v", sortedGateKeys(seen), sortedGateKeys(want))
+	}
+}
+
+func sortedGateKeys(values map[string]bool) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type gateSnapshotEntry struct {
@@ -690,6 +799,39 @@ func resolveGateBinding(t *testing.T, projectID, root string) projectidentity.Bi
 		t.Fatal(err)
 	}
 	return binding
+}
+
+func initializeGateRepository(t *testing.T, root string) string {
+	t.Helper()
+	executable, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("Gate A requires Git: %v", err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err = filepath.EvalSymlinks(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.name", "Gate A"},
+		{"config", "user.email", "gate-a@example.invalid"},
+		{"add", "VERSION", "project-fixture.md"},
+		{"commit", "-m", "gate fixture"},
+		{"branch", "-M", "main"},
+		{"remote", "add", "origin", "https://example.invalid/session-reviewer-gate.git"},
+	} {
+		command := exec.Command(executable, args...)
+		command.Dir = root
+		command.Env = append(os.Environ(), "GIT_AUTHOR_DATE=2026-08-31T10:00:00Z", "GIT_COMMITTER_DATE=2026-08-31T10:00:00Z")
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("initialize Gate A Git repository command=%q: %v: %s", args[0], err, output)
+		}
+	}
+	return executable
 }
 
 func writeGateFixtureFile(t *testing.T, path string, body []byte) {

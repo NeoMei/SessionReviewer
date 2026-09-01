@@ -25,14 +25,16 @@ const (
 	maxRetentionCandidateSize = 4 << 20
 )
 
-// RetentionReport accounts for the unique immutable graph retained by native
-// generations and validated external generation pins, plus old unreachable
-// cache/staging entries that are eligible for rooted cleanup.
+// RetentionReport separates the current prepared/external-pin graph from
+// fully validated but unreachable immutable lineage, plus old cache/staging
+// entries that are eligible for rooted cleanup.
 type RetentionReport struct {
-	ReachableObjects  int   `json:"reachable_objects"`
-	ReachableBytes    int64 `json:"reachable_bytes"`
-	CleanupCandidates int   `json:"cleanup_candidates"`
-	CleanupBytes      int64 `json:"cleanup_bytes"`
+	ReachableObjects           int   `json:"reachable_objects"`
+	ReachableBytes             int64 `json:"reachable_bytes"`
+	RetainedUnreachableObjects int   `json:"retained_unreachable_objects"`
+	RetainedUnreachableBytes   int64 `json:"retained_unreachable_bytes"`
+	CleanupCandidates          int   `json:"cleanup_candidates"`
+	CleanupBytes               int64 `json:"cleanup_bytes"`
 }
 
 type retentionFile struct {
@@ -251,6 +253,10 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 			return retentionSnapshot{}, errors.New("prepared generation is absent from native lineage")
 		}
 	}
+	rootGenerations := make(map[string]struct{}, len(pins)+1)
+	if preparedErr == nil {
+		rootGenerations[prepared.GenerationID] = struct{}{}
+	}
 	for _, pin := range pins {
 		manifest, exists := generations[pin]
 		if !exists {
@@ -259,6 +265,7 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		if err := s.reconcileGenerationGraph(manifest); err != nil {
 			return retentionSnapshot{}, fmt.Errorf("reconcile external generation pin %q: %w", pin, err)
 		}
+		rootGenerations[pin] = struct{}{}
 	}
 
 	objectFiles, objectFacts, err := s.enumerateRetentionObjects()
@@ -271,6 +278,9 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	for generationID, manifest := range generations {
 		if err := s.reconcileGenerationGraph(manifest); err != nil {
 			return retentionSnapshot{}, fmt.Errorf("reconcile native generation %q: %w", generationID, err)
+		}
+		if _, rooted := rootGenerations[generationID]; !rooted {
+			continue
 		}
 		generationFile := generationFiles[generationID]
 		reachablePaths[generationFile.relative] = generationFile
@@ -329,13 +339,26 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	}
 
 	report := RetentionReport{ReachableObjects: len(reachablePaths)}
+	reachablePhysical := make(map[pathguard.IdentityToken]struct{}, len(reachablePaths))
 	for _, file := range reachablePaths {
-		if file.size > 0 && report.ReachableBytes > int64(^uint64(0)>>1)-file.size {
-			return retentionSnapshot{}, errors.New("reachable byte count overflow")
+		if err := addUniqueRetentionBytes(&report.ReachableBytes, reachablePhysical, file); err != nil {
+			return retentionSnapshot{}, fmt.Errorf("reachable accounting: %w", err)
 		}
-		report.ReachableBytes += file.size
+	}
+	retainedPhysical := make(map[pathguard.IdentityToken]struct{}, len(generationFiles)+len(objectFiles))
+	for _, collection := range []map[string]retentionFile{generationFiles, objectFiles} {
+		for _, file := range collection {
+			if _, reachable := reachablePaths[file.relative]; reachable {
+				continue
+			}
+			report.RetainedUnreachableObjects++
+			if err := addUniqueRetentionBytes(&report.RetainedUnreachableBytes, retainedPhysical, file); err != nil {
+				return retentionSnapshot{}, fmt.Errorf("retained unreachable accounting: %w", err)
+			}
+		}
 	}
 	candidates := make([]retentionFile, 0)
+	candidatePhysical := make(map[pathguard.IdentityToken]struct{})
 	for _, file := range allFacts {
 		if !strings.HasPrefix(file.relative, "staging/") && !strings.HasPrefix(file.relative, "cache/") {
 			continue
@@ -348,11 +371,25 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		}
 		candidates = append(candidates, file)
 		report.CleanupCandidates++
-		report.CleanupBytes += file.size
+		if err := addUniqueRetentionBytes(&report.CleanupBytes, candidatePhysical, file); err != nil {
+			return retentionSnapshot{}, fmt.Errorf("cleanup accounting: %w", err)
+		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].relative < candidates[j].relative })
 	fingerprint := retentionFingerprint(allFacts)
 	return retentionSnapshot{report: report, candidates: candidates, fingerprint: fingerprint}, nil
+}
+
+func addUniqueRetentionBytes(total *int64, physical map[pathguard.IdentityToken]struct{}, file retentionFile) error {
+	if _, counted := physical[file.identity]; counted {
+		return nil
+	}
+	if file.size < 0 || file.size > int64(^uint64(0)>>1)-*total {
+		return errors.New("byte count overflow")
+	}
+	physical[file.identity] = struct{}{}
+	*total += file.size
+	return nil
 }
 
 type manifestObjectReference struct {

@@ -318,42 +318,97 @@ func TestMalformedLineAdvancesBoundaryAndLaterValidLineDecodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	observations, report := decodeBoundary(t, adapter, boundary)
-	if report.MalformedLines != 1 || report.UnsupportedRecords != 1 {
+	if report.MalformedLines != 1 || report.UnsupportedRecords != 1 || report.TerminalState != memory.Unreadable {
 		t.Fatalf("decode report=%+v", report)
 	}
-	foundLater := false
+	foundLaterRequest, foundLaterTool, foundLaterUsage := false, false, report.ProposedSource.Usage.TotalTokens == 2
 	for _, observation := range observations {
 		if observation.Operation == "user_request" && observation.Key.Subject == "user-after-malformed" {
-			foundLater = true
+			foundLaterRequest = true
+		}
+		if observation.Operation == "verification" && observation.Key.Subject == "call-after-malformed" && observation.Outcome == "passed" {
+			foundLaterTool = true
 		}
 	}
-	if !foundLater {
-		t.Fatalf("later valid line not decoded: %+v", observations)
+	if !foundLaterRequest || !foundLaterTool || !foundLaterUsage {
+		t.Fatalf("post-malformed continuation request=%v tool=%v usage=%v observations=%+v report=%+v", foundLaterRequest, foundLaterTool, foundLaterUsage, observations, report)
 	}
-	if boundary.Frozen.Location.JSONL == nil || boundary.Frozen.Location.JSONL.Line != 5 {
+	if len(report.Diagnostics) == 0 || len(report.Diagnostics) > maxDiagnostics {
+		t.Fatalf("malformed diagnostic is absent or unbounded: %d", len(report.Diagnostics))
+	}
+	if boundary.Frozen.Location.JSONL == nil || boundary.Frozen.Location.JSONL.Line != 7 {
 		t.Fatalf("malformed line did not advance frozen boundary: %+v", boundary.Frozen)
 	}
 }
 
+func TestDecodeClassifiesUnsupportedOnlySourceAndCrossProjectSource(t *testing.T) {
+	t.Run("unsupported", func(t *testing.T) {
+		fixture := newAdapterFixture(t)
+		body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "unsupported-only", "cwd": fixture.projectA}) +
+			encodedRecord(t, "2026-08-31T14:00:01Z", "future_record", map[string]any{"version": 99}) +
+			usageEvent("2026-08-31T14:00:02Z")
+		if err := os.WriteFile(filepath.Join(fixture.sessions, "unsupported-only.jsonl"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		adapter := fixture.adapter(t, "v1")
+		boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "unsupported-only"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		observations, report := decodeBoundary(t, adapter, boundary)
+		if report.TerminalState != memory.Unsupported || report.UnsupportedRecords != 1 || len(observations) != 1 {
+			t.Fatalf("unsupported source classification=%+v observations=%+v", report, observations)
+		}
+	})
+
+	t.Run("cross project", func(t *testing.T) {
+		fixture := newAdapterFixture(t)
+		fixture.installFixture(t, "session-shared.jsonl")
+		adapter := fixture.adapter(t, "v1")
+		boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-shared"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, report := decodeBoundary(t, adapter, boundary)
+		if report.TerminalState != memory.Ambiguous || len(report.ProposedSource.ProjectIDs) != 2 {
+			t.Fatalf("cross-project source classification=%+v", report)
+		}
+	})
+}
+
 func TestAmbiguousAuthenticatedRootsQuarantineOnlyAffectedRevisions(t *testing.T) {
 	fixture := newAdapterFixture(t)
-	fixture.installFixture(t, "session-project-a.jsonl")
-	duplicateBinding := authenticateBinding(t, "project-shadow", fixture.projectA)
-	fixture.bindings = []projectidentity.Binding{fixture.bindings[0], duplicateBinding}
+	nested := filepath.Join(fixture.projectA, "ambiguous")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	firstNested := authenticateBinding(t, "project-nested-a", nested)
+	secondNested := authenticateBinding(t, "project-nested-b", nested)
+	fixture.bindings = []projectidentity.Binding{fixture.bindings[0], firstNested, secondNested}
+	input, err := json.Marshal(map[string]string{"cmd": "go test ./...", "workdir": nested})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := encodedRecord(t, "2026-08-31T15:00:00Z", "session_meta", map[string]any{"id": "partially-ambiguous", "cwd": fixture.projectA}) +
+		encodedRecord(t, "2026-08-31T15:00:01Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "ambiguous-call", "name": "exec_command", "input": string(input)}) +
+		usageEvent("2026-08-31T15:00:02Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "partially-ambiguous.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	adapter := fixture.adapter(t, "v1")
-	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "partially-ambiguous"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	observations, report := decodeBoundary(t, adapter, boundary)
-	if len(observations) != 0 || len(report.Quarantined) == 0 {
+	if len(observations) != 1 || observations[0].Operation != "session_started" || len(report.Quarantined) == 0 {
 		t.Fatalf("ambiguous observations=%d quarantined=%d report=%+v", len(observations), len(report.Quarantined), report)
 	}
 	if report.TerminalState != memory.Indexed || report.ProposedSource.SessionID == "" {
 		t.Fatalf("one-revision quarantine poisoned source decoding: %+v", report)
 	}
 	for _, quarantined := range report.Quarantined {
-		if quarantined.ReasonCode != "ambiguous_project_root" || len(quarantined.CandidateProjectIDs) != 2 {
+		if quarantined.ReasonCode != "ambiguous_project_root" || len(quarantined.CandidateProjectIDs) < 2 {
 			t.Fatalf("quarantine metadata=%+v", quarantined)
 		}
 	}
