@@ -32,6 +32,8 @@ targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_
 targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.LOCK_EX	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.LOCK_NB	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	unlockProjectPlatformLock	syscall.LOCK_UN	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	ASSIGN	git-fallback	internal/projectprobe/probe.go	Run	runner = defaultGitRunner(options.Binding.CanonicalRoot, gitExecutable) branch=runner == nil	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	git-fallback	internal/projectprobe/probe.go	Run	defaultGitRunner args=options.Binding.CanonicalRoot, gitExecutable branch=runner == nil	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/accounting/accounting.go	validatePricing	net/url.Parse	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/projectprobe/git.go	validASCIIHost	net.ParseIP	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/projectprobe/git.go	validRemote	net/url.Parse	occurrence=1
@@ -91,6 +93,8 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).validateJournalUnlocked	reflect.DeepEqual	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	mergeSource	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	validateMutation	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CONSTRUCT	git-fallback	internal/projectprobe/git.go	defaultGitRunner	func-literal	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	DEF	git-fallback	internal/projectprobe/git.go	defaultGitRunner	function.defaultGitRunner	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/accounting/accounting.go	net/url	alias=url
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/ledger/navigation.go	net/url	alias=url
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/projectprobe/git.go	net	alias=net
@@ -110,9 +114,33 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	in
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/validate.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/codex/adapter.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sourcecatalog/catalog.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	git-fallback	internal/projectprobe/probe.go	Run	identifier.defaultGitRunner branch=runner == nil	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/ledger/navigation.go	markdownNavigationTarget	net/url.URL	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validFileURLRemote	net/url.URL	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validURLRemote	net/url.URL	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/ledger/document.go	topLevelH2Headings	method.Start receiver=first	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerDocument.func1	method.Start receiver=result[i]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerDocument.func1	method.Start receiver=result[j]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	fencedOpeningStart	method.Start receiver=block.Info.Segment	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	fencedOpeningStart	method.Start receiver=block.Lines().At(0)	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	markdownHeadings	method.Start receiver=line	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/codex/decode.go	(*recordDecoder).addToolOutput	method.Output receiver=payload	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/body.go	topLevelHeadings	method.Start receiver=first	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=5
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=6
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=7
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	buildV2DocumentState	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=4
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	<package-init>	reflect.Type	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Array	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Float32	occurrence=1

@@ -215,6 +215,129 @@ func TestGateAZeroTokenCore(t *testing.T) {
 	t.Log("Gate A: 154/154 terminal, 151 indexed, zero model tokens")
 }
 
+func TestGateDangerousMethodValueReferenceRequiresReview(t *testing.T) {
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, "internal/fixture.go", `package fixture
+func consume(func() error) {}
+func fixture(command interface{ Run() error }) func() error {
+	runAgain := command.Run
+	consume(command.Run)
+	_ = runAgain
+	return command.Run
+}
+`, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := make(map[string]bool)
+	visitor := &gateDangerVisitor{
+		t: t, fileSet: fileSet, relativeFile: "internal/fixture.go", qualifier: "targets=linux/amd64",
+		imports: map[string]gateDangerImport{}, records: records, function: "<package-init>",
+		literalCounts: make(map[string]int), occurrences: make(map[string]int), called: make(map[*ast.SelectorExpr]bool),
+	}
+	ast.Walk(visitor, file)
+	base := "targets=linux/amd64\tREF\tprocess-method-ref\tinternal/fixture.go\tfixture\tmethod.Run receiver=command\toccurrence="
+	want := []string{base + "1", base + "2", base + "3"}
+	if got := sortedGateKeys(records); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("dangerous method values were not reviewed across store/pass/return: got=%v want=%v", got, want)
+	}
+}
+
+func TestGateGoListEnvironmentClearsInheritedTargetTuning(t *testing.T) {
+	hostile := []string{
+		"PATH=/usr/bin", "CGO_ENABLED=1", "GOAMD64=v4", "GOARM64=v9.5",
+		"GOEXPERIMENT=boringcrypto", "GOFLAGS=-tags=unreviewed",
+	}
+	for _, target := range gateProductionTargets {
+		t.Run(target.label, func(t *testing.T) {
+			environment := gateGoListEnvironment(hostile, t.TempDir(), target.goos, target.goarch)
+			values := make(map[string]string, len(environment))
+			seen := make(map[string]bool, len(environment))
+			for _, entry := range environment {
+				name, value, found := strings.Cut(entry, "=")
+				if !found || seen[name] {
+					t.Fatalf("malformed or duplicate target environment entry %q", entry)
+				}
+				seen[name] = true
+				values[name] = value
+			}
+			if values["CGO_ENABLED"] != "0" || values["GOEXPERIMENT"] != "" || !seen["GOEXPERIMENT"] || values["GOFLAGS"] != "-mod=readonly" {
+				t.Fatalf("uncontrolled target environment for %s: %v", target.label, values)
+			}
+			if target.goarch == "amd64" {
+				if values["GOAMD64"] != "v1" {
+					t.Fatalf("GOAMD64=%q want v1", values["GOAMD64"])
+				}
+				if _, found := values["GOARM64"]; found {
+					t.Fatalf("irrelevant GOARM64 survived for %s", target.label)
+				}
+			} else {
+				if values["GOARM64"] != "v8.0" {
+					t.Fatalf("GOARM64=%q want v8.0", values["GOARM64"])
+				}
+				if _, found := values["GOAMD64"]; found {
+					t.Fatalf("irrelevant GOAMD64 survived for %s", target.label)
+				}
+			}
+		})
+	}
+}
+
+func TestGateNativeSourceCoverageMatchesCurrentGoListSchema(t *testing.T) {
+	wantFields := []string{
+		"CgoFiles", "IgnoredOtherFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
+		"FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles",
+	}
+	if fmt.Sprint(gateGoListNativeFields) != fmt.Sprint(wantFields) {
+		t.Fatalf("incomplete go list native fields: got=%v want=%v", gateGoListNativeFields, wantFields)
+	}
+	template := gateGoListTemplate()
+	for _, field := range wantFields {
+		if !strings.Contains(template, "{{range ."+field+"}}") {
+			t.Fatalf("go list template omitted native field %s", field)
+		}
+	}
+	wantExtensions := []string{
+		".c", ".cc", ".cpp", ".cxx", ".f", ".f90", ".for", ".h", ".hh", ".hpp", ".hxx",
+		".m", ".s", ".swig", ".swigcxx", ".syso",
+	}
+	if got := sortedGateKeys(gateNativeSourceExtensions); fmt.Sprint(got) != fmt.Sprint(wantExtensions) {
+		t.Fatalf("incomplete native source extensions: got=%v want=%v", got, wantExtensions)
+	}
+	for _, name := range []string{"fixture.S", "fixture.F", "fixture.CXX", "fixture.HPP", "fixture.SWIGCXX"} {
+		if !gateNativeSourceExtension(name) {
+			t.Fatalf("case-normalized native extension escaped: %s", name)
+		}
+	}
+	if gateNativeSourceExtension("fixture.go") {
+		t.Fatal("ordinary Go source classified as native")
+	}
+}
+
+func TestGateDefaultGitRunnerSelectionSitesAreFrozen(t *testing.T) {
+	repositoryRoot := gateRepositoryRoot(t)
+	closure := loadGateProductionImportClosure(t, repositoryRoot)
+	records := loadGateDangerousCapabilityRecords(t, repositoryRoot, closure)
+	qualifier := "targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64"
+	want := []string{
+		qualifier + "\tASSIGN\tgit-fallback\tinternal/projectprobe/probe.go\tRun\trunner = defaultGitRunner(options.Binding.CanonicalRoot, gitExecutable) branch=runner == nil\toccurrence=1",
+		qualifier + "\tCALL\tgit-fallback\tinternal/projectprobe/probe.go\tRun\tdefaultGitRunner args=options.Binding.CanonicalRoot, gitExecutable branch=runner == nil\toccurrence=1",
+		qualifier + "\tCONSTRUCT\tgit-fallback\tinternal/projectprobe/git.go\tdefaultGitRunner\tfunc-literal\toccurrence=1",
+		qualifier + "\tDEF\tgit-fallback\tinternal/projectprobe/git.go\tdefaultGitRunner\tfunction.defaultGitRunner\toccurrence=1",
+		qualifier + "\tREF\tgit-fallback\tinternal/projectprobe/probe.go\tRun\tidentifier.defaultGitRunner branch=runner == nil\toccurrence=1",
+	}
+	var got []string
+	for _, record := range records {
+		fields := strings.Split(record, "\t")
+		if len(fields) >= 3 && fields[2] == "git-fallback" {
+			got = append(got, record)
+		}
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("defaultGitRunner selection sites changed: got=%v want=%v", got, want)
+	}
+}
+
 func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 	t.Helper()
 	root := t.TempDir()
@@ -848,6 +971,7 @@ func assertFrozenGateProductionDependencies(t *testing.T, repositoryRoot string)
 	gotDangerous := loadGateDangerousCapabilityRecords(t, repositoryRoot, got)
 	assertGateReviewedRecords(t, "dangerous production capabilities", gotDangerous, wantDangerous)
 	assertExactGateProcessSites(t, gotDangerous)
+	assertExactGateFallbackSites(t, gotDangerous)
 }
 
 type gateTarget struct {
@@ -891,7 +1015,7 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 	edgeTargets := make(map[string]map[string]bool)
 	localFiles := make(map[string]map[string]bool)
 	localPackages := make(map[string]bool)
-	format := `PATH{{"\t"}}{{.ImportPath}}{{"\n"}}{{range .Imports}}EDGE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .GoFiles}}GOFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .CgoFiles}}CGOFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .SFiles}}ASMFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .SysoFiles}}ASMFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`
+	format := gateGoListTemplate()
 	for _, target := range gateProductionTargets {
 		command := exec.Command(goExecutable, "list", "-deps", "-f", format, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
 		command.Dir = repositoryRoot
@@ -918,9 +1042,9 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 					}
 					addGateTarget(localFiles, filepath.ToSlash(filepath.Join(relativePackage, fields[2])), target.label)
 				}
-			case len(fields) == 3 && (fields[0] == "CGOFILE" || fields[0] == "ASMFILE"):
-				if strings.HasPrefix(fields[1], gateModulePath+"/internal/") {
-					t.Fatalf("unreviewed %s surface in Gate A production closure for %s: %s/%s", fields[0], target.label, fields[1], fields[2])
+			case len(fields) == 4 && fields[0] == "NATIVEFILE":
+				if strings.HasPrefix(fields[2], gateModulePath+"/internal/") {
+					t.Fatalf("unreviewed %s surface in Gate A production closure for %s: %s/%s", fields[1], target.label, fields[2], fields[3])
 				}
 			default:
 				t.Fatalf("invalid Gate A production import record for %s: %q", target.label, line)
@@ -933,6 +1057,20 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 		localFiles:    localFiles,
 		localPackages: localPackages,
 	}
+}
+
+var gateGoListNativeFields = []string{
+	"CgoFiles", "IgnoredOtherFiles", "CFiles", "CXXFiles", "MFiles", "HFiles",
+	"FFiles", "SFiles", "SwigFiles", "SwigCXXFiles", "SysoFiles",
+}
+
+func gateGoListTemplate() string {
+	var format strings.Builder
+	format.WriteString(`PATH{{"\t"}}{{.ImportPath}}{{"\n"}}{{range .Imports}}EDGE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}{{range .GoFiles}}GOFILE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`)
+	for _, field := range gateGoListNativeFields {
+		fmt.Fprintf(&format, `{{range .%s}}NATIVEFILE{{"\t"}}%s{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`, field, field)
+	}
+	return format.String()
 }
 
 func addGateTarget(records map[string]map[string]bool, record, target string) {
@@ -974,7 +1112,8 @@ func gateTargetQualifier(targets map[string]bool) string {
 func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch string) []string {
 	drop := map[string]bool{
 		"CGO_ENABLED": true, "GOCACHE": true, "GOENV": true, "GOFLAGS": true,
-		"GOOS": true, "GOARCH": true, "GOPROXY": true, "GOSUMDB": true,
+		"GOOS": true, "GOARCH": true, "GOAMD64": true, "GOARM64": true, "GOEXPERIMENT": true,
+		"GOPROXY": true, "GOSUMDB": true,
 		"GOTMPDIR": true, "GOWORK": true, "TEMP": true, "TMP": true, "TMPDIR": true,
 	}
 	result := make([]string, 0, len(environment)+13)
@@ -984,12 +1123,21 @@ func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch str
 			result = append(result, entry)
 		}
 	}
-	return append(result,
+	result = append(result,
 		"CGO_ENABLED=0", "GOCACHE="+filepath.Join(temporaryRoot, "cache-"+goos+"-"+goarch),
-		"GOENV=off", "GOFLAGS=-mod=readonly", "GOOS="+goos, "GOARCH="+goarch,
+		"GOENV=off", "GOEXPERIMENT=", "GOFLAGS=-mod=readonly", "GOOS="+goos, "GOARCH="+goarch,
 		"GOPROXY=off", "GOSUMDB=off", "GOTMPDIR="+temporaryRoot, "GOWORK=off",
 		"TEMP="+temporaryRoot, "TMP="+temporaryRoot, "TMPDIR="+temporaryRoot,
 	)
+	switch goarch {
+	case "amd64":
+		result = append(result, "GOAMD64=v1")
+	case "arm64":
+		result = append(result, "GOARM64=v8.0")
+	default:
+		panic("unsupported Gate A target architecture " + goarch)
+	}
+	return result
 }
 
 func gateStringDifference(first, second []string) []string {
@@ -1095,11 +1243,10 @@ func loadGateDangerousCapabilityRecords(t *testing.T, repositoryRoot string, clo
 		}
 		for _, entry := range entries {
 			name := entry.Name()
-			lower := strings.ToLower(name)
 			if entry.IsDir() {
 				continue
 			}
-			if strings.HasSuffix(lower, ".s") || strings.HasSuffix(lower, ".syso") || strings.HasSuffix(lower, ".c") || strings.HasSuffix(lower, ".cc") || strings.HasSuffix(lower, ".cpp") {
+			if gateNativeSourceExtension(name) {
 				t.Fatalf("unreviewed assembly/cgo surface in Gate A local closure: %s/%s", relativePackage, name)
 			}
 			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -1146,9 +1293,108 @@ func loadGateDangerousCapabilityRecords(t *testing.T, repositoryRoot string, clo
 				}
 			}
 			ast.Walk(visitor, file)
+			ast.Walk(&gateFallbackVisitor{
+				fileSet: fileSet, file: file, relativeFile: relativeFile, qualifier: gateTargetQualifier(targets),
+				records: records, function: "<package-init>", occurrences: make(map[string]int),
+				definitionPositions: make(map[token.Pos]bool),
+			}, file)
 		}
 	}
 	return sortedGateKeys(records)
+}
+
+type gateFallbackVisitor struct {
+	fileSet             *token.FileSet
+	file                *ast.File
+	relativeFile        string
+	qualifier           string
+	records             map[string]bool
+	function            string
+	occurrences         map[string]int
+	definitionPositions map[token.Pos]bool
+}
+
+func (visitor *gateFallbackVisitor) Visit(node ast.Node) ast.Visitor {
+	switch value := node.(type) {
+	case *ast.FuncDecl:
+		child := *visitor
+		child.function = gateFunctionName(visitor.fileSet, value)
+		if value.Name.Name == "defaultGitRunner" {
+			visitor.definitionPositions[value.Name.Pos()] = true
+			visitor.record("DEF", child.function, "function.defaultGitRunner")
+		}
+		return &child
+	case *ast.FuncLit:
+		if visitor.function == "defaultGitRunner" {
+			visitor.record("CONSTRUCT", visitor.function, "func-literal")
+		}
+	case *ast.AssignStmt:
+		if gateAssignmentCallsIdentifier(value, "defaultGitRunner") {
+			visitor.record("ASSIGN", visitor.function, gateNodeText(visitor.fileSet, value)+visitor.branchSuffix(value.Pos()))
+		}
+	case *ast.CallExpr:
+		if identifier, ok := value.Fun.(*ast.Ident); ok && identifier.Name == "defaultGitRunner" {
+			arguments := make([]string, 0, len(value.Args))
+			for _, argument := range value.Args {
+				arguments = append(arguments, gateNodeText(visitor.fileSet, argument))
+			}
+			visitor.record("CALL", visitor.function, "defaultGitRunner args="+strings.Join(arguments, ", ")+visitor.branchSuffix(value.Pos()))
+		}
+	case *ast.Ident:
+		if value.Name == "defaultGitRunner" && !visitor.definitionPositions[value.Pos()] {
+			visitor.record("REF", visitor.function, "identifier.defaultGitRunner"+visitor.branchSuffix(value.Pos()))
+		}
+	}
+	return visitor
+}
+
+func (visitor *gateFallbackVisitor) branchSuffix(position token.Pos) string {
+	var conditions []string
+	ast.Inspect(visitor.file, func(node ast.Node) bool {
+		statement, ok := node.(*ast.IfStmt)
+		if !ok {
+			return true
+		}
+		if statement.Body != nil && position > statement.Body.Lbrace && position < statement.Body.Rbrace {
+			conditions = append(conditions, gateNodeText(visitor.fileSet, statement.Cond))
+		}
+		return true
+	})
+	if len(conditions) == 0 {
+		return " branch=<none>"
+	}
+	return " branch=" + strings.Join(conditions, " && ")
+}
+
+func (visitor *gateFallbackVisitor) record(kind, function, symbol string) {
+	base := strings.Join([]string{visitor.qualifier, kind, "git-fallback", visitor.relativeFile, function, symbol}, "\t")
+	visitor.occurrences[base]++
+	visitor.records[base+fmt.Sprintf("\toccurrence=%d", visitor.occurrences[base])] = true
+}
+
+func gateAssignmentCallsIdentifier(assignment *ast.AssignStmt, name string) bool {
+	for _, expression := range assignment.Rhs {
+		call, ok := expression.(*ast.CallExpr)
+		if !ok {
+			continue
+		}
+		identifier, ok := call.Fun.(*ast.Ident)
+		if ok && identifier.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+var gateNativeSourceExtensions = map[string]bool{
+	".c": true, ".cc": true, ".cpp": true, ".cxx": true,
+	".f": true, ".f90": true, ".for": true,
+	".h": true, ".hh": true, ".hpp": true, ".hxx": true,
+	".m": true, ".s": true, ".swig": true, ".swigcxx": true, ".syso": true,
+}
+
+func gateNativeSourceExtension(name string) bool {
+	return gateNativeSourceExtensions[strings.ToLower(filepath.Ext(name))]
 }
 
 func gateDangerousImports(t *testing.T, relativeFile string, file *ast.File) map[string]gateDangerImport {
@@ -1254,26 +1500,32 @@ func (visitor *gateDangerVisitor) recordSelector(selector *ast.SelectorExpr, kin
 			return
 		}
 	}
-	if kind != "CALL" {
-		return
-	}
 	capabilities := gateGlobalDangerousMethods[selector.Sel.Name]
 	recordedCapabilities := make(map[string]bool, len(capabilities))
 	for _, capability := range capabilities {
-		visitor.record(kind, capability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
-		recordedCapabilities[capability] = true
+		recordedCapability := gateDangerousMethodCapability(kind, capability)
+		visitor.record(kind, recordedCapability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
+		recordedCapabilities[recordedCapability] = true
 	}
 	for _, imported := range visitor.imports {
 		if !gateCapabilityMethod(imported.capability, selector.Sel.Name) {
 			continue
 		}
 		visitor.recordImport(imported)
-		if recordedCapabilities[imported.capability] {
+		recordedCapability := gateDangerousMethodCapability(kind, imported.capability)
+		if recordedCapabilities[recordedCapability] {
 			continue
 		}
-		visitor.record(kind, imported.capability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
-		recordedCapabilities[imported.capability] = true
+		visitor.record(kind, recordedCapability, "method."+selector.Sel.Name+" receiver="+gateNodeText(visitor.fileSet, selector.X))
+		recordedCapabilities[recordedCapability] = true
 	}
+}
+
+func gateDangerousMethodCapability(kind, capability string) string {
+	if kind == "REF" {
+		return capability + "-method-ref"
+	}
+	return capability
 }
 
 func (visitor *gateDangerVisitor) recordImport(imported gateDangerImport) {
@@ -1357,6 +1609,28 @@ func assertExactGateProcessSites(t *testing.T, records []string) {
 	}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("Gate A process implementation sites changed: got=%v want=%v", got, want)
+	}
+}
+
+func assertExactGateFallbackSites(t *testing.T, records []string) {
+	t.Helper()
+	qualifier := "targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64"
+	want := []string{
+		qualifier + "\tASSIGN\tgit-fallback\tinternal/projectprobe/probe.go\tRun\trunner = defaultGitRunner(options.Binding.CanonicalRoot, gitExecutable) branch=runner == nil\toccurrence=1",
+		qualifier + "\tCALL\tgit-fallback\tinternal/projectprobe/probe.go\tRun\tdefaultGitRunner args=options.Binding.CanonicalRoot, gitExecutable branch=runner == nil\toccurrence=1",
+		qualifier + "\tCONSTRUCT\tgit-fallback\tinternal/projectprobe/git.go\tdefaultGitRunner\tfunc-literal\toccurrence=1",
+		qualifier + "\tDEF\tgit-fallback\tinternal/projectprobe/git.go\tdefaultGitRunner\tfunction.defaultGitRunner\toccurrence=1",
+		qualifier + "\tREF\tgit-fallback\tinternal/projectprobe/probe.go\tRun\tidentifier.defaultGitRunner branch=runner == nil\toccurrence=1",
+	}
+	var got []string
+	for _, record := range records {
+		fields := strings.Split(record, "\t")
+		if len(fields) >= 3 && fields[2] == "git-fallback" {
+			got = append(got, record)
+		}
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("Gate A defaultGitRunner sites changed: got=%v want=%v", got, want)
 	}
 }
 
