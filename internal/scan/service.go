@@ -719,16 +719,6 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			return nil, fmt.Errorf("decoded source %s/%s has invalid boundary relation %q", record.Provider, record.SessionID, item.report.BoundaryRelation)
 		}
 		chunkDigests := previousChunks(previous, record.Provider, record.SessionID)
-		currentIDs := make(map[string]struct{}, item.spool.count)
-		if err := item.spool.replay(ctx, func(observation memory.ObservationRevision) error {
-			if _, duplicate := currentIDs[observation.RevisionID]; duplicate {
-				return fmt.Errorf("decoded source %s/%s emitted duplicate revision %s", record.Provider, record.SessionID, observation.RevisionID)
-			}
-			currentIDs[observation.RevisionID] = struct{}{}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
 		terminals = append(terminals, terminalSource{
 			record: record, mutation: sourcecatalog.BatchMutation{Relation: item.report.BoundaryRelation, ExpectedDigest: item.report.ExpectedCatalogDigest, Desired: record}, state: state,
 			spool: item.spool, chunks: chunkDigests,
@@ -817,7 +807,12 @@ func replayObservationSpool(ctx context.Context, spool *observationSpool) ([]mem
 		return nil, nil
 	}
 	result := make([]memory.ObservationRevision, 0, spool.count)
+	revisions := make(map[string]struct{}, spool.count)
 	if err := spool.replay(ctx, func(value memory.ObservationRevision) error {
+		if _, duplicate := revisions[value.RevisionID]; duplicate {
+			return fmt.Errorf("decoded source %s/%s emitted duplicate revision %s", value.Key.Provider, value.Key.SessionID, value.RevisionID)
+		}
+		revisions[value.RevisionID] = struct{}{}
 		result = append(result, value)
 		return nil
 	}); err != nil {

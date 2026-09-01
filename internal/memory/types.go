@@ -268,25 +268,54 @@ type AssociatedUsage struct {
 	Shared            bool   `json:"shared"`
 }
 
+// AggregationChannelCoverage describes one bounded ProjectView aggregation
+// channel without copying the authoritative per-Session facts. Seen counts
+// candidate inputs, Emitted counts durable selections, Collapsed counts inputs
+// folded into an existing selection, Dropped counts inputs omitted at a bound,
+// and Evicted counts bounded candidates displaced by a later candidate.
+type AggregationChannelCoverage struct {
+	Seen      int  `json:"seen"`
+	Emitted   int  `json:"emitted"`
+	Collapsed int  `json:"collapsed"`
+	Dropped   int  `json:"dropped"`
+	Evicted   int  `json:"evicted"`
+	Truncated bool `json:"truncated"`
+}
+
+// ProjectAggregationCoverage makes every bounded ProjectView selection
+// explicit. SessionView and SessionLineage remain the complete authoritative
+// per-Session fact materializations.
+type ProjectAggregationCoverage struct {
+	ObservationSummariesSeen  int                        `json:"observation_summaries_seen"`
+	WitnessedKeys             AggregationChannelCoverage `json:"witnessed_keys"`
+	SessionRecoveries         AggregationChannelCoverage `json:"session_recoveries"`
+	CrossSessionRecoveries    AggregationChannelCoverage `json:"cross_session_recoveries"`
+	PhaseBoundaries           AggregationChannelCoverage `json:"phase_boundaries"`
+	ModuleCandidates          AggregationChannelCoverage `json:"module_candidates"`
+	EventReferences           AggregationChannelCoverage `json:"event_references"`
+	SelectedEvidenceRevisions AggregationChannelCoverage `json:"selected_evidence_revisions"`
+}
+
 type ProjectView struct {
-	SchemaVersion           int                     `json:"schema_version"`
-	Digest                  string                  `json:"digest"`
-	ProjectID               string                  `json:"project_id"`
-	Generation              int                     `json:"generation"`
-	StartedAt               string                  `json:"started_at"`
-	EndedAt                 string                  `json:"ended_at"`
-	SourceSessions          int                     `json:"source_sessions"`
-	TerminalCounts          TerminalCounts          `json:"terminal_counts"`
-	SessionViewDependencies []SessionViewDependency `json:"session_view_dependencies"`
-	ObservationRevisionIDs  []string                `json:"observation_revision_ids"`
-	ProbeStateDigest        string                  `json:"probe_state_digest"`
-	LiveState               StateSnapshot           `json:"live_state"`
-	WitnessedState          []DerivedRecord         `json:"witnessed_state"`
-	DerivedRecords          []DerivedRecord         `json:"derived_records"`
-	AssociatedUsage         []AssociatedUsage       `json:"associated_usage"`
-	PreviousViewDigest      string                  `json:"previous_view_digest,omitempty"`
-	DependencyDigest        string                  `json:"dependency_digest"`
-	ReducerVersion          string                  `json:"reducer_version"`
+	SchemaVersion           int                        `json:"schema_version"`
+	Digest                  string                     `json:"digest"`
+	ProjectID               string                     `json:"project_id"`
+	Generation              int                        `json:"generation"`
+	StartedAt               string                     `json:"started_at"`
+	EndedAt                 string                     `json:"ended_at"`
+	SourceSessions          int                        `json:"source_sessions"`
+	TerminalCounts          TerminalCounts             `json:"terminal_counts"`
+	SessionViewDependencies []SessionViewDependency    `json:"session_view_dependencies"`
+	ObservationRevisionIDs  []string                   `json:"observation_revision_ids"`
+	ProbeStateDigest        string                     `json:"probe_state_digest"`
+	LiveState               StateSnapshot              `json:"live_state"`
+	WitnessedState          []DerivedRecord            `json:"witnessed_state"`
+	DerivedRecords          []DerivedRecord            `json:"derived_records"`
+	AggregationCoverage     ProjectAggregationCoverage `json:"aggregation_coverage"`
+	AssociatedUsage         []AssociatedUsage          `json:"associated_usage"`
+	PreviousViewDigest      string                     `json:"previous_view_digest,omitempty"`
+	DependencyDigest        string                     `json:"dependency_digest"`
+	ReducerVersion          string                     `json:"reducer_version"`
 }
 
 type GenerationManifest struct {
@@ -447,6 +476,97 @@ func ValidateSessionViewContext(ctx context.Context, value SessionView) error {
 	}
 	if err != nil || value.Digest != want {
 		return errors.New("SessionView self digest does not match canonical identity")
+	}
+	return nil
+}
+
+func validateProjectAggregationCoverage(value ProjectView, checkpoints ...func() error) error {
+	coverage := value.AggregationCoverage
+	if coverage.ObservationSummariesSeen < 0 || coverage.ObservationSummariesSeen > maxSafeInteger {
+		return errors.New("invalid ProjectView observation summary coverage")
+	}
+	channels := []struct {
+		name  string
+		value AggregationChannelCoverage
+	}{
+		{"witnessed keys", coverage.WitnessedKeys},
+		{"Session recoveries", coverage.SessionRecoveries},
+		{"cross-Session recoveries", coverage.CrossSessionRecoveries},
+		{"phase boundaries", coverage.PhaseBoundaries},
+		{"module candidates", coverage.ModuleCandidates},
+		{"event references", coverage.EventReferences},
+		{"selected evidence revisions", coverage.SelectedEvidenceRevisions},
+	}
+	for _, channel := range channels {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		counts := []int{channel.value.Seen, channel.value.Emitted, channel.value.Collapsed, channel.value.Dropped, channel.value.Evicted}
+		for _, count := range counts {
+			if count < 0 || count > maxSafeInteger {
+				return fmt.Errorf("invalid %s aggregation coverage", channel.name)
+			}
+		}
+		if channel.value.Truncated != (channel.value.Dropped > 0 || channel.value.Evicted > 0) {
+			return fmt.Errorf("%s aggregation truncation flag disagrees with dropped or evicted coverage", channel.name)
+		}
+	}
+	if coverage.EventReferences.Seen != coverage.ObservationSummariesSeen {
+		return errors.New("event reference coverage does not match observation summaries seen")
+	}
+	if coverage.WitnessedKeys.Emitted != len(value.WitnessedState) {
+		return errors.New("witnessed-key coverage does not match ProjectView payload")
+	}
+	derivedCounts := map[string]int{}
+	dependencyReferences := 0
+	for _, record := range value.WitnessedState {
+		dependencyReferences += len(record.DependencyRevisionIDs)
+	}
+	for _, record := range value.DerivedRecords {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		dependencyReferences += len(record.DependencyRevisionIDs)
+		switch {
+		case record.Kind == "recovery_link" && record.RuleID == "matching-operation-component":
+			derivedCounts["session"]++
+		case record.Kind == "recovery_link":
+			derivedCounts["cross"]++
+		case record.Kind == "phase_boundary":
+			derivedCounts["phase"]++
+		case record.Kind == "module_rank":
+			derivedCounts["module"]++
+		case record.Kind == "event_ref":
+			derivedCounts["event"]++
+		}
+	}
+	if coverage.SessionRecoveries.Emitted != derivedCounts["session"] ||
+		coverage.CrossSessionRecoveries.Emitted != derivedCounts["cross"] ||
+		coverage.PhaseBoundaries.Emitted != derivedCounts["phase"] ||
+		coverage.ModuleCandidates.Emitted != derivedCounts["module"] ||
+		coverage.EventReferences.Emitted != derivedCounts["event"] {
+		return errors.New("aggregation coverage does not match ProjectView derived records")
+	}
+	if coverage.SelectedEvidenceRevisions.Emitted != len(value.ObservationRevisionIDs) || coverage.SelectedEvidenceRevisions.Seen != dependencyReferences {
+		return errors.New("selected evidence coverage does not match ProjectView evidence payload")
+	}
+	for _, channel := range []struct {
+		name  string
+		value AggregationChannelCoverage
+	}{
+		{"witnessed keys", coverage.WitnessedKeys},
+		{"Session recoveries", coverage.SessionRecoveries},
+		{"cross-Session recoveries", coverage.CrossSessionRecoveries},
+		{"phase boundaries", coverage.PhaseBoundaries},
+		{"event references", coverage.EventReferences},
+		{"selected evidence revisions", coverage.SelectedEvidenceRevisions},
+	} {
+		if channel.value.Seen != channel.value.Emitted+channel.value.Collapsed+channel.value.Dropped {
+			return fmt.Errorf("%s aggregation coverage does not reconcile", channel.name)
+		}
+	}
+	if coverage.ModuleCandidates.Seen != coverage.ModuleCandidates.Emitted+coverage.ModuleCandidates.Collapsed+coverage.ModuleCandidates.Dropped+coverage.ModuleCandidates.Evicted {
+		return errors.New("module candidate aggregation coverage does not reconcile")
 	}
 	return nil
 }
@@ -642,6 +762,9 @@ func ValidateProjectViewContext(ctx context.Context, value ProjectView) error {
 		if _, duplicate := witnessedIDs[record.ID]; duplicate {
 			return fmt.Errorf("duplicate ProjectView derived record ID %q", record.ID)
 		}
+	}
+	if err := validateProjectAggregationCoverage(value, checkpoints...); err != nil {
+		return err
 	}
 	if err := validateAssociatedUsage(value.AssociatedUsage, checkpoints...); err != nil {
 		return err
@@ -1059,15 +1182,25 @@ func validateLineageDependencies(values []SessionLineageDependency, sessions []S
 	if len(values) != len(sessions) || len(values) > 65536 {
 		return errors.New("Session lineage dependency count does not match SessionViews")
 	}
-	for index, value := range values {
+	expected := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		expected[session.Provider+"\x00"+session.SessionID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
 		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid Session lineage dependency")
 		}
-		if value.Provider != sessions[index].Provider || value.SessionID != sessions[index].SessionID {
-			return errors.New("Session lineage dependency identity does not match SessionView")
+		key := value.Provider + "\x00" + value.SessionID
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("duplicate Session lineage dependency identity")
+		}
+		seen[key] = struct{}{}
+		if _, exists := expected[key]; !exists {
+			return errors.New("Session lineage dependency identity does not match any SessionView")
 		}
 	}
 	return nil

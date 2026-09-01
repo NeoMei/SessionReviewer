@@ -222,6 +222,24 @@ func TestRunReplaysAtMostOneObservationSourcePayload(t *testing.T) {
 	assertNoObservationSpools(t, harness.options.DataRoot, scanTestProject)
 }
 
+func TestRunValidatesEachNewSourceWithOnlyPreApplyAndPersistenceSpoolReplays(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	replayStarts := 0
+	harness.options.spoolObserver = func(stats observationSpoolStats) {
+		if stats.ResidentSources == 1 {
+			replayStarts++
+		}
+	}
+	result, err := Run(context.Background(), harness.options)
+	if err != nil || !result.Prepared {
+		t.Fatalf("scan result=%+v err=%v", result, err)
+	}
+	if replayStarts != 2 {
+		t.Fatalf("observation spool replay starts=%d want one complete pre-Apply validation and one persistence replay", replayStarts)
+	}
+}
+
 func assertNoObservationSpools(t *testing.T, dataRoot, projectID string) {
 	t.Helper()
 	root := filepath.Join(dataRoot, observationSpoolNamespace, projectID)

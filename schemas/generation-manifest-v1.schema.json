@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/neomei/SessionReviewer/schemas/generation-manifest-v1.schema.json",
   "title": "SessionReviewer private GenerationManifest v1",
-  "$comment": "Runtime validation additionally applies UTF-8 byte limits, exact dependency reconciliation, ProbeCheck state binding, and rejects deprecated project-wide lineage fields.",
+  "$comment": "Runtime validation additionally applies UTF-8 byte limits, exact dependency reconciliation, ProbeCheck state binding, and rejects deprecated project-wide lineage fields. session_views remain ProjectView-ordered; session_lineages are an independently ordered exact provider+session identity set.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "generation_id", "project_id", "created_at", "source_record_digests", "session_views", "session_lineages", "probe_state_digest", "probe_check", "project_view_digest"],

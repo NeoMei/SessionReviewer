@@ -319,6 +319,54 @@ func TestAssociatedUsageReferencesSourceCatalogWithoutCopiedTotals(t *testing.T)
 	})
 }
 
+func TestProjectViewAggregationCoverageIsRequiredAndArithmeticallyExact(t *testing.T) {
+	valid := validProjectView()
+	if err := ValidateProjectView(valid); err != nil {
+		t.Fatalf("valid aggregation coverage rejected: %v", err)
+	}
+	body, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/project-view-v1.schema.json", body); err != nil {
+		t.Fatalf("schema rejected valid aggregation coverage: %v", err)
+	}
+
+	var object map[string]any
+	if err := json.Unmarshal(body, &object); err != nil {
+		t.Fatal(err)
+	}
+	delete(object, "aggregation_coverage")
+	missing, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/project-view-v1.schema.json", missing); err == nil {
+		t.Fatal("ProjectView schema accepted missing aggregation coverage")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ProjectView)
+	}{
+		{name: "summary count disagrees with event channel", mutate: func(value *ProjectView) { value.AggregationCoverage.ObservationSummariesSeen++ }},
+		{name: "witness output count disagrees with payload", mutate: func(value *ProjectView) { value.AggregationCoverage.WitnessedKeys.Emitted = 0 }},
+		{name: "evidence output count disagrees with payload", mutate: func(value *ProjectView) { value.AggregationCoverage.SelectedEvidenceRevisions.Emitted = 0 }},
+		{name: "dropped channel denies truncation", mutate: func(value *ProjectView) { value.AggregationCoverage.EventReferences.Truncated = false }},
+		{name: "negative counter", mutate: func(value *ProjectView) { value.AggregationCoverage.PhaseBoundaries.Dropped = -1 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := validProjectView()
+			test.mutate(&value)
+			value.Digest = mustProjectViewDigest(value)
+			if err := ValidateProjectView(value); err == nil {
+				t.Fatal("ProjectView runtime accepted invalid aggregation coverage")
+			}
+		})
+	}
+}
+
 func TestSessionViewCarriesOnlyCompactDependencyBoundObservationSummaries(t *testing.T) {
 	view := validSessionView()
 	if err := ValidateSessionView(view); err != nil {
@@ -558,6 +606,45 @@ func TestSessionLineageIsPerSessionBoundedAndManifestResolved(t *testing.T) {
 	}
 }
 
+func TestGenerationManifestMatchesSessionLineagesByIdentityInsteadOfArrayPosition(t *testing.T) {
+	manifest := validGenerationManifest()
+	manifest.SourceRecordDigests = append(manifest.SourceRecordDigests, objectDigest("b"))
+	manifest.SessionViews = append(manifest.SessionViews, SessionViewDependency{Provider: "codex", SessionID: "s2", Digest: objectDigest("c")})
+	manifest.SessionLineages = []SessionLineageDependency{
+		{Provider: "codex", SessionID: "s2", Digest: objectDigest("d")},
+		manifest.SessionLineages[0],
+	}
+	if err := ValidateGenerationManifest(manifest); err != nil {
+		t.Fatalf("manifest rejected independently permuted lineage dependencies: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*GenerationManifest)
+	}{
+		{name: "duplicate identity", mutate: func(value *GenerationManifest) {
+			value.SessionLineages[0] = SessionLineageDependency{Provider: "codex", SessionID: "s1", Digest: objectDigest("e")}
+		}},
+		{name: "missing identity", mutate: func(value *GenerationManifest) { value.SessionLineages = value.SessionLineages[:1] }},
+		{name: "extra identity", mutate: func(value *GenerationManifest) {
+			value.SessionLineages = append(value.SessionLineages, SessionLineageDependency{Provider: "codex", SessionID: "s3", Digest: objectDigest("f")})
+		}},
+		{name: "mismatched identity", mutate: func(value *GenerationManifest) {
+			value.SessionLineages[0] = SessionLineageDependency{Provider: "codex", SessionID: "s3", Digest: objectDigest("f")}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := manifest
+			value.SessionLineages = append([]SessionLineageDependency(nil), manifest.SessionLineages...)
+			test.mutate(&value)
+			if err := ValidateGenerationManifest(value); err == nil {
+				t.Fatal("manifest accepted an inexact lineage identity set")
+			}
+		})
+	}
+}
+
 func TestSessionLineageAndGenerationManifestSchemasAreStrict(t *testing.T) {
 	fixtures := []struct {
 		name  string
@@ -794,9 +881,15 @@ func validProjectView() ProjectView {
 		LiveState:               StateSnapshot{Branch: "main", Head: strings.Repeat("b", 40), DirtyPathCount: 0},
 		WitnessedState:          []DerivedRecord{validDerivedRecord()},
 		DerivedRecords:          []DerivedRecord{},
-		AssociatedUsage:         []AssociatedUsage{{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2"), Shared: false}},
-		DependencyDigest:        objectDigest("8"),
-		ReducerVersion:          "project-view-v1",
+		AggregationCoverage: ProjectAggregationCoverage{
+			ObservationSummariesSeen:  1,
+			WitnessedKeys:             AggregationChannelCoverage{Seen: 1, Emitted: 1},
+			EventReferences:           AggregationChannelCoverage{Seen: 1, Dropped: 1, Truncated: true},
+			SelectedEvidenceRevisions: AggregationChannelCoverage{Seen: 1, Emitted: 1},
+		},
+		AssociatedUsage:  []AssociatedUsage{{Provider: "codex", SessionID: "s1", UsageRecordDigest: objectDigest("2"), Shared: false}},
+		DependencyDigest: objectDigest("8"),
+		ReducerVersion:   "project-view-v1",
 	}
 	value.Digest = mustProjectViewDigest(value)
 	return value

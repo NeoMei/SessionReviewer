@@ -145,14 +145,19 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 		SessionViewDependencies: []memory.SessionViewDependency{{
 			Provider: "codex", SessionID: "session-1", Digest: session.Digest,
 		}},
-		ObservationRevisionIDs: []string{observation.RevisionID},
+		ObservationRevisionIDs: []string{},
 		ProbeStateDigest:       probe.Digest,
 		LiveState:              memory.StateSnapshot{Branch: "main", Head: probe.Head},
 		WitnessedState:         []memory.DerivedRecord{},
 		DerivedRecords:         []memory.DerivedRecord{},
-		AssociatedUsage:        []memory.AssociatedUsage{},
-		DependencyDigest:       prefixedDigest("project-dependency"),
-		ReducerVersion:         "v1",
+		AggregationCoverage: memory.ProjectAggregationCoverage{
+			ObservationSummariesSeen:  1,
+			EventReferences:           memory.AggregationChannelCoverage{Seen: 1, Dropped: 1, Truncated: true},
+			SelectedEvidenceRevisions: memory.AggregationChannelCoverage{},
+		},
+		AssociatedUsage:  []memory.AssociatedUsage{},
+		DependencyDigest: prefixedDigest("project-dependency"),
+		ReducerVersion:   "v1",
 	}
 	project.Digest, err = memory.ProjectViewDigest(project)
 	if err != nil {

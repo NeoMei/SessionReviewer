@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -730,6 +731,20 @@ func TestRunFailsClosedOnEveryDecodeErrorWithoutCatalogMutation(t *testing.T) {
 	}
 	if records, listErr := harness.catalog.ListCandidates(); listErr != nil || len(records) != 0 {
 		t.Fatalf("decode failure mutated catalog records=%+v err=%v", records, listErr)
+	}
+}
+
+func TestRunRejectsDuplicateRevisionsDuringPreApplyReplayWithoutCatalogMutation(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	spec.observations = append(spec.observations, spec.observations[0])
+
+	result, err := Run(context.Background(), harness.options)
+	if err == nil || !strings.Contains(err.Error(), "emitted duplicate revision") || result.Prepared || result.State != Failed {
+		t.Fatalf("duplicate revision result=%+v err=%v", result, err)
+	}
+	if records, listErr := harness.catalog.ListCandidates(); listErr != nil || len(records) != 0 {
+		t.Fatalf("duplicate revision mutated catalog records=%+v err=%v", records, listErr)
 	}
 }
 

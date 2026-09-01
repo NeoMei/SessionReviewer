@@ -939,7 +939,18 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 	for _, revisionID := range projectView.ObservationRevisionIDs {
 		evidenceRemaining[revisionID] = struct{}{}
 	}
-	for index, dependency := range value.SessionViews {
+	lineageBySession := make(map[string]memory.SessionLineageDependency, len(value.SessionLineages))
+	for _, dependency := range value.SessionLineages {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		key := dependency.Provider + "\x00" + dependency.SessionID
+		if _, duplicate := lineageBySession[key]; duplicate {
+			return errors.New("duplicate SessionLineage dependency identity")
+		}
+		lineageBySession[key] = dependency
+	}
+	for _, dependency := range value.SessionViews {
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
@@ -951,7 +962,12 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 			return errors.New("SessionView source record does not resolve uniquely through manifest")
 		}
 		sourceRecords[view.SourceRecordDigest] = true
-		lineageDependency := value.SessionLineages[index]
+		lineageKey := view.Provider + "\x00" + view.SessionID
+		lineageDependency, exists := lineageBySession[lineageKey]
+		if !exists {
+			return errors.New("SessionView has no matching SessionLineage dependency")
+		}
+		delete(lineageBySession, lineageKey)
 		lineage, err := objects.sessionLineage(ctx, lineageDependency)
 		if err != nil {
 			return err
@@ -1040,6 +1056,9 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 				return errors.New("SessionLineage transition contains an extraneous classification")
 			}
 		}
+	}
+	if len(lineageBySession) != 0 {
+		return errors.New("GenerationManifest has an unmatched SessionLineage dependency")
 	}
 	for digest, used := range sourceRecords {
 		if err := context.Cause(ctx); err != nil {

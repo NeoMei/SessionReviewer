@@ -33,6 +33,7 @@ type streamAggregation struct {
 	phases         []memory.DerivedRecord
 	moduleRankings []memory.DerivedRecord
 	eventRefs      []memory.DerivedRecord
+	coverage       memory.ProjectAggregationCoverage
 }
 
 type summaryCursor struct {
@@ -81,6 +82,7 @@ type streamingAggregator struct {
 	structural   map[string]event
 	modules      boundedModuleHeap
 	moduleByPath map[string]*boundedModuleStats
+	coverage     memory.ProjectAggregationCoverage
 }
 
 type boundedModuleStats struct {
@@ -162,12 +164,19 @@ func aggregateSessionViews(views []memory.SessionView, reference time.Time, obse
 	for _, key := range witnessedKeys {
 		witnessed = append(witnessed, state.witnessed[key])
 	}
+	moduleRankings := state.rankModules()
+	state.coverage.ModuleCandidates.Emitted = len(moduleRankings)
+	state.coverage.ModuleCandidates.Dropped = len(state.moduleByPath) - len(moduleRankings)
+	if state.coverage.ModuleCandidates.Dropped > 0 {
+		state.coverage.ModuleCandidates.Truncated = true
+	}
 	return streamAggregation{
 		witnessed:      witnessed,
 		recoveries:     state.recoveries,
 		phases:         state.phases,
-		moduleRankings: state.rankModules(),
+		moduleRankings: moduleRankings,
 		eventRefs:      state.eventRefs,
+		coverage:       state.coverage,
 	}, nil
 }
 
@@ -179,6 +188,7 @@ func cursorAt(views []memory.SessionView, viewIndex, summaryIndex int) summaryCu
 }
 
 func (state *streamingAggregator) accept(item event) {
+	state.coverage.ObservationSummariesSeen++
 	state.acceptWitnessed(item)
 	state.acceptRecovery(item)
 	state.acceptPhase(item)
@@ -186,13 +196,25 @@ func (state *streamingAggregator) accept(item event) {
 	if len(state.eventRefs) < maxEventReferenceRecords {
 		records, _ := deriveEventReferences([]event{item}, 1)
 		state.eventRefs = append(state.eventRefs, records...)
+		state.coverage.EventReferences.Emitted += len(records)
+	} else {
+		state.coverage.EventReferences.Dropped++
+		state.coverage.EventReferences.Truncated = true
 	}
+	state.coverage.EventReferences.Seen++
 }
 
 func (state *streamingAggregator) acceptWitnessed(item event) {
 	for _, witnessed := range witnessedValues(item.summary) {
-		if _, exists := state.witnessed[witnessed.key]; !exists && len(state.witnessed) >= maxWitnessedRecords {
+		state.coverage.WitnessedKeys.Seen++
+		if _, exists := state.witnessed[witnessed.key]; exists {
+			state.coverage.WitnessedKeys.Collapsed++
+		} else if len(state.witnessed) >= maxWitnessedRecords {
+			state.coverage.WitnessedKeys.Dropped++
+			state.coverage.WitnessedKeys.Truncated = true
 			continue
+		} else {
+			state.coverage.WitnessedKeys.Emitted++
 		}
 		witnessed.fields["value"] = witnessed.value
 		subject := witnessed.key
@@ -217,16 +239,24 @@ func (state *streamingAggregator) acceptRecovery(item event) {
 		if state.pendingN < maxCrossRecoveryRecords {
 			state.pending[key] = append(state.pending[key], item)
 			state.pendingN++
+		} else {
+			state.coverage.CrossSessionRecoveries.Seen++
+			state.coverage.CrossSessionRecoveries.Dropped++
+			state.coverage.CrossSessionRecoveries.Truncated = true
 		}
 	case "success":
 		for _, failure := range state.pending[key] {
-			if len(state.recoveries) >= maxCrossRecoveryRecords {
-				break
-			}
 			if failure.sessionID == item.sessionID && failure.provider == item.provider {
 				continue
 			}
+			state.coverage.CrossSessionRecoveries.Seen++
+			if len(state.recoveries) >= maxCrossRecoveryRecords {
+				state.coverage.CrossSessionRecoveries.Dropped++
+				state.coverage.CrossSessionRecoveries.Truncated = true
+				continue
+			}
 			state.recoveries = append(state.recoveries, recoveryRecord(failure, item, key))
+			state.coverage.CrossSessionRecoveries.Emitted++
 		}
 		state.pendingN -= len(state.pending[key])
 		delete(state.pending, key)
@@ -235,8 +265,13 @@ func (state *streamingAggregator) acceptRecovery(item event) {
 
 func (state *streamingAggregator) acceptPhase(item event) {
 	appendBoundary := func(record memory.DerivedRecord) {
+		state.coverage.PhaseBoundaries.Seen++
 		if len(state.phases) < maxPhaseRecords {
 			state.phases = append(state.phases, record)
+			state.coverage.PhaseBoundaries.Emitted++
+		} else {
+			state.coverage.PhaseBoundaries.Dropped++
+			state.coverage.PhaseBoundaries.Truncated = true
 		}
 	}
 	if state.previous != nil && item.time.Sub(state.previous.time) > 30*24*time.Hour {
@@ -291,6 +326,7 @@ func (state *streamingAggregator) acceptModule(item event) {
 	if modulePath == "" {
 		return
 	}
+	state.coverage.ModuleCandidates.Seen++
 	stats := state.moduleByPath[modulePath]
 	if stats == nil {
 		base := 0
@@ -298,10 +334,14 @@ func (state *streamingAggregator) acceptModule(item event) {
 			evicted := heap.Pop(&state.modules).(*boundedModuleStats)
 			delete(state.moduleByPath, evicted.path)
 			base = evicted.activity
+			state.coverage.ModuleCandidates.Evicted++
+			state.coverage.ModuleCandidates.Truncated = true
 		}
 		stats = &boundedModuleStats{path: modulePath, activity: base, errorUpperBound: base, sessionsComplete: true, sessions: make(map[string]struct{}), seenDeps: make(map[string]struct{})}
 		state.moduleByPath[modulePath] = stats
 		heap.Push(&state.modules, stats)
+	} else {
+		state.coverage.ModuleCandidates.Collapsed++
 	}
 	stats.activity++
 	if len(stats.sessions) < maxModuleSessions {

@@ -4,7 +4,7 @@
   "title": "SessionReviewer private ProjectView v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "digest", "project_id", "generation", "started_at", "ended_at", "source_sessions", "terminal_counts", "session_view_dependencies", "observation_revision_ids", "probe_state_digest", "live_state", "witnessed_state", "derived_records", "associated_usage", "dependency_digest", "reducer_version"],
+  "required": ["schema_version", "digest", "project_id", "generation", "started_at", "ended_at", "source_sessions", "terminal_counts", "session_view_dependencies", "observation_revision_ids", "probe_state_digest", "live_state", "witnessed_state", "derived_records", "aggregation_coverage", "associated_usage", "dependency_digest", "reducer_version"],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
     "digest": { "$ref": "#/$defs/digest" },
@@ -32,6 +32,7 @@
       "maxItems": 65536,
       "items": { "$ref": "#/$defs/derived_record" }
     },
+    "aggregation_coverage": { "$ref": "#/$defs/aggregation_coverage" },
     "associated_usage": {
       "type": "array",
       "maxItems": 65536,
@@ -76,6 +77,34 @@
         "missing": { "$ref": "#/$defs/nonnegative_integer" },
         "unreadable": { "$ref": "#/$defs/nonnegative_integer" },
         "ambiguous": { "$ref": "#/$defs/nonnegative_integer" }
+      }
+    },
+    "aggregation_channel_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seen", "emitted", "collapsed", "dropped", "evicted", "truncated"],
+      "properties": {
+        "seen": { "$ref": "#/$defs/nonnegative_integer" },
+        "emitted": { "$ref": "#/$defs/nonnegative_integer" },
+        "collapsed": { "$ref": "#/$defs/nonnegative_integer" },
+        "dropped": { "$ref": "#/$defs/nonnegative_integer" },
+        "evicted": { "$ref": "#/$defs/nonnegative_integer" },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "aggregation_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["observation_summaries_seen", "witnessed_keys", "session_recoveries", "cross_session_recoveries", "phase_boundaries", "module_candidates", "event_references", "selected_evidence_revisions"],
+      "properties": {
+        "observation_summaries_seen": { "$ref": "#/$defs/nonnegative_integer" },
+        "witnessed_keys": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "session_recoveries": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "cross_session_recoveries": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "phase_boundaries": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "module_candidates": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "event_references": { "$ref": "#/$defs/aggregation_channel_coverage" },
+        "selected_evidence_revisions": { "$ref": "#/$defs/aggregation_channel_coverage" }
       }
     },
     "session_view_dependency": {

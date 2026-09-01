@@ -76,7 +76,7 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 	}
 	witnessed := aggregates.witnessed
 	derived := make([]memory.DerivedRecord, 0, maxProjectRecords-len(witnessed))
-	sessionRecords, _, err := copySessionDerivedRecords(views, maxSessionRecoveryRecords)
+	sessionRecords, _, sessionCoverage, err := copySessionDerivedRecordsCovered(views, maxSessionRecoveryRecords, nil)
 	if err != nil {
 		return memory.ProjectView{}, false, err
 	}
@@ -85,16 +85,19 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 	derived = append(derived, aggregates.phases...)
 	derived = append(derived, aggregates.moduleRankings...)
 	derived = append(derived, aggregates.eventRefs...)
+	aggregates.coverage.SessionRecoveries = sessionCoverage
 	moduleRankings := aggregates.moduleRankings
-	revisionIDs := selectedObservationRevisions(witnessed, derived)
+	revisionIDs, evidenceCoverage := selectedObservationRevisionsCovered(witnessed, derived)
+	aggregates.coverage.SelectedEvidenceRevisions = evidenceCoverage
 
 	dependencyDigest, err := memory.Digest(struct {
-		SessionViews   []memory.SessionViewDependency `json:"session_views"`
-		ProbeState     string                         `json:"probe_state_digest"`
-		Usage          []memory.AssociatedUsage       `json:"associated_usage"`
-		ReducerVersion string                         `json:"reducer_version"`
-		ModuleRankings []memory.DerivedRecord         `json:"module_rankings"`
-	}{dependencies, input.ProbeState.Digest, usage, input.ReducerVersion, moduleRankings})
+		SessionViews   []memory.SessionViewDependency    `json:"session_views"`
+		ProbeState     string                            `json:"probe_state_digest"`
+		Usage          []memory.AssociatedUsage          `json:"associated_usage"`
+		ReducerVersion string                            `json:"reducer_version"`
+		ModuleRankings []memory.DerivedRecord            `json:"module_rankings"`
+		Coverage       memory.ProjectAggregationCoverage `json:"aggregation_coverage"`
+	}{dependencies, input.ProbeState.Digest, usage, input.ReducerVersion, moduleRankings, aggregates.coverage})
 	if err != nil {
 		return memory.ProjectView{}, false, fmt.Errorf("digest ProjectView dependencies: %w", err)
 	}
@@ -124,12 +127,13 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 		LiveState: memory.StateSnapshot{
 			Branch: input.ProbeState.Branch, Head: input.ProbeState.Head, DirtyPathCount: input.ProbeState.DirtyPathCount,
 		},
-		WitnessedState:     witnessed,
-		DerivedRecords:     derived,
-		AssociatedUsage:    usage,
-		PreviousViewDigest: previousDigest,
-		DependencyDigest:   dependencyDigest,
-		ReducerVersion:     input.ReducerVersion,
+		WitnessedState:      witnessed,
+		DerivedRecords:      derived,
+		AggregationCoverage: aggregates.coverage,
+		AssociatedUsage:     usage,
+		PreviousViewDigest:  previousDigest,
+		DependencyDigest:    dependencyDigest,
+		ReducerVersion:      input.ReducerVersion,
 	}
 	startedInstant, _ := time.Parse(time.RFC3339Nano, view.StartedAt)
 	endedInstant, _ := time.Parse(time.RFC3339Nano, view.EndedAt)
@@ -337,23 +341,34 @@ func deriveWitnessedState(events []event, limit int) ([]memory.DerivedRecord, er
 }
 
 func selectedObservationRevisions(groups ...[]memory.DerivedRecord) []string {
+	result, _ := selectedObservationRevisionsCovered(groups...)
+	return result
+}
+
+func selectedObservationRevisionsCovered(groups ...[]memory.DerivedRecord) ([]string, memory.AggregationChannelCoverage) {
 	seen := make(map[string]struct{}, maxProjectRecords)
 	result := make([]string, 0, maxProjectRecords)
+	coverage := memory.AggregationChannelCoverage{}
 	for _, records := range groups {
 		for _, record := range records {
 			for _, revisionID := range record.DependencyRevisionIDs {
+				coverage.Seen++
 				if _, duplicate := seen[revisionID]; duplicate {
+					coverage.Collapsed++
 					continue
 				}
 				if len(result) >= maxProjectRecords {
-					return result
+					coverage.Dropped++
+					coverage.Truncated = true
+					continue
 				}
 				seen[revisionID] = struct{}{}
 				result = append(result, revisionID)
+				coverage.Emitted++
 			}
 		}
 	}
-	return result
+	return result, coverage
 }
 
 type witnessedFact struct {

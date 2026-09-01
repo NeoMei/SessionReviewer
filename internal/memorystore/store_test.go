@@ -166,7 +166,14 @@ func TestReconcileStructuralMismatchErrorsRemainExact(t *testing.T) {
 			name: "selected evidence mismatch", want: "ProjectView selected observation evidence does not resolve through active Session lineages",
 			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
 				projectView := fixture.project
-				projectView.ObservationRevisionIDs = []string{prefixedDigest("missing-selected-evidence")}
+				missing := prefixedDigest("missing-selected-evidence")
+				projectView.ObservationRevisionIDs = []string{missing}
+				projectView.DerivedRecords = []memory.DerivedRecord{{
+					ID: "event-missing-selected", Kind: "event_ref", Subject: "missing selected evidence",
+					OccurredAt: testEndedAt, DependencyRevisionIDs: []string{missing}, RuleID: "typed-event-order", RuleVersion: "v1",
+				}}
+				projectView.AggregationCoverage.EventReferences = memory.AggregationChannelCoverage{Seen: 1, Emitted: 1}
+				projectView.AggregationCoverage.SelectedEvidenceRevisions = memory.AggregationChannelCoverage{Seen: 1, Emitted: 1}
 				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
 				if _, err := store.PutProjectView(projectView); err != nil {
 					t.Fatal(err)
@@ -190,6 +197,108 @@ func TestReconcileStructuralMismatchErrorsRemainExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileGenerationMatchesPermutedSessionLineagesByIdentity(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-permuted-lineages")
+	manifest := buildPermutedLineageManifest(t, store, fixture)
+	if err := memory.ValidateGenerationManifest(manifest); err != nil {
+		t.Fatalf("permuted manifest contract rejected before graph reconciliation: %v", err)
+	}
+	if err := store.reconcileGenerationGraphContext(context.Background(), manifest); err != nil {
+		t.Fatalf("valid independently permuted lineage graph rejected: %v", err)
+	}
+
+	mismatched := manifest
+	mismatched.SessionLineages = append([]memory.SessionLineageDependency(nil), manifest.SessionLineages...)
+	mismatched.SessionLineages[0].Digest = fixture.lineage.Digest
+	if err := store.reconcileGenerationGraphContext(context.Background(), mismatched); err == nil {
+		t.Fatal("graph reconciliation accepted a lineage digest whose object identity mismatched the dependency")
+	}
+}
+
+func buildPermutedLineageManifest(t *testing.T, store *Store, fixture storedFixture) memory.GenerationManifest {
+	t.Helper()
+	secondSession, secondLineage := addStoredSessionFixture(t, store, fixture, "session-2", "source-2")
+	project := fixture.project
+	project.SourceSessions = 2
+	project.TerminalCounts.Indexed = 2
+	project.SessionViewDependencies = append(project.SessionViewDependencies, memory.SessionViewDependency{Provider: "codex", SessionID: secondSession.SessionID, Digest: secondSession.Digest})
+	project.AggregationCoverage.ObservationSummariesSeen = 2
+	project.AggregationCoverage.EventReferences = memory.AggregationChannelCoverage{Seen: 2, Dropped: 2, Truncated: true}
+	var err error
+	project.Digest, err = memory.ProjectViewDigest(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(project); err != nil {
+		t.Fatal(err)
+	}
+	manifest := fixture.manifest
+	manifest.SourceRecordDigests = append(manifest.SourceRecordDigests, secondSession.SourceRecordDigest)
+	manifest.SessionViews = append(manifest.SessionViews, memory.SessionViewDependency{Provider: "codex", SessionID: secondSession.SessionID, Digest: secondSession.Digest})
+	manifest.SessionLineages = []memory.SessionLineageDependency{
+		{Provider: "codex", SessionID: secondSession.SessionID, Digest: secondLineage.Digest},
+		manifest.SessionLineages[0],
+	}
+	manifest.ProjectViewDigest = project.Digest
+	return manifest
+}
+
+func addStoredSessionFixture(t *testing.T, store *Store, fixture storedFixture, sessionID, sourceIdentity string) (memory.SessionView, memory.SessionLineage) {
+	t.Helper()
+	observation := fixture.observation
+	observation.Key.SessionID = sessionID
+	observation.Key.SourceIdentity = sourceIdentity
+	observation.Key.Subject = "go test second"
+	observation.Ref.SessionID = sessionID
+	observation.Ref.SourceIdentity = sourceIdentity
+	observation.Ref.SourceHash = hexDigest(sourceIdentity)
+	observation.RevisionID = memory.ObservationRevisionID(observation)
+	chunk, err := store.PutObservationChunk([]memory.ObservationRevision{observation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := fixture.session
+	session.SessionID = sessionID
+	session.SourceIdentity = sourceIdentity
+	session.SourceRecordDigest = prefixedDigest("source-record-" + sessionID)
+	session.UsageRecordDigest = prefixedDigest("usage-" + sessionID)
+	session.ActiveRevisionIDs = []string{observation.RevisionID}
+	session.ObservationSummaries = []memory.ObservationSummary{{
+		RevisionID: observation.RevisionID, Sequence: observation.Key.Sequence, Kind: observation.Key.Kind,
+		Subject: observation.Key.Subject, OccurredAt: observation.Timestamp, Operation: observation.Operation,
+		Object: observation.Object, Outcome: observation.Outcome, Fields: map[string]string{"passed": "1", "failed": "0"},
+	}}
+	session.ObservationChunkDigests = []string{chunk}
+	session.DependencyDigest = prefixedDigest("session-dependency-" + sessionID)
+	session.Digest, err = memory.SessionViewDigest(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionView(session); err != nil {
+		t.Fatal(err)
+	}
+	lineage := memory.SessionLineage{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: testProjectID, Provider: session.Provider,
+		SessionID: sessionID, SourceIdentity: sourceIdentity,
+		ActiveRevisions:     map[string]string{observationKeyDigest(t, observation.Key): observation.RevisionID},
+		SupersededRevisions: map[string]string{}, WithdrawnRevisions: map[string]string{},
+	}
+	lineage.Digest, err = memory.SessionLineageDigest(lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionLineage(lineage); err != nil {
+		t.Fatal(err)
+	}
+	return session, lineage
 }
 
 func TestStoreCreatesPrivateRootedLayoutAndRoundTripsCanonicalObjects(t *testing.T) {
@@ -564,7 +673,6 @@ func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
 				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 				projectView := fixture.project
 				projectView.SessionViewDependencies = []memory.SessionViewDependency{dependency}
-				projectView.ObservationRevisionIDs = []string{missing}
 				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
 				if _, err := store.PutProjectView(projectView); err != nil {
 					t.Fatalf("put mismatched ProjectView: %v", err)

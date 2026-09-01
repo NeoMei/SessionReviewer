@@ -27,19 +27,29 @@ type sessionDerivedRecord struct {
 }
 
 func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.DerivedRecord, map[string]struct{}, error) {
-	return copySessionDerivedRecordsWithObserver(views, limit, nil)
+	records, represented, _, err := copySessionDerivedRecordsCovered(views, limit, nil)
+	return records, represented, err
 }
 
 func copySessionDerivedRecordsWithObserver(views []memory.SessionView, limit int, observer func(int)) ([]memory.DerivedRecord, map[string]struct{}, error) {
+	records, represented, _, err := copySessionDerivedRecordsCovered(views, limit, observer)
+	return records, represented, err
+}
+
+func copySessionDerivedRecordsCovered(views []memory.SessionView, limit int, observer func(int)) ([]memory.DerivedRecord, map[string]struct{}, memory.AggregationChannelCoverage, error) {
 	items := make([]sessionDerivedRecord, 0)
 	seenIDs := make(map[string]string, limit)
 	representedRecoveries := make(map[string]struct{}, limit)
+	coverage := memory.AggregationChannelCoverage{}
 	for _, view := range views {
 		for _, record := range view.DerivedRecords {
+			coverage.Seen++
 			if err := validateSessionRecoveryRecord(view, record); err != nil {
-				return nil, nil, fmt.Errorf("validate SessionView %s/%s derived record %s: %w", view.Provider, view.SessionID, record.ID, err)
+				return nil, nil, memory.AggregationChannelCoverage{}, fmt.Errorf("validate SessionView %s/%s derived record %s: %w", view.Provider, view.SessionID, record.ID, err)
 			}
 			if len(items) >= limit {
+				coverage.Dropped++
+				coverage.Truncated = true
 				if observer != nil {
 					observer(len(seenIDs))
 				}
@@ -47,12 +57,13 @@ func copySessionDerivedRecordsWithObserver(views []memory.SessionView, limit int
 			}
 			digest, err := memory.Digest(record)
 			if err != nil {
-				return nil, nil, fmt.Errorf("digest SessionView derived record %s: %w", record.ID, err)
+				return nil, nil, memory.AggregationChannelCoverage{}, fmt.Errorf("digest SessionView derived record %s: %w", record.ID, err)
 			}
 			if previous, duplicate := seenIDs[record.ID]; duplicate {
 				if previous != digest {
-					return nil, nil, fmt.Errorf("SessionView derived record ID %s has conflicting content", record.ID)
+					return nil, nil, memory.AggregationChannelCoverage{}, fmt.Errorf("SessionView derived record ID %s has conflicting content", record.ID)
 				}
+				coverage.Collapsed++
 				continue
 			}
 			seenIDs[record.ID] = digest
@@ -62,6 +73,7 @@ func copySessionDerivedRecordsWithObserver(views []memory.SessionView, limit int
 				occurredAt, _ = time.Parse(time.RFC3339Nano, record.OccurredAt)
 			}
 			items = append(items, sessionDerivedRecord{provider: view.Provider, sessionID: view.SessionID, record: cloneDerivedRecords([]memory.DerivedRecord{record})[0], time: occurredAt})
+			coverage.Emitted++
 			if observer != nil {
 				observer(len(seenIDs))
 			}
@@ -83,7 +95,7 @@ func copySessionDerivedRecordsWithObserver(views []memory.SessionView, limit int
 	for index := range items {
 		result[index] = items[index].record
 	}
-	return result, representedRecoveries, nil
+	return result, representedRecoveries, coverage, nil
 }
 
 func validateSessionRecoveryRecord(view memory.SessionView, record memory.DerivedRecord) error {

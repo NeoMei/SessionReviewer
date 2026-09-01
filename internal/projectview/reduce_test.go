@@ -419,6 +419,13 @@ func TestReduceRecomputesOutputInsteadOfTrustingForgedPreviousDependencyDigest(t
 	previous := reduceFixture(t, []memory.SessionView{s1}, "2026-09-01T00:00:00Z", nil)
 	forged := previous
 	forged.DerivedRecords = []memory.DerivedRecord{}
+	forged.AggregationCoverage.SessionRecoveries = memory.AggregationChannelCoverage{}
+	forged.AggregationCoverage.CrossSessionRecoveries = memory.AggregationChannelCoverage{}
+	forged.AggregationCoverage.PhaseBoundaries = memory.AggregationChannelCoverage{}
+	forged.AggregationCoverage.ModuleCandidates = memory.AggregationChannelCoverage{}
+	forged.AggregationCoverage.EventReferences = memory.AggregationChannelCoverage{Seen: forged.AggregationCoverage.ObservationSummariesSeen, Dropped: forged.AggregationCoverage.ObservationSummariesSeen, Truncated: true}
+	forged.AggregationCoverage.SelectedEvidenceRevisions = memory.AggregationChannelCoverage{}
+	forged.ObservationRevisionIDs = nil
 	var err error
 	forged.Digest, err = memory.ProjectViewDigest(forged)
 	if err != nil {
@@ -606,6 +613,43 @@ func TestReduceStreamsMoreThan65536SummariesWithBoundedDeterministicAggregateRes
 	}
 }
 
+func TestReduceReportsExactCoverageForMoreThan65536BoundedAggregateInputs(t *testing.T) {
+	makeLargeView := func(sessionID string, count int) memory.SessionView {
+		specs := make([]summarySpec, count)
+		for index := range specs {
+			specs[index] = summarySpec{
+				sequence: index + 1, kind: "command", subject: fmt.Sprintf("command-%s-%d", sessionID, index),
+				occurredAt: "2026-08-01T00:00:00Z", operation: "command", outcome: "success",
+			}
+		}
+		return viewFixture(t, sessionID, memory.Indexed, "2026-08-01T00:00:00Z", specs)
+	}
+	views := []memory.SessionView{makeLargeView("coverage-1", 32769), makeLargeView("coverage-2", 32769)}
+	input := inputFixture(t, views, "2026-09-01T00:00:00Z", nil)
+
+	first, changed, err := Reduce(input)
+	if err != nil || !changed {
+		t.Fatalf("large coverage reduction changed=%v err=%v", changed, err)
+	}
+	wantEvents := memory.AggregationChannelCoverage{Seen: 65538, Emitted: maxEventReferenceRecords, Dropped: 57346, Truncated: true}
+	wantEvidence := memory.AggregationChannelCoverage{Seen: maxEventReferenceRecords, Emitted: maxEventReferenceRecords}
+	if first.AggregationCoverage.ObservationSummariesSeen != 65538 || first.AggregationCoverage.EventReferences != wantEvents || first.AggregationCoverage.SelectedEvidenceRevisions != wantEvidence {
+		t.Fatalf("large aggregate coverage=%+v want events=%+v evidence=%+v", first.AggregationCoverage, wantEvents, wantEvidence)
+	}
+	if first.AggregationCoverage.WitnessedKeys != (memory.AggregationChannelCoverage{}) ||
+		first.AggregationCoverage.SessionRecoveries != (memory.AggregationChannelCoverage{}) ||
+		first.AggregationCoverage.CrossSessionRecoveries != (memory.AggregationChannelCoverage{}) ||
+		first.AggregationCoverage.PhaseBoundaries != (memory.AggregationChannelCoverage{}) ||
+		first.AggregationCoverage.ModuleCandidates != (memory.AggregationChannelCoverage{}) {
+		t.Fatalf("unwitnessed aggregation channels reported false coverage: %+v", first.AggregationCoverage)
+	}
+
+	second, changed, err := Reduce(input)
+	if err != nil || !changed || second.Digest != first.Digest || second.AggregationCoverage != first.AggregationCoverage {
+		t.Fatalf("coverage is nondeterministic changed=%v err=%v first=%+v second=%+v", changed, err, first.AggregationCoverage, second.AggregationCoverage)
+	}
+}
+
 func TestReduceStreamingMergePreservesInterleavedCrossSessionChronology(t *testing.T) {
 	s1 := viewFixture(t, "chrono-a", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
 		{sequence: 1, kind: "branch", subject: "main", occurredAt: "2026-08-01T00:00:00Z", fields: map[string]string{"branch": "main"}},
@@ -669,6 +713,19 @@ func TestBoundedModuleHeavyHitterAdmitsLateHotModuleHonestly(t *testing.T) {
 	ranks := recordsOfKind(got.DerivedRecords, "module_rank")
 	if len(ranks) == 0 || ranks[0].Subject != "late-hot.go" || ranks[0].Fields["candidate_algorithm"] != "space_saving" || ranks[0].Fields["counts_complete"] != "false" {
 		t.Fatalf("late heavy hitter ranking is absent or misleading: %+v", ranks)
+	}
+}
+
+func TestModuleCoverageCountsRepeatedCandidateInputsAsCollapsed(t *testing.T) {
+	view := viewFixture(t, "module-repeat", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "file", subject: "first", occurredAt: "2026-08-01T00:00:00Z", operation: "file_change", outcome: "success", fields: map[string]string{"path": "same.go"}},
+		{sequence: 2, kind: "file", subject: "second", occurredAt: "2026-08-01T00:00:01Z", operation: "file_change", outcome: "success", fields: map[string]string{"path": "same.go"}},
+		{sequence: 3, kind: "file", subject: "third", occurredAt: "2026-08-01T00:00:02Z", operation: "file_change", outcome: "success", fields: map[string]string{"path": "same.go"}},
+	})
+	got := reduceFixture(t, []memory.SessionView{view}, "2026-09-01T00:00:00Z", nil)
+	want := memory.AggregationChannelCoverage{Seen: 3, Emitted: 1, Collapsed: 2}
+	if got.AggregationCoverage.ModuleCandidates != want {
+		t.Fatalf("repeated module coverage=%+v want=%+v", got.AggregationCoverage.ModuleCandidates, want)
 	}
 }
 

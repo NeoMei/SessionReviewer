@@ -378,6 +378,60 @@ func TestRetentionKeepsNativeLineageAndValidatesOpaquePins(t *testing.T) {
 	}
 }
 
+func TestRetentionTraversesManifestWithIndependentlyPermutedLineages(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-retention-permuted-lineages")
+	manifest := buildPermutedLineageManifest(t, store, fixture)
+	if _, err := store.PrepareGeneration(manifest); err != nil {
+		t.Fatalf("prepare independently permuted lineage manifest: %v", err)
+	}
+	report, err := store.ReportRetention(retentionNow)
+	if err != nil {
+		t.Fatalf("retention rejected independently permuted lineage manifest: %v", err)
+	}
+	// One generation, one ProjectView, one ProbeState, and two each of
+	// SessionView, SessionLineage, and observation chunk are reachable.
+	if report.ReachableObjects != 9 || report.ReachableBytes <= 0 || report.CleanupCandidates != 0 {
+		t.Fatalf("retention report=%+v want nine reachable immutable objects and no cleanup candidate", report)
+	}
+}
+
+func TestRetentionRejectsDuplicateAndMismatchedLineageIdentitySets(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*memory.GenerationManifest)
+	}{
+		{name: "duplicate", mutate: func(manifest *memory.GenerationManifest) {
+			manifest.SessionLineages[0] = memory.SessionLineageDependency{Provider: "codex", SessionID: "session-1", Digest: manifest.SessionLineages[0].Digest}
+		}},
+		{name: "mismatch", mutate: func(manifest *memory.GenerationManifest) {
+			manifest.SessionLineages[0] = memory.SessionLineageDependency{Provider: "codex", SessionID: "session-3", Digest: manifest.SessionLineages[0].Digest}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			store, err := Open(dataRoot, testProjectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			fixture := buildStoredFixture(t, store, "generation-retention-invalid-"+test.name)
+			manifest := buildPermutedLineageManifest(t, store, fixture)
+			test.mutate(&manifest)
+			writeCanonicalJSONForTest(t, filepath.Join(retentionMemoryRoot(dataRoot), "generations", manifest.GenerationID+".json"), manifest, 0o600)
+			if _, err := store.ReportRetention(retentionNow, manifest.GenerationID); err == nil {
+				t.Fatal("retention accepted an inexact SessionLineage identity set")
+			}
+		})
+	}
+}
+
 func TestRetentionRejectsMoreThan64ExternalPinsBeforeStoreIO(t *testing.T) {
 	_, store, _ := newRetentionStore(t, "generation-pin-limit")
 	pins := make([]string, 65)
