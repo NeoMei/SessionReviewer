@@ -3,11 +3,14 @@ package sourcecatalog
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +19,253 @@ import (
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
+	"github.com/neomei/SessionReviewer/internal/source"
 )
+
+func TestApplyBatchIsAllOrNoneAndPreservesAssociations(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	first := sourceRecord("s1", []string{"project-a"}, 10)
+	firstDigest, err := catalog.UpsertSource(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := sourceRecord("s2", []string{"project-b"}, 20)
+	secondDigest, err := catalog.UpsertSource(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appended := first
+	appended.ProjectIDs = []string{"project-c"}
+	appended.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 11, ByteOffset: 160}
+	appended.FrozenBoundary.SourceHash = strings.Repeat("b", 64)
+	broken := second
+	broken.FrozenBoundary.SourceHash = strings.Repeat("c", 64)
+	_, err = catalog.ApplyBatch([]BatchMutation{
+		{Relation: source.BoundaryAppend, ExpectedDigest: firstDigest, Desired: appended},
+		{Relation: source.BoundaryReplacement, ExpectedDigest: "sha256:" + strings.Repeat("0", 64), Desired: broken},
+	})
+	if !errors.Is(err, ErrCASConflict) {
+		t.Fatalf("batch error=%v want CAS conflict", err)
+	}
+	gotFirst, _, _ := catalog.GetSource("codex", "s1")
+	gotSecond, _, _ := catalog.GetSource("codex", "s2")
+	if !reflect.DeepEqual(gotFirst, first) || !reflect.DeepEqual(gotSecond, second) {
+		t.Fatalf("failed batch partially published first=%+v second=%+v", gotFirst, gotSecond)
+	}
+
+	results, err := catalog.ApplyBatch([]BatchMutation{
+		{Relation: source.BoundaryAppend, ExpectedDigest: firstDigest, Desired: appended},
+		{Relation: source.BoundaryUnchanged, ExpectedDigest: secondDigest, Desired: second},
+	})
+	if err != nil || len(results) != 2 {
+		t.Fatalf("apply batch results=%+v err=%v", results, err)
+	}
+	gotFirst, _, _ = catalog.GetSource("codex", "s1")
+	if fmt.Sprint(gotFirst.ProjectIDs) != fmt.Sprint([]string{"project-a", "project-c"}) {
+		t.Fatalf("append removed association: %v", gotFirst.ProjectIDs)
+	}
+}
+
+func TestApplyBatchExactDesiredIsIdempotentAfterExpectedBecameStale(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	record := sourceRecord("s1", []string{"project-a"}, 10)
+	result, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryInitial, Desired: record}})
+	if err != nil || len(result) != 1 {
+		t.Fatalf("initial batch result=%+v err=%v", result, err)
+	}
+	result, err = catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryInitial, ExpectedDigest: "sha256:" + strings.Repeat("f", 64), Desired: record}})
+	if err != nil || len(result) != 1 || result[0].Digest == "" {
+		t.Fatalf("idempotent batch result=%+v err=%v", result, err)
+	}
+}
+
+func TestApplyBatchUnchangedCannotRewriteTimeOrUsage(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	record := sourceRecord("s1", []string{"project-a"}, 10)
+	expected, err := catalog.UpsertSource(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := record
+	changed.EndedAt = "2026-08-31T10:00:02Z"
+	changed.Usage.EndedAt = changed.EndedAt
+	changed.Usage.DurationMS = 2000
+	if _, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryUnchanged, ExpectedDigest: expected, Desired: changed}}); err == nil {
+		t.Fatal("unchanged relation rewrote time and usage")
+	}
+	got, _, _ := catalog.GetSource("codex", "s1")
+	if !reflect.DeepEqual(got, record) {
+		t.Fatalf("rejected unchanged mutation changed record: %+v", got)
+	}
+}
+
+func TestApplyBatchConcurrentStaleCallersHaveOneWholeBatchWinner(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	original := sourceRecord("s1", []string{"project-a"}, 10)
+	expected, err := catalog.UpsertSource(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for _, hash := range []string{"b", "c"} {
+		desired := original
+		desired.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 11, ByteOffset: 160}
+		desired.FrozenBoundary.SourceHash = strings.Repeat(hash, 64)
+		go func(value memory.SourceRecord) {
+			_, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryAppend, ExpectedDigest: expected, Desired: value}})
+			results <- err
+		}(desired)
+	}
+	winners, stale := 0, 0
+	for range 2 {
+		switch err := <-results; {
+		case err == nil:
+			winners++
+		case errors.Is(err, ErrCASConflict):
+			stale++
+		default:
+			t.Fatalf("unexpected batch result: %v", err)
+		}
+	}
+	if winners != 1 || stale != 1 {
+		t.Fatalf("winners=%d stale=%d", winners, stale)
+	}
+}
+
+func TestWithBatchSnapshotRejectsChangedCatalogBeforeCommit(t *testing.T) {
+	catalog := openCatalog(t, t.TempDir())
+	original := sourceRecord("s1", []string{"project-a"}, 10)
+	results, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryInitial, Desired: original}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended := original
+	appended.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 11, ByteOffset: 160}
+	appended.FrozenBoundary.SourceHash = strings.Repeat("b", 64)
+	if _, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryAppend, ExpectedDigest: results[0].Digest, Desired: appended}}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	if err := catalog.WithBatchSnapshot(results, func() error { called = true; return nil }); !errors.Is(err, ErrCASConflict) || called {
+		t.Fatalf("stale snapshot err=%v callback=%v", err, called)
+	}
+}
+
+func TestApplyBatchRecoversEveryProcessCrashCheckpointToFullBatch(t *testing.T) {
+	for checkpoint := 1; checkpoint <= 4; checkpoint++ {
+		t.Run(strconv.Itoa(checkpoint), func(t *testing.T) {
+			dataRoot := t.TempDir()
+			catalog := openCatalog(t, dataRoot)
+			for _, id := range []string{"s1", "s2"} {
+				if _, err := catalog.UpsertSource(sourceRecord(id, []string{"project-a"}, 10)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := catalog.Close(); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command(os.Args[0], "-test.run=^TestApplyBatchCrashHelper$")
+			command.Env = append(os.Environ(), "SR_CATALOG_CRASH_ROOT="+dataRoot, "SR_CATALOG_CRASH_POINT="+strconv.Itoa(checkpoint))
+			if err := command.Run(); err == nil {
+				t.Fatal("crash helper exited successfully")
+			}
+
+			reopened, err := Open(dataRoot)
+			if err != nil {
+				t.Fatalf("reopen after crash: %v", err)
+			}
+			defer reopened.Close()
+			for _, id := range []string{"s1", "s2"} {
+				record, found, err := reopened.GetSource("codex", id)
+				if err != nil || !found || record.FrozenBoundary.Location.JSONL.Line != 11 {
+					t.Fatalf("source %s did not converge to full batch record=%+v found=%v err=%v", id, record, found, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(dataRoot, "source-catalog", batchJournalLeaf)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("batch journal remained: %v", err)
+			}
+		})
+	}
+}
+
+func TestOpenRecoversBoundedBatchJournalLargerThanSingleRecordLimit(t *testing.T) {
+	dataRoot := t.TempDir()
+	catalog := openCatalog(t, dataRoot)
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+	projects := make([]string, 4096)
+	for index := range projects {
+		projects[index] = fmt.Sprintf("p%04d-%s", index, strings.Repeat("x", 108))
+	}
+	journal := batchJournal{Version: 1}
+	for index := 0; index < 10; index++ {
+		record := sourceRecord(fmt.Sprintf("large-%d", index), projects, 10)
+		digest, err := memory.Digest(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		journal.Entries = append(journal.Entries, batchJournalEntry{Leaf: sourceLeaf(record.Provider, record.SessionID), Desired: record, Digest: digest})
+	}
+	body, err := marshalCanonical(journal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) <= maxCatalogRecord {
+		t.Fatalf("fixture journal=%d did not exceed record limit", len(body))
+	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "source-catalog", batchJournalLeaf), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dataRoot)
+	if err != nil {
+		t.Fatalf("recover large bounded journal: %v", err)
+	}
+	defer reopened.Close()
+	records, err := reopened.ListCandidates()
+	if err != nil || len(records) != 10 {
+		t.Fatalf("recovered records=%d err=%v", len(records), err)
+	}
+}
+
+func TestApplyBatchCrashHelper(t *testing.T) {
+	dataRoot := os.Getenv("SR_CATALOG_CRASH_ROOT")
+	if dataRoot == "" {
+		t.Skip("subprocess helper")
+	}
+	point, err := strconv.Atoi(os.Getenv("SR_CATALOG_CRASH_POINT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := Open(dataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	catalog.batchCheckpoint = func() {
+		count++
+		if count == point {
+			os.Exit(71)
+		}
+	}
+	mutations := make([]BatchMutation, 0, 2)
+	for _, id := range []string{"s1", "s2"} {
+		existing, found, err := catalog.GetSource("codex", id)
+		if err != nil || !found {
+			t.Fatal(err)
+		}
+		expected, err := memory.Digest(existing)
+		if err != nil {
+			t.Fatal(err)
+		}
+		desired := existing
+		desired.FrozenBoundary.Location.JSONL = &memory.JSONLSourceLocation{Line: 11, ByteOffset: 160}
+		desired.FrozenBoundary.SourceHash = strings.Repeat("d", 64)
+		mutations = append(mutations, BatchMutation{Relation: source.BoundaryAppend, ExpectedDigest: expected, Desired: desired})
+	}
+	_, _ = catalog.ApplyBatch(mutations)
+}
 
 func TestCatalogStoresSharedSessionUsageOnce(t *testing.T) {
 	dataRoot := t.TempDir()

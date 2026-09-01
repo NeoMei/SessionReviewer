@@ -47,6 +47,17 @@ type MaterializeFunc func(sessionview.Input) (memory.SessionView, bool, error)
 type ProbeFunc func(context.Context, projectprobe.Options) (memory.ProjectProbeState, memory.ProbeCheck, error)
 type ReduceFunc func(projectview.Input) (memory.ProjectView, bool, error)
 
+type MemoryStore interface {
+	PutObservationChunk([]memory.ObservationRevision) (string, error)
+	PutSessionView(memory.SessionView) (string, error)
+	PutProbeState(memory.ProjectProbeState) (string, error)
+	PutProjectView(memory.ProjectView) (string, error)
+	LoadPrepared() (memorystore.Prepared, memory.GenerationManifest, error)
+	LoadObject(memorystore.ObjectKind, string) ([]byte, error)
+	PrepareGeneration(memory.GenerationManifest) (memorystore.Prepared, error)
+	AdvancePrepared(memorystore.Prepared, memory.GenerationManifest) (memorystore.Prepared, error)
+}
+
 type Options struct {
 	ProjectID    string
 	Binding      projectidentity.Binding
@@ -54,7 +65,7 @@ type Options struct {
 	DataRoot     string
 	Adapter      source.Adapter
 	Catalog      *sourcecatalog.Catalog
-	Store        *memorystore.Store
+	Store        MemoryStore
 	Workers      int
 	Now          func() time.Time
 	Materialize  MaterializeFunc
@@ -76,14 +87,16 @@ type decodedTask struct {
 }
 
 type terminalSource struct {
-	record       memory.SourceRecord
-	recordDigest string
-	state        memory.TerminalState
-	observations []memory.ObservationRevision
-	chunks       []string
-	diagnostics  []memory.Diagnostic
-	issue        bool
-	shared       bool
+	record          memory.SourceRecord
+	recordDigest    string
+	mutation        sourcecatalog.BatchMutation
+	state           memory.TerminalState
+	observations    []memory.ObservationRevision
+	newObservations []memory.ObservationRevision
+	chunks          []string
+	diagnostics     []memory.Diagnostic
+	issue           bool
+	shared          bool
 }
 
 type baseline struct {
@@ -95,9 +108,8 @@ type baseline struct {
 	revisions map[string]memory.ObservationRevision
 }
 
-// Run prepares one complete private generation. Source-local failures are
-// isolated; integrity, store, identity, probe, and reduction failures fail the
-// project scan before changing the prepared pointer.
+// Run prepares one complete private generation. Every adapter error is fatal;
+// expected source terminal outcomes travel as typed reports or boundaries.
 func Run(ctx context.Context, options Options) (Result, error) {
 	result := Result{SchemaVersion: resultSchemaVersion, ProjectID: options.ProjectID, State: Failed, ReviewRunTokens: 0}
 	if err := validateOptions(options); err != nil {
@@ -147,6 +159,53 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if len(terminals) == 0 {
 		return result, errors.New("no authenticated target-project source sessions reached a terminal state")
 	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	probeOptions := options.ProbeOptions
+	probeOptions.Binding = options.Binding
+	probeOptions.Now = frozenNow
+	probeState, probeCheck, err := options.Probe(ctx, probeOptions)
+	if err != nil {
+		return result, fmt.Errorf("probe project state: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	mutations := make([]sourcecatalog.BatchMutation, len(terminals))
+	for index := range terminals {
+		mutations[index] = terminals[index].mutation
+	}
+	plannedResults, err := options.Catalog.PlanBatch(mutations)
+	if err != nil {
+		return result, fmt.Errorf("plan source catalog batch: %w", err)
+	}
+	if len(plannedResults) != len(terminals) {
+		return result, errors.New("source catalog batch plan count mismatch")
+	}
+	for index := range terminals {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		planned := terminals[index].mutation.Desired
+		returned := plannedResults[index]
+		if returned.Record.Provider != planned.Provider || returned.Record.SessionID != planned.SessionID || !containsProject(returned.Record.ProjectIDs, options.ProjectID) {
+			return result, errors.New("source catalog batch returned a mismatched proposal")
+		}
+		digest, digestErr := memory.Digest(returned.Record)
+		if digestErr != nil || digest != returned.Digest {
+			return result, errors.Join(errors.New("source catalog batch digest mismatch"), digestErr)
+		}
+		terminals[index].record, terminals[index].recordDigest = returned.Record, returned.Digest
+		terminals[index].shared = len(returned.Record.ProjectIDs) > 1
+		if len(terminals[index].newObservations) > 0 {
+			chunk, digestErr := memory.Digest(terminals[index].newObservations)
+			if digestErr != nil {
+				return result, digestErr
+			}
+			terminals[index].chunks = appendUnique(terminals[index].chunks, chunk)
+		}
+	}
 
 	views := make([]memory.SessionView, 0, len(terminals))
 	sourceDigests := make([]string, 0, len(terminals))
@@ -175,12 +234,6 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if _, err := options.Store.PutSessionView(view); err != nil {
-			return result, fmt.Errorf("persist SessionView %s/%s: %w", view.Provider, view.SessionID, err)
-		}
-		if err := ctx.Err(); err != nil {
-			return result, err
-		}
 		views = append(views, view)
 		sourceDigests = append(sourceDigests, view.SourceRecordDigest)
 		allChunkDigests = append(allChunkDigests, view.ObservationChunkDigests...)
@@ -191,22 +244,6 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		return result, errors.New("source and terminal Session counts do not reconcile")
 	}
 
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-	probeOptions := options.ProbeOptions
-	probeOptions.Binding = options.Binding
-	probeOptions.Now = frozenNow
-	probeState, probeCheck, err := options.Probe(ctx, probeOptions)
-	if err != nil {
-		return result, fmt.Errorf("probe project state: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-	if _, err := options.Store.PutProbeState(probeState); err != nil {
-		return result, fmt.Errorf("persist project probe: %w", err)
-	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -232,13 +269,6 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if projectView.SourceSessions != result.SourceSessions || terminalTotal(projectView.TerminalCounts) != result.TerminalSessions {
 		return result, errors.New("ProjectView terminal counts do not reconcile with scan")
 	}
-	if _, err := options.Store.PutProjectView(projectView); err != nil {
-		return result, fmt.Errorf("persist ProjectView: %w", err)
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-
 	active, superseded, withdrawn, err := classifyRevisions(views, terminals, previous)
 	if err != nil {
 		return result, err
@@ -265,8 +295,65 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
+	batchResults, err := options.Catalog.ApplyBatch(mutations)
+	if err != nil {
+		return result, fmt.Errorf("apply source catalog batch: %w", err)
+	}
+	if len(batchResults) != len(plannedResults) {
+		return result, errors.New("source catalog batch result count mismatch")
+	}
+	for index := range batchResults {
+		if batchResults[index].Digest != plannedResults[index].Digest || !equalJSON(batchResults[index].Record, plannedResults[index].Record) {
+			return result, errors.New("source catalog batch changed after validated plan")
+		}
+	}
+	for index := range terminals {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if len(terminals[index].newObservations) > 0 {
+			chunk, putErr := options.Store.PutObservationChunk(terminals[index].newObservations)
+			if putErr != nil {
+				return result, fmt.Errorf("persist observation chunk: %w", putErr)
+			}
+			if !containsString(terminals[index].chunks, chunk) {
+				return result, errors.New("persisted observation chunk digest changed after planning")
+			}
+		}
+	}
+	for _, view := range views {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if _, err := options.Store.PutSessionView(view); err != nil {
+			return result, fmt.Errorf("persist SessionView %s/%s: %w", view.Provider, view.SessionID, err)
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if _, err := options.Store.PutProbeState(probeState); err != nil {
+		return result, fmt.Errorf("persist project probe: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if _, err := options.Store.PutProjectView(projectView); err != nil {
+		return result, fmt.Errorf("persist ProjectView: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 
-	prepared, err := prepareOrAdvance(options.Store, previous, manifest)
+	var prepared memorystore.Prepared
+	err = options.Catalog.WithBatchSnapshot(batchResults, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var prepareErr error
+		prepared, prepareErr = prepareOrAdvance(options.Store, previous, manifest)
+		return prepareErr
+	})
 	if err != nil {
 		return result, err
 	}
@@ -381,13 +468,7 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 		}
 		boundary, err := options.Adapter.Freeze(ctx, candidates[key])
 		if err != nil {
-			var local *source.LocalError
-			if !errors.As(err, &local) {
-				return nil, nil, fmt.Errorf("freeze source %s/%s: %w", candidates[key].Provider, candidates[key].SessionID, err)
-			}
-			state := terminalStateForLocalError(local.Code)
-			issues[key] = source.Issue{Provider: candidates[key].Provider, SessionID: candidates[key].SessionID, Code: string(local.Code), TerminalState: state}
-			continue
+			return nil, nil, fmt.Errorf("freeze source %s/%s: %w", candidates[key].Provider, candidates[key].SessionID, err)
 		}
 		if boundary.TerminalState != memory.Indexed {
 			issues[key] = source.Issue{Provider: candidates[key].Provider, SessionID: candidates[key].SessionID, Code: "freeze_terminal", TerminalState: boundary.TerminalState}
@@ -463,10 +544,15 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 						cancel(ErrObservationBudget)
 						return ErrObservationBudget
 					}
-					if retained.Add(1) > maxSourceRevisions {
-						retained.Add(-1)
-						cancel(ErrObservationBudget)
-						return ErrObservationBudget
+					for {
+						current := retained.Load()
+						if current >= maxSourceRevisions {
+							cancel(ErrObservationBudget)
+							return ErrObservationBudget
+						}
+						if retained.CompareAndSwap(current, current+1) {
+							break
+						}
 					}
 					result.observations = append(result.observations, observation)
 					return nil
@@ -495,33 +581,20 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			return nil, err
 		}
 		if item.err != nil {
-			var local *source.LocalError
-			if !errors.As(item.err, &local) {
-				return nil, fmt.Errorf("decode source %s/%s: %w", item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID, item.err)
-			}
-			state := terminalStateForLocalError(local.Code)
-			issues = append(issues, source.Issue{Provider: item.task.boundary.Candidate.Provider, SessionID: item.task.boundary.Candidate.SessionID, Code: string(local.Code), TerminalState: state})
-			continue
+			return nil, fmt.Errorf("decode source %s/%s: %w", item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID, item.err)
 		}
-		record, found, err := options.Catalog.GetSource(item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID)
-		if err != nil {
-			return nil, fmt.Errorf("read decoded source catalog record: %w", err)
+		record := item.report.ProposedSource
+		if err := memory.ValidateSourceRecord(record); err != nil {
+			return nil, fmt.Errorf("invalid decoded source proposal: %w", err)
 		}
-		if !found {
-			return nil, fmt.Errorf("decoded source %s/%s did not publish an authenticated catalog record", item.task.boundary.Candidate.Provider, item.task.boundary.Candidate.SessionID)
+		if record.Provider != item.task.boundary.Candidate.Provider || record.SessionID != item.task.boundary.Candidate.SessionID || record.SourceIdentity != item.task.boundary.SourceIdentity || !equalJSON(record.FrozenBoundary, item.task.boundary.Frozen) {
+			return nil, errors.New("decoded source proposal does not match frozen boundary")
 		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		digest, err := memory.Digest(record)
-		if err != nil || digest != item.report.CatalogRecordDigest {
-			return nil, errors.New("decoded source catalog digest does not match authenticated record")
-		}
-		if !sameStringSet(record.ProjectIDs, item.report.ProjectIDs) {
-			return nil, errors.New("decoded source project associations do not match authenticated catalog record")
-		}
 		if !containsProject(record.ProjectIDs, options.ProjectID) {
-			if len(item.observations) != 0 || containsProject(item.report.ProjectIDs, options.ProjectID) {
+			if len(item.observations) != 0 {
 				return nil, projectidentity.ErrAssociationRequired
 			}
 			continue
@@ -554,25 +627,13 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 				newObservations = append(newObservations, observation)
 			}
 		}
-		if len(newObservations) > 0 {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			chunk, err := options.Store.PutObservationChunk(newObservations)
-			if err != nil {
-				return nil, fmt.Errorf("persist observation chunk %s/%s: %w", record.Provider, record.SessionID, err)
-			}
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			chunkDigests = appendUnique(chunkDigests, chunk)
-		}
 		terminals = append(terminals, terminalSource{
-			record: record, recordDigest: digest, state: state,
+			record: record, mutation: sourcecatalog.BatchMutation{Relation: item.report.BoundaryRelation, ExpectedDigest: item.report.ExpectedCatalogDigest, Desired: record}, state: state,
 			observations: item.observations, chunks: chunkDigests,
-			diagnostics: diagnostics,
-			issue:       state != memory.Indexed || item.report.MalformedLines > 0 || item.report.UnsupportedRecords > 0 || len(item.report.Quarantined) > 0 || len(item.report.Diagnostics) > 0,
-			shared:      len(record.ProjectIDs) > 1,
+			newObservations: newObservations,
+			diagnostics:     diagnostics,
+			issue:           state != memory.Indexed || item.report.MalformedLines > 0 || item.report.UnsupportedRecords > 0 || len(item.report.Quarantined) > 0 || len(item.report.Diagnostics) > 0,
+			shared:          len(record.ProjectIDs) > 1,
 		})
 	}
 	for _, issue := range issues {
@@ -589,16 +650,16 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		if issue.TerminalState != memory.Missing && issue.TerminalState != memory.Unreadable && issue.TerminalState != memory.Ambiguous {
 			return nil, fmt.Errorf("issue source %s/%s has incompatible unavailable terminal state %q", issue.Provider, issue.SessionID, issue.TerminalState)
 		}
-		record.Availability = memory.SourceUnavailable
-		digest, err := options.Catalog.UpsertSource(record)
+		expectedDigest, err := memory.Digest(record)
 		if err != nil {
-			return nil, fmt.Errorf("mark issue source unavailable: %w", err)
+			return nil, err
 		}
+		record.Availability = memory.SourceUnavailable
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		terminals = append(terminals, terminalSource{
-			record: record, recordDigest: digest, state: issue.TerminalState,
+			record: record, mutation: sourcecatalog.BatchMutation{Relation: source.BoundaryUnchanged, ExpectedDigest: expectedDigest, Desired: record}, state: issue.TerminalState,
 			diagnostics: []memory.Diagnostic{{Code: terminalIssueCode(issue.TerminalState)}},
 			issue:       true, shared: len(record.ProjectIDs) > 1,
 		})
@@ -614,7 +675,7 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 	return terminals, nil
 }
 
-func loadBaseline(store *memorystore.Store) (baseline, error) {
+func loadBaseline(store MemoryStore) (baseline, error) {
 	result := baseline{sessions: make(map[string]memory.SessionView), revisions: make(map[string]memory.ObservationRevision)}
 	prepared, manifest, err := store.LoadPrepared()
 	if errors.Is(err, memorystore.ErrNoPreparedGeneration) {
@@ -717,7 +778,7 @@ func classifyRevisions(views []memory.SessionView, terminals []terminalSource, p
 	return active, superseded, withdrawn, nil
 }
 
-func prepareOrAdvance(store *memorystore.Store, previous baseline, manifest memory.GenerationManifest) (memorystore.Prepared, error) {
+func prepareOrAdvance(store MemoryStore, previous baseline, manifest memory.GenerationManifest) (memorystore.Prepared, error) {
 	if !previous.present {
 		return store.PrepareGeneration(manifest)
 	}
@@ -781,20 +842,18 @@ func terminalIssueCode(state memory.TerminalState) string {
 	}
 }
 
-func terminalStateForLocalError(code source.LocalErrorCode) memory.TerminalState {
-	switch code {
-	case source.LocalUnavailable:
-		return memory.Missing
-	case source.LocalChanged:
-		return memory.Ambiguous
-	default:
-		return memory.Unreadable
-	}
-}
-
 func containsProject(values []string, projectID string) bool {
 	for _, value := range values {
 		if value == projectID {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
 			return true
 		}
 	}

@@ -26,12 +26,14 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
+	"github.com/neomei/SessionReviewer/internal/source"
 )
 
 const (
 	privateDirectoryMode fs.FileMode = 0o700
 	privateFileMode      fs.FileMode = 0o600
 	maxCatalogRecord                 = 4 << 20
+	maxBatchJournal                  = 64 << 20
 	catalogLockTimeout               = 5 * time.Second
 )
 
@@ -44,6 +46,32 @@ type Catalog struct {
 	closed             bool
 	beforeAdvisoryLock func()
 	beforePublish      func() error
+	batchCheckpoint    func()
+}
+
+const batchJournalLeaf = "batch-mutation-v1.json"
+
+type BatchMutation struct {
+	Relation       source.BoundaryRelation `json:"relation"`
+	ExpectedDigest string                  `json:"expected_digest,omitempty"`
+	Desired        memory.SourceRecord     `json:"desired"`
+}
+
+type BatchResult struct {
+	Record memory.SourceRecord
+	Digest string
+}
+
+type batchJournal struct {
+	Version int                 `json:"version"`
+	Entries []batchJournalEntry `json:"entries"`
+}
+
+type batchJournalEntry struct {
+	Leaf      string              `json:"leaf"`
+	OldDigest string              `json:"old_digest,omitempty"`
+	Desired   memory.SourceRecord `json:"desired"`
+	Digest    string              `json:"digest"`
 }
 
 func Open(dataRoot string) (*Catalog, error) {
@@ -84,7 +112,293 @@ func Open(dataRoot string) (*Catalog, error) {
 	}
 	closeData = false
 	closeRoot = false
-	return &Catalog{data: data, root: root}, nil
+	catalog := &Catalog{data: data, root: root}
+	if err := catalog.withWriteLock(func() error { return nil }); err != nil {
+		_ = catalog.Close()
+		return nil, err
+	}
+	return catalog, nil
+}
+
+// ApplyBatch validates and durably publishes one content-free catalog
+// transaction. A recovered journal always converges to the complete desired
+// batch, so readers observe the old set or the full new set, never a partial
+// transaction after restart.
+func (c *Catalog) ApplyBatch(mutations []BatchMutation) ([]BatchResult, error) {
+	if len(mutations) == 0 {
+		return nil, errors.New("source catalog batch is empty")
+	}
+	var results []BatchResult
+	err := c.withWriteLock(func() error {
+		entries, planned, err := c.planBatch(mutations)
+		if err != nil {
+			return err
+		}
+		results = planned
+		changed := false
+		for _, entry := range entries {
+			current, found, _, err := c.readLeaf(entry.Leaf)
+			if err != nil {
+				return err
+			}
+			if !found {
+				changed = true
+				continue
+			}
+			digest, err := memory.Digest(current)
+			if err != nil {
+				return err
+			}
+			if digest != entry.Digest {
+				changed = true
+			}
+		}
+		if !changed {
+			return nil
+		}
+		journalBody, err := marshalCanonical(batchJournal{Version: 1, Entries: entries})
+		if err != nil {
+			return err
+		}
+		if len(journalBody) > maxBatchJournal {
+			return errors.New("source catalog batch journal exceeds bounded limit")
+		}
+		if err := atomicfile.WriteRootFileCreateIfAbsent(c.root.Root, batchJournalLeaf, journalBody, privateFileMode, c.verifyBeforePublish); err != nil {
+			return fmt.Errorf("write source catalog batch journal: %w", err)
+		}
+		c.runBatchCheckpoint()
+		if err := c.publishBatch(entries); err != nil {
+			return err
+		}
+		if err := atomicfile.RemoveRoot(c.root.Root, batchJournalLeaf); err != nil {
+			return err
+		}
+		c.runBatchCheckpoint()
+		return nil
+	})
+	return results, err
+}
+
+// PlanBatch performs the same complete validation and normalization as
+// ApplyBatch without writing a journal or source record.
+func (c *Catalog) PlanBatch(mutations []BatchMutation) ([]BatchResult, error) {
+	if len(mutations) == 0 {
+		return nil, errors.New("source catalog batch is empty")
+	}
+	var results []BatchResult
+	err := c.withReadLock(func() error {
+		_, planned, err := c.planBatch(mutations)
+		results = planned
+		return err
+	})
+	return results, err
+}
+
+// WithBatchSnapshot verifies that every previously applied batch result is
+// still current and holds the catalog transaction lock while run commits its
+// dependent pointer. It prevents a stale scan from preparing against a newer
+// catalog boundary.
+func (c *Catalog) WithBatchSnapshot(expected []BatchResult, run func() error) error {
+	if len(expected) == 0 || run == nil {
+		return errors.New("catalog batch snapshot and callback are required")
+	}
+	return c.withWriteLock(func() error {
+		seen := make(map[string]struct{}, len(expected))
+		for _, item := range expected {
+			if err := memory.ValidateSourceRecord(item.Record); err != nil {
+				return err
+			}
+			leaf := sourceLeaf(item.Record.Provider, item.Record.SessionID)
+			if _, duplicate := seen[leaf]; duplicate {
+				return errors.New("duplicate source in catalog snapshot")
+			}
+			seen[leaf] = struct{}{}
+			record, found, _, err := c.readLeaf(leaf)
+			if err != nil || !found {
+				return errors.Join(ErrCASConflict, err)
+			}
+			digest, err := memory.Digest(record)
+			if err != nil || digest != item.Digest || !reflect.DeepEqual(record, item.Record) {
+				return errors.Join(ErrCASConflict, err)
+			}
+		}
+		return run()
+	})
+}
+
+func (c *Catalog) planBatch(mutations []BatchMutation) ([]batchJournalEntry, []BatchResult, error) {
+	seen := make(map[string]struct{}, len(mutations))
+	entries := make([]batchJournalEntry, 0, len(mutations))
+	results := make([]BatchResult, 0, len(mutations))
+	for _, mutation := range mutations {
+		desired := cloneRecord(mutation.Desired)
+		sort.Strings(desired.ProjectIDs)
+		desired.ProjectIDs = distinct(desired.ProjectIDs)
+		if err := memory.ValidateSourceRecord(desired); err != nil {
+			return nil, nil, fmt.Errorf("invalid batch source record: %w", err)
+		}
+		if _, err := marshalCanonical(desired); err != nil {
+			return nil, nil, err
+		}
+		leaf := sourceLeaf(desired.Provider, desired.SessionID)
+		if _, duplicate := seen[leaf]; duplicate {
+			return nil, nil, errors.New("duplicate source in catalog batch")
+		}
+		seen[leaf] = struct{}{}
+		existing, found, _, err := c.readLeaf(leaf)
+		if err != nil {
+			return nil, nil, err
+		}
+		var currentDigest string
+		if found {
+			currentDigest, err = memory.Digest(existing)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		if found {
+			if existing.Provider != desired.Provider || existing.SessionID != desired.SessionID || existing.SourceIdentity != desired.SourceIdentity || existing.StartedAt != desired.StartedAt {
+				return nil, nil, projectidentity.ErrAssociationRequired
+			}
+			desired.ProjectIDs = append(desired.ProjectIDs, existing.ProjectIDs...)
+			sort.Strings(desired.ProjectIDs)
+			desired.ProjectIDs = distinct(desired.ProjectIDs)
+		}
+		desiredDigest, err := memory.Digest(desired)
+		if err != nil {
+			return nil, nil, err
+		}
+		if found && currentDigest == desiredDigest {
+			entries = append(entries, batchJournalEntry{Leaf: leaf, OldDigest: currentDigest, Desired: desired, Digest: desiredDigest})
+			results = append(results, BatchResult{Record: cloneRecord(desired), Digest: desiredDigest})
+			continue
+		}
+		switch mutation.Relation {
+		case source.BoundaryInitial:
+			if found {
+				return nil, nil, ErrCASConflict
+			}
+		case source.BoundaryUnchanged:
+			if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
+				return nil, nil, ErrCASConflict
+			}
+			comparison, compareErr := compareBoundary(existing.FrozenBoundary, desired.FrozenBoundary)
+			if compareErr != nil || comparison != 0 {
+				return nil, nil, ErrCASConflict
+			}
+			if existing.EndedAt != desired.EndedAt || !reflect.DeepEqual(existing.Usage, desired.Usage) {
+				return nil, nil, projectidentity.ErrAssociationRequired
+			}
+		case source.BoundaryAppend:
+			if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
+				return nil, nil, ErrCASConflict
+			}
+			comparison, compareErr := compareBoundary(existing.FrozenBoundary, desired.FrozenBoundary)
+			if compareErr != nil || comparison >= 0 {
+				return nil, nil, ErrCASConflict
+			}
+			existingEnd, oldErr := time.Parse(time.RFC3339Nano, existing.EndedAt)
+			desiredEnd, newErr := time.Parse(time.RFC3339Nano, desired.EndedAt)
+			if oldErr != nil || newErr != nil || desiredEnd.Before(existingEnd) {
+				return nil, nil, projectidentity.ErrAssociationRequired
+			}
+		case source.BoundaryReplacement:
+			if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
+				return nil, nil, ErrCASConflict
+			}
+			oldLoc, newLoc := existing.FrozenBoundary.Location.JSONL, desired.FrozenBoundary.Location.JSONL
+			if oldLoc == nil || newLoc == nil || newLoc.Line > oldLoc.Line || newLoc.ByteOffset > oldLoc.ByteOffset {
+				return nil, nil, projectidentity.ErrAssociationRequired
+			}
+		default:
+			return nil, nil, errors.New("invalid source catalog batch relation")
+		}
+		if err := memory.ValidateSourceRecord(desired); err != nil {
+			return nil, nil, err
+		}
+		entries = append(entries, batchJournalEntry{Leaf: leaf, OldDigest: currentDigest, Desired: desired, Digest: desiredDigest})
+		results = append(results, BatchResult{Record: cloneRecord(desired), Digest: desiredDigest})
+	}
+	return entries, results, nil
+}
+
+func (c *Catalog) publishBatch(entries []batchJournalEntry) error {
+	for _, entry := range entries {
+		body, err := marshalCanonical(entry.Desired)
+		if err != nil {
+			return err
+		}
+		if err := c.verifyBeforePublish(); err != nil {
+			return err
+		}
+		if err := atomicfile.WriteRootFile(c.root.Root, entry.Leaf, body, privateFileMode); err != nil {
+			return err
+		}
+		c.runBatchCheckpoint()
+		stored, found, _, err := c.readLeaf(entry.Leaf)
+		if err != nil || !found {
+			return errors.Join(errors.New("batch catalog re-read failed"), err)
+		}
+		digest, err := memory.Digest(stored)
+		if err != nil || digest != entry.Digest {
+			return errors.Join(errors.New("batch catalog digest mismatch"), err)
+		}
+	}
+	return nil
+}
+
+func (c *Catalog) runBatchCheckpoint() {
+	if c.batchCheckpoint != nil {
+		c.batchCheckpoint()
+	}
+}
+
+func (c *Catalog) recoverBatchUnlocked() error {
+	body, found, err := c.root.ReadRegular(batchJournalLeaf, maxBatchJournal)
+	if err != nil || !found {
+		return err
+	}
+	if err := requirePrivateFile(c.root.Root, batchJournalLeaf); err != nil {
+		return err
+	}
+	var journal batchJournal
+	if err := decodeCanonical(body, &journal); err != nil {
+		return err
+	}
+	if journal.Version != 1 || len(journal.Entries) == 0 {
+		return errors.New("invalid source catalog batch journal")
+	}
+	seen := make(map[string]struct{}, len(journal.Entries))
+	for _, entry := range journal.Entries {
+		if sourceLeaf(entry.Desired.Provider, entry.Desired.SessionID) != entry.Leaf {
+			return errors.New("batch journal source identity mismatch")
+		}
+		if _, duplicate := seen[entry.Leaf]; duplicate {
+			return errors.New("duplicate batch journal source")
+		}
+		seen[entry.Leaf] = struct{}{}
+		if err := memory.ValidateSourceRecord(entry.Desired); err != nil {
+			return err
+		}
+		digest, err := memory.Digest(entry.Desired)
+		if err != nil || digest != entry.Digest {
+			return errors.Join(errors.New("batch journal digest mismatch"), err)
+		}
+		current, currentFound, _, err := c.readLeaf(entry.Leaf)
+		if err != nil {
+			return err
+		}
+		if currentFound {
+			currentDigest, err := memory.Digest(current)
+			if err != nil || (currentDigest != entry.OldDigest && currentDigest != entry.Digest) {
+				return errors.Join(ErrCASConflict, err)
+			}
+		}
+	}
+	if err := c.publishBatch(journal.Entries); err != nil {
+		return err
+	}
+	return atomicfile.RemoveRoot(c.root.Root, batchJournalLeaf)
 }
 
 func (c *Catalog) UpsertSource(record memory.SourceRecord) (string, error) {
@@ -358,6 +672,9 @@ func (c *Catalog) withAdvisoryLock(run func() error) error {
 	if err != nil {
 		return err
 	}
+	if err := c.recoverBatchUnlocked(); err != nil {
+		return errors.Join(err, lock.Release())
+	}
 	return errors.Join(run(), lock.Release())
 }
 
@@ -423,7 +740,7 @@ func (c *Catalog) listRecords() ([]memory.SourceRecord, error) {
 	}
 	var records []memory.SourceRecord
 	for _, entry := range entries {
-		if entry.Name() == "catalog.lock" {
+		if entry.Name() == "catalog.lock" || entry.Name() == batchJournalLeaf {
 			continue
 		}
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") || len(entry.Name()) != 64+len(".json") {

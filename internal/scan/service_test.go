@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -35,15 +36,16 @@ const (
 )
 
 type fakeSourceSpec struct {
-	candidate    source.Candidate
-	boundary     source.Boundary
-	record       memory.SourceRecord
-	observations []memory.ObservationRevision
-	report       source.DecodeReport
-	freezeErr    error
-	decodeErr    error
-	skipCatalog  bool
-	wait         <-chan struct{}
+	candidate      source.Candidate
+	boundary       source.Boundary
+	record         memory.SourceRecord
+	observations   []memory.ObservationRevision
+	report         source.DecodeReport
+	freezeErr      error
+	decodeErr      error
+	skipCatalog    bool
+	wait           <-chan struct{}
+	frozenExpected string
 }
 
 type fakeAdapter struct {
@@ -80,6 +82,19 @@ func (adapter *fakeAdapter) Freeze(ctx context.Context, candidate source.Candida
 	spec := adapter.sources[candidate.SessionID]
 	if spec == nil || spec.candidate != candidate {
 		return source.Boundary{}, errors.New("unknown fake candidate")
+	}
+	if spec.freezeErr == nil {
+		existing, found, err := adapter.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
+		if err != nil {
+			return source.Boundary{}, err
+		}
+		spec.frozenExpected = ""
+		if found {
+			spec.frozenExpected, err = memory.Digest(existing)
+			if err != nil {
+				return source.Boundary{}, err
+			}
+		}
 	}
 	return spec.boundary, spec.freezeErr
 }
@@ -121,35 +136,17 @@ func (adapter *fakeAdapter) Decode(ctx context.Context, boundary source.Boundary
 	if spec.decodeErr != nil {
 		return spec.report, spec.decodeErr
 	}
-	digest := spec.report.CatalogRecordDigest
-	if !spec.skipCatalog {
-		var err error
-		if spec.report.BoundaryRelation == source.BoundaryReplacement {
-			existing, found, getErr := adapter.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
-			if getErr != nil || !found {
-				return source.DecodeReport{}, errors.Join(errors.New("replacement baseline missing"), getErr)
-			}
-			expected, digestErr := memory.Digest(existing)
-			if digestErr != nil {
-				return source.DecodeReport{}, digestErr
-			}
-			digest, err = adapter.catalog.ReplaceSource(expected, spec.record)
-		} else {
-			digest, err = adapter.catalog.UpsertSource(spec.record)
-		}
-		if err != nil {
-			return source.DecodeReport{}, err
-		}
-	}
 	report := spec.report
-	report.CatalogRecordDigest = digest
-	report.ProjectIDs = append([]string(nil), spec.record.ProjectIDs...)
 	report.EmittedRevisions = 0
 	for _, observation := range spec.observations {
 		if err := visit(observation); err != nil {
 			return report, err
 		}
 		report.EmittedRevisions++
+	}
+	if !spec.skipCatalog {
+		report.ProposedSource = spec.record
+		report.ExpectedCatalogDigest = spec.frozenExpected
 	}
 	return report, nil
 }
@@ -163,6 +160,19 @@ type scanHarness struct {
 	adapter *fakeAdapter
 	catalog *sourcecatalog.Catalog
 	store   *memorystore.Store
+}
+
+type failingMemoryStore struct {
+	MemoryStore
+	failObservation bool
+}
+
+func (store *failingMemoryStore) PutObservationChunk(records []memory.ObservationRevision) (string, error) {
+	if store.failObservation {
+		store.failObservation = false
+		return "", errors.New("object-store-canary")
+	}
+	return store.MemoryStore.PutObservationChunk(records)
 }
 
 func newScanHarness(t *testing.T) scanHarness {
@@ -619,28 +629,18 @@ func TestRunReplacementRebuildsActiveViewForInteriorMutation(t *testing.T) {
 	}
 }
 
-func TestRunIsolatesOneDecodeFailureAndContinuesLaterSources(t *testing.T) {
+func TestRunFailsClosedOnEveryDecodeErrorWithoutCatalogMutation(t *testing.T) {
 	harness := newScanHarness(t)
 	failed := harness.addSource(1, memory.Indexed, scanTestProject)
-	failed.decodeErr = source.NewLocalError(source.LocalDecode, errors.New("source-local-decode-canary"))
-	if _, err := harness.catalog.UpsertSource(failed.record); err != nil {
-		t.Fatalf("pre-associate failing source: %v", err)
-	}
+	failed.decodeErr = errors.New("decode-canary")
 	harness.addSource(2, memory.Indexed, scanTestProject)
 
 	result, err := Run(context.Background(), harness.options)
-	if err != nil {
-		t.Fatalf("source-local failure stopped project scan: %v", err)
+	if err == nil || result.Prepared || result.State != Failed {
+		t.Fatalf("decode failure result=%+v err=%v", result, err)
 	}
-	if result.SourceSessions != 2 || result.TerminalSessions != 2 || result.IndexedSessions != 1 || result.IssueSessions != 1 || result.State != CompletedWithIssues {
-		t.Fatalf("failure isolation counts mismatch: %+v", result)
-	}
-	harness.adapter.mu.Lock()
-	decoded := append([]string(nil), harness.adapter.decoded...)
-	harness.adapter.mu.Unlock()
-	sort.Strings(decoded)
-	if len(decoded) != 2 || decoded[0] != "session-1" || decoded[1] != "session-2" {
-		t.Fatalf("later source did not run after failure: %v", decoded)
+	if records, listErr := harness.catalog.ListCandidates(); listErr != nil || len(records) != 0 {
+		t.Fatalf("decode failure mutated catalog records=%+v err=%v", records, listErr)
 	}
 }
 
@@ -774,6 +774,79 @@ func TestRunSerializesConcurrentProjectScansForFullLifecycle(t *testing.T) {
 	}
 }
 
+func TestConcurrentProjectScansNeverPrepareOlderFrozenFactsAfterNewerAppendWins(t *testing.T) {
+	older := newScanHarness(t)
+	oldSpec := older.addSource(1, memory.Indexed, scanTestProject, scanTestForeign)
+	if _, err := older.catalog.UpsertSource(oldSpec.record); err != nil {
+		t.Fatal(err)
+	}
+	oldSpec.report.BoundaryRelation = source.BoundaryUnchanged
+	blocked := make(chan struct{})
+	oldSpec.wait = blocked
+	older.adapter.decodeStarted = make(chan string, 1)
+
+	projectRootB := t.TempDir()
+	bindingB, err := projectidentity.Resolve(config.ProjectMapping{ID: scanTestForeign, Root: projectRootB}, projectRootB, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalogB, err := sourcecatalog.Open(older.options.DataRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalogB.Close() })
+	storeB, err := memorystore.Open(older.options.DataRoot, scanTestForeign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = storeB.Close() })
+	adapterB := &fakeAdapter{catalog: catalogB, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error)}
+	newer := *oldSpec
+	newer.candidate.InitialCWD = bindingB.CanonicalRoot
+	newer.boundary.Candidate = newer.candidate
+	newer.boundary.Frozen.Location.JSONL = &memory.JSONLSourceLocation{Line: 3, ByteOffset: 220}
+	newer.boundary.Frozen.SourceHash = scanHex("newer-shared-boundary")
+	newer.record.FrozenBoundary = newer.boundary.Frozen
+	newer.report.BoundaryRelation = source.BoundaryAppend
+	newer.wait = nil
+	newer.observations = append([]memory.ObservationRevision(nil), oldSpec.observations...)
+	for index := range newer.observations {
+		newer.observations[index].Key.ProjectID = scanTestForeign
+		newer.observations[index].RevisionID = memory.ObservationRevisionID(newer.observations[index])
+	}
+	adapterB.sources[newer.record.SessionID] = &newer
+	optionsB := older.options
+	optionsB.ProjectID, optionsB.Binding, optionsB.Adapter, optionsB.Catalog, optionsB.Store = scanTestForeign, bindingB, adapterB, catalogB, storeB
+
+	oldResult := make(chan error, 1)
+	go func() { _, err := Run(context.Background(), older.options); oldResult <- err }()
+	select {
+	case <-older.adapter.decodeStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for older decode")
+	}
+	newResult, err := Run(context.Background(), optionsB)
+	if err != nil || !newResult.Prepared {
+		t.Fatalf("newer scan result=%+v err=%v", newResult, err)
+	}
+	close(blocked)
+	select {
+	case err := <-oldResult:
+		if !errors.Is(err, sourcecatalog.ErrCASConflict) {
+			t.Fatalf("older frozen scan error=%v want catalog CAS conflict", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for older stale scan")
+	}
+	if _, _, err := older.store.LoadPrepared(); !errors.Is(err, memorystore.ErrNoPreparedGeneration) {
+		t.Fatalf("older scan prepared stale observations: %v", err)
+	}
+	record, found, err := older.catalog.GetSource("codex", oldSpec.record.SessionID)
+	if err != nil || !found || !reflect.DeepEqual(record.FrozenBoundary, newer.record.FrozenBoundary) {
+		t.Fatalf("catalog lost newer boundary record=%+v found=%v err=%v", record, found, err)
+	}
+}
+
 func TestRunFreezesOneReferenceTimeForProbeReductionAndManifest(t *testing.T) {
 	harness := newScanHarness(t)
 	harness.addSource(1, memory.Indexed, scanTestProject)
@@ -833,6 +906,61 @@ func TestRunGlobalObservationBudgetFailsWithoutPreparedGeneration(t *testing.T) 
 	}
 	if _, _, loadErr := harness.store.LoadPrepared(); !errors.Is(loadErr, memorystore.ErrNoPreparedGeneration) {
 		t.Fatalf("observation budget prepared a partial generation: %v", loadErr)
+	}
+	if records, listErr := harness.catalog.ListCandidates(); listErr != nil || len(records) != 0 {
+		t.Fatalf("observation budget mutated catalog records=%+v err=%v", records, listErr)
+	}
+}
+
+func TestRunProbeFailureDoesNotApplyCatalogBatch(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	harness.options.Probe = func(context.Context, projectprobe.Options) (memory.ProjectProbeState, memory.ProbeCheck, error) {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, errors.New("probe-canary")
+	}
+	if _, err := Run(context.Background(), harness.options); err == nil {
+		t.Fatal("probe failure was ignored")
+	}
+	if records, err := harness.catalog.ListCandidates(); err != nil || len(records) != 0 {
+		t.Fatalf("probe failure mutated catalog records=%+v err=%v", records, err)
+	}
+}
+
+func TestRunReduceFailureDoesNotApplyCatalogBatch(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	harness.options.Reduce = func(projectview.Input) (memory.ProjectView, bool, error) {
+		return memory.ProjectView{}, false, errors.New("reduce-canary")
+	}
+	if _, err := Run(context.Background(), harness.options); err == nil {
+		t.Fatal("reduce failure was ignored")
+	}
+	if records, err := harness.catalog.ListCandidates(); err != nil || len(records) != 0 {
+		t.Fatalf("reduce failure mutated catalog records=%+v err=%v", records, err)
+	}
+}
+
+func TestRunRepairsIdempotentlyAfterCatalogBatchPrecedesStoreFailure(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	failing := &failingMemoryStore{MemoryStore: harness.store, failObservation: true}
+	harness.options.Store = failing
+	result, err := Run(context.Background(), harness.options)
+	if err == nil || result.Prepared {
+		t.Fatalf("store failure result=%+v err=%v", result, err)
+	}
+	records, listErr := harness.catalog.ListCandidates(scanTestProject)
+	if listErr != nil || len(records) != 1 {
+		t.Fatalf("catalog did not retain complete desired batch records=%+v err=%v", records, listErr)
+	}
+	if _, _, loadErr := harness.store.LoadPrepared(); !errors.Is(loadErr, memorystore.ErrNoPreparedGeneration) {
+		t.Fatalf("store failure prepared generation: %v", loadErr)
+	}
+
+	harness.options.Store = harness.store
+	repaired, err := Run(context.Background(), harness.options)
+	if err != nil || !repaired.Prepared || repaired.SourceSessions != 1 {
+		t.Fatalf("idempotent repair result=%+v err=%v", repaired, err)
 	}
 }
 

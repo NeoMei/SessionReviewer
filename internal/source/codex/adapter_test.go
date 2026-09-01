@@ -138,6 +138,15 @@ func decodeBoundary(t *testing.T, adapter source.Adapter, boundary source.Bounda
 	return observations, report
 }
 
+func publishDecodeProposal(t *testing.T, catalog *sourcecatalog.Catalog, report source.DecodeReport) {
+	t.Helper()
+	if _, err := catalog.ApplyBatch([]sourcecatalog.BatchMutation{{
+		Relation: report.BoundaryRelation, ExpectedDigest: report.ExpectedCatalogDigest, Desired: report.ProposedSource,
+	}}); err != nil {
+		t.Fatalf("publish decode proposal: %v", err)
+	}
+}
+
 func TestNewValidatesDependenciesAndDiscoveryClaimsOnlyCodex(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	fixture.installFixture(t, "session-project-a.jsonl")
@@ -415,7 +424,8 @@ func TestDecodeClassifiesCatalogAppendTruncationAndInteriorMutation(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		decodeBoundary(t, adapter, boundary)
+		_, firstReport := decodeBoundary(t, adapter, boundary)
+		publishDecodeProposal(t, fixture.catalog, firstReport)
 		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
 			t.Fatal(err)
@@ -471,7 +481,8 @@ func TestDecodeClassifiesCatalogAppendTruncationAndInteriorMutation(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
-			decodeBoundary(t, adapter, boundary)
+			_, firstReport := decodeBoundary(t, adapter, boundary)
+			publishDecodeProposal(t, fixture.catalog, firstReport)
 			test.mutate(t, path)
 			boundary, err = adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
 			if err != nil {
@@ -482,10 +493,54 @@ func TestDecodeClassifiesCatalogAppendTruncationAndInteriorMutation(t *testing.T
 				t.Fatalf("mutation relation=%q", report.BoundaryRelation)
 			}
 			stored, found, err := fixture.catalog.GetSource("codex", "session-project-a")
-			if err != nil || !found || !reflect.DeepEqual(stored.FrozenBoundary, boundary.Frozen) {
-				t.Fatalf("replacement catalog boundary=%+v found=%v err=%v want=%+v", stored.FrozenBoundary, found, err, boundary.Frozen)
+			if err != nil || !found || reflect.DeepEqual(stored.FrozenBoundary, boundary.Frozen) {
+				t.Fatalf("Decode unexpectedly published replacement boundary=%+v found=%v err=%v", stored.FrozenBoundary, found, err)
 			}
 		})
+	}
+}
+
+func TestFrozenDecodeProposalKeepsPriorCatalogCASWhenNewerAppendPublishes(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	initial, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, initialReport := decodeBoundary(t, adapter, initial)
+	publishDecodeProposal(t, fixture.catalog, initialReport)
+	oldDigest := initialReport.ProposedSource
+	expectedOld, err := memory.Digest(oldDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	olderFrozen, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.WriteString("{\"timestamp\":\"2026-08-31T10:00:11Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		t.Fatal(err)
+	}
+	newerFrozen, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, newerReport := decodeBoundary(t, adapter, newerFrozen)
+	publishDecodeProposal(t, fixture.catalog, newerReport)
+
+	_, olderReport := decodeBoundary(t, adapter, olderFrozen)
+	if olderReport.BoundaryRelation != source.BoundaryUnchanged || olderReport.ExpectedCatalogDigest != expectedOld {
+		t.Fatalf("older proposal relation=%q expected=%q want unchanged/%q", olderReport.BoundaryRelation, olderReport.ExpectedCatalogDigest, expectedOld)
+	}
+	if _, err := fixture.catalog.ApplyBatch([]sourcecatalog.BatchMutation{{Relation: olderReport.BoundaryRelation, ExpectedDigest: olderReport.ExpectedCatalogDigest, Desired: olderReport.ProposedSource}}); !errors.Is(err, sourcecatalog.ErrCASConflict) {
+		t.Fatalf("older proposal rewound newer catalog: %v", err)
 	}
 }
 

@@ -53,15 +53,17 @@ func TestDecodeEmitsExactObservedRulesWithPerObservationProjectAffinity(t *testi
 			t.Errorf("operation %q not emitted; observations=%+v", operation, observations)
 		}
 	}
-	if fmt.Sprint(report.ProjectIDs) != fmt.Sprint([]string{"project-a", "project-b"}) {
-		t.Fatalf("report project IDs=%v", report.ProjectIDs)
+	if fmt.Sprint(report.ProposedSource.ProjectIDs) != fmt.Sprint([]string{"project-a", "project-b"}) {
+		t.Fatalf("report project IDs=%v", report.ProposedSource.ProjectIDs)
 	}
-	record, found, err := fixture.catalog.GetSource("codex", "session-shared")
-	if err != nil || !found {
-		t.Fatalf("catalog source found=%v err=%v", found, err)
+	if _, found, err := fixture.catalog.GetSource("codex", "session-shared"); err != nil || found {
+		t.Fatalf("Decode mutated catalog found=%v err=%v", found, err)
 	}
-	if record.Usage.TotalTokens != 3 || fmt.Sprint(record.ProjectIDs) != fmt.Sprint([]string{"project-a", "project-b"}) {
-		t.Fatalf("shared source catalog record=%+v", record)
+	if report.ExpectedCatalogDigest != "" || report.BoundaryRelation != source.BoundaryInitial {
+		t.Fatalf("initial proposal metadata=%+v", report)
+	}
+	if report.ProposedSource.Usage.TotalTokens != 3 || fmt.Sprint(report.ProposedSource.ProjectIDs) != fmt.Sprint([]string{"project-a", "project-b"}) {
+		t.Fatalf("shared source proposal=%+v", report.ProposedSource)
 	}
 }
 
@@ -112,9 +114,11 @@ func TestDecodeParsesGitAndVerificationFactsWithoutCopyingMessagesOutputsOrUsage
 	if report.UnsupportedRecords < 1 {
 		t.Fatalf("unsupported record count=%d", report.UnsupportedRecords)
 	}
-	record, found, err := fixture.catalog.GetSource("codex", "session-project-a")
-	if err != nil || !found || record.Usage.TotalTokens != 15 {
-		t.Fatalf("catalog usage record=%+v found=%v err=%v", record, found, err)
+	if _, found, err := fixture.catalog.GetSource("codex", "session-project-a"); err != nil || found {
+		t.Fatalf("Decode mutated catalog found=%v err=%v", found, err)
+	}
+	if report.ProposedSource.Usage.TotalTokens != 15 {
+		t.Fatalf("proposal usage record=%+v", report.ProposedSource)
 	}
 }
 
@@ -256,15 +260,10 @@ func TestDecodeRejectsBoundaryMetadataChangedAfterFreeze(t *testing.T) {
 	boundary.Candidate.InitialCWD = fixture.projectB
 	if _, err := adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil }); err == nil {
 		t.Fatal("Decode accepted boundary metadata changed after freeze")
-	} else {
-		var local *source.LocalError
-		if errors.As(err, &local) {
-			t.Fatalf("adapter contract error was classified source-local: %v", err)
-		}
 	}
 }
 
-func TestDecodeClassifiesFrozenSourceTruncationButNotVisitorFailureAsLocal(t *testing.T) {
+func TestDecodeTreatsFrozenMutationAndVisitorFailureAsFatalWithoutCatalogWrite(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	path := fixture.installFixture(t, "session-project-a.jsonl")
 	adapter := fixture.adapter(t, "v1")
@@ -276,9 +275,8 @@ func TestDecodeClassifiesFrozenSourceTruncationButNotVisitorFailureAsLocal(t *te
 		t.Fatal(err)
 	}
 	_, err = adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil })
-	var local *source.LocalError
-	if !errors.As(err, &local) || local.Code != source.LocalChanged {
-		t.Fatalf("frozen truncation error=%v local=%#v", err, local)
+	if err == nil {
+		t.Fatal("frozen truncation was not fatal")
 	}
 
 	fixture = newAdapterFixture(t)
@@ -290,9 +288,11 @@ func TestDecodeClassifiesFrozenSourceTruncationButNotVisitorFailureAsLocal(t *te
 	}
 	visitorErr := errors.New("visitor-integrity-canary")
 	_, err = adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return visitorErr })
-	local = nil
-	if !errors.Is(err, visitorErr) || errors.As(err, &local) {
-		t.Fatalf("visitor error was swallowed or classified local: err=%v local=%#v", err, local)
+	if !errors.Is(err, visitorErr) {
+		t.Fatalf("visitor error was swallowed: %v", err)
+	}
+	if _, found, getErr := fixture.catalog.GetSource("codex", "session-project-a"); getErr != nil || found {
+		t.Fatalf("visitor failure mutated catalog found=%v err=%v", found, getErr)
 	}
 }
 
@@ -349,7 +349,7 @@ func TestAmbiguousAuthenticatedRootsQuarantineOnlyAffectedRevisions(t *testing.T
 	if len(observations) != 0 || len(report.Quarantined) == 0 {
 		t.Fatalf("ambiguous observations=%d quarantined=%d report=%+v", len(observations), len(report.Quarantined), report)
 	}
-	if report.TerminalState != memory.Indexed || report.CatalogRecordDigest == "" {
+	if report.TerminalState != memory.Indexed || report.ProposedSource.SessionID == "" {
 		t.Fatalf("one-revision quarantine poisoned source decoding: %+v", report)
 	}
 	for _, quarantined := range report.Quarantined {
@@ -501,8 +501,8 @@ func TestDuplicateApplyPatchCallIDInvalidatesPathFactsQuarantineAndLineage(t *te
 	if len(report.Quarantined) != 0 {
 		t.Fatalf("ambiguous patch retained quarantine effects: %+v", report.Quarantined)
 	}
-	if fmt.Sprint(report.ProjectIDs) != fmt.Sprint([]string{"project-a"}) {
-		t.Fatalf("ambiguous patch retained project effects: %v", report.ProjectIDs)
+	if fmt.Sprint(report.ProposedSource.ProjectIDs) != fmt.Sprint([]string{"project-a"}) {
+		t.Fatalf("ambiguous patch retained project effects: %v", report.ProposedSource.ProjectIDs)
 	}
 	if !hasDiagnostic(report.Diagnostics, "duplicate_tool_call_id") || !hasDiagnostic(report.Diagnostics, "ambiguous_tool_call_output") {
 		t.Fatalf("bounded duplicate diagnostics missing: %+v", report.Diagnostics)

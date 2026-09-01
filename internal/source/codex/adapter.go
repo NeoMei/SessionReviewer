@@ -66,9 +66,12 @@ type adapter struct {
 }
 
 type frozenSource struct {
-	boundary  source.Boundary
-	candidate session.Candidate
-	segments  []frozenSegment
+	boundary           source.Boundary
+	candidate          session.Candidate
+	segments           []frozenSegment
+	priorCatalog       memory.SourceRecord
+	priorCatalogFound  bool
+	priorCatalogDigest string
 }
 
 type frozenSegment struct {
@@ -281,7 +284,18 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		},
 		Segments: segmentBoundaries, TerminalState: memory.Indexed, Handle: boundaryHandle,
 	}
-	frozen := frozenSource{boundary: cloneBoundary(boundary), candidate: resolved, segments: segments}
+	prior, priorFound, err := a.catalog.GetSource(providerCodex, candidate.SessionID)
+	if err != nil {
+		return source.Boundary{}, fmt.Errorf("read frozen source catalog baseline: %w", err)
+	}
+	priorDigest := ""
+	if priorFound {
+		priorDigest, err = memory.Digest(prior)
+		if err != nil {
+			return source.Boundary{}, err
+		}
+	}
+	frozen := frozenSource{boundary: cloneBoundary(boundary), candidate: resolved, segments: segments, priorCatalog: prior, priorCatalogFound: priorFound, priorCatalogDigest: priorDigest}
 	key := frozenSourceKey(providerCodex, candidate.SessionID, sourceIdentity)
 	a.mu.Lock()
 	a.frozen[boundaryHandle] = frozen
@@ -330,16 +344,10 @@ func (a *adapter) Read(ctx context.Context, ref memory.SourceRef, limit int64) (
 func (a *adapter) openFrozenPrefix(ctx context.Context, frozen frozenSource) ([]*os.File, error) {
 	files, err := session.OpenCandidates(a.sessionsRoot, frozen.candidate)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
-			return nil, source.NewLocalError(source.LocalUnavailable, err)
-		}
 		return nil, err
 	}
 	if err := a.verifyExactFrozen(ctx, files, frozen); err != nil {
 		closeFiles(files)
-		if errors.Is(err, errFrozenSourceChanged) {
-			return nil, source.NewLocalError(source.LocalChanged, err)
-		}
 		return nil, err
 	}
 	return files, nil

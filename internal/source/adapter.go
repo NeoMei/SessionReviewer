@@ -92,16 +92,16 @@ type QuarantinedRevision struct {
 }
 
 type DecodeReport struct {
-	BoundaryRelation    BoundaryRelation
-	TerminalState       memory.TerminalState
-	MalformedLines      int
-	UnsupportedRecords  int
-	EmittedRevisions    int
-	CatalogRecordDigest string
-	ProjectIDs          []string
-	Diagnostics         []memory.Diagnostic
-	Quarantined         []QuarantinedRevision
-	Supersessions       []RevisionSupersession
+	BoundaryRelation      BoundaryRelation
+	ProposedSource        memory.SourceRecord
+	ExpectedCatalogDigest string
+	TerminalState         memory.TerminalState
+	MalformedLines        int
+	UnsupportedRecords    int
+	EmittedRevisions      int
+	Diagnostics           []memory.Diagnostic
+	Quarantined           []QuarantinedRevision
+	Supersessions         []RevisionSupersession
 }
 
 type BoundaryRelation string

@@ -131,49 +131,38 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	if err := accounting.ValidateSessionUsage(usage); err != nil {
 		return decoder.report, fmt.Errorf("validate decoded Codex accounting: %w", err)
 	}
-	decoder.report.ProjectIDs = sortedSet(decoder.projectIDs)
+	projectIDs := sortedSet(decoder.projectIDs)
 	record := memory.SourceRecord{
 		SchemaVersion: memory.MemorySchemaVersion, Provider: providerCodex,
 		SessionID: boundary.Candidate.SessionID, SourceIdentity: boundary.SourceIdentity,
 		StartedAt: usage.StartedAt, EndedAt: usage.EndedAt, FrozenBoundary: boundary.Frozen,
-		Availability: memory.SourceAvailable, Usage: *usage, ProjectIDs: append([]string(nil), decoder.report.ProjectIDs...),
+		Availability: memory.SourceAvailable, Usage: *usage, ProjectIDs: append([]string(nil), projectIDs...),
+	}
+	if err := memory.ValidateSourceRecord(record); err != nil {
+		return decoder.report, fmt.Errorf("validate proposed Codex source: %w", err)
 	}
 	relation, expectedDigest, err := a.classifyBoundaryRelation(files, frozen, record)
 	if err != nil {
 		return decoder.report, fmt.Errorf("classify Codex source boundary: %w", err)
 	}
 	decoder.report.BoundaryRelation = relation
-	var digest string
-	if relation == source.BoundaryReplacement {
-		digest, err = a.catalog.ReplaceSource(expectedDigest, record)
-	} else {
-		digest, err = a.catalog.UpsertSource(record)
-	}
-	if err != nil {
-		return decoder.report, fmt.Errorf("update Codex source catalog: %w", err)
-	}
-	decoder.report.CatalogRecordDigest = digest
 	for _, observation := range decoder.observations {
 		if err := visit(observation); err != nil {
 			return decoder.report, err
 		}
 		decoder.report.EmittedRevisions++
 	}
+	decoder.report.ProposedSource = record
+	decoder.report.ExpectedCatalogDigest = expectedDigest
 	return decoder.report, nil
 }
 
 func (a *adapter) classifyBoundaryRelation(files []*os.File, frozen frozenSource, incoming memory.SourceRecord) (source.BoundaryRelation, string, error) {
-	existing, found, err := a.catalog.GetSource(incoming.Provider, incoming.SessionID)
-	if err != nil {
-		return "", "", err
-	}
-	if !found {
+	if !frozen.priorCatalogFound {
 		return source.BoundaryInitial, "", nil
 	}
-	expectedDigest, err := memory.Digest(existing)
-	if err != nil {
-		return "", "", err
-	}
+	existing := frozen.priorCatalog
+	expectedDigest := frozen.priorCatalogDigest
 	if existing.SourceIdentity != incoming.SourceIdentity || existing.StartedAt != incoming.StartedAt {
 		return source.BoundaryUnchanged, expectedDigest, nil
 	}
