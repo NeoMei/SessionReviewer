@@ -97,6 +97,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		ProjectID:               input.ProjectID,
 		Provider:                input.Source.Provider,
 		SessionID:               input.Source.SessionID,
+		SourceIdentity:          input.Source.SourceIdentity,
 		SourceRecordDigest:      sourceRecordDigest,
 		UsageRecordDigest:       usageRecordDigest,
 		StartedAt:               input.Source.StartedAt,
@@ -178,8 +179,9 @@ func validateInput(input Input) error {
 		if err := memory.ValidateSessionView(*input.Previous); err != nil {
 			return fmt.Errorf("validate previous SessionView: %w", err)
 		}
-		if input.Previous.ProjectID != input.ProjectID || input.Previous.Provider != input.Source.Provider || input.Previous.SessionID != input.Source.SessionID {
-			return errors.New("previous SessionView does not belong to source and project")
+		if input.Previous.ProjectID != input.ProjectID || input.Previous.Provider != input.Source.Provider ||
+			input.Previous.SessionID != input.Source.SessionID || input.Previous.SourceIdentity != input.Source.SourceIdentity {
+			return errors.New("previous SessionView source identity does not match source and project")
 		}
 	}
 	return nil

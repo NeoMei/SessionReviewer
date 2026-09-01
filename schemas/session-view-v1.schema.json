@@ -4,13 +4,24 @@
   "title": "SessionReviewer private SessionView v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "digest", "project_id", "provider", "session_id", "source_record_digest", "usage_record_digest", "started_at", "ended_at", "terminal_state", "source_availability", "active_revision_ids", "observation_summaries", "observation_chunk_digests", "derived_records", "diagnostics", "dependency_digest", "materializer_version"],
+  "required": ["schema_version", "digest", "project_id", "provider", "session_id", "source_identity", "source_record_digest", "usage_record_digest", "started_at", "ended_at", "terminal_state", "source_availability", "active_revision_ids", "observation_summaries", "observation_chunk_digests", "derived_records", "diagnostics", "dependency_digest", "materializer_version"],
+  "allOf": [
+    {
+      "if": { "properties": { "terminal_state": { "const": "missing" } }, "required": ["terminal_state"] },
+      "then": { "properties": { "source_availability": { "const": "source_unavailable" } } }
+    },
+    {
+      "if": { "properties": { "source_availability": { "const": "source_unavailable" } }, "required": ["source_availability"] },
+      "then": { "properties": { "terminal_state": { "const": "missing" } } }
+    }
+  ],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
     "digest": { "$ref": "#/$defs/digest" },
     "project_id": { "$ref": "#/$defs/safe_id" },
     "provider": { "type": "string", "const": "codex" },
     "session_id": { "$ref": "#/$defs/safe_id" },
+    "source_identity": { "$ref": "#/$defs/safe_id" },
     "source_record_digest": { "$ref": "#/$defs/digest" },
     "usage_record_digest": { "$ref": "#/$defs/digest" },
     "started_at": { "$ref": "#/$defs/timestamp" },

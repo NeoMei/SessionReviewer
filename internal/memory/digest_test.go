@@ -87,6 +87,23 @@ func TestSessionViewDigestIncludesUsageAndObservationSummaryContentWithoutAliasi
 	}
 }
 
+func TestSessionViewDigestIncludesAuthenticatedSourceIdentity(t *testing.T) {
+	first := validSessionView()
+	second := first
+	second.SourceIdentity = "src2"
+	firstDigest, err := SessionViewDigest(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondDigest, err := SessionViewDigest(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstDigest == secondDigest {
+		t.Fatal("SourceIdentity did not affect SessionView canonical identity")
+	}
+}
+
 func TestDigestNormalizesSemanticallyUnorderedProjectCollections(t *testing.T) {
 	first := validProjectView()
 	first.AssociatedUsage = []AssociatedUsage{

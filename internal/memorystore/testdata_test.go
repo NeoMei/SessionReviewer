@@ -67,6 +67,7 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 		ProjectID:          testProjectID,
 		Provider:           "codex",
 		SessionID:          "session-1",
+		SourceIdentity:     "source-1",
 		SourceRecordDigest: prefixedDigest("source-record"),
 		UsageRecordDigest:  prefixedDigest("source-record"),
 		StartedAt:          testStartedAt,

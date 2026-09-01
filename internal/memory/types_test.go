@@ -412,6 +412,74 @@ func TestSessionViewSchemaRejectsMissingOrForbiddenSummaryContent(t *testing.T) 
 	}
 }
 
+func TestSessionViewBindsRequiredOpaqueSourceIdentity(t *testing.T) {
+	view := validSessionView()
+	if err := ValidateSessionView(view); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(body, &object); err != nil {
+		t.Fatal(err)
+	}
+	if object["source_identity"] != "src1" {
+		t.Fatalf("source identity wire value=%v", object["source_identity"])
+	}
+	for _, forbidden := range []string{"source_path", "source_location", "source_hash"} {
+		if object[forbidden] != nil {
+			t.Fatalf("SessionView copied forbidden source detail %q: %s", forbidden, body)
+		}
+	}
+
+	invalid := view
+	invalid.SourceIdentity = "/private/session.jsonl"
+	invalid.Digest = mustSessionViewDigest(invalid)
+	if err := ValidateSessionView(invalid); err == nil {
+		t.Fatal("SessionView accepted a path as opaque SourceIdentity")
+	}
+
+	delete(object, "source_identity")
+	body, err = json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/session-view-v1.schema.json", body); err == nil {
+		t.Fatalf("SessionView schema accepted missing source identity: %s", body)
+	}
+}
+
+func TestSessionViewRejectsImpossibleTerminalAvailabilityAfterDigestRecompute(t *testing.T) {
+	for name, mutate := range map[string]func(*SessionView){
+		"missing available": func(value *SessionView) {
+			value.TerminalState = Missing
+			value.SourceAvailability = SourceAvailable
+		},
+		"indexed unavailable": func(value *SessionView) {
+			value.TerminalState = Indexed
+			value.SourceAvailability = SourceUnavailable
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			value := validSessionView()
+			mutate(&value)
+			value.Digest = mustSessionViewDigest(value)
+			if err := ValidateSessionView(value); err == nil {
+				t.Fatalf("runtime accepted impossible recomputed pair: %+v", value)
+			}
+			body, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateJSONSchemaFixture("../../schemas/session-view-v1.schema.json", body); err == nil {
+				t.Fatalf("schema accepted impossible recomputed pair: %s", body)
+			}
+		})
+	}
+}
+
 func TestProjectProbeStateHasNoWallClockTimeButProbeCheckDoes(t *testing.T) {
 	stateType := reflect.TypeOf(ProjectProbeState{})
 	if _, ok := stateType.FieldByName("CheckedAt"); ok {
@@ -575,6 +643,7 @@ func validSessionView() SessionView {
 		ProjectID:               "project-a",
 		Provider:                "codex",
 		SessionID:               "s1",
+		SourceIdentity:          "src1",
 		SourceRecordDigest:      objectDigest("2"),
 		UsageRecordDigest:       objectDigest("2"),
 		StartedAt:               "2026-08-31T10:00:00Z",
@@ -766,6 +835,36 @@ func validateSchemaValue(root, schema map[string]any, value any, path string) er
 		}
 		return validateSchemaValue(root, target, value, path)
 	}
+	for _, raw := range schemaArray(schema["allOf"]) {
+		branch, _ := raw.(map[string]any)
+		if branch == nil {
+			return fmt.Errorf("%s invalid allOf branch", path)
+		}
+		condition, conditional := branch["if"].(map[string]any)
+		if !conditional {
+			if err := validateSchemaValue(root, branch, value, path); err != nil {
+				return err
+			}
+			continue
+		}
+		matched, err := schemaConditionMatches(root, condition, value)
+		if err != nil {
+			return fmt.Errorf("%s invalid if condition: %w", path, err)
+		}
+		targetName := "else"
+		if matched {
+			targetName = "then"
+		}
+		if target, ok := branch[targetName].(map[string]any); ok {
+			accepted, err := schemaConditionMatches(root, target, value)
+			if err != nil {
+				return fmt.Errorf("%s invalid %s condition: %w", path, targetName, err)
+			}
+			if !accepted {
+				return fmt.Errorf("%s violates %s condition", path, targetName)
+			}
+		}
+	}
 	if constant, ok := schema["const"]; ok && !reflect.DeepEqual(constant, value) {
 		return fmt.Errorf("%s is not exact const %v", path, constant)
 	}
@@ -876,6 +975,65 @@ func validateSchemaValue(root, schema map[string]any, value any, path string) er
 		return fmt.Errorf("%s unsupported schema type %v", path, schema["type"])
 	}
 	return nil
+}
+
+func schemaConditionMatches(root, schema map[string]any, value any) (bool, error) {
+	if ref, _ := schema["$ref"].(string); ref != "" {
+		const prefix = "#/$defs/"
+		if !strings.HasPrefix(ref, prefix) {
+			return false, fmt.Errorf("unsupported ref %q", ref)
+		}
+		defs, _ := root["$defs"].(map[string]any)
+		target, _ := defs[strings.TrimPrefix(ref, prefix)].(map[string]any)
+		if target == nil {
+			return false, fmt.Errorf("missing ref %q", ref)
+		}
+		return schemaConditionMatches(root, target, value)
+	}
+	if constant, ok := schema["const"]; ok && !reflect.DeepEqual(constant, value) {
+		return false, nil
+	}
+	if values, ok := schema["enum"].([]any); ok {
+		for _, candidate := range values {
+			if reflect.DeepEqual(candidate, value) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if required := schemaArray(schema["required"]); len(required) != 0 {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		for _, raw := range required {
+			name, _ := raw.(string)
+			if _, exists := object[name]; !exists {
+				return false, nil
+			}
+		}
+	}
+	if properties, ok := schema["properties"].(map[string]any); ok {
+		object, ok := value.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		for name, raw := range properties {
+			child, exists := object[name]
+			if !exists {
+				continue
+			}
+			childSchema, _ := raw.(map[string]any)
+			if childSchema == nil {
+				return false, fmt.Errorf("property %q condition is not an object", name)
+			}
+			matched, err := schemaConditionMatches(root, childSchema, child)
+			if err != nil || !matched {
+				return false, err
+			}
+		}
+	}
+	return true, nil
 }
 
 func schemaArray(value any) []any {

@@ -95,6 +95,7 @@ type SessionViewIdentity struct {
 	ProjectID               string               `json:"project_id"`
 	Provider                string               `json:"provider"`
 	SessionID               string               `json:"session_id"`
+	SourceIdentity          string               `json:"source_identity"`
 	SourceRecordDigest      string               `json:"source_record_digest"`
 	UsageRecordDigest       string               `json:"usage_record_digest"`
 	StartedAt               string               `json:"started_at"`
@@ -150,6 +151,7 @@ func SessionViewDigest(value SessionView) (string, error) {
 		ProjectID:               value.ProjectID,
 		Provider:                value.Provider,
 		SessionID:               value.SessionID,
+		SourceIdentity:          value.SourceIdentity,
 		SourceRecordDigest:      value.SourceRecordDigest,
 		UsageRecordDigest:       value.UsageRecordDigest,
 		StartedAt:               value.StartedAt,

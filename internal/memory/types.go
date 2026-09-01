@@ -170,6 +170,7 @@ type SessionView struct {
 	ProjectID               string               `json:"project_id"`
 	Provider                string               `json:"provider"`
 	SessionID               string               `json:"session_id"`
+	SourceIdentity          string               `json:"source_identity"`
 	SourceRecordDigest      string               `json:"source_record_digest"`
 	UsageRecordDigest       string               `json:"usage_record_digest"`
 	StartedAt               string               `json:"started_at"`
@@ -356,11 +357,14 @@ func ValidateSessionView(value SessionView) error {
 	if value.UsageRecordDigest != value.SourceRecordDigest {
 		return errors.New("SessionView usage record is not authenticated by source catalog record")
 	}
-	if err := validateSourceIdentity(value.Provider, value.SessionID, "source"); err != nil {
+	if err := validateSourceIdentity(value.Provider, value.SessionID, value.SourceIdentity); err != nil {
 		return err
 	}
 	if !safeIDPattern.MatchString(value.ProjectID) || !validTerminalState(value.TerminalState) || !validSourceAvailability(value.SourceAvailability) {
 		return errors.New("invalid SessionView identity or state")
+	}
+	if (value.TerminalState == Missing) != (value.SourceAvailability == SourceUnavailable) {
+		return errors.New("SessionView terminal state and source availability disagree")
 	}
 	if err := validateTimeRange(value.StartedAt, value.EndedAt); err != nil {
 		return err

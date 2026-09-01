@@ -641,6 +641,7 @@ func validSessionView(t *testing.T, chunkDigest string) memory.SessionView {
 	observation := validObservation()
 	value := memory.SessionView{
 		SchemaVersion: memory.MemorySchemaVersion, ProjectID: testProjectID, Provider: "codex", SessionID: "session-1",
+		SourceIdentity:     "source-1",
 		SourceRecordDigest: prefixedDigest("source-record"), UsageRecordDigest: prefixedDigest("source-record"), StartedAt: testStartedAt, EndedAt: testEndedAt,
 		TerminalState: memory.Indexed, SourceAvailability: memory.SourceAvailable,
 		ActiveRevisionIDs: []string{observation.RevisionID},

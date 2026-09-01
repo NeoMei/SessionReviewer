@@ -71,6 +71,9 @@ func TestMaterializeCarriesCompactTypedSummariesForProjectReduction(t *testing.T
 	if len(view.ObservationSummaries) != len(view.ActiveRevisionIDs) || len(view.ObservationSummaries) != 2 {
 		t.Fatalf("summary coverage=%d active=%d", len(view.ObservationSummaries), len(view.ActiveRevisionIDs))
 	}
+	if view.SourceIdentity != input.Source.SourceIdentity {
+		t.Fatalf("SessionView source identity=%q want authenticated %q", view.SourceIdentity, input.Source.SourceIdentity)
+	}
 	for index, summary := range view.ObservationSummaries {
 		if summary.RevisionID != view.ActiveRevisionIDs[index] {
 			t.Fatalf("summary %d dependency=%s active=%s", index, summary.RevisionID, view.ActiveRevisionIDs[index])
@@ -95,6 +98,38 @@ func TestMaterializeCarriesCompactTypedSummariesForProjectReduction(t *testing.T
 			t.Fatalf("summary copied forbidden content %q: %s", forbidden, body)
 		}
 	}
+}
+
+func TestMaterializeRejectsPreviousViewFromDifferentSourceIdentity(t *testing.T) {
+	base := fixtureInput(t, nil)
+	prior, _, err := Materialize(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("indexed reuse", func(t *testing.T) {
+		input := fixtureInput(t, &prior)
+		rebindInputSource(t, &input, "source-2")
+		view, changed, err := Materialize(input)
+		if err == nil || changed || view.Digest != "" || !strings.Contains(err.Error(), "source identity") {
+			t.Fatalf("cross-source previous reuse view=%+v changed=%v err=%v", view, changed, err)
+		}
+	})
+
+	t.Run("missing preservation", func(t *testing.T) {
+		input := fixtureInput(t, &prior)
+		input.Source.SourceIdentity = "source-2"
+		input.Source.Availability = memory.SourceUnavailable
+		input.SourceRecordDigest = mustDigest(t, input.Source)
+		input.UsageRecordDigest = prior.UsageRecordDigest
+		input.TerminalState = memory.Missing
+		input.Observations = nil
+		input.ObservationChunkDigests = nil
+		view, changed, err := Materialize(input)
+		if err == nil || changed || view.Digest != "" || !strings.Contains(err.Error(), "source identity") {
+			t.Fatalf("cross-source missing preservation view=%+v changed=%v err=%v", view, changed, err)
+		}
+	})
 }
 
 func TestMaterializeAppendCreatesSuccessorWithoutChurningPriorFacts(t *testing.T) {
@@ -477,4 +512,16 @@ func summaryByRevision(t *testing.T, view memory.SessionView, revisionID string)
 	}
 	t.Fatalf("summary %s not found: %+v", revisionID, view.ObservationSummaries)
 	return memory.ObservationSummary{}
+}
+
+func rebindInputSource(t *testing.T, input *Input, sourceIdentity string) {
+	t.Helper()
+	input.Source.SourceIdentity = sourceIdentity
+	input.SourceRecordDigest = mustDigest(t, input.Source)
+	input.UsageRecordDigest = input.SourceRecordDigest
+	for index := range input.Observations {
+		input.Observations[index].Key.SourceIdentity = sourceIdentity
+		input.Observations[index].Ref.SourceIdentity = sourceIdentity
+		input.Observations[index].RevisionID = memory.ObservationRevisionID(input.Observations[index])
+	}
 }
