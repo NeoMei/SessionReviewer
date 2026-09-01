@@ -259,6 +259,36 @@ func TestMaterializeLinksFailureOnlyToLaterMatchingOperationAndComponent(t *test
 	}
 }
 
+func TestMaterializeDoesNotLinkRecoveryAcrossObservationKinds(t *testing.T) {
+	input := fixtureInput(t, nil)
+	failure := observation(t, input.Source, input.ProjectID, 2, "verification", "failed-test", "verification", "package", "failed", map[string]string{"component": "package", "status": "test"})
+	crossKindSuccess := observation(t, input.Source, input.ProjectID, 3, "build", "successful-build", "verification", "package", "passed", map[string]string{"component": "package", "status": "test"})
+	input.Observations = []memory.ObservationRevision{failure, crossKindSuccess}
+
+	view, _, err := Materialize(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.DerivedRecords) != 0 {
+		t.Fatalf("cross-kind facts were linked as one recovery: %+v", view.DerivedRecords)
+	}
+}
+
+func TestMaterializeRecoveryFallsBackFromWhitespaceStatusToOperation(t *testing.T) {
+	input := fixtureInput(t, nil)
+	failure := observation(t, input.Source, input.ProjectID, 2, "verification", "failed-test", "test", "package", "failed", map[string]string{"component": "package", "status": "   "})
+	success := observation(t, input.Source, input.ProjectID, 3, "verification", "successful-test", " TEST ", "package", "passed", map[string]string{"component": "package", "status": " "})
+	input.Observations = []memory.ObservationRevision{failure, success}
+
+	view, _, err := Materialize(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.DerivedRecords) != 1 || view.DerivedRecords[0].Fields["operation"] != "test" {
+		t.Fatalf("whitespace status blocked operation fallback: %+v", view.DerivedRecords)
+	}
+}
+
 func TestMaterializeDoesNotTreatArbitraryObjectAsRecoveryComponent(t *testing.T) {
 	input := fixtureInput(t, nil)
 	failure := observation(t, input.Source, input.ProjectID, 2, "command", "failed-command", "command_finished", "/private/project", "failure", map[string]string{"command_signature": "go:test"})

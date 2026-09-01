@@ -231,12 +231,13 @@ func deriveRecoveryLinks(observations []memory.ObservationRevision) []memory.Der
 	pending := make(map[string][]memory.ObservationRevision)
 	var result []memory.DerivedRecord
 	for _, observation := range observations {
+		kind := normalizedIdentity(observation.Key.Kind)
 		operation := normalizedIdentity(firstNonEmpty(observation.Fields["status"], observation.Operation))
 		component := normalizedIdentity(observation.Fields["component"])
-		if operation == "" || component == "" {
+		if kind == "" || operation == "" || component == "" {
 			continue
 		}
-		key := operation + "\x00" + component
+		key := kind + "\x00" + operation + "\x00" + component
 		switch normalizedIdentity(observation.Outcome) {
 		case "failure", "failed", "error":
 			pending[key] = append(pending[key], observation)

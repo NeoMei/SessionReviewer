@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 )
 
 func TestReduceReconcilesExactInputsAndSeparatesLiveFromWitnessedState(t *testing.T) {
@@ -222,6 +224,43 @@ func TestReduceRecoveryFallsBackFromWhitespaceStatusToOperation(t *testing.T) {
 	recoveries := recordsOfKind(got.DerivedRecords, "recovery_link")
 	if len(recoveries) != 1 || recoveries[0].Fields["operation"] != "test" {
 		t.Fatalf("whitespace status blocked operation fallback: %+v", recoveries)
+	}
+}
+
+func TestReduceAcceptsRecoveryEmittedBySessionViewMaterializer(t *testing.T) {
+	source := memory.SourceRecord{
+		SchemaVersion: memory.MemorySchemaVersion, Provider: "codex", SessionID: "materialized", SourceIdentity: "materialized-source",
+		StartedAt: "2026-08-01T00:00:00Z", EndedAt: "2026-08-01T00:02:00Z",
+		FrozenBoundary: memory.FrozenBoundary{
+			Location:   memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: 2, ByteOffset: 200}},
+			SourceHash: strings.Repeat("a", 64),
+		},
+		Availability: memory.SourceAvailable,
+		Usage: accounting.SessionUsage{
+			StartedAt: "2026-08-01T00:00:00Z", EndedAt: "2026-08-01T00:02:00Z", DurationMS: 120000,
+			Models: []accounting.ModelUsage{{Model: "test-model", TokenUsage: accounting.TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}}, TotalTokens: 2,
+		},
+		ProjectIDs: []string{"project-a"},
+	}
+	failure := materializerObservationFixture(t, source, 1, "verification", "failed", "   ", "test")
+	success := materializerObservationFixture(t, source, 2, "verification", "passed", " ", " TEST ")
+	sourceDigest, err := memory.Digest(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, changed, err := sessionview.Materialize(sessionview.Input{
+		ProjectID: "project-a", Source: source, SourceRecordDigest: sourceDigest, UsageRecordDigest: sourceDigest,
+		Observations: []memory.ObservationRevision{success, failure}, ObservationChunkDigests: []string{},
+		TerminalState: memory.Indexed, Diagnostics: []memory.Diagnostic{}, MaterializerVersion: sessionview.MaterializerVersion,
+	})
+	if err != nil || !changed || len(session.DerivedRecords) != 1 {
+		t.Fatalf("materialize recovery changed=%v err=%v records=%+v", changed, err, session.DerivedRecords)
+	}
+
+	got := reduceFixture(t, []memory.SessionView{session}, "2026-09-01T00:00:00Z", nil)
+	recoveries := recordsOfKind(got.DerivedRecords, "recovery_link")
+	if len(recoveries) != 1 || !reflect.DeepEqual(recoveries[0], session.DerivedRecords[0]) {
+		t.Fatalf("materialized SessionView recovery was not accepted unchanged: got=%+v want=%+v", recoveries, session.DerivedRecords)
 	}
 }
 
@@ -649,6 +688,29 @@ func attachSessionRecovery(t *testing.T, view *memory.SessionView, failureIndex,
 		Fields: map[string]string{"operation": operation, "component": component, "outcome": "recovered"},
 	}}
 	view.Digest = mustSessionDigest(t, *view)
+}
+
+func materializerObservationFixture(t *testing.T, source memory.SourceRecord, sequence int, kind, outcome, status, operation string) memory.ObservationRevision {
+	t.Helper()
+	value := memory.ObservationRevision{
+		SchemaVersion: memory.MemorySchemaVersion,
+		Key: memory.ObservationKey{
+			Provider: source.Provider, SessionID: source.SessionID, SourceIdentity: source.SourceIdentity,
+			Sequence: sequence, ProjectID: "project-a", Kind: kind, Subject: fmt.Sprintf("%s-%d", outcome, sequence),
+		},
+		Ref: memory.SourceRef{
+			Provider: source.Provider, SessionID: source.SessionID, SourceIdentity: source.SourceIdentity,
+			Location:   memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: sequence, ByteOffset: int64(sequence * 100)}},
+			SourceHash: source.FrozenBoundary.SourceHash,
+		},
+		Timestamp: fmt.Sprintf("2026-08-01T00:0%d:00Z", sequence-1), Operation: operation, Object: "package", Outcome: outcome,
+		Fields: map[string]string{"component": "package", "status": status}, AdapterID: "codex-jsonl", AdapterVersion: "v1",
+	}
+	value.RevisionID = memory.ObservationRevisionID(value)
+	if err := memory.ValidateObservationRevision(value); err != nil {
+		t.Fatalf("invalid materializer observation fixture: %v", err)
+	}
+	return value
 }
 
 func cloneSessionViewFixture(value memory.SessionView) memory.SessionView {
