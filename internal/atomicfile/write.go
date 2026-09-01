@@ -91,10 +91,13 @@ func WriteRootFileCreateIfAbsent(parent *os.Root, leaf string, data []byte, perm
 // alias is removed.
 func WriteRootFileCreateIfAbsentWithPostLinkCheckpoint(parent *os.Root, leaf string, data []byte, perm fs.FileMode, beforePublish, afterLink func() error) error {
 	ops := defaultDurabilityOps()
+	linked := false
+	ops.temporaryHardLinked = func() bool { return linked }
 	ops.publish = func(root *os.Root, temporary, destination string) error {
 		if err := root.Link(temporary, destination); err != nil {
 			return err
 		}
+		linked = true
 		if afterLink != nil {
 			if err := afterLink(); err != nil {
 				return err
@@ -169,6 +172,7 @@ type durabilityOps struct {
 	prepareTemporary      func(*os.File) error
 	syncTemporary         func(*os.File) error
 	sanitizeTemporary     func(*os.File) error
+	temporaryHardLinked   func() bool
 	publish               func(*os.Root, string, string) error
 	syncPublication       func(*os.Root, string) error
 	linkRollback          func(*os.Root, string, string) error
@@ -255,6 +259,9 @@ func writeRootAtParentWithPolicy(parent *os.Root, name string, data []byte, perm
 	defer func() {
 		if retErr != nil && sanitizeOnReturn {
 			retErr = errors.Join(retErr, parentGuard.run(parent, func() error {
+				if ops.temporaryHardLinked != nil && ops.temporaryHardLinked() {
+					return removeRootEntryIfOwned(parent, tmpName, createdInfo)
+				}
 				return sanitizeAndRemoveRootTemporary(parent, tmp, tmpName, createdInfo, ops.sanitizeTemporary)
 			}))
 		}

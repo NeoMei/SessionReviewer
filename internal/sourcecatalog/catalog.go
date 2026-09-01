@@ -47,10 +47,15 @@ type Catalog struct {
 	beforeAdvisoryLock func()
 	beforePublish      func() error
 	batchCheckpoint    func()
+	beforeJournalLink  func() error
 	afterJournalLink   func() error
+	beforeOrphanUnlink func()
 }
 
-const batchJournalLeaf = "batch-mutation-v1.json"
+const (
+	batchJournalLeaf        = "batch-mutation-v1.json"
+	batchJournalStagingLeaf = ".batch-mutation-v1.staging"
+)
 
 type BatchMutation struct {
 	Relation       source.BoundaryRelation `json:"relation"`
@@ -185,7 +190,7 @@ func (c *Catalog) ApplyBatch(mutations []BatchMutation) ([]BatchResult, error) {
 		if len(journalBody) > maxBatchJournal {
 			return errors.New("source catalog batch journal exceeds bounded limit")
 		}
-		if err := atomicfile.WriteRootFileCreateIfAbsentWithPostLinkCheckpoint(c.root.Root, batchJournalLeaf, journalBody, privateFileMode, c.verifyBeforePublish, c.afterJournalLink); err != nil {
+		if err := c.writeBatchJournalUnlocked(journalBody); err != nil {
 			return fmt.Errorf("write source catalog batch journal: %w", err)
 		}
 		c.runBatchCheckpoint()
@@ -455,6 +460,112 @@ func (c *Catalog) validateJournalUnlocked(journal batchJournal) error {
 	return nil
 }
 
+func (c *Catalog) writeBatchJournalUnlocked(body []byte) (retErr error) {
+	if len(body) == 0 || len(body) > maxBatchJournal {
+		return errors.New("source catalog batch journal body is invalid")
+	}
+	for _, leaf := range []string{batchJournalLeaf, batchJournalStagingLeaf} {
+		if _, err := c.root.Root.Lstat(leaf); err == nil {
+			return fmt.Errorf("source catalog journal state already exists: %w", fs.ErrExist)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	file, err := c.root.Root.OpenFile(batchJournalStagingLeaf, os.O_RDWR|os.O_CREATE|os.O_EXCL, privateFileMode)
+	if err != nil {
+		return err
+	}
+	created, err := file.Stat()
+	if err != nil || !created.Mode().IsRegular() {
+		return errors.Join(errors.New("cannot authenticate catalog journal staging"), err, file.Close())
+	}
+	keepForRecovery := false
+	defer func() {
+		retErr = errors.Join(retErr, file.Close())
+		if retErr != nil && !keepForRecovery {
+			retErr = errors.Join(retErr, c.removeCreatedJournalStagingUnlocked(created))
+		}
+	}()
+	if err := file.Chmod(privateFileMode); err != nil {
+		return err
+	}
+	written, err := io.Copy(file, bytes.NewReader(body))
+	if err != nil || written != int64(len(body)) {
+		return errors.Join(errors.New("write complete catalog journal staging"), err)
+	}
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	staged, err := file.Stat()
+	if err != nil || !os.SameFile(created, staged) || staged.Size() != int64(len(body)) {
+		return errors.Join(errors.New("catalog journal staging changed while writing"), err)
+	}
+	if err := atomicfile.SyncRootPublication(c.root.Root, batchJournalStagingLeaf); err != nil {
+		return err
+	}
+	validatedBody, _, validatedInfo, err := c.readValidatedJournalLeafUnlocked(batchJournalStagingLeaf)
+	if err != nil || !os.SameFile(created, validatedInfo) || !bytes.Equal(body, validatedBody) {
+		return errors.Join(errors.New("catalog journal staging validation failed"), err)
+	}
+	if err := c.verifyBeforePublish(); err != nil {
+		return err
+	}
+	if c.beforeJournalLink != nil {
+		if err := c.beforeJournalLink(); err != nil {
+			return err
+		}
+	}
+	if err := c.verifyLiveRoot(); err != nil {
+		return err
+	}
+	beforeLinkBody, _, beforeLinkInfo, err := c.readValidatedJournalLeafUnlocked(batchJournalStagingLeaf)
+	if err != nil || !os.SameFile(created, beforeLinkInfo) || !bytes.Equal(body, beforeLinkBody) {
+		return errors.Join(errors.New("catalog journal staging changed before link"), err)
+	}
+	if _, err := c.root.Root.Lstat(batchJournalLeaf); !errors.Is(err, os.ErrNotExist) {
+		return errors.Join(errors.New("catalog journal target appeared before link"), err)
+	}
+	if err := c.root.Root.Link(batchJournalStagingLeaf, batchJournalLeaf); err != nil {
+		return err
+	}
+	keepForRecovery = true
+	if err := atomicfile.SyncRootPublication(c.root.Root, batchJournalLeaf); err != nil {
+		return err
+	}
+	if c.afterJournalLink != nil {
+		if err := c.afterJournalLink(); err != nil {
+			return err
+		}
+	}
+	if err := c.reconcileJournalAliasUnlocked(batchJournalStagingLeaf, false); err != nil {
+		return err
+	}
+	keepForRecovery = false
+	return nil
+}
+
+func (c *Catalog) removeCreatedJournalStagingUnlocked(created os.FileInfo) error {
+	if err := c.verifyLiveRoot(); err != nil {
+		return err
+	}
+	current, err := c.root.Root.Lstat(batchJournalStagingLeaf)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !os.SameFile(created, current) {
+		return errors.Join(errors.New("catalog journal staging ownership changed; not removed"), err)
+	}
+	if _, err := c.root.Root.Lstat(batchJournalLeaf); err == nil {
+		return errors.New("catalog journal staging was linked; not removed as pre-link state")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := c.root.Root.Remove(batchJournalStagingLeaf); err != nil {
+		return err
+	}
+	return atomicfile.SyncRootDirectory(c.root.Root)
+}
+
 func (c *Catalog) reconcileAtomicTempsUnlocked() error {
 	directory, err := c.root.Root.Open(".")
 	if err != nil {
@@ -465,42 +576,120 @@ func (c *Catalog) reconcileAtomicTempsUnlocked() error {
 	if readErr != nil || closeErr != nil {
 		return errors.Join(readErr, closeErr)
 	}
+	stagingFound := false
+	legacy := make([]string, 0, 1)
 	for _, entry := range entries {
 		name := entry.Name()
+		if name == batchJournalStagingLeaf {
+			stagingFound = true
+			continue
+		}
 		if !isAtomicTempName(name) {
 			continue
 		}
-		if entry.IsDir() {
-			return errors.New("catalog atomic temporary is not a regular file")
-		}
-		if err := requirePrivateFile(c.root.Root, name); err != nil {
-			return fmt.Errorf("reject catalog atomic temporary: %w", err)
-		}
-		body, found, err := c.root.ReadRegular(name, maxBatchJournal)
-		if err != nil || !found {
-			return errors.Join(errors.New("read catalog atomic temporary"), err)
-		}
-		recognized := false
-		var journal batchJournal
-		if decodeErr := decodeCanonical(body, &journal); decodeErr == nil {
-			if err := c.validateJournalUnlocked(journal); err != nil {
-				return fmt.Errorf("invalid catalog journal temporary: %w", err)
-			}
-			recognized = true
-		} else if len(body) <= maxCatalogRecord {
-			var record memory.SourceRecord
-			if decodeErr := decodeCanonical(body, &record); decodeErr == nil && memory.ValidateSourceRecord(record) == nil {
-				recognized = true
-			}
-		}
-		if !recognized {
-			return errors.New("unrecognized catalog atomic temporary")
-		}
-		if err := atomicfile.RemoveRoot(c.root.Root, name); err != nil {
-			return fmt.Errorf("remove obsolete catalog atomic temporary: %w", err)
-		}
+		legacy = append(legacy, name)
+	}
+	if len(legacy) > 1 || (stagingFound && len(legacy) != 0) {
+		return errors.New("ambiguous catalog journal temporary ownership")
+	}
+	if stagingFound {
+		return c.reconcileJournalAliasUnlocked(batchJournalStagingLeaf, true)
+	}
+	if len(legacy) == 1 {
+		return c.reconcileJournalAliasUnlocked(legacy[0], false)
 	}
 	return nil
+}
+
+func (c *Catalog) reconcileJournalAliasUnlocked(name string, allowPreLink bool) error {
+	temporaryBody, _, temporaryInfo, err := c.readValidatedJournalLeafUnlocked(name)
+	if err != nil {
+		return fmt.Errorf("invalid catalog journal temporary: %w", err)
+	}
+	targetBody, _, targetInfo, targetErr := c.readValidatedJournalLeafUnlocked(batchJournalLeaf)
+	if errors.Is(targetErr, os.ErrNotExist) {
+		if !allowPreLink {
+			return errors.New("catalog atomic temporary has no active journal target")
+		}
+		if err := c.verifyLiveRoot(); err != nil {
+			return err
+		}
+		recheckedBody, _, recheckedInfo, err := c.readValidatedJournalLeafUnlocked(name)
+		if err != nil || !os.SameFile(temporaryInfo, recheckedInfo) || !bytes.Equal(temporaryBody, recheckedBody) {
+			return errors.Join(errors.New("catalog journal staging changed before recovery link"), err)
+		}
+		if _, err := c.root.Root.Lstat(batchJournalLeaf); !errors.Is(err, os.ErrNotExist) {
+			return errors.Join(errors.New("catalog journal target appeared during recovery"), err)
+		}
+		if err := c.root.Root.Link(name, batchJournalLeaf); err != nil {
+			return err
+		}
+		if err := atomicfile.SyncRootPublication(c.root.Root, batchJournalLeaf); err != nil {
+			return err
+		}
+		targetBody, _, targetInfo, targetErr = c.readValidatedJournalLeafUnlocked(batchJournalLeaf)
+	}
+	if targetErr != nil {
+		return targetErr
+	}
+	if !os.SameFile(temporaryInfo, targetInfo) || !bytes.Equal(temporaryBody, targetBody) {
+		return errors.New("catalog journal temporary is not the active journal inode")
+	}
+	if c.beforeOrphanUnlink != nil {
+		c.beforeOrphanUnlink()
+	}
+	if err := c.verifyLiveRoot(); err != nil {
+		return err
+	}
+	finalTemporaryBody, _, finalTemporaryInfo, err := c.readValidatedJournalLeafUnlocked(name)
+	if err != nil {
+		return err
+	}
+	finalTargetBody, _, finalTargetInfo, err := c.readValidatedJournalLeafUnlocked(batchJournalLeaf)
+	if err != nil || !os.SameFile(temporaryInfo, finalTemporaryInfo) || !os.SameFile(targetInfo, finalTargetInfo) ||
+		!os.SameFile(finalTemporaryInfo, finalTargetInfo) || !bytes.Equal(temporaryBody, finalTemporaryBody) || !bytes.Equal(targetBody, finalTargetBody) {
+		return errors.Join(errors.New("catalog journal alias changed before unlink"), err)
+	}
+	if err := c.root.Root.Remove(name); err != nil {
+		return err
+	}
+	if err := atomicfile.SyncRootDirectory(c.root.Root); err != nil {
+		return err
+	}
+	afterBody, _, afterInfo, err := c.readValidatedJournalLeafUnlocked(batchJournalLeaf)
+	if err != nil || !os.SameFile(finalTargetInfo, afterInfo) || !bytes.Equal(finalTargetBody, afterBody) {
+		return errors.Join(errors.New("active catalog journal changed across temporary unlink"), err)
+	}
+	return nil
+}
+
+func (c *Catalog) readValidatedJournalLeafUnlocked(leaf string) ([]byte, batchJournal, os.FileInfo, error) {
+	before, err := c.root.Root.Lstat(leaf)
+	if err != nil {
+		return nil, batchJournal{}, nil, err
+	}
+	if err := requirePrivateFile(c.root.Root, leaf); err != nil {
+		return nil, batchJournal{}, nil, err
+	}
+	body, found, err := c.root.ReadRegular(leaf, maxBatchJournal)
+	if err != nil || !found {
+		return nil, batchJournal{}, nil, errors.Join(errors.New("read catalog journal file"), err)
+	}
+	after, err := c.root.Root.Lstat(leaf)
+	if err != nil || !os.SameFile(before, after) {
+		return nil, batchJournal{}, nil, errors.Join(errors.New("catalog journal file identity changed"), err)
+	}
+	if err := requirePrivateFile(c.root.Root, leaf); err != nil {
+		return nil, batchJournal{}, nil, err
+	}
+	var journal batchJournal
+	if err := decodeCanonical(body, &journal); err != nil {
+		return nil, batchJournal{}, nil, err
+	}
+	if err := c.validateJournalUnlocked(journal); err != nil {
+		return nil, batchJournal{}, nil, err
+	}
+	return bytes.Clone(body), journal, after, nil
 }
 
 func isAtomicTempName(name string) bool {
