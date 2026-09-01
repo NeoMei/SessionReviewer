@@ -95,6 +95,54 @@ func TestResolveBootstrapReturnsPersistableAuthenticatedAlias(t *testing.T) {
 	}
 }
 
+func TestReauthenticateDetectsGitCommonDirectoryReplacement(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "project")
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Reauthenticate(binding); err != nil {
+		t.Fatalf("unchanged binding failed reauthentication: %v", err)
+	}
+	if err := os.Rename(filepath.Join(root, ".git"), filepath.Join(root, ".git-original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reauthenticate(binding); err == nil {
+		t.Fatal("replaced Git common directory retained authenticated authority")
+	}
+}
+
+func TestReauthenticateDetectsWorktreeGitdirRedirection(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "worktree")
+	firstGitDir := filepath.Join(parent, "common-one.git", "worktrees", "one")
+	secondGitDir := filepath.Join(parent, "common-two.git", "worktrees", "two")
+	for _, directory := range []string{root, firstGitDir, secondGitDir} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+firstGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+secondGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reauthenticate(binding); err == nil {
+		t.Fatal("rewritten worktree Git pointer retained authenticated authority")
+	}
+}
+
 func TestResolveRejectsReplacedExactRootAfterBootstrapWithoutMutation(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "project")

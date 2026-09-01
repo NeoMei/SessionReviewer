@@ -5,9 +5,12 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +19,14 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
 )
+
+func TestMain(m *testing.M) {
+	if marker := os.Getenv("PROJECTPROBE_FAKE_GIT_MARKER"); marker != "" {
+		_ = os.WriteFile(marker, []byte("PATH git executed"), 0o600)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 var approvedGitCalls = [][]string{
 	{"git", "rev-parse", "--show-toplevel"},
@@ -155,20 +166,77 @@ func TestProductionGitContextIsBoundedAndEnvironmentDisablesInteractiveSideEffec
 	}
 
 	environment := safeGitEnvironment([]string{
-		"PATH=/safe/bin", "HOME=/safe/home", "GIT_DIR=/evil", "GIT_WORK_TREE=/evil",
+		"PATH=/evil/bin", "HOME=/evil/home", "GIT_DIR=/evil", "GIT_WORK_TREE=/evil",
+		"git_dir=C:/evil-lower", "git_work_tree=C:/evil-lower", "git_config_count=9",
+		"git_config_key_0=core.fsmonitor", "git_config_value_0=evil.exe",
 		"GIT_TERMINAL_PROMPT=1", "GIT_OPTIONAL_LOCKS=1", "GCM_INTERACTIVE=Always",
+		"git_terminal_prompt=1", "git_askpass=C:/evil.exe", "ssh_askpass=C:/evil.exe",
 		"GIT_ASKPASS=/evil", "SSH_ASKPASS=/evil", "GIT_CONFIG_COUNT=2",
 		"GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=/evil",
+		"LD_PRELOAD=/evil.so", "DYLD_INSERT_LIBRARIES=/evil.dylib", "SystemRoot=C:/Windows", "TEMP=C:/Temp",
 	})
 	joined := strings.Join(environment, "\n")
-	for _, forbidden := range []string{"GIT_DIR=/evil", "GIT_WORK_TREE=/evil", "GIT_TERMINAL_PROMPT=1", "GIT_ASKPASS=/evil", "SSH_ASKPASS=/evil", "GIT_CONFIG_VALUE_0=/evil"} {
+	for _, forbidden := range []string{"PATH=", "HOME=", "GIT_DIR=/evil", "git_dir=", "git_work_tree=", "git_config_count=9", "git_config_value_0=evil.exe", "git_terminal_prompt=1", "git_askpass=", "ssh_askpass=", "LD_PRELOAD=", "DYLD_INSERT_LIBRARIES=", "GIT_TERMINAL_PROMPT=1", "GIT_ASKPASS=/evil", "SSH_ASKPASS=/evil", "GIT_CONFIG_VALUE_0=/evil"} {
 		if strings.Contains(joined, forbidden) {
 			t.Fatalf("unsafe Git environment survived: %q", forbidden)
 		}
 	}
-	for _, required := range []string{"PATH=/safe/bin", "HOME=/safe/home", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GCM_INTERACTIVE=Never", "GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false", "GIT_CONFIG_KEY_2=diff.ignoreSubmodules", "GIT_CONFIG_VALUE_2=all"} {
+	for _, required := range []string{"SYSTEMROOT=C:/Windows", "TEMP=C:/Temp", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GCM_INTERACTIVE=Never", "GIT_PAGER=", "GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=", "core.fsmonitor", "diff.ignoreSubmodules", "core.hooksPath", "core.pager"} {
 		if !strings.Contains(joined, required) {
 			t.Fatalf("safe Git environment omitted %q: %q", required, environment)
+		}
+	}
+}
+
+func TestRunDefaultUsesAuthenticatedAbsoluteGitAndIgnoresFakePATH(t *testing.T) {
+	trustedGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skipf("Git unavailable: %v", err)
+	}
+	trustedGit, err = filepath.Abs(trustedGit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustedGit, err = filepath.EvalSymlinks(trustedGit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, err := projectidentity.Resolve(config.ProjectMapping{ID: "project-a", Root: repoRoot}, repoRoot, runtime.GOOS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeDirectory := t.TempDir()
+	fakeName := "git"
+	if runtime.GOOS == "windows" {
+		fakeName = "git.exe"
+	}
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	copyExecutable(t, testExecutable, filepath.Join(fakeDirectory, fakeName))
+	marker := filepath.Join(t.TempDir(), "path-git-ran")
+	t.Setenv("PATH", fakeDirectory)
+	t.Setenv("PROJECTPROBE_FAKE_GIT_MARKER", marker)
+	if _, _, err := Run(context.Background(), Options{Binding: binding, GitExecutable: trustedGit, Now: time.Now}); err != nil {
+		t.Fatalf("authenticated absolute Git failed: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fake PATH Git was executed: %v", err)
+	}
+}
+
+func TestRunDefaultRejectsMissingRelativeAndInProjectGitExecutable(t *testing.T) {
+	root, binding := newBinding(t)
+	inProject := filepath.Join(root, "git")
+	writeFileMode(t, inProject, "not git", 0o700)
+	for _, executable := range []string{"", "git", inProject} {
+		if _, _, err := Run(context.Background(), Options{Binding: binding, GitExecutable: executable, Now: time.Now}); err == nil {
+			t.Fatalf("unsafe production Git executable accepted: %q", executable)
 		}
 	}
 }
@@ -213,6 +281,30 @@ func TestRunRejectsUnauthenticatedBindingAndGitTopLevelMismatch(t *testing.T) {
 	}
 }
 
+func TestRunRejectsGitCommonDirectoryReplacementBeforeAndAfterProbe(t *testing.T) {
+	root, binding := newBinding(t)
+	replaceGitDirectory(t, root)
+	runner := successfulRunner(root)
+	if _, _, err := Run(context.Background(), Options{Binding: binding, Now: time.Now, RunGit: runner.run}); err == nil {
+		t.Fatal("Run accepted common-directory replacement before Git")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatal("Git ran before common-directory reauthentication")
+	}
+
+	root, binding = newBinding(t)
+	writeFile(t, root, "VERSION", "1")
+	runner = successfulRunner(root)
+	runner.after = func(call []string) {
+		if reflect.DeepEqual(call, approvedGitCalls[len(approvedGitCalls)-1]) {
+			replaceGitDirectory(t, root)
+		}
+	}
+	if _, _, err := Run(context.Background(), Options{Binding: binding, VersionFiles: []string{"VERSION"}, Now: time.Now, RunGit: runner.run}); err == nil {
+		t.Fatal("Run accepted common-directory replacement after Git and file probing")
+	}
+}
+
 func TestRunRejectsUnsafeOrAliasedDeclaredPathsBeforeExecutingGit(t *testing.T) {
 	root, binding := newBinding(t)
 	tests := []struct {
@@ -224,6 +316,7 @@ func TestRunRejectsUnsafeOrAliasedDeclaredPathsBeforeExecutingGit(t *testing.T) 
 		{name: "traversal", versions: []string{"../VERSION"}},
 		{name: "unclean", versions: []string{"a/../VERSION"}},
 		{name: "backslash alias", versions: []string{`docs\VERSION`}},
+		{name: "overlong", versions: []string{strings.Repeat("a", 1025)}},
 		{name: "exact duplicate", versions: []string{"VERSION", "VERSION"}},
 		{name: "case alias", versions: []string{"Version", "version"}},
 		{name: "cross-list alias", versions: []string{"VERSION"}, required: []string{"version"}},
@@ -239,6 +332,36 @@ func TestRunRejectsUnsafeOrAliasedDeclaredPathsBeforeExecutingGit(t *testing.T) 
 				t.Fatal("Git ran before declared paths were validated")
 			}
 		})
+	}
+}
+
+func TestRunCancellationBeforeFileProbeReturnsNoPartialState(t *testing.T) {
+	root, binding := newBinding(t)
+	writeFile(t, root, "VERSION", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := successfulRunner(root)
+	runner.after = func(call []string) {
+		if reflect.DeepEqual(call, approvedGitCalls[len(approvedGitCalls)-1]) {
+			cancel()
+		}
+	}
+	state, check, err := Run(ctx, Options{Binding: binding, VersionFiles: []string{"VERSION"}, Now: time.Now, RunGit: runner.run})
+	if !errors.Is(err, context.Canceled) || !reflect.DeepEqual(state, memory.ProjectProbeState{}) || !reflect.DeepEqual(check, memory.ProbeCheck{}) {
+		t.Fatalf("cancellation returned partial success: state=%+v check=%+v err=%v", state, check, err)
+	}
+}
+
+func TestProbeFilesChecksCancellationAfterEachRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reads := 0
+	reader := func(string, int64) ([]byte, bool, error) {
+		reads++
+		cancel()
+		return []byte("private body"), true, nil
+	}
+	files, diagnostics, err := probeFilesWithReader(ctx, []string{"VERSION", "OTHER"}, nil, reader)
+	if !errors.Is(err, context.Canceled) || files != nil || diagnostics != nil || reads != 1 {
+		t.Fatalf("file-loop cancellation leaked partial data: files=%+v diagnostics=%+v reads=%d err=%v", files, diagnostics, reads, err)
 	}
 }
 
@@ -326,6 +449,44 @@ func TestRunBoundsAndHashesMalformedGitOutputAndContinuesPartialFailures(t *test
 	}
 }
 
+func TestRunBoundsRemoteIdentitiesAtMemoryMaximum(t *testing.T) {
+	root, binding := newBinding(t)
+	lines := make([]string, 300)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("https://example.invalid/repo-%03d.git", index)
+	}
+	runner := successfulRunner(root)
+	runner.responses[callKey("remote", "get-url", "--all", "origin")] = runnerResponse{output: []byte(strings.Join(lines, "\n") + "\n")}
+	state, check, err := Run(context.Background(), Options{Binding: binding, Now: time.Now, RunGit: runner.run})
+	if err != nil {
+		t.Fatalf("excess remotes should be isolated, not invalidate state: %v", err)
+	}
+	if len(state.RemoteIdentityHashes) != 256 || check.Available || !hasDiagnostic(state.Diagnostics, "git_remote_excess") {
+		t.Fatalf("remote bound not enforced: hashes=%d diagnostics=%+v", len(state.RemoteIdentityHashes), state.Diagnostics)
+	}
+	if err := memory.ValidateProjectProbeState(state); err != nil {
+		t.Fatalf("bounded remote state is not validator-safe: %v", err)
+	}
+}
+
+func TestWindowsLocalRemoteGrammarIsStrictAndHashedOnly(t *testing.T) {
+	valid := []string{`C:/Repos/Owner/repo.git`, `D:\Repos\Owner\repo.git`, `//server/share`, `//server/share/repo.git`, `\\server\share\other.git`}
+	hashes, malformed, excess := parseRemoteIdentities([]byte(strings.Join(valid, "\n") + "\n"))
+	if malformed || excess || len(hashes) != len(valid) {
+		t.Fatalf("strict Windows local remotes rejected: hashes=%v malformed=%v excess=%v", hashes, malformed, excess)
+	}
+	for _, remote := range valid {
+		if strings.Contains(strings.Join(hashes, "\n"), remote) {
+			t.Fatal("raw Windows remote escaped hashing")
+		}
+	}
+	for _, invalid := range []string{`relative/repo.git`, `C:relative\repo.git`, `//server`, `\\server`, `//user@server/share`, `https://token@example.invalid/repo.git`, `https://user:secret@example.invalid/repo.git`} {
+		if validRemote(invalid) {
+			t.Fatalf("relative, confusable, or credential-bearing remote accepted: %q", invalid)
+		}
+	}
+}
+
 func TestRunHonorsCancellationAndRejectsRootSwap(t *testing.T) {
 	root, binding := newBinding(t)
 	canceled, cancel := context.WithCancel(context.Background())
@@ -378,6 +539,54 @@ func writeFile(t *testing.T, root, relative, body string) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func writeFileMode(t *testing.T, path, body string, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func replaceGitDirectory(t *testing.T, root string) {
+	t.Helper()
+	original := filepath.Join(root, ".git")
+	moved := filepath.Join(root, fmt.Sprintf(".git-old-%d", time.Now().UnixNano()))
+	if err := os.Rename(original, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func copyExecutable(t *testing.T, source, destination string) {
+	t.Helper()
+	input, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hasDiagnostic(values []memory.Diagnostic, code string) bool {
+	for _, value := range values {
+		if value.Code == code {
+			return true
+		}
+	}
+	return false
 }
 
 type runnerResponse struct {

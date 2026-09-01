@@ -1,6 +1,7 @@
 package projectprobe
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 
 const (
 	maxProbeFileBytes     = 1 << 20
-	maxDeclaredProbeFiles = 4092
+	maxDeclaredProbeFiles = 4091
 )
 
 func validateDeclaredPaths(versionFiles, requiredFiles []string) ([]string, []string, error) {
@@ -26,7 +27,7 @@ func validateDeclaredPaths(versionFiles, requiredFiles []string) ([]string, []st
 	validate := func(values []string) ([]string, error) {
 		result := append([]string(nil), values...)
 		for _, value := range result {
-			if strings.Contains(value, `\`) {
+			if len(value) > 1024 || strings.Contains(value, `\`) {
 				return nil, errors.New("declared probe path must use slash separators")
 			}
 			key, err := platform.PathKey(runtime.GOOS, platform.CaseInsensitive, value)
@@ -52,10 +53,23 @@ func validateDeclaredPaths(versionFiles, requiredFiles []string) ([]string, []st
 	return versions, required, nil
 }
 
-func probeFiles(directory *pathguard.Directory, paths []string, diagnostics []memory.Diagnostic) ([]memory.ProbeFile, []memory.Diagnostic) {
+func probeFiles(ctx context.Context, directory *pathguard.Directory, paths []string, diagnostics []memory.Diagnostic) ([]memory.ProbeFile, []memory.Diagnostic, error) {
+	return probeFilesWithReader(ctx, paths, diagnostics, directory.ReadRegularOptional)
+}
+
+func probeFilesWithReader(ctx context.Context, paths []string, diagnostics []memory.Diagnostic, read func(string, int64) ([]byte, bool, error)) ([]memory.ProbeFile, []memory.Diagnostic, error) {
+	if ctx == nil || read == nil {
+		return nil, nil, errors.New("probe file context and reader are required")
+	}
 	result := make([]memory.ProbeFile, 0, len(paths))
 	for _, relative := range paths {
-		body, found, err := directory.ReadRegularOptional(relative, maxProbeFileBytes)
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		body, found, err := read(relative, maxProbeFileBytes)
+		if contextErr := ctx.Err(); contextErr != nil {
+			return nil, nil, contextErr
+		}
 		file := memory.ProbeFile{Path: relative}
 		if err != nil {
 			diagnostics = append(diagnostics, diagnostic("probe_file_unavailable", relative, []byte(err.Error())))
@@ -69,5 +83,8 @@ func probeFiles(directory *pathguard.Directory, paths []string, diagnostics []me
 		}
 		result = append(result, file)
 	}
-	return result, diagnostics
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return result, diagnostics, nil
 }

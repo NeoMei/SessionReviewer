@@ -28,6 +28,32 @@ type Binding struct {
 	AuthenticatedAlias config.AuthenticatedProjectAlias
 }
 
+// Reauthenticate verifies that a previously resolved binding still names the
+// same physical project root and rooted Git common directory. It does not
+// update or repair binding metadata when either identity has changed.
+func Reauthenticate(binding Binding) error {
+	if binding.ProjectID == "" || binding.CanonicalRoot == "" || !filepath.IsAbs(binding.CanonicalRoot) || filepath.Clean(binding.CanonicalRoot) != binding.CanonicalRoot || !binding.RootIdentity.Valid() {
+		return errors.New("project binding is invalid")
+	}
+	directory, err := pathguard.Open(binding.CanonicalRoot)
+	if err != nil {
+		return fmt.Errorf("reopen project root: %w", err)
+	}
+	defer directory.Close()
+	rootIdentity, err := directory.PhysicalIdentity()
+	if err != nil || rootIdentity != binding.RootIdentity {
+		return errors.New("project root identity changed")
+	}
+	commonIdentity, err := gitCommonDirIdentity(directory)
+	if err != nil {
+		return fmt.Errorf("reauthenticate Git common directory: %w", err)
+	}
+	if commonIdentity != binding.CommonDirIdentity {
+		return errors.New("Git common-directory identity changed")
+	}
+	return nil
+}
+
 // Resolve authenticates requestedRoot before resolving it. A legacy mapping
 // may bootstrap only at its exact configured root. Once authenticated aliases
 // exist, a move requires the recorded root identity and a distinct worktree

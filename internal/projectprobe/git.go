@@ -11,11 +11,15 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
 
 const (
@@ -26,6 +30,8 @@ const (
 var (
 	gitHeadPattern = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 	scpRemote      = regexp.MustCompile(`^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$`)
+	windowsDrive   = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+	windowsUNCHost = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,253}$`)
 	approvedGit    = map[string]struct{}{
 		gitCallKey("rev-parse", "--show-toplevel"):          {},
 		gitCallKey("symbolic-ref", "--short", "-q", "HEAD"): {},
@@ -55,21 +61,100 @@ func runApprovedGit(ctx context.Context, runner func(context.Context, string, ..
 	return bytes.Clone(output), nil
 }
 
-func defaultGitRunner(root string) func(context.Context, string, ...string) ([]byte, error) {
+type authenticatedGitExecutable struct {
+	path     string
+	identity pathguard.IdentityToken
+	file     *os.File
+}
+
+func authenticateGitExecutable(executable string, projectRoot *pathguard.Directory) (*authenticatedGitExecutable, error) {
+	if executable == "" || len(executable) > 4096 || strings.IndexByte(executable, 0) >= 0 || !filepath.IsAbs(executable) || filepath.Clean(executable) != executable || projectRoot == nil || projectRoot.Info() == nil {
+		return nil, errors.New("Git executable must be a clean absolute path")
+	}
+	parent, err := pathguard.Open(filepath.Dir(executable))
+	if err != nil {
+		return nil, errors.New("Git executable parent is unavailable or redirected")
+	}
+	defer parent.Close()
+	if parent.ContainsIdentity(projectRoot.Info()) {
+		return nil, errors.New("Git executable must be outside the authenticated project root")
+	}
+	file, info, err := parent.OpenRegular(filepath.Base(executable))
+	if err != nil || !isExecutableFile(executable, info) {
+		if file != nil {
+			_ = file.Close()
+		}
+		return nil, errors.New("Git executable is not an authenticated regular executable")
+	}
+	identity, err := pathguard.PhysicalFileIdentity(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, errors.New("Git executable identity is unavailable")
+	}
+	return &authenticatedGitExecutable{path: executable, identity: identity, file: file}, nil
+}
+
+func (executable *authenticatedGitExecutable) Close() error {
+	if executable == nil || executable.file == nil {
+		return nil
+	}
+	return executable.file.Close()
+}
+
+func (executable *authenticatedGitExecutable) reauthenticate() error {
+	if executable == nil || executable.file == nil {
+		return errors.New("Git executable authentication is missing")
+	}
+	parent, err := pathguard.Open(filepath.Dir(executable.path))
+	if err != nil {
+		return errors.New("Git executable parent changed")
+	}
+	defer parent.Close()
+	file, info, err := parent.OpenRegular(filepath.Base(executable.path))
+	if err != nil || !isExecutableFile(executable.path, info) {
+		if file != nil {
+			_ = file.Close()
+		}
+		return errors.New("Git executable changed")
+	}
+	defer file.Close()
+	identity, err := pathguard.PhysicalFileIdentity(file)
+	if err != nil || identity != executable.identity {
+		return errors.New("Git executable identity changed")
+	}
+	return nil
+}
+
+func isExecutableFile(executable string, info os.FileInfo) bool {
+	if info == nil || !info.Mode().IsRegular() {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Ext(executable), ".exe")
+	}
+	return info.Mode().Perm()&0o111 != 0
+}
+
+func defaultGitRunner(root string, authenticated *authenticatedGitExecutable) func(context.Context, string, ...string) ([]byte, error) {
 	return func(ctx context.Context, executable string, args ...string) ([]byte, error) {
 		if executable != "git" {
 			return nil, errors.New("only git may be executed")
 		}
+		if err := authenticated.reauthenticate(); err != nil {
+			return nil, err
+		}
 		commandContext, cancel := boundedGitContext(ctx)
 		defer cancel()
-		command := exec.CommandContext(commandContext, executable, args...)
+		command := exec.CommandContext(commandContext, authenticated.path, args...)
 		command.Dir = root
 		command.Env = safeGitEnvironment(os.Environ())
 		stdout := &boundedBuffer{maximum: maxGitOutputBytes}
 		stderr := &boundedBuffer{maximum: 64 << 10}
 		command.Stdout = stdout
 		command.Stderr = stderr
-		if err := command.Run(); err != nil {
+		runErr := command.Run()
+		identityErr := authenticated.reauthenticate()
+		if err := errors.Join(runErr, identityErr); err != nil {
 			return nil, err
 		}
 		return bytes.Clone(stdout.Bytes()), nil
@@ -81,32 +166,51 @@ func boundedGitContext(ctx context.Context) (context.Context, context.CancelFunc
 }
 
 func safeGitEnvironment(environment []string) []string {
-	blocked := map[string]struct{}{
-		"GIT_DIR": {}, "GIT_WORK_TREE": {}, "GIT_COMMON_DIR": {}, "GIT_INDEX_FILE": {},
-		"GIT_OBJECT_DIRECTORY": {}, "GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
-		"GIT_TERMINAL_PROMPT": {}, "GIT_OPTIONAL_LOCKS": {}, "GCM_INTERACTIVE": {},
-		"GIT_ASKPASS": {}, "SSH_ASKPASS": {}, "GIT_CONFIG_COUNT": {},
+	allowed := map[string]struct{}{
+		"SYSTEMROOT": {}, "WINDIR": {}, "TEMP": {}, "TMP": {}, "TMPDIR": {},
 	}
-	result := make([]string, 0, len(environment)+6)
+	values := make(map[string]string, len(allowed))
 	for _, entry := range environment {
-		name, _, _ := strings.Cut(entry, "=")
-		if _, remove := blocked[name]; !remove && !strings.HasPrefix(name, "GIT_CONFIG_KEY_") && !strings.HasPrefix(name, "GIT_CONFIG_VALUE_") {
-			result = append(result, entry)
+		name, value, found := strings.Cut(entry, "=")
+		name = strings.ToUpper(name)
+		if _, keep := allowed[name]; found && keep && !strings.ContainsAny(value, "\x00\r\n") {
+			values[name] = value
 		}
 	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys)+20)
+	for _, key := range keys {
+		result = append(result, key+"="+values[key])
+	}
+	hooksPath := "/dev/null"
+	if runtime.GOOS == "windows" {
+		hooksPath = "NUL"
+	}
 	return append(result,
+		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GCM_INTERACTIVE=Never",
 		"GIT_ASKPASS=",
 		"SSH_ASKPASS=",
-		"GIT_CONFIG_COUNT=3",
+		"GIT_PAGER=",
+		"GIT_CONFIG_COUNT=6",
 		"GIT_CONFIG_KEY_0=credential.helper",
 		"GIT_CONFIG_VALUE_0=",
 		"GIT_CONFIG_KEY_1=core.fsmonitor",
 		"GIT_CONFIG_VALUE_1=false",
 		"GIT_CONFIG_KEY_2=diff.ignoreSubmodules",
 		"GIT_CONFIG_VALUE_2=all",
+		"GIT_CONFIG_KEY_3=core.hooksPath",
+		"GIT_CONFIG_VALUE_3="+hooksPath,
+		"GIT_CONFIG_KEY_4=core.pager",
+		"GIT_CONFIG_VALUE_4=",
+		"GIT_CONFIG_KEY_5=credential.interactive",
+		"GIT_CONFIG_VALUE_5=false",
 	)
 }
 
@@ -175,31 +279,56 @@ func parseHead(output []byte) (string, error) {
 	return head, nil
 }
 
-func parseRemoteIdentities(output []byte) ([]string, bool) {
+func parseRemoteIdentities(output []byte) ([]string, bool, bool) {
 	if len(output) == 0 {
-		return []string{}, false
+		return []string{}, false, false
 	}
-	if len(output) > maxGitOutputBytes || !utf8.Valid(output) || bytes.IndexByte(output, 0) >= 0 {
-		return []string{}, true
+	if len(output) > maxGitOutputBytes || bytes.IndexByte(output, 0) >= 0 {
+		return []string{}, true, false
 	}
-	lines := strings.Split(strings.TrimSuffix(string(output), "\n"), "\n")
-	hashes := make(map[string]struct{}, len(lines))
+	hashes := make([]string, 0, 256)
 	malformed := false
-	for _, line := range lines {
-		line = strings.TrimSuffix(line, "\r")
-		if !validRemote(line) {
-			malformed = true
-			continue
+	excess := false
+	for start := 0; start < len(output); {
+		end := bytes.IndexByte(output[start:], '\n')
+		if end < 0 {
+			end = len(output)
+		} else {
+			end += start
 		}
-		sum := sha256.Sum256([]byte(line))
-		hashes[fmt.Sprintf("sha256:%x", sum)] = struct{}{}
+		line := output[start:end]
+		if len(line) > 0 && line[len(line)-1] == '\r' {
+			line = line[:len(line)-1]
+		}
+		if len(line) == 0 || len(line) > 4096 || !utf8.Valid(line) || !validRemote(string(line)) {
+			malformed = true
+		} else {
+			sum := sha256.Sum256(line)
+			hash := fmt.Sprintf("sha256:%x", sum)
+			index := sort.SearchStrings(hashes, hash)
+			if index == len(hashes) || hashes[index] != hash {
+				if len(hashes) < 256 {
+					hashes = append(hashes, "")
+					copy(hashes[index+1:], hashes[index:])
+					hashes[index] = hash
+				} else {
+					excess = true
+					if index < 256 {
+						copy(hashes[index+1:], hashes[index:255])
+						hashes[index] = hash
+					}
+				}
+			}
+		}
+		if end == len(output) {
+			break
+		}
+		start = end + 1
+		if start == len(output) {
+			break
+		}
 	}
-	result := make([]string, 0, len(hashes))
-	for hash := range hashes {
-		result = append(result, hash)
-	}
-	sort.Strings(result)
-	return result, malformed
+	return hashes, malformed, excess
 }
 
 func validRemote(value string) bool {
@@ -214,6 +343,15 @@ func validRemote(value string) bool {
 	if scpRemote.MatchString(value) {
 		return true
 	}
+	if windowsDrive.MatchString(value) {
+		return validWindowsDriveRemote(value)
+	}
+	if strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, "//") {
+		return validWindowsUNCRemote(value)
+	}
+	if strings.HasPrefix(value, "/") {
+		return path.Clean(value) == value && !strings.HasPrefix(value, "//")
+	}
 	parsed, err := url.Parse(value)
 	if err != nil {
 		return false
@@ -224,9 +362,35 @@ func validRemote(value string) bool {
 		default:
 			return false
 		}
-		return parsed.User == nil && (parsed.Host != "" || parsed.Scheme == "file")
+		return parsed.User == nil && parsed.Opaque == "" && (parsed.Host != "" || (parsed.Scheme == "file" && strings.HasPrefix(parsed.Path, "/")))
 	}
-	return !strings.Contains(value, "://")
+	return false
+}
+
+func validWindowsDriveRemote(value string) bool {
+	normalized := strings.ReplaceAll(value, `\`, "/")
+	if len(normalized) < 4 || normalized[1] != ':' || normalized[2] != '/' || path.Clean(normalized[2:]) != normalized[2:] {
+		return false
+	}
+	return validWindowsLocalComponents(strings.Split(normalized[3:], "/"))
+}
+
+func validWindowsUNCRemote(value string) bool {
+	normalized := strings.ReplaceAll(value, `\`, "/")
+	if !strings.HasPrefix(normalized, "//") || strings.HasPrefix(normalized, "///") {
+		return false
+	}
+	components := strings.Split(strings.TrimPrefix(normalized, "//"), "/")
+	return len(components) >= 2 && windowsUNCHost.MatchString(components[0]) && validWindowsLocalComponents(components)
+}
+
+func validWindowsLocalComponents(components []string) bool {
+	for _, component := range components {
+		if component == "" || component == "." || component == ".." || strings.ContainsAny(component, `<>:"|?*`) {
+			return false
+		}
+	}
+	return len(components) > 0
 }
 
 func parseStatus(output []byte) (int, bool) {

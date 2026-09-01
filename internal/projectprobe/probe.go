@@ -24,6 +24,7 @@ type Options struct {
 	RequiredProjectionFiles []string
 	Now                     func() time.Time
 	RunGit                  func(context.Context, string, ...string) ([]byte, error)
+	GitExecutable           string
 }
 
 // Run authenticates the project root, probes only allowlisted read-only Git
@@ -43,8 +44,14 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 	defer directory.Close()
 
 	runner := options.RunGit
+	var gitExecutable *authenticatedGitExecutable
 	if runner == nil {
-		runner = defaultGitRunner(options.Binding.CanonicalRoot)
+		gitExecutable, err = authenticateGitExecutable(options.GitExecutable, directory)
+		if err != nil {
+			return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+		}
+		defer gitExecutable.Close()
+		runner = defaultGitRunner(options.Binding.CanonicalRoot, gitExecutable)
 	}
 	now := options.Now
 	if now == nil {
@@ -119,16 +126,28 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 		}
 		state.Diagnostics = append(state.Diagnostics, diagnostic("git_remote_unavailable", "", nil))
 	} else {
-		remotes, malformed := parseRemoteIdentities(remoteOutput)
+		remotes, malformed, excess := parseRemoteIdentities(remoteOutput)
 		state.RemoteIdentityHashes = remotes
 		if malformed {
 			state.Diagnostics = append(state.Diagnostics, diagnostic("git_remote_malformed", "", remoteOutput))
 		}
+		if excess {
+			state.Diagnostics = append(state.Diagnostics, diagnostic("git_remote_excess", "", nil))
+		}
 	}
 
-	state.VersionFiles, state.Diagnostics = probeFiles(directory, versionPaths, state.Diagnostics)
-	state.RequiredProjectionFiles, state.Diagnostics = probeFiles(directory, requiredPaths, state.Diagnostics)
-	if err := reauthenticateRoot(options.Binding); err != nil {
+	state.VersionFiles, state.Diagnostics, err = probeFiles(ctx, directory, versionPaths, state.Diagnostics)
+	if err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
+	state.RequiredProjectionFiles, state.Diagnostics, err = probeFiles(ctx, directory, requiredPaths, state.Diagnostics)
+	if err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
+	if err := projectidentity.Reauthenticate(options.Binding); err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
+	if err := ctx.Err(); err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 	}
 	state.Diagnostics = canonicalDiagnostics(state.Diagnostics)
@@ -147,6 +166,9 @@ func Run(ctx context.Context, options Options) (memory.ProjectProbeState, memory
 		Available:     len(state.Diagnostics) == 0,
 		Diagnostics:   cloneDiagnostics(state.Diagnostics),
 	}
+	if err := ctx.Err(); err != nil {
+		return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
+	}
 	if err := memory.ValidateProbeCheck(check); err != nil {
 		return memory.ProjectProbeState{}, memory.ProbeCheck{}, fmt.Errorf("invalid probe check: %w", err)
 	}
@@ -160,6 +182,9 @@ func authenticateBinding(binding projectidentity.Binding) (*pathguard.Directory,
 	alias := binding.AuthenticatedAlias
 	if alias.SchemaVersion != 1 || alias.RootIdentity != binding.RootIdentity || alias.CommonDirIdentity != binding.CommonDirIdentity {
 		return nil, errors.New("authenticated project alias does not match binding")
+	}
+	if err := projectidentity.Reauthenticate(binding); err != nil {
+		return nil, fmt.Errorf("reauthenticate project binding: %w", err)
 	}
 	directory, err := pathguard.Open(binding.CanonicalRoot)
 	if err != nil {
@@ -182,19 +207,6 @@ func authenticateGitTopLevel(topLevel string, expected pathguard.IdentityToken) 
 	identity, err := directory.PhysicalIdentity()
 	if err != nil || identity != expected {
 		return errors.New("Git top-level does not match authenticated project root")
-	}
-	return nil
-}
-
-func reauthenticateRoot(binding projectidentity.Binding) error {
-	directory, err := pathguard.Open(binding.CanonicalRoot)
-	if err != nil {
-		return errors.New("authenticated project root path changed during probe")
-	}
-	defer directory.Close()
-	identity, err := directory.PhysicalIdentity()
-	if err != nil || identity != binding.RootIdentity {
-		return errors.New("authenticated project root path changed during probe")
 	}
 	return nil
 }
