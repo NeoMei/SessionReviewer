@@ -257,22 +257,7 @@ func (s *Store) putImmutable(kind ObjectKind, digest string, body []byte) error 
 // manifest.json as the sole prepared-generation commit point. A different
 // already-prepared generation is never replaced by Gate A.
 func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, error) {
-	if err := memory.ValidateGenerationManifest(value); err != nil {
-		return Prepared{}, fmt.Errorf("invalid generation manifest: %w", err)
-	}
-	if value.ProjectID != s.projectID {
-		return Prepared{}, errors.New("generation manifest belongs to a different project")
-	}
-	manifestDigest, err := memory.Digest(value)
-	if err != nil {
-		return Prepared{}, fmt.Errorf("digest generation manifest: %w", err)
-	}
-	prepared := Prepared{GenerationID: value.GenerationID, ManifestDigest: manifestDigest, ProjectViewDigest: value.ProjectViewDigest}
-	manifestBody, err := marshalCanonical(value)
-	if err != nil {
-		return Prepared{}, err
-	}
-	pointerBody, err := marshalCanonical(prepared)
+	artifacts, err := s.prepareArtifacts(value)
 	if err != nil {
 		return Prepared{}, err
 	}
@@ -280,7 +265,7 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 	err = s.withStoreLock(func() error {
 		existing, _, loadErr := s.loadPreparedUnlocked()
 		if loadErr == nil {
-			if existing != prepared {
+			if existing != artifacts.prepared {
 				return ErrPreparedGeneration
 			}
 			generation, err := s.loadGeneration(value.GenerationID)
@@ -295,44 +280,49 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 		if err := s.reconcileGenerationGraph(value); err != nil {
 			return err
 		}
-
-		generations, err := s.openCollection("generations")
-		if err != nil {
+		if err := s.writeGenerationUnlocked(value, artifacts); err != nil {
 			return err
 		}
-		defer generations.Close()
-		generationLeaf := value.GenerationID + ".json"
-		existingGeneration, found, err := generations.ReadRegular(generationLeaf, maxManifestBytes)
-		if err != nil {
-			return fmt.Errorf("inspect generation object: %w", err)
+		if err := s.writePreparedPointerUnlocked(artifacts.pointerBody, s.manifestCheckpoint); err != nil {
+			return err
 		}
-		if found {
-			if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
-				return err
-			}
-			if !bytes.Equal(existingGeneration, manifestBody) {
-				return ErrImmutableConflict
-			}
-			if _, err := decodeGeneration(existingGeneration, s.projectID, value.GenerationID, manifestDigest); err != nil {
-				return err
-			}
-		} else {
-			if err := atomicfile.WriteRootFileCreateIfAbsent(generations.Root, generationLeaf, manifestBody, privateFileMode, s.objectCheckpoint); err != nil && !errors.Is(err, fs.ErrExist) {
-				return fmt.Errorf("publish immutable generation: %w", err)
-			}
-			stored, found, err := generations.ReadRegular(generationLeaf, maxManifestBytes)
-			if err != nil || !found {
-				return errors.Join(errors.New("generation canonical re-read failed"), err)
-			}
-			if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
-				return err
-			}
-			if !bytes.Equal(stored, manifestBody) {
-				return ErrImmutableConflict
-			}
-			if _, err := decodeGeneration(stored, s.projectID, value.GenerationID, manifestDigest); err != nil {
-				return err
-			}
+		loaded, loadedManifest, err := s.loadPreparedUnlocked()
+		if err != nil || loaded != artifacts.prepared || !equalManifest(loadedManifest, value) {
+			return errors.Join(errors.New("prepared generation canonical re-read failed"), err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Prepared{}, err
+	}
+	return artifacts.prepared, nil
+}
+
+// AdvancePrepared atomically advances only the exact validated prepared
+// pointer supplied by the caller. It retains both immutable generation objects
+// and never creates or changes a published-generation pointer.
+func (s *Store) AdvancePrepared(expected Prepared, successor memory.GenerationManifest) (Prepared, error) {
+	artifacts, err := s.prepareArtifacts(successor)
+	if err != nil {
+		return Prepared{}, err
+	}
+	expectedBody, err := marshalCanonical(expected)
+	if err != nil {
+		return Prepared{}, err
+	}
+	err = s.withStoreLock(func() error {
+		current, _, err := s.loadPreparedUnlocked()
+		if err != nil || current != expected {
+			return errors.Join(ErrPreparedGeneration, err)
+		}
+		if artifacts.prepared == expected {
+			return errors.New("successor generation must differ from expected prepared generation")
+		}
+		if err := s.reconcileGenerationGraph(successor); err != nil {
+			return err
+		}
+		if err := s.writeGenerationUnlocked(successor, artifacts); err != nil {
+			return err
 		}
 
 		root, err := s.reopenMemory()
@@ -343,19 +333,125 @@ func (s *Store) PrepareGeneration(value memory.GenerationManifest) (Prepared, er
 		if err := rejectManifestBackup(root); err != nil {
 			return err
 		}
-		if err := atomicfile.WriteRootFileChecked(root.Root, "manifest.json", pointerBody, privateFileMode, s.manifestCheckpoint); err != nil {
-			return fmt.Errorf("commit prepared generation: %w", err)
+		if err := requirePreparedPointerBytes(root, expectedBody); err != nil {
+			return err
+		}
+		checkpoint := func() error {
+			body, found, readErr := root.ReadRegular("manifest.json", maxManifestBytes)
+			if readErr != nil || !found || (!bytes.Equal(body, expectedBody) && !bytes.Equal(body, artifacts.pointerBody)) {
+				return errors.Join(ErrPreparedGeneration, readErr)
+			}
+			if s.manifestCheckpoint != nil {
+				return s.manifestCheckpoint()
+			}
+			return nil
+		}
+		if err := atomicfile.WriteRootFileChecked(root.Root, "manifest.json", artifacts.pointerBody, privateFileMode, checkpoint); err != nil {
+			return fmt.Errorf("advance prepared generation: %w", err)
 		}
 		loaded, loadedManifest, err := s.loadPreparedUnlocked()
-		if err != nil || loaded != prepared || !equalManifest(loadedManifest, value) {
-			return errors.Join(errors.New("prepared generation canonical re-read failed"), err)
+		if err != nil || loaded != artifacts.prepared || !equalManifest(loadedManifest, successor) {
+			return errors.Join(errors.New("advanced generation canonical re-read failed"), err)
 		}
 		return nil
 	})
 	if err != nil {
 		return Prepared{}, err
 	}
-	return prepared, nil
+	return artifacts.prepared, nil
+}
+
+type preparationArtifacts struct {
+	prepared     Prepared
+	manifestBody []byte
+	pointerBody  []byte
+}
+
+func (s *Store) prepareArtifacts(value memory.GenerationManifest) (preparationArtifacts, error) {
+	if err := memory.ValidateGenerationManifest(value); err != nil {
+		return preparationArtifacts{}, fmt.Errorf("invalid generation manifest: %w", err)
+	}
+	if value.ProjectID != s.projectID {
+		return preparationArtifacts{}, errors.New("generation manifest belongs to a different project")
+	}
+	manifestDigest, err := memory.Digest(value)
+	if err != nil {
+		return preparationArtifacts{}, fmt.Errorf("digest generation manifest: %w", err)
+	}
+	prepared := Prepared{GenerationID: value.GenerationID, ManifestDigest: manifestDigest, ProjectViewDigest: value.ProjectViewDigest}
+	manifestBody, err := marshalCanonical(value)
+	if err != nil {
+		return preparationArtifacts{}, err
+	}
+	pointerBody, err := marshalCanonical(prepared)
+	if err != nil {
+		return preparationArtifacts{}, err
+	}
+	return preparationArtifacts{prepared: prepared, manifestBody: manifestBody, pointerBody: pointerBody}, nil
+}
+
+func (s *Store) writeGenerationUnlocked(value memory.GenerationManifest, artifacts preparationArtifacts) error {
+	generations, err := s.openCollection("generations")
+	if err != nil {
+		return err
+	}
+	defer generations.Close()
+	generationLeaf := value.GenerationID + ".json"
+	existing, found, err := generations.ReadRegular(generationLeaf, maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("inspect generation object: %w", err)
+	}
+	if found {
+		if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
+			return err
+		}
+		if !bytes.Equal(existing, artifacts.manifestBody) {
+			return ErrImmutableConflict
+		}
+		_, err := decodeGeneration(existing, s.projectID, value.GenerationID, artifacts.prepared.ManifestDigest)
+		return err
+	}
+	if err := atomicfile.WriteRootFileCreateIfAbsent(generations.Root, generationLeaf, artifacts.manifestBody, privateFileMode, s.objectCheckpoint); err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("publish immutable generation: %w", err)
+	}
+	stored, found, err := generations.ReadRegular(generationLeaf, maxManifestBytes)
+	if err != nil || !found {
+		return errors.Join(errors.New("generation canonical re-read failed"), err)
+	}
+	if err := requirePrivateRegular(generations.Root, generationLeaf); err != nil {
+		return err
+	}
+	if !bytes.Equal(stored, artifacts.manifestBody) {
+		return ErrImmutableConflict
+	}
+	_, err = decodeGeneration(stored, s.projectID, value.GenerationID, artifacts.prepared.ManifestDigest)
+	return err
+}
+
+func (s *Store) writePreparedPointerUnlocked(pointerBody []byte, checkpoint func() error) error {
+	root, err := s.reopenMemory()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := rejectManifestBackup(root); err != nil {
+		return err
+	}
+	if err := atomicfile.WriteRootFileChecked(root.Root, "manifest.json", pointerBody, privateFileMode, checkpoint); err != nil {
+		return fmt.Errorf("commit prepared generation: %w", err)
+	}
+	return nil
+}
+
+func requirePreparedPointerBytes(root *pathguard.Directory, expected []byte) error {
+	body, found, err := root.ReadRegular("manifest.json", maxManifestBytes)
+	if err != nil || !found || !bytes.Equal(body, expected) {
+		return errors.Join(ErrPreparedGeneration, err)
+	}
+	if err := requirePrivateRegular(root.Root, "manifest.json"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // LoadPrepared returns both the durable prepared pointer and its fully

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -621,6 +622,149 @@ func TestPreparedGenerationRestartRejectsWeakModeExactOrphan(t *testing.T) {
 		t.Fatalf("weak-mode orphan was changed: body_equal=%v err=%v", bytes.Equal(after, before), err)
 	}
 	assertMode(t, generationPath, 0o644)
+}
+
+func TestAdvancePreparedRequiresExactExpectedAndPreservesOldGeneration(t *testing.T) {
+	dataRoot, store, fixture := preparedStore(t)
+	defer store.Close()
+
+	expected, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatalf("load prepared baseline: %v", err)
+	}
+	successor := fixture.manifest
+	successor.GenerationID = "generation-2"
+	successor.CreatedAt = "2026-08-31T10:02:00Z"
+
+	advanced, err := store.AdvancePrepared(expected, successor)
+	if err != nil {
+		t.Fatalf("advance prepared generation: %v", err)
+	}
+	loaded, manifest, err := store.LoadPrepared()
+	if err != nil || loaded != advanced || manifest.GenerationID != successor.GenerationID {
+		t.Fatalf("load advanced generation: prepared=%#v manifest=%#v err=%v", loaded, manifest, err)
+	}
+	oldPath := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "generations", fixture.manifest.GenerationID+".json")
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("old immutable generation was not retained: %v", err)
+	}
+
+	staleSuccessor := successor
+	staleSuccessor.GenerationID = "generation-stale"
+	staleSuccessor.CreatedAt = "2026-08-31T10:03:00Z"
+	if _, err := store.AdvancePrepared(expected, staleSuccessor); !errors.Is(err, ErrPreparedGeneration) {
+		t.Fatalf("stale advance error = %v, want ErrPreparedGeneration", err)
+	}
+	after, afterManifest, err := store.LoadPrepared()
+	if err != nil || after != advanced || afterManifest.GenerationID != successor.GenerationID {
+		t.Fatalf("stale advance changed pointer: prepared=%#v manifest=%#v err=%v", after, afterManifest, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "published_generation")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AdvancePrepared created published_generation: %v", err)
+	}
+}
+
+func TestAdvancePreparedConcurrentStaleCallersHaveOneWinner(t *testing.T) {
+	dataRoot, seed, fixture := preparedStore(t)
+	expected, _, err := seed.LoadPrepared()
+	if err != nil {
+		t.Fatalf("load prepared baseline: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	stores := make([]*Store, 2)
+	for index := range stores {
+		stores[index], err = Open(dataRoot, testProjectID)
+		if err != nil {
+			t.Fatalf("open concurrent store %d: %v", index, err)
+		}
+		defer stores[index].Close()
+	}
+	manifests := []memory.GenerationManifest{fixture.manifest, fixture.manifest}
+	manifests[0].GenerationID = "generation-next-a"
+	manifests[0].CreatedAt = "2026-08-31T10:02:00Z"
+	manifests[1].GenerationID = "generation-next-b"
+	manifests[1].CreatedAt = "2026-08-31T10:03:00Z"
+
+	start := make(chan struct{})
+	results := make([]Prepared, 2)
+	errs := make([]error, 2)
+	var wait sync.WaitGroup
+	for index := range stores {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			results[index], errs[index] = stores[index].AdvancePrepared(expected, manifests[index])
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+
+	successes := 0
+	stale := 0
+	for index, callErr := range errs {
+		switch {
+		case callErr == nil:
+			successes++
+		case errors.Is(callErr, ErrPreparedGeneration):
+			stale++
+		default:
+			t.Fatalf("advance %d returned unexpected error: %v", index, callErr)
+		}
+	}
+	if successes != 1 || stale != 1 {
+		t.Fatalf("successes=%d stale=%d errors=%v results=%v", successes, stale, errs, results)
+	}
+	prepared, manifest, err := stores[0].LoadPrepared()
+	if err != nil || prepared.GenerationID != manifest.GenerationID || (manifest.GenerationID != "generation-next-a" && manifest.GenerationID != "generation-next-b") {
+		t.Fatalf("invalid concurrent winner: prepared=%#v manifest=%#v err=%v", prepared, manifest, err)
+	}
+}
+
+func TestAdvancePreparedCrashAtEveryManifestCheckpointLeavesReadableGeneration(t *testing.T) {
+	for failAt := 1; failAt <= 4; failAt++ {
+		t.Run(fmt.Sprintf("checkpoint-%d", failAt), func(t *testing.T) {
+			dataRoot, store, fixture := preparedStore(t)
+			expected, _, err := store.LoadPrepared()
+			if err != nil {
+				t.Fatalf("load prepared baseline: %v", err)
+			}
+			successor := fixture.manifest
+			successor.GenerationID = fmt.Sprintf("generation-next-%d", failAt)
+			successor.CreatedAt = "2026-08-31T10:02:00Z"
+			calls := 0
+			store.manifestCheckpoint = func() error {
+				calls++
+				if calls == failAt {
+					return errInjectedCrash
+				}
+				return nil
+			}
+			_, _ = store.AdvancePrepared(expected, successor)
+			if calls < failAt {
+				t.Fatalf("checkpoint %d was not reached; callbacks=%d", failAt, calls)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatalf("close interrupted store: %v", err)
+			}
+
+			restarted, err := Open(dataRoot, testProjectID)
+			if err != nil {
+				t.Fatalf("restart store: %v", err)
+			}
+			defer restarted.Close()
+			prepared, manifest, err := restarted.LoadPrepared()
+			if err != nil {
+				t.Fatalf("checkpoint %d left unreadable prepared state after %d callbacks: %v", failAt, calls, err)
+			}
+			if prepared.GenerationID != manifest.GenerationID || (manifest.GenerationID != fixture.manifest.GenerationID && manifest.GenerationID != successor.GenerationID) {
+				t.Fatalf("checkpoint %d left torn state: prepared=%#v manifest=%#v", failAt, prepared, manifest)
+			}
+		})
+	}
 }
 
 var errInjectedCrash = errors.New("injected crash")
