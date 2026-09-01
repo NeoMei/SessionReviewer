@@ -4,6 +4,34 @@ Date: 2026-08-27
 
 Scope: Task 8 core CLI, migration, machine-ledger publication/repair, Project ↔ Vault semantic merge, conflict resolution, and release packaging. This record intentionally uses logical target labels and counts; it contains no private absolute path, raw session text, credential, or high-entropy candidate.
 
+## Gate A zero-token core acceptance — 2026-09-01
+
+Status: **locally accepted as a private prepared-generation core**. This is not a public command, Project/Vault publication, Obsidian integration, GitHub release, or marketplace release. Gates B and C remain required before public release.
+
+The sanitized replay at `test/zerotoken` composes the real Codex discovery/freeze/decode adapter, SourceCatalog, immutable memory store, SessionView materializer, ProjectView reducer, and scan orchestrator. A narrow test-only source-contract decorator assigns the planned unsupported, malformed/unreadable, and shared cross-project ambiguous terminal fixture classes after real Codex decoding; it does not replace source parsing, catalog CAS, persistence, materialization, reduction, or generation preparation. The separate foreign-project source and first-seen unauthenticated issue are discovered but correctly excluded from the target count.
+
+The initial result is exactly 154/154 terminal Sessions: 151 indexed, one unsupported, one malformed/unreadable, and one shared cross-project ambiguous. The same replay then verifies a real append preserving old chunks and writing only one successor chunk/view, an unchanged no-write replay, adapter-v1-to-v2 supersession, source truncation/replacement with withdrawal, missing/unavailable replay retaining prior facts, and an unchanged missing replay. Every run reports `review_run_tokens=0`.
+
+The replay snapshots the complete Project and Vault fixture trees before scanning and compares bytes, modes, sizes, and modification times afterward. No Project/Vault fixture changes. Captured project commands are decoded but never executed, no Agent package or `net/http`/`net/rpc` client dependency appears in the local production closure exercised by the gate, complete user text/tool output canaries do not enter the private store, and the only safe verbose test log is:
+
+```text
+Gate A: 154/154 terminal, 151 indexed, zero model tokens
+```
+
+Retention acceptance accounts exact unique generation/object bytes across the current prepared graph, all native immutable generation lineage, and validated opaque external generation pins. Reporting is read-only. Automatic cleanup is restricted to canonical content-addressed `staging` and `cache` entries that are unreachable and at least seven days old. Tests cover the exact seven-day boundary, corrupt graph/pin/namespace fail-closed behavior, permissions and redirect rejection, entry/mtime/size/namespace TOCTOU, concurrent initial prepare and prepared advance, caller pin mutation, and a real subprocess exit after one deletion followed by successful restart cleanup. Immutable generations, current/pinned graphs, diagnostics, journals, and locks are never cleanup targets.
+
+Local verification completed successfully:
+
+```sh
+go test ./internal/memory ./internal/memorystore ./internal/projectidentity ./internal/sourcecatalog ./internal/source/... ./internal/sessionview ./internal/projectprobe ./internal/projectview ./internal/scan ./internal/cli ./test/zerotoken -count=1
+go test -race ./internal/memorystore ./internal/sourcecatalog ./internal/scan -count=1
+go vet ./...
+task9_tmp_dir="$(mktemp -d)"
+GOOS=windows GOARCH=amd64 go test -c -o "$task9_tmp_dir/memorystore.test.exe" ./internal/memorystore
+GOOS=windows GOARCH=amd64 go test -c -o "$task9_tmp_dir/zerotoken.test.exe" ./test/zerotoken
+git diff --check
+```
+
 ## Repository replay gate
 
 The sanitized eight-step fixture contract is committed at `testdata/acceptance/review-v2-core-manifest.json`. Replay the full generated-fixture chain, including all three isolated conflict actions, with:
