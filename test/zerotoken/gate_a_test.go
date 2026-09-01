@@ -246,7 +246,7 @@ func fixture(command interface{ Run() error }) func() error {
 func TestGateGoListEnvironmentClearsInheritedTargetTuning(t *testing.T) {
 	hostile := []string{
 		"PATH=/usr/bin", "CGO_ENABLED=1", "GOAMD64=v4", "GOARM64=v9.5",
-		"GOEXPERIMENT=boringcrypto", "GOFLAGS=-tags=unreviewed",
+		"GOEXPERIMENT=boringcrypto", "GOFLAGS=-tags=unreviewed", "GOTOOLCHAIN=go1.99.0",
 	}
 	for _, target := range gateProductionTargets {
 		t.Run(target.label, func(t *testing.T) {
@@ -261,7 +261,7 @@ func TestGateGoListEnvironmentClearsInheritedTargetTuning(t *testing.T) {
 				seen[name] = true
 				values[name] = value
 			}
-			if values["CGO_ENABLED"] != "0" || values["GOEXPERIMENT"] != "" || !seen["GOEXPERIMENT"] || values["GOFLAGS"] != "-mod=readonly" {
+			if values["CGO_ENABLED"] != "0" || values["GOEXPERIMENT"] != "" || !seen["GOEXPERIMENT"] || values["GOFLAGS"] != "-mod=readonly" || values["GOTOOLCHAIN"] != "local" {
 				t.Fatalf("uncontrolled target environment for %s: %v", target.label, values)
 			}
 			if target.goarch == "amd64" {
@@ -299,18 +299,32 @@ func TestGateNativeSourceCoverageMatchesCurrentGoListSchema(t *testing.T) {
 	}
 	wantExtensions := []string{
 		".c", ".cc", ".cpp", ".cxx", ".f", ".f90", ".for", ".h", ".hh", ".hpp", ".hxx",
-		".m", ".s", ".swig", ".swigcxx", ".syso",
+		".m", ".s", ".swig", ".swigcxx", ".sx", ".syso",
 	}
 	if got := sortedGateKeys(gateNativeSourceExtensions); fmt.Sprint(got) != fmt.Sprint(wantExtensions) {
 		t.Fatalf("incomplete native source extensions: got=%v want=%v", got, wantExtensions)
 	}
-	for _, name := range []string{"fixture.S", "fixture.F", "fixture.CXX", "fixture.HPP", "fixture.SWIGCXX"} {
+	for _, name := range []string{"fixture.S", "fixture.F", "fixture.CXX", "fixture.HPP", "fixture.SWIGCXX", "fixture.SX"} {
 		if !gateNativeSourceExtension(name) {
 			t.Fatalf("case-normalized native extension escaped: %s", name)
 		}
 	}
 	if gateNativeSourceExtension("fixture.go") {
 		t.Fatal("ordinary Go source classified as native")
+	}
+}
+
+func TestGateNativeDirectoryRejectsSX(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "internal", "fixture")
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "fixture.sx"), []byte("adversarial native source\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := gateCheckNativePackageDirectory(directory, "internal/fixture")
+	if err == nil || !strings.Contains(err.Error(), "unreviewed assembly/cgo surface") || !strings.Contains(err.Error(), "internal/fixture/fixture.sx") {
+		t.Fatalf("selected local package .sx was not rejected by directory checker: %v", err)
 	}
 }
 
@@ -1113,7 +1127,7 @@ func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch str
 	drop := map[string]bool{
 		"CGO_ENABLED": true, "GOCACHE": true, "GOENV": true, "GOFLAGS": true,
 		"GOOS": true, "GOARCH": true, "GOAMD64": true, "GOARM64": true, "GOEXPERIMENT": true,
-		"GOPROXY": true, "GOSUMDB": true,
+		"GOPROXY": true, "GOSUMDB": true, "GOTOOLCHAIN": true,
 		"GOTMPDIR": true, "GOWORK": true, "TEMP": true, "TMP": true, "TMPDIR": true,
 	}
 	result := make([]string, 0, len(environment)+13)
@@ -1126,7 +1140,7 @@ func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch str
 	result = append(result,
 		"CGO_ENABLED=0", "GOCACHE="+filepath.Join(temporaryRoot, "cache-"+goos+"-"+goarch),
 		"GOENV=off", "GOEXPERIMENT=", "GOFLAGS=-mod=readonly", "GOOS="+goos, "GOARCH="+goarch,
-		"GOPROXY=off", "GOSUMDB=off", "GOTMPDIR="+temporaryRoot, "GOWORK=off",
+		"GOPROXY=off", "GOSUMDB=off", "GOTOOLCHAIN=local", "GOTMPDIR="+temporaryRoot, "GOWORK=off",
 		"TEMP="+temporaryRoot, "TMP="+temporaryRoot, "TMPDIR="+temporaryRoot,
 	)
 	switch goarch {
@@ -1237,17 +1251,14 @@ func loadGateDangerousCapabilityRecords(t *testing.T, repositoryRoot string, clo
 	for _, packagePath := range packages {
 		relativePackage := strings.TrimPrefix(packagePath, gateModulePath+"/")
 		directory := filepath.Join(repositoryRoot, filepath.FromSlash(relativePackage))
-		entries, err := os.ReadDir(directory)
+		entries, err := gateCheckNativePackageDirectory(directory, relativePackage)
 		if err != nil {
-			t.Fatalf("read Gate A local production package %s: %v", relativePackage, err)
+			t.Fatal(err)
 		}
 		for _, entry := range entries {
 			name := entry.Name()
 			if entry.IsDir() {
 				continue
-			}
-			if gateNativeSourceExtension(name) {
-				t.Fatalf("unreviewed assembly/cgo surface in Gate A local closure: %s/%s", relativePackage, name)
 			}
 			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
@@ -1301,6 +1312,19 @@ func loadGateDangerousCapabilityRecords(t *testing.T, repositoryRoot string, clo
 		}
 	}
 	return sortedGateKeys(records)
+}
+
+func gateCheckNativePackageDirectory(directory, relativePackage string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, fmt.Errorf("read Gate A local production package %s: %w", relativePackage, err)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && gateNativeSourceExtension(entry.Name()) {
+			return nil, fmt.Errorf("unreviewed assembly/cgo surface in Gate A local closure: %s/%s", relativePackage, entry.Name())
+		}
+	}
+	return entries, nil
 }
 
 type gateFallbackVisitor struct {
@@ -1390,7 +1414,7 @@ var gateNativeSourceExtensions = map[string]bool{
 	".c": true, ".cc": true, ".cpp": true, ".cxx": true,
 	".f": true, ".f90": true, ".for": true,
 	".h": true, ".hh": true, ".hpp": true, ".hxx": true,
-	".m": true, ".s": true, ".swig": true, ".swigcxx": true, ".syso": true,
+	".m": true, ".s": true, ".swig": true, ".swigcxx": true, ".sx": true, ".syso": true,
 }
 
 func gateNativeSourceExtension(name string) bool {
