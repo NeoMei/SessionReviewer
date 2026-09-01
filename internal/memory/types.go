@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"regexp"
@@ -310,7 +311,15 @@ func ValidateSourceRecord(value SourceRecord) error {
 	return nil
 }
 
-func ValidateObservationRevision(value ObservationRevision, checkpoints ...func() error) error {
+func ValidateObservationRevision(value ObservationRevision) error {
+	return ValidateObservationRevisionContext(context.Background(), value)
+}
+
+func ValidateObservationRevisionContext(ctx context.Context, value ObservationRevision) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -343,7 +352,7 @@ func ValidateObservationRevision(value ObservationRevision, checkpoints ...func(
 	if !safeIDPattern.MatchString(value.AdapterID) || !safeIDPattern.MatchString(value.AdapterVersion) {
 		return errors.New("invalid adapter identity")
 	}
-	want := ObservationRevisionID(value, checkpoints...)
+	want := ObservationRevisionIDContext(ctx, value)
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -353,7 +362,15 @@ func ValidateObservationRevision(value ObservationRevision, checkpoints ...func(
 	return nil
 }
 
-func ValidateSessionView(value SessionView, checkpoints ...func() error) error {
+func ValidateSessionView(value SessionView) error {
+	return ValidateSessionViewContext(context.Background(), value)
+}
+
+func ValidateSessionViewContext(ctx context.Context, value SessionView) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -399,7 +416,7 @@ func ValidateSessionView(value SessionView, checkpoints ...func() error) error {
 	if !safeIDPattern.MatchString(value.MaterializerVersion) {
 		return errors.New("invalid materializer version")
 	}
-	want, err := SessionViewDigest(value, checkpoints...)
+	want, err := SessionViewDigestContext(ctx, value)
 	if cause := digestCheckpoint(checkpoints); cause != nil {
 		return cause
 	}
@@ -459,7 +476,15 @@ func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs
 	return nil
 }
 
-func ValidateProjectProbeState(value ProjectProbeState, checkpoints ...func() error) error {
+func ValidateProjectProbeState(value ProjectProbeState) error {
+	return ValidateProjectProbeStateContext(context.Background(), value)
+}
+
+func ValidateProjectProbeStateContext(ctx context.Context, value ProjectProbeState) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -493,7 +518,7 @@ func ValidateProjectProbeState(value ProjectProbeState, checkpoints ...func() er
 	if err := validateDiagnostics(value.Diagnostics, checkpoints...); err != nil {
 		return err
 	}
-	want, err := ProjectProbeStateDigest(value, checkpoints...)
+	want, err := ProjectProbeStateDigestContext(ctx, value)
 	if cause := digestCheckpoint(checkpoints); cause != nil {
 		return cause
 	}
@@ -503,7 +528,15 @@ func ValidateProjectProbeState(value ProjectProbeState, checkpoints ...func() er
 	return nil
 }
 
-func ValidateProbeCheck(value ProbeCheck, checkpoints ...func() error) error {
+func ValidateProbeCheck(value ProbeCheck) error {
+	return ValidateProbeCheckContext(context.Background(), value)
+}
+
+func ValidateProbeCheckContext(ctx context.Context, value ProbeCheck) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -519,7 +552,15 @@ func ValidateProbeCheck(value ProbeCheck, checkpoints ...func() error) error {
 	return validateDiagnostics(value.Diagnostics, checkpoints...)
 }
 
-func ValidateProjectView(value ProjectView, checkpoints ...func() error) error {
+func ValidateProjectView(value ProjectView) error {
+	return ValidateProjectViewContext(context.Background(), value)
+}
+
+func ValidateProjectViewContext(ctx context.Context, value ProjectView) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -583,7 +624,7 @@ func ValidateProjectView(value ProjectView, checkpoints ...func() error) error {
 	if !safeIDPattern.MatchString(value.ReducerVersion) {
 		return errors.New("invalid reducer version")
 	}
-	want, err := ProjectViewDigest(value, checkpoints...)
+	want, err := ProjectViewDigestContext(ctx, value)
 	if cause := digestCheckpoint(checkpoints); cause != nil {
 		return cause
 	}
@@ -593,7 +634,15 @@ func ValidateProjectView(value ProjectView, checkpoints ...func() error) error {
 	return nil
 }
 
-func ValidateGenerationManifest(value GenerationManifest, checkpoints ...func() error) error {
+func ValidateGenerationManifest(value GenerationManifest) error {
+	return ValidateGenerationManifestContext(context.Background(), value)
+}
+
+func ValidateGenerationManifestContext(ctx context.Context, value GenerationManifest) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
 	if err := digestCheckpoint(checkpoints); err != nil {
 		return err
 	}
@@ -621,7 +670,7 @@ func ValidateGenerationManifest(value GenerationManifest, checkpoints ...func() 
 	if !validDigest(value.ProbeStateDigest) || !validDigest(value.ProjectViewDigest) {
 		return errors.New("invalid generation object digest")
 	}
-	if err := ValidateProbeCheck(value.ProbeCheck, checkpoints...); err != nil {
+	if err := ValidateProbeCheckContext(ctx, value.ProbeCheck); err != nil {
 		return err
 	}
 	if value.ProbeCheck.StateDigest != value.ProbeStateDigest {
@@ -663,6 +712,16 @@ func ValidateGenerationManifest(value GenerationManifest, checkpoints ...func() 
 		}
 	}
 	return nil
+}
+
+func memoryValidationCheckpoints(ctx context.Context) ([]func() error, error) {
+	if ctx == nil {
+		return nil, errors.New("memory validation context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, cause
+	}
+	return []func() error{func() error { return context.Cause(ctx) }}, nil
 }
 
 func (value TerminalCounts) total() int {

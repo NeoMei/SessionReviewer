@@ -212,15 +212,7 @@ func TestRetentionLargeValidationAndCanonicalHashCancelInsideLoops(t *testing.T)
 
 	t.Run("validation", func(t *testing.T) {
 		cause := errors.New("cancel large validation")
-		ctx, cancel := context.WithCancelCause(context.Background())
-		calls := 0
-		checkpoint := func() error {
-			calls++
-			if calls == 128 {
-				cancel(cause)
-			}
-			return context.Cause(ctx)
-		}
+		ctx := &checkpointCancelContext{Context: context.Background(), cancelAt: 128, cause: cause}
 		value := memory.ProjectView{
 			SchemaVersion:          memory.MemorySchemaVersion,
 			Digest:                 prefixedDigest("large-validation-view"),
@@ -233,35 +225,39 @@ func TestRetentionLargeValidationAndCanonicalHashCancelInsideLoops(t *testing.T)
 			DependencyDigest:       prefixedDigest("large-validation-dependency"),
 			ReducerVersion:         "v1",
 		}
-		if err := memory.ValidateProjectView(value, checkpoint); !errors.Is(err, cause) {
+		if err := memory.ValidateProjectViewContext(ctx, value); !errors.Is(err, cause) {
 			t.Fatalf("validation error=%v want cancellation cause", err)
 		}
-		if calls != 128 {
-			t.Fatalf("validation checkpoints=%d want 128", calls)
+		if ctx.calls != 128 {
+			t.Fatalf("validation checkpoints=%d want 128", ctx.calls)
 		}
 	})
 
 	t.Run("canonical hash", func(t *testing.T) {
 		cause := errors.New("cancel canonical hash")
-		ctx, cancel := context.WithCancelCause(context.Background())
-		calls := 0
-		// A []string performs entries+1 reflection checks, one post-decode
-		// check, and entries+1 normalization checks before chunked hashing.
-		cancelAt := 2*entries + 8
-		checkpoint := func() error {
-			calls++
-			if calls == cancelAt {
-				cancel(cause)
-			}
-			return context.Cause(ctx)
+		ctx := &checkpointCancelContext{Context: context.Background(), cancelAt: entries + 128, cause: cause}
+		if _, err := memory.DigestContext(ctx, values); !errors.Is(err, cause) {
+			t.Fatalf("digest error=%v want cancellation cause (calls=%d)", err, ctx.calls)
 		}
-		if _, err := memory.Digest(values, checkpoint); !errors.Is(err, cause) {
-			t.Fatalf("digest error=%v want cancellation cause (calls=%d)", err, calls)
-		}
-		if calls != cancelAt {
-			t.Fatalf("digest checkpoints=%d want %d", calls, cancelAt)
+		if ctx.calls != ctx.cancelAt {
+			t.Fatalf("digest checkpoints=%d want %d", ctx.calls, ctx.cancelAt)
 		}
 	})
+}
+
+type checkpointCancelContext struct {
+	context.Context
+	calls    int
+	cancelAt int
+	cause    error
+}
+
+func (ctx *checkpointCancelContext) Err() error {
+	ctx.calls++
+	if ctx.calls >= ctx.cancelAt {
+		return ctx.cause
+	}
+	return nil
 }
 
 func TestRetentionReadsEveryAllowedPinManifestOncePerCandidate(t *testing.T) {

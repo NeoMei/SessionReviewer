@@ -630,7 +630,10 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 				return errors.New("observation chunk contains a different project")
 			}
 		}
-		actual, err := memory.Digest(records, storeCheckpointCallback(ctx, "hash"))
+		actual, err := memory.DigestContext(ctx, records)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		if err != nil || actual != digest {
 			return errors.Join(errors.New("observation chunk digest mismatch"), err)
 		}
@@ -642,8 +645,12 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
 			return err
 		}
-		if err := memory.ValidateSessionView(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored SessionView"), err)
+		validationErr := memory.ValidateSessionViewContext(ctx, value)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored SessionView"), validationErr)
 		}
 	case ObjectProbeState:
 		var value memory.ProjectProbeState
@@ -653,8 +660,12 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
 			return err
 		}
-		if err := memory.ValidateProjectProbeState(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored ProjectProbeState"), err)
+		validationErr := memory.ValidateProjectProbeStateContext(ctx, value)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored ProjectProbeState"), validationErr)
 		}
 	case ObjectProjectView:
 		var value memory.ProjectView
@@ -664,8 +675,12 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
 			return err
 		}
-		if err := memory.ValidateProjectView(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored ProjectView"), err)
+		validationErr := memory.ValidateProjectViewContext(ctx, value)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored ProjectView"), validationErr)
 		}
 	default:
 		return errors.New("unknown immutable object kind")
@@ -810,7 +825,7 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 			if _, duplicate := revisions[record.RevisionID]; duplicate {
 				return fmt.Errorf("observation revision %s occurs in multiple chunks", record.RevisionID)
 			}
-			keyDigest, err := memory.Digest(record.Key)
+			keyDigest, err := memory.DigestContext(ctx, record.Key)
 			if cause := context.Cause(ctx); cause != nil {
 				return cause
 			}
@@ -833,7 +848,10 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 			return fmt.Errorf("verify SessionView %s: %w", dependency.Digest, err)
 		}
 		var view memory.SessionView
-		if err := decodeCanonicalJSON(body, &view); err != nil || view.Provider != dependency.Provider || view.SessionID != dependency.SessionID {
+		if err := decodeCanonicalJSONContext(ctx, body, &view); err != nil || view.Provider != dependency.Provider || view.SessionID != dependency.SessionID {
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
 			return errors.Join(errors.New("SessionView dependency identity mismatch"), err)
 		}
 		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
@@ -895,7 +913,7 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 		return fmt.Errorf("verify ProjectProbeState: %w", err)
 	}
 	var probe memory.ProjectProbeState
-	if err := decodeCanonicalJSON(probeBody, &probe); err != nil {
+	if err := decodeCanonicalJSONContext(ctx, probeBody, &probe); err != nil {
 		return fmt.Errorf("decode ProjectProbeState: %w", err)
 	}
 	projectBody, err := s.loadObjectUnlockedContext(ctx, ObjectProjectView, value.ProjectViewDigest)
@@ -903,7 +921,7 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 		return fmt.Errorf("verify ProjectView: %w", err)
 	}
 	var projectView memory.ProjectView
-	if err := decodeCanonicalJSON(projectBody, &projectView); err != nil {
+	if err := decodeCanonicalJSONContext(ctx, projectBody, &projectView); err != nil {
 		return fmt.Errorf("decode ProjectView: %w", err)
 	}
 	if !reflect.DeepEqual(projectView.SessionViewDependencies, value.SessionViews) {
@@ -1099,7 +1117,10 @@ func decodeObservationChunkContext(ctx context.Context, body []byte) ([]memory.O
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
 			return nil, err
 		}
-		if err := memory.ValidateObservationRevision(value, storeCheckpointCallback(ctx, "validation")); err != nil {
+		if err := memory.ValidateObservationRevisionContext(ctx, value); err != nil {
+			if cause := context.Cause(ctx); cause != nil {
+				return nil, cause
+			}
 			return nil, fmt.Errorf("invalid stored observation: %w", err)
 		}
 		records = append(records, value)
@@ -1128,14 +1149,20 @@ func decodeGenerationContext(ctx context.Context, body []byte, projectID, genera
 	if err := storeCheckpoint(ctx, "validation"); err != nil {
 		return memory.GenerationManifest{}, err
 	}
-	if err := memory.ValidateGenerationManifest(value, storeCheckpointCallback(ctx, "validation")); err != nil {
+	if err := memory.ValidateGenerationManifestContext(ctx, value); err != nil {
+		if cause := context.Cause(ctx); cause != nil {
+			return memory.GenerationManifest{}, cause
+		}
 		return memory.GenerationManifest{}, fmt.Errorf("validate immutable generation: %w", err)
 	}
 	if value.ProjectID != projectID || value.GenerationID != generationID {
 		return memory.GenerationManifest{}, errors.New("immutable generation identity mismatch")
 	}
 	if expectedDigest != "" {
-		digest, err := memory.Digest(value, storeCheckpointCallback(ctx, "hash"))
+		digest, err := memory.DigestContext(ctx, value)
+		if cause := context.Cause(ctx); cause != nil {
+			return memory.GenerationManifest{}, cause
+		}
 		if err != nil || digest != expectedDigest {
 			return memory.GenerationManifest{}, errors.Join(errors.New("immutable generation digest mismatch"), err)
 		}
@@ -1168,18 +1195,43 @@ func decodeCanonicalJSONContext(ctx context.Context, body []byte, destination an
 	if err := storeCheckpoint(ctx, "decode"); err != nil {
 		return err
 	}
-	canonical, err := marshalCanonical(destination)
-	if err != nil {
+	comparison := canonicalJSONComparison{expected: body}
+	if err := memory.WriteCanonicalJSONContext(ctx, &comparison, destination); err != nil {
 		return err
 	}
-	equal, err := equalStoreBytesContext(ctx, body, canonical)
-	if err != nil {
+	if err := storeCheckpoint(ctx, "decode"); err != nil {
 		return err
 	}
-	if !equal {
+	if _, err := comparison.Write([]byte{'\n'}); err != nil {
+		return err
+	}
+	if !comparison.matches() {
 		return errors.New("JSON object is not in canonical stored form")
 	}
 	return nil
+}
+
+type canonicalJSONComparison struct {
+	expected []byte
+	offset   int
+	mismatch bool
+}
+
+func (comparison *canonicalJSONComparison) Write(body []byte) (int, error) {
+	start := comparison.offset
+	comparison.offset += len(body)
+	if start > len(comparison.expected) || len(body) > len(comparison.expected)-start {
+		comparison.mismatch = true
+		return len(body), nil
+	}
+	if !bytes.Equal(body, comparison.expected[start:comparison.offset]) {
+		comparison.mismatch = true
+	}
+	return len(body), nil
+}
+
+func (comparison *canonicalJSONComparison) matches() bool {
+	return !comparison.mismatch && comparison.offset == len(comparison.expected)
 }
 
 func rejectDuplicateJSONFields(body []byte) error {
@@ -1296,26 +1348,6 @@ func storeCheckpoint(ctx context.Context, phase string) error {
 		storeContextCheckpoint(phase)
 	}
 	return context.Cause(ctx)
-}
-
-func storeCheckpointCallback(ctx context.Context, phase string) func() error {
-	return func() error { return storeCheckpoint(ctx, phase) }
-}
-
-func equalStoreBytesContext(ctx context.Context, left, right []byte) (bool, error) {
-	if len(left) != len(right) {
-		return false, nil
-	}
-	for offset := 0; offset < len(left); offset += storeContextReadChunkSize {
-		if err := storeCheckpoint(ctx, "decode"); err != nil {
-			return false, err
-		}
-		end := min(len(left), offset+storeContextReadChunkSize)
-		if !bytes.Equal(left[offset:end], right[offset:end]) {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func marshalCanonical(value any) ([]byte, error) {

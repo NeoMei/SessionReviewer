@@ -2,6 +2,7 @@ package memorystore
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,49 @@ import (
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/memory"
 )
+
+func TestReconcileGenerationGraphContextCancelsDuringLoadedGraphWork(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fixture := buildStoredFixture(t, store, "generation-context-reconcile")
+
+	t.Run("chunked decode", func(t *testing.T) {
+		cause := errors.New("cancel graph decode")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		calls := 0
+		storeContextCheckpoint = func(phase string) {
+			if phase == "decode" {
+				calls++
+				if calls == 24 {
+					cancel(cause)
+				}
+			}
+		}
+		t.Cleanup(func() { storeContextCheckpoint = nil })
+		if err := store.reconcileGenerationGraphContext(ctx, fixture.manifest); !errors.Is(err, cause) {
+			t.Fatalf("reconcile error=%v want cancellation cause", err)
+		}
+		if calls != 24 {
+			t.Fatalf("decode checkpoints=%d want 24", calls)
+		}
+		storeContextCheckpoint = nil
+	})
+
+	t.Run("validation and digest propagation", func(t *testing.T) {
+		cause := errors.New("cancel graph validation or digest")
+		ctx := &checkpointCancelContext{Context: context.Background(), cancelAt: 256, cause: cause}
+		if err := store.reconcileGenerationGraphContext(ctx, fixture.manifest); !errors.Is(err, cause) {
+			t.Fatalf("reconcile error=%v want cancellation cause (calls=%d)", err, ctx.calls)
+		}
+		if ctx.calls != ctx.cancelAt {
+			t.Fatalf("context checkpoints=%d want %d", ctx.calls, ctx.cancelAt)
+		}
+	})
+}
 
 func TestStoreCreatesPrivateRootedLayoutAndRoundTripsCanonicalObjects(t *testing.T) {
 	dataRoot := t.TempDir()

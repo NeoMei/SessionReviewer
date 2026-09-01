@@ -127,9 +127,10 @@ func TestDigestNormalizesSemanticallyUnorderedProjectCollections(t *testing.T) {
 	}
 }
 
-func TestDigestRejectsInvalidUTF8AndNonFiniteNumbers(t *testing.T) {
+func TestDigestRejectsInvalidUTF8AndFloatingPointNumbers(t *testing.T) {
 	for name, value := range map[string]any{
 		"invalid utf8": map[string]string{"value": string([]byte{0xff})},
+		"finite float": map[string]float64{"value": 1.5},
 		"nan":          map[string]float64{"value": math.NaN()},
 		"positive inf": map[string]float64{"value": math.Inf(1)},
 		"negative inf": map[string]float64{"value": math.Inf(-1)},

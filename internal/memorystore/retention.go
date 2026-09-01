@@ -319,7 +319,10 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		if err := retentionCheckpoint(ctx); err != nil {
 			return retentionSnapshot{}, err
 		}
-		digest, err := memory.Digest(manifest, storeCheckpointCallback(ctx, "hash"))
+		digest, err := memory.DigestContext(ctx, manifest)
+		if cause := context.Cause(ctx); cause != nil {
+			return retentionSnapshot{}, cause
+		}
 		if err != nil {
 			return retentionSnapshot{}, err
 		}

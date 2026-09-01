@@ -60,10 +60,17 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderOpenLoopDocument	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderSessionDocument	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderTimelineDocument	reflect.DeepEqual	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	Digest	reflect.ValueOf	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=2
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	WriteCanonicalJSONContext	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	WriteCanonicalJSONContext	reflect.ValueOf	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memorystore/store.go	(*Store).reconcileGenerationGraphContext	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=2
@@ -102,6 +109,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	inter
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	process	internal/projectprobe/git.go	os/exec	alias=exec
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/config/config.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/ledger/render.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/canonical.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/digest.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memorystore/store.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/accepted_patch.go	reflect	alias=reflect
@@ -141,18 +149,89 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-r
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeArray	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeOrdered	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeStruct	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeUnorderedSlice	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.String	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint8	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Value	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	<package-init>	reflect.Type	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Array	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Float32	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Float64	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Interface	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Map	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Pointer	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Slice	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.String	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Struct	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Uint8	occurrence=1
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	validateDigestValue	reflect.Value	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Struct	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Type	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Type	occurrence=2

@@ -1,16 +1,11 @@
 package memory
 
 import (
-	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"math"
 	"reflect"
-	"sort"
-	"unicode/utf8"
 )
 
 var unorderedJSONArrays = map[string]struct{}{
@@ -32,38 +27,59 @@ var unorderedJSONObjects = map[string]struct{}{
 
 // Digest returns a deterministic digest of a normalized defensive JSON copy.
 // Ordered arrays, including SessionView dependencies, retain caller order.
-func Digest(value any, checkpoints ...func() error) (string, error) {
-	if err := validateDigestValue(reflect.ValueOf(value), make(map[digestVisit]bool), checkpoints...); err != nil {
-		return "", err
+func Digest(value any) (string, error) {
+	return DigestContext(context.Background(), value)
+}
+
+func DigestContext(ctx context.Context, value any) (string, error) {
+	if ctx == nil {
+		return "", errors.New("digest context is required")
 	}
-	body, err := json.Marshal(value)
-	if err != nil {
-		return "", fmt.Errorf("encode digest input: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	var copyValue any
-	if err := decoder.Decode(&copyValue); err != nil {
-		return "", fmt.Errorf("decode defensive digest copy: %w", err)
-	}
-	if err := digestCheckpoint(checkpoints); err != nil {
-		return "", err
-	}
-	normalized, err := normalizeJSONValue(copyValue, "", checkpoints...)
-	if err != nil {
+	if err := validateCanonicalValueContext(ctx, reflect.ValueOf(value), make(map[digestVisit]bool)); err != nil {
 		return "", err
 	}
 	hash := sha256.New()
-	if err := writeNormalizedDigest(hash, normalized, checkpoints...); err != nil {
+	writer := digestContextHashWriter{ctx: ctx, writer: hash}
+	encoder := canonicalEncoder{ctx: ctx, writer: &writer, normalizeSets: true, visiting: make(map[digestVisit]bool)}
+	if err := encoder.encode(reflect.ValueOf(value), ""); err != nil {
+		return "", err
+	}
+	if err := canonicalCheckpoint(ctx, digestPhaseHashing); err != nil {
 		return "", err
 	}
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+type digestContextHashWriter struct {
+	ctx    context.Context
+	writer digestWriter
+}
+
+func (writer *digestContextHashWriter) Write(body []byte) (int, error) {
+	written := 0
+	for len(body) > 0 {
+		if err := canonicalCheckpoint(writer.ctx, digestPhaseHashing); err != nil {
+			return written, err
+		}
+		chunk := min(len(body), canonicalContextChunkSize)
+		count, err := writer.writer.Write(body[:chunk])
+		written += count
+		if err != nil || count != chunk {
+			return written, errors.Join(err, errors.New("short canonical digest write"))
+		}
+		body = body[chunk:]
+	}
+	return written, nil
+}
+
 // ObservationRevisionID deliberately excludes the stored revision_id. It
 // combines the stable key with the normalized observed payload, source hash,
 // and adapter version so adapter re-decoding creates an immutable successor.
-func ObservationRevisionID(value ObservationRevision, checkpoints ...func() error) string {
+func ObservationRevisionID(value ObservationRevision) string {
+	return ObservationRevisionIDContext(context.Background(), value)
+}
+
+func ObservationRevisionIDContext(ctx context.Context, value ObservationRevision) string {
 	identity := struct {
 		Key            ObservationKey    `json:"key"`
 		Timestamp      string            `json:"timestamp"`
@@ -85,7 +101,7 @@ func ObservationRevisionID(value ObservationRevision, checkpoints ...func() erro
 		SourceHash:     value.Ref.SourceHash,
 		AdapterVersion: value.AdapterVersion,
 	}
-	digest, err := Digest(identity, checkpoints...)
+	digest, err := DigestContext(ctx, identity)
 	if err != nil {
 		return ""
 	}
@@ -147,8 +163,12 @@ type ProjectViewIdentity struct {
 	ReducerVersion          string                  `json:"reducer_version"`
 }
 
-func SessionViewDigest(value SessionView, checkpoints ...func() error) (string, error) {
-	return Digest(SessionViewIdentity{
+func SessionViewDigest(value SessionView) (string, error) {
+	return SessionViewDigestContext(context.Background(), value)
+}
+
+func SessionViewDigestContext(ctx context.Context, value SessionView) (string, error) {
+	return DigestContext(ctx, SessionViewIdentity{
 		SchemaVersion:           value.SchemaVersion,
 		ProjectID:               value.ProjectID,
 		Provider:                value.Provider,
@@ -167,11 +187,15 @@ func SessionViewDigest(value SessionView, checkpoints ...func() error) (string, 
 		Diagnostics:             value.Diagnostics,
 		DependencyDigest:        value.DependencyDigest,
 		MaterializerVersion:     value.MaterializerVersion,
-	}, checkpoints...)
+	})
 }
 
-func ProjectProbeStateDigest(value ProjectProbeState, checkpoints ...func() error) (string, error) {
-	return Digest(ProjectProbeStateIdentity{
+func ProjectProbeStateDigest(value ProjectProbeState) (string, error) {
+	return ProjectProbeStateDigestContext(context.Background(), value)
+}
+
+func ProjectProbeStateDigestContext(ctx context.Context, value ProjectProbeState) (string, error) {
+	return DigestContext(ctx, ProjectProbeStateIdentity{
 		SchemaVersion:           value.SchemaVersion,
 		ProjectID:               value.ProjectID,
 		CanonicalRoot:           value.CanonicalRoot,
@@ -183,11 +207,15 @@ func ProjectProbeStateDigest(value ProjectProbeState, checkpoints ...func() erro
 		RequiredProjectionFiles: value.RequiredProjectionFiles,
 		ProbeVersion:            value.ProbeVersion,
 		Diagnostics:             value.Diagnostics,
-	}, checkpoints...)
+	})
 }
 
-func ProjectViewDigest(value ProjectView, checkpoints ...func() error) (string, error) {
-	return Digest(ProjectViewIdentity{
+func ProjectViewDigest(value ProjectView) (string, error) {
+	return ProjectViewDigestContext(context.Background(), value)
+}
+
+func ProjectViewDigestContext(ctx context.Context, value ProjectView) (string, error) {
+	return DigestContext(ctx, ProjectViewIdentity{
 		SchemaVersion:           value.SchemaVersion,
 		ProjectID:               value.ProjectID,
 		Generation:              value.Generation,
@@ -205,153 +233,12 @@ func ProjectViewDigest(value ProjectView, checkpoints ...func() error) (string, 
 		PreviousViewDigest:      value.PreviousViewDigest,
 		DependencyDigest:        value.DependencyDigest,
 		ReducerVersion:          value.ReducerVersion,
-	}, checkpoints...)
+	})
 }
 
 type digestVisit struct {
 	typeOf reflect.Type
 	ptr    uintptr
-}
-
-func validateDigestValue(value reflect.Value, visiting map[digestVisit]bool, checkpoints ...func() error) error {
-	if err := digestCheckpoint(checkpoints); err != nil {
-		return err
-	}
-	if !value.IsValid() {
-		return nil
-	}
-	for value.Kind() == reflect.Interface {
-		if value.IsNil() {
-			return nil
-		}
-		value = value.Elem()
-	}
-	switch value.Kind() {
-	case reflect.Pointer:
-		if value.IsNil() {
-			return nil
-		}
-		visit := digestVisit{typeOf: value.Type(), ptr: value.Pointer()}
-		if visiting[visit] {
-			return errors.New("digest input contains a cycle")
-		}
-		visiting[visit] = true
-		defer delete(visiting, visit)
-		return validateDigestValue(value.Elem(), visiting, checkpoints...)
-	case reflect.String:
-		if !utf8.ValidString(value.String()) {
-			return errors.New("digest input contains invalid UTF-8")
-		}
-	case reflect.Float32, reflect.Float64:
-		number := value.Float()
-		if math.IsNaN(number) || math.IsInf(number, 0) {
-			return errors.New("digest input contains NaN or Inf")
-		}
-	case reflect.Struct:
-		typeOf := value.Type()
-		for index := 0; index < value.NumField(); index++ {
-			if typeOf.Field(index).PkgPath != "" {
-				continue
-			}
-			if err := validateDigestValue(value.Field(index), visiting, checkpoints...); err != nil {
-				return err
-			}
-		}
-	case reflect.Map:
-		if value.IsNil() {
-			return nil
-		}
-		visit := digestVisit{typeOf: value.Type(), ptr: value.Pointer()}
-		if visiting[visit] {
-			return errors.New("digest input contains a cycle")
-		}
-		visiting[visit] = true
-		defer delete(visiting, visit)
-		iterator := value.MapRange()
-		for iterator.Next() {
-			if err := validateDigestValue(iterator.Key(), visiting, checkpoints...); err != nil {
-				return err
-			}
-			if err := validateDigestValue(iterator.Value(), visiting, checkpoints...); err != nil {
-				return err
-			}
-		}
-	case reflect.Slice:
-		if value.IsNil() || value.Type().Elem().Kind() == reflect.Uint8 {
-			return nil
-		}
-		visit := digestVisit{typeOf: value.Type(), ptr: value.Pointer()}
-		if visiting[visit] {
-			return errors.New("digest input contains a cycle")
-		}
-		visiting[visit] = true
-		defer delete(visiting, visit)
-		for index := 0; index < value.Len(); index++ {
-			if err := validateDigestValue(value.Index(index), visiting, checkpoints...); err != nil {
-				return err
-			}
-		}
-	case reflect.Array:
-		for index := 0; index < value.Len(); index++ {
-			if err := validateDigestValue(value.Index(index), visiting, checkpoints...); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func normalizeJSONValue(value any, field string, checkpoints ...func() error) (any, error) {
-	if err := digestCheckpoint(checkpoints); err != nil {
-		return nil, err
-	}
-	switch current := value.(type) {
-	case nil:
-		if _, unordered := unorderedJSONArrays[field]; unordered {
-			return []any{}, nil
-		}
-		if _, unordered := unorderedJSONObjects[field]; unordered {
-			return map[string]any{}, nil
-		}
-		return nil, nil
-	case map[string]any:
-		copyMap := make(map[string]any, len(current))
-		for name, child := range current {
-			if !utf8.ValidString(name) {
-				return nil, errors.New("digest input contains invalid UTF-8 map key")
-			}
-			normalized, err := normalizeJSONValue(child, name, checkpoints...)
-			if err != nil {
-				return nil, err
-			}
-			copyMap[name] = normalized
-		}
-		return copyMap, nil
-	case []any:
-		copyArray := make([]any, len(current))
-		for index, child := range current {
-			normalized, err := normalizeJSONValue(child, "", checkpoints...)
-			if err != nil {
-				return nil, err
-			}
-			copyArray[index] = normalized
-		}
-		if _, unordered := unorderedJSONArrays[field]; unordered {
-			sort.Slice(copyArray, func(i, j int) bool {
-				left, _ := json.Marshal(copyArray[i])
-				right, _ := json.Marshal(copyArray[j])
-				return bytes.Compare(left, right) < 0
-			})
-		}
-		return copyArray, nil
-	case string:
-		if !utf8.ValidString(current) {
-			return nil, errors.New("digest input contains invalid UTF-8")
-		}
-		return current, nil
-	default:
-		return current, nil
-	}
 }
 
 func digestCheckpoint(checkpoints []func() error) error {
@@ -363,76 +250,4 @@ func digestCheckpoint(checkpoints []func() error) error {
 
 type digestWriter interface {
 	Write([]byte) (int, error)
-}
-
-func writeNormalizedDigest(writer digestWriter, value any, checkpoints ...func() error) error {
-	if err := digestCheckpoint(checkpoints); err != nil {
-		return err
-	}
-	write := func(body []byte) error {
-		_, err := writer.Write(body)
-		return err
-	}
-	switch current := value.(type) {
-	case map[string]any:
-		keys := make([]string, 0, len(current))
-		for key := range current {
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		if err := write([]byte{'{'}); err != nil {
-			return err
-		}
-		for index, key := range keys {
-			if index > 0 {
-				if err := write([]byte{','}); err != nil {
-					return err
-				}
-			}
-			encoded, err := json.Marshal(key)
-			if err != nil {
-				return fmt.Errorf("encode normalized digest key: %w", err)
-			}
-			if err := write(encoded); err != nil {
-				return err
-			}
-			if err := write([]byte{':'}); err != nil {
-				return err
-			}
-			if err := writeNormalizedDigest(writer, current[key], checkpoints...); err != nil {
-				return err
-			}
-		}
-		return write([]byte{'}'})
-	case []any:
-		if err := write([]byte{'['}); err != nil {
-			return err
-		}
-		for index := range current {
-			if index > 0 {
-				if err := write([]byte{','}); err != nil {
-					return err
-				}
-			}
-			if err := writeNormalizedDigest(writer, current[index], checkpoints...); err != nil {
-				return err
-			}
-		}
-		return write([]byte{']'})
-	default:
-		encoded, err := json.Marshal(current)
-		if err != nil {
-			return fmt.Errorf("encode normalized digest input: %w", err)
-		}
-		for offset := 0; offset < len(encoded); offset += 64 << 10 {
-			if err := digestCheckpoint(checkpoints); err != nil {
-				return err
-			}
-			end := min(len(encoded), offset+(64<<10))
-			if err := write(encoded[offset:end]); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 }
