@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,6 +69,32 @@ type gateManifest struct {
 	ReplayCases     []string `json:"replay_cases"`
 }
 
+type gateGitCall struct {
+	executable  string
+	args        []string
+	workingDir  string
+	environment []string
+}
+
+type gateGitRecorder struct {
+	executable string
+	identity   os.FileInfo
+	root       string
+
+	mu       sync.Mutex
+	attempts int
+	calls    []gateGitCall
+	rejected int
+}
+
+var gateApprovedGitCalls = map[string]struct{}{
+	"rev-parse\x00--show-toplevel":          {},
+	"symbolic-ref\x00--short\x00-q\x00HEAD": {},
+	"rev-parse\x00HEAD":                     {},
+	"status\x00--porcelain=v1\x00-z":        {},
+	"remote\x00get-url\x00--all\x00origin":  {},
+}
+
 type gateHarness struct {
 	repositoryRoot string
 	dataRoot       string
@@ -81,6 +109,7 @@ type gateHarness struct {
 	options        scan.Options
 	baseBodies     map[string][]byte
 	gitExecutable  string
+	gitRecorder    *gateGitRecorder
 }
 
 func TestGateAZeroTokenCore(t *testing.T) {
@@ -93,7 +122,8 @@ func TestGateAZeroTokenCore(t *testing.T) {
 	harness := newGateHarness(t, repositoryRoot)
 	projectBefore := snapshotGateTree(t, harness.projectRoot)
 	vaultBefore := snapshotGateTree(t, harness.vaultRoot)
-	assertNoForbiddenGateDependencies(t, repositoryRoot)
+	assertFrozenGateProductionDependencies(t, repositoryRoot)
+	assertGateGitRecorderDenyByDefault(t, harness.gitRecorder)
 	assertProductionDiscoveryExclusions(t, harness.options.Adapter)
 	assertCanceledProductionProbeIsReadOnly(t, harness)
 
@@ -170,6 +200,7 @@ func TestGateAZeroTokenCore(t *testing.T) {
 
 	assertPlatformEquivalentGatePaths(t)
 	assertGatePrivateStore(t, harness.dataRoot)
+	harness.gitRecorder.assertApprovedCalls(t, 35)
 	if _, err := os.Lstat(filepath.Join(harness.projectRoot, "PROJECT-SCRIPT-MUST-NOT-RUN")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a captured project command executed: %v", err)
 	}
@@ -208,6 +239,7 @@ func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 	harness.foreignBinding = resolveGateBinding(t, gateForeignProject, harness.foreignRoot)
 	harness.projectRoot = harness.binding.CanonicalRoot
 	harness.foreignRoot = harness.foreignBinding.CanonicalRoot
+	harness.gitRecorder = newGateGitRecorder(t, harness.gitExecutable, harness.projectRoot)
 	harness.installSessions(t)
 
 	catalog, err := sourcecatalog.Open(harness.dataRoot)
@@ -227,7 +259,7 @@ func newGateHarness(t *testing.T, repositoryRoot string) *gateHarness {
 		DataRoot: harness.dataRoot, Adapter: harness.codexAdapter(t, "v1"), Catalog: harness.catalog, Store: harness.store,
 		Workers: 8, Now: func() time.Time { return gateNow }, Materialize: sessionview.Materialize,
 		Probe:        projectprobe.Run,
-		ProbeOptions: projectprobe.Options{GitExecutable: harness.gitExecutable, VersionFiles: []string{"VERSION"}, RequiredProjectionFiles: []string{"project-fixture.md"}},
+		ProbeOptions: projectprobe.Options{GitExecutable: harness.gitExecutable, RunGit: harness.gitRecorder.run, VersionFiles: []string{"VERSION"}, RequiredProjectionFiles: []string{"project-fixture.md"}},
 		Reduce:       projectview.Reduce,
 	}
 	return harness
@@ -394,6 +426,172 @@ func readGateManifest(t *testing.T, path string) gateManifest {
 		t.Fatal("Gate A manifest contains trailing data")
 	}
 	return manifest
+}
+
+func newGateGitRecorder(t *testing.T, executable, root string) *gateGitRecorder {
+	t.Helper()
+	info, err := os.Stat(executable)
+	if err != nil || info == nil || !info.Mode().IsRegular() || !filepath.IsAbs(executable) || filepath.Clean(executable) != executable || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		t.Fatalf("invalid Gate A Git recorder binding: %v", err)
+	}
+	return &gateGitRecorder{executable: executable, identity: info, root: root}
+}
+
+func (recorder *gateGitRecorder) run(ctx context.Context, requested string, args ...string) ([]byte, error) {
+	recorder.mu.Lock()
+	recorder.attempts++
+	recorder.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	key := strings.Join(args, "\x00")
+	if requested != "git" {
+		recorder.reject()
+		return nil, errors.New("Gate A process seam rejected a non-Git executable")
+	}
+	if _, approved := gateApprovedGitCalls[key]; !approved {
+		recorder.reject()
+		return nil, errors.New("Gate A process seam rejected unapproved Git argv")
+	}
+	current, err := os.Stat(recorder.executable)
+	if err != nil || current == nil || !os.SameFile(recorder.identity, current) {
+		recorder.reject()
+		return nil, errors.New("Gate A authenticated Git executable changed")
+	}
+	environment := gateApprovedGitEnvironment(os.Environ())
+	if err := validateGateGitEnvironment(environment); err != nil {
+		recorder.reject()
+		return nil, err
+	}
+	call := gateGitCall{
+		executable: recorder.executable, args: append([]string(nil), args...),
+		workingDir: recorder.root, environment: append([]string(nil), environment...),
+	}
+	recorder.mu.Lock()
+	recorder.calls = append(recorder.calls, call)
+	recorder.mu.Unlock()
+	command := exec.CommandContext(ctx, recorder.executable, args...)
+	command.Dir = recorder.root
+	command.Env = environment
+	return command.Output()
+}
+
+func (recorder *gateGitRecorder) reject() {
+	recorder.mu.Lock()
+	recorder.rejected++
+	recorder.mu.Unlock()
+}
+
+func (recorder *gateGitRecorder) assertApprovedCalls(t *testing.T, expected int) {
+	t.Helper()
+	recorder.mu.Lock()
+	attempts := recorder.attempts
+	calls := append([]gateGitCall(nil), recorder.calls...)
+	rejected := recorder.rejected
+	recorder.mu.Unlock()
+	if attempts != expected || rejected != 0 || len(calls) != expected {
+		t.Fatalf("Gate A Git process accounting attempts=%d calls=%d rejected=%d want=%d/%d/0", attempts, len(calls), rejected, expected, expected)
+	}
+	counts := make(map[string]int, len(gateApprovedGitCalls))
+	for _, call := range calls {
+		key := strings.Join(call.args, "\x00")
+		if call.executable != recorder.executable || call.workingDir != recorder.root {
+			t.Fatalf("Gate A process escaped exact executable/cwd contract")
+		}
+		if _, approved := gateApprovedGitCalls[key]; !approved {
+			t.Fatalf("Gate A process recorded unapproved argv %q", key)
+		}
+		if err := validateGateGitEnvironment(call.environment); err != nil {
+			t.Fatalf("Gate A process recorded unsafe environment: %v", err)
+		}
+		counts[key]++
+	}
+	for key := range gateApprovedGitCalls {
+		if counts[key] != expected/len(gateApprovedGitCalls) {
+			t.Fatalf("Gate A approved Git call %q count=%d", key, counts[key])
+		}
+	}
+}
+
+func assertGateGitRecorderDenyByDefault(t *testing.T, production *gateGitRecorder) {
+	t.Helper()
+	recorder := newGateGitRecorder(t, production.executable, production.root)
+	if _, err := recorder.run(context.Background(), "sh", "rev-parse", "--show-toplevel"); err == nil {
+		t.Fatal("Gate A process seam accepted a foreign executable")
+	}
+	if _, err := recorder.run(context.Background(), "git", "fetch"); err == nil {
+		t.Fatal("Gate A process seam accepted unapproved Git argv")
+	}
+	recorder.mu.Lock()
+	attempts, calls, rejected := recorder.attempts, len(recorder.calls), recorder.rejected
+	recorder.mu.Unlock()
+	if attempts != 2 || calls != 0 || rejected != 2 {
+		t.Fatalf("Gate A deny seam accounting attempts=%d calls=%d rejected=%d", attempts, calls, rejected)
+	}
+}
+
+func gateApprovedGitEnvironment(environment []string) []string {
+	allowed := map[string]struct{}{"SYSTEMROOT": {}, "WINDIR": {}, "TEMP": {}, "TMP": {}, "TMPDIR": {}}
+	values := make(map[string]string, len(allowed))
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		name = strings.ToUpper(name)
+		if _, keep := allowed[name]; found && keep && !strings.ContainsAny(value, "\x00\r\n") {
+			values[name] = value
+		}
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys)+20)
+	for _, key := range keys {
+		result = append(result, key+"="+values[key])
+	}
+	hooksPath := "/dev/null"
+	if runtime.GOOS == "windows" {
+		hooksPath = "NUL"
+	}
+	return append(result,
+		"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GCM_INTERACTIVE=Never",
+		"GIT_ASKPASS=", "SSH_ASKPASS=", "GIT_PAGER=", "GIT_CONFIG_COUNT=6",
+		"GIT_CONFIG_KEY_0=credential.helper", "GIT_CONFIG_VALUE_0=",
+		"GIT_CONFIG_KEY_1=core.fsmonitor", "GIT_CONFIG_VALUE_1=false",
+		"GIT_CONFIG_KEY_2=diff.ignoreSubmodules", "GIT_CONFIG_VALUE_2=all",
+		"GIT_CONFIG_KEY_3=core.hooksPath", "GIT_CONFIG_VALUE_3="+hooksPath,
+		"GIT_CONFIG_KEY_4=core.pager", "GIT_CONFIG_VALUE_4=",
+		"GIT_CONFIG_KEY_5=credential.interactive", "GIT_CONFIG_VALUE_5=false",
+	)
+}
+
+func validateGateGitEnvironment(environment []string) error {
+	want := make(map[string]string)
+	for _, entry := range gateApprovedGitEnvironment(nil) {
+		name, value, _ := strings.Cut(entry, "=")
+		want[name] = value
+	}
+	dynamic := map[string]bool{"SYSTEMROOT": true, "WINDIR": true, "TEMP": true, "TMP": true, "TMPDIR": true}
+	seen := make(map[string]bool, len(environment))
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if !found || name == "" || seen[name] || strings.ContainsAny(value, "\x00\r\n") {
+			return errors.New("Gate A Git environment contains malformed or duplicate state")
+		}
+		seen[name] = true
+		if dynamic[name] {
+			continue
+		}
+		if expected, approved := want[name]; !approved || expected != value {
+			return errors.New("Gate A Git environment contains unapproved state")
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			return errors.New("Gate A Git environment is missing required state")
+		}
+	}
+	return nil
 }
 
 func assertGateManifestCases(t *testing.T, manifest gateManifest) {
@@ -638,7 +836,132 @@ func assertPlatformEquivalentGatePaths(t *testing.T) {
 	}
 }
 
-func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
+func assertFrozenGateProductionDependencies(t *testing.T, repositoryRoot string) {
+	t.Helper()
+	wantPath := filepath.Join(repositoryRoot, "testdata", "zero-token", "gate-a-production-imports.txt")
+	wantBody, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("read reviewed Gate A production imports: %v", err)
+	}
+	want := splitGateImportLines(string(wantBody))
+	wantEdgeDigestPath := filepath.Join(repositoryRoot, "testdata", "zero-token", "gate-a-production-import-edges.sha256")
+	wantEdgeDigestBody, err := os.ReadFile(wantEdgeDigestPath)
+	if err != nil {
+		t.Fatalf("read reviewed Gate A production import edges: %v", err)
+	}
+	wantEdgeDigest := strings.TrimSpace(string(wantEdgeDigestBody))
+	decodedDigest, err := hex.DecodeString(wantEdgeDigest)
+	if err != nil || len(decodedDigest) != sha256.Size || wantEdgeDigest != strings.ToLower(wantEdgeDigest) {
+		t.Fatalf("reviewed Gate A production import edge digest is invalid")
+	}
+	got := loadGateProductionImportClosure(t, repositoryRoot)
+	if fmt.Sprint(got.paths) != fmt.Sprint(want) {
+		t.Fatalf("Gate A production import closure requires review: added=%v removed=%v", gateStringDifference(got.paths, want), gateStringDifference(want, got.paths))
+	}
+	if got.edgeDigest != wantEdgeDigest {
+		t.Fatalf("Gate A production import edges require review: got=%s want=%s", got.edgeDigest, wantEdgeDigest)
+	}
+	assertGateLocalEntrypoints(t, repositoryRoot)
+}
+
+type gateDependencyClosure struct {
+	paths      []string
+	edgeDigest string
+}
+
+func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDependencyClosure {
+	t.Helper()
+	goExecutable, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	goExecutable, err = filepath.Abs(goExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goExecutable, err = filepath.EvalSymlinks(goExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commandRoot := t.TempDir()
+	targets := [][2]string{{"darwin", "amd64"}, {"darwin", "arm64"}, {"linux", "amd64"}, {"windows", "amd64"}}
+	closure := make(map[string]bool)
+	edges := make(map[string]bool)
+	for _, target := range targets {
+		command := exec.Command(goExecutable, "list", "-deps", "-f", `PATH{{"\t"}}{{.ImportPath}}{{"\n"}}{{range .Imports}}EDGE{{"\t"}}{{$.ImportPath}}{{"\t"}}{{.}}{{"\n"}}{{end}}`, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
+		command.Dir = repositoryRoot
+		command.Env = gateGoListEnvironment(os.Environ(), commandRoot, target[0], target[1])
+		output, err := command.Output()
+		if err != nil {
+			t.Fatalf("load Gate A production imports for %s/%s: %v", target[0], target[1], err)
+		}
+		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+			fields := strings.Split(line, "\t")
+			switch {
+			case len(fields) == 2 && fields[0] == "PATH" && fields[1] != "":
+				closure[fields[1]] = true
+			case len(fields) == 3 && fields[0] == "EDGE" && fields[1] != "" && fields[2] != "":
+				edges[fields[1]+" -> "+fields[2]] = true
+			default:
+				t.Fatalf("invalid Gate A production import record for %s/%s: %q", target[0], target[1], line)
+			}
+		}
+	}
+	edgeLines := sortedGateKeys(edges)
+	edgeSum := sha256.Sum256([]byte(strings.Join(edgeLines, "\n") + "\n"))
+	return gateDependencyClosure{
+		paths:      sortedGateKeys(closure),
+		edgeDigest: hex.EncodeToString(edgeSum[:]),
+	}
+}
+
+func gateGoListEnvironment(environment []string, temporaryRoot, goos, goarch string) []string {
+	drop := map[string]bool{
+		"CGO_ENABLED": true, "GOCACHE": true, "GOENV": true, "GOFLAGS": true,
+		"GOOS": true, "GOARCH": true, "GOPROXY": true, "GOSUMDB": true,
+		"GOTMPDIR": true, "GOWORK": true, "TEMP": true, "TMP": true, "TMPDIR": true,
+	}
+	result := make([]string, 0, len(environment)+13)
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if found && !drop[strings.ToUpper(name)] {
+			result = append(result, entry)
+		}
+	}
+	return append(result,
+		"CGO_ENABLED=0", "GOCACHE="+filepath.Join(temporaryRoot, "cache-"+goos+"-"+goarch),
+		"GOENV=off", "GOFLAGS=-mod=readonly", "GOOS="+goos, "GOARCH="+goarch,
+		"GOPROXY=off", "GOSUMDB=off", "GOTMPDIR="+temporaryRoot, "GOWORK=off",
+		"TEMP="+temporaryRoot, "TMP="+temporaryRoot, "TMPDIR="+temporaryRoot,
+	)
+}
+
+func splitGateImportLines(body string) []string {
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			seen[line] = true
+		}
+	}
+	return sortedGateKeys(seen)
+}
+
+func gateStringDifference(first, second []string) []string {
+	other := make(map[string]bool, len(second))
+	for _, value := range second {
+		other[value] = true
+	}
+	var result []string
+	for _, value := range first {
+		if !other[value] {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func assertGateLocalEntrypoints(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	queue := []string{"internal/scan", "internal/source/codex", "internal/projectprobe"}
 	seen := make(map[string]bool)
@@ -668,10 +991,11 @@ func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
 			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
 				continue
 			}
-			file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, entry.Name()), nil, parser.ImportsOnly)
+			file, err := parser.ParseFile(token.NewFileSet(), filepath.Join(directory, entry.Name()), nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
+			aliases := make(map[string]string)
 			for _, importSpec := range file.Imports {
 				path, err := strconv.Unquote(importSpec.Path.Value)
 				if err != nil {
@@ -686,11 +1010,34 @@ func assertNoForbiddenGateDependencies(t *testing.T, repositoryRoot string) {
 				if path == "net" && relative != "internal/projectprobe" {
 					t.Fatalf("network-capable package outside ProjectProbe parser: package=%q", relative)
 				}
+				alias := filepath.Base(path)
+				if importSpec.Name != nil {
+					alias = importSpec.Name.Name
+				}
+				aliases[alias] = path
 				const module = "github.com/neomei/SessionReviewer/"
 				if strings.HasPrefix(path, module+"internal/") {
 					queue = append(queue, strings.TrimPrefix(path, module))
 				}
 			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				identifier, ok := selector.X.(*ast.Ident)
+				if !ok || aliases[identifier.Name] != "net" {
+					return true
+				}
+				if selector.Sel.Name != "ParseIP" {
+					t.Fatalf("unapproved network entrypoint %s.%s in %s", identifier.Name, selector.Sel.Name, relative)
+				}
+				return true
+			})
 		}
 	}
 	if fmt.Sprint(sortedGateKeys(seen)) != fmt.Sprint(sortedGateKeys(want)) {
