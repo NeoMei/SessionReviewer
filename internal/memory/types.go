@@ -310,7 +310,10 @@ func ValidateSourceRecord(value SourceRecord) error {
 	return nil
 }
 
-func ValidateObservationRevision(value ObservationRevision) error {
+func ValidateObservationRevision(value ObservationRevision, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -340,14 +343,20 @@ func ValidateObservationRevision(value ObservationRevision) error {
 	if !safeIDPattern.MatchString(value.AdapterID) || !safeIDPattern.MatchString(value.AdapterVersion) {
 		return errors.New("invalid adapter identity")
 	}
-	want := ObservationRevisionID(value)
+	want := ObservationRevisionID(value, checkpoints...)
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if want == "" || value.RevisionID != want {
 		return errors.New("observation revision_id does not match canonical identity")
 	}
 	return nil
 }
 
-func ValidateSessionView(value SessionView) error {
+func ValidateSessionView(value SessionView, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -369,40 +378,46 @@ func ValidateSessionView(value SessionView) error {
 	if err := validateTimeRange(value.StartedAt, value.EndedAt); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("active revision", value.ActiveRevisionIDs, 65536); err != nil {
+	if err := validateUniqueDigests("active revision", value.ActiveRevisionIDs, 65536, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateObservationSummaries(value.ObservationSummaries, value.ActiveRevisionIDs); err != nil {
+	if err := validateObservationSummaries(value.ObservationSummaries, value.ActiveRevisionIDs, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536); err != nil {
+	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDerivedRecords(value.DerivedRecords); err != nil {
+	if err := validateDerivedRecords(value.DerivedRecords, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ActiveRevisionIDs, "active revision"); err != nil {
+	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ActiveRevisionIDs, "active revision", checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDiagnostics(value.Diagnostics); err != nil {
+	if err := validateDiagnostics(value.Diagnostics, checkpoints...); err != nil {
 		return err
 	}
 	if !safeIDPattern.MatchString(value.MaterializerVersion) {
 		return errors.New("invalid materializer version")
 	}
-	want, err := SessionViewDigest(value)
+	want, err := SessionViewDigest(value, checkpoints...)
+	if cause := digestCheckpoint(checkpoints); cause != nil {
+		return cause
+	}
 	if err != nil || value.Digest != want {
 		return errors.New("SessionView self digest does not match canonical identity")
 	}
 	return nil
 }
 
-func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs []string) error {
+func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs []string, checkpoints ...func() error) error {
 	if len(values) != len(activeRevisionIDs) {
 		return errors.New("observation summary count does not match active revisions")
 	}
 	stableKeys := make(map[string]struct{}, len(values))
 	for index, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if value.RevisionID != activeRevisionIDs[index] || !validDigest(value.RevisionID) {
 			return errors.New("observation summary revision does not match active revision order")
 		}
@@ -444,7 +459,10 @@ func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs
 	return nil
 }
 
-func ValidateProjectProbeState(value ProjectProbeState) error {
+func ValidateProjectProbeState(value ProjectProbeState, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -463,26 +481,32 @@ func ValidateProjectProbeState(value ProjectProbeState) error {
 	if value.DirtyPathCount < 0 || value.DirtyPathCount > maxSafeInteger {
 		return errors.New("invalid dirty path count")
 	}
-	if err := validateUniqueDigests("remote identity", value.RemoteIdentityHashes, 256); err != nil {
+	if err := validateUniqueDigests("remote identity", value.RemoteIdentityHashes, 256, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateProbeFiles(value.VersionFiles); err != nil {
+	if err := validateProbeFiles(value.VersionFiles, checkpoints...); err != nil {
 		return fmt.Errorf("invalid version files: %w", err)
 	}
-	if err := validateProbeFiles(value.RequiredProjectionFiles); err != nil {
+	if err := validateProbeFiles(value.RequiredProjectionFiles, checkpoints...); err != nil {
 		return fmt.Errorf("invalid required projection files: %w", err)
 	}
-	if err := validateDiagnostics(value.Diagnostics); err != nil {
+	if err := validateDiagnostics(value.Diagnostics, checkpoints...); err != nil {
 		return err
 	}
-	want, err := ProjectProbeStateDigest(value)
+	want, err := ProjectProbeStateDigest(value, checkpoints...)
+	if cause := digestCheckpoint(checkpoints); cause != nil {
+		return cause
+	}
 	if err != nil || value.Digest != want {
 		return errors.New("ProjectProbeState self digest does not match canonical identity")
 	}
 	return nil
 }
 
-func ValidateProbeCheck(value ProbeCheck) error {
+func ValidateProbeCheck(value ProbeCheck, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -492,10 +516,13 @@ func ValidateProbeCheck(value ProbeCheck) error {
 	if !validDigest(value.StateDigest) {
 		return errors.New("invalid probe state digest")
 	}
-	return validateDiagnostics(value.Diagnostics)
+	return validateDiagnostics(value.Diagnostics, checkpoints...)
 }
 
-func ValidateProjectView(value ProjectView) error {
+func ValidateProjectView(value ProjectView, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -511,10 +538,10 @@ func ValidateProjectView(value ProjectView) error {
 	if len(value.SessionViewDependencies) != value.SourceSessions {
 		return errors.New("SessionView dependency count does not match terminal sessions")
 	}
-	if err := validateSessionDependencies(value.SessionViewDependencies, value.SourceSessions); err != nil {
+	if err := validateSessionDependencies(value.SessionViewDependencies, value.SourceSessions, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("observation revision", value.ObservationRevisionIDs, 1_000_000); err != nil {
+	if err := validateUniqueDigests("observation revision", value.ObservationRevisionIDs, 1_000_000, checkpoints...); err != nil {
 		return err
 	}
 	if !validDigest(value.ProbeStateDigest) || !validDigest(value.DependencyDigest) || (value.PreviousViewDigest != "" && !validDigest(value.PreviousViewDigest)) {
@@ -523,41 +550,53 @@ func ValidateProjectView(value ProjectView) error {
 	if err := validateStateSnapshot(value.LiveState); err != nil {
 		return err
 	}
-	if err := validateDerivedRecords(value.WitnessedState); err != nil {
+	if err := validateDerivedRecords(value.WitnessedState, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDerivedRecords(value.DerivedRecords); err != nil {
+	if err := validateDerivedRecords(value.DerivedRecords, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDerivedDependencyClosure(value.WitnessedState, value.ObservationRevisionIDs, "selected observation"); err != nil {
+	if err := validateDerivedDependencyClosure(value.WitnessedState, value.ObservationRevisionIDs, "selected observation", checkpoints...); err != nil {
 		return err
 	}
-	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ObservationRevisionIDs, "selected observation"); err != nil {
+	if err := validateDerivedDependencyClosure(value.DerivedRecords, value.ObservationRevisionIDs, "selected observation", checkpoints...); err != nil {
 		return err
 	}
 	witnessedIDs := make(map[string]struct{}, len(value.WitnessedState))
 	for _, record := range value.WitnessedState {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		witnessedIDs[record.ID] = struct{}{}
 	}
 	for _, record := range value.DerivedRecords {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if _, duplicate := witnessedIDs[record.ID]; duplicate {
 			return fmt.Errorf("duplicate ProjectView derived record ID %q", record.ID)
 		}
 	}
-	if err := validateAssociatedUsage(value.AssociatedUsage); err != nil {
+	if err := validateAssociatedUsage(value.AssociatedUsage, checkpoints...); err != nil {
 		return err
 	}
 	if !safeIDPattern.MatchString(value.ReducerVersion) {
 		return errors.New("invalid reducer version")
 	}
-	want, err := ProjectViewDigest(value)
+	want, err := ProjectViewDigest(value, checkpoints...)
+	if cause := digestCheckpoint(checkpoints); cause != nil {
+		return cause
+	}
 	if err != nil || value.Digest != want {
 		return errors.New("ProjectView self digest does not match canonical identity")
 	}
 	return nil
 }
 
-func ValidateGenerationManifest(value GenerationManifest) error {
+func ValidateGenerationManifest(value GenerationManifest, checkpoints ...func() error) error {
+	if err := digestCheckpoint(checkpoints); err != nil {
+		return err
+	}
 	if err := validateVersion(value.SchemaVersion); err != nil {
 		return err
 	}
@@ -567,22 +606,22 @@ func ValidateGenerationManifest(value GenerationManifest) error {
 	if err := validateTimestamp(value.CreatedAt, true); err != nil {
 		return fmt.Errorf("invalid generation time: %w", err)
 	}
-	if err := validateUniqueDigests("source record", value.SourceRecordDigests, 65536); err != nil {
+	if err := validateUniqueDigests("source record", value.SourceRecordDigests, 65536, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536); err != nil {
+	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536, checkpoints...); err != nil {
 		return err
 	}
 	if len(value.SessionViews) != len(value.SourceRecordDigests) {
 		return errors.New("SessionView dependency count does not match frozen sources")
 	}
-	if err := validateSessionDependencies(value.SessionViews, len(value.SessionViews)); err != nil {
+	if err := validateSessionDependencies(value.SessionViews, len(value.SessionViews), checkpoints...); err != nil {
 		return err
 	}
 	if !validDigest(value.ProbeStateDigest) || !validDigest(value.ProjectViewDigest) {
 		return errors.New("invalid generation object digest")
 	}
-	if err := ValidateProbeCheck(value.ProbeCheck); err != nil {
+	if err := ValidateProbeCheck(value.ProbeCheck, checkpoints...); err != nil {
 		return err
 	}
 	if value.ProbeCheck.StateDigest != value.ProbeStateDigest {
@@ -590,6 +629,9 @@ func ValidateGenerationManifest(value GenerationManifest) error {
 	}
 	active := make(map[string]struct{}, len(value.ActiveRevisions))
 	for key, revision := range value.ActiveRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !validDigest(key) || !validDigest(revision) {
 			return errors.New("invalid active revision map")
 		}
@@ -599,6 +641,9 @@ func ValidateGenerationManifest(value GenerationManifest) error {
 		active[revision] = struct{}{}
 	}
 	for previous, successor := range value.SupersededRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !validDigest(previous) || !validDigest(successor) || previous == successor {
 			return errors.New("invalid superseded revision map")
 		}
@@ -607,6 +652,9 @@ func ValidateGenerationManifest(value GenerationManifest) error {
 		}
 	}
 	for key, revision := range value.WithdrawnRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !validDigest(key) || !validDigest(revision) {
 			return errors.New("invalid withdrawn revision map")
 		}
@@ -748,12 +796,15 @@ func validateObservationFields(fields map[string]string) error {
 	return nil
 }
 
-func validateDerivedRecords(records []DerivedRecord) error {
+func validateDerivedRecords(records []DerivedRecord, checkpoints ...func() error) error {
 	if len(records) > 65536 {
 		return errors.New("too many derived records")
 	}
 	seen := make(map[string]struct{}, len(records))
 	for _, record := range records {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !safeIDPattern.MatchString(record.ID) || !fieldNamePattern.MatchString(record.Kind) || !safeIDPattern.MatchString(record.RuleID) || !safeIDPattern.MatchString(record.RuleVersion) {
 			return errors.New("invalid derived record identity")
 		}
@@ -772,7 +823,7 @@ func validateDerivedRecords(records []DerivedRecord) error {
 				return err
 			}
 		}
-		if err := validateUniqueDigests("derived dependency", record.DependencyRevisionIDs, 4096); err != nil {
+		if err := validateUniqueDigests("derived dependency", record.DependencyRevisionIDs, 4096, checkpoints...); err != nil {
 			return err
 		}
 		if err := validateFields(record.Fields); err != nil {
@@ -782,13 +833,22 @@ func validateDerivedRecords(records []DerivedRecord) error {
 	return nil
 }
 
-func validateDerivedDependencyClosure(records []DerivedRecord, selected []string, selectedName string) error {
+func validateDerivedDependencyClosure(records []DerivedRecord, selected []string, selectedName string, checkpoints ...func() error) error {
 	allowed := make(map[string]struct{}, len(selected))
 	for _, revisionID := range selected {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		allowed[revisionID] = struct{}{}
 	}
 	for _, record := range records {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		for _, dependency := range record.DependencyRevisionIDs {
+			if err := digestCheckpoint(checkpoints); err != nil {
+				return err
+			}
 			if _, exists := allowed[dependency]; !exists {
 				return fmt.Errorf("derived record %q dependency is not an enclosing %s", record.ID, selectedName)
 			}
@@ -797,11 +857,14 @@ func validateDerivedDependencyClosure(records []DerivedRecord, selected []string
 	return nil
 }
 
-func validateDiagnostics(values []Diagnostic) error {
+func validateDiagnostics(values []Diagnostic, checkpoints ...func() error) error {
 	if len(values) > 4096 {
 		return errors.New("too many diagnostics")
 	}
 	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !safeIDPattern.MatchString(value.Code) {
 			return errors.New("invalid diagnostic code")
 		}
@@ -815,12 +878,15 @@ func validateDiagnostics(values []Diagnostic) error {
 	return nil
 }
 
-func validateProbeFiles(values []ProbeFile) error {
+func validateProbeFiles(values []ProbeFile, checkpoints ...func() error) error {
 	if len(values) > 4096 {
 		return errors.New("too many probe files")
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if err := validateBoundedText("probe path", value.Path, 1024, false); err != nil {
 			return err
 		}
@@ -835,12 +901,15 @@ func validateProbeFiles(values []ProbeFile) error {
 	return nil
 }
 
-func validateSessionDependencies(values []SessionViewDependency, maximum int) error {
+func validateSessionDependencies(values []SessionViewDependency, maximum int, checkpoints ...func() error) error {
 	if len(values) > maximum || len(values) > 65536 {
 		return errors.New("too many SessionView dependencies")
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid SessionView dependency")
 		}
@@ -866,12 +935,15 @@ func validateStateSnapshot(value StateSnapshot) error {
 	return nil
 }
 
-func validateAssociatedUsage(values []AssociatedUsage) error {
+func validateAssociatedUsage(values []AssociatedUsage, checkpoints ...func() error) error {
 	if len(values) > 65536 {
 		return errors.New("too many associated usage rows")
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
 			return errors.New("invalid associated usage row")
 		}
@@ -901,12 +973,15 @@ func validateUniqueSafeIDs(name string, values []string, maximum int) error {
 	return nil
 }
 
-func validateUniqueDigests(name string, values []string, maximum int) error {
+func validateUniqueDigests(name string, values []string, maximum int, checkpoints ...func() error) error {
 	if len(values) > maximum {
 		return fmt.Errorf("too many %s digests", name)
 	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
 		if !validDigest(value) {
 			return fmt.Errorf("invalid %s digest", name)
 		}

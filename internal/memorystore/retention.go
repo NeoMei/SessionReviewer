@@ -24,6 +24,10 @@ const (
 	retentionGracePeriod      = 7 * 24 * time.Hour
 	maxRetentionEntries       = 100_000
 	maxRetentionCandidateSize = 4 << 20
+	// Gate B may pin a bounded publication window. Sixty-four generations is
+	// deliberately generous for that window while keeping every cleanup
+	// candidate's rooted-manifest revalidation a small constant factor.
+	maxExternalGenerationPins = 64
 )
 
 // RetentionReport separates the current prepared/external-pin graph from
@@ -49,17 +53,17 @@ type retentionFile struct {
 }
 
 type retentionSnapshot struct {
-	report      RetentionReport
-	candidates  []retentionFile
-	fingerprint string
-	namespaces  map[string]retentionFile
-	anchors     retentionAnchors
+	report     RetentionReport
+	candidates []retentionFile
+	namespaces map[string]retentionFile
+	anchors    retentionAnchors
 }
 
 type retentionAnchors struct {
 	root            retentionFile
 	preparedPointer *retentionFile
 	generationRoots map[string]retentionFile
+	externalPins    map[string]struct{}
 	namespaces      map[string]retentionFile
 }
 
@@ -70,6 +74,7 @@ var retentionDeleteCheckpoint func() error
 var retentionFullSnapshotCheckpoint func()
 var retentionCandidateRevalidationCheckpoint func()
 var retentionTraversalCheckpoint func()
+var retentionPinnedManifestReadCheckpoint func(string)
 
 // ReportRetention is read-only. External generation pins are opaque generation
 // IDs supplied by later gates; each is validated against a complete immutable
@@ -100,7 +105,7 @@ func (s *Store) ReportRetentionContext(ctx context.Context, now time.Time, exter
 		}
 		report = snapshot.report
 		return nil
-	})
+	}, ctx)
 	return report, err
 }
 
@@ -178,11 +183,14 @@ func (s *Store) CleanupUnreachableContext(ctx context.Context, now time.Time, ex
 			expected.anchors.namespaces[namespace] = namespaceFact
 		}
 		return nil
-	})
+	}, ctx)
 	return report, err
 }
 
 func normalizeGenerationPins(values []string) ([]string, error) {
+	if len(values) > maxExternalGenerationPins {
+		return nil, fmt.Errorf("external generation pins must contain at most %d entries", maxExternalGenerationPins)
+	}
 	pins := append([]string(nil), values...)
 	sort.Strings(pins)
 	for index, pin := range pins {
@@ -304,14 +312,14 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 			return retentionSnapshot{}, err
 		}
 		file.relative = filepath.ToSlash(filepath.Join("generations", entry.Name()))
-		manifest, err := decodeGeneration(body, s.projectID, generationID, "")
+		manifest, err := decodeGenerationContext(ctx, body, s.projectID, generationID, "")
 		if err != nil {
 			return retentionSnapshot{}, fmt.Errorf("validate generation %q: %w", generationID, err)
 		}
 		if err := retentionCheckpoint(ctx); err != nil {
 			return retentionSnapshot{}, err
 		}
-		digest, err := memory.Digest(manifest)
+		digest, err := memory.Digest(manifest, storeCheckpointCallback(ctx, "hash"))
 		if err != nil {
 			return retentionSnapshot{}, err
 		}
@@ -325,7 +333,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 
 	prepared, preparedErr := Prepared{}, ErrNoPreparedGeneration
 	if preparedPointerFound {
-		preparedErr = decodeCanonicalJSON(preparedPointerBody, &prepared)
+		preparedErr = decodeCanonicalJSONContext(ctx, preparedPointerBody, &prepared)
 		if preparedErr == nil {
 			preparedErr = validatePrepared(prepared)
 		}
@@ -486,11 +494,10 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].relative < candidates[j].relative })
-	fingerprint, err := retentionFingerprint(ctx, allFacts)
-	if err != nil {
-		return retentionSnapshot{}, err
+	anchors := retentionAnchors{
+		root: rootAnchor, generationRoots: make(map[string]retentionFile, len(pins)+1),
+		externalPins: make(map[string]struct{}, len(pins)), namespaces: cloneRetentionFacts(namespaceFacts),
 	}
-	anchors := retentionAnchors{root: rootAnchor, generationRoots: make(map[string]retentionFile, len(pins)+1), namespaces: cloneRetentionFacts(namespaceFacts)}
 	for _, fact := range rootFacts {
 		if fact.relative == "manifest.json" {
 			copyFact := fact
@@ -503,8 +510,9 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 	}
 	for _, pin := range pins {
 		anchors.generationRoots[pin] = generationFiles[pin]
+		anchors.externalPins[pin] = struct{}{}
 	}
-	return retentionSnapshot{report: report, candidates: candidates, fingerprint: fingerprint, namespaces: namespaceFacts, anchors: anchors}, nil
+	return retentionSnapshot{report: report, candidates: candidates, namespaces: namespaceFacts, anchors: anchors}, nil
 }
 
 // revalidateRetentionCandidate deliberately rechecks only reachability anchors
@@ -590,6 +598,11 @@ func (s *Store) revalidateRetentionAnchors(ctx context.Context, anchors *retenti
 			return err
 		}
 		current, readErr := readRetentionFile(ctx, generations, generationID+".json", maxManifestBytes)
+		if readErr == nil {
+			if _, pinned := anchors.externalPins[generationID]; pinned && retentionPinnedManifestReadCheckpoint != nil {
+				retentionPinnedManifestReadCheckpoint(generationID)
+			}
+		}
 		current.relative = filepath.ToSlash(filepath.Join("generations", generationID+".json"))
 		current.digest = expected.digest
 		if readErr != nil || !sameRetentionFact(current, expected) {
@@ -922,21 +935,6 @@ func snapshotContainsExactCandidate(snapshot retentionSnapshot, candidate retent
 		}
 	}
 	return false
-}
-
-func retentionFingerprint(ctx context.Context, files []retentionFile) (string, error) {
-	copyFiles := append([]retentionFile(nil), files...)
-	sort.Slice(copyFiles, func(i, j int) bool { return copyFiles[i].relative < copyFiles[j].relative })
-	hash := sha256.New()
-	for _, file := range copyFiles {
-		if err := retentionCheckpoint(ctx); err != nil {
-			return "", err
-		}
-		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s\n",
-			file.relative, file.digest, file.size, uint32(file.mode), file.modified.UnixNano(),
-			file.identity.Kind, file.identity.Volume, file.identity.File+file.bodyHash)
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func retentionBodyHash(ctx context.Context, body []byte) (string, error) {

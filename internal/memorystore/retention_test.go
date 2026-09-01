@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/project"
 )
 
 var retentionNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
@@ -78,6 +79,214 @@ func TestRetentionKeepsNativeLineageAndValidatesOpaquePins(t *testing.T) {
 		if _, err := store.ReportRetention(retentionNow, pins...); err == nil {
 			t.Fatalf("invalid external pins accepted: %q", pins)
 		}
+	}
+}
+
+func TestRetentionRejectsMoreThan64ExternalPinsBeforeStoreIO(t *testing.T) {
+	_, store, _ := newRetentionStore(t, "generation-pin-limit")
+	pins := make([]string, 65)
+	for index := range pins {
+		pins[index] = fmt.Sprintf("generation-pin-%02d", index)
+	}
+	var snapshots atomic.Int32
+	retentionFullSnapshotCheckpoint = func() { snapshots.Add(1) }
+	t.Cleanup(func() { retentionFullSnapshotCheckpoint = nil })
+	if _, err := store.ReportRetention(retentionNow, pins...); err == nil || !strings.Contains(err.Error(), "at most 64") {
+		t.Fatalf("over-limit pin error=%v", err)
+	}
+	if snapshots.Load() != 0 {
+		t.Fatalf("over-limit pins reached store I/O: snapshots=%d", snapshots.Load())
+	}
+}
+
+func TestRetentionContextCancelsWhileStoreLockIsHeld(t *testing.T) {
+	_, store, _ := newRetentionStore(t, "held-lock-cancellation")
+	held, err := project.AcquireProjectLock(store.memory.Root, "locks/scan.lock", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	t.Cleanup(func() {
+		if !released {
+			_ = held.Release()
+		}
+	})
+
+	cancelCause := errors.New("stop waiting for retention lock")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, reportErr := store.ReportRetentionContext(ctx, retentionNow)
+		result <- reportErr
+	}()
+	// Establish that the report reached lock contention. This delay is much
+	// larger than the lock poll interval and much smaller than the legacy
+	// five-second timeout.
+	select {
+	case err := <-result:
+		t.Fatalf("report returned before cancellation: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel(cancelCause)
+
+	select {
+	case err := <-result:
+		if !errors.Is(err, cancelCause) {
+			t.Fatalf("report error=%v want cancellation cause", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Release before failing so the old blocking implementation can unwind
+		// without leaking a goroutine from this test.
+		released = true
+		if releaseErr := held.Release(); releaseErr != nil {
+			t.Fatalf("release held lock after timeout: %v", releaseErr)
+		}
+		err := <-result
+		t.Fatalf("context cancellation did not interrupt lock acquisition: %v", err)
+	}
+	released = true
+	if err := held.Release(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRetentionLargeInputsCancelInsideChunkedDecode(t *testing.T) {
+	payload := bytes.Repeat([]byte{'x'}, 16<<20)
+	jsonBody := make([]byte, 0, len(payload)+32)
+	jsonBody = append(jsonBody, "{\"padding\":\""...)
+	jsonBody = append(jsonBody, payload...)
+	jsonBody = append(jsonBody, "\"}"...)
+	jsonBody = append(jsonBody, '\n')
+	observationBody := bytes.Clone(jsonBody)
+
+	tests := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{name: "observation chunk", run: func(ctx context.Context) error {
+			_, err := decodeObservationChunkContext(ctx, observationBody)
+			return err
+		}},
+		{name: "session object", run: func(ctx context.Context) error {
+			return validateObjectBytesContext(ctx, ObjectSessionView, prefixedDigest("large-session"), jsonBody, testProjectID)
+		}},
+		{name: "project object", run: func(ctx context.Context) error {
+			return validateObjectBytesContext(ctx, ObjectProjectView, prefixedDigest("large-project"), jsonBody, testProjectID)
+		}},
+		{name: "generation manifest", run: func(ctx context.Context) error {
+			_, err := decodeGenerationContext(ctx, jsonBody, testProjectID, "large-generation", "")
+			return err
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cause := errors.New("cancel large " + test.name)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			calls := 0
+			storeContextCheckpoint = func(phase string) {
+				if phase == "decode" && calls < 32 {
+					calls++
+					if calls == 32 {
+						cancel(cause)
+					}
+				}
+			}
+			t.Cleanup(func() { storeContextCheckpoint = nil })
+			if err := test.run(ctx); !errors.Is(err, cause) {
+				t.Fatalf("large decode error=%v want cancellation cause", err)
+			}
+			if calls != 32 {
+				t.Fatalf("decode checkpoints=%d want 32", calls)
+			}
+			storeContextCheckpoint = nil
+		})
+	}
+}
+
+func TestRetentionLargeValidationAndCanonicalHashCancelInsideLoops(t *testing.T) {
+	const entries = 240_000 // More than 16 MiB once encoded as canonical digest strings.
+	values := make([]string, entries)
+	for index := range values {
+		values[index] = prefixedDigest(fmt.Sprintf("large-context-%d", index))
+	}
+
+	t.Run("validation", func(t *testing.T) {
+		cause := errors.New("cancel large validation")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		calls := 0
+		checkpoint := func() error {
+			calls++
+			if calls == 128 {
+				cancel(cause)
+			}
+			return context.Cause(ctx)
+		}
+		value := memory.ProjectView{
+			SchemaVersion:          memory.MemorySchemaVersion,
+			Digest:                 prefixedDigest("large-validation-view"),
+			ProjectID:              testProjectID,
+			Generation:             1,
+			StartedAt:              testStartedAt,
+			EndedAt:                testEndedAt,
+			ObservationRevisionIDs: values,
+			ProbeStateDigest:       prefixedDigest("large-validation-probe"),
+			DependencyDigest:       prefixedDigest("large-validation-dependency"),
+			ReducerVersion:         "v1",
+		}
+		if err := memory.ValidateProjectView(value, checkpoint); !errors.Is(err, cause) {
+			t.Fatalf("validation error=%v want cancellation cause", err)
+		}
+		if calls != 128 {
+			t.Fatalf("validation checkpoints=%d want 128", calls)
+		}
+	})
+
+	t.Run("canonical hash", func(t *testing.T) {
+		cause := errors.New("cancel canonical hash")
+		ctx, cancel := context.WithCancelCause(context.Background())
+		calls := 0
+		// A []string performs entries+1 reflection checks, one post-decode
+		// check, and entries+1 normalization checks before chunked hashing.
+		cancelAt := 2*entries + 8
+		checkpoint := func() error {
+			calls++
+			if calls == cancelAt {
+				cancel(cause)
+			}
+			return context.Cause(ctx)
+		}
+		if _, err := memory.Digest(values, checkpoint); !errors.Is(err, cause) {
+			t.Fatalf("digest error=%v want cancellation cause (calls=%d)", err, calls)
+		}
+		if calls != cancelAt {
+			t.Fatalf("digest checkpoints=%d want %d", calls, cancelAt)
+		}
+	})
+}
+
+func TestRetentionReadsEveryAllowedPinManifestOncePerCandidate(t *testing.T) {
+	dataRoot, store, first := newRetentionStore(t, "generation-pin-read-00")
+	pins := []string{first.manifest.GenerationID}
+	for index := 1; index < 64; index++ {
+		fixture := buildStoredFixture(t, store, fmt.Sprintf("generation-pin-read-%02d", index))
+		artifacts, err := store.prepareArtifacts(fixture.manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.withStoreLock(func() error { return store.writeGenerationUnlocked(fixture.manifest, artifacts) }); err != nil {
+			t.Fatal(err)
+		}
+		pins = append(pins, fixture.manifest.GenerationID)
+	}
+	writeRetentionCandidate(t, retentionMemoryRoot(dataRoot), "cache", ".cache", []byte("pin-read-candidate"), retentionNow.Add(-8*24*time.Hour))
+	var reads atomic.Int32
+	retentionPinnedManifestReadCheckpoint = func(string) { reads.Add(1) }
+	t.Cleanup(func() { retentionPinnedManifestReadCheckpoint = nil })
+	if _, err := store.CleanupUnreachable(retentionNow, pins...); err != nil {
+		t.Fatalf("cleanup at pin limit: %v", err)
+	}
+	if reads.Load() != 64 {
+		t.Fatalf("pin manifest reads=%d want 64", reads.Load())
 	}
 }
 

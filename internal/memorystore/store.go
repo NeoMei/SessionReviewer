@@ -28,12 +28,14 @@ import (
 )
 
 const (
-	privateDirectoryMode       fs.FileMode = 0o700
-	privateFileMode            fs.FileMode = 0o600
-	maxObjectBytes                         = 64 << 20
-	maxManifestBytes                       = 16 << 20
-	storeLockTimeout                       = 5 * time.Second
-	preparedAdvanceJournalLeaf             = "prepared-advance-v1.json"
+	privateDirectoryMode         fs.FileMode = 0o700
+	privateFileMode              fs.FileMode = 0o600
+	maxObjectBytes                           = 64 << 20
+	maxManifestBytes                         = 16 << 20
+	storeLockTimeout                         = 5 * time.Second
+	storeLockContextPollInterval             = 20 * time.Millisecond
+	storeContextReadChunkSize                = 64 * 1024
+	preparedAdvanceJournalLeaf               = "prepared-advance-v1.json"
 
 	// WriteRootFileChecked has three checkpoints when publishing a previously
 	// absent destination: before temporary creation, before publication, and
@@ -48,6 +50,10 @@ var (
 
 	storeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+	// storeContextCheckpoint is a deterministic test seam for proving that
+	// retention cancellation is observed inside large decode/validation work.
+	storeContextCheckpoint func(string)
 )
 
 // ObjectKind identifies one immutable content-addressed object collection.
@@ -610,31 +616,59 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
-	if kind != ObjectObservationChunk {
-		err := validateObjectBytes(kind, digest, body, projectID)
-		if cause := context.Cause(ctx); cause != nil {
-			return cause
-		}
-		return err
-	}
-	records, err := decodeObservationChunkContext(ctx, body)
-	if err != nil {
-		return err
-	}
-	for index := range records {
-		if err := context.Cause(ctx); err != nil {
+	switch kind {
+	case ObjectObservationChunk:
+		records, err := decodeObservationChunkContext(ctx, body)
+		if err != nil {
 			return err
 		}
-		if records[index].Key.ProjectID != projectID {
-			return errors.New("observation chunk contains a different project")
+		for index := range records {
+			if err := storeCheckpoint(ctx, "validation"); err != nil {
+				return err
+			}
+			if records[index].Key.ProjectID != projectID {
+				return errors.New("observation chunk contains a different project")
+			}
 		}
-	}
-	actual, err := memory.Digest(records)
-	if cause := context.Cause(ctx); cause != nil {
-		return cause
-	}
-	if err != nil || actual != digest {
-		return errors.Join(errors.New("observation chunk digest mismatch"), err)
+		actual, err := memory.Digest(records, storeCheckpointCallback(ctx, "hash"))
+		if err != nil || actual != digest {
+			return errors.Join(errors.New("observation chunk digest mismatch"), err)
+		}
+	case ObjectSessionView:
+		var value memory.SessionView
+		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
+			return err
+		}
+		if err := storeCheckpoint(ctx, "validation"); err != nil {
+			return err
+		}
+		if err := memory.ValidateSessionView(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored SessionView"), err)
+		}
+	case ObjectProbeState:
+		var value memory.ProjectProbeState
+		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
+			return err
+		}
+		if err := storeCheckpoint(ctx, "validation"); err != nil {
+			return err
+		}
+		if err := memory.ValidateProjectProbeState(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored ProjectProbeState"), err)
+		}
+	case ObjectProjectView:
+		var value memory.ProjectView
+		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
+			return err
+		}
+		if err := storeCheckpoint(ctx, "validation"); err != nil {
+			return err
+		}
+		if err := memory.ValidateProjectView(value, storeCheckpointCallback(ctx, "validation")); err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored ProjectView"), err)
+		}
+	default:
+		return errors.New("unknown immutable object kind")
 	}
 	return nil
 }
@@ -653,17 +687,54 @@ func (s *Store) Close() error {
 	return errors.Join(s.memory.Close(), s.data.Close())
 }
 
-func (s *Store) withStoreLock(run func() error) error {
+// withStoreLock keeps the legacy five-second wait when no cancellable context
+// is supplied. Retention may pass one context; acquisition then uses repeated
+// authenticated non-blocking attempts and observes cancellation between them.
+func (s *Store) withStoreLock(run func() error, contexts ...context.Context) error {
+	ctx := context.Background()
+	if len(contexts) > 1 || (len(contexts) == 1 && contexts[0] == nil) {
+		return errors.New("memory store lock accepts at most one non-nil context")
+	}
+	if len(contexts) == 1 {
+		ctx = contexts[0]
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.requireOpenLocked(); err != nil {
 		return err
 	}
-	lock, err := project.AcquireProjectLock(s.memory.Root, "locks/scan.lock", storeLockTimeout)
-	if err != nil {
-		return fmt.Errorf("acquire memory store lock: %w", err)
+	var lock *project.ProjectLock
+	for {
+		timeout := storeLockTimeout
+		if ctx.Done() != nil {
+			timeout = 0
+		}
+		var err error
+		lock, err = project.AcquireProjectLock(s.memory.Root, "locks/scan.lock", timeout)
+		if err == nil {
+			break
+		}
+		if ctx.Done() == nil || !errors.Is(err, project.ErrProjectLocked) {
+			return fmt.Errorf("acquire memory store lock: %w", err)
+		}
+		timer := time.NewTimer(storeLockContextPollInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return context.Cause(ctx)
+		case <-timer.C:
+		}
 	}
-	return errors.Join(run(), lock.Release())
+	runErr := context.Cause(ctx)
+	if runErr == nil {
+		runErr = run()
+	}
+	return errors.Join(runErr, lock.Release())
 }
 
 func (s *Store) requireOpenLocked() error {
@@ -1010,11 +1081,11 @@ func decodeObservationChunkContext(ctx context.Context, body []byte) ([]memory.O
 	if len(body) == 0 || body[len(body)-1] != '\n' {
 		return nil, errors.New("observation chunk is not canonical JSONL")
 	}
-	scanner := bufio.NewScanner(bytes.NewReader(body))
+	scanner := bufio.NewScanner(&storeContextReader{ctx: ctx, reader: bytes.NewReader(body), phase: "decode"})
 	scanner.Buffer(make([]byte, 64*1024), maxObjectBytes)
 	var records []memory.ObservationRevision
 	for scanner.Scan() {
-		if err := context.Cause(ctx); err != nil {
+		if err := storeCheckpoint(ctx, "decode"); err != nil {
 			return nil, err
 		}
 		line := scanner.Bytes()
@@ -1022,10 +1093,13 @@ func decodeObservationChunkContext(ctx context.Context, body []byte) ([]memory.O
 			return nil, errors.New("observation chunk contains an empty record")
 		}
 		var value memory.ObservationRevision
-		if err := decodeCanonicalJSON(append(bytes.Clone(line), '\n'), &value); err != nil {
+		if err := decodeCanonicalJSONContext(ctx, append(bytes.Clone(line), '\n'), &value); err != nil {
 			return nil, err
 		}
-		if err := memory.ValidateObservationRevision(value); err != nil {
+		if err := storeCheckpoint(ctx, "validation"); err != nil {
+			return nil, err
+		}
+		if err := memory.ValidateObservationRevision(value, storeCheckpointCallback(ctx, "validation")); err != nil {
 			return nil, fmt.Errorf("invalid stored observation: %w", err)
 		}
 		records = append(records, value)
@@ -1043,18 +1117,25 @@ func decodeObservationChunkContext(ctx context.Context, body []byte) ([]memory.O
 }
 
 func decodeGeneration(body []byte, projectID, generationID, expectedDigest string) (memory.GenerationManifest, error) {
+	return decodeGenerationContext(context.Background(), body, projectID, generationID, expectedDigest)
+}
+
+func decodeGenerationContext(ctx context.Context, body []byte, projectID, generationID, expectedDigest string) (memory.GenerationManifest, error) {
 	var value memory.GenerationManifest
-	if err := decodeCanonicalJSON(body, &value); err != nil {
+	if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
 		return memory.GenerationManifest{}, fmt.Errorf("decode immutable generation: %w", err)
 	}
-	if err := memory.ValidateGenerationManifest(value); err != nil {
+	if err := storeCheckpoint(ctx, "validation"); err != nil {
+		return memory.GenerationManifest{}, err
+	}
+	if err := memory.ValidateGenerationManifest(value, storeCheckpointCallback(ctx, "validation")); err != nil {
 		return memory.GenerationManifest{}, fmt.Errorf("validate immutable generation: %w", err)
 	}
 	if value.ProjectID != projectID || value.GenerationID != generationID {
 		return memory.GenerationManifest{}, errors.New("immutable generation identity mismatch")
 	}
 	if expectedDigest != "" {
-		digest, err := memory.Digest(value)
+		digest, err := memory.Digest(value, storeCheckpointCallback(ctx, "hash"))
 		if err != nil || digest != expectedDigest {
 			return memory.GenerationManifest{}, errors.Join(errors.New("immutable generation digest mismatch"), err)
 		}
@@ -1063,40 +1144,65 @@ func decodeGeneration(body []byte, projectID, generationID, expectedDigest strin
 }
 
 func decodeCanonicalJSON(body []byte, destination any) error {
+	return decodeCanonicalJSONContext(context.Background(), body, destination)
+}
+
+func decodeCanonicalJSONContext(ctx context.Context, body []byte, destination any) error {
+	if err := storeCheckpoint(ctx, "decode"); err != nil {
+		return err
+	}
 	if len(body) == 0 || len(body) > maxObjectBytes {
 		return errors.New("JSON object is empty or oversized")
 	}
-	if err := rejectDuplicateJSONFields(body); err != nil {
+	if err := rejectDuplicateJSONFieldsContext(ctx, body); err != nil {
 		return err
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder := json.NewDecoder(&storeContextReader{ctx: ctx, reader: bytes.NewReader(body), phase: "decode"})
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(destination); err != nil {
 		return err
 	}
-	if err := requireJSONEOF(decoder); err != nil {
+	if err := requireJSONEOFContext(ctx, decoder); err != nil {
+		return err
+	}
+	if err := storeCheckpoint(ctx, "decode"); err != nil {
 		return err
 	}
 	canonical, err := marshalCanonical(destination)
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(body, canonical) {
+	equal, err := equalStoreBytesContext(ctx, body, canonical)
+	if err != nil {
+		return err
+	}
+	if !equal {
 		return errors.New("JSON object is not in canonical stored form")
 	}
 	return nil
 }
 
 func rejectDuplicateJSONFields(body []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(body))
+	return rejectDuplicateJSONFieldsContext(context.Background(), body)
+}
+
+func rejectDuplicateJSONFieldsContext(ctx context.Context, body []byte) error {
+	decoder := json.NewDecoder(&storeContextReader{ctx: ctx, reader: bytes.NewReader(body), phase: "decode"})
 	decoder.UseNumber()
-	if err := scanJSONValue(decoder); err != nil {
+	if err := scanJSONValueContext(ctx, decoder); err != nil {
 		return err
 	}
-	return requireJSONEOF(decoder)
+	return requireJSONEOFContext(ctx, decoder)
 }
 
 func scanJSONValue(decoder *json.Decoder) error {
+	return scanJSONValueContext(context.Background(), decoder)
+}
+
+func scanJSONValueContext(ctx context.Context, decoder *json.Decoder) error {
+	if err := storeCheckpoint(ctx, "decode"); err != nil {
+		return err
+	}
 	token, err := decoder.Token()
 	if err != nil {
 		return err
@@ -1109,6 +1215,9 @@ func scanJSONValue(decoder *json.Decoder) error {
 	case '{':
 		seen := make(map[string]struct{})
 		for decoder.More() {
+			if err := storeCheckpoint(ctx, "decode"); err != nil {
+				return err
+			}
 			nameToken, err := decoder.Token()
 			if err != nil {
 				return err
@@ -1121,7 +1230,7 @@ func scanJSONValue(decoder *json.Decoder) error {
 				return fmt.Errorf("duplicate JSON field %q", name)
 			}
 			seen[name] = struct{}{}
-			if err := scanJSONValue(decoder); err != nil {
+			if err := scanJSONValueContext(ctx, decoder); err != nil {
 				return err
 			}
 		}
@@ -1131,7 +1240,7 @@ func scanJSONValue(decoder *json.Decoder) error {
 		}
 	case '[':
 		for decoder.More() {
-			if err := scanJSONValue(decoder); err != nil {
+			if err := scanJSONValueContext(ctx, decoder); err != nil {
 				return err
 			}
 		}
@@ -1146,6 +1255,13 @@ func scanJSONValue(decoder *json.Decoder) error {
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {
+	return requireJSONEOFContext(context.Background(), decoder)
+}
+
+func requireJSONEOFContext(ctx context.Context, decoder *json.Decoder) error {
+	if err := storeCheckpoint(ctx, "decode"); err != nil {
+		return err
+	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
@@ -1154,6 +1270,52 @@ func requireJSONEOF(decoder *json.Decoder) error {
 		return err
 	}
 	return nil
+}
+
+type storeContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+	phase  string
+}
+
+func (reader *storeContextReader) Read(buffer []byte) (int, error) {
+	if err := storeCheckpoint(reader.ctx, reader.phase); err != nil {
+		return 0, err
+	}
+	if len(buffer) > storeContextReadChunkSize {
+		buffer = buffer[:storeContextReadChunkSize]
+	}
+	return reader.reader.Read(buffer)
+}
+
+func storeCheckpoint(ctx context.Context, phase string) error {
+	if ctx == nil {
+		return errors.New("memory store context is required")
+	}
+	if storeContextCheckpoint != nil {
+		storeContextCheckpoint(phase)
+	}
+	return context.Cause(ctx)
+}
+
+func storeCheckpointCallback(ctx context.Context, phase string) func() error {
+	return func() error { return storeCheckpoint(ctx, phase) }
+}
+
+func equalStoreBytesContext(ctx context.Context, left, right []byte) (bool, error) {
+	if len(left) != len(right) {
+		return false, nil
+	}
+	for offset := 0; offset < len(left); offset += storeContextReadChunkSize {
+		if err := storeCheckpoint(ctx, "decode"); err != nil {
+			return false, err
+		}
+		end := min(len(left), offset+storeContextReadChunkSize)
+		if !bytes.Equal(left[offset:end], right[offset:end]) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func marshalCanonical(value any) ([]byte, error) {
