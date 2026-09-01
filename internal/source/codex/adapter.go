@@ -64,13 +64,27 @@ type adapter struct {
 	supersedes   []string
 
 	mu                        sync.RWMutex
+	leaseSequence             uint64
 	candidates                map[string]discoveredCandidate
-	candidateLeases           map[string]uint64
+	candidateLeases           map[string]candidateLease
+	candidateLeaseCounts      map[string]uint64
 	candidateHandlesBySession map[string][]string
 	frozen                    map[string]frozenSource
-	frozenLeases              map[string]uint64
+	frozenLeases              map[string]boundaryLease
+	frozenLeaseCounts         map[string]uint64
 	frozenBySource            map[string][]string
 	frozenBySession           map[string][]string
+}
+
+type candidateLease struct {
+	handle    string
+	sessionID string
+}
+
+type boundaryLease struct {
+	handle    string
+	key       string
+	sessionID string
 }
 
 type frozenSource struct {
@@ -152,10 +166,12 @@ func New(options AdapterOptions) (source.Adapter, error) {
 		version:                   options.AdapterVersion,
 		supersedes:                supersedes,
 		candidates:                make(map[string]discoveredCandidate),
-		candidateLeases:           make(map[string]uint64),
+		candidateLeases:           make(map[string]candidateLease),
+		candidateLeaseCounts:      make(map[string]uint64),
 		candidateHandlesBySession: make(map[string][]string),
 		frozen:                    make(map[string]frozenSource),
-		frozenLeases:              make(map[string]uint64),
+		frozenLeases:              make(map[string]boundaryLease),
+		frozenLeaseCounts:         make(map[string]uint64),
 		frozenBySource:            make(map[string][]string),
 		frozenBySession:           make(map[string][]string),
 	}, nil
@@ -206,7 +222,7 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
 			for _, candidate := range result.Candidates {
-				a.releaseCandidateLocked(candidate.Handle, candidate.SessionID)
+				a.releaseCandidateLocked(candidate)
 			}
 			return source.Discovery{}, err
 		}
@@ -255,7 +271,9 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 		}
 		candidate.CatalogBaseline = cloneCatalogBaseline(baseline)
 		a.candidates[handle] = discoveredCandidate{resolved: resolved, baseline: cloneCatalogBaseline(baseline)}
-		a.candidateLeases[handle]++
+		candidate.Lease = a.newLeaseLocked("candidate", handle)
+		a.candidateLeases[candidate.Lease] = candidateLease{handle: handle, sessionID: id}
+		a.candidateLeaseCounts[handle]++
 		a.candidateHandlesBySession[id] = appendUnique(a.candidateHandlesBySession[id], handle)
 		a.evictCandidatesLocked(id)
 		result.Candidates = append(result.Candidates, candidate)
@@ -283,13 +301,14 @@ func codexDiscoveryIssue(issue session.DiscoveryIssue) source.Issue {
 func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (source.Boundary, error) {
 	a.mu.RLock()
 	discovered, found := a.candidates[candidate.Handle]
+	lease, leased := a.candidateLeases[candidate.Lease]
 	a.mu.RUnlock()
 	resolved := discovered.resolved
-	if !found || candidate.Provider != providerCodex || candidate.SessionID != resolved.ID || candidate.InitialCWD != resolved.CWD ||
+	if !found || !leased || lease.handle != candidate.Handle || lease.sessionID != candidate.SessionID || candidate.Provider != providerCodex || candidate.SessionID != resolved.ID || candidate.InitialCWD != resolved.CWD ||
 		candidate.StartedAt != candidateStartedAt(resolved) || !sameCatalogBaseline(candidate.CatalogBaseline, discovered.baseline) {
 		return source.Boundary{}, errors.New("candidate was not returned by this Codex adapter")
 	}
-	defer a.releaseCandidate(candidate.Handle, candidate.SessionID)
+	defer a.AbandonCandidate(candidate)
 	if err := ctx.Err(); err != nil {
 		return source.Boundary{}, err
 	}
@@ -299,10 +318,15 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		if errors.Is(err, os.ErrNotExist) {
 			state, code = memory.Missing, "missing_segment"
 		}
-		return source.Boundary{
+		boundary := source.Boundary{
 			Candidate: candidate, TerminalState: state,
 			Issues: []source.Issue{{Code: code, Provider: providerCodex, SessionID: candidate.SessionID, Path: resolved.Path, TerminalState: state}},
-		}, nil
+		}
+		a.mu.Lock()
+		boundary.Lease = a.newLeaseLocked("boundary", candidate.Handle+"\x00"+string(state))
+		a.frozenLeases[boundary.Lease] = boundaryLease{sessionID: candidate.SessionID}
+		a.mu.Unlock()
+		return boundary, nil
 	}
 	defer closeFiles(files)
 	if err := ctx.Err(); err != nil {
@@ -344,33 +368,47 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		a.frozenBySource[key] = append(a.frozenBySource[key], boundaryHandle)
 		a.frozenBySession[candidate.SessionID] = append(a.frozenBySession[candidate.SessionID], boundaryHandle)
 	}
-	a.frozenLeases[boundaryHandle]++
+	boundary.Lease = a.newLeaseLocked("boundary", boundaryHandle)
+	a.frozenLeases[boundary.Lease] = boundaryLease{handle: boundaryHandle, key: key, sessionID: candidate.SessionID}
+	a.frozenLeaseCounts[boundaryHandle]++
 	a.evictFrozenLocked(key, candidate.SessionID)
 	a.mu.Unlock()
 	return cloneBoundary(boundary), nil
 }
 
-func (a *adapter) releaseCandidate(handle, sessionID string) {
+func (a *adapter) newLeaseLocked(kind, handle string) string {
+	a.leaseSequence++
+	return opaqueHandle(kind+"-lease", handle, strconv.FormatUint(a.leaseSequence, 10))
+}
+
+// AbandonCandidate releases exactly one Discover occurrence. It is safe to
+// call repeatedly and does not affect another occurrence with the same Handle.
+func (a *adapter) AbandonCandidate(candidate source.Candidate) {
 	a.mu.Lock()
-	a.releaseCandidateLocked(handle, sessionID)
+	a.releaseCandidateLocked(candidate)
 	a.mu.Unlock()
 }
 
-func (a *adapter) releaseCandidateLocked(handle, sessionID string) {
-	if leases := a.candidateLeases[handle]; leases > 1 {
-		a.candidateLeases[handle] = leases - 1
-	} else {
-		delete(a.candidateLeases, handle)
+func (a *adapter) releaseCandidateLocked(candidate source.Candidate) {
+	lease, found := a.candidateLeases[candidate.Lease]
+	if !found || lease.handle != candidate.Handle || lease.sessionID != candidate.SessionID {
+		return
 	}
-	a.evictCandidatesLocked(sessionID)
+	delete(a.candidateLeases, candidate.Lease)
+	if count := a.candidateLeaseCounts[lease.handle]; count > 1 {
+		a.candidateLeaseCounts[lease.handle] = count - 1
+	} else {
+		delete(a.candidateLeaseCounts, lease.handle)
+	}
+	a.evictCandidatesLocked(lease.sessionID)
 }
 
 func (a *adapter) evictCandidatesLocked(sessionID string) {
 	handles := a.candidateHandlesBySession[sessionID]
-	for inactiveCandidateCount(handles, a.candidateLeases) > maxRetainedCandidatesPerSession {
+	for inactiveHandleCount(handles, a.candidateLeaseCounts) > maxRetainedCandidatesPerSession {
 		removed := false
 		for index, handle := range handles {
-			if a.candidateLeases[handle] != 0 {
+			if a.candidateLeaseCounts[handle] != 0 {
 				continue
 			}
 			delete(a.candidates, handle)
@@ -389,7 +427,7 @@ func (a *adapter) evictCandidatesLocked(sessionID string) {
 	}
 }
 
-func inactiveCandidateCount(handles []string, leases map[string]uint64) int {
+func inactiveHandleCount(handles []string, leases map[string]uint64) int {
 	count := 0
 	for _, handle := range handles {
 		if leases[handle] == 0 {
@@ -411,27 +449,34 @@ func sameFrozenSegments(first, second []frozenSegment) bool {
 	return true
 }
 
-func (a *adapter) releaseFrozen(handle string) {
+// AbandonBoundary releases exactly one Freeze occurrence. It is idempotent;
+// stable frozen content remains available according to the bounded read index.
+func (a *adapter) AbandonBoundary(boundary source.Boundary) {
 	a.mu.Lock()
-	frozen, found := a.frozen[handle]
-	if found {
-		if leases := a.frozenLeases[handle]; leases > 1 {
-			a.frozenLeases[handle] = leases - 1
+	lease, found := a.frozenLeases[boundary.Lease]
+	if !found || lease.handle != boundary.Handle || lease.sessionID != boundary.Candidate.SessionID {
+		a.mu.Unlock()
+		return
+	}
+	delete(a.frozenLeases, boundary.Lease)
+	if lease.handle != "" {
+		if count := a.frozenLeaseCounts[lease.handle]; count > 1 {
+			a.frozenLeaseCounts[lease.handle] = count - 1
 		} else {
-			delete(a.frozenLeases, handle)
+			delete(a.frozenLeaseCounts, lease.handle)
 		}
-		a.evictFrozenLocked(frozenSourceKey(frozen.boundary.Candidate.Provider, frozen.boundary.Candidate.SessionID, frozen.boundary.SourceIdentity), frozen.boundary.Candidate.SessionID)
+		a.evictFrozenLocked(lease.key, lease.sessionID)
 	}
 	a.mu.Unlock()
 }
 
 func (a *adapter) evictFrozenLocked(key, sessionID string) {
-	for inactiveCandidateCount(a.frozenBySource[key], a.frozenLeases) > maxRetainedFrozenPerSource {
+	for inactiveHandleCount(a.frozenBySource[key], a.frozenLeaseCounts) > maxRetainedFrozenPerSource {
 		if !a.removeOldestInactiveFrozenLocked(a.frozenBySource[key]) {
 			break
 		}
 	}
-	for inactiveCandidateCount(a.frozenBySession[sessionID], a.frozenLeases) > maxRetainedFrozenPerSession {
+	for inactiveHandleCount(a.frozenBySession[sessionID], a.frozenLeaseCounts) > maxRetainedFrozenPerSession {
 		if !a.removeOldestInactiveFrozenLocked(a.frozenBySession[sessionID]) {
 			break
 		}
@@ -440,7 +485,7 @@ func (a *adapter) evictFrozenLocked(key, sessionID string) {
 
 func (a *adapter) removeOldestInactiveFrozenLocked(handles []string) bool {
 	for _, handle := range handles {
-		if a.frozenLeases[handle] == 0 {
+		if a.frozenLeaseCounts[handle] == 0 {
 			a.removeFrozenLocked(handle)
 			return true
 		}
@@ -454,7 +499,7 @@ func (a *adapter) removeFrozenLocked(handle string) {
 		return
 	}
 	delete(a.frozen, handle)
-	delete(a.frozenLeases, handle)
+	delete(a.frozenLeaseCounts, handle)
 	key := frozenSourceKey(frozen.boundary.Candidate.Provider, frozen.boundary.Candidate.SessionID, frozen.boundary.SourceIdentity)
 	a.frozenBySource[key] = removeHandle(a.frozenBySource[key], handle)
 	if len(a.frozenBySource[key]) == 0 {

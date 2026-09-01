@@ -53,6 +53,14 @@ type retentionSnapshot struct {
 	candidates  []retentionFile
 	fingerprint string
 	namespaces  map[string]retentionFile
+	anchors     retentionAnchors
+}
+
+type retentionAnchors struct {
+	root            retentionFile
+	preparedPointer *retentionFile
+	generationRoots map[string]retentionFile
+	namespaces      map[string]retentionFile
 }
 
 // retentionDeleteCheckpoint is a deterministic test seam at the final CAS
@@ -61,19 +69,32 @@ var retentionDeleteCheckpoint func() error
 
 var retentionFullSnapshotCheckpoint func()
 var retentionCandidateRevalidationCheckpoint func()
+var retentionTraversalCheckpoint func()
 
 // ReportRetention is read-only. External generation pins are opaque generation
 // IDs supplied by later gates; each is validated against a complete immutable
 // generation graph before it contributes reachability. The variadic form keeps
 // the Gate A no-pin call concise without inventing a Gate B dependency.
 func (s *Store) ReportRetention(now time.Time, externalGenerationPins ...string) (RetentionReport, error) {
+	return s.ReportRetentionContext(context.Background(), now, externalGenerationPins...)
+}
+
+// ReportRetentionContext is the cancellable read-only retention report. It
+// returns context.Cause(ctx) when traversal is cancelled.
+func (s *Store) ReportRetentionContext(ctx context.Context, now time.Time, externalGenerationPins ...string) (RetentionReport, error) {
+	if ctx == nil {
+		return RetentionReport{}, errors.New("retention report context is required")
+	}
+	if err := retentionContextCause(ctx); err != nil {
+		return RetentionReport{}, err
+	}
 	pins, err := normalizeGenerationPins(externalGenerationPins)
 	if err != nil {
 		return RetentionReport{}, err
 	}
 	var report RetentionReport
 	err = s.withStoreLock(func() error {
-		snapshot, snapshotErr := s.captureRetentionSnapshot(now, pins)
+		snapshot, snapshotErr := s.captureRetentionSnapshot(ctx, now, pins)
 		if snapshotErr != nil {
 			return snapshotErr
 		}
@@ -97,7 +118,7 @@ func (s *Store) CleanupUnreachableContext(ctx context.Context, now time.Time, ex
 	if ctx == nil {
 		return RetentionReport{}, errors.New("retention cleanup context is required")
 	}
-	if err := ctx.Err(); err != nil {
+	if err := retentionContextCause(ctx); err != nil {
 		return RetentionReport{}, err
 	}
 	pins, err := normalizeGenerationPins(externalGenerationPins)
@@ -106,10 +127,10 @@ func (s *Store) CleanupUnreachableContext(ctx context.Context, now time.Time, ex
 	}
 	var report RetentionReport
 	err = s.withStoreLock(func() error {
-		if err := ctx.Err(); err != nil {
+		if err := retentionContextCause(ctx); err != nil {
 			return err
 		}
-		expected, captureErr := s.captureRetentionSnapshot(now, pins)
+		expected, captureErr := s.captureRetentionSnapshot(ctx, now, pins)
 		if captureErr != nil {
 			return captureErr
 		}
@@ -120,7 +141,7 @@ func (s *Store) CleanupUnreachableContext(ctx context.Context, now time.Time, ex
 			physicalCandidates[candidate.identity]++
 		}
 		for _, candidate := range planned {
-			if err := ctx.Err(); err != nil {
+			if err := retentionContextCause(ctx); err != nil {
 				return err
 			}
 			namespace := strings.SplitN(candidate.relative, "/", 2)[0]
@@ -133,27 +154,28 @@ func (s *Store) CleanupUnreachableContext(ctx context.Context, now time.Time, ex
 						return err
 					}
 				}
-				if err := ctx.Err(); err != nil {
+				if err := retentionContextCause(ctx); err != nil {
 					return err
 				}
 				if retentionCandidateRevalidationCheckpoint != nil {
 					retentionCandidateRevalidationCheckpoint()
 				}
-				return s.revalidateRetentionCandidate(candidate, expected.namespaces)
+				return s.revalidateRetentionCandidate(ctx, candidate, &expected.anchors)
 			}
 			if err := s.memory.RemoveRegularIfHashMatchesChecked(candidate.relative, candidate.bodyHash, checkpoint); err != nil {
 				return fmt.Errorf("remove retention candidate: %w", err)
 			}
-			namespaceFact, err := s.captureRetentionNamespace(namespace)
-			if err != nil {
-				return err
-			}
-			expected.namespaces[namespace] = namespaceFact
 			report.CleanupCandidates--
 			physicalCandidates[candidate.identity]--
 			if physicalCandidates[candidate.identity] == 0 {
 				report.CleanupBytes -= candidate.size
 			}
+			namespaceFact, err := s.captureRetentionNamespace(ctx, namespace)
+			if err != nil {
+				return err
+			}
+			expected.namespaces[namespace] = namespaceFact
+			expected.anchors.namespaces[namespace] = namespaceFact
 		}
 		return nil
 	})
@@ -174,7 +196,10 @@ func normalizeGenerationPins(values []string) ([]string, error) {
 	return pins, nil
 }
 
-func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentionSnapshot, error) {
+func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pins []string) (retentionSnapshot, error) {
+	if err := retentionCheckpoint(ctx); err != nil {
+		return retentionSnapshot{}, err
+	}
 	if now.IsZero() {
 		return retentionSnapshot{}, errors.New("retention reference time is required")
 	}
@@ -186,8 +211,12 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		return retentionSnapshot{}, err
 	}
 	defer root.Close()
+	rootAnchor, err := retentionRootFact(root)
+	if err != nil {
+		return retentionSnapshot{}, err
+	}
 
-	rootEntries, err := readRetentionEntries(root.Root, maxRetentionEntries)
+	rootEntries, err := readRetentionEntries(ctx, root.Root, maxRetentionEntries)
 	if err != nil {
 		return retentionSnapshot{}, fmt.Errorf("enumerate memory root: %w", err)
 	}
@@ -198,7 +227,12 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	}
 	rootFacts := make([]retentionFile, 0, len(rootEntries)+16)
 	namespaceFacts := make(map[string]retentionFile)
+	var preparedPointerBody []byte
+	preparedPointerFound := false
 	for _, entry := range rootEntries {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		name := entry.Name()
 		info, statErr := root.Root.Lstat(name)
 		if statErr != nil {
@@ -220,7 +254,7 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 			if err := atomicfile.ValidateRootDirectoryLock(root.Root, name); err != nil {
 				return retentionSnapshot{}, err
 			}
-			file, err := readRetentionFile(root, name, 0)
+			file, err := readRetentionFile(ctx, root, name, 0)
 			if err != nil {
 				return retentionSnapshot{}, err
 			}
@@ -230,10 +264,12 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		if name != "manifest.json" {
 			return retentionSnapshot{}, fmt.Errorf("unknown memory root state %q", name)
 		}
-		file, err := readRetentionFile(root, name, maxManifestBytes)
+		file, body, err := readRetentionFileWithBody(ctx, root, name, maxManifestBytes)
 		if err != nil {
 			return retentionSnapshot{}, err
 		}
+		preparedPointerBody = body
+		preparedPointerFound = true
 		rootFacts = append(rootFacts, file)
 	}
 	for _, required := range []string{"observations", "sessions", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
@@ -247,7 +283,7 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		return retentionSnapshot{}, err
 	}
 	defer generationDirectory.Close()
-	generationEntries, err := readRetentionEntries(generationDirectory.Root, maxRetentionEntries)
+	generationEntries, err := readRetentionEntries(ctx, generationDirectory.Root, maxRetentionEntries)
 	if err != nil {
 		return retentionSnapshot{}, fmt.Errorf("enumerate generations: %w", err)
 	}
@@ -256,11 +292,14 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	generationFiles := make(map[string]retentionFile, len(generationEntries))
 	allFacts := append([]retentionFile(nil), rootFacts...)
 	for _, entry := range generationEntries {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		generationID, ok := canonicalGenerationLeaf(entry.Name())
 		if !ok {
 			return retentionSnapshot{}, fmt.Errorf("noncanonical generation entry %q", entry.Name())
 		}
-		file, body, err := readRetentionFileWithBody(generationDirectory, entry.Name(), maxManifestBytes)
+		file, body, err := readRetentionFileWithBody(ctx, generationDirectory, entry.Name(), maxManifestBytes)
 		if err != nil {
 			return retentionSnapshot{}, err
 		}
@@ -269,8 +308,14 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		if err != nil {
 			return retentionSnapshot{}, fmt.Errorf("validate generation %q: %w", generationID, err)
 		}
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		digest, err := memory.Digest(manifest)
 		if err != nil {
+			return retentionSnapshot{}, err
+		}
+		if err := retentionCheckpoint(ctx); err != nil {
 			return retentionSnapshot{}, err
 		}
 		file.digest = digest
@@ -278,32 +323,43 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		allFacts = append(allFacts, file)
 	}
 
-	prepared, preparedManifest, preparedErr := s.loadPreparedRawUnlocked()
-	if preparedErr != nil && !errors.Is(preparedErr, ErrNoPreparedGeneration) {
-		return retentionSnapshot{}, fmt.Errorf("load prepared generation for retention: %w", preparedErr)
-	}
-	if preparedErr == nil {
+	prepared, preparedErr := Prepared{}, ErrNoPreparedGeneration
+	if preparedPointerFound {
+		preparedErr = decodeCanonicalJSON(preparedPointerBody, &prepared)
+		if preparedErr == nil {
+			preparedErr = validatePrepared(prepared)
+		}
+		if preparedErr != nil {
+			return retentionSnapshot{}, fmt.Errorf("load prepared generation for retention: %w", preparedErr)
+		}
 		manifest, exists := generations[prepared.GenerationID]
-		if !exists || generationDigests[prepared.GenerationID] != prepared.ManifestDigest || !equalManifest(manifest, preparedManifest) {
+		if !exists || generationDigests[prepared.GenerationID] != prepared.ManifestDigest || manifest.ProjectViewDigest != prepared.ProjectViewDigest {
 			return retentionSnapshot{}, errors.New("prepared generation is absent from native lineage")
 		}
+		if err := s.reconcileGenerationGraphContext(ctx, manifest); err != nil {
+			return retentionSnapshot{}, fmt.Errorf("reconcile prepared generation: %w", err)
+		}
+		preparedErr = nil
 	}
 	rootGenerations := make(map[string]struct{}, len(pins)+1)
 	if preparedErr == nil {
 		rootGenerations[prepared.GenerationID] = struct{}{}
 	}
 	for _, pin := range pins {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		manifest, exists := generations[pin]
 		if !exists {
 			return retentionSnapshot{}, fmt.Errorf("external generation pin %q is missing", pin)
 		}
-		if err := s.reconcileGenerationGraph(manifest); err != nil {
+		if err := s.reconcileGenerationGraphContext(ctx, manifest); err != nil {
 			return retentionSnapshot{}, fmt.Errorf("reconcile external generation pin %q: %w", pin, err)
 		}
 		rootGenerations[pin] = struct{}{}
 	}
 
-	objectFiles, objectFacts, err := s.enumerateRetentionObjects()
+	objectFiles, objectFacts, err := s.enumerateRetentionObjects(ctx)
 	if err != nil {
 		return retentionSnapshot{}, err
 	}
@@ -311,7 +367,10 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	reachablePaths := make(map[string]retentionFile)
 	reachableDigests := make(map[string]struct{})
 	for generationID, manifest := range generations {
-		if err := s.reconcileGenerationGraph(manifest); err != nil {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
+		if err := s.reconcileGenerationGraphContext(ctx, manifest); err != nil {
 			return retentionSnapshot{}, fmt.Errorf("reconcile native generation %q: %w", generationID, err)
 		}
 		if _, rooted := rootGenerations[generationID]; !rooted {
@@ -321,6 +380,9 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		reachablePaths[generationFile.relative] = generationFile
 		reachableDigests[generationDigests[generationID]] = struct{}{}
 		for _, reference := range manifestObjectReferences(manifest) {
+			if err := retentionCheckpoint(ctx); err != nil {
+				return retentionSnapshot{}, err
+			}
 			file, exists := objectFiles[reference.relative]
 			if !exists || file.digest != reference.digest {
 				return retentionSnapshot{}, fmt.Errorf("generation %q references a missing immutable object", generationID)
@@ -344,18 +406,22 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		if err != nil {
 			return retentionSnapshot{}, err
 		}
-		entries, err := readRetentionEntries(directory.Root, maxRetentionEntries)
+		entries, err := readRetentionEntries(ctx, directory.Root, maxRetentionEntries)
 		if err != nil {
 			_ = directory.Close()
 			return retentionSnapshot{}, fmt.Errorf("enumerate %s: %w", namespace.name, err)
 		}
 		for _, entry := range entries {
+			if err := retentionCheckpoint(ctx); err != nil {
+				_ = directory.Close()
+				return retentionSnapshot{}, err
+			}
 			digest, ok := canonicalRetentionLeaf(entry.Name(), namespace.suffix)
 			if !ok {
 				_ = directory.Close()
 				return retentionSnapshot{}, fmt.Errorf("noncanonical %s entry %q", namespace.name, entry.Name())
 			}
-			file, err := readRetentionFile(directory, entry.Name(), maxRetentionCandidateSize)
+			file, err := readRetentionFile(ctx, directory, entry.Name(), maxRetentionCandidateSize)
 			if err != nil {
 				_ = directory.Close()
 				return retentionSnapshot{}, err
@@ -376,6 +442,9 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	report := RetentionReport{ReachableObjects: len(reachablePaths)}
 	reachablePhysical := make(map[pathguard.IdentityToken]struct{}, len(reachablePaths))
 	for _, file := range reachablePaths {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		if err := addUniqueRetentionBytes(&report.ReachableBytes, reachablePhysical, file); err != nil {
 			return retentionSnapshot{}, fmt.Errorf("reachable accounting: %w", err)
 		}
@@ -383,6 +452,9 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	retainedPhysical := make(map[pathguard.IdentityToken]struct{}, len(generationFiles)+len(objectFiles))
 	for _, collection := range []map[string]retentionFile{generationFiles, objectFiles} {
 		for _, file := range collection {
+			if err := retentionCheckpoint(ctx); err != nil {
+				return retentionSnapshot{}, err
+			}
 			if _, reachable := reachablePaths[file.relative]; reachable {
 				continue
 			}
@@ -395,6 +467,9 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 	candidates := make([]retentionFile, 0)
 	candidatePhysical := make(map[pathguard.IdentityToken]struct{})
 	for _, file := range allFacts {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return retentionSnapshot{}, err
+		}
 		if !strings.HasPrefix(file.relative, "staging/") && !strings.HasPrefix(file.relative, "cache/") {
 			continue
 		}
@@ -411,11 +486,39 @@ func (s *Store) captureRetentionSnapshot(now time.Time, pins []string) (retentio
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].relative < candidates[j].relative })
-	fingerprint := retentionFingerprint(allFacts)
-	return retentionSnapshot{report: report, candidates: candidates, fingerprint: fingerprint, namespaces: namespaceFacts}, nil
+	fingerprint, err := retentionFingerprint(ctx, allFacts)
+	if err != nil {
+		return retentionSnapshot{}, err
+	}
+	anchors := retentionAnchors{root: rootAnchor, generationRoots: make(map[string]retentionFile, len(pins)+1), namespaces: cloneRetentionFacts(namespaceFacts)}
+	for _, fact := range rootFacts {
+		if fact.relative == "manifest.json" {
+			copyFact := fact
+			anchors.preparedPointer = &copyFact
+			break
+		}
+	}
+	if preparedErr == nil {
+		anchors.generationRoots[prepared.GenerationID] = generationFiles[prepared.GenerationID]
+	}
+	for _, pin := range pins {
+		anchors.generationRoots[pin] = generationFiles[pin]
+	}
+	return retentionSnapshot{report: report, candidates: candidates, fingerprint: fingerprint, namespaces: namespaceFacts, anchors: anchors}, nil
 }
 
-func (s *Store) revalidateRetentionCandidate(candidate retentionFile, expectedNamespaces map[string]retentionFile) error {
+// revalidateRetentionCandidate deliberately rechecks only reachability anchors
+// and the exact candidate. Immutable object bodies were authenticated by the
+// one full snapshot; unrelated object mutation cannot add a graph root or make
+// this cache/staging candidate reachable, so rescanning all objects here would
+// add quadratic work without strengthening the unlink decision.
+func (s *Store) revalidateRetentionCandidate(ctx context.Context, candidate retentionFile, anchors *retentionAnchors) error {
+	if anchors == nil {
+		return errors.New("retention anchors are required")
+	}
+	if err := s.revalidateRetentionAnchors(ctx, anchors); err != nil {
+		return err
+	}
 	parts := strings.SplitN(candidate.relative, "/", 2)
 	if len(parts) != 2 || (parts[0] != "cache" && parts[0] != "staging") {
 		return errors.New("retention candidate path is invalid")
@@ -429,21 +532,12 @@ func (s *Store) revalidateRetentionCandidate(candidate retentionFile, expectedNa
 	if !ok || digest != candidate.digest {
 		return errors.New("retention candidate digest path changed")
 	}
-	for name, expectedNamespace := range expectedNamespaces {
-		currentNamespace, err := s.captureRetentionNamespace(name)
-		if err != nil {
-			return err
-		}
-		if !sameRetentionFact(currentNamespace, expectedNamespace) {
-			return errors.New("retention namespace changed before cleanup")
-		}
-	}
 	directory, err := openRetentionDirectory(s, namespace, false)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
-	current, err := readRetentionFile(directory, leaf, maxRetentionCandidateSize)
+	current, err := readRetentionFile(ctx, directory, leaf, maxRetentionCandidateSize)
 	if err != nil {
 		return err
 	}
@@ -454,12 +548,107 @@ func (s *Store) revalidateRetentionCandidate(candidate retentionFile, expectedNa
 	return nil
 }
 
-func (s *Store) captureRetentionNamespace(name string) (retentionFile, error) {
+func (s *Store) revalidateRetentionAnchors(ctx context.Context, anchors *retentionAnchors) error {
+	if err := retentionCheckpoint(ctx); err != nil {
+		return err
+	}
+	currentRoot, err := s.reopenMemory()
+	if err != nil {
+		return err
+	}
+	currentRootFact, factErr := retentionRootFact(currentRoot)
+	if factErr == nil && !sameRetentionFact(currentRootFact, anchors.root) {
+		factErr = errors.New("retention memory root changed before cleanup")
+	}
+	if factErr == nil {
+		info, pointerErr := currentRoot.Root.Lstat("manifest.json")
+		switch {
+		case anchors.preparedPointer == nil && errors.Is(pointerErr, os.ErrNotExist):
+		case anchors.preparedPointer == nil:
+			factErr = errors.Join(errors.New("retention prepared pointer appeared before cleanup"), pointerErr)
+		case pointerErr != nil || info == nil:
+			factErr = errors.Join(errors.New("retention prepared pointer disappeared before cleanup"), pointerErr)
+		default:
+			current, readErr := readRetentionFile(ctx, currentRoot, "manifest.json", maxManifestBytes)
+			if readErr != nil || !sameRetentionFact(current, *anchors.preparedPointer) {
+				factErr = errors.Join(errors.New("retention prepared pointer changed before cleanup"), readErr)
+			}
+		}
+	}
+	closeErr := currentRoot.Close()
+	if err := errors.Join(factErr, closeErr); err != nil {
+		return err
+	}
+
+	generations, err := openRetentionDirectory(s, "generations", false)
+	if err != nil {
+		return err
+	}
+	for generationID, expected := range anchors.generationRoots {
+		if err := retentionCheckpoint(ctx); err != nil {
+			_ = generations.Close()
+			return err
+		}
+		current, readErr := readRetentionFile(ctx, generations, generationID+".json", maxManifestBytes)
+		current.relative = filepath.ToSlash(filepath.Join("generations", generationID+".json"))
+		current.digest = expected.digest
+		if readErr != nil || !sameRetentionFact(current, expected) {
+			_ = generations.Close()
+			return errors.Join(errors.New("retention rooted generation changed before cleanup"), readErr)
+		}
+	}
+	if err := generations.Close(); err != nil {
+		return err
+	}
+	for name, expectedNamespace := range anchors.namespaces {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return err
+		}
+		currentNamespace, err := s.captureRetentionNamespace(ctx, name)
+		if err != nil {
+			return err
+		}
+		if !sameRetentionFact(currentNamespace, expectedNamespace) {
+			return errors.New("retention namespace changed before cleanup")
+		}
+	}
+	return nil
+}
+
+func (s *Store) captureRetentionNamespace(ctx context.Context, name string) (retentionFile, error) {
+	if err := retentionCheckpoint(ctx); err != nil {
+		return retentionFile{}, err
+	}
 	info, err := s.memory.Root.Lstat(name)
 	if err != nil || info == nil || !info.IsDir() {
 		return retentionFile{}, errors.Join(errors.New("retention namespace is unavailable"), err)
 	}
 	return retentionDirectoryFact(s.memory, name, info)
+}
+
+func retentionRootFact(root *pathguard.Directory) (retentionFile, error) {
+	if root == nil || root.Info() == nil {
+		return retentionFile{}, errors.New("retention memory root is unavailable")
+	}
+	file, err := root.Root.Open(".")
+	if err != nil {
+		return retentionFile{}, err
+	}
+	identity, identityErr := pathguard.PhysicalFileIdentity(file)
+	closeErr := file.Close()
+	if identityErr != nil || closeErr != nil {
+		return retentionFile{}, errors.Join(identityErr, closeErr)
+	}
+	info := root.Info()
+	return retentionFile{relative: "./", size: info.Size(), mode: info.Mode(), modified: info.ModTime(), identity: identity}, nil
+}
+
+func cloneRetentionFacts(values map[string]retentionFile) map[string]retentionFile {
+	copyValues := make(map[string]retentionFile, len(values))
+	for key, value := range values {
+		copyValues[key] = value
+	}
+	return copyValues
 }
 
 func sameRetentionFact(first, second retentionFile) bool {
@@ -499,7 +688,7 @@ func manifestObjectReferences(manifest memory.GenerationManifest) []manifestObje
 	return references
 }
 
-func (s *Store) enumerateRetentionObjects() (map[string]retentionFile, []retentionFile, error) {
+func (s *Store) enumerateRetentionObjects(ctx context.Context) (map[string]retentionFile, []retentionFile, error) {
 	objects := make(map[string]retentionFile)
 	facts := make([]retentionFile, 0)
 	collections := []struct {
@@ -513,27 +702,34 @@ func (s *Store) enumerateRetentionObjects() (map[string]retentionFile, []retenti
 		{ObjectProjectView, "project-views", ".json"},
 	}
 	for _, collection := range collections {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return nil, nil, err
+		}
 		directory, err := openRetentionDirectory(s, collection.name, false)
 		if err != nil {
 			return nil, nil, err
 		}
-		entries, err := readRetentionEntries(directory.Root, maxRetentionEntries)
+		entries, err := readRetentionEntries(ctx, directory.Root, maxRetentionEntries)
 		if err != nil {
 			_ = directory.Close()
 			return nil, nil, err
 		}
 		for _, entry := range entries {
+			if err := retentionCheckpoint(ctx); err != nil {
+				_ = directory.Close()
+				return nil, nil, err
+			}
 			digest, ok := canonicalRetentionLeaf(entry.Name(), collection.suffix)
 			if !ok {
 				_ = directory.Close()
 				return nil, nil, fmt.Errorf("noncanonical %s object %q", collection.name, entry.Name())
 			}
-			file, body, err := readRetentionFileWithBody(directory, entry.Name(), maxObjectBytes)
+			file, body, err := readRetentionFileWithBody(ctx, directory, entry.Name(), maxObjectBytes)
 			if err != nil {
 				_ = directory.Close()
 				return nil, nil, err
 			}
-			if err := validateObjectBytes(collection.kind, digest, body, s.projectID); err != nil {
+			if err := validateObjectBytesContext(ctx, collection.kind, digest, body, s.projectID); err != nil {
 				_ = directory.Close()
 				return nil, nil, fmt.Errorf("validate %s object: %w", collection.name, err)
 			}
@@ -567,7 +763,7 @@ func retentionDirectoryFact(root *pathguard.Directory, name string, expected os.
 	if identityErr != nil || closeErr != nil {
 		return retentionFile{}, errors.Join(identityErr, closeErr)
 	}
-	return retentionFile{relative: name + "/", mode: info.Mode(), modified: info.ModTime(), identity: identity}, nil
+	return retentionFile{relative: name + "/", size: info.Size(), mode: info.Mode(), modified: info.ModTime(), identity: identity}, nil
 }
 
 func openRetentionDirectory(s *Store, name string, optional bool) (*pathguard.Directory, error) {
@@ -593,7 +789,10 @@ func openRetentionDirectory(s *Store, name string, optional bool) (*pathguard.Di
 	return directory, nil
 }
 
-func readRetentionEntries(root *os.Root, limit int) ([]fs.DirEntry, error) {
+func readRetentionEntries(ctx context.Context, root *os.Root, limit int) ([]fs.DirEntry, error) {
+	if err := retentionCheckpoint(ctx); err != nil {
+		return nil, err
+	}
 	if root == nil || limit < 0 {
 		return nil, errors.New("retention directory is invalid")
 	}
@@ -605,9 +804,22 @@ func readRetentionEntries(root *os.Root, limit int) ([]fs.DirEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, readErr := directory.ReadDir(limit + 1)
-	if errors.Is(readErr, io.EOF) {
-		readErr = nil
+	entries := make([]fs.DirEntry, 0, min(limit, 256))
+	var readErr error
+	for len(entries) <= limit {
+		if err := retentionCheckpoint(ctx); err != nil {
+			readErr = err
+			break
+		}
+		batch, err := directory.ReadDir(min(256, limit+1-len(entries)))
+		entries = append(entries, batch...)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			readErr = err
+			break
+		}
 	}
 	afterOpen, statErr := directory.Stat()
 	closeErr := directory.Close()
@@ -625,12 +837,15 @@ func readRetentionEntries(root *os.Root, limit int) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
-func readRetentionFile(directory *pathguard.Directory, leaf string, maximum int64) (retentionFile, error) {
-	file, _, err := readRetentionFileWithBody(directory, leaf, maximum)
+func readRetentionFile(ctx context.Context, directory *pathguard.Directory, leaf string, maximum int64) (retentionFile, error) {
+	file, _, err := readRetentionFileWithBody(ctx, directory, leaf, maximum)
 	return file, err
 }
 
-func readRetentionFileWithBody(directory *pathguard.Directory, leaf string, maximum int64) (retentionFile, []byte, error) {
+func readRetentionFileWithBody(ctx context.Context, directory *pathguard.Directory, leaf string, maximum int64) (retentionFile, []byte, error) {
+	if err := retentionCheckpoint(ctx); err != nil {
+		return retentionFile{}, nil, err
+	}
 	before, err := directory.Root.Lstat(leaf)
 	if err != nil || before == nil || !before.Mode().IsRegular() {
 		return retentionFile{}, nil, errors.Join(errors.New("retention entry is not a regular file"), err)
@@ -638,7 +853,7 @@ func readRetentionFileWithBody(directory *pathguard.Directory, leaf string, maxi
 	if runtime.GOOS != "windows" && before.Mode().Perm() != privateFileMode {
 		return retentionFile{}, nil, errors.New("retention entry has incorrect private mode")
 	}
-	body, found, err := directory.ReadRegular(leaf, maximum)
+	body, found, err := directory.ReadRegularContext(ctx, leaf, maximum)
 	if err != nil || !found {
 		return retentionFile{}, nil, errors.Join(errors.New("read stable retention entry"), err)
 	}
@@ -655,8 +870,11 @@ func readRetentionFileWithBody(directory *pathguard.Directory, leaf string, maxi
 	if !sameRetentionMetadata(before, opened) || !sameRetentionMetadata(before, after) {
 		return retentionFile{}, nil, errors.New("retention entry changed while reading")
 	}
-	sum := sha256.Sum256(body)
-	return retentionFile{relative: leaf, size: before.Size(), mode: before.Mode(), modified: before.ModTime(), identity: identity, bodyHash: hex.EncodeToString(sum[:])}, body, nil
+	bodyHash, err := retentionBodyHash(ctx, body)
+	if err != nil {
+		return retentionFile{}, nil, err
+	}
+	return retentionFile{relative: leaf, size: before.Size(), mode: before.Mode(), modified: before.ModTime(), identity: identity, bodyHash: bodyHash}, body, nil
 }
 
 func canonicalGenerationLeaf(leaf string) (string, bool) {
@@ -706,14 +924,48 @@ func snapshotContainsExactCandidate(snapshot retentionSnapshot, candidate retent
 	return false
 }
 
-func retentionFingerprint(files []retentionFile) string {
+func retentionFingerprint(ctx context.Context, files []retentionFile) (string, error) {
 	copyFiles := append([]retentionFile(nil), files...)
 	sort.Slice(copyFiles, func(i, j int) bool { return copyFiles[i].relative < copyFiles[j].relative })
 	hash := sha256.New()
 	for _, file := range copyFiles {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return "", err
+		}
 		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d\x00%d\x00%d\x00%s\x00%s\x00%s\n",
 			file.relative, file.digest, file.size, uint32(file.mode), file.modified.UnixNano(),
 			file.identity.Kind, file.identity.Volume, file.identity.File+file.bodyHash)
 	}
-	return hex.EncodeToString(hash.Sum(nil))
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func retentionBodyHash(ctx context.Context, body []byte) (string, error) {
+	hash := sha256.New()
+	for offset := 0; offset < len(body); offset += 64 << 10 {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return "", err
+		}
+		end := min(offset+(64<<10), len(body))
+		_, _ = hash.Write(body[offset:end])
+	}
+	if len(body) == 0 {
+		if err := retentionCheckpoint(ctx); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func retentionCheckpoint(ctx context.Context) error {
+	if retentionTraversalCheckpoint != nil {
+		retentionTraversalCheckpoint()
+	}
+	return retentionContextCause(ctx)
+}
+
+func retentionContextCause(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("retention context is required")
+	}
+	return context.Cause(ctx)
 }

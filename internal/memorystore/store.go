@@ -5,6 +5,7 @@ package memorystore
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -605,6 +606,39 @@ func (s *Store) LoadObject(kind ObjectKind, digest string) ([]byte, error) {
 	return bytes.Clone(body), nil
 }
 
+func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if kind != ObjectObservationChunk {
+		err := validateObjectBytes(kind, digest, body, projectID)
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		return err
+	}
+	records, err := decodeObservationChunkContext(ctx, body)
+	if err != nil {
+		return err
+	}
+	for index := range records {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		if records[index].Key.ProjectID != projectID {
+			return errors.New("observation chunk contains a different project")
+		}
+	}
+	actual, err := memory.Digest(records)
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if err != nil || actual != digest {
+		return errors.Join(errors.New("observation chunk digest mismatch"), err)
+	}
+	return nil
+}
+
 // Close releases pinned roots. It is safe to call more than once.
 func (s *Store) Close() error {
 	if s == nil {
@@ -667,8 +701,18 @@ func (s *Store) openCollection(name string) (*pathguard.Directory, error) {
 }
 
 func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error {
+	return s.reconcileGenerationGraphContext(context.Background(), value)
+}
+
+func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memory.GenerationManifest) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
 	sourceRecords := make(map[string]bool, len(value.SourceRecordDigests))
 	for _, digest := range value.SourceRecordDigests {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		sourceRecords[digest] = false
 	}
 
@@ -676,20 +720,29 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 	revisions := make(map[string]memory.ObservationRevision)
 	revisionKeys := make(map[string]string)
 	for _, digest := range value.ObservationChunkDigests {
-		body, err := s.loadObjectUnlocked(ObjectObservationChunk, digest)
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		body, err := s.loadObjectUnlockedContext(ctx, ObjectObservationChunk, digest)
 		if err != nil {
 			return fmt.Errorf("verify observation chunk %s: %w", digest, err)
 		}
-		records, err := decodeObservationChunk(body)
+		records, err := decodeObservationChunkContext(ctx, body)
 		if err != nil {
 			return fmt.Errorf("decode observation chunk %s: %w", digest, err)
 		}
 		chunks[digest] = records
 		for _, record := range records {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
 			if _, duplicate := revisions[record.RevisionID]; duplicate {
 				return fmt.Errorf("observation revision %s occurs in multiple chunks", record.RevisionID)
 			}
 			keyDigest, err := memory.Digest(record.Key)
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
 			if err != nil {
 				return fmt.Errorf("digest observation key: %w", err)
 			}
@@ -701,7 +754,10 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 	referencedChunks := make(map[string]bool, len(chunks))
 	sessionActive := make(map[string]struct{})
 	for _, dependency := range value.SessionViews {
-		body, err := s.loadObjectUnlocked(ObjectSessionView, dependency.Digest)
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		body, err := s.loadObjectUnlockedContext(ctx, ObjectSessionView, dependency.Digest)
 		if err != nil {
 			return fmt.Errorf("verify SessionView %s: %w", dependency.Digest, err)
 		}
@@ -715,12 +771,18 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 		sourceRecords[view.SourceRecordDigest] = true
 		sessionRevisions := make(map[string]struct{})
 		for _, chunkDigest := range view.ObservationChunkDigests {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
 			records, exists := chunks[chunkDigest]
 			if !exists || referencedChunks[chunkDigest] {
 				return errors.New("SessionView observation chunk does not resolve uniquely through manifest")
 			}
 			referencedChunks[chunkDigest] = true
 			for _, record := range records {
+				if err := context.Cause(ctx); err != nil {
+					return err
+				}
 				if record.Key.Provider != view.Provider || record.Key.SessionID != view.SessionID {
 					return errors.New("SessionView observation chunk belongs to a different session")
 				}
@@ -728,6 +790,9 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 			}
 		}
 		for _, revisionID := range view.ActiveRevisionIDs {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
 			if _, exists := sessionRevisions[revisionID]; !exists {
 				return errors.New("SessionView active revision is absent from its observation chunks")
 			}
@@ -738,17 +803,23 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 		}
 	}
 	for digest, used := range sourceRecords {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if !used {
 			return fmt.Errorf("manifest source record %s is not referenced by a SessionView", digest)
 		}
 	}
 	for digest := range chunks {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if !referencedChunks[digest] {
 			return fmt.Errorf("manifest observation chunk %s is not referenced by a SessionView", digest)
 		}
 	}
 
-	probeBody, err := s.loadObjectUnlocked(ObjectProbeState, value.ProbeStateDigest)
+	probeBody, err := s.loadObjectUnlockedContext(ctx, ObjectProbeState, value.ProbeStateDigest)
 	if err != nil {
 		return fmt.Errorf("verify ProjectProbeState: %w", err)
 	}
@@ -756,7 +827,7 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 	if err := decodeCanonicalJSON(probeBody, &probe); err != nil {
 		return fmt.Errorf("decode ProjectProbeState: %w", err)
 	}
-	projectBody, err := s.loadObjectUnlocked(ObjectProjectView, value.ProjectViewDigest)
+	projectBody, err := s.loadObjectUnlockedContext(ctx, ObjectProjectView, value.ProjectViewDigest)
 	if err != nil {
 		return fmt.Errorf("verify ProjectView: %w", err)
 	}
@@ -774,6 +845,9 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 	active := make(map[string]struct{}, len(value.ActiveRevisions))
 	classifications := make(map[string]string, len(revisions))
 	for keyDigest, revisionID := range value.ActiveRevisions {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
 			return errors.New("manifest active revision does not resolve to its observation key")
 		}
@@ -781,6 +855,9 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 		active[revisionID] = struct{}{}
 	}
 	for previous, successor := range value.SupersededRevisions {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if _, exists := revisions[previous]; !exists {
 			return errors.New("manifest superseded predecessor does not resolve")
 		}
@@ -793,6 +870,9 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 		classifications[previous] = "superseded"
 	}
 	for keyDigest, revisionID := range value.WithdrawnRevisions {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
 			return errors.New("manifest withdrawn revision does not resolve to its observation key")
 		}
@@ -802,6 +882,9 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 		classifications[revisionID] = "withdrawn"
 	}
 	for revisionID := range revisions {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
 		if _, classified := classifications[revisionID]; !classified {
 			return fmt.Errorf("observation revision %s has no manifest classification", revisionID)
 		}
@@ -837,6 +920,13 @@ func equalDigestSliceSet(values []string, expected map[string]struct{}) bool {
 }
 
 func (s *Store) loadObjectUnlocked(kind ObjectKind, digest string) ([]byte, error) {
+	return s.loadObjectUnlockedContext(context.Background(), kind, digest)
+}
+
+func (s *Store) loadObjectUnlockedContext(ctx context.Context, kind ObjectKind, digest string) ([]byte, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
 	collection, suffix, err := objectLocation(kind, digest)
 	if err != nil {
 		return nil, err
@@ -847,7 +937,7 @@ func (s *Store) loadObjectUnlocked(kind ObjectKind, digest string) ([]byte, erro
 	}
 	defer parent.Close()
 	leaf := digestLeafName(digest, suffix)
-	body, found, err := parent.ReadRegular(leaf, maxObjectBytes)
+	body, found, err := parent.ReadRegularContext(ctx, leaf, maxObjectBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -857,7 +947,7 @@ func (s *Store) loadObjectUnlocked(kind ObjectKind, digest string) ([]byte, erro
 	if err := requirePrivateRegular(parent.Root, leaf); err != nil {
 		return nil, err
 	}
-	if err := validateObjectBytes(kind, digest, body, s.projectID); err != nil {
+	if err := validateObjectBytesContext(ctx, kind, digest, body, s.projectID); err != nil {
 		return nil, err
 	}
 	return body, nil
@@ -910,6 +1000,13 @@ func validateObjectBytes(kind ObjectKind, digest string, body []byte, projectID 
 }
 
 func decodeObservationChunk(body []byte) ([]memory.ObservationRevision, error) {
+	return decodeObservationChunkContext(context.Background(), body)
+}
+
+func decodeObservationChunkContext(ctx context.Context, body []byte) ([]memory.ObservationRevision, error) {
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
 	if len(body) == 0 || body[len(body)-1] != '\n' {
 		return nil, errors.New("observation chunk is not canonical JSONL")
 	}
@@ -917,6 +1014,9 @@ func decodeObservationChunk(body []byte) ([]memory.ObservationRevision, error) {
 	scanner.Buffer(make([]byte, 64*1024), maxObjectBytes)
 	var records []memory.ObservationRevision
 	for scanner.Scan() {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			return nil, errors.New("observation chunk contains an empty record")
@@ -935,6 +1035,9 @@ func decodeObservationChunk(body []byte) ([]memory.ObservationRevision, error) {
 	}
 	if len(records) == 0 {
 		return nil, errors.New("observation chunk is empty")
+	}
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
 	}
 	return records, nil
 }

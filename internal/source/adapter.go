@@ -25,14 +25,28 @@ type Adapter interface {
 	Read(context.Context, memory.SourceRef, int64) ([]byte, error)
 }
 
-// Candidate identifies one logical provider Session. Handle is opaque outside
-// the adapter that returned it.
+// LeaseLifecycle is implemented by stateful adapters whose Discover and
+// Freeze results retain adapter-owned bookkeeping. Each Candidate returned by
+// Discover is owned by the caller until Freeze consumes it or the caller
+// abandons it. Each Boundary returned by a successful Freeze is owned by the
+// caller until Decode consumes it or the caller abandons it. Abandon methods
+// must be idempotent and must not invalidate another occurrence with the same
+// stable Handle. Stateless adapters do not need to implement this interface.
+type LeaseLifecycle interface {
+	AbandonCandidate(Candidate)
+	AbandonBoundary(Boundary)
+}
+
+// Candidate identifies one logical provider Session. Handle is a stable opaque
+// content boundary key. Lease is a single-owner occurrence token and is opaque
+// outside the adapter that returned it.
 type Candidate struct {
 	Provider        string
 	SessionID       string
 	StartedAt       string
 	InitialCWD      string
 	Handle          string
+	Lease           string
 	CatalogBaseline CatalogBaselineSnapshot
 }
 
@@ -59,8 +73,9 @@ type Issue struct {
 	TerminalState memory.TerminalState
 }
 
-// Boundary is one immutable logical source prefix. Handle remains opaque to
-// provider-neutral callers and is valid only for the originating Adapter.
+// Boundary is one immutable logical source prefix. Handle remains stable for
+// equivalent content. Lease is the caller-owned occurrence token and is valid
+// only for the originating Adapter.
 type Boundary struct {
 	Candidate      Candidate
 	SourceIdentity string
@@ -69,6 +84,7 @@ type Boundary struct {
 	TerminalState  memory.TerminalState
 	Issues         []Issue
 	Handle         string
+	Lease          string
 }
 
 // SegmentBoundary authenticates one ordered physical member of a logical

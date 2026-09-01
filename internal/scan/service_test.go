@@ -43,22 +43,30 @@ type fakeSourceSpec struct {
 	report         source.DecodeReport
 	freezeErr      error
 	decodeErr      error
+	freezePanic    bool
+	decodePanic    bool
 	skipCatalog    bool
 	wait           <-chan struct{}
 	frozenExpected string
 }
 
 type fakeAdapter struct {
-	catalog *sourcecatalog.Catalog
-	sources map[string]*fakeSourceSpec
-	issues  []source.Issue
+	catalog     *sourcecatalog.Catalog
+	sources     map[string]*fakeSourceSpec
+	issues      []source.Issue
+	discoverErr error
 
-	mu            sync.Mutex
-	active        int
-	maxActive     int
-	decoded       []string
-	decodeErrors  map[string]error
-	decodeStarted chan string
+	mu              sync.Mutex
+	active          int
+	maxActive       int
+	decoded         []string
+	decodeErrors    map[string]error
+	decodeStarted   chan string
+	afterDiscover   func()
+	afterFreeze     func(source.Boundary)
+	leaseSequence   int
+	candidateLeases map[string]string
+	boundaryLeases  map[string]string
 }
 
 func (adapter *fakeAdapter) Discover(ctx context.Context) (source.Discovery, error) {
@@ -67,12 +75,22 @@ func (adapter *fakeAdapter) Discover(ctx context.Context) (source.Discovery, err
 	}
 	candidates := make([]source.Candidate, 0, len(adapter.sources))
 	for _, spec := range adapter.sources {
-		candidates = append(candidates, spec.candidate)
+		candidate := spec.candidate
+		adapter.mu.Lock()
+		adapter.leaseSequence++
+		candidate.Lease = fmt.Sprintf("candidate-lease-%d", adapter.leaseSequence)
+		adapter.candidateLeases[candidate.Lease] = candidate.Handle
+		adapter.mu.Unlock()
+		candidates = append(candidates, candidate)
 	}
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].SessionID < candidates[j].SessionID
 	})
-	return source.Discovery{Candidates: candidates, Issues: append([]source.Issue(nil), adapter.issues...)}, nil
+	result := source.Discovery{Candidates: candidates, Issues: append([]source.Issue(nil), adapter.issues...)}
+	if adapter.afterDiscover != nil {
+		adapter.afterDiscover()
+	}
+	return result, adapter.discoverErr
 }
 
 func (adapter *fakeAdapter) Freeze(ctx context.Context, candidate source.Candidate) (source.Boundary, error) {
@@ -80,29 +98,58 @@ func (adapter *fakeAdapter) Freeze(ctx context.Context, candidate source.Candida
 		return source.Boundary{}, err
 	}
 	spec := adapter.sources[candidate.SessionID]
-	if spec == nil || !reflect.DeepEqual(spec.candidate, candidate) {
+	stable := candidate
+	stable.Lease = ""
+	adapter.mu.Lock()
+	owned := adapter.candidateLeases[candidate.Lease] == candidate.Handle
+	adapter.mu.Unlock()
+	if spec == nil || !owned || !reflect.DeepEqual(spec.candidate, stable) {
 		return source.Boundary{}, errors.New("unknown fake candidate")
 	}
-	if spec.freezeErr == nil {
-		existing, found, err := adapter.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
+	if spec.freezePanic {
+		panic("fake freeze panic")
+	}
+	if spec.freezeErr != nil {
+		return source.Boundary{}, spec.freezeErr
+	}
+	existing, found, err := adapter.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
+	if err != nil {
+		return source.Boundary{}, err
+	}
+	spec.frozenExpected = ""
+	if found {
+		spec.frozenExpected, err = memory.Digest(existing)
 		if err != nil {
 			return source.Boundary{}, err
 		}
-		spec.frozenExpected = ""
-		if found {
-			spec.frozenExpected, err = memory.Digest(existing)
-			if err != nil {
-				return source.Boundary{}, err
-			}
-		}
 	}
-	return spec.boundary, spec.freezeErr
+	boundary := spec.boundary
+	boundary.Candidate = candidate
+	adapter.mu.Lock()
+	delete(adapter.candidateLeases, candidate.Lease)
+	adapter.leaseSequence++
+	boundary.Lease = fmt.Sprintf("boundary-lease-%d", adapter.leaseSequence)
+	adapter.boundaryLeases[boundary.Lease] = boundary.Handle
+	adapter.mu.Unlock()
+	if adapter.afterFreeze != nil {
+		adapter.afterFreeze(boundary)
+	}
+	return boundary, nil
 }
 
 func (adapter *fakeAdapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (returned source.DecodeReport, returnedErr error) {
 	spec := adapter.sources[boundary.Candidate.SessionID]
 	if spec == nil {
 		return source.DecodeReport{}, errors.New("unknown fake boundary")
+	}
+	adapter.mu.Lock()
+	owned := adapter.boundaryLeases[boundary.Lease] == boundary.Handle
+	adapter.mu.Unlock()
+	if !owned {
+		return source.DecodeReport{}, errors.New("unknown fake boundary lease")
+	}
+	if spec.decodePanic {
+		panic("fake decode panic")
 	}
 	adapter.mu.Lock()
 	adapter.active++
@@ -112,6 +159,9 @@ func (adapter *fakeAdapter) Decode(ctx context.Context, boundary source.Boundary
 	adapter.mu.Unlock()
 	defer func() {
 		adapter.mu.Lock()
+		if returnedErr == nil {
+			delete(adapter.boundaryLeases, boundary.Lease)
+		}
 		adapter.active--
 		adapter.decoded = append(adapter.decoded, boundary.Candidate.SessionID)
 		if returnedErr != nil {
@@ -149,6 +199,28 @@ func (adapter *fakeAdapter) Decode(ctx context.Context, boundary source.Boundary
 		report.ExpectedCatalogDigest = spec.frozenExpected
 	}
 	return report, nil
+}
+
+func (adapter *fakeAdapter) AbandonCandidate(candidate source.Candidate) {
+	adapter.mu.Lock()
+	if adapter.candidateLeases[candidate.Lease] == candidate.Handle {
+		delete(adapter.candidateLeases, candidate.Lease)
+	}
+	adapter.mu.Unlock()
+}
+
+func (adapter *fakeAdapter) AbandonBoundary(boundary source.Boundary) {
+	adapter.mu.Lock()
+	if adapter.boundaryLeases[boundary.Lease] == boundary.Handle {
+		delete(adapter.boundaryLeases, boundary.Lease)
+	}
+	adapter.mu.Unlock()
+}
+
+func (adapter *fakeAdapter) leaseCounts() (int, int) {
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	return len(adapter.candidateLeases), len(adapter.boundaryLeases)
 }
 
 func (*fakeAdapter) Read(context.Context, memory.SourceRef, int64) ([]byte, error) {
@@ -194,7 +266,10 @@ func newScanHarness(t *testing.T) scanHarness {
 		t.Fatalf("open memory store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	adapter := &fakeAdapter{catalog: catalog, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error)}
+	adapter := &fakeAdapter{
+		catalog: catalog, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error),
+		candidateLeases: make(map[string]string), boundaryLeases: make(map[string]string),
+	}
 	now := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
 	options := Options{
 		ProjectID: scanTestProject, Binding: binding, SessionsRoot: sessionsRoot,
@@ -644,6 +719,115 @@ func TestRunFailsClosedOnEveryDecodeErrorWithoutCatalogMutation(t *testing.T) {
 	}
 }
 
+func TestRunAbandonsEveryLeaseAcrossCancellationAndAdapterFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		workers int
+		prepare func(*scanHarness, context.CancelFunc)
+	}{
+		{
+			name: "discover-error-with-candidates", workers: 1,
+			prepare: func(harness *scanHarness, _ context.CancelFunc) {
+				harness.adapter.discoverErr = errors.New("discover-lease-canary")
+			},
+		},
+		{
+			name: "cancel-after-discover", workers: 1,
+			prepare: func(harness *scanHarness, cancel context.CancelFunc) { harness.adapter.afterDiscover = cancel },
+		},
+		{
+			name: "cancel-after-first-freeze", workers: 1,
+			prepare: func(harness *scanHarness, cancel context.CancelFunc) {
+				harness.adapter.afterFreeze = func(source.Boundary) { cancel() }
+			},
+		},
+		{
+			name: "freeze-error", workers: 1,
+			prepare: func(harness *scanHarness, _ context.CancelFunc) {
+				harness.adapter.sources["session-2"].freezeErr = errors.New("freeze-lease-canary")
+			},
+		},
+		{
+			name: "one-worker-decode-error", workers: 1,
+			prepare: func(harness *scanHarness, _ context.CancelFunc) {
+				harness.adapter.sources["session-1"].decodeErr = errors.New("decode-lease-canary")
+			},
+		},
+		{
+			name: "multi-worker-decode-error", workers: 4,
+			prepare: func(harness *scanHarness, _ context.CancelFunc) {
+				harness.adapter.sources["session-1"].decodeErr = errors.New("decode-lease-canary")
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness := newScanHarness(t)
+			for index := 1; index <= 8; index++ {
+				harness.addSource(index, memory.Indexed, scanTestProject)
+			}
+			harness.options.Workers = test.workers
+			for attempt := 0; attempt < 10; attempt++ {
+				ctx, cancel := context.WithCancel(context.Background())
+				test.prepare(&harness, cancel)
+				_, _ = Run(ctx, harness.options)
+				cancel()
+				candidateLeases, boundaryLeases := harness.adapter.leaseCounts()
+				if candidateLeases != 0 || boundaryLeases != 0 {
+					t.Fatalf("attempt %d leaked leases: candidates=%d boundaries=%d", attempt, candidateLeases, boundaryLeases)
+				}
+			}
+		})
+	}
+}
+
+func TestRunLeaseCleanupIsPanicSafeAndSuccessfulCyclesStayBounded(t *testing.T) {
+	t.Run("freeze-panic-unwinds-owned-candidates", func(t *testing.T) {
+		harness := newScanHarness(t)
+		harness.addSource(1, memory.Indexed, scanTestProject).freezePanic = true
+		harness.addSource(2, memory.Indexed, scanTestProject)
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("freeze panic was not propagated")
+				}
+			}()
+			_, _ = Run(context.Background(), harness.options)
+		}()
+		candidates, boundaries := harness.adapter.leaseCounts()
+		if candidates != 0 || boundaries != 0 {
+			t.Fatalf("freeze panic leaked leases: candidates=%d boundaries=%d", candidates, boundaries)
+		}
+	})
+
+	t.Run("decode-panic-fails-closed", func(t *testing.T) {
+		harness := newScanHarness(t)
+		harness.addSource(1, memory.Indexed, scanTestProject).decodePanic = true
+		harness.addSource(2, memory.Indexed, scanTestProject)
+		if result, err := Run(context.Background(), harness.options); err == nil || result.Prepared {
+			t.Fatalf("decode panic result=%+v err=%v", result, err)
+		}
+		candidates, boundaries := harness.adapter.leaseCounts()
+		if candidates != 0 || boundaries != 0 {
+			t.Fatalf("decode panic leaked leases: candidates=%d boundaries=%d", candidates, boundaries)
+		}
+	})
+
+	t.Run("successful-repeated-runs", func(t *testing.T) {
+		harness := newScanHarness(t)
+		harness.addSource(1, memory.Indexed, scanTestProject)
+		for attempt := 0; attempt < 100; attempt++ {
+			if _, err := Run(context.Background(), harness.options); err != nil {
+				t.Fatalf("attempt %d: %v", attempt, err)
+			}
+			candidates, boundaries := harness.adapter.leaseCounts()
+			if candidates != 0 || boundaries != 0 {
+				t.Fatalf("attempt %d retained leases: candidates=%d boundaries=%d", attempt, candidates, boundaries)
+			}
+		}
+	})
+}
+
 func TestRunFailsClosedOnUnknownDecodeErrorWithoutAdvancingPrepared(t *testing.T) {
 	harness := newScanHarness(t)
 	spec := harness.addSource(1, memory.Indexed, scanTestProject)
@@ -800,7 +984,10 @@ func TestConcurrentProjectScansNeverPrepareOlderFrozenFactsAfterNewerAppendWins(
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = storeB.Close() })
-	adapterB := &fakeAdapter{catalog: catalogB, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error)}
+	adapterB := &fakeAdapter{
+		catalog: catalogB, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error),
+		candidateLeases: make(map[string]string), boundaryLeases: make(map[string]string),
+	}
 	newer := *oldSpec
 	newer.candidate.InitialCWD = bindingB.CanonicalRoot
 	newer.boundary.Candidate = newer.candidate

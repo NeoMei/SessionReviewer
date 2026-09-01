@@ -76,6 +76,13 @@ type recordDecoder struct {
 
 func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (source.DecodeReport, error) {
 	report := source.DecodeReport{TerminalState: boundary.TerminalState}
+	a.mu.RLock()
+	lease, leased := a.frozenLeases[boundary.Lease]
+	a.mu.RUnlock()
+	if !leased || lease.handle != boundary.Handle || lease.sessionID != boundary.Candidate.SessionID || boundary.Candidate.Provider != providerCodex {
+		return report, errors.New("boundary was not frozen by this Codex adapter")
+	}
+	defer a.AbandonBoundary(boundary)
 	if boundary.TerminalState != memory.Indexed {
 		if err := ctx.Err(); err != nil {
 			return report, err
@@ -91,7 +98,6 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	if !found || !sameBoundary(boundary, frozen.boundary) {
 		return report, errors.New("boundary was not frozen by this Codex adapter")
 	}
-	defer a.releaseFrozen(boundary.Handle)
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}

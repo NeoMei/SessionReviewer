@@ -1,6 +1,7 @@
 package pathguard
 
 import (
+	"context"
 	"errors"
 	"io/fs"
 	"math"
@@ -278,6 +279,27 @@ func TestTreeReadRegularBoundsContentAndReturnsMissing(t *testing.T) {
 	got, found, err := directory.ReadRegular("small.md", 5)
 	if err != nil || !found || string(got) != "12345" {
 		t.Fatalf("got=%q found=%v err=%v", got, found, err)
+	}
+}
+
+func TestReadRegularContextReturnsCancellationCause(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "bounded.txt"), []byte("bounded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	cause := errors.New("read-cancel-cause")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	if _, _, err := directory.ReadRegularContext(ctx, "bounded.txt", 64); !errors.Is(err, cause) {
+		t.Fatalf("ReadRegularContext error=%v want cause", err)
+	}
+	if _, _, err := directory.ReadRegularContext(nil, "bounded.txt", 64); err == nil {
+		t.Fatal("ReadRegularContext accepted nil context")
 	}
 }
 

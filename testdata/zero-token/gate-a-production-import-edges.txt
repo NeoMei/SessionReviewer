@@ -351,6 +351,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	sync
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/memorystore	time
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/pathguard	bytes
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/pathguard	context
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/pathguard	errors
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/pathguard	fmt
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/pathguard	github.com/neomei/SessionReviewer/internal/atomicfile

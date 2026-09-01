@@ -2,6 +2,7 @@ package pathguard
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -98,14 +99,23 @@ func (directory *Directory) EnsureDirectoryChecked(relative string, perm fs.File
 // ReadRegular reads a bounded regular file without following redirects and
 // verifies that its namespace entry still names the opened file after reading.
 func (directory *Directory) ReadRegular(relative string, max int64) ([]byte, bool, error) {
-	return directory.readRegularWithOptions(relative, max, nil, false)
+	return directory.readRegularWithOptions(context.Background(), relative, max, nil, false)
+}
+
+// ReadRegularContext is ReadRegular with cooperative cancellation during
+// path traversal and both bounded snapshot reads.
+func (directory *Directory) ReadRegularContext(ctx context.Context, relative string, max int64) ([]byte, bool, error) {
+	if ctx == nil {
+		return nil, false, errors.New("read context is required")
+	}
+	return directory.readRegularWithOptions(ctx, relative, max, nil, false)
 }
 
 // ReadRegularOptional has the same redirect and namespace guarantees as
 // ReadRegular, but treats a missing parent directory as an absent file. It is
 // intended for read-only planners that must not create target directories.
 func (directory *Directory) ReadRegularOptional(relative string, max int64) ([]byte, bool, error) {
-	return directory.readRegularWithOptions(relative, max, nil, true)
+	return directory.readRegularWithOptions(context.Background(), relative, max, nil, true)
 }
 
 // RemoveRegularIfHashMatches retires an exact regular file below the pinned
@@ -170,10 +180,13 @@ func (directory *Directory) RemoveRegularIfHashMatchesChecked(relative, expected
 }
 
 func (directory *Directory) readRegularWithHook(relative string, max int64, afterRead func() error) ([]byte, bool, error) {
-	return directory.readRegularWithOptions(relative, max, afterRead, false)
+	return directory.readRegularWithOptions(context.Background(), relative, max, afterRead, false)
 }
 
-func (directory *Directory) readRegularWithOptions(relative string, max int64, afterRead func() error, missingParentIsAbsent bool) ([]byte, bool, error) {
+func (directory *Directory) readRegularWithOptions(ctx context.Context, relative string, max int64, afterRead func() error, missingParentIsAbsent bool) ([]byte, bool, error) {
+	if err := contextCause(ctx); err != nil {
+		return nil, false, err
+	}
 	components, err := cleanTreeRelative(relative, false)
 	if err != nil {
 		return nil, false, err
@@ -196,6 +209,9 @@ func (directory *Directory) readRegularWithOptions(relative string, max int64, a
 	}()
 	parents := make([]treeParentIdentity, 0, len(components)-1)
 	for _, component := range components[:len(components)-1] {
+		if err := contextCause(ctx); err != nil {
+			return nil, false, err
+		}
 		before, err := current.Lstat(component)
 		if errors.Is(err, os.ErrNotExist) && missingParentIsAbsent {
 			if err := directory.validatePinnedRoot(); err != nil {
@@ -242,7 +258,7 @@ func (directory *Directory) readRegularWithOptions(relative string, max int64, a
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, true, errors.New("file changed while opening")
 	}
-	content, err := readStableRegularSnapshot(file, before, opened, max, afterRead)
+	content, err := readStableRegularSnapshotContext(ctx, file, before, opened, max, afterRead)
 	if err != nil {
 		return nil, true, err
 	}
@@ -500,10 +516,14 @@ func readMarkdownRootFile(root *os.Root, name string, before os.FileInfo) ([]byt
 }
 
 func readStableRegularSnapshot(file *os.File, before, opened os.FileInfo, max int64, afterFirstRead func() error) ([]byte, error) {
+	return readStableRegularSnapshotContext(context.Background(), file, before, opened, max, afterFirstRead)
+}
+
+func readStableRegularSnapshotContext(ctx context.Context, file *os.File, before, opened os.FileInfo, max int64, afterFirstRead func() error) ([]byte, error) {
 	if max < 0 || max > maxReadRegularBytes || !sameStableFileMetadata(before, opened) {
 		return nil, errors.New("regular file changed before reading")
 	}
-	first, err := readBoundedRegular(file, max)
+	first, err := readBoundedRegularContext(ctx, file, max)
 	if err != nil {
 		return nil, err
 	}
@@ -519,7 +539,7 @@ func readStableRegularSnapshot(file *os.File, before, opened os.FileInfo, max in
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, errors.New("cannot rewind regular file snapshot")
 	}
-	second, err := readBoundedRegular(file, max)
+	second, err := readBoundedRegularContext(ctx, file, max)
 	if err != nil {
 		return nil, err
 	}
@@ -531,14 +551,41 @@ func readStableRegularSnapshot(file *os.File, before, opened os.FileInfo, max in
 }
 
 func readBoundedRegular(file *os.File, max int64) ([]byte, error) {
-	content, err := io.ReadAll(io.LimitReader(file, max+1))
-	if err != nil {
-		return nil, errors.New("cannot read regular file snapshot")
+	return readBoundedRegularContext(context.Background(), file, max)
+}
+
+func readBoundedRegularContext(ctx context.Context, file *os.File, max int64) ([]byte, error) {
+	if err := contextCause(ctx); err != nil {
+		return nil, err
 	}
-	if int64(len(content)) > max {
-		return nil, errors.New("file exceeds read limit")
+	reader := io.LimitReader(file, max+1)
+	content := make([]byte, 0, min(int64(64<<10), max+1))
+	buffer := make([]byte, 64<<10)
+	for {
+		if err := contextCause(ctx); err != nil {
+			return nil, err
+		}
+		count, err := reader.Read(buffer)
+		if count > 0 {
+			content = append(content, buffer[:count]...)
+			if int64(len(content)) > max {
+				return nil, errors.New("file exceeds read limit")
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return content, nil
+		}
+		if err != nil {
+			return nil, errors.New("cannot read regular file snapshot")
+		}
 	}
-	return content, nil
+}
+
+func contextCause(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	return context.Cause(ctx)
 }
 
 func sameStableFileMetadata(first, second os.FileInfo) bool {

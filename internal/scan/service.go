@@ -135,6 +135,7 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		return result, err
 	}
 	discovery, err := options.Adapter.Discover(ctx)
+	defer abandonCandidates(options.Adapter, discovery.Candidates)
 	if err != nil {
 		return result, fmt.Errorf("discover source sessions: %w", err)
 	}
@@ -145,6 +146,7 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return result, err
 	}
+	defer abandonFrozenTasks(options.Adapter, tasks)
 	decoded, err := decodeFrozen(ctx, options, tasks)
 	if err != nil {
 		return result, err
@@ -425,6 +427,14 @@ func acquireScanLock(ctx context.Context, dataRoot, projectID string) (*project.
 }
 
 func freezeDiscovery(ctx context.Context, options Options, discovery source.Discovery) ([]frozenTask, []source.Issue, error) {
+	defer abandonCandidates(options.Adapter, discovery.Candidates)
+	transferred := false
+	ownedBoundaries := make([]source.Boundary, 0, len(discovery.Candidates))
+	defer func() {
+		if !transferred {
+			abandonBoundaries(options.Adapter, ownedBoundaries)
+		}
+	}()
 	if len(discovery.Candidates)+len(discovery.Issues) > maxScanSources {
 		return nil, nil, errors.New("source discovery exceeds scan limit")
 	}
@@ -472,8 +482,10 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 		}
 		if boundary.TerminalState != memory.Indexed {
 			issues[key] = source.Issue{Provider: candidates[key].Provider, SessionID: candidates[key].SessionID, Code: "freeze_terminal", TerminalState: boundary.TerminalState}
+			abandonBoundary(options.Adapter, boundary)
 			continue
 		}
+		ownedBoundaries = append(ownedBoundaries, boundary)
 		tasks = append(tasks, frozenTask{key: key, boundary: boundary})
 	}
 	known, err := options.Catalog.ListCandidates(options.ProjectID)
@@ -496,10 +508,12 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 	sort.Slice(issueList, func(i, j int) bool {
 		return sourceKey(issueList[i].Provider, issueList[i].SessionID) < sourceKey(issueList[j].Provider, issueList[j].SessionID)
 	})
+	transferred = true
 	return tasks, issueList, nil
 }
 
 func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]decodedTask, error) {
+	defer abandonFrozenTasks(options.Adapter, tasks)
 	decodeContext, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	workers := options.Workers
@@ -519,7 +533,12 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 	for worker := 0; worker < workers; worker++ {
 		wait.Add(1)
 		go func() {
-			defer wait.Done()
+			defer func() {
+				if recover() != nil {
+					cancel(errors.New("source adapter Decode panicked"))
+				}
+				wait.Done()
+			}()
 			for {
 				if decodeContext.Err() != nil {
 					return
@@ -572,6 +591,42 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 		return nil, err
 	}
 	return results, nil
+}
+
+func abandonCandidates(adapter source.Adapter, candidates []source.Candidate) {
+	lifecycle, ok := adapter.(source.LeaseLifecycle)
+	if !ok {
+		return
+	}
+	for _, candidate := range candidates {
+		lifecycle.AbandonCandidate(candidate)
+	}
+}
+
+func abandonBoundaries(adapter source.Adapter, boundaries []source.Boundary) {
+	lifecycle, ok := adapter.(source.LeaseLifecycle)
+	if !ok {
+		return
+	}
+	for _, boundary := range boundaries {
+		lifecycle.AbandonBoundary(boundary)
+	}
+}
+
+func abandonBoundary(adapter source.Adapter, boundary source.Boundary) {
+	if lifecycle, ok := adapter.(source.LeaseLifecycle); ok {
+		lifecycle.AbandonBoundary(boundary)
+	}
+}
+
+func abandonFrozenTasks(adapter source.Adapter, tasks []frozenTask) {
+	lifecycle, ok := adapter.(source.LeaseLifecycle)
+	if !ok {
+		return
+	}
+	for _, task := range tasks {
+		lifecycle.AbandonBoundary(task.boundary)
+	}
 }
 
 func collectTerminals(ctx context.Context, options Options, decoded []decodedTask, issues []source.Issue, previous baseline) ([]terminalSource, error) {

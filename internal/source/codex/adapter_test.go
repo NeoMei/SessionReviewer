@@ -704,6 +704,46 @@ func TestRepeatedUnchangedCyclesReuseBoundedHandlesAndReadIndex(t *testing.T) {
 	}
 }
 
+func TestStableHandlesUseIndependentIdempotentLeases(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	fixture.installFixture(t, "session-project-a.jsonl")
+	implementation := fixture.adapter(t, "v1").(*adapter)
+	lifecycle := source.LeaseLifecycle(implementation)
+
+	first := discoverCandidate(t, implementation, "session-project-a")
+	second := discoverCandidate(t, implementation, "session-project-a")
+	if first.Handle != second.Handle || first.Lease == "" || second.Lease == "" || first.Lease == second.Lease {
+		t.Fatalf("candidate handles/leases = (%q, %q) (%q, %q)", first.Handle, first.Lease, second.Handle, second.Lease)
+	}
+	lifecycle.AbandonCandidate(first)
+	lifecycle.AbandonCandidate(first)
+	firstBoundary, err := implementation.Freeze(context.Background(), second)
+	if err != nil {
+		t.Fatalf("second candidate lease was invalidated by duplicate abandon: %v", err)
+	}
+
+	third := discoverCandidate(t, implementation, "session-project-a")
+	secondBoundary, err := implementation.Freeze(context.Background(), third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstBoundary.Handle != secondBoundary.Handle || firstBoundary.Lease == "" || secondBoundary.Lease == "" || firstBoundary.Lease == secondBoundary.Lease {
+		t.Fatalf("boundary handles/leases = (%q, %q) (%q, %q)", firstBoundary.Handle, firstBoundary.Lease, secondBoundary.Handle, secondBoundary.Lease)
+	}
+	lifecycle.AbandonBoundary(firstBoundary)
+	lifecycle.AbandonBoundary(firstBoundary)
+	if _, err := implementation.Decode(context.Background(), secondBoundary, func(memory.ObservationRevision) error { return nil }); err != nil {
+		t.Fatalf("second boundary lease was invalidated by duplicate abandon: %v", err)
+	}
+
+	implementation.mu.RLock()
+	candidateLeases, boundaryLeases := len(implementation.candidateLeases), len(implementation.frozenLeases)
+	implementation.mu.RUnlock()
+	if candidateLeases != 0 || boundaryLeases != 0 {
+		t.Fatalf("consumed lifecycle retained leases: candidates=%d boundaries=%d", candidateLeases, boundaryLeases)
+	}
+}
+
 func TestFrozenLifecycleRetainsInFlightBoundaryAndEvictsConsumedAppendHistory(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	path := fixture.installFixture(t, "session-project-a.jsonl")
@@ -760,7 +800,7 @@ func TestConcurrentFreezeDecodeReusesOneBoundaryAndCancelledFreezeReleasesCandid
 		t.Fatalf("cancelled freeze error=%v", err)
 	}
 	implementation.mu.RLock()
-	remainingLease := implementation.candidateLeases[candidate.Handle]
+	remainingLease := implementation.candidateLeaseCounts[candidate.Handle]
 	implementation.mu.RUnlock()
 	if remainingLease != 0 {
 		t.Fatalf("cancelled freeze leaked candidate lease=%d", remainingLease)

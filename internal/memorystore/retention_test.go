@@ -280,6 +280,123 @@ func TestRetentionRechecksIdentityMetadataAndNamespaceBeforeDelete(t *testing.T)
 	}
 }
 
+func TestRetentionRevalidatesReachabilityAnchorsBeforeEveryUnlink(t *testing.T) {
+	t.Run("prepared-pointer-content", func(t *testing.T) {
+		dataRoot, store, _ := newRetentionStore(t, "generation-anchor-pointer")
+		memoryRoot := retentionMemoryRoot(dataRoot)
+		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("pointer-candidate"), retentionNow.Add(-8*24*time.Hour))
+		assertAnchorMutationStopsCleanup(t, store, candidate, nil, func() {
+			mutateRetentionFileInPlace(t, filepath.Join(memoryRoot, "manifest.json"))
+		})
+	})
+
+	t.Run("prepared-generation-manifest", func(t *testing.T) {
+		dataRoot, store, fixture := newRetentionStore(t, "generation-anchor-prepared")
+		memoryRoot := retentionMemoryRoot(dataRoot)
+		candidate := writeRetentionCandidate(t, memoryRoot, "staging", ".stage", []byte("prepared-candidate"), retentionNow.Add(-8*24*time.Hour))
+		assertAnchorMutationStopsCleanup(t, store, candidate, nil, func() {
+			mutateRetentionFileInPlace(t, filepath.Join(memoryRoot, "generations", fixture.manifest.GenerationID+".json"))
+		})
+	})
+
+	t.Run("external-pinned-generation-manifest", func(t *testing.T) {
+		dataRoot, store, pinned := newRetentionStore(t, "generation-anchor-pinned")
+		successor := buildStoredFixture(t, store, "generation-anchor-current")
+		expected, _, err := store.LoadPrepared()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.AdvancePrepared(expected, successor.manifest); err != nil {
+			t.Fatal(err)
+		}
+		memoryRoot := retentionMemoryRoot(dataRoot)
+		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("pinned-candidate"), retentionNow.Add(-8*24*time.Hour))
+		assertAnchorMutationStopsCleanup(t, store, candidate, []string{pinned.manifest.GenerationID}, func() {
+			mutateRetentionFileInPlace(t, filepath.Join(memoryRoot, "generations", pinned.manifest.GenerationID+".json"))
+		})
+	})
+
+	t.Run("memory-root-identity", func(t *testing.T) {
+		dataRoot, store, _ := newRetentionStore(t, "generation-anchor-root")
+		memoryRoot := retentionMemoryRoot(dataRoot)
+		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("root-candidate"), retentionNow.Add(-8*24*time.Hour))
+		movedRoot := memoryRoot + ".moved"
+		retained := filepath.Join(movedRoot, "cache", filepath.Base(candidate))
+		assertAnchorMutationStopsCleanup(t, store, retained, nil, func() {
+			if err := os.Rename(memoryRoot, movedRoot); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(memoryRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+
+	t.Run("namespace-identity", func(t *testing.T) {
+		dataRoot, store, _ := newRetentionStore(t, "generation-anchor-namespace")
+		memoryRoot := retentionMemoryRoot(dataRoot)
+		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("namespace-candidate"), retentionNow.Add(-8*24*time.Hour))
+		rootInfo, err := os.Stat(memoryRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		movedCache := filepath.Join(t.TempDir(), "cache.moved")
+		retained := filepath.Join(movedCache, filepath.Base(candidate))
+		assertAnchorMutationStopsCleanup(t, store, retained, nil, func() {
+			if err := os.Rename(filepath.Join(memoryRoot, "cache"), movedCache); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(memoryRoot, "cache"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(memoryRoot, rootInfo.ModTime(), rootInfo.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	})
+}
+
+func assertAnchorMutationStopsCleanup(t *testing.T, store *Store, retainedPath string, pins []string, mutate func()) {
+	t.Helper()
+	var invoked atomic.Bool
+	retentionDeleteCheckpoint = func() error {
+		if invoked.CompareAndSwap(false, true) {
+			mutate()
+		}
+		return nil
+	}
+	t.Cleanup(func() { retentionDeleteCheckpoint = nil })
+	if _, err := store.CleanupUnreachable(retentionNow, pins...); err == nil {
+		t.Fatal("cleanup accepted a changed reachability anchor")
+	}
+	if !invoked.Load() {
+		t.Fatal("anchor mutation checkpoint was not reached")
+	}
+	assertExists(t, retainedPath)
+}
+
+func mutateRetentionFileInPlace(t *testing.T, path string) {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) == 0 {
+		t.Fatal("anchor fixture is empty")
+	}
+	body[len(body)/2] ^= 1
+	if err := os.WriteFile(path, body, info.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRetentionSerializesConcurrentAdvanceAndCopiesExplicitPins(t *testing.T) {
 	dataRoot, store, first := newRetentionStore(t, "generation-concurrent-a")
 	second := buildStoredFixture(t, store, "generation-concurrent-b")
@@ -480,6 +597,46 @@ func TestRetentionCleanupCancellationReturnsValidPartialReportAndCanResume(t *te
 	retentionDeleteCheckpoint = nil
 	if _, err := store.CleanupUnreachable(retentionNow); err != nil {
 		t.Fatalf("resume partial cleanup: %v", err)
+	}
+}
+
+func TestRetentionSnapshotTraversalReturnsContextCauseWithoutMutation(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		run  func(*Store, context.Context) error
+	}{
+		{name: "report", run: func(store *Store, ctx context.Context) error {
+			_, err := store.ReportRetentionContext(ctx, retentionNow)
+			return err
+		}},
+		{name: "cleanup-capture", run: func(store *Store, ctx context.Context) error {
+			_, err := store.CleanupUnreachableContext(ctx, retentionNow)
+			return err
+		}},
+	} {
+		t.Run(operation.name, func(t *testing.T) {
+			dataRoot, store, _ := newRetentionStore(t, "generation-snapshot-cancel-"+operation.name)
+			memoryRoot := retentionMemoryRoot(dataRoot)
+			for index := 0; index < 256; index++ {
+				writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte(fmt.Sprintf("snapshot-cancel-%03d", index)), retentionNow.Add(-8*24*time.Hour))
+			}
+			before := retentionInventory(t, memoryRoot)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cause := errors.New("retention-snapshot-cause")
+			var traversed atomic.Int32
+			retentionTraversalCheckpoint = func() {
+				if traversed.Add(1) == 12 {
+					cancel(cause)
+				}
+			}
+			t.Cleanup(func() { retentionTraversalCheckpoint = nil })
+			if err := operation.run(store, ctx); !errors.Is(err, cause) {
+				t.Fatalf("snapshot cancellation error=%v want cause", err)
+			}
+			if after := retentionInventory(t, memoryRoot); !equalRetentionInventory(before, after) {
+				t.Fatal("cancelled retention snapshot mutated the store")
+			}
+		})
 	}
 }
 

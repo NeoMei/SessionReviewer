@@ -64,7 +64,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	validateDigestValue	method.Pointer receiver=value	occurrence=3
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memorystore/store.go	(*Store).reconcileGenerationGraph	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memorystore/store.go	(*Store).reconcileGenerationGraphContext	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	patchAcceptedHistory	reflect.DeepEqual	occurrence=1
