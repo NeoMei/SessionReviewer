@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/config"
@@ -17,6 +18,8 @@ import (
 )
 
 var ErrAssociationRequired = errors.New("project association requires explicit confirmation")
+
+var errWorktreeRegistration = errors.New("Git worktree registration is invalid")
 
 type Binding struct {
 	ProjectID          string
@@ -77,6 +80,9 @@ func Resolve(mapping config.ProjectMapping, requestedRoot, goos string) (Binding
 	}
 	commonIdentity, err := gitCommonDirIdentity(directory)
 	if err != nil {
+		if errors.Is(err, errWorktreeRegistration) {
+			return Binding{}, ErrAssociationRequired
+		}
 		return Binding{}, fmt.Errorf("authenticate Git common directory: %w", err)
 	}
 	binding := Binding{
@@ -171,17 +177,21 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 		return "", errors.New("Git metadata is redirected or unavailable")
 	}
 	var gitDirPath string
+	var pointerIdentity pathguard.IdentityToken
+	worktreePointer := false
 	switch {
 	case info.IsDir():
 		gitDirPath = filepath.Join(projectRoot.Path, ".git")
 	case info.Mode().IsRegular():
+		worktreePointer = true
 		file, opened, openErr := projectRoot.OpenRegular(".git")
 		if openErr != nil {
 			return "", openErr
 		}
+		pointerIdentity, openErr = pathguard.PhysicalFileIdentity(file)
 		body, readErr := io.ReadAll(io.LimitReader(file, 4097))
 		closeErr := file.Close()
-		if readErr != nil || closeErr != nil || len(body) > 4096 || opened.Size() != int64(len(body)) {
+		if openErr != nil || readErr != nil || closeErr != nil || len(body) > 4096 || opened.Size() != int64(len(body)) {
 			return "", errors.New("Git directory pointer is invalid")
 		}
 		line := string(bytes.TrimSuffix(body, []byte("\n")))
@@ -225,9 +235,77 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 		return "", err
 	}
 	defer common.Close()
+	if worktreePointer {
+		if err := authenticateWorktreeRegistration(projectRoot, gitDir, common, pointerIdentity); err != nil {
+			return "", errors.Join(errWorktreeRegistration, err)
+		}
+	}
 	token, err := common.PhysicalIdentity()
 	if err != nil {
 		return "", err
 	}
 	return identityKey(token), nil
+}
+
+func authenticateWorktreeRegistration(projectRoot, gitDir, common *pathguard.Directory, pointerIdentity pathguard.IdentityToken) error {
+	relative, err := filepath.Rel(common.Path, gitDir.Path)
+	if err != nil || filepath.IsAbs(relative) || filepath.Clean(relative) != relative {
+		return errors.New("worktree gitdir is outside the common directory")
+	}
+	components := strings.Split(relative, string(filepath.Separator))
+	if len(components) != 2 || components[0] != "worktrees" || components[1] == "" || components[1] == "." || components[1] == ".." {
+		return errors.New("worktree gitdir is not a registered common-directory entry")
+	}
+	registeredRoot, registeredInfo, err := common.OpenDirectory(filepath.Join(components...))
+	if err != nil {
+		return fmt.Errorf("open registered worktree entry: %w", err)
+	}
+	openedInfo, statErr := registeredRoot.Stat(".")
+	closeErr := registeredRoot.Close()
+	if statErr != nil || closeErr != nil || registeredInfo == nil || openedInfo == nil || !os.SameFile(registeredInfo, openedInfo) || !os.SameFile(openedInfo, gitDir.Info()) {
+		return errors.Join(errors.New("registered worktree entry identity changed"), statErr, closeErr)
+	}
+
+	body, found, err := gitDir.ReadRegular("gitdir", 4096)
+	if err != nil || !found {
+		return errors.Join(errors.New("registered worktree backlink is missing"), err)
+	}
+	backlink := string(bytes.TrimSuffix(body, []byte("\n")))
+	backlink = strings.TrimSuffix(backlink, "\r")
+	if backlink == "" || strings.ContainsAny(backlink, "\r\n\x00") {
+		return errors.New("registered worktree backlink is invalid")
+	}
+	if !filepath.IsAbs(backlink) {
+		backlink = filepath.Join(gitDir.Path, backlink)
+	}
+	backlink = filepath.Clean(backlink)
+	wantBacklink := filepath.Join(projectRoot.Path, ".git")
+	backlinkKey, backlinkErr := pathAliasKey(runtime.GOOS, backlink)
+	wantBacklinkKey, wantErr := pathAliasKey(runtime.GOOS, wantBacklink)
+	if backlinkErr != nil || wantErr != nil || backlinkKey != wantBacklinkKey {
+		return errors.New("registered worktree backlink names another root")
+	}
+	backlinkParent, err := pathguard.Open(filepath.Dir(backlink))
+	if err != nil {
+		return fmt.Errorf("authenticate registered worktree root: %w", err)
+	}
+	defer backlinkParent.Close()
+	projectIdentity, err := projectRoot.PhysicalIdentity()
+	if err != nil {
+		return err
+	}
+	backlinkRootIdentity, err := backlinkParent.PhysicalIdentity()
+	if err != nil || backlinkRootIdentity != projectIdentity {
+		return errors.Join(errors.New("registered worktree backlink root identity changed"), err)
+	}
+	backlinkFile, _, err := backlinkParent.OpenRegular(filepath.Base(backlink))
+	if err != nil {
+		return fmt.Errorf("authenticate registered worktree backlink: %w", err)
+	}
+	backlinkIdentity, identityErr := pathguard.PhysicalFileIdentity(backlinkFile)
+	closeErr = backlinkFile.Close()
+	if identityErr != nil || closeErr != nil || backlinkIdentity != pointerIdentity {
+		return errors.Join(errors.New("registered worktree backlink file identity changed"), identityErr, closeErr)
+	}
+	return nil
 }

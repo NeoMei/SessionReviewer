@@ -2,9 +2,11 @@ package memorystore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -409,6 +411,75 @@ func TestRetentionCleanupIsRestartableAfterPartialProcessExit(t *testing.T) {
 		if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("candidate remains after restart %q: %v", filepath.Base(candidate), err)
 		}
+	}
+}
+
+func TestRetentionCleanupUsesOneFullSnapshotAndLinearCandidateRevalidation(t *testing.T) {
+	dataRoot, store, _ := newRetentionStore(t, "generation-linear")
+	memoryRoot := retentionMemoryRoot(dataRoot)
+	const candidates = 64
+	for index := 0; index < candidates; index++ {
+		writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte(fmt.Sprintf("linear-%03d", index)), retentionNow.Add(-8*24*time.Hour))
+	}
+	var snapshots, revalidations atomic.Int32
+	retentionFullSnapshotCheckpoint = func() { snapshots.Add(1) }
+	retentionCandidateRevalidationCheckpoint = func() { revalidations.Add(1) }
+	t.Cleanup(func() {
+		retentionFullSnapshotCheckpoint = nil
+		retentionCandidateRevalidationCheckpoint = nil
+	})
+	report, err := store.CleanupUnreachableContext(context.Background(), retentionNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshots.Load() != 1 || revalidations.Load() != candidates {
+		t.Fatalf("cleanup complexity snapshots=%d revalidations=%d want 1/%d", snapshots.Load(), revalidations.Load(), candidates)
+	}
+	if report.CleanupCandidates != 0 || report.CleanupBytes != 0 {
+		t.Fatalf("completed cleanup report=%+v", report)
+	}
+}
+
+func TestRetentionCleanupCancellationReturnsValidPartialReportAndCanResume(t *testing.T) {
+	dataRoot, store, _ := newRetentionStore(t, "generation-cancel")
+	memoryRoot := retentionMemoryRoot(dataRoot)
+	paths := make([]string, 5)
+	for index := range paths {
+		paths[index] = writeRetentionCandidate(t, memoryRoot, "staging", ".stage", []byte(fmt.Sprintf("cancel-%d", index)), retentionNow.Add(-8*24*time.Hour))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var checkpoints atomic.Int32
+	retentionDeleteCheckpoint = func() error {
+		if checkpoints.Add(1) == 2 {
+			cancel()
+		}
+		return nil
+	}
+	t.Cleanup(func() { retentionDeleteCheckpoint = nil })
+	report, err := store.CleanupUnreachableContext(ctx, retentionNow)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cleanup cancellation error=%v", err)
+	}
+	if report.CleanupCandidates != 4 {
+		t.Fatalf("partial cleanup report=%+v want 4 remaining candidates", report)
+	}
+	remaining := 0
+	for _, path := range paths {
+		if _, statErr := os.Lstat(path); statErr == nil {
+			remaining++
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatal(statErr)
+		}
+	}
+	if remaining != 4 {
+		t.Fatalf("cancelled cleanup left %d candidates, want 4", remaining)
+	}
+	if current, reportErr := store.ReportRetention(retentionNow); reportErr != nil || current.CleanupCandidates != 4 {
+		t.Fatalf("partial store is not reportable: report=%+v err=%v", current, reportErr)
+	}
+	retentionDeleteCheckpoint = nil
+	if _, err := store.CleanupUnreachable(retentionNow); err != nil {
+		t.Fatalf("resume partial cleanup: %v", err)
 	}
 }
 

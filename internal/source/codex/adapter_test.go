@@ -12,7 +12,9 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
@@ -656,6 +658,200 @@ func TestMissingAndDuplicateSegmentsBecomeTerminalIssues(t *testing.T) {
 	}
 	if boundary.TerminalState != memory.Missing || len(boundary.Issues) != 1 || boundary.Issues[0].Code != "missing_segment" {
 		t.Fatalf("missing terminal boundary=%+v", boundary)
+	}
+}
+
+func TestRepeatedUnchangedCyclesReuseBoundedHandlesAndReadIndex(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	implementation := fixture.adapter(t, "v1").(*adapter)
+	var ref memory.SourceRef
+	var candidateHandle, boundaryHandle string
+	for cycle := 0; cycle < 500; cycle++ {
+		if cycle == 250 {
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(path, info.ModTime().Add(time.Second), info.ModTime().Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		candidate := discoverCandidate(t, implementation, "session-project-a")
+		boundary, err := implementation.Freeze(context.Background(), candidate)
+		if err != nil {
+			t.Fatalf("cycle %d freeze: %v", cycle, err)
+		}
+		observations, _ := decodeBoundary(t, implementation, boundary)
+		if len(observations) == 0 {
+			t.Fatalf("cycle %d emitted no observations", cycle)
+		}
+		if cycle == 0 {
+			candidateHandle, boundaryHandle, ref = candidate.Handle, boundary.Handle, observations[0].Ref
+		} else if candidate.Handle != candidateHandle || boundary.Handle != boundaryHandle {
+			t.Fatalf("unchanged cycle %d created new handles: candidate=%q boundary=%q", cycle, candidate.Handle, boundary.Handle)
+		}
+	}
+	implementation.mu.RLock()
+	candidateCount, frozenCount := len(implementation.candidates), len(implementation.frozen)
+	indexedCount := len(implementation.frozenBySource[frozenSourceKey(ref.Provider, ref.SessionID, ref.SourceIdentity)])
+	implementation.mu.RUnlock()
+	if candidateCount != 1 || frozenCount != 1 || indexedCount != 1 {
+		t.Fatalf("unchanged cycles grew adapter state: candidates=%d frozen=%d read-index=%d", candidateCount, frozenCount, indexedCount)
+	}
+	if _, err := implementation.Read(context.Background(), ref, 64); err != nil {
+		t.Fatalf("bounded read after repeated scans: %v", err)
+	}
+}
+
+func TestFrozenLifecycleRetainsInFlightBoundaryAndEvictsConsumedAppendHistory(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	implementation := fixture.adapter(t, "v1").(*adapter)
+	inFlight, err := implementation.Freeze(context.Background(), discoverCandidate(t, implementation, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for appendIndex := 0; appendIndex < maxRetainedFrozenPerSource+5; appendIndex++ {
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		line := fmt.Sprintf("{\"timestamp\":\"2026-08-31T11:10:%02dZ\",\"type\":\"future_record\",\"payload\":{}}\n", appendIndex)
+		if _, err := file.WriteString(line); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		boundary, err := implementation.Freeze(context.Background(), discoverCandidate(t, implementation, "session-project-a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		decodeBoundary(t, implementation, boundary)
+	}
+	key := frozenSourceKey(inFlight.Candidate.Provider, inFlight.Candidate.SessionID, inFlight.SourceIdentity)
+	implementation.mu.RLock()
+	beforeRelease := len(implementation.frozenBySource[key])
+	_, inFlightPresent := implementation.frozen[inFlight.Handle]
+	implementation.mu.RUnlock()
+	if !inFlightPresent || beforeRelease != maxRetainedFrozenPerSource+1 {
+		t.Fatalf("in-flight boundary was not preserved with bounded history: present=%v entries=%d", inFlightPresent, beforeRelease)
+	}
+	decodeBoundary(t, implementation, inFlight)
+	implementation.mu.RLock()
+	afterRelease := len(implementation.frozenBySource[key])
+	_, stalePresent := implementation.frozen[inFlight.Handle]
+	implementation.mu.RUnlock()
+	if stalePresent || afterRelease != maxRetainedFrozenPerSource {
+		t.Fatalf("consumed old boundary was not evicted: present=%v entries=%d", stalePresent, afterRelease)
+	}
+}
+
+func TestConcurrentFreezeDecodeReusesOneBoundaryAndCancelledFreezeReleasesCandidate(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	fixture.installFixture(t, "session-project-a.jsonl")
+	implementation := fixture.adapter(t, "v1").(*adapter)
+	candidate := discoverCandidate(t, implementation, "session-project-a")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := implementation.Freeze(cancelled, candidate); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled freeze error=%v", err)
+	}
+	implementation.mu.RLock()
+	remainingLease := implementation.candidateLeases[candidate.Handle]
+	implementation.mu.RUnlock()
+	if remainingLease != 0 {
+		t.Fatalf("cancelled freeze leaked candidate lease=%d", remainingLease)
+	}
+
+	const workers = 24
+	candidates := make([]source.Candidate, workers)
+	for index := range candidates {
+		candidates[index] = discoverCandidate(t, implementation, "session-project-a")
+	}
+	var wait sync.WaitGroup
+	errorsOut := make(chan error, workers)
+	handles := make(chan string, workers)
+	for _, value := range candidates {
+		wait.Add(1)
+		go func(candidate source.Candidate) {
+			defer wait.Done()
+			boundary, err := implementation.Freeze(context.Background(), candidate)
+			if err != nil {
+				errorsOut <- err
+				return
+			}
+			handles <- boundary.Handle
+			_, err = implementation.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil })
+			if err != nil {
+				errorsOut <- err
+			}
+		}(value)
+	}
+	wait.Wait()
+	close(errorsOut)
+	close(handles)
+	for err := range errorsOut {
+		t.Fatal(err)
+	}
+	var wantHandle string
+	for handle := range handles {
+		if wantHandle == "" {
+			wantHandle = handle
+		} else if handle != wantHandle {
+			t.Fatalf("concurrent unchanged freezes produced handles %q and %q", wantHandle, handle)
+		}
+	}
+	implementation.mu.RLock()
+	frozenCount := len(implementation.frozen)
+	implementation.mu.RUnlock()
+	if frozenCount != 1 {
+		t.Fatalf("concurrent unchanged cycle retained %d frozen boundaries", frozenCount)
+	}
+}
+
+func TestReplacementLifecycleBoundsSessionHistoryWithoutEvictingInFlightHandle(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	implementation := fixture.adapter(t, "v1").(*adapter)
+	inFlight, err := implementation.Freeze(context.Background(), discoverCandidate(t, implementation, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for replacement := 0; replacement < maxRetainedFrozenPerSession+5; replacement++ {
+		if err := os.Rename(path, fmt.Sprintf("%s.replaced-%02d", path, replacement)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		boundary, err := implementation.Freeze(context.Background(), discoverCandidate(t, implementation, "session-project-a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		decodeBoundary(t, implementation, boundary)
+	}
+	implementation.mu.RLock()
+	beforeRelease, inFlightPresent := len(implementation.frozen), implementation.frozen[inFlight.Handle].boundary.Handle == inFlight.Handle
+	implementation.mu.RUnlock()
+	if !inFlightPresent || beforeRelease != maxRetainedFrozenPerSession+1 {
+		t.Fatalf("replacement lifecycle before release: in-flight=%v frozen=%d", inFlightPresent, beforeRelease)
+	}
+	if _, err := implementation.Decode(context.Background(), inFlight, func(memory.ObservationRevision) error { return nil }); err == nil {
+		t.Fatal("replaced physical source unexpectedly decoded through old boundary")
+	}
+	implementation.mu.RLock()
+	afterRelease := len(implementation.frozen)
+	_, stalePresent := implementation.frozen[inFlight.Handle]
+	implementation.mu.RUnlock()
+	if stalePresent || afterRelease != maxRetainedFrozenPerSession {
+		t.Fatalf("replacement lifecycle after release: stale=%v frozen=%d", stalePresent, afterRelease)
 	}
 }
 

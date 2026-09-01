@@ -3,6 +3,7 @@ package projectidentity
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -16,10 +17,14 @@ import (
 func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 	parent := t.TempDir()
 	mainRoot := filepath.Join(parent, "main")
-	commonDir := filepath.Join(mainRoot, ".git")
-	if err := os.MkdirAll(filepath.Join(commonDir, "worktrees", "linked"), 0o700); err != nil {
+	runGitFixture(t, parent, "init", "-q", mainRoot)
+	runGitFixture(t, mainRoot, "config", "user.email", "session-reviewer@example.invalid")
+	runGitFixture(t, mainRoot, "config", "user.name", "Session Reviewer Test")
+	if err := os.WriteFile(filepath.Join(mainRoot, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	runGitFixture(t, mainRoot, "add", "tracked.txt")
+	runGitFixture(t, mainRoot, "commit", "-q", "-m", "fixture")
 	mapping := config.ProjectMapping{ID: "project-a", Root: mainRoot}
 	mainBinding, err := Resolve(mapping, mainRoot, runtime.GOOS)
 	if err != nil {
@@ -28,16 +33,7 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{mainBinding.AuthenticatedAlias}
 
 	worktree := filepath.Join(parent, "linked")
-	if err := os.MkdirAll(worktree, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	gitDir := filepath.Join(commonDir, "worktrees", "linked")
-	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	runGitFixture(t, mainRoot, "worktree", "add", "-q", "-b", "linked-branch", worktree)
 	worktreeBinding, err := Resolve(mapping, worktree, runtime.GOOS)
 	if err != nil || worktreeBinding.ProjectID != "project-a" || worktreeBinding.CommonDirIdentity != mainBinding.CommonDirIdentity || !worktreeBinding.NewAuthentication {
 		t.Fatalf("worktree binding=%#v err=%v", worktreeBinding, err)
@@ -50,6 +46,46 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 	movedBinding, err := Resolve(mapping, movedRoot, runtime.GOOS)
 	if err != nil || movedBinding.ProjectID != "project-a" || movedBinding.RootIdentity != mainBinding.RootIdentity || !movedBinding.NewAuthentication {
 		t.Fatalf("moved binding=%#v err=%v", movedBinding, err)
+	}
+}
+
+func TestResolveRejectsForgedWorktreePointerWithoutRegisteredBacklink(t *testing.T) {
+	parent := t.TempDir()
+	mainRoot := filepath.Join(parent, "main")
+	commonDir := filepath.Join(mainRoot, ".git")
+	if err := os.MkdirAll(filepath.Join(commonDir, "worktrees", "forged"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: "project-a", Root: mainRoot}
+	mainBinding, err := Resolve(mapping, mainRoot, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("bootstrap main root: %v", err)
+	}
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{mainBinding.AuthenticatedAlias}
+
+	forgedRoot := filepath.Join(parent, "forged")
+	if err := os.MkdirAll(forgedRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	gitDir := filepath.Join(commonDir, "worktrees", "forged")
+	if err := os.WriteFile(filepath.Join(forgedRoot, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Resolve(mapping, forgedRoot, runtime.GOOS); !errors.Is(err, ErrAssociationRequired) {
+		t.Fatalf("forged worktree pointer error=%v, want association required", err)
+	}
+}
+
+func runGitFixture(t *testing.T, directory string, args ...string) {
+	t.Helper()
+	command := exec.Command("git", args...)
+	command.Dir = directory
+	command.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
 	}
 }
 
@@ -120,15 +156,25 @@ func TestReauthenticateDetectsGitCommonDirectoryReplacement(t *testing.T) {
 
 func TestReauthenticateDetectsWorktreeGitdirRedirection(t *testing.T) {
 	parent := t.TempDir()
-	root := filepath.Join(parent, "worktree")
-	firstGitDir := filepath.Join(parent, "common-one.git", "worktrees", "one")
-	secondGitDir := filepath.Join(parent, "common-two.git", "worktrees", "two")
-	for _, directory := range []string{root, firstGitDir, secondGitDir} {
-		if err := os.MkdirAll(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
+	mainRoot := filepath.Join(parent, "main")
+	runGitFixture(t, parent, "init", "-q", mainRoot)
+	runGitFixture(t, mainRoot, "config", "user.email", "session-reviewer@example.invalid")
+	runGitFixture(t, mainRoot, "config", "user.name", "Session Reviewer Test")
+	if err := os.WriteFile(filepath.Join(mainRoot, "tracked.txt"), []byte("tracked\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+firstGitDir+"\n"), 0o600); err != nil {
+	runGitFixture(t, mainRoot, "add", "tracked.txt")
+	runGitFixture(t, mainRoot, "commit", "-q", "-m", "fixture")
+	root := filepath.Join(parent, "worktree")
+	runGitFixture(t, mainRoot, "worktree", "add", "-q", "-b", "redirection-fixture", root)
+	secondGitDir := filepath.Join(parent, "common-two.git", "worktrees", "two")
+	if err := os.MkdirAll(secondGitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondGitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secondGitDir, "gitdir"), []byte(filepath.Join(root, ".git")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	binding, err := Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, runtime.GOOS)

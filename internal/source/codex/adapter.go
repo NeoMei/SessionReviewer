@@ -32,9 +32,12 @@ import (
 )
 
 const (
-	providerCodex         = "codex"
-	metadataOnlySelection = "\x00session-reviewer-metadata-only"
-	maxReadRecordBytes    = 64 << 20
+	providerCodex                   = "codex"
+	metadataOnlySelection           = "\x00session-reviewer-metadata-only"
+	maxReadRecordBytes              = 64 << 20
+	maxRetainedCandidatesPerSession = 8
+	maxRetainedFrozenPerSource      = 8
+	maxRetainedFrozenPerSession     = 16
 )
 
 var (
@@ -60,11 +63,14 @@ type adapter struct {
 	version      string
 	supersedes   []string
 
-	mu             sync.RWMutex
-	discovery      uint64
-	candidates     map[string]discoveredCandidate
-	frozen         map[string]frozenSource
-	frozenBySource map[string][]string
+	mu                        sync.RWMutex
+	candidates                map[string]discoveredCandidate
+	candidateLeases           map[string]uint64
+	candidateHandlesBySession map[string][]string
+	frozen                    map[string]frozenSource
+	frozenLeases              map[string]uint64
+	frozenBySource            map[string][]string
+	frozenBySession           map[string][]string
 }
 
 type frozenSource struct {
@@ -139,15 +145,19 @@ func New(options AdapterOptions) (source.Adapter, error) {
 		}
 	}
 	return &adapter{
-		sessionsRoot:   options.SessionsRoot,
-		bindings:       append([]projectidentity.Binding(nil), options.Bindings...),
-		catalog:        options.Catalog,
-		redactor:       *options.Redactor,
-		version:        options.AdapterVersion,
-		supersedes:     supersedes,
-		candidates:     make(map[string]discoveredCandidate),
-		frozen:         make(map[string]frozenSource),
-		frozenBySource: make(map[string][]string),
+		sessionsRoot:              options.SessionsRoot,
+		bindings:                  append([]projectidentity.Binding(nil), options.Bindings...),
+		catalog:                   options.Catalog,
+		redactor:                  *options.Redactor,
+		version:                   options.AdapterVersion,
+		supersedes:                supersedes,
+		candidates:                make(map[string]discoveredCandidate),
+		candidateLeases:           make(map[string]uint64),
+		candidateHandlesBySession: make(map[string][]string),
+		frozen:                    make(map[string]frozenSource),
+		frozenLeases:              make(map[string]uint64),
+		frozenBySource:            make(map[string][]string),
+		frozenBySession:           make(map[string][]string),
 	}, nil
 }
 
@@ -192,10 +202,12 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.discovery++
 	result := source.Discovery{}
 	for _, id := range ids {
 		if err := ctx.Err(); err != nil {
+			for _, candidate := range result.Candidates {
+				a.releaseCandidateLocked(candidate.Handle, candidate.SessionID)
+			}
 			return source.Discovery{}, err
 		}
 		if id == "" {
@@ -229,12 +241,12 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 			continue
 		}
 		startedAt := candidateStartedAt(resolved)
-		handle := opaqueHandle("candidate", strconv.FormatUint(a.discovery, 10), id, resolved.Path, startedAt)
+		snapshot := baselines[sourcecatalog.SnapshotKey{Provider: providerCodex, SessionID: id}]
+		handle := opaqueHandle("candidate", id, resolved.Path, resolved.CWD, startedAt, snapshot.Digest)
 		candidate := source.Candidate{
 			Provider: providerCodex, SessionID: id, StartedAt: startedAt,
 			InitialCWD: resolved.CWD, Handle: handle,
 		}
-		snapshot := baselines[sourcecatalog.SnapshotKey{Provider: providerCodex, SessionID: id}]
 		baselineHandle := opaqueHandle("catalog-baseline", handle, snapshot.Digest)
 		baseline := source.CatalogBaselineSnapshot{Handle: baselineHandle, ExpectedDigest: snapshot.Digest}
 		if snapshot.Found {
@@ -243,6 +255,9 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 		}
 		candidate.CatalogBaseline = cloneCatalogBaseline(baseline)
 		a.candidates[handle] = discoveredCandidate{resolved: resolved, baseline: cloneCatalogBaseline(baseline)}
+		a.candidateLeases[handle]++
+		a.candidateHandlesBySession[id] = appendUnique(a.candidateHandlesBySession[id], handle)
+		a.evictCandidatesLocked(id)
 		result.Candidates = append(result.Candidates, candidate)
 	}
 	sort.Slice(result.Issues, func(i, j int) bool {
@@ -266,9 +281,6 @@ func codexDiscoveryIssue(issue session.DiscoveryIssue) source.Issue {
 }
 
 func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (source.Boundary, error) {
-	if err := ctx.Err(); err != nil {
-		return source.Boundary{}, err
-	}
 	a.mu.RLock()
 	discovered, found := a.candidates[candidate.Handle]
 	a.mu.RUnlock()
@@ -276,6 +288,10 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 	if !found || candidate.Provider != providerCodex || candidate.SessionID != resolved.ID || candidate.InitialCWD != resolved.CWD ||
 		candidate.StartedAt != candidateStartedAt(resolved) || !sameCatalogBaseline(candidate.CatalogBaseline, discovered.baseline) {
 		return source.Boundary{}, errors.New("candidate was not returned by this Codex adapter")
+	}
+	defer a.releaseCandidate(candidate.Handle, candidate.SessionID)
+	if err := ctx.Err(); err != nil {
+		return source.Boundary{}, err
 	}
 	files, err := session.OpenCandidates(a.sessionsRoot, resolved)
 	if err != nil {
@@ -318,10 +334,146 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 	frozen := frozenSource{boundary: cloneBoundary(boundary), candidate: resolved, segments: segments, priorCatalog: prior, priorCatalogFound: priorFound, priorCatalogDigest: priorDigest}
 	key := frozenSourceKey(providerCodex, candidate.SessionID, sourceIdentity)
 	a.mu.Lock()
-	a.frozen[boundaryHandle] = frozen
-	a.frozenBySource[key] = appendUnique(a.frozenBySource[key], boundaryHandle)
+	if existing, exists := a.frozen[boundaryHandle]; exists {
+		if !sameBoundary(existing.boundary, boundary) || !sameFrozenSegments(existing.segments, frozen.segments) {
+			a.mu.Unlock()
+			return source.Boundary{}, errors.New("frozen boundary handle collision")
+		}
+	} else {
+		a.frozen[boundaryHandle] = frozen
+		a.frozenBySource[key] = append(a.frozenBySource[key], boundaryHandle)
+		a.frozenBySession[candidate.SessionID] = append(a.frozenBySession[candidate.SessionID], boundaryHandle)
+	}
+	a.frozenLeases[boundaryHandle]++
+	a.evictFrozenLocked(key, candidate.SessionID)
 	a.mu.Unlock()
 	return cloneBoundary(boundary), nil
+}
+
+func (a *adapter) releaseCandidate(handle, sessionID string) {
+	a.mu.Lock()
+	a.releaseCandidateLocked(handle, sessionID)
+	a.mu.Unlock()
+}
+
+func (a *adapter) releaseCandidateLocked(handle, sessionID string) {
+	if leases := a.candidateLeases[handle]; leases > 1 {
+		a.candidateLeases[handle] = leases - 1
+	} else {
+		delete(a.candidateLeases, handle)
+	}
+	a.evictCandidatesLocked(sessionID)
+}
+
+func (a *adapter) evictCandidatesLocked(sessionID string) {
+	handles := a.candidateHandlesBySession[sessionID]
+	for inactiveCandidateCount(handles, a.candidateLeases) > maxRetainedCandidatesPerSession {
+		removed := false
+		for index, handle := range handles {
+			if a.candidateLeases[handle] != 0 {
+				continue
+			}
+			delete(a.candidates, handle)
+			handles = append(handles[:index], handles[index+1:]...)
+			removed = true
+			break
+		}
+		if !removed {
+			break
+		}
+	}
+	if len(handles) == 0 {
+		delete(a.candidateHandlesBySession, sessionID)
+	} else {
+		a.candidateHandlesBySession[sessionID] = handles
+	}
+}
+
+func inactiveCandidateCount(handles []string, leases map[string]uint64) int {
+	count := 0
+	for _, handle := range handles {
+		if leases[handle] == 0 {
+			count++
+		}
+	}
+	return count
+}
+
+func sameFrozenSegments(first, second []frozenSegment) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for index := range first {
+		if first[index] != second[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *adapter) releaseFrozen(handle string) {
+	a.mu.Lock()
+	frozen, found := a.frozen[handle]
+	if found {
+		if leases := a.frozenLeases[handle]; leases > 1 {
+			a.frozenLeases[handle] = leases - 1
+		} else {
+			delete(a.frozenLeases, handle)
+		}
+		a.evictFrozenLocked(frozenSourceKey(frozen.boundary.Candidate.Provider, frozen.boundary.Candidate.SessionID, frozen.boundary.SourceIdentity), frozen.boundary.Candidate.SessionID)
+	}
+	a.mu.Unlock()
+}
+
+func (a *adapter) evictFrozenLocked(key, sessionID string) {
+	for inactiveCandidateCount(a.frozenBySource[key], a.frozenLeases) > maxRetainedFrozenPerSource {
+		if !a.removeOldestInactiveFrozenLocked(a.frozenBySource[key]) {
+			break
+		}
+	}
+	for inactiveCandidateCount(a.frozenBySession[sessionID], a.frozenLeases) > maxRetainedFrozenPerSession {
+		if !a.removeOldestInactiveFrozenLocked(a.frozenBySession[sessionID]) {
+			break
+		}
+	}
+}
+
+func (a *adapter) removeOldestInactiveFrozenLocked(handles []string) bool {
+	for _, handle := range handles {
+		if a.frozenLeases[handle] == 0 {
+			a.removeFrozenLocked(handle)
+			return true
+		}
+	}
+	return false
+}
+
+func (a *adapter) removeFrozenLocked(handle string) {
+	frozen, found := a.frozen[handle]
+	if !found {
+		return
+	}
+	delete(a.frozen, handle)
+	delete(a.frozenLeases, handle)
+	key := frozenSourceKey(frozen.boundary.Candidate.Provider, frozen.boundary.Candidate.SessionID, frozen.boundary.SourceIdentity)
+	a.frozenBySource[key] = removeHandle(a.frozenBySource[key], handle)
+	if len(a.frozenBySource[key]) == 0 {
+		delete(a.frozenBySource, key)
+	}
+	sessionID := frozen.boundary.Candidate.SessionID
+	a.frozenBySession[sessionID] = removeHandle(a.frozenBySession[sessionID], handle)
+	if len(a.frozenBySession[sessionID]) == 0 {
+		delete(a.frozenBySession, sessionID)
+	}
+}
+
+func removeHandle(handles []string, target string) []string {
+	for index, handle := range handles {
+		if handle == target {
+			return append(handles[:index], handles[index+1:]...)
+		}
+	}
+	return handles
 }
 
 func (a *adapter) Read(ctx context.Context, ref memory.SourceRef, limit int64) ([]byte, error) {

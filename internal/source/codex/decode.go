@@ -76,13 +76,13 @@ type recordDecoder struct {
 
 func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (source.DecodeReport, error) {
 	report := source.DecodeReport{TerminalState: boundary.TerminalState}
-	if err := ctx.Err(); err != nil {
-		return report, err
-	}
-	if visit == nil {
-		return report, errors.New("observation visitor is required")
-	}
 	if boundary.TerminalState != memory.Indexed {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+		if visit == nil {
+			return report, errors.New("observation visitor is required")
+		}
 		return report, nil
 	}
 	a.mu.RLock()
@@ -90,6 +90,13 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	a.mu.RUnlock()
 	if !found || !sameBoundary(boundary, frozen.boundary) {
 		return report, errors.New("boundary was not frozen by this Codex adapter")
+	}
+	defer a.releaseFrozen(boundary.Handle)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
+	if visit == nil {
+		return report, errors.New("observation visitor is required")
 	}
 	startedAt, err := time.Parse(time.RFC3339Nano, boundary.Candidate.StartedAt)
 	if err != nil {
