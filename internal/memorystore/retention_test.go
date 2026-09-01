@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
 
@@ -131,6 +132,182 @@ func TestRetentionContextSortsMatchLegacyOrder(t *testing.T) {
 				t.Fatalf("iteration %d entry %d=%q want %q", iteration, index, gotEntries[index].Name(), wantEntries[index].Name())
 			}
 		}
+	}
+}
+
+func TestRetentionSnapshotReadsSharedObjectsAndReconcilesGenerationsOnce(t *testing.T) {
+	dataRoot, store, first := newRetentionStore(t, "generation-shared-000")
+	large := buildStoredFixture(t, store, "generation-shared-001")
+	large.session.Diagnostics = make([]memory.Diagnostic, 1024)
+	for index := range large.session.Diagnostics {
+		large.session.Diagnostics[index] = memory.Diagnostic{
+			Code: fmt.Sprintf("shared-%04d", index),
+			Path: strings.Repeat("large-shared-object/", 40) + fmt.Sprintf("%04d", index),
+		}
+	}
+	var err error
+	large.session.Digest, err = memory.SessionViewDigest(large.session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionView(large.session); err != nil {
+		t.Fatal(err)
+	}
+	largeSessionPath := filepath.Join(retentionMemoryRoot(dataRoot), "sessions", digestLeaf(large.session.Digest, ".json"))
+	if size := fileSize(t, largeSessionPath); size < 512<<10 {
+		t.Fatalf("shared SessionView fixture size=%d want at least 512 KiB", size)
+	}
+	large.project.SessionViewDependencies[0].Digest = large.session.Digest
+	large.project.Digest, err = memory.ProjectViewDigest(large.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(large.project); err != nil {
+		t.Fatal(err)
+	}
+	large.manifest.SessionViews[0].Digest = large.session.Digest
+	large.manifest.ProjectViewDigest = large.project.Digest
+	if err := memory.ValidateGenerationManifest(large.manifest); err != nil {
+		t.Fatal(err)
+	}
+	expected, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvancePrepared(expected, large.manifest); err != nil {
+		t.Fatal(err)
+	}
+
+	const sharedGenerations = 32
+	memoryRoot := retentionMemoryRoot(dataRoot)
+	for index := 2; index < sharedGenerations; index++ {
+		manifest := large.manifest
+		manifest.GenerationID = fmt.Sprintf("generation-shared-%03d", index)
+		writeCanonicalJSONForTest(t, filepath.Join(memoryRoot, "generations", manifest.GenerationID+".json"), manifest, 0o600)
+	}
+
+	objectReads := make(map[string]int)
+	objectReconciles := make(map[string]int)
+	reconciles := make(map[string]int)
+	retentionObjectReadCheckpoint = func(kind ObjectKind, digest string) {
+		objectReads[string(kind)+"/"+digest]++
+	}
+	retentionObjectReconcileCheckpoint = func(kind ObjectKind, digest string) {
+		objectReconciles[string(kind)+"/"+digest]++
+	}
+	retentionGenerationReconcileCheckpoint = func(generationID string) {
+		reconciles[generationID]++
+	}
+	t.Cleanup(func() {
+		retentionObjectReadCheckpoint = nil
+		retentionObjectReconcileCheckpoint = nil
+		retentionGenerationReconcileCheckpoint = nil
+	})
+	if _, err := store.ReportRetention(retentionNow, first.manifest.GenerationID, large.manifest.GenerationID); err != nil {
+		t.Fatal(err)
+	}
+	for object, reads := range objectReads {
+		if reads != 1 {
+			t.Fatalf("shared object %s read/decode/hash count=%d want 1", object, reads)
+		}
+	}
+	if len(objectReads) != 6 {
+		t.Fatalf("unique stored object reads=%d want 6", len(objectReads))
+	}
+	if len(objectReconciles) != len(objectReads) {
+		t.Fatalf("unique object reconciles=%d want %d", len(objectReconciles), len(objectReads))
+	}
+	for object, count := range objectReconciles {
+		if count != 1 {
+			t.Fatalf("shared object %s validated/reconciled %d times want 1", object, count)
+		}
+	}
+	if len(reconciles) != sharedGenerations {
+		t.Fatalf("unique generation reconciles=%d want %d", len(reconciles), sharedGenerations)
+	}
+	for generationID, count := range reconciles {
+		if count != 1 {
+			t.Fatalf("generation %s reconciled %d times want 1", generationID, count)
+		}
+	}
+}
+
+func TestRetentionCandidatePlanningCancelsInsideLargeLoopsWithoutResult(t *testing.T) {
+	const count = 100_000
+	candidates := make([]retentionFile, count)
+	for index := range candidates {
+		candidates[index] = retentionFile{
+			relative: fmt.Sprintf("cache/%06d.cache", index),
+			identity: pathguard.IdentityToken{Kind: "posix-dev-inode", Volume: "1", File: fmt.Sprintf("%d", index+1)},
+		}
+	}
+	before := append([]retentionFile(nil), candidates...)
+	for _, phase := range []string{"candidate_copy", "candidate_identity_map"} {
+		t.Run(phase, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cause := errors.New("cancel " + phase)
+			calls := 0
+			retentionLargeLoopCheckpoint = func(current string) {
+				if current == phase {
+					calls++
+					if calls == 128 {
+						cancel(cause)
+					}
+				}
+			}
+			t.Cleanup(func() { retentionLargeLoopCheckpoint = nil })
+			planned, identities, err := planRetentionCandidatesContext(ctx, candidates)
+			if !errors.Is(err, cause) {
+				t.Fatalf("planning error=%v want cause", err)
+			}
+			if planned != nil || identities != nil {
+				t.Fatal("cancelled candidate planning returned partial mutable state")
+			}
+			if calls != 128 {
+				t.Fatalf("%s checkpoints=%d want 128", phase, calls)
+			}
+			for index := range candidates {
+				if candidates[index] != before[index] {
+					t.Fatalf("candidate input mutated at %d", index)
+				}
+			}
+			retentionLargeLoopCheckpoint = nil
+		})
+	}
+}
+
+func TestManifestObjectReferenceConstructionCancelsMidLoop(t *testing.T) {
+	const count = 65_536
+	manifest := memory.GenerationManifest{
+		ObservationChunkDigests: make([]string, count),
+		SessionViews:            make([]memory.SessionViewDependency, count),
+	}
+	for index := 0; index < count; index++ {
+		digest := prefixedDigest(fmt.Sprintf("manifest-reference-%06d", index))
+		manifest.ObservationChunkDigests[index] = digest
+		manifest.SessionViews[index] = memory.SessionViewDependency{Digest: digest}
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("cancel manifest references")
+	calls := 0
+	retentionLargeLoopCheckpoint = func(phase string) {
+		if phase == "manifest_reference_construction" {
+			calls++
+			if calls == 512 {
+				cancel(cause)
+			}
+		}
+	}
+	t.Cleanup(func() { retentionLargeLoopCheckpoint = nil })
+	references, err := manifestObjectReferencesContext(ctx, manifest)
+	if !errors.Is(err, cause) {
+		t.Fatalf("reference construction error=%v want cause", err)
+	}
+	if references != nil {
+		t.Fatal("cancelled reference construction returned partial references")
+	}
+	if calls != 512 {
+		t.Fatalf("reference construction checkpoints=%d want 512", calls)
 	}
 }
 

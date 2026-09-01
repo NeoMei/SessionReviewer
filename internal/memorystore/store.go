@@ -613,79 +613,94 @@ func (s *Store) LoadObject(kind ObjectKind, digest string) ([]byte, error) {
 }
 
 func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) error {
+	_, err := decodeValidatedObjectBytesContext(ctx, kind, digest, body, projectID)
+	return err
+}
+
+type decodedStoredObject struct {
+	observations []memory.ObservationRevision
+	session      memory.SessionView
+	probe        memory.ProjectProbeState
+	project      memory.ProjectView
+}
+
+func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) (decodedStoredObject, error) {
 	if err := context.Cause(ctx); err != nil {
-		return err
+		return decodedStoredObject{}, err
 	}
 	switch kind {
 	case ObjectObservationChunk:
 		records, err := decodeObservationChunkContext(ctx, body)
 		if err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		for index := range records {
 			if err := storeCheckpoint(ctx, "validation"); err != nil {
-				return err
+				return decodedStoredObject{}, err
 			}
 			if records[index].Key.ProjectID != projectID {
-				return errors.New("observation chunk contains a different project")
+				return decodedStoredObject{}, errors.New("observation chunk contains a different project")
 			}
 		}
 		actual, err := memory.DigestContext(ctx, records)
 		if cause := context.Cause(ctx); cause != nil {
-			return cause
+			return decodedStoredObject{}, cause
 		}
 		if err != nil || actual != digest {
-			return errors.Join(errors.New("observation chunk digest mismatch"), err)
+			return decodedStoredObject{}, errors.Join(errors.New("observation chunk digest mismatch"), err)
 		}
+		return decodedStoredObject{observations: records}, nil
 	case ObjectSessionView:
 		var value memory.SessionView
 		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		validationErr := memory.ValidateSessionViewContext(ctx, value)
 		if cause := context.Cause(ctx); cause != nil {
-			return cause
+			return decodedStoredObject{}, cause
 		}
 		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored SessionView"), validationErr)
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored SessionView"), validationErr)
 		}
+		return decodedStoredObject{session: value}, nil
 	case ObjectProbeState:
 		var value memory.ProjectProbeState
 		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		validationErr := memory.ValidateProjectProbeStateContext(ctx, value)
 		if cause := context.Cause(ctx); cause != nil {
-			return cause
+			return decodedStoredObject{}, cause
 		}
 		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored ProjectProbeState"), validationErr)
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored ProjectProbeState"), validationErr)
 		}
+		return decodedStoredObject{probe: value}, nil
 	case ObjectProjectView:
 		var value memory.ProjectView
 		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		if err := storeCheckpoint(ctx, "validation"); err != nil {
-			return err
+			return decodedStoredObject{}, err
 		}
 		validationErr := memory.ValidateProjectViewContext(ctx, value)
 		if cause := context.Cause(ctx); cause != nil {
-			return cause
+			return decodedStoredObject{}, cause
 		}
 		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
-			return errors.Join(errors.New("invalid stored ProjectView"), validationErr)
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored ProjectView"), validationErr)
 		}
+		return decodedStoredObject{project: value}, nil
 	default:
-		return errors.New("unknown immutable object kind")
+		return decodedStoredObject{}, errors.New("unknown immutable object kind")
 	}
-	return nil
 }
 
 // Close releases pinned roots. It is safe to call more than once.
@@ -791,6 +806,70 @@ func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error 
 }
 
 func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memory.GenerationManifest) error {
+	return reconcileGenerationGraphObjectsContext(ctx, value, storedGenerationGraphObjects{store: s})
+}
+
+type generationGraphObjects interface {
+	observationChunk(context.Context, string) ([]memory.ObservationRevision, error)
+	sessionView(context.Context, memory.SessionViewDependency) (memory.SessionView, error)
+	probeState(context.Context, string) (memory.ProjectProbeState, error)
+	projectView(context.Context, string) (memory.ProjectView, error)
+}
+
+type storedGenerationGraphObjects struct{ store *Store }
+
+func (objects storedGenerationGraphObjects) observationChunk(ctx context.Context, digest string) ([]memory.ObservationRevision, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectObservationChunk, digest)
+	if err != nil {
+		return nil, fmt.Errorf("verify observation chunk %s: %w", digest, err)
+	}
+	records, err := decodeObservationChunkContext(ctx, body)
+	if err != nil {
+		return nil, fmt.Errorf("decode observation chunk %s: %w", digest, err)
+	}
+	return records, nil
+}
+
+func (objects storedGenerationGraphObjects) sessionView(ctx context.Context, dependency memory.SessionViewDependency) (memory.SessionView, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectSessionView, dependency.Digest)
+	if err != nil {
+		return memory.SessionView{}, fmt.Errorf("verify SessionView %s: %w", dependency.Digest, err)
+	}
+	var view memory.SessionView
+	if err := decodeCanonicalJSONContext(ctx, body, &view); err != nil || view.Provider != dependency.Provider || view.SessionID != dependency.SessionID {
+		if cause := context.Cause(ctx); cause != nil {
+			return memory.SessionView{}, cause
+		}
+		return memory.SessionView{}, errors.Join(errors.New("SessionView dependency identity mismatch"), err)
+	}
+	return view, nil
+}
+
+func (objects storedGenerationGraphObjects) probeState(ctx context.Context, digest string) (memory.ProjectProbeState, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectProbeState, digest)
+	if err != nil {
+		return memory.ProjectProbeState{}, fmt.Errorf("verify ProjectProbeState: %w", err)
+	}
+	var probe memory.ProjectProbeState
+	if err := decodeCanonicalJSONContext(ctx, body, &probe); err != nil {
+		return memory.ProjectProbeState{}, fmt.Errorf("decode ProjectProbeState: %w", err)
+	}
+	return probe, nil
+}
+
+func (objects storedGenerationGraphObjects) projectView(ctx context.Context, digest string) (memory.ProjectView, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectProjectView, digest)
+	if err != nil {
+		return memory.ProjectView{}, fmt.Errorf("verify ProjectView: %w", err)
+	}
+	var view memory.ProjectView
+	if err := decodeCanonicalJSONContext(ctx, body, &view); err != nil {
+		return memory.ProjectView{}, fmt.Errorf("decode ProjectView: %w", err)
+	}
+	return view, nil
+}
+
+func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.GenerationManifest, objects generationGraphObjects) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
 	}
@@ -809,13 +888,9 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
-		body, err := s.loadObjectUnlockedContext(ctx, ObjectObservationChunk, digest)
+		records, err := objects.observationChunk(ctx, digest)
 		if err != nil {
-			return fmt.Errorf("verify observation chunk %s: %w", digest, err)
-		}
-		records, err := decodeObservationChunkContext(ctx, body)
-		if err != nil {
-			return fmt.Errorf("decode observation chunk %s: %w", digest, err)
+			return err
 		}
 		chunks[digest] = records
 		for _, record := range records {
@@ -843,16 +918,9 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 		if err := context.Cause(ctx); err != nil {
 			return err
 		}
-		body, err := s.loadObjectUnlockedContext(ctx, ObjectSessionView, dependency.Digest)
+		view, err := objects.sessionView(ctx, dependency)
 		if err != nil {
-			return fmt.Errorf("verify SessionView %s: %w", dependency.Digest, err)
-		}
-		var view memory.SessionView
-		if err := decodeCanonicalJSONContext(ctx, body, &view); err != nil || view.Provider != dependency.Provider || view.SessionID != dependency.SessionID {
-			if cause := context.Cause(ctx); cause != nil {
-				return cause
-			}
-			return errors.Join(errors.New("SessionView dependency identity mismatch"), err)
+			return err
 		}
 		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
 			return errors.New("SessionView source record does not resolve uniquely through manifest")
@@ -908,21 +976,13 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 		}
 	}
 
-	probeBody, err := s.loadObjectUnlockedContext(ctx, ObjectProbeState, value.ProbeStateDigest)
+	probe, err := objects.probeState(ctx, value.ProbeStateDigest)
 	if err != nil {
-		return fmt.Errorf("verify ProjectProbeState: %w", err)
+		return err
 	}
-	var probe memory.ProjectProbeState
-	if err := decodeCanonicalJSONContext(ctx, probeBody, &probe); err != nil {
-		return fmt.Errorf("decode ProjectProbeState: %w", err)
-	}
-	projectBody, err := s.loadObjectUnlockedContext(ctx, ObjectProjectView, value.ProjectViewDigest)
+	projectView, err := objects.projectView(ctx, value.ProjectViewDigest)
 	if err != nil {
-		return fmt.Errorf("verify ProjectView: %w", err)
-	}
-	var projectView memory.ProjectView
-	if err := decodeCanonicalJSONContext(ctx, projectBody, &projectView); err != nil {
-		return fmt.Errorf("decode ProjectView: %w", err)
+		return err
 	}
 	dependenciesMatch, err := equalSessionViewDependenciesContext(ctx, projectView.SessionViewDependencies, value.SessionViews)
 	if err != nil {
@@ -1091,6 +1151,9 @@ func (s *Store) loadObjectUnlockedContext(ctx context.Context, kind ObjectKind, 
 	}
 	defer parent.Close()
 	leaf := digestLeafName(digest, suffix)
+	if retentionObjectReadCheckpoint != nil {
+		retentionObjectReadCheckpoint(kind, digest)
+	}
 	body, found, err := parent.ReadRegularContext(ctx, leaf, maxObjectBytes)
 	if err != nil {
 		return nil, err
@@ -1103,6 +1166,9 @@ func (s *Store) loadObjectUnlockedContext(ctx context.Context, kind ObjectKind, 
 	}
 	if err := validateObjectBytesContext(ctx, kind, digest, body, s.projectID); err != nil {
 		return nil, err
+	}
+	if retentionObjectReconcileCheckpoint != nil {
+		retentionObjectReconcileCheckpoint(kind, digest)
 	}
 	return body, nil
 }
