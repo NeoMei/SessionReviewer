@@ -133,7 +133,6 @@ func TestContextGraphStructuralComparisonsCancelByPhase(t *testing.T) {
 
 func TestReconcileStructuralMismatchErrorsRemainExact(t *testing.T) {
 	const dependencyError = "ProjectView ordered SessionView dependencies do not match manifest"
-	const activeError = "active revision sets disagree across manifest, SessionViews, and ProjectView"
 	tests := []struct {
 		name   string
 		want   string
@@ -152,18 +151,22 @@ func TestReconcileStructuralMismatchErrorsRemainExact(t *testing.T) {
 			},
 		},
 		{
-			name: "revision set mismatch", want: activeError,
-			mutate: func(t *testing.T, _ *Store, fixture *storedFixture) {
-				key := observationKeyDigest(t, fixture.observation.Key)
-				fixture.manifest.ActiveRevisions = map[string]string{}
-				fixture.manifest.WithdrawnRevisions = map[string]string{key: fixture.observation.RevisionID}
+			name: "lineage active mismatch", want: "SessionView active revision is absent from SessionLineage",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				lineage := fixture.lineage
+				lineage.ActiveRevisions = map[string]string{}
+				lineage.Digest, _ = memory.SessionLineageDigest(lineage)
+				if _, err := store.PutSessionLineage(lineage); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 			},
 		},
 		{
-			name: "digest slice set mismatch", want: activeError,
+			name: "selected evidence mismatch", want: "ProjectView selected observation evidence does not resolve through active Session lineages",
 			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
 				projectView := fixture.project
-				projectView.ObservationRevisionIDs = []string{}
+				projectView.ObservationRevisionIDs = []string{prefixedDigest("missing-selected-evidence")}
 				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
 				if _, err := store.PutProjectView(projectView); err != nil {
 					t.Fatal(err)
@@ -521,17 +524,22 @@ func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
 			},
 		},
 		{
-			name: "session chunk absent from manifest",
+			name: "session chunk is missing",
 			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
-				other := fixture.observation
-				other.Key.Sequence++
-				other.Object = "other focused tests"
-				other.RevisionID = memory.ObservationRevisionID(other)
-				digest, err := store.PutObservationChunk([]memory.ObservationRevision{other})
-				if err != nil {
-					t.Fatalf("put unrelated manifest chunk: %v", err)
+				session := fixture.session
+				session.ObservationChunkDigests = []string{prefixedDigest("missing-session-chunk")}
+				session.Digest, _ = memory.SessionViewDigest(session)
+				if _, err := store.PutSessionView(session); err != nil {
+					t.Fatal(err)
 				}
-				fixture.manifest.ObservationChunkDigests[0] = digest
+				fixture.manifest.SessionViews[0].Digest = session.Digest
+				projectView := fixture.project
+				projectView.SessionViewDependencies[0].Digest = session.Digest
+				projectView.Digest, _ = memory.ProjectViewDigest(projectView)
+				if _, err := store.PutProjectView(projectView); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.ProjectViewDigest = projectView.Digest
 			},
 		},
 		{
@@ -547,7 +555,13 @@ func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
 				}
 				dependency := memory.SessionViewDependency{Provider: session.Provider, SessionID: session.SessionID, Digest: session.Digest}
 				fixture.manifest.SessionViews = []memory.SessionViewDependency{dependency}
-				fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): missing}
+				lineage := fixture.lineage
+				lineage.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): missing}
+				lineage.Digest, _ = memory.SessionLineageDigest(lineage)
+				if _, err := store.PutSessionLineage(lineage); err != nil {
+					t.Fatalf("put mismatched SessionLineage: %v", err)
+				}
+				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 				projectView := fixture.project
 				projectView.SessionViewDependencies = []memory.SessionViewDependency{dependency}
 				projectView.ObservationRevisionIDs = []string{missing}
@@ -584,26 +598,50 @@ func TestPreparedGenerationRejectsBrokenTransitiveGraph(t *testing.T) {
 		},
 		{
 			name: "active key does not classify its observation",
-			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
-				fixture.manifest.ActiveRevisions = map[string]string{prefixedDigest("wrong-observation-key"): fixture.observation.RevisionID}
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				lineage := fixture.lineage
+				lineage.ActiveRevisions = map[string]string{prefixedDigest("wrong-observation-key"): fixture.observation.RevisionID}
+				lineage.Digest, _ = memory.SessionLineageDigest(lineage)
+				if _, err := store.PutSessionLineage(lineage); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 			},
 		},
 		{
-			name: "active revision is missing",
-			mutate: func(t *testing.T, _ *Store, fixture *storedFixture) {
-				fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): prefixedDigest("missing-active")}
+			name: "lineage head is missing",
+			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
+				fixture.manifest.SessionLineages[0].Digest = prefixedDigest("missing-lineage-head")
 			},
 		},
 		{
-			name: "superseded predecessor is missing",
-			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
-				fixture.manifest.SupersededRevisions = map[string]string{prefixedDigest("missing-predecessor"): fixture.observation.RevisionID}
+			name: "lineage predecessor is missing",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				lineage := fixture.lineage
+				lineage.PreviousLineageDigest = prefixedDigest("missing-predecessor")
+				lineage.Digest, _ = memory.SessionLineageDigest(lineage)
+				if _, err := store.PutSessionLineage(lineage); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 			},
 		},
 		{
-			name: "withdrawn revision is missing",
-			mutate: func(_ *testing.T, _ *Store, fixture *storedFixture) {
-				fixture.manifest.WithdrawnRevisions = map[string]string{prefixedDigest("withdrawn-key"): prefixedDigest("missing-withdrawn")}
+			name: "lineage predecessor identity differs",
+			mutate: func(t *testing.T, store *Store, fixture *storedFixture) {
+				previous := fixture.lineage
+				previous.SourceIdentity = "other-source"
+				previous.Digest, _ = memory.SessionLineageDigest(previous)
+				if _, err := store.PutSessionLineage(previous); err != nil {
+					t.Fatal(err)
+				}
+				lineage := fixture.lineage
+				lineage.PreviousLineageDigest = previous.Digest
+				lineage.Digest, _ = memory.SessionLineageDigest(lineage)
+				if _, err := store.PutSessionLineage(lineage); err != nil {
+					t.Fatal(err)
+				}
+				fixture.manifest.SessionLineages[0].Digest = lineage.Digest
 			},
 		},
 	}
@@ -640,7 +678,7 @@ func TestPreparedGenerationLoadRejectsBrokenTransitiveGraph(t *testing.T) {
 	}
 	defer store.Close()
 	fixture := buildStoredFixture(t, store, "generation-load-broken")
-	fixture.manifest.ActiveRevisions = map[string]string{observationKeyDigest(t, fixture.observation.Key): prefixedDigest("missing-on-load")}
+	fixture.manifest.SessionLineages[0].Digest = prefixedDigest("missing-lineage-on-load")
 	if err := memory.ValidateGenerationManifest(fixture.manifest); err != nil {
 		t.Fatalf("fixture must pass Task-1 validation: %v", err)
 	}

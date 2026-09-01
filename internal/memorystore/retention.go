@@ -233,7 +233,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		return retentionSnapshot{}, fmt.Errorf("enumerate memory root: %w", err)
 	}
 	allowedDirectories := map[string]bool{
-		"observations": true, "sessions": true, "project-probes": true,
+		"observations": true, "sessions": true, "session-lineages": true, "project-probes": true,
 		"project-views": true, "generations": true, "diagnostics": true,
 		"staging": true, "locks": true, "cache": true,
 	}
@@ -286,7 +286,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		preparedPointerFound = true
 		rootFacts = append(rootFacts, file)
 	}
-	for _, required := range []string{"observations", "sessions", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
+	for _, required := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
 		if _, found := rootDirectories[required]; !found {
 			return retentionSnapshot{}, fmt.Errorf("required memory namespace %q is missing", required)
 		}
@@ -425,6 +425,33 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 			}
 			reachablePaths[file.relative] = file
 			reachableDigests[file.digest] = struct{}{}
+		}
+		for _, dependency := range manifest.SessionViews {
+			view := objects.sessions[dependency.Digest]
+			for _, chunkDigest := range view.ObservationChunkDigests {
+				relative := filepath.ToSlash(filepath.Join("observations", digestLeafName(chunkDigest, ".jsonl")))
+				file, exists := objects.files[relative]
+				if !exists || file.digest != chunkDigest {
+					return retentionSnapshot{}, fmt.Errorf("generation %q references a missing Session observation chunk", generationID)
+				}
+				reachablePaths[relative], reachableDigests[chunkDigest] = file, struct{}{}
+			}
+		}
+		for _, dependency := range manifest.SessionLineages {
+			digest := dependency.Digest
+			for digest != "" {
+				relative := filepath.ToSlash(filepath.Join("session-lineages", digestLeafName(digest, ".json")))
+				if _, seen := reachablePaths[relative]; seen {
+					break
+				}
+				file, exists := objects.files[relative]
+				lineage, decoded := objects.lineages[digest]
+				if !exists || !decoded || file.digest != digest {
+					return retentionSnapshot{}, fmt.Errorf("generation %q references a missing SessionLineage", generationID)
+				}
+				reachablePaths[relative], reachableDigests[digest] = file, struct{}{}
+				digest = lineage.PreviousLineageDigest
+			}
 		}
 	}
 
@@ -728,15 +755,7 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 	if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
 		return nil, err
 	}
-	references := make([]manifestObjectReference, 0, len(manifest.ObservationChunkDigests)+len(manifest.SessionViews)+2)
-	for index, digest := range manifest.ObservationChunkDigests {
-		if index%256 == 0 {
-			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
-				return nil, err
-			}
-		}
-		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("observations", digestLeafName(digest, ".jsonl"))), digest: digest})
-	}
+	references := make([]manifestObjectReference, 0, len(manifest.SessionViews)+len(manifest.SessionLineages)+2)
 	for index, dependency := range manifest.SessionViews {
 		if index%256 == 0 {
 			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
@@ -744,6 +763,14 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 			}
 		}
 		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("sessions", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
+	}
+	for index, dependency := range manifest.SessionLineages {
+		if index%256 == 0 {
+			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
+				return nil, err
+			}
+		}
+		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("session-lineages", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
 	}
 	if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
 		return nil, err
@@ -763,6 +790,7 @@ type retentionObjectSnapshot struct {
 	files        map[string]retentionFile
 	observations map[string][]memory.ObservationRevision
 	sessions     map[string]memory.SessionView
+	lineages     map[string]memory.SessionLineage
 	probes       map[string]memory.ProjectProbeState
 	projects     map[string]memory.ProjectView
 }
@@ -792,6 +820,20 @@ func (objects *retentionObjectSnapshot) sessionView(ctx context.Context, depende
 	return view, nil
 }
 
+func (objects *retentionObjectSnapshot) sessionLineage(ctx context.Context, dependency memory.SessionLineageDependency) (memory.SessionLineage, error) {
+	if err := retentionContextCause(ctx); err != nil {
+		return memory.SessionLineage{}, err
+	}
+	lineage, exists := objects.lineages[dependency.Digest]
+	if !exists {
+		return memory.SessionLineage{}, fmt.Errorf("verify SessionLineage %s: %w", dependency.Digest, os.ErrNotExist)
+	}
+	if lineage.Provider != dependency.Provider || lineage.SessionID != dependency.SessionID {
+		return memory.SessionLineage{}, errors.New("SessionLineage dependency identity mismatch")
+	}
+	return lineage, nil
+}
+
 func (objects *retentionObjectSnapshot) probeState(ctx context.Context, digest string) (memory.ProjectProbeState, error) {
 	if err := retentionContextCause(ctx); err != nil {
 		return memory.ProjectProbeState{}, err
@@ -817,7 +859,7 @@ func (objects *retentionObjectSnapshot) projectView(ctx context.Context, digest 
 func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObjectSnapshot, error) {
 	objects := &retentionObjectSnapshot{
 		files: make(map[string]retentionFile), observations: make(map[string][]memory.ObservationRevision),
-		sessions: make(map[string]memory.SessionView), probes: make(map[string]memory.ProjectProbeState),
+		sessions: make(map[string]memory.SessionView), lineages: make(map[string]memory.SessionLineage), probes: make(map[string]memory.ProjectProbeState),
 		projects: make(map[string]memory.ProjectView),
 	}
 	collections := []struct {
@@ -827,6 +869,7 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 	}{
 		{ObjectObservationChunk, "observations", ".jsonl"},
 		{ObjectSessionView, "sessions", ".json"},
+		{ObjectSessionLineage, "session-lineages", ".json"},
 		{ObjectProbeState, "project-probes", ".json"},
 		{ObjectProjectView, "project-views", ".json"},
 	}
@@ -877,6 +920,8 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 				objects.observations[digest] = decoded.observations
 			case ObjectSessionView:
 				objects.sessions[digest] = decoded.session
+			case ObjectSessionLineage:
+				objects.lineages[digest] = decoded.lineage
 			case ObjectProbeState:
 				objects.probes[digest] = decoded.probe
 			case ObjectProjectView:

@@ -1,7 +1,6 @@
 package projectview
 
 import (
-	"fmt"
 	"path"
 	"sort"
 	"strconv"
@@ -36,8 +35,8 @@ func rankModules(events []event, reference time.Time, limit int) ([]memory.Deriv
 		}
 		stats := modules[modulePath]
 		if stats == nil {
-			if err := ensureRecordCapacity(len(modules), 1, limit); err != nil {
-				return nil, fmt.Errorf("module ranking limit exceeded: %w", err)
+			if len(modules) >= limit {
+				continue
 			}
 			stats = &moduleStats{path: modulePath, sessions: make(map[string]struct{}), seenDeps: make(map[string]struct{})}
 			modules[modulePath] = stats

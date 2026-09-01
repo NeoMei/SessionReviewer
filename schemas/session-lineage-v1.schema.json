@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/session-lineage-v1.schema.json",
+  "title": "SessionReviewer private SessionLineage v1",
+  "$comment": "Runtime validation additionally applies UTF-8 byte limits and cross-field lineage transition checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "digest", "project_id", "provider", "session_id", "source_identity", "active_revisions", "superseded_revisions", "withdrawn_revisions"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/safe_id" },
+    "provider": { "type": "string", "const": "codex" },
+    "session_id": { "$ref": "#/$defs/safe_id" },
+    "source_identity": { "$ref": "#/$defs/safe_id" },
+    "active_revisions": { "$ref": "#/$defs/digest_map" },
+    "superseded_revisions": { "$ref": "#/$defs/digest_map" },
+    "withdrawn_revisions": { "$ref": "#/$defs/digest_map" },
+    "previous_lineage_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "digest_map": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 65536,
+      "patternProperties": {
+        "^sha256:[0-9a-f]{64}$": { "$ref": "#/$defs/digest" }
+      }
+    }
+  }
+}

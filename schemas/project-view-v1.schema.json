@@ -54,7 +54,7 @@
     "positive_integer": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
     "digest_set": {
       "type": "array",
-      "maxItems": 1000000,
+      "maxItems": 65536,
       "uniqueItems": true,
       "items": { "$ref": "#/$defs/digest" }
     },

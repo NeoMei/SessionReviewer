@@ -81,7 +81,9 @@ func TestPrivateWireSchemasAcceptMatchingVersionOneFixtures(t *testing.T) {
 		{name: "source catalog", path: "../../schemas/source-catalog-v1.schema.json", value: validSourceRecord()},
 		{name: "observation", path: "../../schemas/observation-v1.schema.json", value: validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"})},
 		{name: "session view", path: "../../schemas/session-view-v1.schema.json", value: validSessionView()},
+		{name: "session lineage", path: "../../schemas/session-lineage-v1.schema.json", value: validSessionLineage()},
 		{name: "project view", path: "../../schemas/project-view-v1.schema.json", value: validProjectView()},
+		{name: "generation manifest", path: "../../schemas/generation-manifest-v1.schema.json", value: validGenerationManifest()},
 	}
 	for _, fixture := range fixtures {
 		t.Run(fixture.name, func(t *testing.T) {
@@ -336,12 +338,17 @@ func TestSessionViewCarriesOnlyCompactDependencyBoundObservationSummaries(t *tes
 	}
 }
 
-func TestSessionViewRejectsUnauthenticatedUsageAndSummaryDependencyMismatches(t *testing.T) {
+func TestSessionViewAllowsIndependentUsageDigestAndRejectsSummaryDependencyMismatches(t *testing.T) {
+	independent := validSessionView()
+	independent.UsageRecordDigest = objectDigest("9")
+	independent.Digest = mustSessionViewDigest(independent)
+	if err := ValidateSessionView(independent); err != nil {
+		t.Fatalf("SessionView rejected independently authenticated usage digest: %v", err)
+	}
 	tests := []struct {
 		name string
 		run  func(*SessionView)
 	}{
-		{name: "usage differs from catalog source", run: func(value *SessionView) { value.UsageRecordDigest = objectDigest("9") }},
 		{name: "missing summary", run: func(value *SessionView) { value.ObservationSummaries = nil }},
 		{name: "extra summary", run: func(value *SessionView) {
 			value.ObservationSummaries = append(value.ObservationSummaries, value.ObservationSummaries[0])
@@ -528,28 +535,91 @@ func TestProjectProbeStateHasNoWallClockTimeButProbeCheckDoes(t *testing.T) {
 	}
 }
 
-func TestGenerationManifestRejectsInactiveRevisionSelectedAsActive(t *testing.T) {
-	manifest := validGenerationManifest()
-	if err := ValidateGenerationManifest(manifest); err != nil {
-		t.Fatal(err)
-	}
-	for _, mutate := range []func(*GenerationManifest){
-		func(value *GenerationManifest) { value.SupersededRevisions[revisionDigest("1")] = revisionDigest("2") },
-		func(value *GenerationManifest) { value.WithdrawnRevisions[stableKeyDigest("1")] = revisionDigest("1") },
-	} {
-		value := validGenerationManifest()
-		mutate(&value)
-		if err := ValidateGenerationManifest(value); err == nil || !strings.Contains(err.Error(), "inactive") {
-			t.Fatalf("inactive active revision accepted or misclassified: %v", err)
-		}
-	}
-}
-
 func TestGenerationManifestReconcilesFrozenSourcesWithSessionViews(t *testing.T) {
 	manifest := validGenerationManifest()
 	manifest.SessionViews = nil
 	if err := ValidateGenerationManifest(manifest); err == nil || !strings.Contains(err.Error(), "SessionView dependency count") {
 		t.Fatalf("unmaterialized frozen source accepted or misclassified: %v", err)
+	}
+}
+
+func TestSessionLineageIsPerSessionBoundedAndManifestResolved(t *testing.T) {
+	lineage := validSessionLineage()
+	if err := ValidateSessionLineage(lineage); err != nil {
+		t.Fatalf("valid lineage rejected: %v", err)
+	}
+	manifest := validGenerationManifest()
+	if err := ValidateGenerationManifest(manifest); err != nil {
+		t.Fatalf("valid manifest rejected: %v", err)
+	}
+	manifest.SessionLineages[0].SessionID = "other"
+	if err := ValidateGenerationManifest(manifest); err == nil || !strings.Contains(err.Error(), "lineage") {
+		t.Fatalf("manifest accepted mismatched lineage dependency: %v", err)
+	}
+}
+
+func TestSessionLineageAndGenerationManifestSchemasAreStrict(t *testing.T) {
+	fixtures := []struct {
+		name  string
+		path  string
+		value any
+	}{
+		{name: "SessionLineage", path: "../../schemas/session-lineage-v1.schema.json", value: validSessionLineage()},
+		{name: "GenerationManifest", path: "../../schemas/generation-manifest-v1.schema.json", value: validGenerationManifest()},
+	}
+	for _, fixture := range fixtures {
+		t.Run(fixture.name, func(t *testing.T) {
+			body, err := json.Marshal(fixture.value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var object map[string]any
+			if err := json.Unmarshal(body, &object); err != nil {
+				t.Fatal(err)
+			}
+			object["full_transcript"] = "forbidden"
+			body, err = json.Marshal(object)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateJSONSchemaFixture(fixture.path, body); err == nil {
+				t.Fatalf("%s schema accepted an unknown raw field", fixture.name)
+			}
+		})
+	}
+}
+
+func TestGenerationManifestSchemaAllowsUnicodeButRejectsStructuredControlCharacters(t *testing.T) {
+	manifest := validGenerationManifest()
+	manifest.ProbeCheck.Diagnostics = []Diagnostic{{Code: "probe-note", Path: "模块/文件.md"}}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/generation-manifest-v1.schema.json", body); err != nil {
+		t.Fatalf("schema rejected valid Unicode diagnostic path: %v", err)
+	}
+	manifest.ProbeCheck.Diagnostics[0].Path = "bad\u0001path"
+	body, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJSONSchemaFixture("../../schemas/generation-manifest-v1.schema.json", body); err == nil {
+		t.Fatal("schema accepted a C0 control character in structured text")
+	}
+}
+
+func TestSessionLineageRejectsOversizedSingleSourceWithoutProjectWideMaps(t *testing.T) {
+	lineage := validSessionLineage()
+	lineage.ActiveRevisions = make(map[string]string, 65537)
+	for index := 0; index < 65537; index++ {
+		key := fmt.Sprintf("sha256:%064x", index+1)
+		revision := fmt.Sprintf("sha256:%064x", index+65538)
+		lineage.ActiveRevisions[key] = revision
+	}
+	lineage.Digest, _ = SessionLineageDigest(lineage)
+	if err := ValidateSessionLineage(lineage); err == nil || !strings.Contains(err.Error(), "65536") {
+		t.Fatalf("oversized source lineage accepted: %v", err)
 	}
 }
 
@@ -758,20 +828,32 @@ func mustProjectViewDigest(value ProjectView) string {
 
 func validGenerationManifest() GenerationManifest {
 	return GenerationManifest{
-		SchemaVersion:           MemorySchemaVersion,
-		GenerationID:            "generation-1",
-		ProjectID:               "project-a",
-		CreatedAt:               "2026-08-31T10:00:03Z",
-		SourceRecordDigests:     []string{objectDigest("2")},
-		ObservationChunkDigests: []string{objectDigest("3")},
-		SessionViews:            []SessionViewDependency{{Provider: "codex", SessionID: "s1", Digest: objectDigest("1")}},
-		ProbeStateDigest:        objectDigest("5"),
-		ProbeCheck:              validProbeCheck(),
-		ProjectViewDigest:       objectDigest("7"),
-		ActiveRevisions:         map[string]string{stableKeyDigest("1"): revisionDigest("1")},
-		SupersededRevisions:     map[string]string{},
-		WithdrawnRevisions:      map[string]string{},
+		SchemaVersion:       MemorySchemaVersion,
+		GenerationID:        "generation-1",
+		ProjectID:           "project-a",
+		CreatedAt:           "2026-08-31T10:00:03Z",
+		SourceRecordDigests: []string{objectDigest("2")},
+		SessionViews:        []SessionViewDependency{{Provider: "codex", SessionID: "s1", Digest: objectDigest("1")}},
+		SessionLineages:     []SessionLineageDependency{{Provider: "codex", SessionID: "s1", Digest: objectDigest("9")}},
+		ProbeStateDigest:    objectDigest("5"),
+		ProbeCheck:          validProbeCheck(),
+		ProjectViewDigest:   objectDigest("7"),
 	}
+}
+
+func validSessionLineage() SessionLineage {
+	value := SessionLineage{
+		SchemaVersion:       MemorySchemaVersion,
+		ProjectID:           "project-a",
+		Provider:            "codex",
+		SessionID:           "s1",
+		SourceIdentity:      "src1",
+		ActiveRevisions:     map[string]string{stableKeyDigest("1"): revisionDigest("1")},
+		SupersededRevisions: map[string]string{},
+		WithdrawnRevisions:  map[string]string{},
+	}
+	value.Digest, _ = SessionLineageDigest(value)
+	return value
 }
 
 func objectDigest(seed string) string {

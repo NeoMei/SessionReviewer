@@ -162,7 +162,7 @@ Deterministic conclusions such as compatible failure recovery, rankings, phase b
 
 The stable observation key identifies one canonical fact slot from authenticated provider, Session, source event coordinate, project association, kind, and typed subject identity. It excludes adapter version and extracted payload. The immutable revision ID hashes that key together with the normalized payload, source hash, and adapter version.
 
-Each published generation contains an active-revision map. Re-decoding after an adapter upgrade or interior source mutation emits successor revisions and selects them in the new generation. A prior revision that is corrected or no longer emitted remains queryable as inactive history with `superseded` or `withdrawn` lineage; it is never mutated in place. SessionViews, ProjectViews, and AgentAnnotations bind to exact revision IDs, so a superseded dependency invalidates only the affected derived view or annotation.
+Each Session has one immutable content-addressed `SessionLineage` head containing that Session's bounded active-revision map and only the `superseded` or `withdrawn` delta from its preceding head. A generation references one lineage head beside each SessionView; it never repeats project-wide observation chunks or revision maps. Re-decoding after an adapter upgrade or interior source mutation emits successor revisions and selects them in the affected Session's new head. Prior revisions remain queryable as inactive history and are never mutated in place. SessionViews, ProjectViews, and AgentAnnotations bind to exact revision IDs, so a superseded dependency invalidates only the affected derived view or annotation.
 
 ### Text and raw-source policy
 
@@ -205,7 +205,9 @@ The complete fact and view store lives outside Project and Vault:
 
 Directories and records use the existing private platform-data permissions, rooted path validation, identity pinning, atomic private-object writes, and project locks. Complete facts are not placed in Git, Project Markdown, or the Obsidian Vault.
 
-Observation chunks are immutable and content-addressed. A Session append writes only successor chunks. SessionView manifests reference old and new chunks instead of copying all prior facts. ProjectViews contain compact aggregates and references rather than duplicating complete Session observations.
+Observation chunks are immutable and content-addressed. A Session append writes only successor chunks. SessionViews reference old and new chunks instead of copying all prior facts. Decode output is first validated into private, per-source typed-observation spools; replay keeps at most one source payload resident, removes every run on success/error/cancellation/panic, and rejects identity, permission, size, timestamp, or canonical-content changes during replay. The per-source ceiling remains 65,536 revisions, but there is no project-global observation ceiling.
+
+ProjectViews contain bounded compact aggregates and references rather than duplicating complete Session observations. Their reducer performs a chronological k-way merge with one cursor per Session. Witnessed state, recovery candidates/results, phase boundaries, event references, Session-derived records, and module candidates each have explicit resident/output bounds. Module candidates use deterministic Space-Saving admission: `estimated_activity` and `error_upper_bound` are estimates, and `counts_complete=false` whenever eviction or Session-cardinality truncation means exact counts cannot be claimed.
 
 Unchanged scans produce no new Observation, SessionView, or ProjectView version; a bounded scan-run/ProbeCheck record may still record that the check occurred. A SessionView is versioned only when its active Observation revision digest, frozen source-availability digest, or materializer version changes. A ProjectView is versioned only when its ordered SessionView dependency digest, ProjectProbe state digest, or reducer version changes.
 
@@ -246,7 +248,7 @@ A scan freezes the ordered source candidates and readable boundaries. The first 
 
 SessionView includes:
 
-- Session identity, provider, time range, and a reference to the SourceCatalog model/token usage record;
+- Session identity, provider, time range, the current SourceRecord digest, and an independently authenticated digest of normalized SourceCatalog model/token usage;
 - coverage and source-availability state;
 - ordered references to observations and chunks;
 - user-request presentation excerpts;
@@ -301,6 +303,8 @@ Reduction rules are transparent and versioned:
 - ambiguous data contributes diagnostics, not guessed facts.
 
 ProjectView is the complete deterministic second-pass result. Obsidian renders only its concise human-facing subset.
+
+The private JSON Schemas describe interoperable Unicode code-point lengths, while the Go runtime intentionally enforces stricter valid-UTF-8 byte bounds and rejects all C0/DEL control characters in structured single-line fields. Schemas exclude standard controls where expressible, but non-ASCII text remains valid. External schema acceptance therefore does not replace runtime validation or content-addressed-store revalidation.
 
 ## Read-only ProjectProbe
 

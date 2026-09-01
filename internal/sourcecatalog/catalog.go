@@ -878,7 +878,7 @@ func (c *Catalog) AssociatedUsage(projectID string) ([]memory.AssociatedUsage, e
 	}
 	result := make([]memory.AssociatedUsage, 0, len(records))
 	for _, record := range records {
-		digest, err := memory.Digest(record)
+		digest, err := memory.Digest(record.Usage)
 		if err != nil {
 			return nil, err
 		}

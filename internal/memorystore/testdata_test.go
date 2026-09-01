@@ -19,6 +19,7 @@ const (
 type storedFixture struct {
 	observation memory.ObservationRevision
 	session     memory.SessionView
+	lineage     memory.SessionLineage
 	probe       memory.ProjectProbeState
 	project     memory.ProjectView
 	manifest    memory.GenerationManifest
@@ -94,6 +95,23 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 	if _, err := store.PutSessionView(session); err != nil {
 		t.Fatalf("put session view: %v", err)
 	}
+	lineage := memory.SessionLineage{
+		SchemaVersion:       memory.MemorySchemaVersion,
+		ProjectID:           testProjectID,
+		Provider:            session.Provider,
+		SessionID:           session.SessionID,
+		SourceIdentity:      session.SourceIdentity,
+		ActiveRevisions:     map[string]string{observationKeyDigest(t, observation.Key): observation.RevisionID},
+		SupersededRevisions: map[string]string{},
+		WithdrawnRevisions:  map[string]string{},
+	}
+	lineage.Digest, err = memory.SessionLineageDigest(lineage)
+	if err != nil {
+		t.Fatalf("digest SessionLineage: %v", err)
+	}
+	if _, err := store.PutSessionLineage(lineage); err != nil {
+		t.Fatalf("put SessionLineage: %v", err)
+	}
 
 	probe := memory.ProjectProbeState{
 		SchemaVersion:           memory.MemorySchemaVersion,
@@ -145,28 +163,25 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 	}
 
 	manifest := memory.GenerationManifest{
-		SchemaVersion:           memory.MemorySchemaVersion,
-		GenerationID:            generationID,
-		ProjectID:               testProjectID,
-		CreatedAt:               testEndedAt,
-		SourceRecordDigests:     []string{session.SourceRecordDigest},
-		ObservationChunkDigests: []string{chunkDigest},
+		SchemaVersion:       memory.MemorySchemaVersion,
+		GenerationID:        generationID,
+		ProjectID:           testProjectID,
+		CreatedAt:           testEndedAt,
+		SourceRecordDigests: []string{session.SourceRecordDigest},
 		SessionViews: []memory.SessionViewDependency{{
 			Provider: "codex", SessionID: "session-1", Digest: session.Digest,
+		}},
+		SessionLineages: []memory.SessionLineageDependency{{
+			Provider: "codex", SessionID: "session-1", Digest: lineage.Digest,
 		}},
 		ProbeStateDigest:  probe.Digest,
 		ProbeCheck:        memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: testEndedAt, StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}},
 		ProjectViewDigest: project.Digest,
-		ActiveRevisions: map[string]string{
-			observationKeyDigest(t, observation.Key): observation.RevisionID,
-		},
-		SupersededRevisions: map[string]string{},
-		WithdrawnRevisions:  map[string]string{},
 	}
 	if err := memory.ValidateGenerationManifest(manifest); err != nil {
 		t.Fatalf("fixture manifest is invalid: %v", err)
 	}
-	return storedFixture{observation: observation, session: session, probe: probe, project: project, manifest: manifest}
+	return storedFixture{observation: observation, session: session, lineage: lineage, probe: probe, project: project, manifest: manifest}
 }
 
 func observationKeyDigest(t *testing.T, key memory.ObservationKey) string {

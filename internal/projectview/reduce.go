@@ -23,13 +23,14 @@ const (
 // Input contains the complete, generation-frozen reducer boundary. ReferenceTime
 // is an explicit UTC RFC3339 timestamp used only by documented recency buckets.
 type Input struct {
-	ProjectID       string
-	SessionViews    []memory.SessionView
-	ProbeState      memory.ProjectProbeState
-	AssociatedUsage []memory.AssociatedUsage
-	Previous        *memory.ProjectView
-	ReducerVersion  string
-	ReferenceTime   string
+	ProjectID         string
+	SessionViews      []memory.SessionView
+	ProbeState        memory.ProjectProbeState
+	AssociatedUsage   []memory.AssociatedUsage
+	Previous          *memory.ProjectView
+	ReducerVersion    string
+	ReferenceTime     string
+	aggregateObserver func(aggregateStats)
 }
 
 type event struct {
@@ -69,46 +70,23 @@ func Reduce(input Input) (memory.ProjectView, bool, error) {
 		incrementTerminalCount(&counts, view.TerminalState)
 	}
 
-	events, revisionIDs, err := collectEvents(views)
+	aggregates, err := aggregateSessionViews(views, referenceTime, input.aggregateObserver)
 	if err != nil {
 		return memory.ProjectView{}, false, err
 	}
-	witnessed, err := deriveWitnessedState(events, maxProjectRecords)
+	witnessed := aggregates.witnessed
+	derived := make([]memory.DerivedRecord, 0, maxProjectRecords-len(witnessed))
+	sessionRecords, _, err := copySessionDerivedRecords(views, maxSessionRecoveryRecords)
 	if err != nil {
 		return memory.ProjectView{}, false, err
 	}
-	remaining := maxProjectRecords - len(witnessed)
-	derived := make([]memory.DerivedRecord, 0, minInt(len(events), remaining))
-	appendPhase := func(records []memory.DerivedRecord) {
-		derived = append(derived, records...)
-		remaining -= len(records)
-	}
-
-	eventRecords, err := deriveEventReferences(events, remaining)
-	if err != nil {
-		return memory.ProjectView{}, false, err
-	}
-	appendPhase(eventRecords)
-	sessionRecords, representedRecoveries, err := copySessionDerivedRecords(views, remaining)
-	if err != nil {
-		return memory.ProjectView{}, false, err
-	}
-	appendPhase(sessionRecords)
-	crossSessionRecoveries, err := deriveRecoveryLinks(events, representedRecoveries, remaining)
-	if err != nil {
-		return memory.ProjectView{}, false, err
-	}
-	appendPhase(crossSessionRecoveries)
-	phaseBoundaries, err := derivePhaseBoundaries(events, remaining)
-	if err != nil {
-		return memory.ProjectView{}, false, err
-	}
-	appendPhase(phaseBoundaries)
-	moduleRankings, err := rankModules(events, referenceTime, remaining)
-	if err != nil {
-		return memory.ProjectView{}, false, err
-	}
-	appendPhase(moduleRankings)
+	derived = append(derived, sessionRecords...)
+	derived = append(derived, aggregates.recoveries...)
+	derived = append(derived, aggregates.phases...)
+	derived = append(derived, aggregates.moduleRankings...)
+	derived = append(derived, aggregates.eventRefs...)
+	moduleRankings := aggregates.moduleRankings
+	revisionIDs := selectedObservationRevisions(witnessed, derived)
 
 	dependencyDigest, err := memory.Digest(struct {
 		SessionViews   []memory.SessionViewDependency `json:"session_views"`
@@ -276,26 +254,10 @@ func reconcileUsage(views []memory.SessionView, supplied []memory.AssociatedUsag
 	return usage, nil
 }
 
-func collectEvents(views []memory.SessionView) ([]event, []string, error) {
-	total := 0
-	for _, view := range views {
-		if err := ensureRecordCapacity(total, len(view.ObservationSummaries)); err != nil {
-			return nil, nil, fmt.Errorf("observation event limit exceeded: %w", err)
-		}
-		total += len(view.ObservationSummaries)
-	}
-	events := make([]event, 0, total)
-	seen := make(map[string]string, total)
+func collectEvents(views []memory.SessionView) ([]event, error) {
+	events := make([]event, 0)
 	for _, view := range views {
 		for _, summary := range view.ObservationSummaries {
-			if len(events) >= maxProjectRecords {
-				return nil, nil, errors.New("observation event limit exceeded during collection")
-			}
-			provenance := view.Provider + "\x00" + view.SessionID
-			if previous, duplicate := seen[summary.RevisionID]; duplicate {
-				return nil, nil, fmt.Errorf("observation revision %s appears in both %s and %s", summary.RevisionID, previous, provenance)
-			}
-			seen[summary.RevisionID] = provenance
 			occurredAt, _ := time.Parse(time.RFC3339Nano, summary.OccurredAt)
 			events = append(events, event{provider: view.Provider, sessionID: view.SessionID, summary: cloneSummary(summary), time: occurredAt})
 		}
@@ -312,19 +274,16 @@ func collectEvents(views []memory.SessionView) ([]event, []string, error) {
 		}
 		return events[i].summary.RevisionID < events[j].summary.RevisionID
 	})
-	revisions := make([]string, len(events))
-	for index := range events {
-		revisions[index] = events[index].summary.RevisionID
-	}
-	return events, revisions, nil
+	return events, nil
 }
 
 func deriveEventReferences(events []event, limit int) ([]memory.DerivedRecord, error) {
-	if err := ensureRecordCapacity(0, len(events), limit); err != nil {
-		return nil, fmt.Errorf("event reference limit exceeded: %w", err)
+	if limit < 0 {
+		return nil, errors.New("event reference limit is negative")
 	}
-	result := make([]memory.DerivedRecord, 0, len(events))
-	for _, item := range events {
+	count := minInt(len(events), limit)
+	result := make([]memory.DerivedRecord, 0, count)
+	for _, item := range events[:count] {
 		fields := map[string]string{
 			"provider": item.provider, "session_id": item.sessionID, "sequence": strconv.Itoa(item.summary.Sequence), "fact_kind": item.summary.Kind,
 		}
@@ -352,8 +311,8 @@ func deriveWitnessedState(events []event, limit int) ([]memory.DerivedRecord, er
 	for _, item := range events {
 		for _, witnessed := range witnessedValues(item.summary) {
 			if _, exists := latest[witnessed.key]; !exists {
-				if err := ensureRecordCapacity(len(latest), 1, limit); err != nil {
-					return nil, fmt.Errorf("witnessed state limit exceeded: %w", err)
+				if len(latest) >= limit {
+					continue
 				}
 				order = append(order, witnessed.key)
 			}
@@ -375,6 +334,26 @@ func deriveWitnessedState(events []event, limit int) ([]memory.DerivedRecord, er
 		result = append(result, latest[key])
 	}
 	return result, nil
+}
+
+func selectedObservationRevisions(groups ...[]memory.DerivedRecord) []string {
+	seen := make(map[string]struct{}, maxProjectRecords)
+	result := make([]string, 0, maxProjectRecords)
+	for _, records := range groups {
+		for _, record := range records {
+			for _, revisionID := range record.DependencyRevisionIDs {
+				if _, duplicate := seen[revisionID]; duplicate {
+					continue
+				}
+				if len(result) >= maxProjectRecords {
+					return result
+				}
+				seen[revisionID] = struct{}{}
+				result = append(result, revisionID)
+			}
+		}
+	}
+	return result
 }
 
 type witnessedFact struct {

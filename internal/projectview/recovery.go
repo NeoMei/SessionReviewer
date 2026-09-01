@@ -27,13 +27,23 @@ type sessionDerivedRecord struct {
 }
 
 func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.DerivedRecord, map[string]struct{}, error) {
+	return copySessionDerivedRecordsWithObserver(views, limit, nil)
+}
+
+func copySessionDerivedRecordsWithObserver(views []memory.SessionView, limit int, observer func(int)) ([]memory.DerivedRecord, map[string]struct{}, error) {
 	items := make([]sessionDerivedRecord, 0)
-	seenIDs := make(map[string]string)
-	representedRecoveries := make(map[string]struct{})
+	seenIDs := make(map[string]string, limit)
+	representedRecoveries := make(map[string]struct{}, limit)
 	for _, view := range views {
 		for _, record := range view.DerivedRecords {
 			if err := validateSessionRecoveryRecord(view, record); err != nil {
 				return nil, nil, fmt.Errorf("validate SessionView %s/%s derived record %s: %w", view.Provider, view.SessionID, record.ID, err)
+			}
+			if len(items) >= limit {
+				if observer != nil {
+					observer(len(seenIDs))
+				}
+				continue
 			}
 			digest, err := memory.Digest(record)
 			if err != nil {
@@ -45,16 +55,16 @@ func copySessionDerivedRecords(views []memory.SessionView, limit int) ([]memory.
 				}
 				continue
 			}
-			if err := ensureRecordCapacity(len(items), 1, limit); err != nil {
-				return nil, nil, fmt.Errorf("SessionView derived record limit exceeded: %w", err)
-			}
 			seenIDs[record.ID] = digest
+			representedRecoveries[record.DependencyRevisionIDs[0]+"\x00"+record.DependencyRevisionIDs[1]] = struct{}{}
 			occurredAt := time.Time{}
 			if record.OccurredAt != "" {
 				occurredAt, _ = time.Parse(time.RFC3339Nano, record.OccurredAt)
 			}
 			items = append(items, sessionDerivedRecord{provider: view.Provider, sessionID: view.SessionID, record: cloneDerivedRecords([]memory.DerivedRecord{record})[0], time: occurredAt})
-			representedRecoveries[record.DependencyRevisionIDs[0]+"\x00"+record.DependencyRevisionIDs[1]] = struct{}{}
+			if observer != nil {
+				observer(len(seenIDs))
+			}
 		}
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -200,8 +210,8 @@ func deriveRecoveryLinks(events []event, represented map[string]struct{}, limit 
 				if _, alreadyDerived := existing[pair]; alreadyDerived {
 					continue
 				}
-				if err := ensureRecordCapacity(len(result), 1, limit); err != nil {
-					return nil, fmt.Errorf("recovery link limit exceeded: %w", err)
+				if len(result) >= limit {
+					continue
 				}
 				result = append(result, recoveryRecord(failure, item, key))
 				existing[pair] = struct{}{}
@@ -263,19 +273,17 @@ func derivePhaseBoundaries(events []event, limit int) ([]memory.DerivedRecord, e
 	for index := range events {
 		item := events[index]
 		if previous != nil && item.time.Sub(previous.time) > 30*24*time.Hour {
-			if err := ensureRecordCapacity(len(result), 1, limit); err != nil {
-				return nil, fmt.Errorf("phase boundary limit exceeded: %w", err)
+			if len(result) < limit {
+				result = append(result, phaseBoundary(item.time.Format("2006-01-02"), "time_gap", item, []string{previous.summary.RevisionID, item.summary.RevisionID}))
 			}
-			result = append(result, phaseBoundary(item.time.Format("2006-01-02"), "time_gap", item, []string{previous.summary.RevisionID, item.summary.RevisionID}))
 		}
 		switch item.summary.Kind {
 		case "branch", "git_status":
 			value := structuralValue(item.summary, "branch")
 			if prior, exists := lastValue["branch"]; exists && structuralValue(prior.summary, "branch") != value && value != "" {
-				if err := ensureRecordCapacity(len(result), 1, limit); err != nil {
-					return nil, fmt.Errorf("phase boundary limit exceeded: %w", err)
+				if len(result) < limit {
+					result = append(result, phaseBoundary(item.time.Format("2006-01-02"), "branch_change", item, []string{prior.summary.RevisionID, item.summary.RevisionID}))
 				}
-				result = append(result, phaseBoundary(item.time.Format("2006-01-02"), "branch_change", item, []string{prior.summary.RevisionID, item.summary.RevisionID}))
 			}
 			if value != "" {
 				lastValue["branch"] = item
@@ -312,8 +320,8 @@ func appendStructuralBoundary(result []memory.DerivedRecord, lastValue map[strin
 		dependencies = []string{prior.summary.RevisionID, item.summary.RevisionID}
 	}
 	lastValue[kind] = item
-	if err := ensureRecordCapacity(len(result), 1, limit); err != nil {
-		return nil, fmt.Errorf("phase boundary limit exceeded: %w", err)
+	if len(result) >= limit {
+		return result, nil
 	}
 	return append(result, phaseBoundary(value, kind+"_change", item, dependencies)), nil
 }

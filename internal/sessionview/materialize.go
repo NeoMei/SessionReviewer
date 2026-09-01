@@ -46,11 +46,20 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		return observations[i].RevisionID < observations[j].RevisionID
 	})
 	observations = deduplicateRevisions(observations)
+	derivedRecords := deriveRecoveryLinks(observations)
+	sort.Slice(observations, func(i, j int) bool {
+		if observations[i].Timestamp != observations[j].Timestamp {
+			return observations[i].Timestamp < observations[j].Timestamp
+		}
+		if observations[i].Key.Sequence != observations[j].Key.Sequence {
+			return observations[i].Key.Sequence < observations[j].Key.Sequence
+		}
+		return observations[i].RevisionID < observations[j].RevisionID
+	})
 
 	activeRevisionIDs := revisionIDs(observations)
 	observationSummaries := summarizeObservations(observations)
 	chunkDigests := firstSeenUniqueStrings(input.ObservationChunkDigests)
-	derivedRecords := deriveRecoveryLinks(observations)
 	diagnostics := sortedUniqueDiagnostics(input.Diagnostics)
 	sourceRecordDigest := input.SourceRecordDigest
 	usageRecordDigest := input.UsageRecordDigest
@@ -60,8 +69,6 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		chunkDigests = append([]string(nil), input.Previous.ObservationChunkDigests...)
 		derivedRecords = cloneDerivedRecords(input.Previous.DerivedRecords)
 		diagnostics = sortedUniqueDiagnostics(append(append([]memory.Diagnostic(nil), input.Previous.Diagnostics...), diagnostics...))
-		sourceRecordDigest = input.Previous.SourceRecordDigest
-		usageRecordDigest = input.Previous.UsageRecordDigest
 	}
 
 	availabilityDigest, err := memory.Digest(struct {
@@ -136,12 +143,9 @@ func validateInput(input Input) error {
 	if err != nil || input.SourceRecordDigest != wantSourceDigest {
 		return errors.New("source record digest does not match source")
 	}
-	if !isDigest(input.UsageRecordDigest) {
-		return errors.New("invalid usage record digest")
-	}
-	if input.UsageRecordDigest != input.SourceRecordDigest &&
-		!(input.Source.Availability == memory.SourceUnavailable && input.Previous != nil && input.UsageRecordDigest == input.Previous.UsageRecordDigest) {
-		return errors.New("usage record digest is not authenticated by source catalog record")
+	wantUsageDigest, err := memory.Digest(input.Source.Usage)
+	if err != nil || input.UsageRecordDigest != wantUsageDigest {
+		return errors.New("usage record digest does not match source usage")
 	}
 	if !containsString(input.Source.ProjectIDs, input.ProjectID) {
 		return errors.New("source is not associated with target project")

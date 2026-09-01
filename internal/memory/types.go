@@ -230,6 +230,31 @@ type SessionViewDependency struct {
 	Digest    string `json:"digest"`
 }
 
+// SessionLineageDependency identifies the bounded lineage head for one
+// Session. Generation manifests carry one head per Session rather than
+// project-wide observation and revision-classification collections.
+type SessionLineageDependency struct {
+	Provider  string `json:"provider"`
+	SessionID string `json:"session_id"`
+	Digest    string `json:"digest"`
+}
+
+// SessionLineage is an immutable, per-source lineage head. ActiveRevisions is
+// the current bounded source selection; the inactive maps describe only the
+// transition from PreviousLineageDigest, never cumulative project history.
+type SessionLineage struct {
+	SchemaVersion         int               `json:"schema_version"`
+	Digest                string            `json:"digest"`
+	ProjectID             string            `json:"project_id"`
+	Provider              string            `json:"provider"`
+	SessionID             string            `json:"session_id"`
+	SourceIdentity        string            `json:"source_identity"`
+	ActiveRevisions       map[string]string `json:"active_revisions"`
+	SupersededRevisions   map[string]string `json:"superseded_revisions"`
+	WithdrawnRevisions    map[string]string `json:"withdrawn_revisions"`
+	PreviousLineageDigest string            `json:"previous_lineage_digest,omitempty"`
+}
+
 type StateSnapshot struct {
 	Branch         string `json:"branch,omitempty"`
 	Head           string `json:"head,omitempty"`
@@ -265,19 +290,22 @@ type ProjectView struct {
 }
 
 type GenerationManifest struct {
-	SchemaVersion           int                     `json:"schema_version"`
-	GenerationID            string                  `json:"generation_id"`
-	ProjectID               string                  `json:"project_id"`
-	CreatedAt               string                  `json:"created_at"`
-	SourceRecordDigests     []string                `json:"source_record_digests"`
-	ObservationChunkDigests []string                `json:"observation_chunk_digests"`
-	SessionViews            []SessionViewDependency `json:"session_views"`
-	ProbeStateDigest        string                  `json:"probe_state_digest"`
-	ProbeCheck              ProbeCheck              `json:"probe_check"`
-	ProjectViewDigest       string                  `json:"project_view_digest"`
-	ActiveRevisions         map[string]string       `json:"active_revisions"`
-	SupersededRevisions     map[string]string       `json:"superseded_revisions"`
-	WithdrawnRevisions      map[string]string       `json:"withdrawn_revisions"`
+	SchemaVersion       int                        `json:"schema_version"`
+	GenerationID        string                     `json:"generation_id"`
+	ProjectID           string                     `json:"project_id"`
+	CreatedAt           string                     `json:"created_at"`
+	SourceRecordDigests []string                   `json:"source_record_digests"`
+	SessionViews        []SessionViewDependency    `json:"session_views"`
+	SessionLineages     []SessionLineageDependency `json:"session_lineages"`
+	ProbeStateDigest    string                     `json:"probe_state_digest"`
+	ProbeCheck          ProbeCheck                 `json:"probe_check"`
+	ProjectViewDigest   string                     `json:"project_view_digest"`
+	// Deprecated Gate A draft fields are retained in the Go API so callers
+	// still compile, but v1 validation rejects non-empty project-wide lineage.
+	ObservationChunkDigests []string          `json:"observation_chunk_digests,omitempty"`
+	ActiveRevisions         map[string]string `json:"active_revisions,omitempty"`
+	SupersededRevisions     map[string]string `json:"superseded_revisions,omitempty"`
+	WithdrawnRevisions      map[string]string `json:"withdrawn_revisions,omitempty"`
 }
 
 func ValidateSourceRecord(value SourceRecord) error {
@@ -380,9 +408,6 @@ func ValidateSessionViewContext(ctx context.Context, value SessionView) error {
 	if !validDigest(value.Digest) || !validDigest(value.SourceRecordDigest) || !validDigest(value.UsageRecordDigest) || !validDigest(value.DependencyDigest) {
 		return errors.New("invalid SessionView digest")
 	}
-	if value.UsageRecordDigest != value.SourceRecordDigest {
-		return errors.New("SessionView usage record is not authenticated by source catalog record")
-	}
 	if err := validateSourceIdentity(value.Provider, value.SessionID, value.SourceIdentity); err != nil {
 		return err
 	}
@@ -463,8 +488,8 @@ func validateObservationSummaries(values []ObservationSummary, activeRevisionIDs
 		}
 		if index > 0 {
 			previous := values[index-1]
-			if previous.Sequence > value.Sequence || (previous.Sequence == value.Sequence && previous.RevisionID >= value.RevisionID) {
-				return errors.New("observation summaries are not in canonical sequence and revision order")
+			if previous.OccurredAt > value.OccurredAt || (previous.OccurredAt == value.OccurredAt && (previous.Sequence > value.Sequence || (previous.Sequence == value.Sequence && previous.RevisionID >= value.RevisionID))) {
+				return errors.New("observation summaries are not in canonical time, sequence, and revision order")
 			}
 		}
 		stableKey := fmt.Sprintf("%d\x00%s\x00%s", value.Sequence, value.Kind, value.Subject)
@@ -582,7 +607,7 @@ func ValidateProjectViewContext(ctx context.Context, value ProjectView) error {
 	if err := validateSessionDependencies(value.SessionViewDependencies, value.SourceSessions, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("observation revision", value.ObservationRevisionIDs, 1_000_000, checkpoints...); err != nil {
+	if err := validateUniqueDigests("selected observation revision", value.ObservationRevisionIDs, 65536, checkpoints...); err != nil {
 		return err
 	}
 	if !validDigest(value.ProbeStateDigest) || !validDigest(value.DependencyDigest) || (value.PreviousViewDigest != "" && !validDigest(value.PreviousViewDigest)) {
@@ -638,6 +663,87 @@ func ValidateGenerationManifest(value GenerationManifest) error {
 	return ValidateGenerationManifestContext(context.Background(), value)
 }
 
+func ValidateSessionLineage(value SessionLineage) error {
+	return ValidateSessionLineageContext(context.Background(), value)
+}
+
+func ValidateSessionLineageContext(ctx context.Context, value SessionLineage) error {
+	checkpoints, err := memoryValidationCheckpoints(ctx)
+	if err != nil {
+		return err
+	}
+	if err := validateVersion(value.SchemaVersion); err != nil {
+		return err
+	}
+	if !validDigest(value.Digest) || !safeIDPattern.MatchString(value.ProjectID) {
+		return errors.New("invalid SessionLineage identity")
+	}
+	if err := validateSourceIdentity(value.Provider, value.SessionID, value.SourceIdentity); err != nil {
+		return err
+	}
+	if value.PreviousLineageDigest != "" && !validDigest(value.PreviousLineageDigest) {
+		return errors.New("invalid previous SessionLineage digest")
+	}
+	if len(value.ActiveRevisions) > 65536 || len(value.SupersededRevisions) > 65536 || len(value.WithdrawnRevisions) > 65536 {
+		return errors.New("SessionLineage source revision limit 65536 exceeded")
+	}
+	activeIDs := make(map[string]struct{}, len(value.ActiveRevisions))
+	for key, revision := range value.ActiveRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		if !validDigest(key) || !validDigest(revision) {
+			return errors.New("invalid active SessionLineage revision")
+		}
+		if _, duplicate := activeIDs[revision]; duplicate {
+			return errors.New("duplicate active SessionLineage revision")
+		}
+		activeIDs[revision] = struct{}{}
+	}
+	inactiveIDs := make(map[string]struct{}, len(value.SupersededRevisions)+len(value.WithdrawnRevisions))
+	for previous, successor := range value.SupersededRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		if !validDigest(previous) || !validDigest(successor) || previous == successor {
+			return errors.New("invalid superseded SessionLineage revision")
+		}
+		if _, selected := activeIDs[previous]; selected {
+			return errors.New("inactive superseded SessionLineage revision selected as active")
+		}
+		if _, selected := activeIDs[successor]; !selected {
+			return errors.New("superseded SessionLineage successor is not active")
+		}
+		inactiveIDs[previous] = struct{}{}
+	}
+	for key, revision := range value.WithdrawnRevisions {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		if !validDigest(key) || !validDigest(revision) {
+			return errors.New("invalid withdrawn SessionLineage revision")
+		}
+		if _, selected := activeIDs[revision]; selected {
+			return errors.New("inactive withdrawn SessionLineage revision selected as active")
+		}
+		if _, duplicate := inactiveIDs[revision]; duplicate {
+			return errors.New("SessionLineage predecessor has multiple classifications")
+		}
+		inactiveIDs[revision] = struct{}{}
+	}
+	if value.PreviousLineageDigest == "" && (len(value.SupersededRevisions) != 0 || len(value.WithdrawnRevisions) != 0) {
+		return errors.New("initial SessionLineage cannot classify a predecessor")
+	}
+	want, err := SessionLineageDigestContext(ctx, value)
+	if cause := digestCheckpoint(checkpoints); cause != nil {
+		return cause
+	}
+	if err != nil || want != value.Digest {
+		return errors.Join(errors.New("SessionLineage self digest does not match canonical identity"), err)
+	}
+	return nil
+}
+
 func ValidateGenerationManifestContext(ctx context.Context, value GenerationManifest) error {
 	checkpoints, err := memoryValidationCheckpoints(ctx)
 	if err != nil {
@@ -658,14 +764,17 @@ func ValidateGenerationManifestContext(ctx context.Context, value GenerationMani
 	if err := validateUniqueDigests("source record", value.SourceRecordDigests, 65536, checkpoints...); err != nil {
 		return err
 	}
-	if err := validateUniqueDigests("observation chunk", value.ObservationChunkDigests, 65536, checkpoints...); err != nil {
-		return err
-	}
 	if len(value.SessionViews) != len(value.SourceRecordDigests) {
 		return errors.New("SessionView dependency count does not match frozen sources")
 	}
 	if err := validateSessionDependencies(value.SessionViews, len(value.SessionViews), checkpoints...); err != nil {
 		return err
+	}
+	if err := validateLineageDependencies(value.SessionLineages, value.SessionViews, checkpoints...); err != nil {
+		return err
+	}
+	if len(value.ObservationChunkDigests) != 0 || len(value.ActiveRevisions) != 0 || len(value.SupersededRevisions) != 0 || len(value.WithdrawnRevisions) != 0 {
+		return errors.New("deprecated project-wide observation lineage is not allowed")
 	}
 	if !validDigest(value.ProbeStateDigest) || !validDigest(value.ProjectViewDigest) {
 		return errors.New("invalid generation object digest")
@@ -675,41 +784,6 @@ func ValidateGenerationManifestContext(ctx context.Context, value GenerationMani
 	}
 	if value.ProbeCheck.StateDigest != value.ProbeStateDigest {
 		return errors.New("probe check does not reference generation probe state")
-	}
-	active := make(map[string]struct{}, len(value.ActiveRevisions))
-	for key, revision := range value.ActiveRevisions {
-		if err := digestCheckpoint(checkpoints); err != nil {
-			return err
-		}
-		if !validDigest(key) || !validDigest(revision) {
-			return errors.New("invalid active revision map")
-		}
-		if _, duplicate := active[revision]; duplicate {
-			return errors.New("duplicate active revision ID")
-		}
-		active[revision] = struct{}{}
-	}
-	for previous, successor := range value.SupersededRevisions {
-		if err := digestCheckpoint(checkpoints); err != nil {
-			return err
-		}
-		if !validDigest(previous) || !validDigest(successor) || previous == successor {
-			return errors.New("invalid superseded revision map")
-		}
-		if _, selected := active[previous]; selected {
-			return errors.New("inactive superseded revision selected as active")
-		}
-	}
-	for key, revision := range value.WithdrawnRevisions {
-		if err := digestCheckpoint(checkpoints); err != nil {
-			return err
-		}
-		if !validDigest(key) || !validDigest(revision) {
-			return errors.New("invalid withdrawn revision map")
-		}
-		if _, selected := active[revision]; selected {
-			return errors.New("inactive withdrawn revision selected as active")
-		}
 	}
 	return nil
 }
@@ -977,6 +1051,24 @@ func validateSessionDependencies(values []SessionViewDependency, maximum int, ch
 			return fmt.Errorf("duplicate SessionView dependency %q", value.SessionID)
 		}
 		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateLineageDependencies(values []SessionLineageDependency, sessions []SessionViewDependency, checkpoints ...func() error) error {
+	if len(values) != len(sessions) || len(values) > 65536 {
+		return errors.New("Session lineage dependency count does not match SessionViews")
+	}
+	for index, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+			return errors.New("invalid Session lineage dependency")
+		}
+		if value.Provider != sessions[index].Provider || value.SessionID != sessions[index].SessionID {
+			return errors.New("Session lineage dependency identity does not match SessionView")
+		}
 	}
 	return nil
 }

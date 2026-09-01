@@ -248,8 +248,12 @@ func TestReduceAcceptsRecoveryEmittedBySessionViewMaterializer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	usageDigest, err := memory.Digest(source.Usage)
+	if err != nil {
+		t.Fatal(err)
+	}
 	session, changed, err := sessionview.Materialize(sessionview.Input{
-		ProjectID: "project-a", Source: source, SourceRecordDigest: sourceDigest, UsageRecordDigest: sourceDigest,
+		ProjectID: "project-a", Source: source, SourceRecordDigest: sourceDigest, UsageRecordDigest: usageDigest,
 		Observations: []memory.ObservationRevision{success, failure}, ObservationChunkDigests: []string{},
 		TerminalState: memory.Indexed, Diagnostics: []memory.Diagnostic{}, MaterializerVersion: sessionview.MaterializerVersion,
 	})
@@ -512,23 +516,15 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 	if err := ensureRecordCapacity(maxProjectRecords-1, 2); err == nil {
 		t.Fatal("append crossing the cumulative record limit was accepted")
 	}
-	tooMany := []memory.SessionView{
-		{ObservationSummaries: make([]memory.ObservationSummary, maxProjectRecords)},
-		{ObservationSummaries: make([]memory.ObservationSummary, 1)},
-	}
-	if events, revisions, err := collectEvents(tooMany); err == nil || events != nil || revisions != nil {
-		t.Fatalf("oversized event union was allocated/accepted: events=%d revisions=%d err=%v", len(events), len(revisions), err)
-	}
-
 	item := event{provider: "codex", sessionID: "s1", time: mustTime(t, "2026-08-01T00:00:00Z"), summary: memory.ObservationSummary{
 		RevisionID: digestFor("limit-event"), Sequence: 1, Kind: "file", Subject: "a", OccurredAt: "2026-08-01T00:00:00Z",
 		Operation: "file_change", Outcome: "success", Fields: map[string]string{"path": "a.go", "component": "a.go", "branch": "main"},
 	}}
-	if records, err := deriveEventReferences([]event{item}, 0); err == nil || records != nil {
-		t.Fatalf("event phase exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, err := deriveEventReferences([]event{item}, 0); err != nil || len(records) != 0 {
+		t.Fatalf("event references did not truncate to the derived budget: records=%d err=%v", len(records), err)
 	}
-	if records, err := rankModules([]event{item}, mustTime(t, "2026-09-01T00:00:00Z"), 0); err == nil || records != nil {
-		t.Fatalf("ranking phase exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, err := rankModules([]event{item}, mustTime(t, "2026-09-01T00:00:00Z"), 0); err != nil || len(records) != 0 {
+		t.Fatalf("ranking phase did not truncate at zero budget: records=%d err=%v", len(records), err)
 	}
 	if records, err := derivePhaseBoundaries([]event{item}, 0); err != nil || len(records) != 0 {
 		t.Fatalf("non-boundary phase should consume no budget: records=%d err=%v", len(records), err)
@@ -543,11 +539,11 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 	branch2.summary.OccurredAt = "2026-08-02T00:00:00Z"
 	branch2.summary.Fields = map[string]string{"branch": "release"}
 	branch2.time = mustTime(t, branch2.summary.OccurredAt)
-	if records, err := derivePhaseBoundaries([]event{branch1, branch2}, 0); err == nil || records != nil {
-		t.Fatalf("phase boundary exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, err := derivePhaseBoundaries([]event{branch1, branch2}, 0); err != nil || len(records) != 0 {
+		t.Fatalf("phase boundary did not truncate at zero budget: records=%d err=%v", len(records), err)
 	}
-	if records, err := deriveWitnessedState([]event{branch1}, 0); err == nil || records != nil {
-		t.Fatalf("witness phase exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, err := deriveWitnessedState([]event{branch1}, 0); err != nil || len(records) != 0 {
+		t.Fatalf("witness phase did not truncate at zero budget: records=%d err=%v", len(records), err)
 	}
 
 	boundedView := viewFixture(t, "bounded", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
@@ -555,8 +551,8 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 		{sequence: 2, kind: "verification", subject: "s", occurredAt: "2026-08-01T00:01:00Z", operation: "test", outcome: "passed", fields: map[string]string{"component": "a.go"}},
 	})
 	attachSessionRecovery(t, &boundedView, 0, 1)
-	if records, _, err := copySessionDerivedRecords([]memory.SessionView{boundedView}, 0); err == nil || records != nil {
-		t.Fatalf("Session-derived phase exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, _, err := copySessionDerivedRecords([]memory.SessionView{boundedView}, 0); err != nil || len(records) != 0 {
+		t.Fatalf("Session-derived phase did not truncate at zero budget: records=%d err=%v", len(records), err)
 	}
 
 	failure := item
@@ -570,8 +566,131 @@ func TestProjectReductionBoundsEventsAndEachDerivedPhaseBeforeAppend(t *testing.
 	success.summary.Outcome = "passed"
 	success.summary.OccurredAt = "2026-08-02T00:00:00Z"
 	success.time = mustTime(t, success.summary.OccurredAt)
-	if records, err := deriveRecoveryLinks([]event{failure, success}, nil, 0); err == nil || records != nil {
-		t.Fatalf("recovery phase exceeded zero budget: records=%d err=%v", len(records), err)
+	if records, err := deriveRecoveryLinks([]event{failure, success}, nil, 0); err != nil || len(records) != 0 {
+		t.Fatalf("recovery phase did not truncate at zero budget: records=%d err=%v", len(records), err)
+	}
+}
+
+func TestReduceStreamsMoreThan65536SummariesWithBoundedDeterministicAggregateResidency(t *testing.T) {
+	makeLargeView := func(sessionID string, count int) memory.SessionView {
+		specs := make([]summarySpec, count)
+		for index := range specs {
+			specs[index] = summarySpec{
+				sequence: index + 1, kind: "file", subject: fmt.Sprintf("event-%s-%d", sessionID, index),
+				occurredAt: "2026-08-01T00:00:00Z", operation: "file_change", outcome: "success",
+				fields: map[string]string{"path": fmt.Sprintf("module-%05d.go", index%5000)},
+			}
+		}
+		return viewFixture(t, sessionID, memory.Indexed, "2026-08-01T00:00:00Z", specs)
+	}
+	views := []memory.SessionView{makeLargeView("large-1", 32769), makeLargeView("large-2", 32769)}
+	input := inputFixture(t, views, "2026-09-01T00:00:00Z", nil)
+	peak := aggregateStats{}
+	eventsSeen := 0
+	input.aggregateObserver = func(stats aggregateStats) {
+		eventsSeen = stats.EventsSeen
+		if stats.RetainedEvents > peak.RetainedEvents {
+			peak = stats
+		}
+	}
+	first, changed, err := Reduce(input)
+	if err != nil || !changed {
+		t.Fatalf("large streamed reduction changed=%v err=%v", changed, err)
+	}
+	if eventsSeen != 65538 || peak.RetainedEvents > maxAggregateResidentEvents {
+		t.Fatalf("aggregate residency stats=%+v events=%d max=%d", peak, eventsSeen, maxAggregateResidentEvents)
+	}
+	second, changed, err := Reduce(input)
+	if err != nil || !changed || second.Digest != first.Digest {
+		t.Fatalf("streamed reduction is nondeterministic changed=%v err=%v first=%s second=%s", changed, err, first.Digest, second.Digest)
+	}
+}
+
+func TestReduceStreamingMergePreservesInterleavedCrossSessionChronology(t *testing.T) {
+	s1 := viewFixture(t, "chrono-a", memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+		{sequence: 1, kind: "branch", subject: "main", occurredAt: "2026-08-01T00:00:00Z", fields: map[string]string{"branch": "main"}},
+		{sequence: 2, kind: "verification", subject: "success", occurredAt: "2026-08-01T00:00:03Z", operation: "test", outcome: "passed", fields: map[string]string{"component": "core"}},
+	})
+	s2 := viewFixture(t, "chrono-b", memory.Indexed, "2026-08-01T00:00:01Z", []summarySpec{
+		{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:01Z", operation: "test", outcome: "failed", fields: map[string]string{"component": "core"}},
+		{sequence: 2, kind: "branch", subject: "release", occurredAt: "2026-08-01T00:00:04Z", fields: map[string]string{"branch": "release"}},
+	})
+	got := reduceFixture(t, []memory.SessionView{s2, s1}, "2026-09-01T00:00:00Z", nil)
+	branch := findRecord(t, got.WitnessedState, "witnessed_state", "branch")
+	if branch.Fields["value"] != "release" || branch.OccurredAt != "2026-08-01T00:00:04Z" {
+		t.Fatalf("interleaved newest witnessed state=%+v", branch)
+	}
+	recoveries := recordsOfKind(got.DerivedRecords, "recovery_link")
+	if len(recoveries) != 1 || recoveries[0].OccurredAt != "2026-08-01T00:00:03Z" {
+		t.Fatalf("interleaved recovery chronology=%+v", recoveries)
+	}
+}
+
+func TestAggregateResidentBoundIncludesCompletedAndPendingRecoveries(t *testing.T) {
+	wantBound := maxWitnessedRecords + 2*maxCrossRecoveryRecords + maxPhaseRecords + maxModuleRecords + maxEventReferenceRecords + 5
+	if maxAggregateResidentEvents != wantBound {
+		t.Fatalf("aggregate bound=%d want completed+pending-aware %d", maxAggregateResidentEvents, wantBound)
+	}
+	base := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	failures := make([]summarySpec, maxCrossRecoveryRecords)
+	lateFailures := make([]summarySpec, maxCrossRecoveryRecords)
+	for index := 0; index < maxCrossRecoveryRecords; index++ {
+		failures[index] = summarySpec{sequence: index + 1, kind: "verification", subject: fmt.Sprintf("first-%d", index), occurredAt: base.Add(time.Duration(index) * time.Nanosecond).Format(time.RFC3339Nano), operation: "test", outcome: "failed", fields: map[string]string{"component": "core"}}
+		lateFailures[index] = summarySpec{sequence: index + 1, kind: "verification", subject: fmt.Sprintf("late-%d", index), occurredAt: base.Add(time.Duration(6000+index) * time.Nanosecond).Format(time.RFC3339Nano), operation: "test", outcome: "failed", fields: map[string]string{"component": "core"}}
+	}
+	views := []memory.SessionView{
+		viewFixture(t, "recover-a", memory.Indexed, base.Format(time.RFC3339Nano), failures),
+		viewFixture(t, "recover-b", memory.Indexed, base.Add(5000*time.Nanosecond).Format(time.RFC3339Nano), []summarySpec{{sequence: 1, kind: "verification", subject: "success", occurredAt: base.Add(5000 * time.Nanosecond).Format(time.RFC3339Nano), operation: "test", outcome: "passed", fields: map[string]string{"component": "core"}}}),
+		viewFixture(t, "recover-c", memory.Indexed, base.Add(6000*time.Nanosecond).Format(time.RFC3339Nano), lateFailures),
+	}
+	peak := 0
+	_, err := aggregateSessionViews(views, base.Add(time.Hour), func(stats aggregateStats) {
+		if stats.RetainedEvents > peak {
+			peak = stats.RetainedEvents
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if peak > maxAggregateResidentEvents {
+		t.Fatalf("completed+pending recovery residency=%d max=%d", peak, maxAggregateResidentEvents)
+	}
+}
+
+func TestBoundedModuleHeavyHitterAdmitsLateHotModuleHonestly(t *testing.T) {
+	specs := make([]summarySpec, 0, maxModuleRecords+200)
+	for index := 0; index < maxModuleRecords+1; index++ {
+		specs = append(specs, summarySpec{sequence: index + 1, kind: "file", subject: fmt.Sprintf("cold-%d", index), occurredAt: "2026-08-01T00:00:00Z", operation: "file_change", outcome: "success", fields: map[string]string{"path": fmt.Sprintf("cold-%05d.go", index)}})
+	}
+	for index := 0; index < 199; index++ {
+		specs = append(specs, summarySpec{sequence: len(specs) + 1, kind: "file", subject: fmt.Sprintf("hot-%d", index), occurredAt: "2026-08-01T00:00:01Z", operation: "file_change", outcome: "success", fields: map[string]string{"path": "late-hot.go"}})
+	}
+	got := reduceFixture(t, []memory.SessionView{viewFixture(t, "heavy", memory.Indexed, "2026-08-01T00:00:00Z", specs)}, "2026-09-01T00:00:00Z", nil)
+	ranks := recordsOfKind(got.DerivedRecords, "module_rank")
+	if len(ranks) == 0 || ranks[0].Subject != "late-hot.go" || ranks[0].Fields["candidate_algorithm"] != "space_saving" || ranks[0].Fields["counts_complete"] != "false" {
+		t.Fatalf("late heavy hitter ranking is absent or misleading: %+v", ranks)
+	}
+}
+
+func TestSessionDerivedCopyTracksOnlyBoundedRetainedRecords(t *testing.T) {
+	const limit = 8
+	views := make([]memory.SessionView, 64)
+	for index := range views {
+		view := viewFixture(t, fmt.Sprintf("derived-%03d", index), memory.Indexed, "2026-08-01T00:00:00Z", []summarySpec{
+			{sequence: 1, kind: "verification", subject: "failure", occurredAt: "2026-08-01T00:00:00Z", operation: "test", outcome: "failed", fields: map[string]string{"component": "core"}},
+			{sequence: 2, kind: "verification", subject: "success", occurredAt: "2026-08-01T00:00:01Z", operation: "test", outcome: "passed", fields: map[string]string{"component": "core"}},
+		})
+		attachSessionRecovery(t, &view, 0, 1)
+		views[index] = view
+	}
+	peakTracked := 0
+	records, _, err := copySessionDerivedRecordsWithObserver(views, limit, func(tracked int) {
+		if tracked > peakTracked {
+			peakTracked = tracked
+		}
+	})
+	if err != nil || len(records) != limit || peakTracked > limit {
+		t.Fatalf("session-derived retention records=%d peak_tracked=%d limit=%d err=%v", len(records), peakTracked, limit, err)
 	}
 }
 
@@ -598,6 +717,9 @@ func viewFixture(t *testing.T, sessionID string, state memory.TerminalState, sta
 		})
 	}
 	sort.Slice(summaries, func(i, j int) bool {
+		if summaries[i].OccurredAt != summaries[j].OccurredAt {
+			return summaries[i].OccurredAt < summaries[j].OccurredAt
+		}
 		if summaries[i].Sequence != summaries[j].Sequence {
 			return summaries[i].Sequence < summaries[j].Sequence
 		}

@@ -150,7 +150,7 @@ func TestGateAZeroTokenCore(t *testing.T) {
 		t.Fatalf("append did not create a zero-token successor: before=%+v after=%+v", initial, appended)
 	}
 	_, appendManifest := harness.prepared(t)
-	assertSuccessorOnlyAppend(t, beforeAppend, snapshotGateImmutable(t, harness.dataRoot), initialManifest, appendManifest)
+	assertSuccessorOnlyAppend(t, harness.store, beforeAppend, snapshotGateImmutable(t, harness.dataRoot), initialManifest, appendManifest)
 
 	beforeUnchanged := snapshotGateImmutable(t, harness.dataRoot)
 	unchanged := harness.run(t)
@@ -161,14 +161,14 @@ func TestGateAZeroTokenCore(t *testing.T) {
 		t.Fatal("unchanged replay wrote immutable objects")
 	}
 
-	oldActive := cloneStringMap(appendManifest.ActiveRevisions)
+	oldActive := cloneStringMap(loadGateSessionLineage(t, harness.store, appendManifest, "session-001").ActiveRevisions)
 	harness.options.Adapter = harness.codexAdapter(t, "v2", "v1")
 	superseded := harness.run(t)
 	if superseded.ReviewRunTokens != 0 || superseded.GenerationID == unchanged.GenerationID {
 		t.Fatalf("adapter successor did not advance: %+v", superseded)
 	}
 	_, supersededManifest := harness.prepared(t)
-	assertAdapterSupersession(t, oldActive, supersededManifest)
+	assertAdapterSupersession(t, oldActive, loadGateSessionLineage(t, harness.store, supersededManifest, "session-001"))
 
 	appendPath := filepath.Join(harness.sessionsRoot, "session-001.jsonl")
 	if err := os.WriteFile(appendPath, harness.baseBodies["session-001"], 0o600); err != nil {
@@ -179,7 +179,10 @@ func TestGateAZeroTokenCore(t *testing.T) {
 		t.Fatalf("source replacement/truncation did not advance: %+v", withdrawn)
 	}
 	_, withdrawnManifest := harness.prepared(t)
-	assertWithdrawal(t, supersededManifest, withdrawnManifest)
+	assertWithdrawal(t,
+		loadGateSessionLineage(t, harness.store, supersededManifest, "session-001"),
+		loadGateSessionLineage(t, harness.store, withdrawnManifest, "session-001"),
+	)
 
 	missingPath := filepath.Join(harness.sessionsRoot, "session-002.jsonl")
 	if err := os.Remove(missingPath); err != nil {
@@ -787,6 +790,26 @@ func loadGateSessionView(t *testing.T, store *memorystore.Store, manifest memory
 	return memory.SessionView{}
 }
 
+func loadGateSessionLineage(t *testing.T, store *memorystore.Store, manifest memory.GenerationManifest, sessionID string) memory.SessionLineage {
+	t.Helper()
+	for _, dependency := range manifest.SessionLineages {
+		if dependency.SessionID != sessionID {
+			continue
+		}
+		body, err := store.LoadObject(memorystore.ObjectSessionLineage, dependency.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lineage memory.SessionLineage
+		if err := json.Unmarshal(body, &lineage); err != nil {
+			t.Fatal(err)
+		}
+		return lineage
+	}
+	t.Fatalf("SessionLineage %q is missing", sessionID)
+	return memory.SessionLineage{}
+}
+
 func assertGateSharedUsage(t *testing.T, view memory.ProjectView) {
 	t.Helper()
 	for _, usage := range view.AssociatedUsage {
@@ -893,24 +916,26 @@ func assertCanceledProductionProbeIsReadOnly(t *testing.T, harness *gateHarness)
 	}
 }
 
-func assertSuccessorOnlyAppend(t *testing.T, before, after map[string]gateSnapshotEntry, first, second memory.GenerationManifest) {
+func assertSuccessorOnlyAppend(t *testing.T, store *memorystore.Store, before, after map[string]gateSnapshotEntry, first, second memory.GenerationManifest) {
 	t.Helper()
-	for _, old := range first.ObservationChunkDigests {
-		if !containsGateString(second.ObservationChunkDigests, old) {
+	firstView := loadGateSessionView(t, store, first, "session-001")
+	secondView := loadGateSessionView(t, store, second, "session-001")
+	for _, old := range firstView.ObservationChunkDigests {
+		if !containsGateString(secondView.ObservationChunkDigests, old) {
 			t.Fatalf("append dropped old chunk %q", old)
 		}
 	}
-	if len(second.ObservationChunkDigests) != len(first.ObservationChunkDigests)+1 {
-		t.Fatalf("append chunks before=%d after=%d", len(first.ObservationChunkDigests), len(second.ObservationChunkDigests))
+	if len(secondView.ObservationChunkDigests) != len(firstView.ObservationChunkDigests)+1 {
+		t.Fatalf("append chunks before=%d after=%d", len(firstView.ObservationChunkDigests), len(secondView.ObservationChunkDigests))
 	}
 	added := gateAddedByCollection(before, after)
-	want := map[string]int{"generations": 1, "observations": 1, "project-views": 1, "sessions": 1}
+	want := map[string]int{"generations": 1, "observations": 1, "project-views": 1, "session-lineages": 1, "sessions": 1}
 	if !equalGateIntMaps(added, want) {
 		t.Fatalf("append wrote outside exact successors: got=%v want=%v", added, want)
 	}
 }
 
-func assertAdapterSupersession(t *testing.T, oldActive map[string]string, successor memory.GenerationManifest) {
+func assertAdapterSupersession(t *testing.T, oldActive map[string]string, successor memory.SessionLineage) {
 	t.Helper()
 	for key, oldRevision := range oldActive {
 		newRevision, active := successor.ActiveRevisions[key]
@@ -920,7 +945,7 @@ func assertAdapterSupersession(t *testing.T, oldActive map[string]string, succes
 	}
 }
 
-func assertWithdrawal(t *testing.T, before, after memory.GenerationManifest) {
+func assertWithdrawal(t *testing.T, before, after memory.SessionLineage) {
 	t.Helper()
 	found := false
 	for key, revision := range before.ActiveRevisions {
@@ -1708,7 +1733,7 @@ func snapshotGateImmutable(t *testing.T, dataRoot string) map[string]gateSnapsho
 	t.Helper()
 	memoryRoot := filepath.Join(dataRoot, "projects", gateProjectID, "memory-v1")
 	result := make(map[string]gateSnapshotEntry)
-	for _, collection := range []string{"generations", "observations", "sessions", "project-probes", "project-views"} {
+	for _, collection := range []string{"generations", "observations", "sessions", "session-lineages", "project-probes", "project-views"} {
 		for relative, entry := range snapshotGateTree(t, filepath.Join(memoryRoot, collection)) {
 			if relative == "." {
 				continue

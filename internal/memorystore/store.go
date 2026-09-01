@@ -62,6 +62,7 @@ type ObjectKind string
 const (
 	ObjectObservationChunk ObjectKind = "observations"
 	ObjectSessionView      ObjectKind = "sessions"
+	ObjectSessionLineage   ObjectKind = "session-lineages"
 	ObjectProbeState       ObjectKind = "project-probes"
 	ObjectProjectView      ObjectKind = "project-views"
 )
@@ -122,7 +123,7 @@ func Open(dataRoot, projectID string) (*Store, error) {
 		filepath.ToSlash(filepath.Join("projects", projectID)),
 		projectBase,
 	}
-	for _, child := range []string{"observations", "sessions", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
+	for _, child := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
 		directories = append(directories, projectBase+"/"+child)
 	}
 	for _, relative := range directories {
@@ -194,6 +195,16 @@ func (s *Store) PutSessionView(value memory.SessionView) (string, error) {
 		return "", errors.New("SessionView belongs to a different project")
 	}
 	return s.putJSON(ObjectSessionView, value.Digest, value)
+}
+
+func (s *Store) PutSessionLineage(value memory.SessionLineage) (string, error) {
+	if err := memory.ValidateSessionLineage(value); err != nil {
+		return "", fmt.Errorf("invalid SessionLineage: %w", err)
+	}
+	if value.ProjectID != s.projectID {
+		return "", errors.New("SessionLineage belongs to a different project")
+	}
+	return s.putJSON(ObjectSessionLineage, value.Digest, value)
 }
 
 func (s *Store) PutProbeState(value memory.ProjectProbeState) (string, error) {
@@ -620,6 +631,7 @@ func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest str
 type decodedStoredObject struct {
 	observations []memory.ObservationRevision
 	session      memory.SessionView
+	lineage      memory.SessionLineage
 	probe        memory.ProjectProbeState
 	project      memory.ProjectView
 }
@@ -666,6 +678,22 @@ func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, dig
 			return decodedStoredObject{}, errors.Join(errors.New("invalid stored SessionView"), validationErr)
 		}
 		return decodedStoredObject{session: value}, nil
+	case ObjectSessionLineage:
+		var value memory.SessionLineage
+		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
+			return decodedStoredObject{}, err
+		}
+		if err := storeCheckpoint(ctx, "validation"); err != nil {
+			return decodedStoredObject{}, err
+		}
+		validationErr := memory.ValidateSessionLineageContext(ctx, value)
+		if cause := context.Cause(ctx); cause != nil {
+			return decodedStoredObject{}, cause
+		}
+		if validationErr != nil || value.Digest != digest || value.ProjectID != projectID {
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored SessionLineage"), validationErr)
+		}
+		return decodedStoredObject{lineage: value}, nil
 	case ObjectProbeState:
 		var value memory.ProjectProbeState
 		if err := decodeCanonicalJSONContext(ctx, body, &value); err != nil {
@@ -812,6 +840,7 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 type generationGraphObjects interface {
 	observationChunk(context.Context, string) ([]memory.ObservationRevision, error)
 	sessionView(context.Context, memory.SessionViewDependency) (memory.SessionView, error)
+	sessionLineage(context.Context, memory.SessionLineageDependency) (memory.SessionLineage, error)
 	probeState(context.Context, string) (memory.ProjectProbeState, error)
 	projectView(context.Context, string) (memory.ProjectView, error)
 }
@@ -843,6 +872,21 @@ func (objects storedGenerationGraphObjects) sessionView(ctx context.Context, dep
 		return memory.SessionView{}, errors.Join(errors.New("SessionView dependency identity mismatch"), err)
 	}
 	return view, nil
+}
+
+func (objects storedGenerationGraphObjects) sessionLineage(ctx context.Context, dependency memory.SessionLineageDependency) (memory.SessionLineage, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectSessionLineage, dependency.Digest)
+	if err != nil {
+		return memory.SessionLineage{}, fmt.Errorf("verify SessionLineage %s: %w", dependency.Digest, err)
+	}
+	var lineage memory.SessionLineage
+	if err := decodeCanonicalJSONContext(ctx, body, &lineage); err != nil || lineage.Provider != dependency.Provider || lineage.SessionID != dependency.SessionID {
+		if cause := context.Cause(ctx); cause != nil {
+			return memory.SessionLineage{}, cause
+		}
+		return memory.SessionLineage{}, errors.Join(errors.New("SessionLineage dependency identity mismatch"), err)
+	}
+	return lineage, nil
 }
 
 func (objects storedGenerationGraphObjects) probeState(ctx context.Context, digest string) (memory.ProjectProbeState, error) {
@@ -880,106 +924,6 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		}
 		sourceRecords[digest] = false
 	}
-
-	chunks := make(map[string][]memory.ObservationRevision, len(value.ObservationChunkDigests))
-	revisions := make(map[string]memory.ObservationRevision)
-	revisionKeys := make(map[string]string)
-	for _, digest := range value.ObservationChunkDigests {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		records, err := objects.observationChunk(ctx, digest)
-		if err != nil {
-			return err
-		}
-		chunks[digest] = records
-		for _, record := range records {
-			if err := context.Cause(ctx); err != nil {
-				return err
-			}
-			if _, duplicate := revisions[record.RevisionID]; duplicate {
-				return fmt.Errorf("observation revision %s occurs in multiple chunks", record.RevisionID)
-			}
-			keyDigest, err := memory.DigestContext(ctx, record.Key)
-			if cause := context.Cause(ctx); cause != nil {
-				return cause
-			}
-			if err != nil {
-				return fmt.Errorf("digest observation key: %w", err)
-			}
-			revisions[record.RevisionID] = record
-			revisionKeys[record.RevisionID] = keyDigest
-		}
-	}
-
-	referencedChunks := make(map[string]bool, len(chunks))
-	sessionActive := make(map[string]struct{})
-	for _, dependency := range value.SessionViews {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		view, err := objects.sessionView(ctx, dependency)
-		if err != nil {
-			return err
-		}
-		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
-			return errors.New("SessionView source record does not resolve uniquely through manifest")
-		}
-		sourceRecords[view.SourceRecordDigest] = true
-		sessionRevisions := make(map[string]struct{})
-		for _, chunkDigest := range view.ObservationChunkDigests {
-			if err := context.Cause(ctx); err != nil {
-				return err
-			}
-			records, exists := chunks[chunkDigest]
-			if !exists || referencedChunks[chunkDigest] {
-				return errors.New("SessionView observation chunk does not resolve uniquely through manifest")
-			}
-			referencedChunks[chunkDigest] = true
-			for _, record := range records {
-				if err := context.Cause(ctx); err != nil {
-					return err
-				}
-				if record.Key.Provider != view.Provider || record.Key.SessionID != view.SessionID {
-					return errors.New("SessionView observation chunk belongs to a different session")
-				}
-				sessionRevisions[record.RevisionID] = struct{}{}
-			}
-		}
-		for _, revisionID := range view.ActiveRevisionIDs {
-			if err := context.Cause(ctx); err != nil {
-				return err
-			}
-			if _, exists := sessionRevisions[revisionID]; !exists {
-				return errors.New("SessionView active revision is absent from its observation chunks")
-			}
-			if _, duplicate := sessionActive[revisionID]; duplicate {
-				return errors.New("active revision occurs in multiple SessionViews")
-			}
-			sessionActive[revisionID] = struct{}{}
-		}
-	}
-	for digest, used := range sourceRecords {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if !used {
-			return fmt.Errorf("manifest source record %s is not referenced by a SessionView", digest)
-		}
-	}
-	for digest := range chunks {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if !referencedChunks[digest] {
-			return fmt.Errorf("manifest observation chunk %s is not referenced by a SessionView", digest)
-		}
-	}
-
-	probe, err := objects.probeState(ctx, value.ProbeStateDigest)
-	if err != nil {
-		return err
-	}
 	projectView, err := objects.projectView(ctx, value.ProjectViewDigest)
 	if err != nil {
 		return err
@@ -991,70 +935,130 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 	if !dependenciesMatch {
 		return errors.New("ProjectView ordered SessionView dependencies do not match manifest")
 	}
-	if projectView.ProbeStateDigest != value.ProbeStateDigest || probe.Digest != value.ProbeStateDigest {
-		return errors.New("ProjectView probe dependency does not match manifest")
+	evidenceRemaining := make(map[string]struct{}, len(projectView.ObservationRevisionIDs))
+	for _, revisionID := range projectView.ObservationRevisionIDs {
+		evidenceRemaining[revisionID] = struct{}{}
+	}
+	for index, dependency := range value.SessionViews {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		view, err := objects.sessionView(ctx, dependency)
+		if err != nil {
+			return err
+		}
+		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
+			return errors.New("SessionView source record does not resolve uniquely through manifest")
+		}
+		sourceRecords[view.SourceRecordDigest] = true
+		lineageDependency := value.SessionLineages[index]
+		lineage, err := objects.sessionLineage(ctx, lineageDependency)
+		if err != nil {
+			return err
+		}
+		if lineage.ProjectID != view.ProjectID || lineage.Provider != view.Provider || lineage.SessionID != view.SessionID || lineage.SourceIdentity != view.SourceIdentity {
+			return errors.New("SessionLineage identity does not match SessionView")
+		}
+		activeByRevision := make(map[string]string, len(lineage.ActiveRevisions))
+		for keyDigest, revisionID := range lineage.ActiveRevisions {
+			activeByRevision[revisionID] = keyDigest
+		}
+		viewActive := make(map[string]struct{}, len(view.ActiveRevisionIDs))
+		for _, revisionID := range view.ActiveRevisionIDs {
+			viewActive[revisionID] = struct{}{}
+			if _, exists := activeByRevision[revisionID]; !exists {
+				return errors.New("SessionView active revision is absent from SessionLineage")
+			}
+		}
+		if len(viewActive) != len(activeByRevision) {
+			return errors.New("SessionView and SessionLineage active revision sets disagree")
+		}
+		unresolved := make(map[string]string, len(activeByRevision))
+		for revisionID, keyDigest := range activeByRevision {
+			unresolved[revisionID] = keyDigest
+		}
+		seenChunks := make(map[string]struct{}, len(view.ObservationChunkDigests))
+		for _, chunkDigest := range view.ObservationChunkDigests {
+			if err := context.Cause(ctx); err != nil {
+				return err
+			}
+			if _, duplicate := seenChunks[chunkDigest]; duplicate {
+				return errors.New("SessionView repeats an observation chunk")
+			}
+			seenChunks[chunkDigest] = struct{}{}
+			records, err := objects.observationChunk(ctx, chunkDigest)
+			if err != nil {
+				return err
+			}
+			for _, record := range records {
+				if err := context.Cause(ctx); err != nil {
+					return err
+				}
+				if record.Key.Provider != view.Provider || record.Key.SessionID != view.SessionID {
+					return errors.New("SessionView observation chunk belongs to a different session")
+				}
+				keyDigest, active := unresolved[record.RevisionID]
+				if !active {
+					continue
+				}
+				actualKey, digestErr := memory.DigestContext(ctx, record.Key)
+				if digestErr != nil || actualKey != keyDigest {
+					return errors.Join(errors.New("SessionLineage active revision does not resolve to its observation key"), digestErr)
+				}
+				delete(unresolved, record.RevisionID)
+				delete(evidenceRemaining, record.RevisionID)
+			}
+		}
+		if len(unresolved) != 0 {
+			return errors.New("SessionLineage active revision is absent from SessionView chunks")
+		}
+		if lineage.PreviousLineageDigest != "" {
+			previous, err := objects.sessionLineage(ctx, memory.SessionLineageDependency{Provider: lineage.Provider, SessionID: lineage.SessionID, Digest: lineage.PreviousLineageDigest})
+			if err != nil {
+				return err
+			}
+			if previous.ProjectID != lineage.ProjectID || previous.SourceIdentity != lineage.SourceIdentity {
+				return errors.New("SessionLineage predecessor identity mismatch")
+			}
+			expectedSuperseded, expectedWithdrawn := 0, 0
+			for keyDigest, oldRevision := range previous.ActiveRevisions {
+				if currentRevision, exists := lineage.ActiveRevisions[keyDigest]; exists {
+					if currentRevision != oldRevision {
+						expectedSuperseded++
+						if lineage.SupersededRevisions[oldRevision] != currentRevision {
+							return errors.New("SessionLineage supersession delta does not match predecessor")
+						}
+					}
+				} else {
+					expectedWithdrawn++
+					if lineage.WithdrawnRevisions[keyDigest] != oldRevision {
+						return errors.New("SessionLineage withdrawal delta does not match predecessor")
+					}
+				}
+			}
+			if expectedSuperseded != len(lineage.SupersededRevisions) || expectedWithdrawn != len(lineage.WithdrawnRevisions) {
+				return errors.New("SessionLineage transition contains an extraneous classification")
+			}
+		}
+	}
+	for digest, used := range sourceRecords {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		if !used {
+			return fmt.Errorf("manifest source record %s is not referenced by a SessionView", digest)
+		}
+	}
+	if len(evidenceRemaining) != 0 {
+		return errors.New("ProjectView selected observation evidence does not resolve through active Session lineages")
 	}
 
-	active := make(map[string]struct{}, len(value.ActiveRevisions))
-	classifications := make(map[string]string, len(revisions))
-	for keyDigest, revisionID := range value.ActiveRevisions {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
-			return errors.New("manifest active revision does not resolve to its observation key")
-		}
-		classifications[revisionID] = "active"
-		active[revisionID] = struct{}{}
-	}
-	for previous, successor := range value.SupersededRevisions {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if _, exists := revisions[previous]; !exists {
-			return errors.New("manifest superseded predecessor does not resolve")
-		}
-		if _, exists := revisions[successor]; !exists || revisionKeys[previous] != revisionKeys[successor] {
-			return errors.New("manifest superseded successor does not resolve to the same observation key")
-		}
-		if _, classified := classifications[previous]; classified {
-			return errors.New("observation revision has multiple manifest classifications")
-		}
-		classifications[previous] = "superseded"
-	}
-	for keyDigest, revisionID := range value.WithdrawnRevisions {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if _, exists := revisions[revisionID]; !exists || revisionKeys[revisionID] != keyDigest {
-			return errors.New("manifest withdrawn revision does not resolve to its observation key")
-		}
-		if _, classified := classifications[revisionID]; classified {
-			return errors.New("observation revision has multiple manifest classifications")
-		}
-		classifications[revisionID] = "withdrawn"
-	}
-	for revisionID := range revisions {
-		if err := context.Cause(ctx); err != nil {
-			return err
-		}
-		if _, classified := classifications[revisionID]; !classified {
-			return fmt.Errorf("observation revision %s has no manifest classification", revisionID)
-		}
-	}
-	revisionSetsMatch, err := equalDigestSetContext(ctx, active, sessionActive)
+	probe, err := objects.probeState(ctx, value.ProbeStateDigest)
 	if err != nil {
 		return err
 	}
-	if !revisionSetsMatch {
-		return errors.New("active revision sets disagree across manifest, SessionViews, and ProjectView")
-	}
-	digestSliceMatches, err := equalDigestSliceSetContext(ctx, projectView.ObservationRevisionIDs, active)
-	if err != nil {
-		return err
-	}
-	if !digestSliceMatches {
-		return errors.New("active revision sets disagree across manifest, SessionViews, and ProjectView")
+	if projectView.ProbeStateDigest != value.ProbeStateDigest || probe.Digest != value.ProbeStateDigest {
+		return errors.New("ProjectView probe dependency does not match manifest")
 	}
 	return nil
 }
@@ -1196,6 +1200,14 @@ func validateObjectBytes(kind ObjectKind, digest string, body []byte, projectID 
 		}
 		if err := memory.ValidateSessionView(value); err != nil || value.Digest != digest || value.ProjectID != projectID {
 			return errors.Join(errors.New("invalid stored SessionView"), err)
+		}
+	case ObjectSessionLineage:
+		var value memory.SessionLineage
+		if err := decodeCanonicalJSON(body, &value); err != nil {
+			return err
+		}
+		if err := memory.ValidateSessionLineage(value); err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored SessionLineage"), err)
 		}
 	case ObjectProbeState:
 		var value memory.ProjectProbeState
@@ -1634,6 +1646,8 @@ func objectLocation(kind ObjectKind, digest string) (string, string, error) {
 		return "observations", ".jsonl", nil
 	case ObjectSessionView:
 		return "sessions", ".json", nil
+	case ObjectSessionLineage:
+		return "session-lineages", ".json", nil
 	case ObjectProbeState:
 		return "project-probes", ".json", nil
 	case ObjectProjectView:

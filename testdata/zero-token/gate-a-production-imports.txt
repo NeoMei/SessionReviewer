@@ -4,6 +4,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64	PATH	internal/syscall/unix
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	bufio
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	bytes
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	cmp
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	container/heap
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	context
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	crypto/cipher

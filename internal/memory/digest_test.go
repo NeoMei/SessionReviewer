@@ -239,18 +239,18 @@ func TestTypedSelfDigestsExcludeStoredDigestAndNormalizeNilEmptySets(t *testing.
 		t.Fatalf("nil and empty associated usage sets differ: %q %q %v", nilDigest, emptyDigest, err)
 	}
 
-	manifest := validGenerationManifest()
-	manifest.ActiveRevisions = nil
-	manifest.SupersededRevisions = nil
-	manifest.WithdrawnRevisions = nil
-	nilDigest, err = Digest(manifest)
+	lineage := validSessionLineage()
+	lineage.ActiveRevisions = nil
+	lineage.SupersededRevisions = nil
+	lineage.WithdrawnRevisions = nil
+	nilDigest, err = SessionLineageDigest(lineage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest.ActiveRevisions = map[string]string{}
-	manifest.SupersededRevisions = map[string]string{}
-	manifest.WithdrawnRevisions = map[string]string{}
-	emptyDigest, err = Digest(manifest)
+	lineage.ActiveRevisions = map[string]string{}
+	lineage.SupersededRevisions = map[string]string{}
+	lineage.WithdrawnRevisions = map[string]string{}
+	emptyDigest, err = SessionLineageDigest(lineage)
 	if err != nil || nilDigest != emptyDigest {
 		t.Fatalf("nil and empty revision maps differ: %q %q %v", nilDigest, emptyDigest, err)
 	}

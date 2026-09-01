@@ -50,6 +50,7 @@ type ReduceFunc func(projectview.Input) (memory.ProjectView, bool, error)
 type MemoryStore interface {
 	PutObservationChunk([]memory.ObservationRevision) (string, error)
 	PutSessionView(memory.SessionView) (string, error)
+	PutSessionLineage(memory.SessionLineage) (string, error)
 	PutProbeState(memory.ProjectProbeState) (string, error)
 	PutProjectView(memory.ProjectView) (string, error)
 	LoadPrepared() (memorystore.Prepared, memory.GenerationManifest, error)
@@ -59,19 +60,20 @@ type MemoryStore interface {
 }
 
 type Options struct {
-	ProjectID    string
-	Binding      projectidentity.Binding
-	SessionsRoot string
-	DataRoot     string
-	Adapter      source.Adapter
-	Catalog      *sourcecatalog.Catalog
-	Store        MemoryStore
-	Workers      int
-	Now          func() time.Time
-	Materialize  MaterializeFunc
-	Probe        ProbeFunc
-	ProbeOptions projectprobe.Options
-	Reduce       ReduceFunc
+	ProjectID     string
+	Binding       projectidentity.Binding
+	SessionsRoot  string
+	DataRoot      string
+	Adapter       source.Adapter
+	Catalog       *sourcecatalog.Catalog
+	Store         MemoryStore
+	Workers       int
+	Now           func() time.Time
+	Materialize   MaterializeFunc
+	Probe         ProbeFunc
+	ProbeOptions  projectprobe.Options
+	Reduce        ReduceFunc
+	spoolObserver func(observationSpoolStats)
 }
 
 type frozenTask struct {
@@ -80,38 +82,39 @@ type frozenTask struct {
 }
 
 type decodedTask struct {
-	task         frozenTask
-	report       source.DecodeReport
-	observations []memory.ObservationRevision
-	err          error
+	task   frozenTask
+	report source.DecodeReport
+	spool  *observationSpool
+	err    error
 }
 
 type terminalSource struct {
-	record          memory.SourceRecord
-	recordDigest    string
-	mutation        sourcecatalog.BatchMutation
-	state           memory.TerminalState
-	observations    []memory.ObservationRevision
-	newObservations []memory.ObservationRevision
-	chunks          []string
-	diagnostics     []memory.Diagnostic
-	issue           bool
-	shared          bool
+	record              memory.SourceRecord
+	recordDigest        string
+	mutation            sourcecatalog.BatchMutation
+	state               memory.TerminalState
+	spool               *observationSpool
+	newObservationCount int
+	chunks              []string
+	diagnostics         []memory.Diagnostic
+	lineage             memory.SessionLineage
+	issue               bool
+	shared              bool
 }
 
 type baseline struct {
-	present   bool
-	prepared  memorystore.Prepared
-	manifest  memory.GenerationManifest
-	sessions  map[string]memory.SessionView
-	project   *memory.ProjectView
-	revisions map[string]memory.ObservationRevision
+	present  bool
+	prepared memorystore.Prepared
+	manifest memory.GenerationManifest
+	sessions map[string]memory.SessionView
+	project  *memory.ProjectView
+	lineages map[string]memory.SessionLineageDependency
 }
 
 // Run prepares one complete private generation. Every adapter error is fatal;
 // expected source terminal outcomes travel as typed reports or boundaries.
-func Run(ctx context.Context, options Options) (Result, error) {
-	result := Result{SchemaVersion: resultSchemaVersion, ProjectID: options.ProjectID, State: Failed, ReviewRunTokens: 0}
+func Run(ctx context.Context, options Options) (result Result, returnedErr error) {
+	result = Result{SchemaVersion: resultSchemaVersion, ProjectID: options.ProjectID, State: Failed, ReviewRunTokens: 0}
 	if err := validateOptions(options); err != nil {
 		return result, err
 	}
@@ -147,7 +150,16 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		return result, err
 	}
 	defer abandonFrozenTasks(options.Adapter, tasks)
-	decoded, err := decodeFrozen(ctx, options, tasks)
+	spools, err := openObservationSpools(ctx, options.DataRoot, options.ProjectID, options.spoolObserver)
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if spools != nil {
+			returnedErr = errors.Join(returnedErr, spools.close())
+		}
+	}()
+	decoded, err := decodeFrozen(ctx, options, tasks, spools)
 	if err != nil {
 		return result, err
 	}
@@ -200,45 +212,71 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		}
 		terminals[index].record, terminals[index].recordDigest = returned.Record, returned.Digest
 		terminals[index].shared = len(returned.Record.ProjectIDs) > 1
-		if len(terminals[index].newObservations) > 0 {
-			chunk, digestErr := memory.Digest(terminals[index].newObservations)
-			if digestErr != nil {
-				return result, digestErr
-			}
-			terminals[index].chunks = appendUnique(terminals[index].chunks, chunk)
-		}
 	}
 
 	views := make([]memory.SessionView, 0, len(terminals))
 	sourceDigests := make([]string, 0, len(terminals))
-	allChunkDigests := make([]string, 0)
+	lineageDependencies := make([]memory.SessionLineageDependency, 0, len(terminals))
 	usage := make([]memory.AssociatedUsage, 0, len(terminals))
-	for _, terminal := range terminals {
+	for index := range terminals {
+		terminal := &terminals[index]
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
+		observations, err := replayObservationSpool(ctx, terminal.spool)
+		if err != nil {
+			return result, fmt.Errorf("replay source observations %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+		}
 		previousView := previous.sessions[sourceKey(terminal.record.Provider, terminal.record.SessionID)]
+		newObservations, err := selectNewObservations(ctx, observations, previousView, options.Store)
+		if err != nil {
+			return result, fmt.Errorf("classify new source observations %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+		}
+		terminal.newObservationCount = len(newObservations)
+		if len(newObservations) > 0 {
+			chunk, digestErr := memory.Digest(newObservations)
+			if digestErr != nil {
+				return result, digestErr
+			}
+			terminal.chunks = appendUnique(terminal.chunks, chunk)
+		}
 		var previousPointer *memory.SessionView
 		if previousView.Digest != "" {
 			previousCopy := previousView
 			previousPointer = &previousCopy
 		}
+		usageDigest, err := memory.Digest(terminal.record.Usage)
+		if err != nil {
+			return result, fmt.Errorf("digest source usage %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+		}
 		view, _, err := options.Materialize(sessionview.Input{
 			ProjectID: options.ProjectID, Source: terminal.record,
-			SourceRecordDigest: terminal.recordDigest, UsageRecordDigest: terminal.recordDigest,
-			Observations: terminal.observations, ObservationChunkDigests: terminal.chunks,
+			SourceRecordDigest: terminal.recordDigest, UsageRecordDigest: usageDigest,
+			Observations: observations, ObservationChunkDigests: terminal.chunks,
 			TerminalState: terminal.state, Diagnostics: terminal.diagnostics,
 			Previous: previousPointer, MaterializerVersion: sessionview.MaterializerVersion,
 		})
 		if err != nil {
 			return result, fmt.Errorf("materialize SessionView %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
 		}
+		previousLineage, err := loadPreviousLineage(ctx, options.Store, previous, terminal.record.Provider, terminal.record.SessionID)
+		if err != nil {
+			return result, err
+		}
+		lineage, err := buildSessionLineage(ctx, options.ProjectID, terminal.record, observations, previousLineage)
+		if err != nil {
+			return result, fmt.Errorf("materialize SessionLineage %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+		}
+		if !sameDigestSet(view.ActiveRevisionIDs, lineage.ActiveRevisions) {
+			return result, errors.New("SessionView and SessionLineage active revisions disagree")
+		}
+		terminal.lineage = lineage
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		views = append(views, view)
 		sourceDigests = append(sourceDigests, view.SourceRecordDigest)
-		allChunkDigests = append(allChunkDigests, view.ObservationChunkDigests...)
+		lineageDependencies = append(lineageDependencies, memory.SessionLineageDependency{Provider: view.Provider, SessionID: view.SessionID, Digest: lineage.Digest})
 		usage = append(usage, memory.AssociatedUsage{Provider: view.Provider, SessionID: view.SessionID, UsageRecordDigest: view.UsageRecordDigest, Shared: terminal.shared})
 		incrementResult(&result, view.TerminalState, terminal.issue)
 	}
@@ -271,21 +309,15 @@ func Run(ctx context.Context, options Options) (Result, error) {
 	if projectView.SourceSessions != result.SourceSessions || terminalTotal(projectView.TerminalCounts) != result.TerminalSessions {
 		return result, errors.New("ProjectView terminal counts do not reconcile with scan")
 	}
-	active, superseded, withdrawn, err := classifyRevisions(views, terminals, previous)
-	if err != nil {
-		return result, err
-	}
 	sort.Strings(sourceDigests)
 	sourceDigests = uniqueStrings(sourceDigests)
-	allChunkDigests = uniqueStrings(allChunkDigests)
 	manifest := memory.GenerationManifest{
 		SchemaVersion: memory.MemorySchemaVersion, ProjectID: options.ProjectID,
 		CreatedAt: referenceTimestamp, SourceRecordDigests: sourceDigests,
-		ObservationChunkDigests: allChunkDigests,
-		SessionViews:            append([]memory.SessionViewDependency(nil), projectView.SessionViewDependencies...),
-		ProbeStateDigest:        probeState.Digest, ProbeCheck: probeCheck,
-		ProjectViewDigest: projectView.Digest, ActiveRevisions: active,
-		SupersededRevisions: superseded, WithdrawnRevisions: withdrawn,
+		SessionViews:     append([]memory.SessionViewDependency(nil), projectView.SessionViewDependencies...),
+		SessionLineages:  lineageDependencies,
+		ProbeStateDigest: probeState.Digest, ProbeCheck: probeCheck,
+		ProjectViewDigest: projectView.Digest,
 	}
 	manifest.GenerationID, err = generationID(manifest)
 	if err != nil {
@@ -313,8 +345,20 @@ func Run(ctx context.Context, options Options) (Result, error) {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		if len(terminals[index].newObservations) > 0 {
-			chunk, putErr := options.Store.PutObservationChunk(terminals[index].newObservations)
+		if terminals[index].newObservationCount > 0 {
+			observations, replayErr := replayObservationSpool(ctx, terminals[index].spool)
+			if replayErr != nil {
+				return result, fmt.Errorf("replay source observations for persistence: %w", replayErr)
+			}
+			previousView := previous.sessions[sourceKey(terminals[index].record.Provider, terminals[index].record.SessionID)]
+			newObservations, classifyErr := selectNewObservations(ctx, observations, previousView, options.Store)
+			if classifyErr != nil {
+				return result, classifyErr
+			}
+			if len(newObservations) != terminals[index].newObservationCount {
+				return result, errors.New("observation spool changed after catalog apply")
+			}
+			chunk, putErr := options.Store.PutObservationChunk(newObservations)
 			if putErr != nil {
 				return result, fmt.Errorf("persist observation chunk: %w", putErr)
 			}
@@ -323,12 +367,24 @@ func Run(ctx context.Context, options Options) (Result, error) {
 			}
 		}
 	}
+	if err := spools.close(); err != nil {
+		return result, fmt.Errorf("cleanup observation spools: %w", err)
+	}
+	spools = nil
 	for _, view := range views {
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
 		if _, err := options.Store.PutSessionView(view); err != nil {
 			return result, fmt.Errorf("persist SessionView %s/%s: %w", view.Provider, view.SessionID, err)
+		}
+	}
+	for _, terminal := range terminals {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if _, err := options.Store.PutSessionLineage(terminal.lineage); err != nil {
+			return result, fmt.Errorf("persist SessionLineage %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -512,7 +568,7 @@ func freezeDiscovery(ctx context.Context, options Options, discovery source.Disc
 	return tasks, issueList, nil
 }
 
-func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]decodedTask, error) {
+func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask, spools *observationSpools) ([]decodedTask, error) {
 	defer abandonFrozenTasks(options.Adapter, tasks)
 	decodeContext, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -528,7 +584,6 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 	}
 	results := make([]decodedTask, len(tasks))
 	var next atomic.Int64
-	var retained atomic.Int64
 	var wait sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
 		wait.Add(1)
@@ -548,7 +603,12 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 					return
 				}
 				task := tasks[index]
-				result := decodedTask{task: task}
+				spool, err := spools.create(decodeContext, task.boundary.Candidate.Provider, task.boundary.Candidate.SessionID)
+				if err != nil {
+					cancel(err)
+					return
+				}
+				result := decodedTask{task: task, spool: spool}
 				result.report, result.err = options.Adapter.Decode(decodeContext, task.boundary, func(observation memory.ObservationRevision) error {
 					if err := decodeContext.Err(); err != nil {
 						return err
@@ -559,23 +619,11 @@ func decodeFrozen(ctx context.Context, options Options, tasks []frozenTask) ([]d
 					if observation.Key.ProjectID != options.ProjectID {
 						return nil
 					}
-					if len(result.observations) >= maxSourceRevisions {
-						cancel(ErrObservationBudget)
-						return ErrObservationBudget
-					}
-					for {
-						current := retained.Load()
-						if current >= maxSourceRevisions {
-							cancel(ErrObservationBudget)
-							return ErrObservationBudget
-						}
-						if retained.CompareAndSwap(current, current+1) {
-							break
-						}
-					}
-					result.observations = append(result.observations, observation)
-					return nil
+					return spool.append(decodeContext, observation)
 				})
+				if result.err == nil {
+					result.err = spool.seal(decodeContext)
+				}
 				results[index] = result
 				if decodeContext.Err() != nil {
 					return
@@ -649,7 +697,7 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			return nil, err
 		}
 		if !containsProject(record.ProjectIDs, options.ProjectID) {
-			if len(item.observations) != 0 {
+			if item.spool != nil && item.spool.count != 0 {
 				return nil, projectidentity.ErrAssociationRequired
 			}
 			continue
@@ -671,24 +719,22 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			return nil, fmt.Errorf("decoded source %s/%s has invalid boundary relation %q", record.Provider, record.SessionID, item.report.BoundaryRelation)
 		}
 		chunkDigests := previousChunks(previous, record.Provider, record.SessionID)
-		newObservations := make([]memory.ObservationRevision, 0, len(item.observations))
-		currentIDs := make(map[string]struct{}, len(item.observations))
-		for _, observation := range item.observations {
+		currentIDs := make(map[string]struct{}, item.spool.count)
+		if err := item.spool.replay(ctx, func(observation memory.ObservationRevision) error {
 			if _, duplicate := currentIDs[observation.RevisionID]; duplicate {
-				return nil, fmt.Errorf("decoded source %s/%s emitted duplicate revision %s", record.Provider, record.SessionID, observation.RevisionID)
+				return fmt.Errorf("decoded source %s/%s emitted duplicate revision %s", record.Provider, record.SessionID, observation.RevisionID)
 			}
 			currentIDs[observation.RevisionID] = struct{}{}
-			if _, alreadyStored := previous.revisions[observation.RevisionID]; !alreadyStored {
-				newObservations = append(newObservations, observation)
-			}
+			return nil
+		}); err != nil {
+			return nil, err
 		}
 		terminals = append(terminals, terminalSource{
 			record: record, mutation: sourcecatalog.BatchMutation{Relation: item.report.BoundaryRelation, ExpectedDigest: item.report.ExpectedCatalogDigest, Desired: record}, state: state,
-			observations: item.observations, chunks: chunkDigests,
-			newObservations: newObservations,
-			diagnostics:     diagnostics,
-			issue:           state != memory.Indexed || item.report.MalformedLines > 0 || item.report.UnsupportedRecords > 0 || len(item.report.Quarantined) > 0 || len(item.report.Diagnostics) > 0,
-			shared:          len(record.ProjectIDs) > 1,
+			spool: item.spool, chunks: chunkDigests,
+			diagnostics: diagnostics,
+			issue:       state != memory.Indexed || item.report.MalformedLines > 0 || item.report.UnsupportedRecords > 0 || len(item.report.Quarantined) > 0 || len(item.report.Diagnostics) > 0,
+			shared:      len(record.ProjectIDs) > 1,
 		})
 	}
 	for _, issue := range issues {
@@ -731,7 +777,7 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 }
 
 func loadBaseline(store MemoryStore) (baseline, error) {
-	result := baseline{sessions: make(map[string]memory.SessionView), revisions: make(map[string]memory.ObservationRevision)}
+	result := baseline{sessions: make(map[string]memory.SessionView), lineages: make(map[string]memory.SessionLineageDependency)}
 	prepared, manifest, err := store.LoadPrepared()
 	if errors.Is(err, memorystore.ErrNoPreparedGeneration) {
 		return result, nil
@@ -751,18 +797,8 @@ func loadBaseline(store MemoryStore) (baseline, error) {
 		}
 		result.sessions[sourceKey(view.Provider, view.SessionID)] = view
 	}
-	for _, digest := range manifest.ObservationChunkDigests {
-		body, err := store.LoadObject(memorystore.ObjectObservationChunk, digest)
-		if err != nil {
-			return baseline{}, err
-		}
-		records, err := decodeObservationChunk(body)
-		if err != nil {
-			return baseline{}, err
-		}
-		for _, record := range records {
-			result.revisions[record.RevisionID] = record
-		}
+	for _, dependency := range manifest.SessionLineages {
+		result.lineages[sourceKey(dependency.Provider, dependency.SessionID)] = dependency
 	}
 	body, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
 	if err != nil {
@@ -776,61 +812,173 @@ func loadBaseline(store MemoryStore) (baseline, error) {
 	return result, nil
 }
 
-func classifyRevisions(views []memory.SessionView, terminals []terminalSource, previous baseline) (map[string]string, map[string]string, map[string]string, error) {
-	revisions := make(map[string]memory.ObservationRevision, len(previous.revisions))
-	for id, revision := range previous.revisions {
-		revisions[id] = revision
+func replayObservationSpool(ctx context.Context, spool *observationSpool) ([]memory.ObservationRevision, error) {
+	if spool == nil {
+		return nil, nil
 	}
-	for _, terminal := range terminals {
-		for _, revision := range terminal.observations {
-			revisions[revision.RevisionID] = revision
+	result := make([]memory.ObservationRevision, 0, spool.count)
+	if err := spool.replay(ctx, func(value memory.ObservationRevision) error {
+		result = append(result, value)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func selectNewObservations(ctx context.Context, values []memory.ObservationRevision, previous memory.SessionView, store MemoryStore) ([]memory.ObservationRevision, error) {
+	unknown := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		unknown[value.RevisionID] = struct{}{}
+	}
+	for _, digest := range previous.ObservationChunkDigests {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-	}
-	active := make(map[string]string)
-	for _, view := range views {
-		for _, revisionID := range view.ActiveRevisionIDs {
-			revision, found := revisions[revisionID]
-			if !found {
-				return nil, nil, nil, fmt.Errorf("active revision %s is unavailable", revisionID)
-			}
-			key, err := memory.Digest(revision.Key)
-			if err != nil {
-				return nil, nil, nil, err
-			}
-			if existing, duplicate := active[key]; duplicate && existing != revisionID {
-				return nil, nil, nil, errors.New("multiple active revisions share one stable key")
-			}
-			active[key] = revisionID
-		}
-	}
-	superseded := make(map[string]string)
-	withdrawn := make(map[string]string)
-	for revisionID, revision := range revisions {
-		key, err := memory.Digest(revision.Key)
+		body, err := store.LoadObject(memorystore.ObjectObservationChunk, digest)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, err
 		}
-		if selected, found := active[key]; found {
-			if selected != revisionID {
-				superseded[revisionID] = selected
-			}
-			continue
+		records, err := decodeObservationChunk(body)
+		if err != nil {
+			return nil, err
 		}
-		if previousSelected, found := previous.manifest.ActiveRevisions[key]; found && previousSelected == revisionID {
-			withdrawn[key] = revisionID
-			continue
+		for _, record := range records {
+			delete(unknown, record.RevisionID)
 		}
-		if successor, found := previous.manifest.SupersededRevisions[revisionID]; found {
-			superseded[revisionID] = successor
-			continue
-		}
-		if withdrawnRevision, found := previous.manifest.WithdrawnRevisions[key]; found && withdrawnRevision == revisionID {
-			withdrawn[key] = revisionID
-			continue
-		}
-		return nil, nil, nil, fmt.Errorf("historical revision %s has no deterministic inactive lineage", revisionID)
 	}
-	return active, superseded, withdrawn, nil
+	result := make([]memory.ObservationRevision, 0, len(values))
+	for _, value := range values {
+		if _, exists := unknown[value.RevisionID]; exists {
+			result = append(result, value)
+		}
+	}
+	return result, nil
+}
+
+func loadPreviousLineage(ctx context.Context, store MemoryStore, previous baseline, provider, sessionID string) (*memory.SessionLineage, error) {
+	dependency, exists := previous.lineages[sourceKey(provider, sessionID)]
+	if !exists {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	body, err := store.LoadObject(memorystore.ObjectSessionLineage, dependency.Digest)
+	if err != nil {
+		return nil, fmt.Errorf("load previous SessionLineage %s/%s: %w", provider, sessionID, err)
+	}
+	var lineage memory.SessionLineage
+	if err := decodeExactJSON(body, &lineage); err != nil {
+		return nil, err
+	}
+	if lineage.Provider != provider || lineage.SessionID != sessionID || lineage.Digest != dependency.Digest {
+		return nil, errors.New("previous SessionLineage dependency identity mismatch")
+	}
+	return &lineage, nil
+}
+
+func buildSessionLineage(ctx context.Context, projectID string, record memory.SourceRecord, observations []memory.ObservationRevision, previous *memory.SessionLineage) (memory.SessionLineage, error) {
+	active := make(map[string]string, len(observations))
+	if record.Availability == memory.SourceUnavailable {
+		if previous == nil {
+			return memory.SessionLineage{}, errors.New("unavailable source has no previous SessionLineage")
+		}
+		for key, revision := range previous.ActiveRevisions {
+			active[key] = revision
+		}
+	} else {
+		for _, observation := range observations {
+			if err := ctx.Err(); err != nil {
+				return memory.SessionLineage{}, err
+			}
+			key, err := memory.DigestContext(ctx, observation.Key)
+			if err != nil {
+				return memory.SessionLineage{}, err
+			}
+			if existing, duplicate := active[key]; duplicate && existing != observation.RevisionID {
+				return memory.SessionLineage{}, errors.New("multiple active revisions share one stable key")
+			}
+			active[key] = observation.RevisionID
+		}
+	}
+	if previous != nil && previous.ProjectID == projectID && previous.Provider == record.Provider && previous.SessionID == record.SessionID && previous.SourceIdentity == record.SourceIdentity && equalStringMap(active, previous.ActiveRevisions) {
+		copy := *previous
+		copy.ActiveRevisions = cloneStringMap(previous.ActiveRevisions)
+		copy.SupersededRevisions = cloneStringMap(previous.SupersededRevisions)
+		copy.WithdrawnRevisions = cloneStringMap(previous.WithdrawnRevisions)
+		return copy, nil
+	}
+	lineage := memory.SessionLineage{
+		SchemaVersion:       memory.MemorySchemaVersion,
+		ProjectID:           projectID,
+		Provider:            record.Provider,
+		SessionID:           record.SessionID,
+		SourceIdentity:      record.SourceIdentity,
+		ActiveRevisions:     active,
+		SupersededRevisions: map[string]string{},
+		WithdrawnRevisions:  map[string]string{},
+	}
+	if previous != nil {
+		if previous.ProjectID != projectID || previous.Provider != record.Provider || previous.SessionID != record.SessionID || previous.SourceIdentity != record.SourceIdentity {
+			return memory.SessionLineage{}, errors.New("previous SessionLineage identity mismatch")
+		}
+		lineage.PreviousLineageDigest = previous.Digest
+		for key, oldRevision := range previous.ActiveRevisions {
+			currentRevision, exists := active[key]
+			switch {
+			case !exists:
+				lineage.WithdrawnRevisions[key] = oldRevision
+			case currentRevision != oldRevision:
+				lineage.SupersededRevisions[oldRevision] = currentRevision
+			}
+		}
+	}
+	var err error
+	lineage.Digest, err = memory.SessionLineageDigestContext(ctx, lineage)
+	if err != nil {
+		return memory.SessionLineage{}, err
+	}
+	if err := memory.ValidateSessionLineageContext(ctx, lineage); err != nil {
+		return memory.SessionLineage{}, err
+	}
+	return lineage, nil
+}
+
+func sameDigestSet(revisions []string, active map[string]string) bool {
+	if len(revisions) != len(active) {
+		return false
+	}
+	selected := make(map[string]struct{}, len(active))
+	for _, revision := range active {
+		selected[revision] = struct{}{}
+	}
+	for _, revision := range revisions {
+		if _, exists := selected[revision]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+func equalStringMap(first, second map[string]string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	for key, value := range first {
+		if second[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func prepareOrAdvance(store MemoryStore, previous baseline, manifest memory.GenerationManifest) (memorystore.Prepared, error) {
@@ -845,16 +993,12 @@ func prepareOrAdvance(store MemoryStore, previous baseline, manifest memory.Gene
 
 func sameGenerationContent(first, second memory.GenerationManifest) bool {
 	first.GenerationID, second.GenerationID = "same", "same"
-	first.CreatedAt, second.CreatedAt = "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"
-	first.ProbeCheck.CheckedAt, second.ProbeCheck.CheckedAt = "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"
 	return equalJSON(first, second)
 }
 
 func generationID(value memory.GenerationManifest) (string, error) {
 	identity := value
 	identity.GenerationID = "scan"
-	identity.CreatedAt = "2026-01-01T00:00:00Z"
-	identity.ProbeCheck.CheckedAt = "2026-01-01T00:00:00Z"
 	digest, err := memory.Digest(identity)
 	if err != nil {
 		return "", fmt.Errorf("digest scan generation identity: %w", err)

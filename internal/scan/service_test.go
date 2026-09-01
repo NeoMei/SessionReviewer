@@ -290,7 +290,7 @@ func newScanHarness(t *testing.T) scanHarness {
 			if err != nil {
 				return memory.ProjectProbeState{}, memory.ProbeCheck{}, err
 			}
-			check := memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: now.Format(time.RFC3339Nano), StateDigest: state.Digest, Available: true, Diagnostics: []memory.Diagnostic{}}
+			check := memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: options.Now().UTC().Format(time.RFC3339Nano), StateDigest: state.Digest, Available: true, Diagnostics: []memory.Diagnostic{}}
 			return state, check, nil
 		},
 		Reduce: projectview.Reduce,
@@ -396,14 +396,29 @@ func TestRunCompletes154SessionsWithoutAgentOrForeignFacts(t *testing.T) {
 	if !sharedFound {
 		t.Fatal("shared Session usage was not marked shared")
 	}
-	for _, digest := range manifest.ObservationChunkDigests {
-		body, err := harness.store.LoadObject(memorystore.ObjectObservationChunk, digest)
+	checkedChunks := 0
+	for _, dependency := range manifest.SessionViews {
+		viewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
 		if err != nil {
-			t.Fatalf("load observation chunk: %v", err)
+			t.Fatalf("load SessionView for privacy check: %v", err)
 		}
-		if string(body) == "" || containsBytes(body, []byte(scanTestForeign)) || containsBytes(body, []byte("foreign-only")) {
-			t.Fatalf("foreign project fact entered target store: %s", body)
+		var view memory.SessionView
+		if err := decodeExactJSON(viewBody, &view); err != nil {
+			t.Fatalf("decode SessionView for privacy check: %v", err)
 		}
+		for _, digest := range view.ObservationChunkDigests {
+			body, err := harness.store.LoadObject(memorystore.ObjectObservationChunk, digest)
+			if err != nil {
+				t.Fatalf("load observation chunk: %v", err)
+			}
+			if string(body) == "" || containsBytes(body, []byte(scanTestForeign)) || containsBytes(body, []byte("foreign-only")) {
+				t.Fatalf("foreign project fact entered target store: %s", body)
+			}
+			checkedChunks++
+		}
+	}
+	if checkedChunks == 0 {
+		t.Fatal("privacy check did not inspect any SessionView observation chunk")
 	}
 	maximum := minScanInt(4, runtime.GOMAXPROCS(0))
 	if harness.adapter.maxActive > maximum {
@@ -508,8 +523,9 @@ func TestRunAdvancesSupersededAndWithdrawnRevisionsThenReusesUnchangedGeneration
 	}
 	firstKey := observationKeyDigestForScan(t, spec.observations[0].Key)
 	removedKey := observationKeyDigestForScan(t, secondOld.Key)
-	oldFirstRevision := firstManifest.ActiveRevisions[firstKey]
-	oldRemovedRevision := firstManifest.ActiveRevisions[removedKey]
+	firstLineage := loadScanLineage(t, harness.store, firstManifest.SessionLineages[0])
+	oldFirstRevision := firstLineage.ActiveRevisions[firstKey]
+	oldRemovedRevision := firstLineage.ActiveRevisions[removedKey]
 
 	successor := spec.observations[0]
 	successor.AdapterVersion = "v2"
@@ -543,14 +559,16 @@ func TestRunAdvancesSupersededAndWithdrawnRevisionsThenReusesUnchangedGeneration
 	if err != nil {
 		t.Fatalf("load revision successor: %v", err)
 	}
-	if secondManifest.ActiveRevisions[firstKey] != successor.RevisionID || secondManifest.SupersededRevisions[oldFirstRevision] != successor.RevisionID {
-		t.Fatalf("supersession lineage mismatch: active=%v superseded=%v", secondManifest.ActiveRevisions, secondManifest.SupersededRevisions)
+	secondLineage := loadScanLineage(t, harness.store, secondManifest.SessionLineages[0])
+	if secondLineage.ActiveRevisions[firstKey] != successor.RevisionID || secondLineage.SupersededRevisions[oldFirstRevision] != successor.RevisionID {
+		t.Fatalf("supersession lineage mismatch: active=%v superseded=%v", secondLineage.ActiveRevisions, secondLineage.SupersededRevisions)
 	}
-	if secondManifest.WithdrawnRevisions[removedKey] != oldRemovedRevision {
-		t.Fatalf("withdrawal lineage mismatch: %v", secondManifest.WithdrawnRevisions)
+	if secondLineage.WithdrawnRevisions[removedKey] != oldRemovedRevision || secondLineage.PreviousLineageDigest != firstLineage.Digest {
+		t.Fatalf("withdrawal lineage mismatch: %+v", secondLineage)
 	}
-	if len(secondManifest.ObservationChunkDigests) != 2 {
-		t.Fatalf("append/successor scan did not retain old plus new chunks: %v", secondManifest.ObservationChunkDigests)
+	secondView := loadScanSessionView(t, harness.store, secondManifest.SessionViews[0])
+	if len(secondView.ObservationChunkDigests) != 2 {
+		t.Fatalf("append/successor scan did not retain old plus new chunks: %v", secondView.ObservationChunkDigests)
 	}
 
 	third, err := Run(context.Background(), harness.options)
@@ -583,10 +601,11 @@ func TestRunAppendReusesOldChunksAndPersistsOnlyNewSuffixRevision(t *testing.T) 
 		t.Fatalf("prepare append baseline: %v", err)
 	}
 	_, firstManifest, err := harness.store.LoadPrepared()
-	if err != nil || len(firstManifest.ObservationChunkDigests) != 1 {
-		t.Fatalf("append baseline chunks=%v err=%v", firstManifest.ObservationChunkDigests, err)
+	firstView := loadScanSessionView(t, harness.store, firstManifest.SessionViews[0])
+	if err != nil || len(firstView.ObservationChunkDigests) != 1 {
+		t.Fatalf("append baseline chunks=%v err=%v", firstView.ObservationChunkDigests, err)
 	}
-	oldChunk := firstManifest.ObservationChunkDigests[0]
+	oldChunk := firstView.ObservationChunkDigests[0]
 
 	newSuffix := oldSecond
 	newSuffix.Key.Sequence = 4
@@ -613,22 +632,15 @@ func TestRunAppendReusesOldChunksAndPersistsOnlyNewSuffixRevision(t *testing.T) 
 		t.Fatal("append reused baseline generation")
 	}
 	_, manifest, err := harness.store.LoadPrepared()
-	if err != nil || len(manifest.ObservationChunkDigests) != 2 {
-		t.Fatalf("append successor chunks=%v err=%v", manifest.ObservationChunkDigests, err)
-	}
-	viewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, manifest.SessionViews[0].Digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var view memory.SessionView
-	if err := decodeExactJSON(viewBody, &view); err != nil {
-		t.Fatal(err)
+	view := loadScanSessionView(t, harness.store, manifest.SessionViews[0])
+	if err != nil || len(view.ObservationChunkDigests) != 2 {
+		t.Fatalf("append successor chunks=%v err=%v", view.ObservationChunkDigests, err)
 	}
 	if len(view.ActiveRevisionIDs) != 3 || len(view.ObservationChunkDigests) != 2 || view.ObservationChunkDigests[0] != oldChunk {
 		t.Fatalf("append view did not retain full active set and ordered old chunk: %+v", view)
 	}
 	seen := map[string]string{}
-	for _, digest := range manifest.ObservationChunkDigests {
+	for _, digest := range view.ObservationChunkDigests {
 		body, err := harness.store.LoadObject(memorystore.ObjectObservationChunk, digest)
 		if err != nil {
 			t.Fatal(err)
@@ -670,8 +682,9 @@ func TestRunReplacementRebuildsActiveViewForInteriorMutation(t *testing.T) {
 	}
 	stableKey := observationKeyDigestForScan(t, spec.observations[0].Key)
 	removedKey := observationKeyDigestForScan(t, removed.Key)
-	oldActive := baseline.ActiveRevisions[stableKey]
-	oldRemoved := baseline.ActiveRevisions[removedKey]
+	baselineLineage := loadScanLineage(t, harness.store, baseline.SessionLineages[0])
+	oldActive := baselineLineage.ActiveRevisions[stableKey]
+	oldRemoved := baselineLineage.ActiveRevisions[removedKey]
 
 	replacement := spec.observations[0]
 	replacement.Outcome = "corrected-after-interior-mutation"
@@ -688,8 +701,9 @@ func TestRunReplacementRebuildsActiveViewForInteriorMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if manifest.ActiveRevisions[stableKey] != replacement.RevisionID || manifest.SupersededRevisions[oldActive] != replacement.RevisionID || manifest.WithdrawnRevisions[removedKey] != oldRemoved {
-		t.Fatalf("replacement lineage active=%v superseded=%v withdrawn=%v", manifest.ActiveRevisions, manifest.SupersededRevisions, manifest.WithdrawnRevisions)
+	lineage := loadScanLineage(t, harness.store, manifest.SessionLineages[0])
+	if lineage.ActiveRevisions[stableKey] != replacement.RevisionID || lineage.SupersededRevisions[oldActive] != replacement.RevisionID || lineage.WithdrawnRevisions[removedKey] != oldRemoved {
+		t.Fatalf("replacement lineage active=%v superseded=%v withdrawn=%v", lineage.ActiveRevisions, lineage.SupersededRevisions, lineage.WithdrawnRevisions)
 	}
 	viewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, manifest.SessionViews[0].Digest)
 	if err != nil {
@@ -1068,7 +1082,7 @@ func TestRunFreezesOneReferenceTimeForProbeReductionAndManifest(t *testing.T) {
 	}
 }
 
-func TestRunGlobalObservationBudgetFailsWithoutPreparedGeneration(t *testing.T) {
+func TestRunMoreThanGlobalObservationBudgetAcrossSourcesSucceeds(t *testing.T) {
 	harness := newScanHarness(t)
 	for sourceIndex := 1; sourceIndex <= 2; sourceIndex++ {
 		spec := harness.addSource(sourceIndex, memory.Indexed, scanTestProject)
@@ -1088,14 +1102,152 @@ func TestRunGlobalObservationBudgetFailsWithoutPreparedGeneration(t *testing.T) 
 	}
 
 	result, err := Run(context.Background(), harness.options)
-	if err == nil || !errors.Is(err, ErrObservationBudget) || result.Prepared || result.State != Failed {
-		t.Fatalf("global observation budget result=%+v err=%v", result, err)
+	if err != nil || !result.Prepared || result.State != Completed || result.SourceSessions != 2 {
+		t.Fatalf("multi-source observation scan result=%+v err=%v", result, err)
 	}
-	if _, _, loadErr := harness.store.LoadPrepared(); !errors.Is(loadErr, memorystore.ErrNoPreparedGeneration) {
-		t.Fatalf("observation budget prepared a partial generation: %v", loadErr)
+	_, manifest, loadErr := harness.store.LoadPrepared()
+	coverage := 0
+	for _, dependency := range manifest.SessionLineages {
+		body, err := harness.store.LoadObject(memorystore.ObjectSessionLineage, dependency.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var lineage memory.SessionLineage
+		if err := decodeExactJSON(body, &lineage); err != nil {
+			t.Fatal(err)
+		}
+		coverage += len(lineage.ActiveRevisions)
 	}
-	if records, listErr := harness.catalog.ListCandidates(); listErr != nil || len(records) != 0 {
-		t.Fatalf("observation budget mutated catalog records=%+v err=%v", records, listErr)
+	if loadErr != nil || len(manifest.SessionLineages) != 2 || coverage != 65538 {
+		t.Fatalf("multi-source observation coverage=%d lineages=%d err=%v", coverage, len(manifest.SessionLineages), loadErr)
+	}
+}
+
+func TestRunSingleSourceObservationBudgetStillFailsClosed(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	base := spec.observations[0]
+	spec.observations = make([]memory.ObservationRevision, maxSourceRevisions+1)
+	for index := range spec.observations {
+		observation := base
+		observation.Key.Sequence = index + 1
+		observation.Key.Subject = fmt.Sprintf("per-source-budget-%d", index)
+		observation.Ref.Location.JSONL = &memory.JSONLSourceLocation{Line: index + 1, ByteOffset: int64(index * 10)}
+		observation.Ref.SourceHash = scanHex(observation.Key.Subject)
+		observation.Object = observation.Key.Subject
+		observation.Fields = map[string]string{"path": observation.Key.Subject}
+		observation.RevisionID = memory.ObservationRevisionID(observation)
+		spec.observations[index] = observation
+	}
+	result, err := Run(context.Background(), harness.options)
+	if !errors.Is(err, ErrObservationBudget) || result.Prepared || result.State != Failed {
+		t.Fatalf("single-source budget result=%+v err=%v", result, err)
+	}
+}
+
+func TestRunProbeCheckOnlyAdvancesGenerationWithoutSemanticObjectChurn(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	checkedAt := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
+	harness.options.Now = func() time.Time { return checkedAt }
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt = checkedAt.Add(time.Minute)
+	second, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.GenerationID == first.GenerationID || secondManifest.ProbeCheck.CheckedAt == firstManifest.ProbeCheck.CheckedAt {
+		t.Fatalf("fresh ProbeCheck did not advance generation: first=%+v second=%+v", firstManifest.ProbeCheck, secondManifest.ProbeCheck)
+	}
+	if second.ProjectViewDigest != first.ProjectViewDigest || secondManifest.ProjectViewDigest != firstManifest.ProjectViewDigest ||
+		secondManifest.ProbeStateDigest != firstManifest.ProbeStateDigest ||
+		!reflect.DeepEqual(secondManifest.SessionViews, firstManifest.SessionViews) ||
+		!reflect.DeepEqual(secondManifest.ObservationChunkDigests, firstManifest.ObservationChunkDigests) {
+		t.Fatalf("ProbeCheck-only successor churned semantic objects\nfirst=%+v\nsecond=%+v", firstManifest, secondManifest)
+	}
+	third, err := Run(context.Background(), harness.options)
+	if err != nil || third.GenerationID != second.GenerationID {
+		t.Fatalf("byte-identical ProbeCheck did not reuse prepared: second=%+v third=%+v err=%v", second, third, err)
+	}
+}
+
+type rejectAdvanceStore struct {
+	MemoryStore
+}
+
+func (store rejectAdvanceStore) AdvancePrepared(memorystore.Prepared, memory.GenerationManifest) (memorystore.Prepared, error) {
+	return memorystore.Prepared{}, memorystore.ErrPreparedGeneration
+}
+
+func TestRunProbeCheckOnlySuccessorFailsClosedOnStalePreparedCAS(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	checkedAt := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
+	harness.options.Now = func() time.Time { return checkedAt }
+	first, err := Run(context.Background(), harness.options)
+	if err != nil || !first.Prepared {
+		t.Fatalf("initial scan result=%+v err=%v", first, err)
+	}
+	before, beforeManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkedAt = checkedAt.Add(time.Minute)
+	harness.options.Store = rejectAdvanceStore{MemoryStore: harness.store}
+	second, err := Run(context.Background(), harness.options)
+	if !errors.Is(err, memorystore.ErrPreparedGeneration) || second.Prepared {
+		t.Fatalf("stale ProbeCheck successor result=%+v err=%v", second, err)
+	}
+	after, afterManifest, err := harness.store.LoadPrepared()
+	if err != nil || after != before || afterManifest.GenerationID != beforeManifest.GenerationID || !reflect.DeepEqual(afterManifest.ProbeCheck, beforeManifest.ProbeCheck) {
+		t.Fatalf("stale ProbeCheck CAS changed prepared generation: before=%+v after=%+v err=%v", before, after, err)
+	}
+}
+
+func TestRunSessionViewUsageDigestResolvesExactCatalogUsage(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	result, err := Run(context.Background(), harness.options)
+	if err != nil || !result.Prepared {
+		t.Fatalf("scan result=%+v err=%v", result, err)
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil || len(manifest.SessionViews) != 1 {
+		t.Fatalf("prepared manifest=%+v err=%v", manifest, err)
+	}
+	body, err := harness.store.LoadObject(memorystore.ObjectSessionView, manifest.SessionViews[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view memory.SessionView
+	if err := decodeExactJSON(body, &view); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := harness.catalog.GetSource(spec.record.Provider, spec.record.SessionID)
+	if err != nil || !found {
+		t.Fatalf("catalog record found=%v err=%v", found, err)
+	}
+	wantSource, err := memory.Digest(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsage, err := memory.Digest(record.Usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.SourceRecordDigest != wantSource || view.UsageRecordDigest != wantUsage || wantSource == wantUsage {
+		t.Fatalf("SessionView catalog references source=%q/%q usage=%q/%q", view.SourceRecordDigest, wantSource, view.UsageRecordDigest, wantUsage)
 	}
 }
 
@@ -1198,6 +1350,32 @@ func observationKeyDigestForScan(t *testing.T, key memory.ObservationKey) string
 		t.Fatalf("digest observation key: %v", err)
 	}
 	return digest
+}
+
+func loadScanSessionView(t *testing.T, store *memorystore.Store, dependency memory.SessionViewDependency) memory.SessionView {
+	t.Helper()
+	body, err := store.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view memory.SessionView
+	if err := decodeExactJSON(body, &view); err != nil {
+		t.Fatal(err)
+	}
+	return view
+}
+
+func loadScanLineage(t *testing.T, store *memorystore.Store, dependency memory.SessionLineageDependency) memory.SessionLineage {
+	t.Helper()
+	body, err := store.LoadObject(memorystore.ObjectSessionLineage, dependency.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lineage memory.SessionLineage
+	if err := decodeExactJSON(body, &lineage); err != nil {
+		t.Fatal(err)
+	}
+	return lineage
 }
 
 func scanHex(value string) string {

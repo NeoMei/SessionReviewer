@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -211,8 +212,8 @@ func TestRetentionSnapshotReadsSharedObjectsAndReconcilesGenerationsOnce(t *test
 			t.Fatalf("shared object %s read/decode/hash count=%d want 1", object, reads)
 		}
 	}
-	if len(objectReads) != 6 {
-		t.Fatalf("unique stored object reads=%d want 6", len(objectReads))
+	if len(objectReads) != 7 {
+		t.Fatalf("unique stored object reads=%d want 7", len(objectReads))
 	}
 	if len(objectReconciles) != len(objectReads) {
 		t.Fatalf("unique object reconciles=%d want %d", len(objectReconciles), len(objectReads))
@@ -279,13 +280,13 @@ func TestRetentionCandidatePlanningCancelsInsideLargeLoopsWithoutResult(t *testi
 func TestManifestObjectReferenceConstructionCancelsMidLoop(t *testing.T) {
 	const count = 65_536
 	manifest := memory.GenerationManifest{
-		ObservationChunkDigests: make([]string, count),
-		SessionViews:            make([]memory.SessionViewDependency, count),
+		SessionViews:    make([]memory.SessionViewDependency, count),
+		SessionLineages: make([]memory.SessionLineageDependency, count),
 	}
 	for index := 0; index < count; index++ {
 		digest := prefixedDigest(fmt.Sprintf("manifest-reference-%06d", index))
-		manifest.ObservationChunkDigests[index] = digest
 		manifest.SessionViews[index] = memory.SessionViewDependency{Digest: digest}
+		manifest.SessionLineages[index] = memory.SessionLineageDependency{Digest: digest}
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	cause := errors.New("cancel manifest references")
@@ -499,7 +500,7 @@ func TestRetentionLargeInputsCancelInsideChunkedDecode(t *testing.T) {
 }
 
 func TestRetentionLargeValidationAndCanonicalHashCancelInsideLoops(t *testing.T) {
-	const entries = 240_000 // More than 16 MiB once encoded as canonical digest strings.
+	const entries = 65_536
 	values := make([]string, entries)
 	for index := range values {
 		values[index] = prefixedDigest(fmt.Sprintf("large-context-%d", index))
@@ -1195,10 +1196,20 @@ func writeRetentionCandidate(t *testing.T, memoryRoot, namespace, suffix string,
 
 func reachableFixtureTotals(t *testing.T, memoryRoot string, manifest memory.GenerationManifest) (int, int64) {
 	t.Helper()
+	sessionPath := filepath.Join(memoryRoot, "sessions", digestLeaf(manifest.SessionViews[0].Digest, ".json"))
+	body, err := os.ReadFile(sessionPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var session memory.SessionView
+	if err := json.Unmarshal(body, &session); err != nil {
+		t.Fatal(err)
+	}
 	paths := []string{
 		filepath.Join(memoryRoot, "generations", manifest.GenerationID+".json"),
-		filepath.Join(memoryRoot, "observations", digestLeaf(manifest.ObservationChunkDigests[0], ".jsonl")),
-		filepath.Join(memoryRoot, "sessions", digestLeaf(manifest.SessionViews[0].Digest, ".json")),
+		filepath.Join(memoryRoot, "observations", digestLeaf(session.ObservationChunkDigests[0], ".jsonl")),
+		sessionPath,
+		filepath.Join(memoryRoot, "session-lineages", digestLeaf(manifest.SessionLineages[0].Digest, ".json")),
 		filepath.Join(memoryRoot, "project-probes", digestLeaf(manifest.ProbeStateDigest, ".json")),
 		filepath.Join(memoryRoot, "project-views", digestLeaf(manifest.ProjectViewDigest, ".json")),
 	}

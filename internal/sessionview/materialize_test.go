@@ -169,6 +169,7 @@ func TestMaterializeMissingSourcePreservesPriorFactsWithoutClaimingFreshness(t *
 	input.Previous = &prior
 	input.Source.Availability = memory.SourceUnavailable
 	input.SourceRecordDigest = mustDigest(t, input.Source)
+	input.UsageRecordDigest = mustDigest(t, input.Source.Usage)
 	input.TerminalState = memory.Missing
 	input.Observations = nil
 	input.ObservationChunkDigests = nil
@@ -184,7 +185,7 @@ func TestMaterializeMissingSourcePreservesPriorFactsWithoutClaimingFreshness(t *
 	if fmt.Sprint(missing.ActiveRevisionIDs) != fmt.Sprint(prior.ActiveRevisionIDs) ||
 		fmt.Sprint(missing.ObservationChunkDigests) != fmt.Sprint(prior.ObservationChunkDigests) ||
 		fmt.Sprint(missing.ObservationSummaries) != fmt.Sprint(prior.ObservationSummaries) ||
-		fmt.Sprint(missing.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) || missing.SourceRecordDigest != prior.SourceRecordDigest || missing.UsageRecordDigest != prior.UsageRecordDigest {
+		fmt.Sprint(missing.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) || missing.SourceRecordDigest != input.SourceRecordDigest || missing.UsageRecordDigest != prior.UsageRecordDigest {
 		t.Fatalf("missing source discarded retained facts\nprior=%+v\nmissing=%+v", prior, missing)
 	}
 }
@@ -200,6 +201,7 @@ func TestMaterializeEveryUnavailableTerminalPreservesPriorFactsAndExactState(t *
 			input.Previous = &prior
 			input.Source.Availability = memory.SourceUnavailable
 			input.SourceRecordDigest = mustDigest(t, input.Source)
+			input.UsageRecordDigest = mustDigest(t, input.Source.Usage)
 			input.TerminalState = state
 			input.Observations = nil
 			input.ObservationChunkDigests = nil
@@ -216,7 +218,7 @@ func TestMaterializeEveryUnavailableTerminalPreservesPriorFactsAndExactState(t *
 				fmt.Sprint(view.ObservationChunkDigests) != fmt.Sprint(prior.ObservationChunkDigests) ||
 				fmt.Sprint(view.ObservationSummaries) != fmt.Sprint(prior.ObservationSummaries) ||
 				fmt.Sprint(view.DerivedRecords) != fmt.Sprint(prior.DerivedRecords) ||
-				view.SourceRecordDigest != prior.SourceRecordDigest || view.UsageRecordDigest != prior.UsageRecordDigest {
+				view.SourceRecordDigest != input.SourceRecordDigest || view.UsageRecordDigest != prior.UsageRecordDigest {
 				t.Fatalf("unavailable %s discarded prior facts\nprior=%+v\nview=%+v", state, prior, view)
 			}
 		})
@@ -241,7 +243,7 @@ func TestMaterializeAssignsExactlyOneRequestedTerminalState(t *testing.T) {
 			if state == memory.Missing {
 				input.Source.Availability = memory.SourceUnavailable
 				input.SourceRecordDigest = mustDigest(t, input.Source)
-				input.UsageRecordDigest = input.SourceRecordDigest
+				input.UsageRecordDigest = mustDigest(t, input.Source.Usage)
 				input.Observations = nil
 				input.ObservationChunkDigests = nil
 			}
@@ -364,7 +366,7 @@ func TestMaterializeReferencesSharedCatalogUsageWithoutCopyingTotals(t *testing.
 	input := fixtureInput(t, nil)
 	input.Source.ProjectIDs = []string{"project-a", "project-b"}
 	input.SourceRecordDigest = mustDigest(t, input.Source)
-	input.UsageRecordDigest = input.SourceRecordDigest
+	input.UsageRecordDigest = mustDigest(t, input.Source.Usage)
 	view, _, err := Materialize(input)
 	if err != nil {
 		t.Fatal(err)
@@ -378,8 +380,8 @@ func TestMaterializeReferencesSharedCatalogUsageWithoutCopyingTotals(t *testing.
 			t.Fatalf("SessionView copied SourceCatalog usage field %q: %s", forbidden, body)
 		}
 	}
-	if view.UsageRecordDigest != input.UsageRecordDigest || view.UsageRecordDigest != view.SourceRecordDigest {
-		t.Fatalf("usage reference=%q source=%q want authenticated catalog digest %q", view.UsageRecordDigest, view.SourceRecordDigest, input.UsageRecordDigest)
+	if view.UsageRecordDigest != input.UsageRecordDigest || view.UsageRecordDigest == view.SourceRecordDigest {
+		t.Fatalf("usage reference=%q source=%q want independent authenticated usage digest %q", view.UsageRecordDigest, view.SourceRecordDigest, input.UsageRecordDigest)
 	}
 
 	unauthenticated := input
@@ -394,7 +396,7 @@ func TestMaterializeReferencesSharedCatalogUsageWithoutCopyingTotals(t *testing.
 	changedUsage.Source.Usage.Models[0].TokenUsage.TotalTokens++
 	changedUsage.Source.Usage.TotalTokens++
 	changedUsage.SourceRecordDigest = mustDigest(t, changedUsage.Source)
-	changedUsage.UsageRecordDigest = changedUsage.SourceRecordDigest
+	changedUsage.UsageRecordDigest = mustDigest(t, changedUsage.Source.Usage)
 	changedView, changed, err := Materialize(changedUsage)
 	if err != nil || !changed || changedView.DependencyDigest == view.DependencyDigest || changedView.UsageRecordDigest == view.UsageRecordDigest {
 		t.Fatalf("authenticated usage successor did not invalidate view: changed=%v err=%v", changed, err)
@@ -502,11 +504,12 @@ func fixtureInput(t *testing.T, previous *memory.SessionView) Input {
 	request.RevisionID = memory.ObservationRevisionID(request)
 	verification := observation(t, source, "project-a", 10, "verification", "verify-1", "verification", "package", "passed", map[string]string{"component": "package", "status": "test"})
 	sourceDigest := mustDigest(t, source)
+	usageDigest := mustDigest(t, source.Usage)
 	return Input{
 		ProjectID:               "project-a",
 		Source:                  source,
 		SourceRecordDigest:      sourceDigest,
-		UsageRecordDigest:       sourceDigest,
+		UsageRecordDigest:       usageDigest,
 		Observations:            []memory.ObservationRevision{verification, request},
 		ObservationChunkDigests: []string{testDigest(t, "chunk-1")},
 		TerminalState:           memory.Indexed,
@@ -582,7 +585,7 @@ func rebindInputSource(t *testing.T, input *Input, sourceIdentity string) {
 	t.Helper()
 	input.Source.SourceIdentity = sourceIdentity
 	input.SourceRecordDigest = mustDigest(t, input.Source)
-	input.UsageRecordDigest = input.SourceRecordDigest
+	input.UsageRecordDigest = mustDigest(t, input.Source.Usage)
 	for index := range input.Observations {
 		input.Observations[index].Key.SourceIdentity = sourceIdentity
 		input.Observations[index].Ref.SourceIdentity = sourceIdentity

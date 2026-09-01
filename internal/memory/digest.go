@@ -129,6 +129,18 @@ type SessionViewIdentity struct {
 	MaterializerVersion     string               `json:"materializer_version"`
 }
 
+type SessionLineageIdentity struct {
+	SchemaVersion         int               `json:"schema_version"`
+	ProjectID             string            `json:"project_id"`
+	Provider              string            `json:"provider"`
+	SessionID             string            `json:"session_id"`
+	SourceIdentity        string            `json:"source_identity"`
+	ActiveRevisions       map[string]string `json:"active_revisions"`
+	SupersededRevisions   map[string]string `json:"superseded_revisions"`
+	WithdrawnRevisions    map[string]string `json:"withdrawn_revisions"`
+	PreviousLineageDigest string            `json:"previous_lineage_digest,omitempty"`
+}
+
 type ProjectProbeStateIdentity struct {
 	SchemaVersion           int          `json:"schema_version"`
 	ProjectID               string       `json:"project_id"`
@@ -187,6 +199,24 @@ func SessionViewDigestContext(ctx context.Context, value SessionView) (string, e
 		Diagnostics:             value.Diagnostics,
 		DependencyDigest:        value.DependencyDigest,
 		MaterializerVersion:     value.MaterializerVersion,
+	})
+}
+
+func SessionLineageDigest(value SessionLineage) (string, error) {
+	return SessionLineageDigestContext(context.Background(), value)
+}
+
+func SessionLineageDigestContext(ctx context.Context, value SessionLineage) (string, error) {
+	return DigestContext(ctx, SessionLineageIdentity{
+		SchemaVersion:         value.SchemaVersion,
+		ProjectID:             value.ProjectID,
+		Provider:              value.Provider,
+		SessionID:             value.SessionID,
+		SourceIdentity:        value.SourceIdentity,
+		ActiveRevisions:       value.ActiveRevisions,
+		SupersededRevisions:   value.SupersededRevisions,
+		WithdrawnRevisions:    value.WithdrawnRevisions,
+		PreviousLineageDigest: value.PreviousLineageDigest,
 	})
 }
 

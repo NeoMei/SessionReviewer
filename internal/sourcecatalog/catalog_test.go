@@ -634,7 +634,7 @@ func TestCatalogStoresSharedSessionUsageOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := sourceRecord("s1", []string{"project-a", "project-b", "project-a"}, 573135757)
-	digest, err := catalog.UpsertSource(second)
+	_, err := catalog.UpsertSource(second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,7 +650,11 @@ func TestCatalogStoresSharedSessionUsageOnce(t *testing.T) {
 		if err != nil || len(usage) != 1 {
 			t.Fatalf("project=%s usage=%+v err=%v", projectID, usage, err)
 		}
-		want := memory.AssociatedUsage{Provider: "codex", SessionID: "s1", UsageRecordDigest: digest, Shared: true}
+		usageDigest, digestErr := memory.Digest(second.Usage)
+		if digestErr != nil {
+			t.Fatal(digestErr)
+		}
+		want := memory.AssociatedUsage{Provider: "codex", SessionID: "s1", UsageRecordDigest: usageDigest, Shared: true}
 		if usage[0] != want {
 			t.Fatalf("project=%s usage=%+v want=%+v", projectID, usage[0], want)
 		}
