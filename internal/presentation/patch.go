@@ -187,12 +187,6 @@ func Capture(input CaptureInput) (CaptureResult, error) {
 				Value: observation.Value, Values: append([]string(nil), observation.Values...),
 				BaseGeneratedHash: baseline.GeneratedHash,
 			}
-		case hadPatch && prior.Operation == Suppress:
-			captured = Patch{
-				EntityID: baseline.EntityID, Field: baseline.Field, Operation: Set,
-				Value: observation.Value, Values: append([]string(nil), observation.Values...),
-				BaseGeneratedHash: baseline.GeneratedHash,
-			}
 		default:
 			continue
 		}

@@ -17,6 +17,7 @@
     "accounting",
     "sessions",
     "human_patches",
+    "orphan_patches",
     "generated_baselines",
     "legacy_compatibility"
   ],
@@ -60,6 +61,12 @@
       }
     },
     "human_patches": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/human_patch"
+      }
+    },
+    "orphan_patches": {
       "type": "array",
       "items": {
         "$ref": "#/$defs/human_patch"
@@ -881,6 +888,7 @@
         "generation_id",
         "entity_id",
         "field",
+        "kind",
         "generated_hash"
       ],
       "properties": {
@@ -894,6 +902,9 @@
         "field": {
           "type": "string",
           "minLength": 1
+        },
+        "kind": {
+          "enum": ["scalar", "list"]
         },
         "value": {
           "type": "string"

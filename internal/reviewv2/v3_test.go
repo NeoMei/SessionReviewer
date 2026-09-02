@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 )
 
 func TestSchemaV3RequiresMinimumWriterAndGeneration(t *testing.T) {
@@ -216,7 +219,7 @@ func TestMachineLedgerV3RequiresEveryPublicField(t *testing.T) {
 	for _, field := range []string{
 		"schema_version", "minimum_writer_version", "project_id", "generation_id", "project_view_digest",
 		"accepted_revision", "review_sha256", "history_sha256", "accounting", "sessions",
-		"human_patches", "generated_baselines", "legacy_compatibility",
+		"human_patches", "orphan_patches", "generated_baselines", "legacy_compatibility",
 	} {
 		t.Run(field, func(t *testing.T) {
 			value := decodeV3Map(t, body)
@@ -255,6 +258,58 @@ func TestMachineLedgerV3SchemaMatchesContract(t *testing.T) {
 	}
 	if strings.Contains(string(body), "review-ledger-v2.schema.json#") {
 		t.Fatal("public v3 schema is not self-contained")
+	}
+}
+
+func TestMachineLedgerV3WirePreservesEmptyListsAndBaselineHashContract(t *testing.T) {
+	patch := HumanPatchWire{
+		EntityID: "event-a", Field: "changes", Operation: "set",
+		Values: []string{}, BaseGeneratedHash: strings.Repeat("c", 64),
+	}
+	encoded, err := json.Marshal(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte("\"values\":[]")) {
+		t.Fatalf("empty human patch list was omitted: %s", encoded)
+	}
+	var decodedPatch HumanPatchWire
+	if err := json.Unmarshal(encoded, &decodedPatch); err != nil || decodedPatch.Values == nil || len(decodedPatch.Values) != 0 {
+		t.Fatalf("empty human patch list did not round trip: %+v err=%v", decodedPatch, err)
+	}
+
+	baselineValue := GeneratedBaselineWire{
+		GenerationID: "generation-3f00000000000001", EntityID: "event-a", Field: "changes",
+		Kind: "list", Values: []string{},
+	}
+	baselineValue.GeneratedHash = generatedBaselineHash(baselineValue)
+	encoded, err = json.Marshal(baselineValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte("\"values\":[]")) || !bytes.Contains(encoded, []byte("\"kind\":\"list\"")) {
+		t.Fatalf("empty baseline list wire lost contract bytes: %s", encoded)
+	}
+	var decodedBaseline GeneratedBaselineWire
+	if err := json.Unmarshal(encoded, &decodedBaseline); err != nil || decodedBaseline.Values == nil {
+		t.Fatalf("empty baseline list did not round trip: %+v err=%v", decodedBaseline, err)
+	}
+
+	emptyScalar := GeneratedBaselineWire{
+		GenerationID: "generation-3f00000000000001", EntityID: "project-overview",
+		Field: "next_action", Kind: "scalar",
+	}
+	emptyScalar.GeneratedHash = generatedBaselineHash(emptyScalar)
+	if _, err := RenderMachineLedgerV3(MachineLedgerV3{
+		SchemaVersion: SchemaVersion, MinimumWriterVersion: MinimumWriterVersion,
+		ProjectID: "project-a", GenerationID: emptyScalar.GenerationID,
+		ProjectViewDigest: strings.Repeat("d", 64), AcceptedRevision: 1,
+		ReviewSHA256: strings.Repeat("e", 64), HistorySHA256: strings.Repeat("f", 64),
+		Accounting: accounting.ProjectSummary{Models: []accounting.ProjectModelSummary{}},
+		Sessions:   []ledger.SessionReport{}, HumanPatches: []HumanPatchWire{},
+		OrphanPatches: []HumanPatchWire{}, GeneratedBaselines: []GeneratedBaselineWire{emptyScalar},
+	}); err != nil {
+		t.Fatalf("intentionally empty scalar baseline rejected: %v", err)
 	}
 }
 
@@ -332,8 +387,8 @@ func validBaselineMap() map[string]any {
 	generationID := "generation-3f00000000000001"
 	baseline := GeneratedBaselineWire{GenerationID: generationID, EntityID: "project-overview", Field: "status", Value: "generated"}
 	return map[string]any{
-		"generation_id": generationID, "entity_id": baseline.EntityID, "field": baseline.Field,
-		"value": baseline.Value, "generated_hash": generatedBaselineHash(generationID, baseline),
+		"generation_id": generationID, "entity_id": baseline.EntityID, "field": baseline.Field, "kind": "scalar",
+		"value": baseline.Value, "generated_hash": generatedBaselineHash(baseline),
 	}
 }
 

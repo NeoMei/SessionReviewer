@@ -27,6 +27,7 @@ type GeneratedBaselineWire struct {
 	GenerationID  string   "json:\"generation_id\""
 	EntityID      string   "json:\"entity_id\""
 	Field         string   "json:\"field\""
+	Kind          string   "json:\"kind\""
 	Value         string   "json:\"value,omitempty\""
 	Values        []string "json:\"values,omitempty\""
 	GeneratedHash string   "json:\"generated_hash\""
@@ -49,6 +50,7 @@ type MachineLedgerV3 struct {
 	Accounting           accounting.ProjectSummary "json:\"accounting\""
 	Sessions             []ledger.SessionReport    "json:\"sessions\""
 	HumanPatches         []HumanPatchWire          "json:\"human_patches\""
+	OrphanPatches        []HumanPatchWire          "json:\"orphan_patches\""
 	GeneratedBaselines   []GeneratedBaselineWire   "json:\"generated_baselines\""
 	LegacyCompatibility  LegacyCompatibility       "json:\"legacy_compatibility\""
 }
@@ -161,6 +163,18 @@ func LoadV3(projectRoot string) (AcceptedV3, error) {
 	if err != nil {
 		return AcceptedV3{}, err
 	}
+	accepted, err := LoadV3Bytes(reviewBody, historyBody, machineBody)
+	if err != nil {
+		return AcceptedV3{}, err
+	}
+	if err := revalidateLoadedFiles(directory, files); err != nil {
+		return AcceptedV3{}, err
+	}
+	accepted.projectRoot, accepted.projectInfo, accepted.files = projectRoot, directory.Info(), files
+	return accepted, nil
+}
+
+func LoadV3Bytes(reviewBody, historyBody, machineBody []byte) (AcceptedV3, error) {
 	review, err := ParseReview(reviewBody)
 	if err != nil {
 		return AcceptedV3{}, err
@@ -186,13 +200,7 @@ func LoadV3(projectRoot string) (AcceptedV3, error) {
 			return AcceptedV3{}, errors.New("history event generation does not match machine ledger")
 		}
 	}
-	if err := revalidateLoadedFiles(directory, files); err != nil {
-		return AcceptedV3{}, err
-	}
-	return AcceptedV3{
-		State:       StateV3{Review: review.Model, Events: history.Events, Machine: machine},
-		projectRoot: projectRoot, projectInfo: directory.Info(), files: files,
-	}, nil
+	return AcceptedV3{State: StateV3{Review: review.Model, Events: history.Events, Machine: machine}}, nil
 }
 
 func RenderReviewV3(value Review) ([]byte, error) {
@@ -238,11 +246,18 @@ func normalizeMachineLedgerV3(value MachineLedgerV3) MachineLedgerV3 {
 		return value.Sessions[i].ID < value.Sessions[j].ID
 	})
 	value.HumanPatches = append([]HumanPatchWire{}, value.HumanPatches...)
+	value.OrphanPatches = append([]HumanPatchWire{}, value.OrphanPatches...)
 	sort.Slice(value.HumanPatches, func(i, j int) bool {
 		if value.HumanPatches[i].EntityID != value.HumanPatches[j].EntityID {
 			return value.HumanPatches[i].EntityID < value.HumanPatches[j].EntityID
 		}
 		return value.HumanPatches[i].Field < value.HumanPatches[j].Field
+	})
+	sort.Slice(value.OrphanPatches, func(i, j int) bool {
+		if value.OrphanPatches[i].EntityID != value.OrphanPatches[j].EntityID {
+			return value.OrphanPatches[i].EntityID < value.OrphanPatches[j].EntityID
+		}
+		return value.OrphanPatches[i].Field < value.OrphanPatches[j].Field
 	})
 	value.GeneratedBaselines = append([]GeneratedBaselineWire{}, value.GeneratedBaselines...)
 	sort.Slice(value.GeneratedBaselines, func(i, j int) bool {
@@ -273,7 +288,7 @@ func validateMachineLedgerV3(value MachineLedgerV3) error {
 	if value.AcceptedRevision < 0 {
 		return errors.New("v3 accepted revision must be nonnegative")
 	}
-	if value.Sessions == nil || value.HumanPatches == nil || value.GeneratedBaselines == nil ||
+	if value.Sessions == nil || value.HumanPatches == nil || value.OrphanPatches == nil || value.GeneratedBaselines == nil ||
 		value.Accounting.Models == nil || value.LegacyCompatibility.Timeline == nil ||
 		value.LegacyCompatibility.Decisions == nil || value.LegacyCompatibility.OpenLoops == nil ||
 		value.LegacyCompatibility.CurrentRisks == nil {
@@ -295,8 +310,8 @@ func validateMachineLedgerV3(value MachineLedgerV3) error {
 			return fmt.Errorf("v3 session %q accounting: %w", session.ID, err)
 		}
 	}
-	patches := make(map[string]struct{}, len(value.HumanPatches))
-	for _, patch := range value.HumanPatches {
+	patches := make(map[string]struct{}, len(value.HumanPatches)+len(value.OrphanPatches))
+	for _, patch := range append(append([]HumanPatchWire(nil), value.HumanPatches...), value.OrphanPatches...) {
 		key := patch.EntityID + "\x00" + patch.Field
 		if _, duplicate := patches[key]; duplicate {
 			return fmt.Errorf("duplicate v3 patch identity %s/%s", patch.EntityID, patch.Field)
@@ -307,9 +322,6 @@ func validateMachineLedgerV3(value MachineLedgerV3) error {
 		}
 		switch patch.Operation {
 		case "set":
-			if patch.Value == "" && len(patch.Values) == 0 {
-				return errors.New("v3 set patch requires a value")
-			}
 		case "suppress", "restore_default":
 			if patch.Value != "" || patch.Values != nil {
 				return errors.New("v3 suppress/restore patch cannot carry a value")
@@ -325,27 +337,26 @@ func validateMachineLedgerV3(value MachineLedgerV3) error {
 			return fmt.Errorf("duplicate v3 baseline identity %s/%s", baseline.EntityID, baseline.Field)
 		}
 		baselines[key] = struct{}{}
-		if baseline.GenerationID != value.GenerationID || !validStableID(baseline.EntityID) || baseline.Field == "" || !lowercaseSHA256.MatchString(baseline.GeneratedHash) {
+		if baseline.GenerationID != value.GenerationID || !validStableID(baseline.EntityID) || baseline.Field == "" ||
+			(baseline.Kind != "scalar" && baseline.Kind != "list") || !lowercaseSHA256.MatchString(baseline.GeneratedHash) {
 			return fmt.Errorf("invalid v3 baseline identity %s/%s", baseline.EntityID, baseline.Field)
 		}
-		if baseline.Value == "" && baseline.Values == nil {
-			return errors.New("v3 baseline requires a generated value")
-		}
-		if baseline.GeneratedHash != generatedBaselineHash(value.GenerationID, baseline) {
+		if baseline.GeneratedHash != generatedBaselineHash(baseline) {
 			return errors.New("v3 baseline hash does not match its canonical generated value")
 		}
 	}
 	return nil
 }
 
-func generatedBaselineHash(generationID string, baseline GeneratedBaselineWire) string {
+func generatedBaselineHash(baseline GeneratedBaselineWire) string {
 	identity := struct {
-		GenerationID string
-		EntityID     string
-		Field        string
-		Value        string
-		Values       []string
-	}{generationID, baseline.EntityID, baseline.Field, baseline.Value, baseline.Values}
+		SchemaVersion int      "json:\"schema_version\""
+		EntityID      string   "json:\"entity_id\""
+		Field         string   "json:\"field\""
+		Kind          string   "json:\"kind\""
+		Value         string   "json:\"value\""
+		Values        []string "json:\"values\""
+	}{1, baseline.EntityID, baseline.Field, baseline.Kind, baseline.Value, baseline.Values}
 	body, err := json.Marshal(identity)
 	if err != nil {
 		return ""
@@ -359,4 +370,89 @@ func validGenerationID(value string) bool {
 
 func validMinimumWriterVersion(value string) bool {
 	return value == MinimumWriterVersion
+}
+
+type humanPatchWireJSON struct {
+	EntityID          string          "json:\"entity_id\""
+	Field             string          "json:\"field\""
+	Operation         string          "json:\"operation\""
+	Value             string          "json:\"value,omitempty\""
+	Values            json.RawMessage "json:\"values,omitempty\""
+	BaseGeneratedHash string          "json:\"base_generated_hash\""
+}
+
+func (value HumanPatchWire) MarshalJSON() ([]byte, error) {
+	var values json.RawMessage
+	if value.Values != nil {
+		encoded, err := json.Marshal(value.Values)
+		if err != nil {
+			return nil, err
+		}
+		values = encoded
+	}
+	return json.Marshal(humanPatchWireJSON{
+		EntityID: value.EntityID, Field: value.Field, Operation: value.Operation,
+		Value: value.Value, Values: values, BaseGeneratedHash: value.BaseGeneratedHash,
+	})
+}
+
+func (value *HumanPatchWire) UnmarshalJSON(body []byte) error {
+	var wire humanPatchWireJSON
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	result := HumanPatchWire{
+		EntityID: wire.EntityID, Field: wire.Field, Operation: wire.Operation,
+		Value: wire.Value, BaseGeneratedHash: wire.BaseGeneratedHash,
+	}
+	if len(wire.Values) != 0 && string(wire.Values) != "null" {
+		if err := json.Unmarshal(wire.Values, &result.Values); err != nil {
+			return err
+		}
+	}
+	*value = result
+	return nil
+}
+
+type generatedBaselineWireJSON struct {
+	GenerationID  string          "json:\"generation_id\""
+	EntityID      string          "json:\"entity_id\""
+	Field         string          "json:\"field\""
+	Kind          string          "json:\"kind\""
+	Value         string          "json:\"value,omitempty\""
+	Values        json.RawMessage "json:\"values,omitempty\""
+	GeneratedHash string          "json:\"generated_hash\""
+}
+
+func (value GeneratedBaselineWire) MarshalJSON() ([]byte, error) {
+	var values json.RawMessage
+	if value.Values != nil {
+		encoded, err := json.Marshal(value.Values)
+		if err != nil {
+			return nil, err
+		}
+		values = encoded
+	}
+	return json.Marshal(generatedBaselineWireJSON{
+		GenerationID: value.GenerationID, EntityID: value.EntityID, Field: value.Field,
+		Kind: value.Kind, Value: value.Value, Values: values, GeneratedHash: value.GeneratedHash,
+	})
+}
+
+func (value *GeneratedBaselineWire) UnmarshalJSON(body []byte) error {
+	var wire generatedBaselineWireJSON
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	result := GeneratedBaselineWire{
+		GenerationID: wire.GenerationID, EntityID: wire.EntityID, Field: wire.Field,
+		Kind: wire.Kind, Value: wire.Value, GeneratedHash: wire.GeneratedHash,
+	}
+	if len(wire.Values) != 0 && string(wire.Values) != "null" {
+		if err := json.Unmarshal(wire.Values, &result.Values); err != nil {
+			return err
+		}
+	}
+	*value = result
+	return nil
 }
