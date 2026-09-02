@@ -34,7 +34,7 @@ func (d Document) v2EntityType() (string, bool) {
 		return "", false
 	}
 	version, err := positiveInt(schema)
-	if err != nil || version != reviewv2.SchemaVersion {
+	if err != nil || version != reviewv2.LegacySchemaVersion {
 		return "", false
 	}
 	entityType, err := requiredString(d.frontmatter, "entity_type")
@@ -50,7 +50,7 @@ func validatedV2Source(mappingNode *yaml.Node, source []byte) ([]byte, []reviewv
 	if !v2 {
 		if schema, ok := mappingValue(mappingNode, "schema_version"); ok {
 			version, err := positiveInt(schema)
-			if err == nil && version == reviewv2.SchemaVersion {
+			if err == nil && version == reviewv2.LegacySchemaVersion {
 				return nil, nil, "", invalidDocument("schema v2 requires a compact review entity type")
 			}
 		}

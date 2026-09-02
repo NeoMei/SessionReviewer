@@ -33,7 +33,7 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 			LastVerification: legacy.CurrentState.LastVerified,
 		},
 		Machine: MachineLedger{
-			SchemaVersion:       SchemaVersion,
+			SchemaVersion:       LegacySchemaVersion,
 			ProjectID:           legacy.ProjectID,
 			AcceptedRevision:    legacy.CurrentState.Revision,
 			Evidence:            make(map[string][]ledger.EvidenceRef),

@@ -114,9 +114,12 @@ func normalizedToOriginalOffsets(source []byte) []int {
 }
 
 type frontmatterIdentity struct {
-	projectID string
-	revision  int
-	bodyStart int
+	projectID            string
+	revision             int
+	schemaVersion        int
+	generationID         string
+	minimumWriterVersion string
+	bodyStart            int
 }
 
 type markdownHeading struct {
@@ -182,14 +185,27 @@ func parseFrontmatter(source []byte, expectedID, expectedType string) (frontmatt
 		return frontmatterIdentity{}, errors.New("frontmatter project_id must be a stable lower-case project ID")
 	}
 	schema, err := requiredFrontmatterInt(mapping, "schema_version")
-	if err != nil || schema != SchemaVersion {
-		return frontmatterIdentity{}, fmt.Errorf("frontmatter schema_version must be %d", SchemaVersion)
+	if err != nil || (schema != LegacySchemaVersion && schema != SchemaVersion) {
+		return frontmatterIdentity{}, fmt.Errorf("frontmatter schema_version must be %d or %d", LegacySchemaVersion, SchemaVersion)
+	}
+	identity := frontmatterIdentity{schemaVersion: schema}
+	if schema == SchemaVersion {
+		generation, err := requiredFrontmatterString(mapping, "generation_id")
+		if err != nil || !validGenerationID(generation) {
+			return frontmatterIdentity{}, errors.New("frontmatter generation_id must be a stable generation ID")
+		}
+		writer, err := requiredFrontmatterString(mapping, "minimum_writer_version")
+		if err != nil || !writerAtLeastV3(writer) {
+			return frontmatterIdentity{}, fmt.Errorf("frontmatter minimum_writer_version must be at least %s", MinimumWriterVersion)
+		}
+		identity.generationID, identity.minimumWriterVersion = generation, writer
 	}
 	revision, err := requiredFrontmatterInt(mapping, "revision")
 	if err != nil || revision < 1 {
 		return frontmatterIdentity{}, errors.New("frontmatter revision must be a positive integer")
 	}
-	return frontmatterIdentity{projectID: projectID, revision: revision, bodyStart: closeEnd}, nil
+	identity.projectID, identity.revision, identity.bodyStart = projectID, revision, closeEnd
+	return identity, nil
 }
 
 func validateFrontmatterMapping(mapping *yaml.Node) error {

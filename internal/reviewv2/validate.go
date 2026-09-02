@@ -150,7 +150,7 @@ func validateCompatibilityProjection(state State, risks, decisions map[string]st
 }
 
 func validateMachineLedger(value MachineLedger) error {
-	if value.SchemaVersion != SchemaVersion {
+	if value.SchemaVersion != LegacySchemaVersion {
 		return fmt.Errorf("unsupported review ledger schema version %d", value.SchemaVersion)
 	}
 	if strings.TrimSpace(value.ProjectID) == "" {

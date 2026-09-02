@@ -87,6 +87,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/project.go	overlayUnchangedHumanFields	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/project.go	overlayUnchangedHumanFields	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/review_markdown.go	RenderReview	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.TypeOf	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=3
@@ -117,6 +118,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	in
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/migration_journal.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/project.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/review_markdown.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/v3.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/validate.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/codex/adapter.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sourcecatalog/catalog.go	reflect	alias=reflect
@@ -253,6 +255,8 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	inter
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Type	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/migration_journal.go	decodeMigrationJournal	reflect.Type	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/migration_journal.go	decodeMigrationJournal	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.Type	occurrence=2
 targets=linux/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_linux.go	renameRootNoReplace	golang.org/x/sys/unix.Renameat2	occurrence=1
 targets=linux/amd64	IMPORT	xsys	internal/atomicfile/rename_noreplace_linux.go	golang.org/x/sys/unix	alias=unix
 targets=linux/amd64	REF	xsys	internal/atomicfile/rename_noreplace_linux.go	renameRootNoReplace	golang.org/x/sys/unix.RENAME_NOREPLACE	occurrence=1

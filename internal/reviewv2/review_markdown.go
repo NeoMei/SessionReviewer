@@ -46,7 +46,10 @@ func ParseReview(source []byte) (ReviewDocument, error) {
 		return ReviewDocument{}, fmt.Errorf("parse review: %w", err)
 	}
 	document := ReviewDocument{
-		Model:  Review{ProjectID: identity.projectID, Revision: identity.revision, Name: name},
+		Model: Review{
+			ProjectID: identity.projectID, Revision: identity.revision, Name: name,
+			GenerationID: identity.generationID, MinimumWriterVersion: identity.minimumWriterVersion,
+		},
 		source: source,
 		fields: make(map[semanticField]sourceSpan),
 		blocks: make(map[string]markerBlock),
@@ -171,7 +174,7 @@ func RenderReview(value Review) ([]byte, error) {
 	}
 
 	var out bytes.Buffer
-	fmt.Fprintf(&out, "---\nid: project-overview\nentity_type: project_review\nproject_id: %s\nschema_version: %d\nrevision: %d\n---\n", value.ProjectID, SchemaVersion, value.Revision)
+	fmt.Fprintf(&out, "---\nid: project-overview\nentity_type: project_review\nproject_id: %s\nschema_version: %d\nrevision: %d\n---\n", value.ProjectID, LegacySchemaVersion, value.Revision)
 	fmt.Fprintf(&out, "# %s\n\n", strings.TrimSpace(value.Name))
 	writeReviewSection(&out, "项目目标", value.Goal)
 	writeReviewSection(&out, "当前阶段", value.Stage)
@@ -226,7 +229,10 @@ func RenderReview(value Review) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("render review: generated Markdown is invalid: %w", err)
 	}
-	if !reflect.DeepEqual(document.Model, value) {
+	expected := value
+	expected.GenerationID = document.Model.GenerationID
+	expected.MinimumWriterVersion = document.Model.MinimumWriterVersion
+	if !reflect.DeepEqual(document.Model, expected) {
 		return nil, errors.New("render review: generated Markdown changed semantic fields")
 	}
 	return bytes.Clone(rendered), nil
