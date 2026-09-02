@@ -890,6 +890,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/netip	math
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/netip	math/bits
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/netip	strconv
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/netip	unique
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/url	bytes
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/url	errors
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/url	fmt
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	net/url	internal/godebug
