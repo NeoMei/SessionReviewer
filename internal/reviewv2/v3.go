@@ -365,7 +365,7 @@ func generatedBaselineHash(baseline GeneratedBaselineWire) string {
 }
 
 func validGenerationID(value string) bool {
-	return validStableID(value) && strings.HasPrefix(value, "generation-")
+	return validStableID(value) && (strings.HasPrefix(value, "generation-") || strings.HasPrefix(value, "scan-"))
 }
 
 func validMinimumWriterVersion(value string) bool {
