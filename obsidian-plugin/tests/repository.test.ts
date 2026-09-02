@@ -7,7 +7,7 @@ import { ProjectRepository, type SnapshotReady } from "../src/data/repository";
 import type { VaultFile, VaultPort } from "../src/data/vault-port";
 
 const fixture = (name: string): Promise<string> =>
-  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v2", name), "utf8");
+  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v3", name), "utf8");
 
 class FakeVault implements VaultPort {
   readonly files = new Map<string, string>();

@@ -6,7 +6,6 @@ import { CliRunner } from "./runner";
 
 export interface RuntimeDiscoveryOptions {
   legacyCliPath?: string;
-  legacyAgentPath?: string;
   home?: string;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
@@ -16,7 +15,6 @@ export interface RuntimeDiscoveryOptions {
 
 export interface DiscoveredRuntime {
   runner: CliRunner;
-  agentExecutable: string;
 }
 
 export type RuntimeResolver = (options?: RuntimeDiscoveryOptions) => Promise<DiscoveredRuntime | undefined>;
@@ -28,34 +26,22 @@ export async function discoverRuntime(options: RuntimeDiscoveryOptions = {}): Pr
   const createRunner = options.createRunner ?? ((executable: string) => new CliRunner(executable));
   const exists = options.executableExists ?? executableExists;
   const cliCandidates = executableCandidates("session-reviewer", platform, home, env, options.legacyCliPath, env.SESSIONREVIEWER_CLI_PATH);
-  const agentCandidates = executableCandidates("codex", platform, home, env, options.legacyAgentPath, env.SESSIONREVIEWER_AGENT_PATH, env.CODEX_CLI_PATH);
-  let fallback: DiscoveredRuntime | undefined;
 
   for (const cli of cliCandidates) {
     if (!await exists(cli, platform)) continue;
-    let runner: CliRunner;
     try {
-      runner = createRunner(cli);
+      const runner = createRunner(cli);
       await runner.verifyExecutable();
+      return { runner };
     } catch {
       continue;
     }
-    fallback ??= { runner, agentExecutable: "" };
-    for (const agent of agentCandidates) {
-      if (!await exists(agent, platform)) continue;
-      try {
-        const verified = await runner.verifyAgent(agent);
-        if (verified.compatible) return { runner, agentExecutable: agent };
-      } catch {
-        // Continue to the next installed Agent candidate.
-      }
-    }
   }
-  return fallback;
+  return undefined;
 }
 
 function executableCandidates(
-  name: "session-reviewer" | "codex",
+  name: "session-reviewer",
   platform: NodeJS.Platform,
   home: string,
   env: NodeJS.ProcessEnv,
@@ -69,7 +55,6 @@ function executableCandidates(
     : unixDirectories(name, home);
   directories.push(...pathDirectories);
   const candidates = [...preferred, ...directories.flatMap((directory) => names.map((filename) => path.join(directory, filename)))];
-  if (platform === "darwin" && name === "codex") candidates.push("/Applications/ChatGPT.app/Contents/Resources/codex");
   const seen = new Set<string>();
   return candidates.filter((candidate): candidate is string => {
     if (!candidate || !path.isAbsolute(candidate)) return false;
@@ -80,33 +65,17 @@ function executableCandidates(
   });
 }
 
-function unixDirectories(name: "session-reviewer" | "codex", home: string): string[] {
-  const result = [posix.join(home, ".local", "bin")];
-  if (name === "codex") result.push(posix.join(home, ".npm-global", "bin"));
-  result.push("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin");
-  return result;
+function unixDirectories(name: "session-reviewer", home: string): string[] {
+  return [posix.join(home, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
 }
 
-function windowsDirectories(name: "session-reviewer" | "codex", home: string, env: NodeJS.ProcessEnv, pathDirectories: string[]): string[] {
+function windowsDirectories(name: "session-reviewer", home: string, env: NodeJS.ProcessEnv, _pathDirectories: string[]): string[] {
   const localAppData = env.LOCALAPPDATA;
-  const appData = env.APPDATA;
-  if (name === "session-reviewer") {
-    return localAppData ? [
-      win32.join(localAppData, "SessionReviewer", "bin"),
-      win32.join(localAppData, "SessionReviewer"),
-      win32.join(localAppData, "Programs", "SessionReviewer")
-    ] : [];
-  }
-  const npmRoots = [appData ? win32.join(appData, "npm") : undefined, ...pathDirectories].filter((directory): directory is string => Boolean(directory));
-  const vendorDirectories = npmRoots.flatMap((root) => [
-    win32.join(root, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "bin"),
-    win32.join(root, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-win32-x64", "vendor", "x86_64-pc-windows-msvc", "codex")
-  ]);
-  return [
-    ...vendorDirectories,
-    win32.join(home, ".codex", "packages", "standalone", "current", "bin"),
-    ...(localAppData ? [win32.join(localAppData, "Programs", "codex")] : [])
-  ];
+  return localAppData ? [
+    win32.join(localAppData, "SessionReviewer", "bin"),
+    win32.join(localAppData, "SessionReviewer"),
+    win32.join(localAppData, "Programs", "SessionReviewer")
+  ] : [];
 }
 
 async function executableExists(path: string, platform: NodeJS.Platform): Promise<boolean> {

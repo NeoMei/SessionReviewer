@@ -1,4 +1,4 @@
-import type { BrowserModel } from "../contracts/review-v2";
+import type { BrowserModel } from "../contracts/review-v3";
 import { definition, element } from "./dom";
 
 export function renderUsage(model: BrowserModel): HTMLElement {

@@ -13,20 +13,18 @@ export default class SessionReviewerPlugin extends Plugin {
   private viewState: ViewState = defaultViewState();
   private runtime: DiscoveredRuntime | undefined;
   private runtimeResolver: RuntimeResolver = discoverRuntime;
-  private legacyPaths: { cliPath?: string; codexPath?: string } = {};
+  private legacyPaths: { cliPath?: string } = {};
 
   async onload(): Promise<void> {
-    const stored = await this.loadData() as { viewState?: Partial<ViewState>; cliPath?: unknown; codexPath?: unknown } | null;
+    const stored = await this.loadData() as { viewState?: Partial<ViewState>; cliPath?: unknown } | null;
     this.viewState = { ...defaultViewState(), ...(stored?.viewState ?? {}) };
     this.legacyPaths = {
-      ...(typeof stored?.cliPath === "string" ? { cliPath: stored.cliPath } : {}),
-      ...(typeof stored?.codexPath === "string" ? { codexPath: stored.codexPath } : {})
+      ...(typeof stored?.cliPath === "string" ? { cliPath: stored.cliPath } : {})
     };
     this.runtime = await this.runtimeResolver({
-      legacyCliPath: this.legacyPaths.cliPath,
-      legacyAgentPath: this.legacyPaths.codexPath
+      legacyCliPath: this.legacyPaths.cliPath
     });
-    if (this.runtime && (this.legacyPaths.cliPath || this.legacyPaths.codexPath)) {
+    if (this.runtime && this.legacyPaths.cliPath) {
       this.legacyPaths = {};
       await this.saveData({ viewState: this.viewState });
     }
@@ -36,7 +34,7 @@ export default class SessionReviewerPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.runtime?.runner, this.viewState, async (viewState) => {
       this.viewState = viewState;
       await this.saveData({ viewState, ...this.legacyPaths });
-    }, () => this.runtime?.agentExecutable ?? ""));
+    }));
     this.addRibbonIcon("history", "打开项目脉络", () => void this.activateView());
     this.addCommand({
       id: "open-project-evolution",

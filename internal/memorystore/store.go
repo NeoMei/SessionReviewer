@@ -24,7 +24,6 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
-	"github.com/neomei/SessionReviewer/internal/publication"
 )
 
 const (
@@ -47,7 +46,7 @@ var (
 	ErrNoPreparedGeneration    = errors.New("no prepared generation")
 	ErrPreparedGeneration      = errors.New("a different prepared generation already exists")
 	ErrNoPublishedGeneration   = errors.New("no published generation")
-	ErrPublicationProofInvalid = publication.ErrPublicationProofInvalid
+	ErrPublicationProofInvalid = errors.New("publication proof is invalid")
 	ErrImmutableConflict       = errors.New("immutable object digest already contains different bytes")
 
 	storeIDPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
@@ -528,7 +527,7 @@ func (s *Store) LoadPrepared() (Prepared, memory.GenerationManifest, error) {
 // CommitPublished atomically records the published generation pointer after verifying
 // the immutable generation manifest, project view digest, three projection file hashes,
 // and the journal verification proof.
-func (s *Store) CommitPublished(generationID string, proof publication.PublicationProof) error {
+func (s *Store) CommitPublished(generationID string, proof memory.PublicationProof) error {
 	if err := validateStoreID(generationID); err != nil {
 		return fmt.Errorf("%w: invalid generation ID", ErrPublicationProofInvalid)
 	}

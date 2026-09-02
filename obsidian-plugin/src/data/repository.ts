@@ -1,4 +1,4 @@
-import type { BrowserModel, MachineLedger } from "../contracts/review-v2";
+import type { BrowserModel, MachineLedger } from "../contracts/review-v3";
 import { sha256Text } from "./hash";
 import { parseLedger } from "./ledger";
 import { parseHistory, parseReview } from "./markdown";
@@ -55,7 +55,7 @@ export class ProjectRepository {
     for (const file of markdownFiles) {
       if (file.basename !== "项目回顾") continue;
       const frontmatter = this.vault.getFrontmatter(file.path);
-      if (frontmatter?.entity_type !== "project_review" || frontmatter.schema_version !== 2 || typeof frontmatter.project_id !== "string") continue;
+      if (frontmatter?.entity_type !== "project_review" || (frontmatter.schema_version !== 2 && frontmatter.schema_version !== 3) || typeof frontmatter.project_id !== "string") continue;
       const projectId = frontmatter.project_id;
       if (!validProjectId(projectId)) continue;
       const root = parent(file.path);

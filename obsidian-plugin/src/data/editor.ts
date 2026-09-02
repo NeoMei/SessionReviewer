@@ -1,4 +1,4 @@
-import type { EditableField, EditableFieldName } from "../contracts/review-v2";
+import type { EditableField, EditableFieldName } from "../contracts/review-v3";
 import { sha256Text } from "./hash";
 import { parseHistory, parseReview } from "./markdown";
 import type { VaultPort } from "./vault-port";

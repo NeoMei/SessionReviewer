@@ -1,4 +1,6 @@
 import type {
+  GeneratedBaselineWire,
+  HumanPatchWire,
   MachineLedger,
   ModelAccounting,
   Pricing,
@@ -6,7 +8,7 @@ import type {
   ProjectModelSummary,
   SessionAccounting,
   SessionReport
-} from "../contracts/review-v2";
+} from "../contracts/review-v3";
 
 const MAX_LEDGER_BYTES = 16 << 20;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -23,12 +25,23 @@ export function parseLedger(source: string): MachineLedger {
   } catch (error) {
     throw new Error(`decode machine ledger: ${message(error)}`);
   }
-  const root = object(value, "$", [
-    "schema_version", "project_id", "accepted_revision", "review_sha256", "history_sha256",
-    "last_successful_sync", "accounting", "sessions", "evidence", "legacy_compatibility"
-  ], ["schema_version", "project_id", "accepted_revision", "review_sha256", "history_sha256", "accounting", "sessions", "evidence", "legacy_compatibility"]);
-  if (integer(root.schema_version, "$.schema_version") !== 2) throw new Error("unsupported review ledger schema version");
+  const allowed = [
+    "schema_version", "minimum_writer_version", "project_id", "generation_id", "project_view_digest",
+    "accepted_revision", "review_sha256", "history_sha256", "last_successful_sync", "accounting",
+    "sessions", "human_patches", "orphan_patches", "generated_baselines", "legacy_compatibility"
+  ];
+  const required = [
+    "schema_version", "minimum_writer_version", "project_id", "generation_id", "project_view_digest",
+    "accepted_revision", "review_sha256", "history_sha256", "accounting", "sessions",
+    "human_patches", "orphan_patches", "generated_baselines"
+  ];
+  const root = object(value, "$", allowed, required);
+  if (integer(root.schema_version, "$.schema_version") !== 3) throw new Error("unsupported review ledger schema version");
+  const minimumWriterVersion = string(root.minimum_writer_version, "$.minimum_writer_version");
+  if (!isCompatibleWriter(minimumWriterVersion)) throw new Error("writer below 0.3.0 is incompatible");
   const projectId = nonempty(root.project_id, "$.project_id");
+  const generationId = nonempty(root.generation_id, "$.generation_id");
+  const projectViewDigest = nonempty(root.project_view_digest, "$.project_view_digest");
   const acceptedRevision = integer(root.accepted_revision, "$.accepted_revision");
   const reviewSha256 = hash(root.review_sha256, "$.review_sha256");
   const historySha256 = hash(root.history_sha256, "$.history_sha256");
@@ -42,22 +55,78 @@ export function parseLedger(source: string): MachineLedger {
   };
   validateProjectAggregate(accounting, sessions);
 
-  const sessionIds = new Set(sessions.map((session) => session.sessionId));
-  const evidence = parseEvidence(root.evidence, sessionIds);
-  const legacyCompatibility = parseLegacy(root.legacy_compatibility, projectId, sessionIds);
+  const humanPatches = array(root.human_patches, "$.human_patches").map((p, i) => parseHumanPatch(p, `$.human_patches[${i}]`));
+  const orphanPatches = array(root.orphan_patches, "$.orphan_patches").map((p, i) => parseHumanPatch(p, `$.orphan_patches[${i}]`));
+  const generatedBaselines = array(root.generated_baselines, "$.generated_baselines").map((b, i) => parseGeneratedBaseline(b, `$.generated_baselines[${i}]`, generationId));
+  const legacyCompatibility = root.legacy_compatibility === undefined ? undefined : root.legacy_compatibility as Record<string, unknown>;
   const lastSuccessfulSync = root.last_successful_sync === undefined ? undefined : string(root.last_successful_sync, "$.last_successful_sync");
+
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    minimumWriterVersion,
     projectId,
+    generationId,
+    projectViewDigest,
     acceptedRevision,
     reviewSha256,
     historySha256,
     ...(lastSuccessfulSync === undefined ? {} : { lastSuccessfulSync }),
     accounting,
     sessions,
-    evidence,
-    legacyCompatibility
+    humanPatches,
+    orphanPatches,
+    generatedBaselines,
+    ...(legacyCompatibility === undefined ? {} : { legacyCompatibility })
   };
+}
+
+function isCompatibleWriter(version: string): boolean {
+  const parts = version.split(".").map((p) => parseInt(p, 10));
+  if (parts.length < 3 || parts.some(isNaN)) return false;
+  const p0 = parts[0];
+  if (p0 !== undefined && p0 > 0) return true;
+  const p1 = parts[1];
+  if (p0 === 0 && p1 !== undefined && p1 >= 3) return true;
+  return false;
+}
+
+function parseHumanPatch(value: unknown, path: string): HumanPatchWire {
+  const row = object(value, path, ["entity_id", "field", "operation", "value", "values", "base_generated_hash"]);
+  const op = string(row.operation, `${path}.operation`);
+  if (op !== "set" && op !== "suppress" && op !== "restore_default") throw new Error(`${path}.operation is invalid`);
+  return {
+    entity_id: nonempty(row.entity_id, `${path}.entity_id`),
+    field: nonempty(row.field, `${path}.field`),
+    operation: op,
+    value: row.value === undefined ? undefined : string(row.value, `${path}.value`),
+    values: row.values === undefined ? undefined : strings(row.values, `${path}.values`),
+    base_generated_hash: hash(row.base_generated_hash, `${path}.base_generated_hash`)
+  };
+}
+
+function parseGeneratedBaseline(value: unknown, path: string, generationId: string): GeneratedBaselineWire {
+  const row = object(value, path, ["generation_id", "entity_id", "field", "kind", "value", "values", "generated_hash"]);
+  const gen = nonempty(row.generation_id, `${path}.generation_id`);
+  if (gen !== generationId) throw new Error(`${path}.generation_id does not match ledger generation ID`);
+  const kind = string(row.kind, `${path}.kind`);
+  if (kind !== "scalar" && kind !== "list" && kind !== "unsupported") throw new Error(`${path}.kind is invalid`);
+  return {
+    generation_id: gen,
+    entity_id: nonempty(row.entity_id, `${path}.entity_id`),
+    field: nonempty(row.field, `${path}.field`),
+    kind,
+    value: row.value === undefined ? undefined : string(row.value, `${path}.value`),
+    values: row.values === undefined ? undefined : strings(row.values, `${path}.values`),
+    generated_hash: hash(row.generated_hash, `${path}.generated_hash`)
+  };
+}
+
+function validateProjectAggregate(accounting: ProjectAccounting, sessions: SessionReport[]): void {
+  const reports = sessions.flatMap((session) => session.accounting ? [session.accounting] : []);
+  if (reports.length === 0) return;
+  if (sum(reports.map((item) => item.durationMs)) !== accounting.totalDurationMs || sum(reports.map((item) => item.totalTokens)) !== accounting.totalTokens || !near(sum(reports.map((item) => item.totalCostUsd)), accounting.totalCostUsd)) {
+    throw new Error("project aggregate total differs from session rows");
+  }
 }
 
 function parseProjectAccounting(value: unknown, path: string): ProjectAccounting {
@@ -97,20 +166,10 @@ function parseSession(value: unknown, path: string, projectId: string): SessionR
     "verification", "decisions_added", "decisions_revised", "open_loops_created", "open_loops_closed",
     "previous_session_id", "next_session_id", "evidence", "accounting"
   ];
-  const required = allowed.filter((key) => key !== "accounting");
+  const required = ["id", "project_id", "session_id", "previous_session_id", "next_session_id"];
   const row = object(value, path, allowed, required);
   const id = nonempty(row.id, `${path}.id`);
   if (string(row.project_id, `${path}.project_id`) !== projectId) throw new Error(`session "${id}" has a different project ID`);
-  integer(row.revision, `${path}.revision`);
-  string(row.initial_goal, `${path}.initial_goal`);
-  for (const key of ["goal_changes", "files", "commits", "verification", "decisions_added", "decisions_revised", "open_loops_created", "open_loops_closed"] as const) strings(row[key], `${path}.${key}`);
-  array(row.phases, `${path}.phases`).forEach((phase, index) => {
-    const item = object(phase, `${path}.phases[${index}]`, ["title", "summary", "evidence"]);
-    string(item.title, `${path}.phases[${index}].title`);
-    string(item.summary, `${path}.phases[${index}].summary`);
-    validateEvidenceRefs(item.evidence, `${path}.phases[${index}].evidence`);
-  });
-  validateEvidenceRefs(row.evidence, `${path}.evidence`);
   const accounting = row.accounting === undefined ? undefined : parseSessionAccounting(row.accounting, `${path}.accounting`);
   return {
     id,
@@ -193,108 +252,6 @@ function parsePricing(value: unknown, path: string): Pricing | undefined {
   };
 }
 
-function parseEvidence(value: unknown, sessionIds: Set<string>): ReadonlyMap<string, readonly unknown[]> {
-  const result = new Map<string, readonly unknown[]>();
-  array(value, "$.evidence").forEach((entry, index) => {
-    const row = object(entry, `$.evidence[${index}]`, ["id", "refs"]);
-    const id = nonempty(row.id, `$.evidence[${index}].id`);
-    if (result.has(id)) throw new Error(`duplicate evidence owner identity "${id}"`);
-    result.set(id, validateEvidenceRefs(row.refs, `$.evidence[${index}].refs`, sessionIds));
-  });
-  return result;
-}
-
-function validateEvidenceRefs(value: unknown, path: string, sessionIds?: Set<string>): readonly unknown[] {
-  const seen = new Set<string>();
-  return array(value, path).map((entry, index) => {
-    const row = object(entry, `${path}[${index}]`, ["evidence_id", "session_id", "jsonl_line", "source_hash", "summary"]);
-    const id = nonempty(row.evidence_id, `${path}[${index}].evidence_id`);
-    if (seen.has(id)) throw new Error(`duplicate evidence identity "${id}"`);
-    seen.add(id);
-    const sessionId = nonempty(row.session_id, `${path}[${index}].session_id`);
-    if (sessionIds && !sessionIds.has(sessionId)) throw new Error(`evidence "${id}" references missing session "${sessionId}"`);
-    positiveInteger(row.jsonl_line, `${path}[${index}].jsonl_line`);
-    hash(row.source_hash, `${path}[${index}].source_hash`);
-    string(row.summary, `${path}[${index}].summary`);
-    return row;
-  });
-}
-
-function parseLegacy(value: unknown, projectId: string, sessionIds: Set<string>): Readonly<Record<string, unknown>> {
-  const legacy = object(value, "$.legacy_compatibility", ["current_state", "timeline", "decisions", "open_loops", "current_risks"]);
-  const current = object(legacy.current_state, "$.legacy_compatibility.current_state", [
-    "project_id", "revision", "goal", "last_verified", "branch", "uncommitted_changes", "blockers", "open_risks",
-    "next_action", "first_inspection", "last_updated", "source_sessions", "evidence"
-  ]);
-  if (string(current.project_id, "legacy.current_state.project_id") !== projectId) throw new Error("legacy current-state project ID differs");
-  integer(current.revision, "legacy.current_state.revision");
-  for (const key of ["goal", "last_verified", "branch", "next_action", "first_inspection", "last_updated"] as const) string(current[key], `legacy.current_state.${key}`);
-  for (const key of ["uncommitted_changes", "blockers", "open_risks", "source_sessions"] as const) strings(current[key], `legacy.current_state.${key}`);
-  validateEvidenceRefs(current.evidence, "legacy.current_state.evidence", sessionIds);
-  const timeline = array(legacy.timeline, "legacy.timeline");
-  const decisions = array(legacy.decisions, "legacy.decisions");
-  const loops = array(legacy.open_loops, "legacy.open_loops");
-  const risks = array(legacy.current_risks, "legacy.current_risks");
-  const decisionIds = decisions.map((item, index) => validateLegacyDecision(item, index, projectId, sessionIds));
-  const loopIds = loops.map((item, index) => validateLegacyLoop(item, index, projectId, sessionIds));
-  const timelineIds = timeline.map((item, index) => validateLegacyEvent(item, index, new Set(decisionIds), new Set(loopIds), sessionIds));
-  unique(decisionIds, "legacy decision identity");
-  unique(loopIds, "legacy open-loop identity");
-  unique(timelineIds, "legacy timeline identity");
-  risks.forEach((item, index) => {
-    const row = object(item, `legacy.current_risks[${index}]`, ["risk_id", "kind", "source_key"]);
-    nonempty(row.risk_id, `legacy.current_risks[${index}].risk_id`);
-    if (row.kind !== "blocker" && row.kind !== "open_risk") throw new Error("legacy risk kind is invalid");
-    hash(row.source_key, `legacy.current_risks[${index}].source_key`);
-  });
-  return legacy;
-}
-
-function validateLegacyEvent(value: unknown, index: number, decisions: Set<string>, loops: Set<string>, sessions: Set<string>): string {
-  const path = `legacy.timeline[${index}]`;
-  const row = object(value, path, ["id", "occurred_at", "revision", "class", "title", "summary", "evidence", "decision_ids", "open_loop_ids"]);
-  const id = nonempty(row.id, `${path}.id`);
-  string(row.occurred_at, `${path}.occurred_at`); integer(row.revision, `${path}.revision`); string(row.class, `${path}.class`); string(row.title, `${path}.title`); string(row.summary, `${path}.summary`);
-  validateEvidenceRefs(row.evidence, `${path}.evidence`, sessions);
-  references(strings(row.decision_ids, `${path}.decision_ids`), decisions, `${path}.decision_ids`);
-  references(strings(row.open_loop_ids, `${path}.open_loop_ids`), loops, `${path}.open_loop_ids`);
-  return id;
-}
-
-function validateLegacyDecision(value: unknown, index: number, projectId: string, sessions: Set<string>): string {
-  const path = `legacy.decisions[${index}]`;
-  const row = object(value, path, ["id", "project_id", "title", "status", "revision", "tags", "supersedes", "source_sessions", "evidence", "context", "rationale", "consequences", "reevaluate_when", "alternatives", "rejected_paths"]);
-  const id = nonempty(row.id, `${path}.id`);
-  if (string(row.project_id, `${path}.project_id`) !== projectId) throw new Error(`${path} project ID differs`);
-  integer(row.revision, `${path}.revision`);
-  for (const key of ["title", "status", "context", "rationale", "consequences", "reevaluate_when"] as const) string(row[key], `${path}.${key}`);
-  for (const key of ["tags", "supersedes", "alternatives", "rejected_paths"] as const) strings(row[key], `${path}.${key}`);
-  references(strings(row.source_sessions, `${path}.source_sessions`), sessions, `${path}.source_sessions`);
-  validateEvidenceRefs(row.evidence, `${path}.evidence`, sessions);
-  return id;
-}
-
-function validateLegacyLoop(value: unknown, index: number, projectId: string, sessions: Set<string>): string {
-  const path = `legacy.open_loops[${index}]`;
-  const row = object(value, path, ["id", "project_id", "title", "status", "revision", "tags", "source_sessions", "evidence", "question", "attempts", "blocker", "next_experiment", "completion_criterion"]);
-  const id = nonempty(row.id, `${path}.id`);
-  if (string(row.project_id, `${path}.project_id`) !== projectId) throw new Error(`${path} project ID differs`);
-  integer(row.revision, `${path}.revision`);
-  for (const key of ["title", "status", "question", "blocker", "next_experiment", "completion_criterion"] as const) string(row[key], `${path}.${key}`);
-  strings(row.tags, `${path}.tags`); strings(row.attempts, `${path}.attempts`);
-  references(strings(row.source_sessions, `${path}.source_sessions`), sessions, `${path}.source_sessions`);
-  validateEvidenceRefs(row.evidence, `${path}.evidence`, sessions);
-  return id;
-}
-
-function validateProjectAggregate(accounting: ProjectAccounting, sessions: SessionReport[]): void {
-  const reports = sessions.flatMap((session) => session.accounting ? [session.accounting] : []);
-  if (reports.length === 0) return;
-  if (sum(reports.map((item) => item.durationMs)) !== accounting.totalDurationMs || sum(reports.map((item) => item.totalTokens)) !== accounting.totalTokens || !near(sum(reports.map((item) => item.totalCostUsd)), accounting.totalCostUsd)) {
-    throw new Error("project aggregate total differs from session rows");
-  }
-}
-
 function object(value: unknown, path: string, allowed: readonly string[], required: readonly string[] = allowed): JsonObject {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${path} must be an object`);
   const result = value as JsonObject;
@@ -325,12 +282,6 @@ function integer(value: unknown, path: string): number {
   return value;
 }
 
-function positiveInteger(value: unknown, path: string): number {
-  const result = integer(value, path);
-  if (result < 1) throw new Error(`${path} must be positive`);
-  return result;
-}
-
 function finite(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${path} must be finite and nonnegative`);
   return value;
@@ -358,10 +309,6 @@ function unique(values: string[], kind: string): void {
     if (seen.has(value)) throw new Error(`duplicate ${kind} "${value}"`);
     seen.add(value);
   }
-}
-
-function references(values: string[], known: Set<string>, path: string): void {
-  for (const value of values) if (!known.has(value)) throw new Error(`${path} references missing identity "${value}"`);
 }
 
 function near(left: number, right: number): boolean {

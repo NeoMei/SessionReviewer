@@ -1,4 +1,4 @@
-import type { BrowserModel } from "../../src/contracts/review-v2";
+import type { BrowserModel } from "../../src/contracts/review-v3";
 
 export function browserModelFixture(): BrowserModel {
   return {

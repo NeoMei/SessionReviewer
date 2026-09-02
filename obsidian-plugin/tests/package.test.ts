@@ -48,8 +48,8 @@ describe("Obsidian plugin package", () => {
     expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.2.13" });
     const mainJs = execFileSync("unzip", ["-p", firstArchive, "session-reviewer/main.js"], { encoding: "utf8" });
     expect(mainJs).not.toContain("sourceMappingURL=data:");
-    expect(mainJs).toContain("E_APPLY_RECOVERY");
-    expect(mainJs).toContain('"review","start"');
+    expect(mainJs.includes("\\u66F4") || mainJs.includes("更新")).toBe(true);
+    expect(mainJs).toContain('"scan","start"');
     expect(mainJs).not.toMatch(/\/Users\/|AppData|private_error/);
     expect(await readFile(firstArchive)).toEqual(await readFile(join(second, archiveName)));
     expect(await readFile(join(first, "SHA256SUMS"), "utf8")).toEqual(await readFile(join(second, "SHA256SUMS"), "utf8"));

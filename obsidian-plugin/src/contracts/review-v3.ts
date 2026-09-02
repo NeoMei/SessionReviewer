@@ -140,18 +140,44 @@ export interface ProjectAccounting {
   pricingComplete: boolean;
 }
 
-export interface MachineLedger {
-  schemaVersion: 2;
+export interface HumanPatchWire {
+  entity_id: string;
+  field: string;
+  operation: "set" | "suppress" | "restore_default";
+  value?: string;
+  values?: string[];
+  base_generated_hash: string;
+}
+
+export interface GeneratedBaselineWire {
+  generation_id: string;
+  entity_id: string;
+  field: string;
+  kind: "scalar" | "list" | "unsupported";
+  value?: string;
+  values?: string[];
+  generated_hash: string;
+}
+
+export interface MachineLedgerV3 {
+  schemaVersion: 3;
+  minimumWriterVersion: string;
   projectId: string;
+  generationId: string;
+  projectViewDigest: string;
   acceptedRevision: number;
   reviewSha256: string;
   historySha256: string;
   lastSuccessfulSync?: string;
   accounting: ProjectAccounting;
   sessions: SessionReport[];
-  evidence: ReadonlyMap<string, readonly unknown[]>;
-  legacyCompatibility: Readonly<Record<string, unknown>>;
+  humanPatches: HumanPatchWire[];
+  orphanPatches: HumanPatchWire[];
+  generatedBaselines: GeneratedBaselineWire[];
+  legacyCompatibility?: Readonly<Record<string, unknown>>;
 }
+
+export type MachineLedger = MachineLedgerV3;
 
 export interface BrowserSource {
   reviewPath: string;
@@ -171,4 +197,17 @@ export interface BrowserModel {
   lastSuccessfulSync?: string;
   source: BrowserSource;
   historyFields?: EditableField[];
+}
+
+export interface ScanStatus {
+  schema_version: 1;
+  job_id: string;
+  project_id: string;
+  state: "queued" | "running" | "completed" | "completed_with_issues" | "failed";
+  phase: "discovering" | "extracting" | "reducing" | "rendering" | "syncing";
+  session_count: number;
+  indexed_count: number;
+  issue_count: number;
+  generation_id?: string;
+  error_code?: string;
 }

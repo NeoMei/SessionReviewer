@@ -20,7 +20,6 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/memory"
-	"github.com/neomei/SessionReviewer/internal/publication"
 )
 
 func TestReconcileGenerationGraphContextCancelsDuringLoadedGraphWork(t *testing.T) {
@@ -1283,7 +1282,7 @@ func TestCommitPublishedRequiresProofAndSwitchesAtomically(t *testing.T) {
 		t.Fatalf("expected ErrNoPublishedGeneration, got %v", err)
 	}
 
-	validProof := publication.PublicationProof{
+	validProof := memory.PublicationProof{
 		ProjectID:         testProjectID,
 		GenerationID:      fixture.manifest.GenerationID,
 		ManifestDigest:    prepared.ManifestDigest,

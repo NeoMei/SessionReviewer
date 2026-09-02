@@ -5,12 +5,13 @@ import { describe, expect, it } from "vitest";
 import { parseLedger } from "../src/data/ledger";
 
 const fixture = (name: string): Promise<string> =>
-  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v2", name), "utf8");
+  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v3", name), "utf8");
 
 describe("review v2 machine contract", () => {
   it("accepts the Go golden ledger and exposes accounting", async () => {
     const ledger = parseLedger(await fixture("ledger.valid.json"));
-    expect(ledger.schemaVersion).toBe(2);
+    expect(ledger.schemaVersion).toBe(3);
+    expect(ledger.minimumWriterVersion).toBe("0.3.0");
     expect(ledger.projectId).toBe("project-review-v2");
     expect(ledger.accounting.totalTokens).toBe(350);
     expect(ledger.sessions[0]?.accounting?.models[0]?.pricing?.source).toBe("https://example.com/pricing");

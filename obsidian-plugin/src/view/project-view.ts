@@ -1,7 +1,6 @@
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
-import { ACTIVE_REVIEW_STATES, type ReviewStatus } from "../cli/runner";
-import type { BrowserModel, EditableField } from "../contracts/review-v2";
+import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
 import type { CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
 import type { Diagnostic, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
@@ -10,7 +9,7 @@ import { ConfirmModal } from "./confirm-modal";
 import { element } from "./dom";
 import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
-import { renderReviewJobBanner, renderStatusBanner, reviewActionLabel, reviewFailureText } from "./status-banner";
+import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -21,10 +20,10 @@ export class ProjectEvolutionView extends ItemView {
   private announcement = "";
   private cliDiagnostic?: Diagnostic;
   private hiddenConflictIds: string[] = [];
-  private reviewStatus?: ReviewStatus;
-  private reviewActionInFlight = false;
-  private reviewPollGeneration = 0;
-  private reviewPollTimer?: number;
+  private scanStatus?: ScanStatus;
+  private scanActionInFlight = false;
+  private scanPollGeneration = 0;
+  private scanPollTimer?: number;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -32,8 +31,7 @@ export class ProjectEvolutionView extends ItemView {
     private readonly editor?: ReviewEditor,
     private readonly runner?: CliRunner,
     private readonly initialState: ViewState = defaultViewState(),
-    private readonly saveState?: SaveViewState,
-    private readonly agentExecutable: string | (() => string) = ""
+    private readonly saveState?: SaveViewState
   ) {
     super(leaf);
     this.currentState = initialState;
@@ -56,7 +54,7 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
-    this.stopReviewPolling();
+    this.stopScanPolling();
     this.disposeWatch?.();
     this.contentEl.replaceChildren();
   }
@@ -67,8 +65,8 @@ export class ProjectEvolutionView extends ItemView {
     this.projects = projects;
     if (projects.length === 0) {
       this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
-        element("h1", { text: "还没有 v2 项目回顾" }),
-        element("p", { text: "请先运行 SessionReviewer v2 迁移或同步，生成项目回顾、项目历史和机器账本。" })
+        element("h1", { text: "还没有项目回顾" }),
+        element("p", { text: "请先运行 SessionReviewer 扫描或同步，生成项目回顾、项目历史和机器账本。" })
       ]));
       return;
     }
@@ -77,20 +75,20 @@ export class ProjectEvolutionView extends ItemView {
     this.disposeWatch = this.repository!.watch(this.selected, () => { void this.refresh(projects); });
   }
 
-  private async refresh(projects: ProjectDescriptor[], options: { reviewStatus?: boolean } = {}): Promise<void> {
+  private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean } = {}): Promise<void> {
     if (!this.selected) return;
     const snapshot = await this.repository!.load(this.selected, this.lastReady);
     if (snapshot.kind === "ready") this.lastReady = snapshot;
     await this.refreshCliStatus();
-    if (options.reviewStatus !== false) await this.refreshReviewStatus();
+    if (options.scanStatus !== false) await this.refreshScanStatus();
     this.renderSnapshot(snapshot, projects);
-    this.scheduleReviewPolling();
+    this.scheduleScanPolling();
   }
 
   private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
     this.contentEl.replaceChildren();
     if (snapshot.kind === "empty" || snapshot.kind === "migration_required") {
-      const diagnostic = snapshot.kind === "empty" ? snapshot.diagnostic : snapshot.diagnostic;
+      const diagnostic = snapshot.diagnostic;
       this.contentEl.append(element("div", { className: "session-reviewer-browser" }, [
         element("h1", { text: "暂时无法打开项目回顾" }),
         element("p", { text: diagnostic?.message ?? "项目还没有可用快照。" })
@@ -98,27 +96,23 @@ export class ProjectEvolutionView extends ItemView {
       return;
     }
     const model = snapshot.kind === "stale" ? snapshot.lastValid.model : snapshot.model;
-    const review = this.runner
+    const scanAction = this.runner
       ? {
-          label: reviewActionLabel(this.reviewStatus),
-          disabled: this.reviewActionInFlight || (this.reviewStatus !== undefined && ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)),
-          onStart: () => this.startReview()
+          label: scanActionLabel(this.scanStatus),
+          disabled: this.scanActionInFlight || (this.scanStatus !== undefined && (this.scanStatus.state === "queued" || this.scanStatus.state === "running")),
+          onStart: () => this.startScan()
         }
       : undefined;
     const browser = renderReadyView(model, { ...this.currentState, projectId: model.review.projectId }, (viewState) => {
       this.currentState = viewState;
       return this.saveState?.(viewState);
-    }, this.editor ? (field) => this.openEditor(field, model) : undefined, review);
+    }, this.editor ? (field) => this.openEditor(field, model) : undefined, scanAction);
     if (projects.length > 1) browser.prepend(this.projectPicker(projects));
     if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") browser.prepend(renderStatusBanner(snapshot.diagnostic, this.actionFor(snapshot.diagnostic)));
     if (this.cliDiagnostic) browser.prepend(renderStatusBanner(this.cliDiagnostic, this.actionFor(this.cliDiagnostic)));
     if (this.announcement) browser.prepend(element("div", { className: "sr-sr-only", text: this.announcement, attrs: { "aria-live": "polite" } }));
-    if (this.reviewStatus) {
-      const banner = renderReviewJobBanner(this.reviewStatus, {
-        onCancel: this.reviewStatus.canCancel ? () => this.cancelReview() : undefined,
-        onRetry: this.reviewStatus.canRetry ? () => this.retryReview() : undefined,
-        onSyncOnly: this.reviewStatus.canSyncOnly ? () => this.syncOnlyChanges() : undefined
-      });
+    if (this.scanStatus) {
+      const banner = renderScanJobBanner(this.scanStatus);
       if (banner) browser.prepend(banner);
     }
     this.contentEl.append(browser);
@@ -168,106 +162,76 @@ export class ProjectEvolutionView extends ItemView {
     await this.refresh(this.projects);
   }
 
-  private agentPath(): string {
-    return typeof this.agentExecutable === "function" ? this.agentExecutable() : this.agentExecutable;
-  }
-
-  private async refreshReviewStatus(): Promise<void> {
-    this.reviewStatus = undefined;
+  private async refreshScanStatus(): Promise<void> {
+    this.scanStatus = undefined;
     if (!this.runner || !this.selected) return;
     try {
-      this.reviewStatus = await this.runner.reviewStatus(this.selected.projectId);
+      this.scanStatus = await this.runner.getScanStatus(this.selected.projectId);
     } catch {
-      // 状态读取失败时隐藏横幅，保持既有浏览能力。
+      // 状态读取失败时保持既有状态
     }
   }
 
-  private startReview(): void {
-    if (!this.runner || !this.selected || this.reviewActionInFlight) return;
-    if (this.reviewStatus && ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)) return;
+  private startScan(): void {
+    if (!this.runner || !this.selected || this.scanActionInFlight) return;
+    if (this.scanStatus && (this.scanStatus.state === "queued" || this.scanStatus.state === "running")) return;
     const projectId = this.selected.projectId;
-    const agentExecutable = this.agentPath();
-    if (!agentExecutable) {
-      const message = reviewFailureText("E_AGENT_UNCONFIGURED", "尚未配置 Codex。");
-      this.announcement = message;
-      new Notice(message);
-      this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
-      return;
-    }
-    void this.runReviewAction(() => this.runner!.startReview(projectId, agentExecutable), "自动总结已开始。");
+    void this.runScanAction(() => this.runner!.startScan(projectId), "项目脉络扫描已开始。");
   }
 
-  private cancelReview(): void {
-    const jobId = this.reviewStatus?.jobId;
-    if (!this.runner || !jobId) return;
-    void this.runReviewAction(() => this.runner!.cancelReview(jobId), "已请求取消自动总结。");
-  }
-
-  private retryReview(): void {
-    const status = this.reviewStatus;
-    const jobId = status?.jobId;
-    if (!this.runner || !jobId || status.retryExpectedAttempt === undefined || status.retryExpectedRevision === undefined) return;
-    const attempt = status.retryExpectedAttempt;
-    const revision = status.retryExpectedRevision;
-    void this.runReviewAction(() => this.runner!.retryReview(jobId, this.agentPath(), attempt, revision), "已重新开始自动总结。");
-  }
-
-  private syncOnlyChanges(): void {
-    if (!this.runner || !this.selected) return;
-    void this.runCliAction(() => this.runner!.syncProject(this.selected!.projectId), "已有修改同步完成。");
-  }
-
-  private async runReviewAction(action: () => Promise<ReviewStatus>, success: string): Promise<void> {
-    if (this.reviewActionInFlight) return;
-    this.reviewActionInFlight = true;
+  private async runScanAction(action: () => Promise<ScanStatus>, success: string): Promise<void> {
+    if (this.scanActionInFlight) return;
+    this.scanActionInFlight = true;
     this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
     try {
-      this.reviewStatus = await action();
+      this.scanStatus = await action();
       this.announcement = success;
     } catch (error) {
       this.announcement = error instanceof Error ? error.message : String(error);
       new Notice(this.announcement);
     }
-    this.reviewActionInFlight = false;
-    await this.refresh(this.projects, { reviewStatus: false });
+    this.scanActionInFlight = false;
+    await this.refresh(this.projects, { scanStatus: false });
   }
 
-  private scheduleReviewPolling(): void {
-    this.stopReviewPolling();
-    if (!this.reviewStatus || !ACTIVE_REVIEW_STATES.includes(this.reviewStatus.state)) return;
-    void this.pollReviewJob(this.reviewPollGeneration, 0);
+  private scheduleScanPolling(): void {
+    this.stopScanPolling();
+    if (!this.scanStatus || (this.scanStatus.state !== "queued" && this.scanStatus.state !== "running")) return;
+    void this.pollScanJob(this.scanPollGeneration, 0);
   }
 
-  private stopReviewPolling(): void {
-    this.reviewPollGeneration += 1;
-    if (this.reviewPollTimer !== undefined) {
-      window.clearTimeout(this.reviewPollTimer);
-      this.reviewPollTimer = undefined;
+  private stopScanPolling(): void {
+    this.scanPollGeneration += 1;
+    if (this.scanPollTimer !== undefined) {
+      window.clearTimeout(this.scanPollTimer);
+      this.scanPollTimer = undefined;
     }
   }
 
-  private async pollReviewJob(generation: number, round: number): Promise<void> {
+  private async pollScanJob(generation: number, round: number): Promise<void> {
     const delay = round === 0 ? 1000 : round === 1 ? 2000 : 5000;
     await new Promise<void>((resolve) => {
-      this.reviewPollTimer = window.setTimeout(resolve, delay);
+      this.scanPollTimer = window.setTimeout(resolve, delay);
     });
-    this.reviewPollTimer = undefined;
-    if (generation !== this.reviewPollGeneration) return;
-    const previous = this.reviewStatus;
-    await this.refreshReviewStatus();
-    if (generation !== this.reviewPollGeneration) return;
-    const current = this.reviewStatus;
+    this.scanPollTimer = undefined;
+    if (generation !== this.scanPollGeneration) return;
+    const previous = this.scanStatus;
+    await this.refreshScanStatus();
+    if (generation !== this.scanPollGeneration) return;
+    const current = this.scanStatus;
     if (!current) {
-      void this.pollReviewJob(generation, round + 1);
+      void this.pollScanJob(generation, round + 1);
       return;
     }
-    if (!ACTIVE_REVIEW_STATES.includes(current.state)) {
-      if (previous && ACTIVE_REVIEW_STATES.includes(previous.state)) this.announcement = reviewTerminalAnnouncement(current);
-      await this.refresh(this.projects, { reviewStatus: false });
+    if (current.state !== "queued" && current.state !== "running") {
+      if (previous && (previous.state === "queued" || previous.state === "running")) {
+        this.announcement = scanTerminalAnnouncement(current);
+      }
+      await this.refresh(this.projects, { scanStatus: false });
       return;
     }
     this.renderSnapshot(this.lastReady ?? emptyReviewSnapshot(), this.projects);
-    void this.pollReviewJob(generation, round + 1);
+    void this.pollScanJob(generation, round + 1);
   }
 
   private async openConflict(): Promise<void> {
@@ -318,8 +282,8 @@ export class ProjectEvolutionView extends ItemView {
     select.addEventListener("change", () => {
       const next = projects.find((project) => project.projectId === select.value);
       if (!next) return;
-      this.stopReviewPolling();
-      this.reviewStatus = undefined;
+      this.stopScanPolling();
+      this.scanStatus = undefined;
       this.disposeWatch?.();
       this.selected = next;
       this.lastReady = undefined;
@@ -334,9 +298,15 @@ function emptyReviewSnapshot(): Snapshot {
   return { kind: "empty", diagnostic: { code: "stale_snapshot", message: "" } };
 }
 
-function reviewTerminalAnnouncement(status: ReviewStatus): string {
-  if (status.state === "failed") return reviewFailureText(status.errorCode, "自动总结失败，可重试。");
-  if (status.state === "cancelled") return reviewFailureText(status.errorCode, "自动总结已取消。");
-  if (status.state === "completed") return "自动总结完成。";
+function scanTerminalAnnouncement(status: ScanStatus): string {
+  if (status.state === "completed_with_issues") {
+    return `项目脉络已更新 · ${status.session_count} 个 Session · ${status.indexed_count} 已索引 · ${status.issue_count} 需检查`;
+  }
+  if (status.state === "completed") {
+    return `项目脉络已更新 · ${status.session_count} 个 Session`;
+  }
+  if (status.state === "failed") {
+    return status.error_code ? `更新失败：${status.error_code}` : "更新失败，可重试。";
+  }
   return "";
 }

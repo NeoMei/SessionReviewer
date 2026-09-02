@@ -1,4 +1,4 @@
-import type { BrowserModel, EditableFieldName } from "../contracts/review-v2";
+import type { BrowserModel, EditableFieldName } from "../contracts/review-v3";
 import type { EditHandler, ViewState } from "./render-shell";
 import { button, definition, element } from "./dom";
 import { presentDateTime, presentStatus } from "./presentation";
