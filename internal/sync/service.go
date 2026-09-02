@@ -42,6 +42,7 @@ type Options struct {
 	Retry                                                              RetryPolicy
 	Debounce                                                           time.Duration
 	Now                                                                func() time.Time
+	TrustAppliedTransition                                             func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 }
 
 type ReconcileRequest struct {
@@ -252,8 +253,12 @@ func NewEngine(options Options) (*Engine, error) {
 		}
 		return engine.verifyVaultMutation(vaultMutationPublish)
 	}
-	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
-		return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
+	if options.TrustAppliedTransition != nil {
+		engine.trustAppliedTransition = options.TrustAppliedTransition
+	} else {
+		engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
+			return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
+		}
 	}
 	projectInventory := syncdoc.Scan(projectRoot, "docs/session-review", options.GOOS, platform.CaseSensitive)
 	overview, found := projectInventory.ByID["project-overview"]

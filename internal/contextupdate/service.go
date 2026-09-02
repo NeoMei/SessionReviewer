@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/projectprobe"
 	"github.com/neomei/SessionReviewer/internal/projectview"
 	"github.com/neomei/SessionReviewer/internal/publication"
+	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/scan"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
@@ -120,10 +122,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if sessionsRoot == "" || !filepath.IsAbs(sessionsRoot) {
 		return Result{}, errors.New("sessions root must be an absolute path")
 	}
+	r := redact.Default()
 	adapter, err := codex.New(codex.AdapterOptions{
 		SessionsRoot:   sessionsRoot,
 		Bindings:       []projectidentity.Binding{binding},
 		Catalog:        catalog,
+		Redactor:       &r,
 		AdapterVersion: "codex-jsonl-v1",
 	})
 	if err != nil {
@@ -138,12 +142,17 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		DataRoot:     opts.DataRoot,
 		Adapter:      adapter,
 		Catalog:      catalog,
+		Workers:      4,
 		Store:        store,
 		Now:          now,
 		Materialize:  sessionview.Materialize,
 		Probe:        projectprobe.Run,
-		ProbeOptions: projectprobe.Options{Binding: binding, Now: now},
-		Reduce:       projectview.Reduce,
+		ProbeOptions: projectprobe.Options{
+			Binding:       binding,
+			GitExecutable: resolveGitExecutable(),
+			Now:           now,
+		},
+		Reduce: projectview.Reduce,
 	}
 
 	scanResult, err := scan.Run(ctx, scanOpts)
@@ -153,6 +162,22 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	notifyPhase("reducing")
 	prepared, manifest, err := store.LoadPrepared()
+	if err != nil {
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load prepared generation: %w", err)
+	}
+	publishedID, _, pubErr := store.LoadPublished()
+	if pubErr == nil && publishedID == prepared.GenerationID {
+		return Result{
+			SchemaVersion:   1,
+			ProjectID:       opts.ProjectID,
+			State:           scanResult.State,
+			GenerationID:    publishedID,
+			SourceSessions:  scanResult.SourceSessions,
+			IndexedSessions: scanResult.IndexedSessions,
+			IssueSessions:   scanResult.IssueSessions,
+			ReviewRunTokens: 0,
+		}, nil
+	}
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load prepared generation: %w", err)
 	}
@@ -189,7 +214,12 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	if reviewFound && historyFound && ledgerFound {
 		if acceptedV3, err := reviewv2.LoadV3Bytes(reviewBody, historyBody, ledgerBody); err == nil {
-			revision = acceptedV3.State.Review.Revision + 1
+			publishedID, _, pubErr := store.LoadPublished()
+			if pubErr == nil && publishedID == prepared.GenerationID {
+				revision = acceptedV3.State.Review.Revision
+			} else {
+				revision = acceptedV3.State.Review.Revision + 1
+			}
 			legacyPresentation = reviewv2.LegacyPresentation{Compatibility: acceptedV3.State.Machine.LegacyCompatibility}
 		}
 	}
@@ -239,4 +269,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Publication:     pubResult,
 		ReviewRunTokens: 0,
 	}, nil
+}
+
+func resolveGitExecutable() string {
+	if p, err := exec.LookPath("git"); err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
+			if eval, err := filepath.EvalSymlinks(abs); err == nil {
+				return filepath.Clean(eval)
+			}
+			return filepath.Clean(abs)
+		}
+	}
+	return "/usr/bin/git"
 }

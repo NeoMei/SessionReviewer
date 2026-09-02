@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
@@ -250,19 +251,35 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		_ = os.WriteFile(syncLockPath, nil, 0o600)
 	}
 
+	trustTransition := func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
+		for _, dest := range intent.Destinations {
+			if dest.Side == "project" && dest.Relative == relative && strings.EqualFold(dest.DesiredSHA256, targetHash) {
+				if (!dest.PreimageExists && !preimageExists) || (dest.PreimageExists && preimageExists && strings.EqualFold(dest.PreimageSHA256, preimageHash)) {
+					return true, nil
+				}
+			}
+		}
+		return false, nil
+	}
+
 	// Sync to Vault
 	syncOpts := syncproject.Options{
-		ProjectID:           opts.ProjectID,
-		CWD:                 opts.Mapping.Root,
-		DataDir:             opts.DataRoot,
-		GOOS:                runtime.GOOS,
-		Now:                 now,
-		Trigger:             "cli",
-		RepairMachineLedger: true,
+		ProjectID:              opts.ProjectID,
+		CWD:                    opts.Mapping.Root,
+		DataDir:                opts.DataRoot,
+		GOOS:                   runtime.GOOS,
+		Now:                    now,
+		Trigger:                "cli",
+		RepairMachineLedger:    true,
+		TrustAppliedTransition: trustTransition,
 	}
-	if _, err := syncproject.Run(ctx, syncOpts); err != nil {
+	rep, err := syncproject.Run(ctx, syncOpts)
+	if err != nil {
 		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
 		return Result{}, fmt.Errorf("sync to vault: %w", err)
+	}
+	for _, op := range rep.Operations {
+		fmt.Printf("DEBUG OP: entity=%s kind=%s rel=%s\n", op.EntityID, op.Kind, op.RelativePath)
 	}
 	if err := j.Advance(StageProjectWritten, StageVaultSynced); err != nil {
 		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
