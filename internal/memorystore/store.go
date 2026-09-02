@@ -24,6 +24,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/publication"
 )
 
 const (
@@ -43,12 +44,15 @@ const (
 )
 
 var (
-	ErrNoPreparedGeneration = errors.New("no prepared generation")
-	ErrPreparedGeneration   = errors.New("a different prepared generation already exists")
-	ErrImmutableConflict    = errors.New("immutable object digest already contains different bytes")
+	ErrNoPreparedGeneration    = errors.New("no prepared generation")
+	ErrPreparedGeneration      = errors.New("a different prepared generation already exists")
+	ErrNoPublishedGeneration   = errors.New("no published generation")
+	ErrPublicationProofInvalid = publication.ErrPublicationProofInvalid
+	ErrImmutableConflict       = errors.New("immutable object digest already contains different bytes")
 
-	storeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	digestPattern  = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	storeIDPattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	digestPattern    = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	sha256HexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 	// storeContextCheckpoint is a deterministic test seam for proving that
 	// cancellation is observed inside large decode, validation, and structural
@@ -519,6 +523,80 @@ func (s *Store) LoadPrepared() (Prepared, memory.GenerationManifest, error) {
 		return err
 	})
 	return prepared, manifest, err
+}
+
+// CommitPublished atomically records the published generation pointer after verifying
+// the immutable generation manifest, project view digest, three projection file hashes,
+// and the journal verification proof.
+func (s *Store) CommitPublished(generationID string, proof publication.PublicationProof) error {
+	if err := validateStoreID(generationID); err != nil {
+		return fmt.Errorf("%w: invalid generation ID", ErrPublicationProofInvalid)
+	}
+	if proof.ProjectID != s.projectID || proof.GenerationID != generationID {
+		return fmt.Errorf("%w: proof project or generation ID mismatch", ErrPublicationProofInvalid)
+	}
+	if !proof.JournalVerified {
+		return fmt.Errorf("%w: journal verified proof is required", ErrPublicationProofInvalid)
+	}
+	if !sha256HexPattern.MatchString(strings.ToLower(proof.ReviewSHA256)) ||
+		!sha256HexPattern.MatchString(strings.ToLower(proof.HistorySHA256)) ||
+		!sha256HexPattern.MatchString(strings.ToLower(proof.LedgerSHA256)) {
+		return fmt.Errorf("%w: public projection file hashes are invalid", ErrPublicationProofInvalid)
+	}
+
+	return s.withStoreLock(func() error {
+		manifest, err := s.loadGeneration(generationID)
+		if err != nil {
+			return fmt.Errorf("%w: load generation %q: %v", ErrPublicationProofInvalid, generationID, err)
+		}
+		digest, err := memory.Digest(manifest)
+		if err != nil || digest != proof.ManifestDigest || manifest.ProjectViewDigest != proof.ProjectViewDigest {
+			return fmt.Errorf("%w: manifest or project view digest mismatch", ErrPublicationProofInvalid)
+		}
+
+		root, err := s.reopenMemory()
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+
+		publishedBody := []byte(generationID + "\n")
+		if err := atomicfile.WriteRootFile(root.Root, "published_generation", publishedBody, privateFileMode); err != nil {
+			return fmt.Errorf("commit published generation: %w", err)
+		}
+		return nil
+	})
+}
+
+// LoadPublished returns the currently published generation ID and its manifest.
+func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
+	var genID string
+	var manifest memory.GenerationManifest
+	err := s.withStoreLock(func() error {
+		root, err := s.reopenMemory()
+		if err != nil {
+			return err
+		}
+		defer root.Close()
+
+		body, found, err := root.ReadRegular("published_generation", maxManifestBytes)
+		if err != nil {
+			return fmt.Errorf("read published generation: %w", err)
+		}
+		if !found {
+			return ErrNoPublishedGeneration
+		}
+		if err := requirePrivateRegular(root.Root, "published_generation"); err != nil {
+			return err
+		}
+		genID = strings.TrimSpace(string(body))
+		if err := validateStoreID(genID); err != nil {
+			return fmt.Errorf("corrupt published generation pointer: %w", err)
+		}
+		manifest, err = s.loadGeneration(genID)
+		return err
+	})
+	return genID, manifest, err
 }
 
 func (s *Store) loadPreparedUnlocked() (Prepared, memory.GenerationManifest, error) {

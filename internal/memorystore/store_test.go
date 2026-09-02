@@ -20,6 +20,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/publication"
 )
 
 func TestReconcileGenerationGraphContextCancelsDuringLoadedGraphWork(t *testing.T) {
@@ -1265,4 +1266,59 @@ func regularFilesUnder(root string) ([]string, error) {
 	})
 	sort.Strings(paths)
 	return paths, err
+}
+
+func TestCommitPublishedRequiresProofAndSwitchesAtomically(t *testing.T) {
+	_, store, fixture := preparedStore(t)
+	defer store.Close()
+
+	prepared, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatalf("LoadPrepared: %v", err)
+	}
+
+	// No published generation initially
+	_, _, err = store.LoadPublished()
+	if !errors.Is(err, ErrNoPublishedGeneration) {
+		t.Fatalf("expected ErrNoPublishedGeneration, got %v", err)
+	}
+
+	validProof := publication.PublicationProof{
+		ProjectID:         testProjectID,
+		GenerationID:      fixture.manifest.GenerationID,
+		ManifestDigest:    prepared.ManifestDigest,
+		ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256:      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		HistorySHA256:     "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		LedgerSHA256:      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		JournalVerified:   true,
+	}
+
+	// Unverified proof fails
+	unverifiedProof := validProof
+	unverifiedProof.JournalVerified = false
+	if err := store.CommitPublished(fixture.manifest.GenerationID, unverifiedProof); !errors.Is(err, ErrPublicationProofInvalid) {
+		t.Fatalf("expected ErrPublicationProofInvalid for unverified proof, got %v", err)
+	}
+
+	// Invalid digest fails
+	badDigestProof := validProof
+	badDigestProof.ManifestDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := store.CommitPublished(fixture.manifest.GenerationID, badDigestProof); !errors.Is(err, ErrPublicationProofInvalid) {
+		t.Fatalf("expected ErrPublicationProofInvalid for bad manifest digest, got %v", err)
+	}
+
+	// Valid commit succeeds
+	if err := store.CommitPublished(fixture.manifest.GenerationID, validProof); err != nil {
+		t.Fatalf("CommitPublished: %v", err)
+	}
+
+	// Load published generation matches
+	pubID, pubManifest, err := store.LoadPublished()
+	if err != nil {
+		t.Fatalf("LoadPublished: %v", err)
+	}
+	if pubID != fixture.manifest.GenerationID || pubManifest.GenerationID != fixture.manifest.GenerationID {
+		t.Fatalf("published manifest mismatch: ID=%s manifest=%+v", pubID, pubManifest)
+	}
 }
