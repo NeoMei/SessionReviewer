@@ -33,7 +33,7 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 			LastVerification: legacy.CurrentState.LastVerified,
 		},
 		Machine: MachineLedger{
-			SchemaVersion:       SchemaVersion,
+			SchemaVersion:       LegacySchemaVersion,
 			ProjectID:           legacy.ProjectID,
 			AcceptedRevision:    legacy.CurrentState.Revision,
 			Evidence:            make(map[string][]ledger.EvidenceRef),
@@ -147,6 +147,32 @@ func ProjectLegacy(legacy ledger.State) (State, error) {
 		return State{}, fmt.Errorf("project legacy state: %w", err)
 	}
 	return state, nil
+}
+
+type LegacyPresentation struct {
+	Review              Review
+	Events              []Event
+	Compatibility       LegacyCompatibility
+	HasMachineInternals bool
+}
+
+func SafeLegacyPresentation(state State) (LegacyPresentation, error) {
+	if err := Validate(state); err != nil {
+		return LegacyPresentation{}, err
+	}
+	events := append([]Event(nil), state.Events...)
+	for index := range events {
+		events[index].Changes = append([]string(nil), events[index].Changes...)
+		events[index].Results = append([]string(nil), events[index].Results...)
+		events[index].DecisionIDs = append([]string(nil), events[index].DecisionIDs...)
+	}
+	review := state.Review
+	review.Risks = append([]Risk(nil), review.Risks...)
+	review.Decisions = append([]Decision(nil), review.Decisions...)
+	return LegacyPresentation{
+		Review: review, Events: events,
+		Compatibility: cloneLegacyCompatibility(state.Machine.LegacyCompatibility),
+	}, nil
 }
 
 // LegacyState reconstructs the public compatibility model used by proposal,

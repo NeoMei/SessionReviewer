@@ -1,0 +1,441 @@
+targets=darwin/amd64,darwin/arm64	CALL	xsys	internal/atomicfile/rename_noreplace_darwin.go	renameRootNoReplace	golang.org/x/sys/unix.RenameatxNp	occurrence=1
+targets=darwin/amd64,darwin/arm64	IMPORT	xsys	internal/atomicfile/rename_noreplace_darwin.go	golang.org/x/sys/unix	alias=unix
+targets=darwin/amd64,darwin/arm64	REF	xsys	internal/atomicfile/rename_noreplace_darwin.go	renameRootNoReplace	golang.org/x/sys/unix.RENAME_EXCL	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	reflection	internal/pathguard/identity_other.go	physicalIdentityFromFile	reflect.Indirect	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	reflection	internal/pathguard/identity_other.go	physicalIdentityFromFile	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent	syscall.Flock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent	syscall.Flock	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent.func1	syscall.Flock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.Flock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	CALL	syscall	internal/project/lock_unix.go	unlockProjectPlatformLock	syscall.Flock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	IMPORT	reflection	internal/pathguard/identity_other.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64	IMPORT	syscall	internal/atomicfile/directory_lock_other.go	syscall	alias=syscall
+targets=darwin/amd64,darwin/arm64,linux/amd64	IMPORT	syscall	internal/project/lock_unix.go	syscall	alias=syscall
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	reflection	internal/pathguard/identity_other.go	identityInteger	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent	syscall.EINTR	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent	syscall.LOCK_EX	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent	syscall.LOCK_UN	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/atomicfile/directory_lock_other.go	lockRootDirectoryParent.func1	syscall.LOCK_UN	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.EAGAIN	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.EWOULDBLOCK	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.LOCK_EX	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	tryProjectPlatformLock	syscall.LOCK_NB	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64	REF	syscall	internal/project/lock_unix.go	unlockProjectPlatformLock	syscall.LOCK_UN	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	ASSIGN	git-fallback	internal/projectprobe/probe.go	Run	runner = defaultGitRunner(options.Binding.CanonicalRoot, gitExecutable) branch=runner == nil	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	git-fallback	internal/projectprobe/probe.go	Run	defaultGitRunner args=options.Binding.CanonicalRoot, gitExecutable branch=runner == nil	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/accounting/accounting.go	validatePricing	net/url.Parse	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/projectprobe/git.go	validASCIIHost	net.ParseIP	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	network	internal/projectprobe/git.go	validRemote	net/url.Parse	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process	internal/projectprobe/git.go	defaultGitRunner.func1	method.Run receiver=command	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process	internal/projectprobe/git.go	defaultGitRunner.func1	os/exec.CommandContext	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/memorystore/store.go	(*Store).withStoreLock	method.Release receiver=lock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/project/init.go	Initialize.func1	method.Release receiver=lock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/project/lock.go	(*ProjectLock).release	method.Release receiver=lock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/scan/service.go	Run.func1	method.Release receiver=lock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/scan/service.go	decodeFrozen	method.Wait receiver=wait	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/sourcecatalog/catalog.go	(*Catalog).withAdvisoryLock	method.Release receiver=lock	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/sourcecatalog/catalog.go	(*Catalog).withAdvisoryLock	method.Release receiver=lock	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	process-api-candidate	internal/sourcecatalog/catalog.go	(*Catalog).withAdvisoryLock	method.Release receiver=lock	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	PublishProjectFragmentRoot	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	sharedConfigForSave	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderCurrentDocument	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderDecisionDocument	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderDecisionDocument	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderOpenLoopDocument	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderOpenLoopDocument	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderSessionDocument	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderTimelineDocument	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	WriteCanonicalJSONContext	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	WriteCanonicalJSONContext	reflect.ValueOf	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/canonical.go	validateCanonicalValueContext	method.Pointer receiver=value	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/memory/digest.go	DigestContext	reflect.ValueOf	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	equalReviewSemantics	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/accepted_patch.go	patchAcceptedHistory	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/history_markdown.go	RenderHistory	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/history_markdown.go	historyFieldMatches	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/history_markdown.go	historyFieldMatches	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/ledger_json.go	rejectInexactJSONFields	reflect.TypeOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/load.go	loadAcceptedWithHooks	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/load.go	loadAcceptedWithHooks	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/load.go	loadAcceptedWithHooks	reflect.DeepEqual	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/migration_journal.go	decodeMigrationJournal	reflect.TypeOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/migration_journal.go	sameMigrationJournalIdentity	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/migration_journal.go	saveMigrationJournal	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/project.go	overlayUnchangedHumanFields	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/project.go	overlayUnchangedHumanFields	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/review_markdown.go	RenderReview	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.TypeOf	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/codex/adapter.go	sameCatalogBaseline	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).ReplaceSource.func1	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).UpsertSource.func1	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).WithBatchSnapshot.func1	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).validateJournalUnlocked	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).validateJournalUnlocked	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).validateJournalUnlocked	reflect.DeepEqual	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	mergeSource	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	validateMutation	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CONSTRUCT	git-fallback	internal/projectprobe/git.go	defaultGitRunner	func-literal	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	DEF	git-fallback	internal/projectprobe/git.go	defaultGitRunner	function.defaultGitRunner	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/accounting/accounting.go	net/url	alias=url
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/ledger/navigation.go	net/url	alias=url
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/projectprobe/git.go	net	alias=net
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/projectprobe/git.go	net/url	alias=url
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	process	internal/projectprobe/git.go	os/exec	alias=exec
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/config/config.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/ledger/render.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/canonical.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/digest.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/accepted_patch.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/history_markdown.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/ledger_json.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/load.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/migration_journal.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/project.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/review_markdown.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/v3.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/validate.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/codex/adapter.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sourcecatalog/catalog.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	git-fallback	internal/projectprobe/probe.go	Run	identifier.defaultGitRunner branch=runner == nil	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/ledger/navigation.go	markdownNavigationTarget	net/url.URL	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validFileURLRemote	net/url.URL	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validURLRemote	net/url.URL	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/ledger/document.go	topLevelH2Headings	method.Start receiver=first	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerDocument.func1	method.Start receiver=result[i]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerDocument.func1	method.Start receiver=result[j]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	ValidatedMarkerSpans	method.Start receiver=spans[index]	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	fencedOpeningStart	method.Start receiver=block.Info.Segment	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	fencedOpeningStart	method.Start receiver=block.Lines().At(0)	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv2/markers.go	markdownHeadings	method.Start receiver=line	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/codex/decode.go	(*recordDecoder).addToolOutput	method.Output receiver=payload	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/body.go	topLevelHeadings	method.Start receiver=first	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=5
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=6
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=7
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	buildV2DocumentState	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	v2ShellSource	method.Start receiver=span	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).encode	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeArray	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeMap	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeOrdered	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeSlice	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeStruct	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	(*canonicalEncoder).writeUnorderedSlice	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalEmptyValue	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalFieldByIndex	reflect.Value	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	canonicalStructFields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Bool	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Float32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Float64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Int8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Interface	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Map	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.String	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.String	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint16	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint32	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint64	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint8	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uint8	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Uintptr	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/canonical.go	validateCanonicalValueContext	reflect.Value	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/memory/digest.go	<package-init>	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectExactJSONFieldTypes	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectRequiredJSONFields	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	collectRequiredJSONFields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	dereferenceJSONType	reflect.Pointer	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	dereferenceJSONType	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	dereferenceJSONType	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	exactJSONFieldTypes	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	exactJSONFieldTypes	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	exactJSONFieldTypes	reflect.Type	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	exactJSONFieldTypes	reflect.Type	occurrence=4
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	exactJSONFieldTypes	reflect.Type	occurrence=5
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	rejectInexactJSONFields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	rejectInexactJSONFields	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Array	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Slice	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Struct	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/ledger_json.go	scanExactJSONFields	reflect.Type	occurrence=3
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/migration_journal.go	decodeMigrationJournal	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/migration_journal.go	decodeMigrationJournal	reflect.Type	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.Type	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	reflection	internal/reviewv2/v3.go	rejectInexactMachineLedgerV3Fields	reflect.Type	occurrence=2
+targets=linux/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_linux.go	renameRootNoReplace	golang.org/x/sys/unix.Renameat2	occurrence=1
+targets=linux/amd64	IMPORT	xsys	internal/atomicfile/rename_noreplace_linux.go	golang.org/x/sys/unix	alias=unix
+targets=linux/amd64	REF	xsys	internal/atomicfile/rename_noreplace_linux.go	renameRootNoReplace	golang.org/x/sys/unix.RENAME_NOREPLACE	occurrence=1
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=1
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=2
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=3
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=4
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	finalProjectPath	method.Call receiver=projectProcGetFinalPathNameByHandleW	occurrence=1
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	method.Call receiver=projectProcReOpenFile	occurrence=1
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	tryProjectPlatformLock	method.Call receiver=projectProcLockFileEx	occurrence=1
+targets=windows/amd64	CALL	dynamic	internal/project/lock_windows.go	unlockProjectPlatformLock	method.Call receiver=projectProcUnlockFileEx	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/pathguard/identity_windows.go	physicalIdentityFromFile	syscall.GetFileInformationByHandle	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/pathguard/identity_windows.go	physicalIdentityFromFile	syscall.Handle	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=2
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=3
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	<package-init>	method.NewProc receiver=projectKernel32	occurrence=4
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	<package-init>	syscall.NewLazyDLL	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	finalProjectPath	method.Call receiver=projectProcGetFinalPathNameByHandleW	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	finalProjectPath	syscall.UTF16ToString	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.CloseHandle	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.CreateFile	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.UTF16PtrFromString	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	method.Call receiver=projectProcReOpenFile	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.CloseHandle	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.Handle	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.Handle	occurrence=2
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	tryProjectPlatformLock	method.Call receiver=projectProcLockFileEx	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	tryProjectPlatformLock	syscall.Errno	occurrence=1
+targets=windows/amd64	CALL	syscall	internal/project/lock_windows.go	unlockProjectPlatformLock	method.Call receiver=projectProcUnlockFileEx	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/atomicfile/create_temp_windows.go	createRootTempFile	unsafe.Sizeof	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	unsafe.Sizeof	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	unsafe.Offsetof	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	unsafe.Pointer	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	unsafe.Sizeof	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/project/lock_windows.go	finalProjectPath	unsafe.Pointer	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/project/lock_windows.go	tryProjectPlatformLock	unsafe.Pointer	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/project/lock_windows.go	unlockProjectPlatformLock	unsafe.Pointer	occurrence=1
+targets=windows/amd64	CALL	unsafe	internal/winsecurity/private_acl_windows.go	aceSID	unsafe.Pointer	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.CloseHandle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.NewNTUnicodeString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.NtCreateFile	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.CloseHandle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.NewNTUnicodeString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.NtCreateFile	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.CloseHandle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.Handle	occurrence=2
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.NewNTUnicodeString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.NtCreateFile	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.NtSetInformationFile	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.UTF16FromString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/config/fragments_privacy_windows.go	privateConfigPath	golang.org/x/sys/windows.GetNamedSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/config/fragments_privacy_windows.go	privateConfigSDDL	golang.org/x/sys/windows.GetCurrentProcessToken	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.SecurityDescriptorFromString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.SetSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	migrationPrivacyDiagnostic	golang.org/x/sys/windows.GetNamedSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	privateMigrationPath	golang.org/x/sys/windows.GetNamedSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	privateMigrationSDDL	golang.org/x/sys/windows.GetCurrentProcessToken	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACL	golang.org/x/sys/windows.SecurityDescriptorFromString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACL	golang.org/x/sys/windows.SetNamedSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.SecurityDescriptorFromString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.SetSecurityInfo	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/winsecurity/private_acl_windows.go	ProtectedDACLMatches	golang.org/x/sys/windows.SecurityDescriptorFromString	occurrence=1
+targets=windows/amd64	CALL	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.GetAce	occurrence=1
+targets=windows/amd64	IMPORT	syscall	internal/atomicfile/durability_windows.go	syscall	alias=syscall
+targets=windows/amd64	IMPORT	syscall	internal/pathguard/identity_windows.go	syscall	alias=syscall
+targets=windows/amd64	IMPORT	syscall	internal/pathguard/reparse_windows.go	syscall	alias=syscall
+targets=windows/amd64	IMPORT	syscall	internal/project/lock_windows.go	syscall	alias=syscall
+targets=windows/amd64	IMPORT	syscall	internal/session/reparse_windows.go	syscall	alias=syscall
+targets=windows/amd64	IMPORT	unsafe	internal/atomicfile/create_temp_windows.go	unsafe	alias=unsafe
+targets=windows/amd64	IMPORT	unsafe	internal/atomicfile/directory_create_windows.go	unsafe	alias=unsafe
+targets=windows/amd64	IMPORT	unsafe	internal/atomicfile/rename_noreplace_windows.go	unsafe	alias=unsafe
+targets=windows/amd64	IMPORT	unsafe	internal/project/lock_windows.go	unsafe	alias=unsafe
+targets=windows/amd64	IMPORT	unsafe	internal/winsecurity/private_acl_windows.go	unsafe	alias=unsafe
+targets=windows/amd64	IMPORT	xsys	internal/atomicfile/create_temp_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	IMPORT	xsys	internal/atomicfile/directory_create_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	IMPORT	xsys	internal/atomicfile/rename_noreplace_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	IMPORT	xsys	internal/config/fragments_privacy_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	IMPORT	xsys	internal/reviewv2/migration_privacy_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	IMPORT	xsys	internal/winsecurity/private_acl_windows.go	golang.org/x/sys/windows	alias=windows
+targets=windows/amd64	REF	syscall	internal/atomicfile/durability_windows.go	isAtomicRedirect	syscall.FILE_ATTRIBUTE_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	syscall	internal/atomicfile/durability_windows.go	isAtomicRedirect	syscall.Win32FileAttributeData	occurrence=1
+targets=windows/amd64	REF	syscall	internal/pathguard/identity_windows.go	physicalIdentityFromFile	syscall.ByHandleFileInformation	occurrence=1
+targets=windows/amd64	REF	syscall	internal/pathguard/reparse_windows.go	isRedirect	syscall.FILE_ATTRIBUTE_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	syscall	internal/pathguard/reparse_windows.go	isRedirect	syscall.Win32FileAttributeData	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	isProjectLockRedirect	syscall.FILE_ATTRIBUTE_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	isProjectLockRedirect	syscall.Win32FileAttributeData	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.FILE_SHARE_READ	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.FILE_SHARE_WRITE	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.GENERIC_READ	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	openProjectNamespaceAnchor	syscall.OPEN_EXISTING	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.FILE_SHARE_READ	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.FILE_SHARE_WRITE	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	reopenProjectHandleWithoutDelete	syscall.InvalidHandle	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	stabilizeProjectLockFile	syscall.GENERIC_READ	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	stabilizeProjectLockFile	syscall.GENERIC_WRITE	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	tryProjectPlatformLock	syscall.Overlapped	occurrence=1
+targets=windows/amd64	REF	syscall	internal/project/lock_windows.go	unlockProjectPlatformLock	syscall.Overlapped	occurrence=1
+targets=windows/amd64	REF	syscall	internal/session/reparse_windows.go	isSymlinkOrReparse	syscall.FILE_ATTRIBUTE_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	syscall	internal/session/reparse_windows.go	isSymlinkOrReparse	syscall.Win32FileAttributeData	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_ATTRIBUTE_NORMAL	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_CREATE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_GENERIC_READ	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_GENERIC_WRITE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_NON_DIRECTORY_FILE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_OPEN_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_SHARE_DELETE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_SHARE_READ	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_SHARE_WRITE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.FILE_SYNCHRONOUS_IO_NONALERT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.IO_STATUS_BLOCK	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=2
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.STATUS_OBJECT_NAME_COLLISION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.SYNCHRONIZE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/create_temp_windows.go	createRootTempFile	golang.org/x/sys/windows.WRITE_DAC	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_ATTRIBUTE_DIRECTORY	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_CREATE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_DIRECTORY_FILE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_GENERIC_READ	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_OPEN_FOR_BACKUP_INTENT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_OPEN_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_SHARE_DELETE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_SHARE_READ	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_SHARE_WRITE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.FILE_SYNCHRONOUS_IO_NONALERT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.IO_STATUS_BLOCK	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=2
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.STATUS_OBJECT_NAME_COLLISION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.SYNCHRONIZE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/directory_create_windows.go	createRootDirectoryFile	golang.org/x/sys/windows.WRITE_DAC	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	<package-init>	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	<package-init>	golang.org/x/sys/windows.MAX_LONG_PATH	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.DELETE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.ERROR_FILENAME_EXCED_RANGE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_OPEN	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_OPEN_FOR_BACKUP_INTENT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_OPEN_REPARSE_POINT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_SHARE_DELETE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_SHARE_READ	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_SHARE_WRITE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FILE_SYNCHRONOUS_IO_NONALERT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.FileRenameInformation	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.Handle	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.IO_STATUS_BLOCK	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.IO_STATUS_BLOCK	occurrence=2
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=1
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.OBJECT_ATTRIBUTES	occurrence=2
+targets=windows/amd64	REF	xsys	internal/atomicfile/rename_noreplace_windows.go	renameRootNoReplace	golang.org/x/sys/windows.SYNCHRONIZE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/config/fragments_privacy_windows.go	privateConfigPath	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/config/fragments_privacy_windows.go	privateConfigPath	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.PROTECTED_DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/config/fragments_privacy_windows.go	setPrivateConfigDACLHandle	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	migrationPrivacyDiagnostic	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	migrationPrivacyDiagnostic	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	privateMigrationPath	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	privateMigrationPath	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACL	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACL	golang.org/x/sys/windows.PROTECTED_DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACL	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.PROTECTED_DACL_SECURITY_INFORMATION	occurrence=1
+targets=windows/amd64	REF	xsys	internal/reviewv2/migration_privacy_windows.go	setPrivateMigrationDACLHandle	golang.org/x/sys/windows.SE_FILE_OBJECT	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	ProtectedDACLMatches	golang.org/x/sys/windows.SECURITY_DESCRIPTOR	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	ProtectedDACLMatches	golang.org/x/sys/windows.SE_DACL_PROTECTED	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	aceSID	golang.org/x/sys/windows.ACCESS_ALLOWED_ACE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	aceSID	golang.org/x/sys/windows.SID	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	aceSID	golang.org/x/sys/windows.SID	occurrence=2
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.ACCESS_ALLOWED_ACE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.ACCESS_ALLOWED_ACE	occurrence=2
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.ACCESS_ALLOWED_ACE_TYPE	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.ACL	occurrence=1
+targets=windows/amd64	REF	xsys	internal/winsecurity/private_acl_windows.go	allowedACE	golang.org/x/sys/windows.ERROR_INVALID_ACL	occurrence=1

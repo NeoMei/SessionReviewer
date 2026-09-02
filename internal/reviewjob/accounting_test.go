@@ -130,6 +130,32 @@ func TestReviewAccountingTransitionValidatesExactDeltasIncludingLegacyMigration(
 	}
 }
 
+func TestReviewAccountingTransitionAcceptsHostReasoningBeyondVisibleOutputButRejectsReclassification(t *testing.T) {
+	before := validReviewAccountingFixture()
+	hostAfter := before
+	hostAfter.Models = append([]accounting.ModelAccounting(nil), before.Models...)
+	hostAfter.Models[0].TokenUsage = accounting.TokenUsage{InputTokens: 36484, CachedInputTokens: 128, OutputTokens: 211, ReasoningOutputTokens: 376, TotalTokens: 36695}
+	if err := recomputeReviewTotals(&hostAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateReviewAccounting(hostAfter); err != nil {
+		t.Fatalf("host token_count must be valid in isolation: %v", err)
+	}
+	if err := validateReviewAccountingTransition(before, hostAfter); err != nil {
+		t.Fatalf("host token_count additive delta rejected: %v", err)
+	}
+
+	reclassified := before
+	reclassified.Models = append([]accounting.ModelAccounting(nil), before.Models...)
+	reclassified.Models[0].ReasoningOutputTokens++
+	if err := ValidateReviewAccounting(reclassified); err != nil {
+		t.Fatalf("candidate must be valid in isolation to exercise transition: %v", err)
+	}
+	if err := validateReviewAccountingTransition(before, reclassified); err == nil {
+		t.Fatal("transition accepted reasoning reclassification with no additive output delta")
+	}
+}
+
 func TestReviewAccountingAggregatesPacketsByModelInStableOrder(t *testing.T) {
 	at := time.Date(2026, 8, 29, 12, 0, 0, 0, time.UTC)
 	resolver := fixturePricingResolver{

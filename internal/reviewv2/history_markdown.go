@@ -11,12 +11,14 @@ import (
 )
 
 type HistoryDocument struct {
-	ProjectID string
-	Revision  int
-	Events    []Event
-	source    []byte
-	fields    map[semanticField]sourceSpan
-	blocks    map[string]markerBlock
+	ProjectID            string
+	GenerationID         string
+	MinimumWriterVersion string
+	Revision             int
+	Events               []Event
+	source               []byte
+	fields               map[semanticField]sourceSpan
+	blocks               map[string]markerBlock
 }
 
 func ParseHistory(source []byte) (HistoryDocument, error) {
@@ -36,11 +38,9 @@ func ParseHistory(source []byte) (HistoryDocument, error) {
 		return HistoryDocument{}, fmt.Errorf("parse history: %w", err)
 	}
 	document := HistoryDocument{
-		ProjectID: identity.projectID,
-		Revision:  identity.revision,
-		source:    source,
-		fields:    make(map[semanticField]sourceSpan),
-		blocks:    make(map[string]markerBlock),
+		ProjectID: identity.projectID, GenerationID: identity.generationID,
+		MinimumWriterVersion: identity.minimumWriterVersion, Revision: identity.revision,
+		source: source, fields: make(map[semanticField]sourceSpan), blocks: make(map[string]markerBlock),
 	}
 	for _, block := range blocks {
 		if block.kind != "event" {
@@ -50,6 +50,7 @@ func ParseHistory(source []byte) (HistoryDocument, error) {
 		if err != nil {
 			return HistoryDocument{}, err
 		}
+		event.GenerationID = identity.generationID
 		document.Events = append(document.Events, event)
 		document.blocks[event.ID] = block
 		for field, span := range spans {
@@ -81,7 +82,7 @@ func RenderHistory(projectID string, revision int, events []Event) ([]byte, erro
 		return nil, err
 	}
 	var out bytes.Buffer
-	fmt.Fprintf(&out, "---\nid: project-history\nentity_type: project_history\nproject_id: %s\nschema_version: %d\nrevision: %d\n---\n# 项目历史\n\n> 按时间逆序排列。\n\n", projectID, SchemaVersion, revision)
+	fmt.Fprintf(&out, "---\nid: project-history\nentity_type: project_history\nproject_id: %s\nschema_version: %d\nrevision: %d\n---\n# 项目历史\n\n> 按时间逆序排列。\n\n", projectID, LegacySchemaVersion, revision)
 	for _, event := range ordered {
 		if !validStableID(event.ID) {
 			return nil, fmt.Errorf("render history: invalid event ID %q", event.ID)
@@ -194,6 +195,7 @@ func normalizedEvents(events []Event) []Event {
 	}
 	result := append([]Event(nil), events...)
 	for index := range result {
+		result[index].GenerationID = ""
 		if len(result[index].Changes) == 0 {
 			result[index].Changes = nil
 		}

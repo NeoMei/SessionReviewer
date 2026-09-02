@@ -13,12 +13,12 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [GitHub Release 0.2.5](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.5) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+无需 Go 工具链时，从 [GitHub Release 0.2.12](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.12) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
 
-- Apple Silicon Mac：`session-reviewer_0.2.5_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.2.5_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.2.5_windows_amd64.zip`
-- Obsidian：`session-reviewer-obsidian-0.2.5.zip`
+- Apple Silicon Mac：`session-reviewer_0.2.12_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.2.12_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.2.12_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.2.12.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -148,7 +148,7 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-`0.2.5` 发布包中的 `session-reviewer-obsidian-0.2.5.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+`0.2.12` 发布包中的 `session-reviewer-obsidian-0.2.12.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
@@ -159,10 +159,7 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 页面可编辑目标、阶段、状态、下一步、风险、决策和事件叙述。保存后会立即显示新的人类内容，同时标记“等待同步到代码目录”；在同步成功前，页面不会把旧的机器用量冒充为当前数据。
 
-要在页面中查看状态、预览迁移、修复机器账本或解决冲突，请打开“设置 → SessionReviewer CLI”，填写绝对路径并点击“验证并保存”：
-
-- macOS 示例：`/Users/me/.local/bin/session-reviewer`
-- Windows 示例：`C:\Users\Me\AppData\Local\SessionReviewer\bin\session-reviewer.exe`
+插件不再要求填写 SessionReviewer 或 Codex 路径。启动时会从 Agent 的常用用户级安装目录和 `PATH` 自动发现并验证两者；旧版保存的路径只用于一次升级迁移，发现成功后即删除。若未发现，请先在 Agent 中运行一次 SessionReviewer，再重新加载插件。
 
 插件只接受兼容 review schema v2 的语义版本 CLI，并且只会执行固定白名单动作；不会从 Markdown 读取可执行路径，也不会通过 shell 执行任意参数。看到“项目需要迁移”时先做 dry-run 预览；看到“两边修改了同一内容”时比较 Base/Project/Obsidian 三个候选再确认；看到“机器账本被改动”时，只在确认 Project 副本为权威字节后执行修复。
 
@@ -210,7 +207,7 @@ session report 的双向链、revision、evidence 和 accounting 保存在隐藏
 
 Obsidian 插件的“总结并同步”视图把整条 reviewed 链路作为一个持久 job 运行：准备有界 packet、以 proposal-only 方式调用本机 Codex CLI、校验并 apply proposal，然后同步 vault。job 支持重试、取消以及 worker 被杀后的重启恢复。worker 的同步步骤会修复由已完成 apply 合法推进的 machine ledger；独立 `sync` 命令保持保守行为不变。
 
-agent 可执行文件默认 fail-closed：操作者必须通过 `SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS`（逗号分隔的精确 SHA-256 摘要）显式断言，证明该可执行文件是专用的 hermetic proposal agent；没有该证明的真实 0.147.x 安装会被拒绝。hermetic 端到端验收测试利用这个白名单，用专用 fake agent 驱动真实编排：
+agent 可执行文件默认 fail-closed：当前只接受经过审查并通过能力探测的 Codex `0.150.1`。固定调用会忽略用户配置与规则、禁用可关闭的外部能力、在私有只读沙箱运行，并拒绝任何观察到的工具事件。由于 Codex 保留一个不可关闭的核心执行能力，SessionReviewer 明确报告受限只读隔离，而不声称工具注册表为空。其他 Codex 版本在完成审查前保持阻止。端到端验收测试使用专用 fake agent 驱动同一编排：
 
 ```bash
 go test ./test/reviewjob -count=1
@@ -255,28 +252,28 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.2.5 dist
+./scripts/build-release.sh 0.2.12 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.2.5 -Dist dist
+.\scripts\build-release.ps1 -Version 0.2.12 -Dist dist
 ```
 
 Obsidian 插件包可独立构建：
 
 ```bash
-./scripts/build-obsidian-plugin.sh 0.2.5 dist
+./scripts/build-obsidian-plugin.sh 0.2.12 dist
 ```
 
 ```powershell
-.\scripts\build-obsidian-plugin.ps1 -Version 0.2.5 -Dist dist
+.\scripts\build-obsidian-plugin.ps1 -Version 0.2.12 -Dist dist
 ```
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.5` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.12` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 

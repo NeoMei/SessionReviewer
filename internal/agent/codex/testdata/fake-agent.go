@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const defaultVersion = "codex-cli 0.147.0"
+const defaultVersion = "codex-cli 0.150.1"
 
 type fakeFeature struct {
 	name           string
@@ -129,7 +129,25 @@ responses_websockets|removed|false
 responses_websockets_v2|removed|false
 remote_compaction_v2|stable|true
 use_agent_identity|under development|false
-workspace_dependencies|stable|true`
+workspace_dependencies|stable|true
+apply_patch_preserve_line_endings|under development|false
+background_paginated_rollout_migration|under development|false
+code_mode_interrupt|under development|false
+content_item_kinds|under development|false
+cwd_relative_turn_diffs|under development|false
+guardian_enhanced_node_repl_transcripts|under development|false
+guardian_ext|under development|false
+guardian_node_repl_transcript_images|under development|false
+guardian_reuse_parent_compaction|under development|false
+in_app_chat|stable|true
+in_app_dictation|stable|true
+in_app_local_automation|stable|true
+psp|under development|false
+retain_client_developer_messages|under development|false
+send_async_message|removed|false
+shell_snapshot_v2|under development|false
+transcript_v2|under development|false
+unified_image_budget|under development|false`
 
 func buildFeatures() []fakeFeature {
 	lines := strings.Split(featureFingerprint, "\n")
@@ -342,9 +360,36 @@ func hasArg(want string) bool {
 	return false
 }
 
+func hasAdjacentArg(first, second string) bool {
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] == first && os.Args[index+1] == second {
+			return true
+		}
+	}
+	return false
+}
+
 func runExecMode(mode string) {
 	switch mode {
 	case "", "success":
+		writeSuccess(validProposal(), validUsage())
+	case "noisy-disable-diagnostics":
+		if hasAdjacentArg("--disable", "web_search_cached") || hasAdjacentArg("--disable", "web_search_request") || hasAdjacentArg("--disable", "code_mode_host") {
+			writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
+			writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-warning", "type": "error", "message": "redundant disable warning"}})
+			writeEvent(map[string]any{"type": "turn.started"})
+			writeAgentAndUsage(validProposal(), validUsage())
+			return
+		}
+		writeSuccess(validProposal(), validUsage())
+	case "require-transport-envelope":
+		if !hasStrictTransportEnvelopeSchema() {
+			writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
+			writeEvent(map[string]any{"type": "turn.started"})
+			writeEvent(map[string]any{"type": "error", "message": "invalid_json_schema"})
+			writeEvent(map[string]any{"type": "turn.failed", "error": map[string]any{"message": "invalid_json_schema"}})
+			return
+		}
 		writeSuccess(validProposal(), validUsage())
 	case "success-stderr-model":
 		fmt.Fprintln(os.Stderr, "configured/default model: invented-stderr-model")
@@ -467,8 +512,34 @@ func writeSuccess(proposal string, usage map[string]int64) {
 	writeAgentAndUsage(proposal, usage)
 }
 
+func hasStrictTransportEnvelopeSchema() bool {
+	for index := 1; index+1 < len(os.Args); index++ {
+		if os.Args[index] != "--output-schema" {
+			continue
+		}
+		body, err := os.ReadFile(os.Args[index+1])
+		if err != nil {
+			return false
+		}
+		var schema struct {
+			Type                 string   `json:"type"`
+			AdditionalProperties *bool    `json:"additionalProperties"`
+			Required             []string `json:"required"`
+			Properties           map[string]struct {
+				Type string `json:"type"`
+			} `json:"properties"`
+		}
+		if json.Unmarshal(body, &schema) != nil || schema.Type != "object" || schema.AdditionalProperties == nil || *schema.AdditionalProperties || len(schema.Required) != 1 || schema.Required[0] != "proposal" {
+			return false
+		}
+		return len(schema.Properties) == 1 && schema.Properties["proposal"].Type == "string"
+	}
+	return false
+}
+
 func writeAgentAndUsage(proposal string, usage map[string]int64) {
-	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": proposal}})
+	envelope, _ := json.Marshal(map[string]string{"proposal": proposal})
+	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": string(envelope)}})
 	writeEvent(map[string]any{"type": "turn.completed", "usage": usage})
 }
 

@@ -6,7 +6,7 @@ import { sha256Text } from "../src/data/hash";
 import { parseHistory, parseReview } from "../src/data/markdown";
 
 const fixture = (name: string): Promise<string> =>
-  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v2", name), "utf8");
+  readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v3", name), "utf8");
 
 describe("review v2 human Markdown contract", () => {
   it("accepts shared Go fixtures and ignores marker-looking text in fences", async () => {

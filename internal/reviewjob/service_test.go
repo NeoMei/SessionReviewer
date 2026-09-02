@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/proposal"
+	"github.com/neomei/SessionReviewer/internal/reviewprompt"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
@@ -372,6 +374,88 @@ func workerDraft(t *testing.T, packet evidence.Packet, state ledger.State) []byt
 	return body
 }
 
+func TestRestoreEvidenceSummariesUsesAuthenticatedPacketTuples(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	packet := workerPacket("project-1111111111111111", "session-s1", 1, 1, "", hash, false, "ev-111111111111")
+	packet.Events[0].Summary = `run in "/Users/Neo/AgentWiki /agentwiki"`
+	redacted := ledger.EvidenceRef{
+		EvidenceID: packet.Events[0].ID, SessionID: packet.SessionID, JSONLLine: 1,
+		SourceHash: hash, Summary: `[REDACTED:HOST_PATH]`,
+	}
+	draft := proposal.Proposal{
+		NewDecisions:     []ledger.Decision{{Evidence: []ledger.EvidenceRef{redacted}}},
+		UpdatedDecisions: []proposal.DecisionPatch{{Evidence: &[]ledger.EvidenceRef{redacted}}},
+		OpenLoops: []proposal.OpenLoopChange{
+			{Entity: &ledger.OpenLoop{Evidence: []ledger.EvidenceRef{redacted}}},
+			{Patch: &proposal.OpenLoopPatch{Evidence: &[]ledger.EvidenceRef{redacted}}},
+		},
+		TimelineEvents:    []ledger.TimelineEvent{{Evidence: []ledger.EvidenceRef{redacted}}},
+		CurrentStatePatch: proposal.CurrentStatePatch{Evidence: &[]ledger.EvidenceRef{redacted}},
+		SessionReport: ledger.SessionReport{
+			Evidence: []ledger.EvidenceRef{redacted},
+			Phases:   []ledger.SessionPhase{{Evidence: []ledger.EvidenceRef{redacted}}},
+		},
+	}
+
+	if err := restoreEvidenceSummaries(&draft, packet); err != nil {
+		t.Fatal(err)
+	}
+	want := packet.Events[0].Summary
+	refs := []*ledger.EvidenceRef{
+		&draft.NewDecisions[0].Evidence[0],
+		&(*draft.UpdatedDecisions[0].Evidence)[0],
+		&draft.OpenLoops[0].Entity.Evidence[0],
+		&(*draft.OpenLoops[1].Patch.Evidence)[0],
+		&draft.TimelineEvents[0].Evidence[0],
+		&(*draft.CurrentStatePatch.Evidence)[0],
+		&draft.SessionReport.Evidence[0],
+		&draft.SessionReport.Phases[0].Evidence[0],
+	}
+	for index, ref := range refs {
+		if ref.Summary != want {
+			t.Fatalf("reference %d summary=%q want authenticated %q", index, ref.Summary, want)
+		}
+	}
+
+	draft.NewDecisions[0].Evidence[0] = redacted
+	draft.NewDecisions[0].Evidence[0].JSONLLine = 2
+	if err := restoreEvidenceSummaries(&draft, packet); err == nil {
+		t.Fatal("restored a summary for a mismatched evidence tuple")
+	}
+}
+
+func TestClassifyWorkerInputFailuresSeparately(t *testing.T) {
+	segmentErr := errors.Join(errors.New("private candidate path"), prepare.ErrSessionSegmentConflict)
+	if got := classifyPrepareFailure(segmentErr); got != SessionSegmentConflict {
+		t.Fatalf("prepare code=%s want %s", got, SessionSegmentConflict)
+	}
+	if got := classifyPromptFailure(reviewprompt.ErrUnsafeInput); got != ProposalUnsafeInput {
+		t.Fatalf("prompt code=%s want %s", got, ProposalUnsafeInput)
+	}
+	if got := classifyPromptFailure(errors.New("malformed prompt input")); got != ProposalRejected {
+		t.Fatalf("generic prompt code=%s want %s", got, ProposalRejected)
+	}
+}
+
+func TestDistinctAliasesPreservesTrailingSpacePathIdentity(t *testing.T) {
+	root := "/Users/Neo/AgentWiki "
+	if aliases := distinctAliases(root, root); len(aliases) != 0 {
+		t.Fatalf("same trailing-space root became aliases=%q", aliases)
+	}
+	aliases := distinctAliases("/private/physical", root)
+	if len(aliases) != 1 || aliases[0] != root {
+		t.Fatalf("aliases=%q want exact trailing-space spelling", aliases)
+	}
+}
+
+func TestBoundedPrivateErrorRetainsWrappedAgentCause(t *testing.T) {
+	err := agent.NewError(agent.CodeIncompatible, errors.New("private adapter diagnostic"))
+	got := boundedPrivateError(err)
+	if !strings.Contains(got, "E_AGENT_INCOMPATIBLE") || !strings.Contains(got, "private adapter diagnostic") {
+		t.Fatalf("private error lost wrapped cause: %q", got)
+	}
+}
+
 func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter *verifiedWorkerAgent, applyFn ApplyFunc, syncFn SyncFunc, pricing PricingResolver) RunOptions {
 	var handle *AgentHandle
 	if adapter != nil {
@@ -387,7 +471,7 @@ func workerRunOptions(fixture workerFixture, prepare PrepareFunc, adapter *verif
 	return RunOptions{
 		Store: fixture.store, JobID: fixture.job.ID, OwnerID: "worker-owner-1",
 		LeaseTimeout: 0, ProjectRoot: fixture.project, VaultRoot: fixture.vault,
-		DataDir: fixture.data, GOOS: "test", AgentTimeout: time.Minute,
+		DataDir: fixture.data, GOOS: runtime.GOOS, AgentTimeout: time.Minute,
 		Now:     func() time.Time { return fixture.now },
 		Prepare: prepare, Agent: handle, Apply: applyFn, Sync: syncFn, Pricing: pricing,
 	}
@@ -467,7 +551,19 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 		if !reflect.DeepEqual(request.ForbiddenRoots, wantRoots) || request.WorkingDirectory == fixture.project || request.WorkingDirectory == fixture.vault {
 			return agent.Result{}, errors.New("agent request lost physical root isolation")
 		}
-		return agent.Result{Proposal: workerDraft(t, current, accepted.legacy)}, nil
+		body := workerDraft(t, current, accepted.legacy)
+		var draft proposal.Proposal
+		if err := json.Unmarshal(body, &draft); err != nil {
+			t.Fatal(err)
+		}
+		draft.EvidenceLinks = append(draft.EvidenceLinks, proposal.EvidenceLink{
+			EntityID: current.ProjectID, EvidenceID: current.Events[0].ID, Relation: "supports",
+		})
+		body, err := json.Marshal(draft)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return agent.Result{Proposal: body}, nil
 	}
 	applyFn := func(_ context.Context, request ApplyRequest) (apply.Result, error) {
 		sequence = append(sequence, "apply")
@@ -479,6 +575,9 @@ func TestWorkerHappyPathPersistsExactPacketOrderAndCleansPrivateBytes(t *testing
 		}
 		if request.Proposal.SessionReport.Accounting != nil {
 			return apply.Result{}, errors.New("unexpected host accounting")
+		}
+		if len(request.Proposal.EvidenceLinks) != 2 {
+			return apply.Result{}, errors.New("unchanged-entity evidence link reached apply")
 		}
 		if request.ProjectIdentity != fixture.job.ProjectIdentity || !request.DataIdentity.Valid() {
 			return apply.Result{}, errors.New("apply request lost pinned root identities")
@@ -828,7 +927,7 @@ func TestWorkerRejectsVaultRootOutsideConfiguredMapping(t *testing.T) {
 }
 
 // Accepting a structurally plausible but unverified capability would recreate
-// the forbidden Codex 0.147 production bypass from Ruling P5.
+// a provider-specific production verification bypass.
 func TestWorkerRejectsUnverifiedCapabilityBeforePrepare(t *testing.T) {
 	hash := strings.Repeat("d", 64)
 	fixture := newWorkerFixture(t, []FrozenSession{{
@@ -2380,6 +2479,7 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 				pinnedTarget := target + ".pinned-" + phase
 				var configReplacement []byte
 				mutated := false
+				replacementBlocked := false
 				mutate := func(at string) {
 					if mutated || at != phase {
 						return
@@ -2393,6 +2493,13 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 						configReplacement = append([]byte(nil), body...)
 					}
 					if err := os.Rename(target, pinnedTarget); err != nil {
+						// Windows refuses to rename Data/Vault directories while
+						// their authenticated handles are open. That is the secure
+						// outcome this adversarial replacement test is exercising.
+						if runtime.GOOS == "windows" && rootKind != "config" && errors.Is(err, os.ErrPermission) {
+							replacementBlocked = true
+							return
+						}
 						t.Fatal(err)
 					}
 					if rootKind == "config" {
@@ -2429,8 +2536,18 @@ func TestWorkerRejectsMutationRootOrConfigReplacementAtEveryExternalPhaseWithout
 					},
 					nil,
 				)
-				if err := Run(t.Context(), options); err == nil || !mutated {
-					t.Fatalf("Run() err=%v mutated=%v", err, mutated)
+				runErr := Run(t.Context(), options)
+				if replacementBlocked {
+					if _, err := os.Stat(target); err != nil {
+						t.Fatalf("blocked replacement lost authoritative root: %v", err)
+					}
+					if _, err := os.Stat(pinnedTarget); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("blocked replacement created pinned decoy: %v", err)
+					}
+					return
+				}
+				if runErr == nil || !mutated {
+					t.Fatalf("Run() err=%v mutated=%v", runErr, mutated)
 				}
 				authoritativeStore := fixture.store
 				if rootKind == "data" {
@@ -2591,5 +2708,26 @@ func TestWorkerHostEnrichesSourceAccountingAndKeepsUnknownReviewModelUnpriced(t 
 	}
 	if projected.Machine.Accounting.TotalTokens != packet.SessionUsage.TotalTokens || len(projected.Machine.Sessions) != 1 || projected.Machine.Sessions[0].Accounting == nil {
 		t.Fatalf("source machine accounting = %#v", projected.Machine)
+	}
+}
+
+func TestEnrichSourceAccountingKeepsUnknownSourceModelUnpriced(t *testing.T) {
+	usage := &accounting.SessionUsage{
+		StartedAt: "2026-08-31T01:00:00Z", EndedAt: "2026-08-31T01:00:01Z", DurationMS: 1000,
+		Models: []accounting.ModelUsage{{
+			Model:      "unpriced-source-model",
+			TokenUsage: accounting.TokenUsage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+		}},
+		TotalTokens: 12,
+	}
+	draft := proposal.Proposal{}
+
+	if err := enrichSourceAccounting(&draft, usage, fixtureTime(0), workerPrices{}); err != nil {
+		t.Fatalf("enrichSourceAccounting() rejected unknown pricing: %v", err)
+	}
+	report := draft.SessionReport.Accounting
+	if report == nil || report.TotalTokens != 12 || report.TotalCostUSD != 0 || len(report.Models) != 1 ||
+		report.Models[0].ModelUsage != usage.Models[0] || report.Models[0].Pricing != (accounting.Pricing{}) || report.Models[0].CostUSD != 0 {
+		t.Fatalf("unpriced source accounting = %#v", report)
 	}
 }

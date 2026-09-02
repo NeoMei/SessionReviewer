@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "logical_sessions": 154,
+  "terminal": {
+    "indexed": 151,
+    "unsupported": 1,
+    "unreadable": 1,
+    "ambiguous": 1
+  },
+  "non_counted_cases": [
+    "first_seen_unassociated_issue",
+    "foreign_project_source"
+  ],
+  "replay_cases": [
+    "shared_session",
+    "append_successor",
+    "adapter_supersession",
+    "withdrawal",
+    "missing_unavailable",
+    "unchanged",
+    "replacement_truncation",
+    "platform_path_equivalence"
+  ]
+}

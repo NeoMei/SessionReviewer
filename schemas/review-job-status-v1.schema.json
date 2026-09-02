@@ -29,7 +29,7 @@
     "session_count": { "$ref": "#/$defs/nonnegative_integer" },
     "accepted_packets": { "$ref": "#/$defs/nonnegative_integer" },
     "accepted_sessions": { "$ref": "#/$defs/nonnegative_integer" },
-    "error_code": { "type": "string", "enum": ["E_AGENT_UNCONFIGURED", "E_AGENT_INCOMPATIBLE", "E_AGENT_AUTH", "E_AGENT_BUSY", "E_AGENT_TIMEOUT", "E_AGENT_TOOL_FORBIDDEN", "E_AGENT_CANCELLED", "E_PROPOSAL_REJECTED", "E_APPLY_RECOVERY", "E_SYNC_CONFLICT", "E_SYNC_PARTIAL"] },
+    "error_code": { "type": "string", "enum": ["E_AGENT_UNCONFIGURED", "E_AGENT_INCOMPATIBLE", "E_AGENT_AUTH", "E_AGENT_BUSY", "E_AGENT_TIMEOUT", "E_AGENT_TOOL_FORBIDDEN", "E_AGENT_CANCELLED", "E_PROPOSAL_REJECTED", "E_SESSION_DISCOVERY", "E_APPLY_RECOVERY", "E_SYNC_CONFLICT", "E_SYNC_PARTIAL"] },
     "can_retry": { "type": "boolean" },
     "retry_expected_attempt": { "$ref": "#/$defs/positive_integer" },
     "retry_expected_revision": { "$ref": "#/$defs/positive_integer" },

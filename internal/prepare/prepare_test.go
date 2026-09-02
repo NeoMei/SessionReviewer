@@ -817,6 +817,40 @@ func TestRunRejectsExplicitSessionFromDifferentProject(t *testing.T) {
 	}
 }
 
+// This catches collapsing a real trailing-space project root onto a sibling
+// without the space, or rejecting structured subagent session metadata before
+// the physical project identity check can run.
+func TestRunPreparesExplicitSessionForTrailingSpaceProjectRoot(t *testing.T) {
+	root := t.TempDir()
+	sessions := filepath.Join(root, "sessions")
+	data := filepath.Join(root, "data")
+	projectRoot := filepath.Join(root, "AgentWiki ")
+	emptySibling := filepath.Join(root, "AgentWiki")
+	for _, directory := range []string{sessions, data, projectRoot, emptySibling} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := config.Save(filepath.Join(data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: "project-trailing", Root: projectRoot}}}); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"timestamp":"2026-08-22T10:00:00Z","type":"session_meta","payload":{"id":"session-trailing","cwd":` + fmt.Sprintf("%q", filepath.ToSlash(projectRoot)) + `,"source":{"subagent":{"thread_spawn":{"depth":1}}}}}`
+	message := `{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"goal"}]}}`
+	if err := os.WriteFile(filepath.Join(sessions, "session.jsonl"), []byte(meta+"\n"+message+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := Write(Options{
+		Mode: "review", SessionsRoot: sessions, SessionID: "session-trailing", CWD: projectRoot,
+		DataDir: data, Output: filepath.Join(root, "packet.json"), FromStart: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.ProjectID != "project-trailing" || packet.SessionID != "session-trailing" || len(packet.Events) != 1 {
+		t.Fatalf("packet=%+v", packet)
+	}
+}
+
 func TestRunRejectsNoSessionAndAmbiguousSession(t *testing.T) {
 	f := newRunFixture(t, "")
 	if err := os.Remove(filepath.Join(f.sessions, "s1.jsonl")); err != nil {
@@ -838,7 +872,7 @@ func TestRunRejectsNoSessionAndAmbiguousSession(t *testing.T) {
 	}
 }
 
-func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
+func TestRunSkipsOversizedRecordAndPublishesBoundedMalformedWarning(t *testing.T) {
 	large := strings.Repeat("x", 2048)
 	f := newRunFixture(t, sessionBody("PROJECT", `{"timestamp":"2026-08-22T10:01:00Z","type":"response_item","payload":{"type":"message","id":"u1","role":"user","content":[{"type":"input_text","text":"`+large+`"}]}}`))
 	path := filepath.Join(f.sessions, "s1.jsonl")
@@ -857,11 +891,22 @@ func TestRunStreamFailurePreservesExistingOutput(t *testing.T) {
 	}
 	opts := f.options("review")
 	opts.MaxRecordBytes = 512
-	if _, err := Write(opts); err == nil {
-		t.Fatal("expected stream error")
+	packet, err := Write(opts)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if body, err := os.ReadFile(f.output); err != nil || string(body) != "old" {
-		t.Fatalf("output=%q err=%v", body, err)
+	if !containsString(packet.Warnings, "malformed_jsonl_lines:1") {
+		t.Fatalf("warnings=%v", packet.Warnings)
+	}
+	body, err = os.ReadFile(f.output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) == "old" {
+		t.Fatal("successful bounded decode did not replace stale output")
+	}
+	if bytes.Contains(body, []byte(large)) {
+		t.Fatal("oversized raw record leaked into output")
 	}
 }
 

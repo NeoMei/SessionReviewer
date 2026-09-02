@@ -52,6 +52,54 @@ func TestInitCreatesReviewV2(t *testing.T) {
 	}
 }
 
+func TestInitializeNormalizesTrailingSpaceProjectDirectoryName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Win32 cannot represent a directory leaf with a trailing space")
+	}
+	parent := t.TempDir()
+	root := filepath.Join(parent, "AgentWiki ")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	vault, data := t.TempDir(), t.TempDir()
+	result, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data,
+		Now:    func() time.Time { return time.Date(2026, 8, 30, 8, 31, 11, 517436000, time.UTC) },
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x51}, 16)),
+	})
+	if err != nil {
+		t.Fatalf("initialize trailing-space project directory: %v", err)
+	}
+	accepted, err := reviewv2.Load(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.State.Review.Name != "AgentWiki" {
+		t.Fatalf("review name=%q want %q", accepted.State.Review.Name, "AgentWiki")
+	}
+	reviewBody, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(reviewBody, []byte("# AgentWiki\n")) {
+		t.Fatalf("review heading missing canonical name:\n%s", reviewBody)
+	}
+	if bytes.Contains(reviewBody, []byte("# AgentWiki \n")) {
+		t.Fatal("review heading retained trailing space")
+	}
+	cfg, err := config.Load(result.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Projects) != 1 {
+		t.Fatalf("projects=%+v, want one mapping", cfg.Projects)
+	}
+	wantVaultPath := "Projects/AgentWiki--51515151/Session Review"
+	if cfg.Projects[0].VaultReviewPath != wantVaultPath {
+		t.Fatalf("vault review path=%q want %q", cfg.Projects[0].VaultReviewPath, wantVaultPath)
+	}
+}
+
 func TestInitializeReassociatesCompleteReviewV2WithoutChangingIdentity(t *testing.T) {
 	root, vault, firstData, secondData := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
 	first, err := Initialize(InitOptions{

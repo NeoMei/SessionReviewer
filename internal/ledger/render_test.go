@@ -14,9 +14,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 )
+
+func TestAccountingMarkdownDoesNotPresentUnknownPricingAsZeroCost(t *testing.T) {
+	report := &accounting.SessionAccounting{
+		StartedAt: "2026-08-31T01:00:00Z", EndedAt: "2026-08-31T01:00:01Z", DurationMS: 1000,
+		Models: []accounting.ModelAccounting{{
+			ModelUsage: accounting.ModelUsage{Model: "unpriced-model", TokenUsage: accounting.TokenUsage{TotalTokens: 12}},
+		}},
+		TotalTokens: 12,
+	}
+
+	got := sessionAccountingMarkdown(report)
+	if !strings.Contains(got, "Total cost: unavailable") || !strings.Contains(got, "cost unavailable") || strings.Contains(got, "$0.000000000") {
+		t.Fatalf("unknown pricing markdown = %q", got)
+	}
+	quick := renderSessionQuick(SessionReport{InitialGoal: "review", Accounting: report})
+	if !strings.Contains(quick, "费用暂不可用") || strings.Contains(quick, "$0.000000000") {
+		t.Fatalf("unknown pricing quick view = %q", quick)
+	}
+	project := projectAccountingMarkdown(accounting.ProjectSummary{TotalTokens: 12}, false)
+	if !strings.Contains(project, "Total cost: unavailable") || strings.Contains(project, "$0.000000000") {
+		t.Fatalf("unknown project pricing markdown = %q", project)
+	}
+}
 
 func TestEnsureSafeParentsPropagatesDurableCreatorFailure(t *testing.T) {
 	directory, err := pathguard.Open(t.TempDir())

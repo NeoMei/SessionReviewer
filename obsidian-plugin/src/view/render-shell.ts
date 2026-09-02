@@ -1,4 +1,4 @@
-import type { BrowserModel, EditableField, EditableFieldName, ViewKind } from "../contracts/review-v2";
+import type { BrowserModel, EditableField, EditableFieldName, ViewKind } from "../contracts/review-v3";
 import { button, element } from "./dom";
 import { renderDecisions } from "./render-decisions";
 import { renderEvolution } from "./render-evolution";

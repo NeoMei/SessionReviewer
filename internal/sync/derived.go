@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"path"
@@ -28,14 +29,16 @@ const (
 )
 
 type machineSnapshot struct {
-	projectBody []byte
-	projectHash string
-	ledger      reviewv2.MachineLedger
-	vaultBody   []byte
-	vaultHash   string
-	vaultFound  bool
-	humanStale  bool
-	operations  []Operation
+	schemaVersion int
+	projectBody   []byte
+	projectHash   string
+	ledger        reviewv2.MachineLedger
+	ledgerV3      reviewv2.MachineLedgerV3
+	vaultBody     []byte
+	vaultHash     string
+	vaultFound    bool
+	humanStale    bool
+	operations    []Operation
 }
 
 func (snapshot machineSnapshot) needsPublish() bool {
@@ -63,6 +66,44 @@ func (engine *Engine) loadMachineLedgerSnapshot(allowModifiedVault bool) (machin
 	if err != nil || !found {
 		return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("project machine ledger is unavailable")
 	}
+	var schemaProbe struct {
+		SchemaVersion int `json:"schema_version"`
+	}
+	_ = json.Unmarshal(body, &schemaProbe)
+	if schemaProbe.SchemaVersion == 3 {
+		ledgerV3, err := reviewv2.ParseMachineLedgerV3(body)
+		if err != nil || ledgerV3.ProjectID != engine.options.ProjectID {
+			return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("project machine ledger is invalid")
+		}
+		canonical, err := reviewv2.RenderMachineLedgerV3(ledgerV3)
+		if err != nil || !bytes.Equal(body, canonical) {
+			return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("project machine ledger is not canonical")
+		}
+		snapshot := machineSnapshot{schemaVersion: 3, projectBody: bytes.Clone(body), projectHash: syncdoc.ContentHash(body), ledgerV3: ledgerV3, operations: []Operation{}}
+		snapshot.humanStale = engine.machineLedgerBehindProjectV3(ledgerV3)
+		vaultBody, vaultFound, err := engine.readReviewTargetOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
+		if err != nil {
+			return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("vault machine ledger is unavailable")
+		}
+		snapshot.vaultBody = bytes.Clone(vaultBody)
+		snapshot.vaultFound = vaultFound
+		if vaultFound {
+			snapshot.vaultHash = syncdoc.ContentHash(vaultBody)
+			if !bytes.Equal(body, vaultBody) {
+				if !allowModifiedVault {
+					return snapshot, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("vault machine ledger was modified")
+				}
+				snapshot.operations = machineLedgerOperations(snapshot, snapshot.projectHash)
+				return snapshot, snapshot.report(), nil
+			}
+			return snapshot, snapshot.report(), nil
+		}
+		snapshot.operations = []Operation{{
+			EntityID: machineLedgerEntityID, Kind: OperationAddVault, Target: SideVault,
+			RelativePath: ".session-reviewer/ledger.json",
+		}}
+		return snapshot, snapshot.report(), nil
+	}
 	ledgerValue, err := reviewv2.ParseMachineLedger(body)
 	if err != nil || ledgerValue.ProjectID != engine.options.ProjectID {
 		return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("project machine ledger is invalid")
@@ -71,7 +112,7 @@ func (engine *Engine) loadMachineLedgerSnapshot(allowModifiedVault bool) (machin
 	if err != nil || !bytes.Equal(body, canonical) {
 		return machineSnapshot{}, MachineReport{State: MachineBlocked, Operations: []Operation{}}, errors.New("project machine ledger is not canonical")
 	}
-	snapshot := machineSnapshot{projectBody: bytes.Clone(body), projectHash: syncdoc.ContentHash(body), ledger: ledgerValue, operations: []Operation{}}
+	snapshot := machineSnapshot{schemaVersion: 2, projectBody: bytes.Clone(body), projectHash: syncdoc.ContentHash(body), ledger: ledgerValue, operations: []Operation{}}
 	snapshot.humanStale = engine.machineLedgerBehindProject(ledgerValue)
 	vaultBody, vaultFound, err := engine.readReviewTargetOptional(engine.machineVaultRelativePath(), int64(reviewv2.MaxMachineLedgerBytes))
 	if err != nil {
@@ -95,6 +136,20 @@ func (engine *Engine) loadMachineLedgerSnapshot(allowModifiedVault bool) (machin
 		RelativePath: ".session-reviewer/ledger.json",
 	}}
 	return snapshot, snapshot.report(), nil
+}
+
+func (engine *Engine) machineLedgerBehindProjectV3(machine reviewv2.MachineLedgerV3) bool {
+	reviewBody, reviewFound, reviewErr := engine.project.ReadRegular(reviewv2.ReviewRelativePath, int64(reviewv2.MaxDocumentBytes))
+	historyBody, historyFound, historyErr := engine.project.ReadRegular(reviewv2.HistoryRelativePath, int64(reviewv2.MaxDocumentBytes))
+	if reviewErr != nil || historyErr != nil || !reviewFound || !historyFound {
+		return false
+	}
+	review, reviewErr := reviewv2.ParseReview(reviewBody)
+	history, historyErr := reviewv2.ParseHistory(historyBody)
+	if reviewErr != nil || historyErr != nil || review.Model.ProjectID != machine.ProjectID || history.ProjectID != machine.ProjectID || review.Model.Revision != history.Revision {
+		return false
+	}
+	return machine.AcceptedRevision != review.Model.Revision || machine.ReviewSHA256 != syncdoc.ContentHash(reviewBody) || machine.HistorySHA256 != syncdoc.ContentHash(historyBody)
 }
 
 func (engine *Engine) machineLedgerBehindProject(machine reviewv2.MachineLedger) bool {
@@ -141,6 +196,9 @@ func (engine *Engine) renderMachineLedgerForAccepted(snapshot machineSnapshot, r
 	historyDocument, err := reviewv2.ParseHistory(historyBody)
 	if err != nil || historyDocument.ProjectID != reviewDocument.Model.ProjectID || historyDocument.Revision != reviewDocument.Model.Revision {
 		return nil, errors.New("project human documents do not share one accepted revision")
+	}
+	if snapshot.schemaVersion == 3 {
+		return bytes.Clone(snapshot.projectBody), nil
 	}
 	next := snapshot.ledger
 	next.AcceptedRevision = reviewDocument.Model.Revision

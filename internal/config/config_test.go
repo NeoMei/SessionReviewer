@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/pelletier/go-toml/v2"
 )
@@ -621,6 +622,12 @@ func TestConfigUnionRoundTripPreservesEveryField(t *testing.T) {
 			RemoteIdentities: []string{"origin:https://example.invalid/repo.git"},
 			CommonDirs:       []string{"/work/common"},
 			Aliases:          []string{"reviewer", "会话审查"},
+			AuthenticatedAliases: []AuthenticatedProjectAlias{{
+				SchemaVersion:     1,
+				Path:              "/work/项目",
+				RootIdentity:      pathguard.IdentityToken{Kind: "posix-dev-inode", Volume: "1", File: "2"},
+				CommonDirIdentity: "posix-dev-inode:1:3",
+			}},
 		}},
 		SessionAssociations: []SessionAssociation{{SessionID: "session-1", ProjectID: "project-2a2a2a2a2a2a2a2a"}},
 	}
@@ -671,7 +678,6 @@ func TestConfigRejectsUnsafeVaultReviewMapping(t *testing.T) {
 		{name: "device", path: `\\?\C:\Projects\work--11111111\Session Review`, caseMode: platform.CaseSensitive},
 		{name: "reserved", path: "Projects/CON/Session Review", caseMode: platform.CaseSensitive},
 		{name: "trailing dot", path: "Projects/work./Session Review", caseMode: platform.CaseSensitive},
-		{name: "trailing space", path: "Projects/work /Session Review", caseMode: platform.CaseSensitive},
 		{name: "NUL", path: "Projects/work\x00name/Session Review", caseMode: platform.CaseSensitive},
 	}
 	for _, test := range tests {
@@ -684,6 +690,16 @@ func TestConfigRejectsUnsafeVaultReviewMapping(t *testing.T) {
 				t.Fatalf("accepted unsafe mapping path %q", test.path)
 			}
 		})
+	}
+}
+
+func TestConfigAllowsDarwinVaultReviewPathWithTrailingSpaceComponent(t *testing.T) {
+	mapping := ProjectMapping{
+		ID: "project-1111111111111111", Root: "/work", VaultRoot: "/vault",
+		VaultReviewPath: "Projects/work /Session Review", VaultCaseMode: platform.CaseSensitive,
+	}
+	if err := Save(filepath.Join(t.TempDir(), "config.toml"), Config{Version: 1, Projects: []ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
 	}
 }
 

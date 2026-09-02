@@ -38,6 +38,31 @@ func TestProjectLegacyProducesTwoDocumentsAndMachineLedger(t *testing.T) {
 	}
 }
 
+func TestSafeLegacyPresentationCopiesHumanModelWithoutMachineInternals(t *testing.T) {
+	legacy := legacyFixtureState(t)
+	state, err := ProjectLegacy(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe, err := SafeLegacyPresentation(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(safe.Review, state.Review) || !reflect.DeepEqual(safe.Events, state.Events) {
+		t.Fatalf("safe presentation lost human values: %+v", safe)
+	}
+	safe.Review.Goal = "changed"
+	if state.Review.Goal == "changed" {
+		t.Fatal("safe presentation shared mutable review storage")
+	}
+	if safe.HasMachineInternals {
+		t.Fatal("safe presentation advertised machine internals")
+	}
+	if !reflect.DeepEqual(safe.Compatibility, state.Machine.LegacyCompatibility) {
+		t.Fatalf("safe presentation lost legacy compatibility: %+v", safe.Compatibility)
+	}
+}
+
 func TestProjectLegacyPreservesProposalV1StableIDCharacters(t *testing.T) {
 	legacy := legacyFixtureState(t)
 	loop := legacy.OpenLoops["risk-install"]

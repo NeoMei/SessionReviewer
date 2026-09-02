@@ -23,7 +23,8 @@ type Capability struct {
 	Version      string
 	ProposalOnly bool
 	// NoTools may be true only when a provider proves an empty effective tool
-	// registry. Codex 0.147.x cannot do that and returns no Capability at all.
+	// registry. The reviewed Codex adapter deliberately reports false and relies
+	// on RestrictedReadOnly containment plus tool-event rejection instead.
 	NoTools            bool
 	ReadOnly           bool
 	Containment        Containment
@@ -37,10 +38,10 @@ type Capability struct {
 type Containment string
 
 const (
-	// ContainmentRestrictedReadOnly is the future-version acceptance seam: every
-	// reviewed external, file-read, network, and agent feature is disabled; the
+	// ContainmentRestrictedReadOnly means every reviewed external, file-read,
+	// network, and agent feature is disabled where the provider permits it; the
 	// run has a private work root under the native read-only sandbox; and any
-	// observed tool event fails it. Codex 0.147.x cannot prove this capability.
+	// observed tool event fails it.
 	ContainmentRestrictedReadOnly Containment = "restricted_read_only"
 )
 

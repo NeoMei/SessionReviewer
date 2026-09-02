@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/neomei/SessionReviewer/schemas/generation-manifest-v1.schema.json",
+  "title": "SessionReviewer private GenerationManifest v1",
+  "$comment": "Runtime validation additionally applies UTF-8 byte limits, exact dependency reconciliation, ProbeCheck state binding, and rejects deprecated project-wide lineage fields. session_views remain ProjectView-ordered; session_lineages are an independently ordered exact provider+session identity set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation_id", "project_id", "created_at", "source_record_digests", "session_views", "session_lineages", "probe_state_digest", "probe_check", "project_view_digest"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generation_id": { "$ref": "#/$defs/safe_id" },
+    "project_id": { "$ref": "#/$defs/safe_id" },
+    "created_at": { "$ref": "#/$defs/timestamp" },
+    "source_record_digests": { "$ref": "#/$defs/digest_set" },
+    "session_views": {
+      "type": "array",
+      "maxItems": 65536,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/session_dependency" }
+    },
+    "session_lineages": {
+      "type": "array",
+      "maxItems": 65536,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/session_dependency" }
+    },
+    "probe_state_digest": { "$ref": "#/$defs/digest" },
+    "probe_check": { "$ref": "#/$defs/probe_check" },
+    "project_view_digest": { "$ref": "#/$defs/digest" }
+  },
+  "$defs": {
+    "safe_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+    },
+    "timestamp": { "type": "string", "minLength": 20, "maxLength": 35, "format": "date-time" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "digest_set": {
+      "type": "array",
+      "maxItems": 65536,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/digest" }
+    },
+    "session_dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "session_id", "digest"],
+      "properties": {
+        "provider": { "type": "string", "const": "codex" },
+        "session_id": { "$ref": "#/$defs/safe_id" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code"],
+      "properties": {
+        "code": { "$ref": "#/$defs/safe_id" },
+        "path": { "type": "string", "maxLength": 1024, "pattern": "^[^\\x00-\\x1f\\x7f]*$" },
+        "detail_hash": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "probe_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "checked_at", "state_digest", "available", "diagnostics"],
+      "properties": {
+        "schema_version": { "type": "integer", "const": 1 },
+        "checked_at": { "$ref": "#/$defs/timestamp" },
+        "state_digest": { "$ref": "#/$defs/digest" },
+        "available": { "type": "boolean" },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": { "$ref": "#/$defs/diagnostic" }
+        }
+      }
+    }
+  }
+}

@@ -28,8 +28,7 @@ type AgentHandle struct {
 }
 
 // VerifyAgent is the production control-plane factory. Unsupported providers
-// fail closed; notably, the reviewed Codex 0.147 Adapter cannot return a
-// capability and therefore cannot produce an AgentHandle.
+// and unreviewed executable versions fail closed before an AgentHandle exists.
 func VerifyAgent(ctx context.Context, provider, executable string) (*AgentHandle, error) {
 	if ctx == nil {
 		return nil, errors.New("Agent verification context is required")
@@ -111,11 +110,11 @@ func (handle *AgentHandle) cancel(ctx context.Context) error {
 
 func validateCapabilityContract(capability agent.Capability) error {
 	if strings.TrimSpace(capability.Provider) == "" || strings.TrimSpace(capability.Version) == "" ||
-		!capability.ProposalOnly || !capability.NoTools || !capability.ReadOnly ||
+		!capability.ProposalOnly || !capability.ReadOnly ||
 		capability.Containment != agent.ContainmentRestrictedReadOnly ||
 		!capability.StructuredOutput || !capability.NativeCancellation ||
 		capability.ModelProvenance != agent.ModelProvenanceUnavailable {
-		return errors.New("verified Agent capability does not satisfy the proposal-only no-tools contract")
+		return errors.New("verified Agent capability does not satisfy the proposal-only restricted contract")
 	}
 	return nil
 }

@@ -67,7 +67,7 @@ func TestMachineLedgerRenderUsesStableOrderAndJSONFormatting(t *testing.T) {
 
 func TestMachineLedgerRenderNormalizesEmptyArraysWithoutMutatingInput(t *testing.T) {
 	value := MachineLedger{
-		SchemaVersion: SchemaVersion,
+		SchemaVersion: LegacySchemaVersion,
 		ProjectID:     "project-empty",
 		ReviewSHA256:  strings.Repeat("a", 64),
 		HistorySHA256: strings.Repeat("b", 64),
@@ -480,7 +480,8 @@ func assertNonnegativeNumericDefinitions(t *testing.T, schema map[string]any) {
 						t.Fatalf("%s.%s is not a nonnegative integer: %+v", path, name, property)
 					}
 				case strings.Contains(name, "cost") || strings.HasSuffix(name, "_per_million"):
-					if property["type"] != "number" || property["minimum"] != float64(0) {
+					zeroSentinel := property["const"] == float64(0)
+					if !zeroSentinel && (property["type"] != "number" || property["minimum"] != float64(0)) {
 						t.Fatalf("%s.%s is not a nonnegative number: %+v", path, name, property)
 					}
 				}
@@ -513,7 +514,7 @@ func assertFixtureTopLevelShape(t *testing.T, schema map[string]any, body []byte
 		}
 	}
 	version, _ := properties["schema_version"].(map[string]any)
-	if version["const"] != float64(SchemaVersion) || fixture["schema_version"] != float64(SchemaVersion) {
+	if version["const"] != float64(LegacySchemaVersion) || fixture["schema_version"] != float64(LegacySchemaVersion) {
 		t.Fatalf("schema or fixture has wrong schema_version: schema=%+v fixture=%v", version, fixture["schema_version"])
 	}
 }

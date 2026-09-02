@@ -1106,11 +1106,10 @@ func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, exp
 			return syncdoc.Document{}, syncdoc.ErrReservedField
 		}
 	}
-	rendered, err := selected.Render()
-	if err != nil {
+	if _, err := selected.Render(); err != nil {
 		return syncdoc.Document{}, syncdoc.ErrInvalidDocument
 	}
-	if result := redact.Default().Text(string(rendered)); len(result.Findings) != 0 {
+	if documentSensitive(selected) {
 		return syncdoc.Document{}, ErrSensitiveContent
 	}
 	selected, err = finalizeAcceptedDocument(selected, base, true)
@@ -1244,14 +1243,24 @@ func sensitiveConflictCandidate(record ConflictRecord) (Side, []byte, bool) {
 	candidates := []struct {
 		side  Side
 		value []byte
+		path  string
 	}{
-		{side: SideProject, value: record.Base},
-		{side: SideProject, value: record.Project},
-		{side: SideVault, value: record.Vault},
-		{side: SideProject, value: record.Suggested},
+		{side: SideProject, value: record.Base, path: conflictPath(record.BasePath, record.RelativePath)},
+		{side: SideProject, value: record.Project, path: conflictPath(record.ProjectPath, record.RelativePath)},
+		{side: SideVault, value: record.Vault, path: conflictPath(record.VaultPath, record.RelativePath)},
+		{side: SideProject, value: record.Suggested, path: record.RelativePath},
 	}
 	redactor := redact.Default()
 	for _, candidate := range candidates {
+		if candidate.path != "" {
+			document, err := syncdoc.Parse(candidate.path, candidate.value)
+			if err == nil {
+				if documentSensitive(document) {
+					return candidate.side, bytes.Clone(candidate.value), true
+				}
+				continue
+			}
+		}
 		if result := redactor.Text(string(candidate.value)); len(result.Findings) != 0 {
 			return candidate.side, bytes.Clone(candidate.value), true
 		}

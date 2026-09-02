@@ -2,7 +2,6 @@ package reviewjob
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,9 +27,8 @@ import (
 )
 
 var (
-	cliBin     string
-	fakeBin    string
-	fakeDigest string
+	cliBin  string
+	fakeBin string
 )
 
 func TestMain(m *testing.M) {
@@ -58,12 +56,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "build fake codex: %v\n%s\n", buildErr, output)
 		os.Exit(1)
 	}
-	digestBytes, err := os.ReadFile(fakeBin)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "read fake codex digest: %v\n", err)
-		os.Exit(1)
-	}
-	fakeDigest = fmt.Sprintf("%x", sha256.Sum256(digestBytes))
 	code := m.Run()
 	if runtime.GOOS != "windows" {
 		_ = exec.Command("pkill", "-f", fakeBin).Run()
@@ -141,11 +133,10 @@ func parseProjectID(t *testing.T, output string) string {
 
 func (e *reviewEnv) childEnv(extra map[string]string) []string {
 	skip := map[string]bool{
-		"HOME":                                   true,
-		"USERPROFILE":                            true,
-		"LOCALAPPDATA":                           true,
-		"SESSION_REVIEWER_SESSIONS_ROOT":         true,
-		"SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS": true,
+		"HOME":                           true,
+		"USERPROFILE":                    true,
+		"LOCALAPPDATA":                   true,
+		"SESSION_REVIEWER_SESSIONS_ROOT": true,
 	}
 	result := make([]string, 0, len(os.Environ())+len(extra)+4)
 	for _, entry := range os.Environ() {
@@ -161,7 +152,6 @@ func (e *reviewEnv) childEnv(extra map[string]string) []string {
 		result = append(result, "HOME="+e.home)
 	}
 	result = append(result, "SESSION_REVIEWER_SESSIONS_ROOT="+e.sessions)
-	result = append(result, "SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS="+fakeDigest)
 	for name, value := range extra {
 		result = append(result, name+"="+value)
 	}

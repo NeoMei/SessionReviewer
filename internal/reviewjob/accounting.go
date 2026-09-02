@@ -393,6 +393,9 @@ func reviewUsageDelta(total, previous accounting.TokenUsage) (accounting.TokenUs
 	if err := accounting.ValidateTokenUsage(delta); err != nil {
 		return accounting.TokenUsage{}, err
 	}
+	if delta.OutputTokens == 0 && delta.ReasoningOutputTokens > 0 {
+		return accounting.TokenUsage{}, errors.New("reasoning tokens exceed output tokens")
+	}
 	return delta, nil
 }
 

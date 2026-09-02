@@ -311,7 +311,7 @@ func sourceDeclaresV2(content []byte) bool {
 		return false
 	}
 	version, err := positiveInt(schema)
-	return err == nil && version == 2
+	return err == nil && (version == 2 || version == 3)
 }
 
 func sortScanIssues(issues []ScanIssue) {

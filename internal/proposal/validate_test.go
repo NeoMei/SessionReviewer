@@ -528,6 +528,23 @@ func TestValidateSafeTextCoversNarrativePatchFields(t *testing.T) {
 	}
 }
 
+func TestValidateSafeTextIdentifiesRedactionBoundaryWithoutEchoingSecret(t *testing.T) {
+	secret := "Authorization: Bearer abcdefghijklmnop"
+	packet := evidence.Packet{Events: []evidence.Item{{Summary: secret}}}
+	if err := validateSafeText(Proposal{}, packet); err == nil ||
+		!strings.Contains(err.Error(), "packet.events[0].summary") ||
+		!strings.Contains(err.Error(), "bearer=1") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("packet diagnostic = %v", err)
+	}
+
+	proposalValue := Proposal{SessionReport: ledger.SessionReport{Files: []string{secret}}}
+	if err := validateSafeText(proposalValue, evidence.Packet{}); err == nil ||
+		!strings.Contains(err.Error(), "proposal.text[") ||
+		!strings.Contains(err.Error(), "bearer=1") || strings.Contains(err.Error(), secret) {
+		t.Fatalf("proposal diagnostic = %v", err)
+	}
+}
+
 func TestValidateRejectsCrossSessionReportOverwrite(t *testing.T) {
 	p, packet, state := fixedProposalPacketState(t, "valid-first.json")
 	existing := p.SessionReport

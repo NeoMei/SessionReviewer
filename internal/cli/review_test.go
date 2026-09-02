@@ -196,6 +196,28 @@ func TestRunReviewStartPersistsFrozenLaunchIntentBeforeSpawn(t *testing.T) {
 	}
 }
 
+func TestRunReviewStartClassifiesFreezeFailureAsSessionDiscovery(t *testing.T) {
+	fixture := newReviewCLIFixture(t)
+	const privateCanary = "private-session-path-canary"
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		return reviewVerifiedAgent{Agent: fixture.agent}, nil
+	}
+	reviewFreeze = func(reviewjob.FreezeOptions) ([]reviewjob.FrozenSession, error) {
+		return nil, errors.New(privateCanary)
+	}
+	t.Cleanup(resetReviewCLISeams)
+
+	var out, errOut bytes.Buffer
+	code := Run([]string{"review", "start", "--json", "--agent-executable", fixture.executable, "--project-id", fixture.projectID}, &out, &errOut)
+	if code != 1 || errOut.Len() != 0 || strings.Contains(out.String(), privateCanary) {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	status := decodeReviewStatus(t, out.Bytes())
+	if status.State != reviewjob.Idle || status.ErrorCode != "E_SESSION_DISCOVERY" {
+		t.Fatalf("status=%#v", status)
+	}
+}
+
 func TestRunReviewStartRepairsPartialPointerCommitAndLaunchesSameJob(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
@@ -1006,7 +1028,7 @@ func TestRunReviewRetryWorkerRootAuthenticationFailureTerminalizesOwnedLaunch(t 
 	}
 }
 
-func TestReviewProduction0147FailsClosedBeforeJobCreation(t *testing.T) {
+func TestReviewUnreviewed0147FailsClosedBeforeJobCreation(t *testing.T) {
 	fixture := newReviewCLIFixture(t)
 	executable := filepath.Join(t.TempDir(), "fake-codex")
 	if runtime.GOOS == "windows" {
@@ -1017,6 +1039,7 @@ func TestReviewProduction0147FailsClosedBeforeJobCreation(t *testing.T) {
 		t.Fatalf("build fake Codex: %v\n%s", err, output)
 	}
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "success")
+	t.Setenv("SESSIONREVIEWER_FAKE_VERSION", "codex-cli 0.147.0")
 	resetReviewCLISeams()
 	t.Cleanup(resetReviewCLISeams)
 	var out, errOut bytes.Buffer
@@ -1191,10 +1214,11 @@ func TestDetachedReviewLauncherHandlesSuccessBadByteEOFAndTimeout(t *testing.T) 
 		maxRun time.Duration
 	}{
 		{jobID: "job-handshake-success", ok: true, maxRun: 2 * time.Second},
+		{jobID: "job-handshake-delayed", ok: true, maxRun: 6 * time.Second},
 		{jobID: "job-handshake-bad", maxRun: 2 * time.Second},
 		{jobID: "job-handshake-busy", maxRun: 2 * time.Second},
 		{jobID: "job-handshake-eof", maxRun: 2 * time.Second},
-		{jobID: "job-handshake-timeout", maxRun: 5 * time.Second},
+		{jobID: "job-handshake-timeout", maxRun: 12 * time.Second},
 	}
 	for _, test := range tests {
 		t.Run(test.jobID, func(t *testing.T) {
@@ -1267,8 +1291,9 @@ func main() {
 	if path := os.Getenv("SESSIONREVIEWER_DETACHED_TEST_PID_FILE"); path != "" { os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0600) }
   os.Stdout.WriteString("stdout-canary")
   os.Stderr.WriteString("stderr-canary")
-  if strings.HasSuffix(job, "timeout") { time.Sleep(10*time.Second); return }
-  if strings.HasSuffix(job, "eof") { return }
+	if strings.HasSuffix(job, "timeout") { time.Sleep(10*time.Second); return }
+	if strings.HasSuffix(job, "delayed") { time.Sleep(4*time.Second) }
+	if strings.HasSuffix(job, "eof") { return }
   value, _ := strconv.ParseUint(handle, 10, 64)
   file := os.NewFile(uintptr(value), "handshake")
   if file == nil { os.Exit(3) }

@@ -80,6 +80,22 @@ describe("project evolution browser", () => {
     expect(source?.href).toBe("https://example.com/pricing");
   });
 
+  it("shows unavailable costs without invented zero pricing", () => {
+	const model = browserModelFixture();
+	model.accounting.pricingComplete = false;
+	const sessionAccounting = model.sessions[0]?.accounting;
+	if (!sessionAccounting) throw new Error("fixture session accounting is missing");
+	sessionAccounting.pricingComplete = false;
+		sessionAccounting.models[0].pricing = undefined;
+
+	const view = renderReadyView(model);
+	click(view, '[data-view="usage"]');
+
+	expect(text(view, '[data-role="usage-total"]')).toContain("费用暂不可用");
+	expect(text(view, ".sr-model-metrics")).toContain("费用暂不可用");
+	expect(view.querySelector(".sr-model-pricing")).toBeNull();
+  });
+
   it("translates machine-facing states and timestamps into readable Chinese", () => {
     const model = browserModelFixture();
     model.review.status = "at_risk";

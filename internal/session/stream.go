@@ -45,24 +45,35 @@ func StreamFiles(files []*os.File, opts DecodeOptions, visit func(Record) error)
 	if len(files) == 0 {
 		return DecodeSummary{}, fmt.Errorf("at least one session file is required")
 	}
+	if opts.SegmentBytes != nil && len(opts.SegmentBytes) != len(files) {
+		return DecodeSummary{}, fmt.Errorf("segment byte limits must match session file count")
+	}
 	readers := make([]io.Reader, 0, len(files)*2)
-	for _, file := range files {
+	for index, file := range files {
 		if file == nil {
 			return DecodeSummary{}, fmt.Errorf("session file is required")
-		}
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return DecodeSummary{}, fmt.Errorf("seek session file: %w", err)
 		}
 		info, err := file.Stat()
 		if err != nil {
 			return DecodeSummary{}, fmt.Errorf("inspect session file: %w", err)
 		}
-		readers = append(readers, file)
-		if info.Size() == 0 {
+		segmentBytes := info.Size()
+		var reader io.Reader = file
+		if opts.SegmentBytes != nil {
+			segmentBytes = opts.SegmentBytes[index]
+			if segmentBytes < 0 || info.Size() < segmentBytes {
+				return DecodeSummary{}, fmt.Errorf("session file is shorter than authenticated prefix")
+			}
+			reader = io.NewSectionReader(file, 0, segmentBytes)
+		} else if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return DecodeSummary{}, fmt.Errorf("seek session file: %w", err)
+		}
+		readers = append(readers, reader)
+		if segmentBytes == 0 {
 			continue
 		}
 		var last [1]byte
-		if _, err := file.ReadAt(last[:], info.Size()-1); err != nil {
+		if _, err := file.ReadAt(last[:], segmentBytes-1); err != nil {
 			return DecodeSummary{}, fmt.Errorf("inspect session file ending: %w", err)
 		}
 		if last[0] != '\n' {
@@ -96,7 +107,8 @@ func StreamReader(source io.Reader, opts DecodeOptions, visit func(Record) error
 		start := offset
 		offset += bytesRead
 		if errors.Is(readErr, errRecordTooLarge) {
-			return summary, fmt.Errorf("line %d exceeds %d bytes", summary.Lines, opts.MaxRecordBytes)
+			summary.MalformedLines++
+			continue
 		}
 
 		trimmed := bytes.TrimSpace(line)
@@ -142,16 +154,23 @@ func readBoundedLine(reader *bufio.Reader, maxBytes int) ([]byte, int64, error) 
 	}
 	line := make([]byte, 0, capacity)
 	var bytesRead int64
+	oversized := false
 
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		bytesRead += int64(len(fragment))
-		if len(fragment) > maxBytes-len(line) {
-			return line, bytesRead, errRecordTooLarge
+		if !oversized {
+			if len(fragment) > maxBytes-len(line) {
+				oversized = true
+			} else {
+				line = append(line, fragment...)
+			}
 		}
-		line = append(line, fragment...)
 
 		if err == nil || err == io.EOF {
+			if oversized {
+				return line, bytesRead, errRecordTooLarge
+			}
 			return line, bytesRead, err
 		}
 		if err != bufio.ErrBufferFull {

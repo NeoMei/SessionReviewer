@@ -219,6 +219,45 @@ func TestFreezePendingFailsClosedForRelevantOrUnclassifiableDiscoveryIssue(t *te
 	}
 }
 
+// This catches failing the target project because a malformed session whose
+// metadata names a physically different configured project is not associated
+// in config yet. Parsed cwd identity is sufficient to exclude it safely.
+func TestFreezePendingSkipsUnassociatedMalformedSessionFromOtherPhysicalProject(t *testing.T) {
+	f := newFreezeFixture(t)
+	record := responseRecord("2026-08-28T08:01:00Z", "one", "first")
+	f.write(t, "target.jsonl", "session-target", f.project, "2026-08-28T08:00:00Z", record)
+	meta := `{"timestamp":"2026-08-28T07:00:00Z","type":"session_meta","payload":{"id":"broken-other","cwd":"` + filepath.ToSlash(f.other) + `","source":"vscode"}}`
+	if err := os.WriteFile(filepath.Join(f.sessions, "broken-other.jsonl"), []byte(meta+"\n{broken\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FreezePending(f.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "session-target" {
+		t.Fatalf("FreezePending()=%+v", got)
+	}
+}
+
+// This catches allowing an unrelated historical cwd that no longer exists to
+// block every configured project. Without an explicit target association, a
+// missing path distinct from the live configured root cannot be authenticated
+// as the target and is excluded.
+func TestFreezePendingSkipsUnassociatedSessionWhoseUnrelatedCWDNoLongerExists(t *testing.T) {
+	f := newFreezeFixture(t)
+	record := responseRecord("2026-08-28T08:01:00Z", "one", "first")
+	f.write(t, "target.jsonl", "session-target", f.project, "2026-08-28T08:00:00Z", record)
+	f.write(t, "missing.jsonl", "session-missing", filepath.Join(f.root, "retired-project"), "2026-08-28T07:00:00Z", responseRecord("2026-08-28T07:01:00Z", "old", "old"))
+
+	got, err := FreezePending(f.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].SessionID != "session-target" {
+		t.Fatalf("FreezePending()=%+v", got)
+	}
+}
+
 // FrozenSession requires a real canonical start time. This catches silently
 // substituting filesystem modification time (which is mutable) or allowing an
 // unstable zero-time ordering.

@@ -6,7 +6,9 @@ import (
 )
 
 const (
-	SchemaVersion = 2
+	SchemaVersion        = 3
+	LegacySchemaVersion  = 2
+	MinimumWriterVersion = "0.3.0"
 
 	ReviewRelativePath        = "docs/session-review/项目回顾.md"
 	HistoryRelativePath       = "docs/session-review/项目历史.md"
@@ -33,30 +35,33 @@ type Decision struct {
 }
 
 type Event struct {
-	ID          string
-	OccurredAt  string
-	Kind        string
-	Title       string
-	Meaning     string
-	Summary     string
-	Why         string
-	Next        string
-	Changes     []string
-	Results     []string
-	DecisionIDs []string
+	ID           string
+	GenerationID string
+	OccurredAt   string
+	Kind         string
+	Title        string
+	Meaning      string
+	Summary      string
+	Why          string
+	Next         string
+	Changes      []string
+	Results      []string
+	DecisionIDs  []string
 }
 
 type Review struct {
-	ProjectID        string
-	Revision         int
-	Name             string
-	Goal             string
-	Stage            string
-	Status           string
-	NextAction       string
-	LastVerification string
-	Risks            []Risk
-	Decisions        []Decision
+	ProjectID            string
+	GenerationID         string
+	MinimumWriterVersion string
+	Revision             int
+	Name                 string
+	Goal                 string
+	Stage                string
+	Status               string
+	NextAction           string
+	LastVerification     string
+	Risks                []Risk
+	Decisions            []Decision
 }
 
 type MachineLedger struct {

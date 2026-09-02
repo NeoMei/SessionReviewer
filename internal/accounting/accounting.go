@@ -78,6 +78,30 @@ type ProjectSummary struct {
 	Models          []ProjectModelSummary `json:"models" yaml:"models"`
 }
 
+// SessionPricingComplete reports whether every persisted model row has a
+// trusted pricing snapshot. A zero Pricing value is the explicit marker for
+// actual usage whose authoritative price is unavailable.
+func SessionPricingComplete(report *SessionAccounting) bool {
+	if report == nil {
+		return false
+	}
+	for _, model := range report.Models {
+		if model.Pricing == (Pricing{}) {
+			return false
+		}
+	}
+	return true
+}
+
+func SessionsPricingComplete(reports []*SessionAccounting) bool {
+	for _, report := range reports {
+		if report != nil && !SessionPricingComplete(report) {
+			return false
+		}
+	}
+	return true
+}
+
 func FormatDurationMS(value int64) string {
 	if value < 0 {
 		return "invalid"
@@ -385,9 +409,6 @@ func ValidateTokenUsage(value TokenUsage) error {
 	if value.CachedInputTokens+value.CacheWriteInputTokens > value.InputTokens {
 		return errors.New("cached and cache-write tokens exceed input tokens")
 	}
-	if value.ReasoningOutputTokens > value.OutputTokens {
-		return errors.New("reasoning tokens exceed output tokens")
-	}
 	if value.TotalTokens != value.InputTokens+value.OutputTokens {
 		return errors.New("total tokens do not equal input plus output")
 	}
@@ -457,6 +478,12 @@ func ValidateSessionAccounting(report *SessionAccounting, usage *SessionUsage) e
 		want := usage.Models[index]
 		if model.ModelUsage != want {
 			return errors.New("model accounting does not match packet usage")
+		}
+		if model.Pricing == (Pricing{}) {
+			if model.CostUSD != 0 {
+				return fmt.Errorf("model %q with unknown pricing must not claim a cost", model.Model)
+			}
+			continue
 		}
 		cost, err := PriceUsage(model.TokenUsage, model.Pricing)
 		if err != nil {

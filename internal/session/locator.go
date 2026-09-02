@@ -43,7 +43,6 @@ type Candidate struct {
 	ID        string
 	Path      string
 	CWD       string
-	Source    string
 	StartedAt time.Time
 	ModTime   time.Time
 	fileInfo  os.FileInfo
@@ -55,6 +54,7 @@ type Candidate struct {
 type DiscoveryIssue struct {
 	Path      string
 	SessionID string
+	CWD       string
 	Err       error
 }
 
@@ -149,6 +149,7 @@ func DiscoverWithLimits(root, selectedSessionID string, limits DiscoveryLimits) 
 
 func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candidate, bool, *DiscoveryIssue) {
 	var candidate Candidate
+	var rootSessionID string
 	var metadataLine int
 	var metadataErr error
 	summary, err := StreamFile(file, DecodeOptions{MaxRecordBytes: 64 << 20}, func(record Record) error {
@@ -157,9 +158,9 @@ func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candi
 		}
 
 		var meta struct {
-			ID     string `json:"id"`
-			CWD    string `json:"cwd"`
-			Source string `json:"source"`
+			ID        string `json:"id"`
+			SessionID string `json:"session_id"`
+			CWD       string `json:"cwd"`
 		}
 		if err := json.Unmarshal(record.Payload, &meta); err != nil {
 			if metadataErr == nil {
@@ -176,11 +177,11 @@ func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candi
 
 		if metadataLine == 0 {
 			metadataLine = record.Line
+			rootSessionID = meta.SessionID
 			candidate = Candidate{
-				ID:     meta.ID,
-				Path:   path,
-				CWD:    meta.CWD,
-				Source: meta.Source,
+				ID:   meta.ID,
+				Path: path,
+				CWD:  meta.CWD,
 			}
 			if record.Timestamp != "" {
 				startedAt, err := time.Parse(time.RFC3339Nano, record.Timestamp)
@@ -197,13 +198,14 @@ func discoverCandidateFile(file *os.File, path, selectedSessionID string) (Candi
 			}
 			return nil
 		}
-		if meta.ID != candidate.ID && metadataErr == nil {
+		inheritedMetadata := rootSessionID != "" && meta.SessionID == rootSessionID && meta.CWD == candidate.CWD
+		if meta.ID != candidate.ID && !inheritedMetadata && metadataErr == nil {
 			metadataErr = fmt.Errorf("decode session metadata in %q at line %d: conflicting session id", path, record.Line)
 		}
 		return nil
 	})
 	issue := func(issueErr error) (Candidate, bool, *DiscoveryIssue) {
-		return Candidate{}, false, &DiscoveryIssue{Path: path, SessionID: candidate.ID, Err: issueErr}
+		return Candidate{}, false, &DiscoveryIssue{Path: path, SessionID: candidate.ID, CWD: candidate.CWD, Err: issueErr}
 	}
 	issueErr := metadataErr
 	if summary.MalformedLines > 0 {

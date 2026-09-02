@@ -20,11 +20,13 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/agent"
+	"github.com/neomei/SessionReviewer/internal/agent/codex"
 	"github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/proposal"
 	"github.com/neomei/SessionReviewer/internal/reviewprompt"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
@@ -602,6 +604,9 @@ func openJobWork(leases *LeaseSet, jobID string) (_ *jobWork, retErr error) {
 	base := filepath.Join(layout.data.Path, "review-jobs", "work", jobID)
 	work.inputsPath = filepath.Join(base, "inputs")
 	work.agentPath = filepath.Join(base, "agent")
+	if err := codex.PrepareWorkingDirectory(work.agentPath); err != nil {
+		return nil, fmt.Errorf("protect private Agent work directory: %w", err)
+	}
 	work.packetPath = filepath.Join(work.inputsPath, packetWorkName)
 	work.proposalPath = filepath.Join(work.inputsPath, proposalWorkName)
 	return work, nil
@@ -633,7 +638,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		} else if requested {
 			return runner.finishCancelled(errors.Join(err, ctx.Err()))
 		}
-		return runner.fail(ProposalRejected, err)
+		return runner.fail(classifyPrepareFailure(err), err)
 	}
 	if len(prepared.PacketBytes) == 0 || len(prepared.PacketBytes) > maxPrivatePacketBytes {
 		return runner.fail(ProposalRejected, errors.New("prepared packet bytes are absent or oversized"))
@@ -680,7 +685,7 @@ func (runner *worker) runPacket(ctx context.Context) error {
 		},
 	})
 	if err != nil {
-		return runner.fail(ProposalRejected, err)
+		return runner.fail(classifyPromptFailure(err), err)
 	}
 	if requested, err := runner.observeCancellation(ctx); err != nil {
 		return runner.fail(ApplyRecovery, err)
@@ -755,6 +760,10 @@ func (runner *worker) runPacket(ctx context.Context) error {
 	if err := enrichSourceAccounting(&draft, packet.SessionUsage, runner.job.StartedAt, runner.options.Pricing); err != nil {
 		return runner.fail(ProposalRejected, err)
 	}
+	if err := restoreEvidenceSummaries(&draft, packet); err != nil {
+		return runner.fail(ProposalRejected, err)
+	}
+	discardProjectEvidenceLinks(&draft)
 	changes, err := proposal.Validate(draft, packet, prepared.Accepted.Legacy)
 	if err != nil {
 		return runner.fail(ProposalRejected, err)
@@ -891,13 +900,98 @@ func distinctAliases(canonical string, candidates ...string) []string {
 	aliases := make([]string, 0, len(candidates))
 	seen := map[string]bool{canonical: true}
 	for _, candidate := range candidates {
-		candidate = strings.TrimSpace(candidate)
-		if candidate != "" && !seen[candidate] {
+		if strings.TrimSpace(candidate) != "" && !seen[candidate] {
 			seen[candidate] = true
 			aliases = append(aliases, candidate)
 		}
 	}
 	return aliases
+}
+
+type evidenceTuple struct {
+	id         string
+	sessionID  string
+	jsonlLine  int
+	sourceHash string
+}
+
+func restoreEvidenceSummaries(draft *proposal.Proposal, packet evidence.Packet) error {
+	if draft == nil {
+		return errors.New("proposal is absent")
+	}
+	authenticated := make(map[evidenceTuple]string, len(packet.Events))
+	for _, item := range packet.Events {
+		key := evidenceTuple{id: item.ID, sessionID: packet.SessionID, jsonlLine: item.JSONLLine, sourceHash: item.SourceHash}
+		if _, duplicate := authenticated[key]; duplicate {
+			return errors.New("packet contains a duplicate evidence tuple")
+		}
+		authenticated[key] = item.Summary
+	}
+
+	refs := make([]*ledger.EvidenceRef, 0)
+	appendRefs := func(values []ledger.EvidenceRef) {
+		for index := range values {
+			refs = append(refs, &values[index])
+		}
+	}
+	for index := range draft.NewDecisions {
+		appendRefs(draft.NewDecisions[index].Evidence)
+	}
+	for index := range draft.UpdatedDecisions {
+		if draft.UpdatedDecisions[index].Evidence != nil {
+			appendRefs(*draft.UpdatedDecisions[index].Evidence)
+		}
+	}
+	for index := range draft.OpenLoops {
+		if draft.OpenLoops[index].Entity != nil {
+			appendRefs(draft.OpenLoops[index].Entity.Evidence)
+		}
+		if draft.OpenLoops[index].Patch != nil && draft.OpenLoops[index].Patch.Evidence != nil {
+			appendRefs(*draft.OpenLoops[index].Patch.Evidence)
+		}
+	}
+	for index := range draft.TimelineEvents {
+		appendRefs(draft.TimelineEvents[index].Evidence)
+	}
+	if draft.CurrentStatePatch.Evidence != nil {
+		appendRefs(*draft.CurrentStatePatch.Evidence)
+	}
+	appendRefs(draft.SessionReport.Evidence)
+	for index := range draft.SessionReport.Phases {
+		appendRefs(draft.SessionReport.Phases[index].Evidence)
+	}
+
+	replacements := make([]string, len(refs))
+	for index, ref := range refs {
+		key := evidenceTuple{id: ref.EvidenceID, sessionID: ref.SessionID, jsonlLine: ref.JSONLLine, sourceHash: ref.SourceHash}
+		summary, found := authenticated[key]
+		if !found {
+			return errors.New("proposal evidence tuple is not authenticated by the packet")
+		}
+		replacements[index] = summary
+	}
+	for index, ref := range refs {
+		ref.Summary = replacements[index]
+	}
+	return nil
+}
+
+// discardProjectEvidenceLinks removes the one structurally impossible link
+// target that models may infer from the proposal envelope. A project ID is
+// context, not a change entity. All other links remain untouched so final
+// validation still rejects unknown entities, unbound evidence, duplicates,
+// and invalid relations.
+func discardProjectEvidenceLinks(draft *proposal.Proposal) {
+	if draft == nil {
+		return
+	}
+	filtered := make([]proposal.EvidenceLink, 0, len(draft.EvidenceLinks))
+	for _, link := range draft.EvidenceLinks {
+		if link.EntityID != draft.ProjectID {
+			filtered = append(filtered, link)
+		}
+	}
+	draft.EvidenceLinks = filtered
 }
 
 func enrichSourceAccounting(draft *proposal.Proposal, usage *accounting.SessionUsage, at time.Time, resolver PricingResolver) error {
@@ -916,12 +1010,13 @@ func enrichSourceAccounting(draft *proposal.Proposal, usage *accounting.SessionU
 		Models: make([]accounting.ModelAccounting, 0, len(usage.Models)), TotalTokens: usage.TotalTokens,
 	}
 	for _, model := range usage.Models {
-		if resolver == nil {
-			return fmt.Errorf("source model %q lacks trusted pricing", model.Model)
+		pricing, found := accounting.Pricing{}, false
+		if resolver != nil {
+			pricing, found = resolver.Resolve(model.Model, at)
 		}
-		pricing, found := resolver.Resolve(model.Model, at)
 		if !found {
-			return fmt.Errorf("source model %q lacks trusted pricing", model.Model)
+			report.Models = append(report.Models, accounting.ModelAccounting{ModelUsage: model})
+			continue
 		}
 		cost, err := accounting.PriceUsage(model.TokenUsage, pricing)
 		if err != nil {
@@ -1206,7 +1301,7 @@ func boundedPrivateError(err error) string {
 	if err == nil {
 		return ""
 	}
-	value := err.Error()
+	value := privateErrorDetails(err, 0)
 	if !utf8.ValidString(value) {
 		value = "review worker failed with invalid diagnostic text"
 	}
@@ -1217,6 +1312,31 @@ func boundedPrivateError(err error) string {
 		}
 	}
 	return value
+}
+
+func privateErrorDetails(err error, depth int) string {
+	if err == nil || depth >= 32 {
+		return ""
+	}
+	current := err.Error()
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		parts := []string{current}
+		for _, child := range joined.Unwrap() {
+			if detail := privateErrorDetails(child, depth+1); detail != "" && detail != current {
+				parts = append(parts, detail)
+			}
+		}
+		return strings.Join(parts, " | ")
+	}
+	child := errors.Unwrap(err)
+	if child == nil {
+		return current
+	}
+	detail := privateErrorDetails(child, depth+1)
+	if detail == "" || detail == current || strings.Contains(current, detail) {
+		return current
+	}
+	return current + " | " + detail
 }
 
 func mapAgentError(err error) ErrorCode {
@@ -1242,6 +1362,20 @@ func mapAgentError(err error) ErrorCode {
 	default:
 		return AgentIncompatible
 	}
+}
+
+func classifyPrepareFailure(err error) ErrorCode {
+	if errors.Is(err, prepare.ErrSessionSegmentConflict) {
+		return SessionSegmentConflict
+	}
+	return ProposalRejected
+}
+
+func classifyPromptFailure(err error) ErrorCode {
+	if errors.Is(err, reviewprompt.ErrUnsafeInput) {
+		return ProposalUnsafeInput
+	}
+	return ProposalRejected
 }
 
 func (runner *worker) publishPacketPayload(body []byte, digest string) error {

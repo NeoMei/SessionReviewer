@@ -10,9 +10,11 @@ import (
 	"path"
 	"reflect"
 	"sort"
+	"strconv"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"gopkg.in/yaml.v3"
 )
 
 type Version string
@@ -20,6 +22,7 @@ type Version string
 const (
 	VersionLegacy Version = "legacy"
 	VersionV2     Version = "v2"
+	VersionV3     Version = "v3"
 	VersionMixed  Version = "mixed"
 	VersionEmpty  Version = "empty"
 )
@@ -160,6 +163,8 @@ func loadAcceptedWithHooks(projectRoot string, expectedRoot os.FileInfo, allowLe
 		}, nil
 	case VersionV2:
 		return loadV2FromDirectory(projectRoot, directory, hooks)
+	case VersionV3:
+		return Accepted{}, &ErrWriterUpgradeRequired{ProjectRoot: projectRoot}
 	default:
 		return Accepted{}, fmt.Errorf("unsupported review ledger version %q", version)
 	}
@@ -267,13 +272,20 @@ func revalidateLoadedFiles(directory *pathguard.Directory, files map[string]acce
 }
 
 func detectVersionFromDirectory(directory *pathguard.Directory) (Version, error) {
-	v2 := false
+	modern, v3 := false, false
 	for _, relative := range []string{ReviewRelativePath, HistoryRelativePath, MachineLedgerRelativePath} {
 		exists, err := reviewRegularExists(directory, relative)
 		if err != nil {
 			return "", err
 		}
-		v2 = v2 || exists
+		modern = modern || exists
+	}
+	if modern {
+		body, _, err := readStableReviewFile(directory, ReviewRelativePath, MaxDocumentBytes)
+		if err != nil {
+			return "", err
+		}
+		v3 = frontmatterSchemaVersion(body) == SchemaVersion
 	}
 	legacy := false
 	for _, relative := range []string{
@@ -299,15 +311,45 @@ func detectVersionFromDirectory(directory *pathguard.Directory) (Version, error)
 		legacy = legacy || exists
 	}
 	switch {
-	case legacy && v2:
+	case legacy && modern:
 		return VersionMixed, nil
 	case legacy:
 		return VersionLegacy, nil
-	case v2:
+	case v3:
+		return VersionV3, nil
+	case modern:
 		return VersionV2, nil
 	default:
 		return VersionEmpty, nil
 	}
+}
+
+func frontmatterSchemaVersion(source []byte) int {
+	source = bytes.ReplaceAll(bytes.ReplaceAll(source, []byte("\r\n"), []byte("\n")), []byte("\r"), []byte("\n"))
+	if !bytes.HasPrefix(source, []byte("---\n")) {
+		return LegacySchemaVersion
+	}
+	closeStart := bytes.Index(source[4:], []byte("\n---\n"))
+	if closeStart < 0 {
+		return LegacySchemaVersion
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(source[4:closeStart+4], &document); err != nil || document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
+		return LegacySchemaVersion
+	}
+	mapping := document.Content[0]
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return LegacySchemaVersion
+	}
+	schema, ok := frontmatterValue(mapping, "schema_version")
+	if !ok || schema.Kind != yaml.ScalarNode || schema.Tag != "!!int" {
+		return LegacySchemaVersion
+	}
+	value, err := strconv.Atoi(schema.Value)
+	if err != nil {
+		return LegacySchemaVersion
+	}
+	return value
 }
 
 func reviewDirectoryExists(directory *pathguard.Directory, relative string) (bool, error) {

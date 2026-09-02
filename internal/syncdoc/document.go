@@ -42,7 +42,7 @@ func MachineReservedFields() map[string]struct{} {
 // ProposalOwnedFields returns a caller-owned snapshot of the provenance field
 // catalog. Mutating it never changes merge validation.
 func ProposalOwnedFields() map[string]struct{} {
-	return map[string]struct{}{"revision": {}, "source_sessions": {}, "evidence": {}, "supersedes": {}}
+	return map[string]struct{}{"revision": {}, "source_sessions": {}, "evidence": {}, "supersedes": {}, "generation_id": {}, "minimum_writer_version": {}}
 }
 
 func isMachineReservedField(name string) bool {
@@ -56,7 +56,7 @@ func isMachineReservedField(name string) bool {
 
 func isProposalOwnedField(name string) bool {
 	switch name {
-	case "revision", "source_sessions", "evidence", "supersedes":
+	case "revision", "source_sessions", "evidence", "supersedes", "generation_id", "minimum_writer_version":
 		return true
 	default:
 		return false

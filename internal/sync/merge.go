@@ -533,7 +533,7 @@ func validCompactV2Candidate(identity syncdoc.Identity, units syncdoc.UnitSet) b
 		return false
 	}
 	var schema, revision int
-	if unit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "schema_version"}]; !unit.Present || yaml.Unmarshal(unit.Value, &schema) != nil || schema != 2 {
+	if unit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "schema_version"}]; !unit.Present || yaml.Unmarshal(unit.Value, &schema) != nil || (schema != 2 && schema != 3) {
 		return false
 	}
 	if unit := units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "revision"}]; !unit.Present || yaml.Unmarshal(unit.Value, &revision) != nil || revision < 1 || revision > 1<<53-1 {

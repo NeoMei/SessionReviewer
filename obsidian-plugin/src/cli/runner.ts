@@ -2,61 +2,12 @@ import { execFile as nodeExecFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ScanStatus } from "../contracts/review-v3";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
 const CONFLICT_ID = /^conflict-[a-z0-9][a-z0-9._-]{0,191}$/;
-const REVIEW_JOB_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
-const REVIEW_COMMAND_FAILED = "SessionReviewer review command failed";
-const REVIEW_STATES = ["idle", "queued", "running", "completed", "failed", "cancel_requested", "cancelled", "retrying"] as const;
-const REVIEW_PHASES = ["preflight", "scanning", "preparing", "reviewing", "applying", "syncing"] as const;
-
-export const ACTIVE_REVIEW_STATES: readonly ReviewState[] = ["queued", "running", "retrying", "cancel_requested"];
-
-export type ReviewState = (typeof REVIEW_STATES)[number];
-export type ReviewPhase = (typeof REVIEW_PHASES)[number];
-
-export interface AgentVerification {
-  schemaVersion: 1;
-  kind: "codex";
-  compatible: boolean;
-  version?: string;
-  errorCode?: string;
-}
-
-export interface ReviewUsage {
-  totalTokens: number;
-  totalCostUsd?: number;
-  pricingComplete: boolean;
-}
-
-export interface ReviewStatus {
-  schemaVersion: 1;
-  jobId?: string;
-  projectId: string;
-  state: ReviewState;
-  phase?: ReviewPhase;
-  attempt: number;
-  sessionIndex: number;
-  sessionCount: number;
-  acceptedPackets: number;
-  acceptedSessions: number;
-  errorCode?: string;
-  retryExpectedAttempt?: number;
-  retryExpectedRevision?: number;
-  canRetry: boolean;
-  canCancel: boolean;
-  canSyncOnly: boolean;
-  reviewUsage?: ReviewUsage;
-}
-
-export interface ReviewRunner {
-  verifyAgent: (executable: string) => Promise<AgentVerification>;
-  startReview: (projectId: string, agentExecutable: string) => Promise<ReviewStatus>;
-  reviewStatus: (projectId: string) => Promise<ReviewStatus>;
-  cancelReview: (jobId: string) => Promise<ReviewStatus>;
-  retryReview: (jobId: string, agentExecutable: string, expectedAttempt: number, expectedRevision: number) => Promise<ReviewStatus>;
-  syncProject: (projectId: string) => Promise<string>;
-}
+const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
+const SCAN_STATES = ["queued", "running", "completed", "completed_with_issues", "failed"] as const;
 
 interface ExecOptions {
   shell: false;
@@ -71,15 +22,8 @@ export type ExecFileLike = (file: string, args: readonly string[], options: Exec
 
 export interface VerifiedExecutable {
   version: string;
-  reviewSchemaVersion: 2;
+  reviewSchemaVersion: 3;
 }
-
-export type AllowedAction =
-  | { kind: "status"; projectId: string }
-  | { kind: "migrationDryRun"; projectId: string }
-  | { kind: "resolve"; projectId: string; conflictId: string; action: "accept_project" | "accept_obsidian" }
-  | { kind: "manualMerge"; projectId: string; conflictId: string; file: string }
-  | { kind: "repairMachineLedger"; projectId: string };
 
 export class CliRunner {
   constructor(
@@ -93,38 +37,18 @@ export class CliRunner {
     const { stdout } = await this.run(["version", "--json"]);
     const value = parseJson(stdout) as Record<string, unknown>;
     if (typeof value.version !== "string" || !/^\d+\.\d+\.\d+$/.test(value.version)) throw new Error("CLI version is not semantic");
-    if (value.review_schema_version !== 2) throw new Error("CLI review schema version is incompatible");
-    return { version: value.version, reviewSchemaVersion: 2 };
+    if (value.review_schema_version !== 3) throw new Error("CLI review schema version is incompatible");
+    return { version: value.version, reviewSchemaVersion: 3 };
   }
 
-  async verifyAgent(executable: string): Promise<AgentVerification> {
-    return parseAgentVerification(await this.runJSON(["review", "agent", "verify", "--executable", executable, "--json"]));
-  }
-
-  async startReview(projectId: string, agentExecutable: string): Promise<ReviewStatus> {
+  async startScan(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
-    return parseReviewStatus(await this.runJSON(["review", "start", "--project-id", projectId, "--agent-executable", agentExecutable, "--json"]));
+    return parseScanStatus(await this.runJSON(["scan", "start", "--project-id", projectId, "--json"]));
   }
 
-  async reviewStatus(projectId: string): Promise<ReviewStatus> {
+  async getScanStatus(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
-    return parseReviewStatus(await this.runJSON(["review", "status", "--project-id", projectId, "--json"]));
-  }
-
-  async cancelReview(jobId: string): Promise<ReviewStatus> {
-    validateJobId(jobId);
-    return parseReviewStatus(await this.runJSON(["review", "cancel", "--job-id", jobId, "--json"]));
-  }
-
-  async retryReview(jobId: string, agentExecutable: string, expectedAttempt: number, expectedRevision: number): Promise<ReviewStatus> {
-    validateJobId(jobId);
-    if (!Number.isSafeInteger(expectedAttempt) || expectedAttempt < 1 || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
-      throw new Error(REVIEW_COMMAND_FAILED);
-    }
-    return parseReviewStatus(await this.runJSON([
-      "review", "retry", "--job-id", jobId, "--agent-executable", agentExecutable,
-      "--expected-attempt", String(expectedAttempt), "--expected-revision", String(expectedRevision), "--json"
-    ]));
+    return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]));
   }
 
   async syncProject(projectId: string): Promise<string> {
@@ -171,8 +95,9 @@ export class CliRunner {
 
   private async run(args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
     if (!allowedArgs(args)) throw new Error("command is not allowed");
+    const timeout = 10_000;
     return new Promise((resolve, reject) => {
-      this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
+      this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
         if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { stdout: stdout || (error as { stdout?: unknown }).stdout }));
         else resolve({ stdout, stderr });
       });
@@ -188,9 +113,9 @@ export class CliRunner {
       if (typeof carried?.stdout === "string") {
         try { payload = JSON.parse(carried.stdout); } catch { payload = undefined; }
       }
-      if (payload === undefined || payload === null) throw new Error(REVIEW_COMMAND_FAILED);
+      if (payload === undefined || payload === null) throw new Error(SCAN_COMMAND_FAILED);
     }
-    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) throw new Error(REVIEW_COMMAND_FAILED);
+    if (typeof payload !== "object" || payload === null || Array.isArray(payload)) throw new Error(SCAN_COMMAND_FAILED);
     return payload as Record<string, unknown>;
   }
 
@@ -209,13 +134,8 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args.length === 8 && args[0] === "sync" && args[1] === "resolve" && args[2] === "--conflict" && CONFLICT_ID.test(args[3] ?? "") && args[4] === "--action" && (args[5] === "accept_project" || args[5] === "accept_obsidian") && args[6] === "--project-id") return PROJECT_ID.test(args[7] ?? "");
   if (args.length === 10 && args[0] === "sync" && args[1] === "resolve" && args[2] === "--conflict" && CONFLICT_ID.test(args[3] ?? "") && args[4] === "--action" && args[5] === "manual_merge" && args[6] === "--file" && args[8] === "--project-id") return Boolean(args[7]) && PROJECT_ID.test(args[9] ?? "");
   if (args.length === 3 && args[0] === "sync" && args[1] === "--project-id") return PROJECT_ID.test(args[2] ?? "");
-  if (args.length === 6 && args[0] === "review" && args[1] === "agent" && args[2] === "verify" && args[3] === "--executable" && args[5] === "--json") return absoluteExecutable(args[4] ?? "");
-  if (args.length === 7 && args[0] === "review" && args[1] === "start" && args[2] === "--project-id" && args[4] === "--agent-executable" && args[6] === "--json") return PROJECT_ID.test(args[3] ?? "") && absoluteExecutable(args[5] ?? "");
-  if (args.length === 5 && args[0] === "review" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
-  if (args.length === 5 && args[0] === "review" && args[1] === "cancel" && args[2] === "--job-id" && args[4] === "--json") return REVIEW_JOB_ID.test(args[3] ?? "");
-  if (args.length === 11 && args[0] === "review" && args[1] === "retry" && args[2] === "--job-id" && args[4] === "--agent-executable" && args[6] === "--expected-attempt" && args[8] === "--expected-revision" && args[10] === "--json") {
-    return REVIEW_JOB_ID.test(args[3] ?? "") && absoluteExecutable(args[5] ?? "") && /^[1-9][0-9]*$/.test(args[7] ?? "") && /^[1-9][0-9]*$/.test(args[9] ?? "");
-  }
+  if (args.length === 5 && args[0] === "scan" && args[1] === "start" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
+  if (args.length === 5 && args[0] === "scan" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   return false;
 }
 
@@ -227,10 +147,6 @@ function validateConflict(value: string): void {
   if (!CONFLICT_ID.test(value)) throw new Error("invalid conflict ID");
 }
 
-function validateJobId(value: string): void {
-  if (!REVIEW_JOB_ID.test(value)) throw new Error(REVIEW_COMMAND_FAILED);
-}
-
 function absoluteExecutable(value: string): boolean {
   return value.startsWith("/") || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith("\\\\");
 }
@@ -239,81 +155,24 @@ function parseJson(source: string): unknown {
   try { return JSON.parse(source); } catch { throw new Error("CLI returned malformed JSON"); }
 }
 
-function parseAgentVerification(value: Record<string, unknown>): AgentVerification {
-  if (value.schema_version !== 1 || value.kind !== "codex" || typeof value.compatible !== "boolean") {
-    throw new Error(REVIEW_COMMAND_FAILED);
-  }
-  if (value.version !== undefined && typeof value.version !== "string") throw new Error(REVIEW_COMMAND_FAILED);
-  if (value.error_code !== undefined && typeof value.error_code !== "string") throw new Error(REVIEW_COMMAND_FAILED);
-  return {
-    schemaVersion: 1,
-    kind: "codex",
-    compatible: value.compatible,
-    version: value.version,
-    errorCode: value.error_code
+function parseScanStatus(value: Record<string, unknown>): ScanStatus {
+  if (value.schema_version !== 1) throw new Error(SCAN_COMMAND_FAILED);
+  const projectId = typeof value.project_id === "string" ? value.project_id : "";
+  const jobId = typeof value.job_id === "string" ? value.job_id : "";
+  const stateStr = typeof value.state === "string" ? value.state : "";
+  if (!projectId || !jobId || !SCAN_STATES.includes(stateStr as ScanStatus["state"])) throw new Error(SCAN_COMMAND_FAILED);
+  const phaseStr = typeof value.phase === "string" ? value.phase : "discovering";
+  const status: ScanStatus = {
+    schema_version: 1,
+    job_id: jobId,
+    project_id: projectId,
+    state: stateStr as ScanStatus["state"],
+    phase: phaseStr as ScanStatus["phase"],
+    session_count: typeof value.session_count === "number" ? value.session_count : 0,
+    indexed_count: typeof value.indexed_count === "number" ? value.indexed_count : 0,
+    issue_count: typeof value.issue_count === "number" ? value.issue_count : 0,
+    generation_id: typeof value.generation_id === "string" ? value.generation_id : undefined,
+    error_code: typeof value.error_code === "string" ? value.error_code : undefined,
   };
-}
-
-function parseReviewStatus(value: Record<string, unknown>): ReviewStatus {
-  if (value.schema_version !== 1) throw new Error(REVIEW_COMMAND_FAILED);
-  if (typeof value.project_id !== "string" || value.project_id.length === 0 || value.project_id.length > 129) throw new Error(REVIEW_COMMAND_FAILED);
-  if (typeof value.state !== "string" || !REVIEW_STATES.includes(value.state as ReviewState)) throw new Error(REVIEW_COMMAND_FAILED);
-  const idle = value.state === "idle";
-  if (idle ? value.job_id !== undefined : typeof value.job_id !== "string" || !REVIEW_JOB_ID.test(value.job_id)) {
-    throw new Error(REVIEW_COMMAND_FAILED);
-  }
-  const status: ReviewStatus = {
-    schemaVersion: 1,
-    projectId: value.project_id,
-    state: value.state as ReviewState,
-    attempt: readCount(value, "attempt", !idle),
-    sessionIndex: readCount(value, "session_index"),
-    sessionCount: readCount(value, "session_count"),
-    acceptedPackets: readCount(value, "accepted_packets"),
-    acceptedSessions: readCount(value, "accepted_sessions"),
-    canRetry: readBoolean(value, "can_retry"),
-    canCancel: readBoolean(value, "can_cancel"),
-    canSyncOnly: readBoolean(value, "can_sync_only")
-  };
-  if (typeof value.job_id === "string") status.jobId = value.job_id;
-  if (value.phase !== undefined) {
-    if (typeof value.phase !== "string" || !REVIEW_PHASES.includes(value.phase as ReviewPhase)) throw new Error(REVIEW_COMMAND_FAILED);
-    status.phase = value.phase as ReviewPhase;
-  }
-  if (value.error_code !== undefined) {
-    if (typeof value.error_code !== "string" || value.error_code.length === 0) throw new Error(REVIEW_COMMAND_FAILED);
-    status.errorCode = value.error_code;
-  }
-  if (value.retry_expected_attempt !== undefined) status.retryExpectedAttempt = readCount(value, "retry_expected_attempt");
-  if (value.retry_expected_revision !== undefined) status.retryExpectedRevision = readCount(value, "retry_expected_revision");
-  if (value.review_usage !== undefined) status.reviewUsage = parseReviewUsage(value.review_usage);
   return status;
-}
-
-function parseReviewUsage(value: unknown): ReviewUsage {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(REVIEW_COMMAND_FAILED);
-  const usage = value as Record<string, unknown>;
-  const totalTokens = usage.total_tokens;
-  if (typeof totalTokens !== "number" || !Number.isSafeInteger(totalTokens) || totalTokens < 0) throw new Error(REVIEW_COMMAND_FAILED);
-  if (typeof usage.pricing_complete !== "boolean") throw new Error(REVIEW_COMMAND_FAILED);
-  const parsed: ReviewUsage = { totalTokens, pricingComplete: usage.pricing_complete };
-  if (usage.total_cost_usd !== undefined) {
-    if (typeof usage.total_cost_usd !== "number" || !Number.isFinite(usage.total_cost_usd) || usage.total_cost_usd < 0) {
-      throw new Error(REVIEW_COMMAND_FAILED);
-    }
-    parsed.totalCostUsd = usage.total_cost_usd;
-  }
-  return parsed;
-}
-
-function readCount(value: Record<string, unknown>, key: string, required = true): number {
-  const count = value[key];
-  if (count === undefined && !required) return 0;
-  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) throw new Error(REVIEW_COMMAND_FAILED);
-  return count;
-}
-
-function readBoolean(value: Record<string, unknown>, key: string): boolean {
-  if (typeof value[key] !== "boolean") throw new Error(REVIEW_COMMAND_FAILED);
-  return value[key];
 }

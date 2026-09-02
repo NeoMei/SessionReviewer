@@ -114,8 +114,7 @@ describe("review job layout", () => {
 
     const banner = renderReviewJobBanner(
       {
-        schemaVersion: 1, projectId: "project-x", state: "running", jobId: "job-1", phase: "reviewing", attempt: 1,
-        sessionIndex: 2, sessionCount: 12, acceptedPackets: 0, acceptedSessions: 0, canRetry: false, canCancel: true, canSyncOnly: true
+        schema_version: 1, project_id: "project-x", state: "running", job_id: "job-1", phase: "extracting", session_count: 12, indexed_count: 2, issue_count: 0
       },
       { onCancel: () => {}, onRetry: () => {}, onSyncOnly: () => {} }
     )!;

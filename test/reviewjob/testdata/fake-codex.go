@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-const defaultVersion = "codex-cli 0.147.0"
+const defaultVersion = "codex-cli 0.150.1"
 
 type fakeFeature struct {
 	name           string
@@ -129,7 +129,25 @@ responses_websockets|removed|false
 responses_websockets_v2|removed|false
 remote_compaction_v2|stable|true
 use_agent_identity|under development|false
-workspace_dependencies|stable|true`
+workspace_dependencies|stable|true
+apply_patch_preserve_line_endings|under development|false
+background_paginated_rollout_migration|under development|false
+code_mode_interrupt|under development|false
+content_item_kinds|under development|false
+cwd_relative_turn_diffs|under development|false
+guardian_enhanced_node_repl_transcripts|under development|false
+guardian_ext|under development|false
+guardian_node_repl_transcript_images|under development|false
+guardian_reuse_parent_compaction|under development|false
+in_app_chat|stable|true
+in_app_dictation|stable|true
+in_app_local_automation|stable|true
+psp|under development|false
+retain_client_developer_messages|under development|false
+send_async_message|removed|false
+shell_snapshot_v2|under development|false
+transcript_v2|under development|false
+unified_image_budget|under development|false`
 
 func buildFeatures() []fakeFeature {
 	lines := strings.Split(featureFingerprint, "\n")
@@ -408,12 +426,12 @@ func runExecMode(mode string) {
 	case "missing-usage":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeEvent(map[string]any{"type": "turn.completed"})
 	case "duplicate-final":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeAgentAndUsage(validProposal(), validUsage())
 	case "event-after-complete":
 		writeSuccess(validProposal(), validUsage())
@@ -421,7 +439,7 @@ func runExecMode(mode string) {
 	case "model-spoof":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		writeEvent(map[string]any{"type": "turn.completed", "model": "invented-model", "usage": validUsage()})
 	case "duplicate-json-key":
 		fmt.Println(`{"type":"thread.started","type":"thread.started","thread_id":"thread-1"}`)
@@ -434,7 +452,7 @@ func runExecMode(mode string) {
 	case "trailing-no-newline":
 		writeEvent(map[string]any{"type": "thread.started", "thread_id": "thread-1"})
 		writeEvent(map[string]any{"type": "turn.started"})
-		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()}})
+		writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())}})
 		data, _ := json.Marshal(map[string]any{"type": "turn.completed", "usage": validUsage()})
 		_, _ = os.Stdout.Write(data)
 	case "turn-failed-before-start":
@@ -445,7 +463,7 @@ func runExecMode(mode string) {
 		writeEvent(map[string]any{"type": "turn.started"})
 		line, _ := json.Marshal(map[string]any{
 			"type": "item.completed",
-			"item": map[string]any{"id": "item-1", "type": "agent_message", "text": validProposal()},
+			"item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(validProposal())},
 		})
 		marker := []byte("Build a durable review ledger")
 		position := bytes.Index(line, marker)
@@ -474,8 +492,16 @@ func writeSuccess(proposal string, usage map[string]int64) {
 }
 
 func writeAgentAndUsage(proposal string, usage map[string]int64) {
-	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": proposal}})
+	writeEvent(map[string]any{"type": "item.completed", "item": map[string]any{"id": "item-1", "type": "agent_message", "text": transportProposal(proposal)}})
 	writeEvent(map[string]any{"type": "turn.completed", "usage": usage})
+}
+
+func transportProposal(proposal string) string {
+	body, err := json.Marshal(map[string]string{"proposal": proposal})
+	if err != nil {
+		os.Exit(3)
+	}
+	return string(body)
 }
 
 func writeEvent(value any) {

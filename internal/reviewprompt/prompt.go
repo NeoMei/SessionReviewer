@@ -31,11 +31,12 @@ const (
 	MaxAcceptedContextBytes = 2 << 20
 	MaxOutputSchemaBytes    = 1 << 20
 
-	proposalSchemaDigest = "6f84e74c4c0fdc2d6ad9ffdc9ebf1e45c05200f82387af263d7e63eb31dd33ee"
+	proposalSchemaDigest = "b4da13ba50e50d9a37833412e9c6c5a479a6ea54e510c46b96266c1066d61034"
 	applyInvariantDigest = "6328b30b5956d0142bb5f21e23316d5e35e68debf13f606fd46b0224c1f148fa"
 	agentDraftSchemaID   = "https://github.com/neomei/SessionReviewer/schemas/proposal-agent-draft-v1.schema.json"
 	maxSafeInteger       = 1<<53 - 1
 	maxExternalTextBytes = 4096
+	hostPathMarker       = "[REDACTED:HOST_PATH]"
 )
 
 var (
@@ -271,7 +272,11 @@ func Build(input Input) (Bundle, error) {
 	if digestBytes(finalSchema) != proposalSchemaDigest || digestBytes(invariants) != applyInvariantDigest {
 		return Bundle{}, fmt.Errorf("%w: pinned prompt source drift", ErrInvalidInput)
 	}
-	draftSchema, err := agentDraftSchema(finalSchema)
+	reportRevision, err := expectedSessionReportRevision(accepted, input.Packet.SessionID)
+	if err != nil {
+		return Bundle{}, err
+	}
+	draftSchema, err := agentDraftSchema(finalSchema, reportRevision)
 	if err != nil {
 		return Bundle{}, err
 	}
@@ -279,15 +284,19 @@ func Build(input Input) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: digest packet", ErrInvalidInput)
 	}
-	packetJSON, err := json.Marshal(projectPacket(input.Packet))
+	matchers, err := forbiddenPathMatchers(input)
+	if err != nil {
+		return Bundle{}, err
+	}
+	packetJSON, err := marshalPromptProjection(projectPacket(input.Packet), matchers, strings.ToLower(strings.TrimSpace(input.GOOS)))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: encode packet data", ErrInvalidInput)
 	}
-	contextJSON, err := json.Marshal(accepted)
+	contextJSON, err := marshalPromptProjection(accepted, matchers, strings.ToLower(strings.TrimSpace(input.GOOS)))
 	if err != nil {
 		return Bundle{}, fmt.Errorf("%w: encode accepted context", ErrInvalidInput)
 	}
-	if len(redact.Default().Text(string(contextJSON)).Findings) != 0 {
+	if hasFindingOtherThan(string(contextJSON), redact.RuleHighEntropy) {
 		return Bundle{}, ErrUnsafeInput
 	}
 	if len(packetJSON) > MaxPacketDataBytes || len(contextJSON) > MaxAcceptedContextBytes ||
@@ -336,9 +345,6 @@ func validateInput(input Input, accepted acceptedContext) error {
 	if err := validateAcceptedContextStrings(accepted); err != nil {
 		return err
 	}
-	if err := validateForbiddenRootStrings(input, accepted); err != nil {
-		return err
-	}
 	if !validPacketEnvelope(packet) {
 		return ErrInvalidInput
 	}
@@ -358,12 +364,140 @@ func validateInput(input Input, accepted acceptedContext) error {
 	return nil
 }
 
+type forbiddenPathMatcher struct {
+	normalized string
+	raw        []string
+}
+
+func forbiddenPathMatchers(input Input) ([]forbiddenPathMatcher, error) {
+	if len(input.ForbiddenRoots) == 0 {
+		return nil, nil
+	}
+	goos := strings.ToLower(strings.TrimSpace(input.GOOS))
+	if goos == "" {
+		return nil, ErrInvalidInput
+	}
+	matchers := make([]forbiddenPathMatcher, 0, len(input.ForbiddenRoots)*2)
+	for _, root := range input.ForbiddenRoots {
+		for _, candidate := range append([]string{root.CanonicalPath}, root.Aliases...) {
+			normalized, ok := normalizeForbiddenPath(candidate, goos)
+			if !ok {
+				return nil, ErrInvalidInput
+			}
+			raw := []string{candidate, norm.NFC.String(candidate), norm.NFD.String(candidate)}
+			if goos == "windows" {
+				raw = append(raw, strings.ReplaceAll(candidate, `\`, "/"), strings.ReplaceAll(candidate, "/", `\`))
+			}
+			matchers = append(matchers, forbiddenPathMatcher{normalized: normalized, raw: distinctStrings(raw)})
+		}
+	}
+	return matchers, nil
+}
+
+func marshalPromptProjection(value any, matchers []forbiddenPathMatcher, goos string) ([]byte, error) {
+	body, err := json.Marshal(value)
+	if err != nil || len(matchers) == 0 {
+		return body, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var projection any
+	if err := decoder.Decode(&projection); err != nil {
+		return nil, err
+	}
+	redactPromptProjection(projection, matchers, goos)
+	return json.Marshal(projection)
+}
+
+func redactPromptProjection(value any, matchers []forbiddenPathMatcher, goos string) {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, child := range current {
+			if text, ok := child.(string); ok {
+				current[key] = redactForbiddenPaths(text, matchers, goos)
+				continue
+			}
+			redactPromptProjection(child, matchers, goos)
+		}
+	case []any:
+		for index, child := range current {
+			if text, ok := child.(string); ok {
+				current[index] = redactForbiddenPaths(text, matchers, goos)
+				continue
+			}
+			redactPromptProjection(child, matchers, goos)
+		}
+	}
+}
+
+func redactForbiddenPaths(value string, matchers []forbiddenPathMatcher, goos string) string {
+	redacted := value
+	for _, matcher := range matchers {
+		for _, candidate := range matcher.raw {
+			redacted = replaceForbiddenPathSpans(redacted, candidate)
+		}
+	}
+	normalized := normalizePathText(redacted, goos)
+	for _, matcher := range matchers {
+		if containsForbiddenPathSpan(normalized, matcher.normalized) {
+			return hostPathMarker
+		}
+	}
+	return redacted
+}
+
+func replaceForbiddenPathSpans(value, root string) string {
+	if root == "" {
+		return value
+	}
+	var result strings.Builder
+	searchFrom := 0
+	for searchFrom <= len(value)-len(root) {
+		relative := strings.Index(value[searchFrom:], root)
+		if relative < 0 {
+			break
+		}
+		start := searchFrom + relative
+		end := start + len(root)
+		leftOK := start == 0 || isPathSpanDelimiterBefore(value[:start])
+		rightOK := end == len(value) || value[end] == '/' || value[end] == '\\' || isPathSpanTerminator(value[end:])
+		if !leftOK || !rightOK {
+			searchFrom = start + 1
+			continue
+		}
+		if result.Cap() == 0 {
+			result.Grow(len(value))
+		}
+		result.WriteString(value[searchFrom:start])
+		result.WriteString(hostPathMarker)
+		searchFrom = end
+	}
+	if result.Cap() == 0 {
+		return value
+	}
+	result.WriteString(value[searchFrom:])
+	return result.String()
+}
+
+func distinctStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 // validPacketEnvelope mirrors the canonical evidence-v2/proposal packet
 // invariants before any digest or prompt bytes are produced. It deliberately
 // returns only a boolean so callers expose the single safe ErrInvalidInput.
 func validPacketEnvelope(packet evidence.Packet) bool {
 	if packet.SchemaVersion != 2 || !validCanonicalEnvelopeText(packet.ProjectID, 1024) ||
-		!validCanonicalEnvelopeText(packet.SessionID, 1024) || !validCanonicalEnvelopeText(packet.CWD, 16<<10) {
+		!validCanonicalEnvelopeText(packet.SessionID, 1024) || !validCanonicalPathText(packet.CWD, 16<<10) {
 		return false
 	}
 	for _, value := range []string{packet.ProjectID, packet.SessionID, packet.CWD} {
@@ -396,7 +530,7 @@ func validPacketEnvelope(packet evidence.Packet) bool {
 // recognition. Keep this explicit traversal aligned with acceptedContext so a
 // newly allowlisted string cannot silently skip the raw boundary.
 func validateAcceptedContextStrings(context acceptedContext) error {
-	for _, value := range acceptedContextStrings(context) {
+	for _, value := range acceptedContextHumanStrings(context) {
 		if !utf8.ValidString(value) {
 			return ErrInvalidInput
 		}
@@ -404,13 +538,19 @@ func validateAcceptedContextStrings(context acceptedContext) error {
 			return ErrUnsafeInput
 		}
 	}
+	for _, value := range acceptedContextIdentityStrings(context) {
+		if !utf8.ValidString(value) {
+			return ErrInvalidInput
+		}
+		if hasFindingOtherThan(value, redact.RuleHighEntropy) {
+			return ErrUnsafeInput
+		}
+	}
 	return nil
 }
 
-func acceptedContextStrings(context acceptedContext) []string {
+func acceptedContextHumanStrings(context acceptedContext) []string {
 	values := []string{
-		context.ProjectID,
-		context.CurrentState.ProjectID,
 		context.CurrentState.Goal,
 		context.CurrentState.LastVerified,
 		context.CurrentState.Branch,
@@ -421,51 +561,68 @@ func acceptedContextStrings(context acceptedContext) []string {
 	}
 	values = append(values, context.CurrentState.Blockers...)
 	values = append(values, context.CurrentState.OpenRisks...)
-	values = append(values, context.CurrentState.SourceSessions...)
 	for _, risk := range context.Risks {
-		values = append(values, risk.ID, risk.Title, risk.Status, risk.Detail)
+		values = append(values, risk.Title, risk.Status, risk.Detail)
 	}
 	for _, decision := range context.Decisions {
 		values = append(values,
-			decision.ID, decision.ProjectID, decision.OccurredAt, decision.Title, decision.Status,
+			decision.OccurredAt, decision.Title, decision.Status,
 			decision.Context, decision.Rationale, decision.Consequences, decision.ReevaluateWhen,
 		)
 		values = append(values, decision.Tags...)
-		values = append(values, decision.Supersedes...)
-		values = append(values, decision.SourceSessions...)
 		values = append(values, decision.Alternatives...)
 		values = append(values, decision.RejectedPaths...)
 	}
 	for _, loop := range context.OpenLoops {
 		values = append(values,
-			loop.ID, loop.ProjectID, loop.Title, loop.Status, loop.AcceptedDetail,
+			loop.Title, loop.Status, loop.AcceptedDetail,
 			loop.Question, loop.Blocker, loop.NextExperiment, loop.CompletionCriterion,
 		)
 		values = append(values, loop.Tags...)
-		values = append(values, loop.SourceSessions...)
 		values = append(values, loop.Attempts...)
 	}
 	for _, event := range context.Timeline {
 		values = append(values,
-			event.ID, event.OccurredAt, string(event.Class), event.Title, event.Meaning,
+			event.OccurredAt, string(event.Class), event.Title, event.Meaning,
 			event.Summary, event.Why, event.Next,
 		)
 		values = append(values, event.Changes...)
 		values = append(values, event.Results...)
-		values = append(values, event.DecisionIDs...)
-		values = append(values, event.OpenLoopIDs...)
 	}
 	for _, report := range context.Sessions {
-		values = append(values,
-			report.ID, report.ProjectID, report.SessionID, report.InitialGoal,
-			report.PreviousSessionID, report.NextSessionID,
-		)
+		values = append(values, report.InitialGoal)
 		values = append(values, report.GoalChanges...)
 		for _, phase := range report.Phases {
 			values = append(values, phase.Title, phase.Summary)
 		}
 		values = append(values, report.Commits...)
 		values = append(values, report.Verification...)
+	}
+	return values
+}
+
+func acceptedContextIdentityStrings(context acceptedContext) []string {
+	values := []string{context.ProjectID, context.CurrentState.ProjectID}
+	values = append(values, context.CurrentState.SourceSessions...)
+	for _, risk := range context.Risks {
+		values = append(values, risk.ID)
+	}
+	for _, decision := range context.Decisions {
+		values = append(values, decision.ID, decision.ProjectID)
+		values = append(values, decision.Supersedes...)
+		values = append(values, decision.SourceSessions...)
+	}
+	for _, loop := range context.OpenLoops {
+		values = append(values, loop.ID, loop.ProjectID)
+		values = append(values, loop.SourceSessions...)
+	}
+	for _, event := range context.Timeline {
+		values = append(values, event.ID)
+		values = append(values, event.DecisionIDs...)
+		values = append(values, event.OpenLoopIDs...)
+	}
+	for _, report := range context.Sessions {
+		values = append(values, report.ID, report.ProjectID, report.SessionID, report.PreviousSessionID, report.NextSessionID)
 		values = append(values, report.DecisionsAdded...)
 		values = append(values, report.DecisionsRevised...)
 		values = append(values, report.OpenLoopsCreated...)
@@ -474,48 +631,17 @@ func acceptedContextStrings(context acceptedContext) []string {
 	return values
 }
 
-// validateForbiddenRootStrings walks the exact structured projections before
-// JSON escaping can transform separators or casing. Forbidden roots are
-// process-only metadata and never enter either returned Bundle field.
-func validateForbiddenRootStrings(input Input, accepted acceptedContext) error {
-	if len(input.ForbiddenRoots) == 0 {
-		return nil
-	}
-	goos := strings.ToLower(strings.TrimSpace(input.GOOS))
-	if goos == "" {
-		return ErrInvalidInput
-	}
-	forbidden := make([]string, 0, len(input.ForbiddenRoots)*2)
-	for _, root := range input.ForbiddenRoots {
-		paths := append([]string{root.CanonicalPath}, root.Aliases...)
-		for _, candidate := range paths {
-			normalized, ok := normalizeForbiddenPath(candidate, goos)
-			if !ok {
-				return ErrInvalidInput
-			}
-			forbidden = append(forbidden, normalized)
+func hasFindingOtherThan(value, allowedRule string) bool {
+	for _, finding := range redact.Default().Text(value).Findings {
+		if finding.Rule != allowedRule {
+			return true
 		}
 	}
-	values := acceptedContextStrings(accepted)
-	values = append(values, input.Packet.ProjectID, input.Packet.SessionID)
-	values = append(values, input.Packet.Warnings...)
-	for _, item := range input.Packet.Events {
-		values = append(values, item.ID, item.ItemID, item.Timestamp, item.Kind, item.Role, item.ToolName, item.Summary)
-	}
-	for _, value := range values {
-		normalized := normalizePathText(value, goos)
-		for _, root := range forbidden {
-			if containsForbiddenPathSpan(normalized, root) {
-				return ErrUnsafeInput
-			}
-		}
-	}
-	return nil
+	return false
 }
 
 func normalizeForbiddenPath(value, goos string) (string, bool) {
-	value = strings.TrimSpace(value)
-	if value == "" || !utf8.ValidString(value) {
+	if strings.TrimSpace(value) == "" || !utf8.ValidString(value) {
 		return "", false
 	}
 	normalized := normalizePathText(value, goos)
@@ -637,6 +763,10 @@ func validCanonicalEnvelopeText(value string, maxBytes int) bool {
 	return value != "" && value == strings.TrimSpace(value) && utf8.ValidString(value) && len(value) <= maxBytes
 }
 
+func validCanonicalPathText(value string, maxBytes int) bool {
+	return strings.TrimSpace(value) != "" && utf8.ValidString(value) && strings.IndexByte(value, 0) < 0 && len(value) <= maxBytes
+}
+
 func positiveSafeInteger(value int) bool    { return value >= 1 && value <= maxSafeInteger }
 func nonnegativeSafeInteger(value int) bool { return value >= 0 && value <= maxSafeInteger }
 
@@ -700,7 +830,7 @@ func validatePacketItems(packet evidence.Packet) error {
 	return nil
 }
 
-func agentDraftSchema(final []byte) ([]byte, error) {
+func agentDraftSchema(final []byte, reportRevision int) ([]byte, error) {
 	var root map[string]any
 	if err := json.Unmarshal(final, &root); err != nil {
 		return nil, fmt.Errorf("%w: decode final proposal schema", ErrInvalidInput)
@@ -720,10 +850,16 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 	if _, ok := properties["accounting"]; !ok {
 		return nil, fmt.Errorf("%w: missing accounting seam", ErrInvalidInput)
 	}
+	if _, ok := properties["revision"]; !ok {
+		return nil, fmt.Errorf("%w: missing session report revision", ErrInvalidInput)
+	}
+	properties["revision"] = map[string]any{"type": "integer", "const": reportRevision}
 	delete(properties, "accounting")
 	delete(defs, "session_accounting")
 	delete(defs, "model_accounting")
 	delete(defs, "pricing")
+	delete(defs, "trusted_pricing")
+	delete(defs, "unknown_pricing")
 	root["$id"] = agentDraftSchemaID
 	root["title"] = "SessionReviewer Agent Draft Proposal v1 (trusted-host accounting omitted)"
 	data, err := json.MarshalIndent(root, "", "  ")
@@ -731,6 +867,22 @@ func agentDraftSchema(final []byte) ([]byte, error) {
 		return nil, fmt.Errorf("%w: encode Agent draft schema", ErrInvalidInput)
 	}
 	return append(data, '\n'), nil
+}
+
+func expectedSessionReportRevision(context acceptedContext, sessionID string) (int, error) {
+	revision := 1
+	found := false
+	for _, report := range context.Sessions {
+		if report.SessionID != sessionID {
+			continue
+		}
+		if found || report.Revision <= 0 || report.Revision >= maxSafeInteger {
+			return 0, ErrInvalidInput
+		}
+		found = true
+		revision = report.Revision + 1
+	}
+	return revision, nil
 }
 
 func projectPacket(packet evidence.Packet) packetData {

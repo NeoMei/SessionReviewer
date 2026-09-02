@@ -1,5 +1,5 @@
 import { type App, Modal, Notice } from "obsidian";
-import type { EditableField } from "../contracts/review-v2";
+import type { EditableField } from "../contracts/review-v3";
 import { button, element } from "./dom";
 
 export class EditModal extends Modal {

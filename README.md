@@ -26,7 +26,7 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
-Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Release 0.2.5](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.5). Place the three files in:
+Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Release 0.3.0](https://github.com/NeoMei/SessionReviewer/releases/tag/0.3.0). Place the three files in:
 
 ```text
 <Vault>/.obsidian/plugins/session-reviewer/
@@ -34,7 +34,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Release 0.2.5
 
 Enable **SessionReviewer** under **Settings → Community plugins**, then run **SessionReviewer: Open project evolution** from the command palette or select the history icon in the left ribbon.
 
-In **Settings → SessionReviewer CLI**, enter the absolute path to a compatible `session-reviewer` executable and select **Verify and save**. The plugin only executes fixed, allow-listed CLI actions; it does not read executable paths or arbitrary arguments from Markdown.
+No executable settings are required. On startup, the plugin discovers and verifies SessionReviewer and Codex from the Agent's normal user installation locations and `PATH`; legacy saved paths are accepted once for migration and then removed. If discovery fails, run SessionReviewer once from the Agent and reload the plugin. The plugin only executes fixed, allow-listed CLI actions; it does not read executable paths or arbitrary arguments from Markdown.
 
 ## Initialize and synchronize a project
 
@@ -86,7 +86,7 @@ An accepted apply updates the machine ledger and the two human-readable project 
 
 The Obsidian plugin's “总结并同步” view drives the whole reviewed pipeline as one durable job: prepare a bounded packet, invoke the local Codex CLI as a proposal-only agent, validate and apply the proposal, then synchronize the vault. Jobs support retry, cancellation, and restart recovery after a killed worker. The worker's sync step repairs a machine ledger that a completed apply legitimately advanced; standalone `sync` invocations keep their conservative behavior unchanged.
 
-The agent executable fails closed by default. An operator must assert exact SHA-256 digests through `SESSIONREVIEWER_CODEX_HERMETIC_DIGESTS` (comma-separated) to prove an executable is a purpose-built hermetic proposal agent; unproven 0.147.x installations stay blocked. The hermetic end-to-end acceptance suite uses that allowlist to exercise the real orchestration with a dedicated fake agent:
+The agent executable fails closed unless it matches the reviewed Codex `0.150.1` contract and passes capability probes. The fixed invocation ignores user configuration and rules, disables reviewed external capabilities, runs in a private read-only sandbox, and rejects every observed tool event. Codex retains one non-disableable core execution capability, so SessionReviewer reports restricted containment rather than claiming an empty tool registry. Other Codex versions remain blocked until reviewed. The end-to-end acceptance suite exercises the same orchestration with a dedicated fake agent:
 
 ```bash
 go test ./test/reviewjob -count=1

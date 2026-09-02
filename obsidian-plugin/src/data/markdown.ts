@@ -7,7 +7,7 @@ import type {
   ReviewModel,
   RiskModel,
   SourceRange
-} from "../contracts/review-v2";
+} from "../contracts/review-v3";
 
 const MAX_MARKDOWN_BYTES = 4 << 20;
 const STABLE_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -130,7 +130,8 @@ function parseFrontmatter(source: string, expectedId: string, expectedType: stri
   if (values.get("entity_type") !== expectedType) throw new Error(`frontmatter entity_type must be "${expectedType}"`);
   const projectId = values.get("project_id") ?? "";
   if (!projectId.startsWith("project-") || !STABLE_ID.test(projectId)) throw new Error("invalid frontmatter project_id");
-  if (values.get("schema_version") !== "2") throw new Error("frontmatter schema_version must be 2");
+  const schema = values.get("schema_version");
+  if (schema !== "2" && schema !== "3") throw new Error("frontmatter schema_version must be 2 or 3");
   const revision = Number(values.get("revision"));
   if (!Number.isSafeInteger(revision) || revision < 1) throw new Error("frontmatter revision must be a positive integer");
   return { projectId, revision, bodyStart: closing + 5 };

@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	Version = "dev"
+	Version = "0.3.0"
 	Commit  = "unknown"
 	BuiltAt = "unknown"
 )
@@ -22,7 +22,7 @@ type Info struct {
 }
 
 func Current() Info {
-	return Info{Version: Version, Commit: Commit, BuiltAt: BuiltAt, GoVersion: runtime.Version(), ReviewSchemaVersion: 2}
+	return Info{Version: Version, Commit: Commit, BuiltAt: BuiltAt, GoVersion: runtime.Version(), ReviewSchemaVersion: 3}
 }
 
 func ValidateRelease(info Info) error {
@@ -38,8 +38,8 @@ func ValidateRelease(info Info) error {
 	if info.GoVersion == "" {
 		return errors.New("release Go version is required")
 	}
-	if info.ReviewSchemaVersion != 2 {
-		return errors.New("review schema version must be 2")
+	if info.ReviewSchemaVersion != 3 {
+		return errors.New("review schema version must be 3")
 	}
 	return nil
 }

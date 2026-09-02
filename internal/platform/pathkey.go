@@ -24,7 +24,7 @@ func PathKey(goos string, caseMode CaseMode, relative string) (string, error) {
 	if caseMode != CaseSensitive && caseMode != CaseInsensitive {
 		return "", fmt.Errorf("invalid filesystem case mode %q", caseMode)
 	}
-	canonical, err := validateRelativePath(relative)
+	canonical, err := validateRelativePath(goos, relative)
 	if err != nil {
 		return "", err
 	}
@@ -35,7 +35,7 @@ func PathKey(goos string, caseMode CaseMode, relative string) (string, error) {
 	return canonical, nil
 }
 
-func validateRelativePath(relative string) (string, error) {
+func validateRelativePath(goos, relative string) (string, error) {
 	if relative == "" || !utf8.ValidString(relative) || strings.IndexByte(relative, 0) >= 0 {
 		return "", fmt.Errorf("invalid relative path")
 	}
@@ -50,7 +50,7 @@ func validateRelativePath(relative string) (string, error) {
 		if component == "" || component == "." || component == ".." {
 			return "", fmt.Errorf("path contains an invalid component")
 		}
-		if strings.HasSuffix(component, ".") || strings.HasSuffix(component, " ") {
+		if strings.HasSuffix(component, ".") || (goos == "windows" && strings.HasSuffix(component, " ")) {
 			return "", fmt.Errorf("path component has a trailing dot or space")
 		}
 		for _, r := range component {

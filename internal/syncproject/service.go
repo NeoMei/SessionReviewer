@@ -33,7 +33,8 @@ type Options struct {
 	// whose accepted apply is the legitimate writer that advanced the project
 	// copy since the last successful sync; interactive sync keeps failing
 	// closed so an out-of-band vault edit still requires an explicit repair.
-	RepairMachineLedger bool
+	RepairMachineLedger    bool
+	TrustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 
 	pinCheckpoint func(pinCheckpointStage) error
 	beforeEngine  func() error
@@ -74,19 +75,20 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 	}
 
 	engine, err := syncengine.NewEngine(syncengine.Options{
-		ProjectRoot:          pin.project.Path,
-		ProjectRootExpected:  pin.project.Info(),
-		VaultRoot:            pin.vault.Path,
-		VaultRootExpected:    pin.vault.Info(),
-		VaultReviewPath:      pin.mapping.VaultReviewPath,
-		ReviewTargetExpected: pin.target,
-		DataRoot:             pin.syncData.Path,
-		DataRootExpected:     pin.syncData.Info(),
-		ProjectID:            pin.mapping.ID,
-		GOOS:                 options.GOOS,
-		VaultCaseMode:        pin.mapping.VaultCaseMode,
-		Retry:                syncengine.DefaultRetryPolicy(),
-		Now:                  options.Now,
+		ProjectRoot:            pin.project.Path,
+		ProjectRootExpected:    pin.project.Info(),
+		VaultRoot:              pin.vault.Path,
+		VaultRootExpected:      pin.vault.Info(),
+		VaultReviewPath:        pin.mapping.VaultReviewPath,
+		ReviewTargetExpected:   pin.target,
+		DataRoot:               pin.syncData.Path,
+		DataRootExpected:       pin.syncData.Info(),
+		ProjectID:              pin.mapping.ID,
+		GOOS:                   options.GOOS,
+		VaultCaseMode:          pin.mapping.VaultCaseMode,
+		Retry:                  syncengine.DefaultRetryPolicy(),
+		TrustAppliedTransition: options.TrustAppliedTransition,
+		Now:                    options.Now,
 	})
 	if err != nil {
 		return syncengine.Report{}, err

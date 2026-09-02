@@ -38,6 +38,36 @@ func TestPriceUsageAppliesEachRateOnceAndDoesNotChargeReasoningTwice(t *testing.
 	}
 }
 
+func TestValidateSessionAccountingPreservesUsageWhenPricingIsUnknown(t *testing.T) {
+	usage := &SessionUsage{
+		StartedAt:  "2026-08-31T01:00:00Z",
+		EndedAt:    "2026-08-31T01:00:01Z",
+		DurationMS: 1000,
+		Models: []ModelUsage{{
+			Model: "unpriced-model",
+			TokenUsage: TokenUsage{
+				InputTokens: 10, OutputTokens: 2, TotalTokens: 12,
+			},
+		}},
+		TotalTokens: 12,
+	}
+	report := &SessionAccounting{
+		StartedAt: usage.StartedAt, EndedAt: usage.EndedAt, DurationMS: usage.DurationMS,
+		Models: []ModelAccounting{{ModelUsage: usage.Models[0]}}, TotalTokens: usage.TotalTokens,
+	}
+
+	if err := ValidateSessionAccounting(report, usage); err != nil {
+		t.Fatalf("unknown pricing rejected actual usage: %v", err)
+	}
+	if SessionPricingComplete(report) {
+		t.Fatal("unknown pricing reported as complete")
+	}
+	report.Models[0].CostUSD = 0.01
+	if err := ValidateSessionAccounting(report, usage); err == nil {
+		t.Fatal("unknown pricing accepted an invented cost")
+	}
+}
+
 func TestPriceUsageRejectsUnsafeUsagePricingAndArithmetic(t *testing.T) {
 	validUsage := TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}
 	validPricing := Pricing{Currency: "USD", InputPerMillion: 1, OutputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "2026-08-29"}
@@ -51,7 +81,6 @@ func TestPriceUsageRejectsUnsafeUsagePricingAndArithmetic(t *testing.T) {
 		{name: "negative tokens", usage: TokenUsage{InputTokens: -1}, pricing: validPricing, want: "token count"},
 		{name: "unsafe integer", usage: TokenUsage{InputTokens: 1 << 53, TotalTokens: 1 << 53}, pricing: validPricing, want: "safe integer"},
 		{name: "cached exceeds input", usage: TokenUsage{InputTokens: 1, CachedInputTokens: 2, TotalTokens: 1}, pricing: validPricing, want: "cached"},
-		{name: "reasoning exceeds output", usage: TokenUsage{OutputTokens: 1, ReasoningOutputTokens: 2, TotalTokens: 1}, pricing: validPricing, want: "reasoning"},
 		{name: "wrong total", usage: TokenUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 1}, pricing: validPricing, want: "total tokens"},
 		{name: "nonfinite rate", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: math.NaN(), Source: "https://example.com/pricing", AsOf: "2026-08-29"}, want: "finite"},
 		{name: "invalid source", usage: validUsage, pricing: Pricing{Currency: "USD", InputPerMillion: 1, Source: "http://example.com/pricing", AsOf: "2026-08-29"}, want: "HTTPS"},
@@ -128,6 +157,36 @@ func TestAccumulatorRejectsContextOnlyTokenHeartbeatWithoutMatchingCumulativeUsa
 	record := session.Record{Line: 1, Timestamp: "2026-08-24T10:01:00Z", Type: "event_msg", Payload: json.RawMessage(`{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":0,"reasoning_output_tokens":0,"total_tokens":2048},"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0,"total_tokens":15}}}`)}
 	if err := accumulator.Observe(record); err == nil {
 		t.Fatal("accepted aggregate-only token event without a matching prior cumulative snapshot")
+	}
+}
+
+func TestAccumulatorAcceptsHostTokenCountWhenReasoningExceedsVisibleOutput(t *testing.T) {
+	started := time.Date(2026, 8, 30, 8, 20, 49, 0, time.UTC)
+	accumulator := NewAccumulator(started)
+	record := session.Record{
+		Line:      16,
+		Timestamp: "2026-08-30T08:20:49.025Z",
+		Type:      "event_msg",
+		Payload:   json.RawMessage(`{"type":"token_count","info":{"total_token_usage":{"input_tokens":36483,"cached_input_tokens":128,"cache_write_input_tokens":0,"output_tokens":210,"reasoning_output_tokens":376,"total_tokens":36693},"last_token_usage":{"input_tokens":36483,"cached_input_tokens":128,"cache_write_input_tokens":0,"output_tokens":210,"reasoning_output_tokens":376,"total_tokens":36693}}}`),
+	}
+	if err := accumulator.Observe(record); err != nil {
+		t.Fatalf("observe host token_count: %v", err)
+	}
+	usage := accumulator.Snapshot()
+	if usage.TotalTokens != 36693 || len(usage.Models) != 1 {
+		t.Fatalf("usage=%+v", usage)
+	}
+	got := usage.Models[0].TokenUsage
+	want := TokenUsage{InputTokens: 36483, CachedInputTokens: 128, OutputTokens: 210, ReasoningOutputTokens: 376, TotalTokens: 36693}
+	if got != want {
+		t.Fatalf("model usage=%+v want %+v", got, want)
+	}
+	cost, err := PriceUsage(got, Pricing{Currency: "USD", InputPerMillion: 1, CachedInputPerMillion: 0, CacheWriteInputPerMillion: 0, OutputPerMillion: 1, Source: "https://example.com/pricing", AsOf: "2026-08-30"})
+	if err != nil {
+		t.Fatalf("price host token_count: %v", err)
+	}
+	if cost <= 0 {
+		t.Fatalf("cost=%v", cost)
 	}
 }
 

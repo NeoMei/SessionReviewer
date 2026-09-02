@@ -41,6 +41,15 @@ var (
 
 const outputSchemaName = "proposal-schema.json"
 
+const codexTransportSchema = `{"type":"object","properties":{"proposal":{"type":"string"}},"required":["proposal"],"additionalProperties":false}`
+
+const codexTransportInstructions = `
+
+CODEX TRANSPORT ENVELOPE
+- Return exactly one JSON object with the single required string field "proposal".
+- The decoded UTF-8 contents of "proposal" must be exactly the proposal JSON object required by AGENT_DRAFT_JSON_SCHEMA_V1 above.
+- Do not put Markdown fences, commentary, or any other bytes inside or outside "proposal".`
+
 type activeRun struct {
 	mu         sync.Mutex
 	process    *managedProcess
@@ -152,7 +161,7 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 			resultErr = agent.NewError(agent.CodeIncompatible, cleanupErr)
 		}
 	}()
-	if err := runDirectory.writePrivateFile(outputSchemaName, request.OutputSchema); err != nil {
+	if err := runDirectory.writePrivateFile(outputSchemaName, []byte(codexTransportSchema)); err != nil {
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
 	}
 	if err := recheckExecutable(executable, executableIdentity); err != nil {
@@ -167,7 +176,12 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
 	}
-	pipes, err := attachCommandIO(command, request.Prompt, stdout, stderr)
+	transportPrompt, err := codexTransportPrompt(request.Prompt)
+	if err != nil {
+		run.setProcess(nil)
+		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
+	}
+	pipes, err := attachCommandIO(command, transportPrompt, stdout, stderr)
 	if err != nil {
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
@@ -251,7 +265,7 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 	}
 	return agent.Result{
 		Proposal: append([]byte(nil), parsed.proposal...),
-		// Ruling P3: Codex 0.147.x does not expose provider model provenance
+		// The reviewed Codex JSONL contract does not expose provider model provenance
 		// in exec JSONL. Empty is authoritative and must not be guessed.
 		Model: "",
 		Usage: parsed.usage,
@@ -435,10 +449,36 @@ func parseJSONL(output []byte) (parsedStream, error) {
 	if result.failure != "" {
 		return result, nil
 	}
-	if err := validateProposal(result.proposal); err != nil {
+	proposalBytes, err := decodeCodexTransportProposal(result.proposal)
+	if err != nil {
 		return parsedStream{}, fmt.Errorf("%w: invalid final proposal", errors.Join(errInvalidStream, err))
 	}
+	result.proposal = proposalBytes
 	return result, nil
+}
+
+func codexTransportPrompt(prompt []byte) ([]byte, error) {
+	if len(prompt)+len(codexTransportInstructions) > maxPromptBytes {
+		return nil, errors.New("Codex transport prompt exceeds reviewed bound")
+	}
+	result := make([]byte, 0, len(prompt)+len(codexTransportInstructions))
+	result = append(result, prompt...)
+	result = append(result, codexTransportInstructions...)
+	return result, nil
+}
+
+func decodeCodexTransportProposal(data []byte) ([]byte, error) {
+	var envelope struct {
+		Proposal string `json:"proposal"`
+	}
+	if err := decodeStrict(data, &envelope); err != nil || envelope.Proposal == "" {
+		return nil, errInvalidStream
+	}
+	proposalBytes := []byte(envelope.Proposal)
+	if err := validateProposal(proposalBytes); err != nil {
+		return nil, err
+	}
+	return proposalBytes, nil
 }
 
 func parseAllowedItem(line []byte, eventType string) (string, bool, error) {

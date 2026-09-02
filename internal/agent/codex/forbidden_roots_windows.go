@@ -12,7 +12,22 @@ import (
 )
 
 func canonicalPathEqual(first, second string) bool {
-	return strings.EqualFold(filepath.Clean(first), filepath.Clean(second))
+	firstLong, firstOK := longWindowsPath(first)
+	secondLong, secondOK := longWindowsPath(second)
+	return firstOK && secondOK && strings.EqualFold(firstLong, secondLong)
+}
+
+func longWindowsPath(path string) (string, bool) {
+	pointer, err := windows.UTF16PtrFromString(filepath.Clean(path))
+	if err != nil {
+		return "", false
+	}
+	buffer := make([]uint16, 32768)
+	length, err := windows.GetLongPathName(pointer, &buffer[0], uint32(len(buffer)))
+	if err != nil || length == 0 || length >= uint32(len(buffer)) {
+		return "", false
+	}
+	return filepath.Clean(windows.UTF16ToString(buffer[:length])), true
 }
 
 func validateForbiddenRootPlatform(path string, _ *os.File) error {

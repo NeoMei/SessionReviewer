@@ -91,6 +91,48 @@ func TestWriteRootFileCreateIfAbsentPublishesNewFile(t *testing.T) {
 	}
 }
 
+func TestWriteRootFileCreateIfAbsentPostLinkFailuresNeverSanitizeSharedInode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions provide the rollback and unlink fault injection")
+	}
+	directory := t.TempDir()
+	root, err := os.OpenRoot(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	t.Cleanup(func() { _ = os.Chmod(directory, 0o700) })
+
+	canonical := []byte(`{"version":1,"entries":[{"digest":"exact"}]}` + "\n")
+	callbackErr := errors.New("post-link callback failed")
+	err = WriteRootFileCreateIfAbsentWithPostLinkCheckpoint(root, "journal.json", canonical, 0o600, nil, func() error {
+		if err := os.Chmod(directory, 0o500); err != nil {
+			return err
+		}
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("error=%v want callback failure", err)
+	}
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, readErr := os.ReadFile(filepath.Join(directory, "journal.json"))
+	if readErr != nil || string(got) != string(canonical) {
+		t.Fatalf("published hardlink was modified: bytes=%q err=%v write_err=%v", got, readErr, err)
+	}
+	entries, readDirErr := os.ReadDir(directory)
+	if readDirErr != nil || len(entries) != 2 {
+		t.Fatalf("failed rollback and temp unlink should leave two readable links: entries=%v err=%v", entries, readDirErr)
+	}
+	for _, entry := range entries {
+		body, readErr := os.ReadFile(filepath.Join(directory, entry.Name()))
+		if readErr != nil || string(body) != string(canonical) {
+			t.Fatalf("shared inode link %q changed: bytes=%q err=%v", entry.Name(), body, readErr)
+		}
+	}
+}
+
 func TestWriteRootFileCreateIfAbsentRejectsClaimantCapturedAfterInitialCheckWithoutStaleAuthorization(t *testing.T) {
 	directory := t.TempDir()
 	root, err := os.OpenRoot(directory)

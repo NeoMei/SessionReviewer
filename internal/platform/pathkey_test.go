@@ -50,7 +50,7 @@ func TestPathKeyRejectsUnsafeRelativePaths(t *testing.T) {
 		"/absolute.md", `\absolute.md`, `C:file.md`, `C:\file.md`, `C:/file.md`,
 		`\\server\share\file.md`, `//server/share/file.md`, `\\?\C:\file.md`, `\\.\C:\file.md`,
 		"folder/CON", "folder/con.md", "folder/NUL.txt", "folder/COM1", "folder/LPT9.log",
-		"folder/trailing.", "folder/trailing ", "folder/bad\x00name.md",
+		"folder/trailing.", "folder/bad\x00name.md",
 		"folder/bad:name.md", "folder/bad<name>.md", "folder/bad|name.md", "folder/bad?name.md", "folder/bad*name.md",
 	}
 	for _, relative := range tests {
@@ -59,6 +59,16 @@ func TestPathKeyRejectsUnsafeRelativePaths(t *testing.T) {
 				t.Fatalf("PathKey(%q)=%q, want error", relative, got)
 			}
 		})
+	}
+}
+
+func TestPathKeyAllowsTrailingSpaceOnDarwinButRejectsItOnWindows(t *testing.T) {
+	const relative = "folder/trailing "
+	if got, err := PathKey("darwin", CaseSensitive, relative); err != nil || got != relative {
+		t.Fatalf("darwin PathKey(%q)=%q, %v", relative, got, err)
+	}
+	if got, err := PathKey("windows", CaseSensitive, relative); err == nil {
+		t.Fatalf("windows PathKey(%q)=%q, want error", relative, got)
 	}
 }
 

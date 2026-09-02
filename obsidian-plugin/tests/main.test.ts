@@ -1,43 +1,31 @@
 import { describe, expect, it, vi } from "vitest";
-import SessionReviewerPlugin, { VIEW_TYPE } from "../src/main";
+import SessionReviewerPlugin from "../src/main";
 
 describe("plugin lifecycle", () => {
-  it("registers one desktop project-evolution view and open command", async () => {
-    const registerView = vi.fn();
-    const addCommand = vi.fn();
-    const addRibbonIcon = vi.fn();
-    const plugin = new SessionReviewerPlugin({ workspace: {} } as never, {} as never);
-    Object.assign(plugin, { registerView, addCommand, addRibbonIcon, addSettingTab: vi.fn(), registerEvent: vi.fn() });
-    await plugin.onload();
-    expect(VIEW_TYPE).toBe("session-reviewer-project-evolution");
-    expect(registerView).toHaveBeenCalledOnce();
-    expect(addCommand).toHaveBeenCalledWith(expect.objectContaining({ id: "open-project-evolution" }));
-    expect(addRibbonIcon).toHaveBeenCalledWith("history", "打开项目脉络", expect.any(Function));
-  });
-
-  it("persists the Codex path next to the CLI path without extra credentials", async () => {
-    const registerView = vi.fn();
-    const addCommand = vi.fn();
-    const addRibbonIcon = vi.fn();
+  it("auto-discovers the runtime, removes the settings tab, and clears legacy path fields", async () => {
+    const plugin = new SessionReviewerPlugin({} as never, {} as never);
     const addSettingTab = vi.fn();
-    const saveData = vi.fn();
-    const plugin = new SessionReviewerPlugin({ workspace: {} } as never, {} as never);
-    Object.assign(plugin, {
-      registerView,
-      addCommand,
-      addRibbonIcon,
-      addSettingTab,
-      registerEvent: vi.fn(),
-      loadData: vi.fn().mockResolvedValue({ cliPath: "/bin/sr", codexPath: "/bin/codex" }),
-      saveData
+    const saveData = vi.fn().mockResolvedValue(undefined);
+    const loadData = vi.fn().mockResolvedValue({ cliPath: "/bin/sr", codexPath: "/bin/codex", viewState: { fullHistory: true } });
+    const runtimeResolver = vi.fn().mockResolvedValue({
+      runner: { executable: "/bin/sr" }
     });
+
+    Object.assign(plugin, {
+      app: { workspace: { getLeaf: vi.fn(), revealLeaf: vi.fn() } },
+      addSettingTab,
+      saveData,
+      loadData,
+      registerView: vi.fn(),
+      addRibbonIcon: vi.fn(),
+      addCommand: vi.fn(),
+      runtimeResolver
+    });
+
     await plugin.onload();
 
-    const settingsTab = addSettingTab.mock.calls[0]?.[0] as { saveCodexPath?: (path: string) => Promise<void> };
-    await settingsTab.saveCodexPath?.("/bin/codex-next");
-
-    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything() as unknown, cliPath: "/bin/sr", codexPath: "/bin/codex-next" });
-    const payload = saveData.mock.lastCall?.[0] as Record<string, unknown>;
-    expect(Object.keys(payload).sort()).toEqual(["cliPath", "codexPath", "viewState"]);
+    expect(runtimeResolver).toHaveBeenCalledWith({ legacyCliPath: "/bin/sr" });
+    expect(addSettingTab).not.toHaveBeenCalled();
+    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything() as never });
   });
 });

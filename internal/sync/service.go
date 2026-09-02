@@ -42,6 +42,7 @@ type Options struct {
 	Retry                                                              RetryPolicy
 	Debounce                                                           time.Duration
 	Now                                                                func() time.Time
+	TrustAppliedTransition                                             func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 }
 
 type ReconcileRequest struct {
@@ -252,8 +253,12 @@ func NewEngine(options Options) (*Engine, error) {
 		}
 		return engine.verifyVaultMutation(vaultMutationPublish)
 	}
-	engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
-		return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
+	if options.TrustAppliedTransition != nil {
+		engine.trustAppliedTransition = options.TrustAppliedTransition
+	} else {
+		engine.trustAppliedTransition = func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
+			return applyledger.TrustsAppliedTransition(dataRoot.Root, options.ProjectID, relative, preimageExists, preimageHash, targetHash)
+		}
 	}
 	projectInventory := syncdoc.Scan(projectRoot, "docs/session-review", options.GOOS, platform.CaseSensitive)
 	overview, found := projectInventory.ByID["project-overview"]
@@ -486,7 +491,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		version = reviewv2.VersionV2
 	}
 	var machine machineSnapshot
-	if version == reviewv2.VersionV2 {
+	if version == reviewv2.VersionV2 || version == reviewv2.VersionV3 {
 		machine, report.Machine, err = engine.planMachineLedger()
 		if err != nil {
 			report.Machine.State = MachineBlocked
@@ -680,7 +685,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 		}
 		entityCommitted = true
 	}
-	if version == reviewv2.VersionV2 && !selectedScope && !request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+	if (version == reviewv2.VersionV2 || version == reviewv2.VersionV3) && !selectedScope && !request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
 		operations, aligned, err := engine.alignCompactV2Revisions(ctx)
 		if err != nil {
 			report.Errors = append(report.Errors, EntityError{EntityID: "project-overview", Code: "revision_alignment_failed"})
@@ -689,7 +694,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 			entityCommitted = entityCommitted || aligned
 		}
 	}
-	if version == reviewv2.VersionV2 && !selectedScope && request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+	if (version == reviewv2.VersionV2 || version == reviewv2.VersionV3) && !selectedScope && request.DryRun && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
 		alignment, finalBodies, aligned, err := engine.planCompactV2DryRun(projectInventory, vaultInventory, dryAccepted)
 		if err != nil {
 			report.Errors = append(report.Errors, EntityError{EntityID: "project-overview", Code: "revision_alignment_failed"})
@@ -711,7 +716,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	if len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
 		report.Derived = DerivedReport{State: DerivedCurrent, Operations: []Operation{}}
 	}
-	if version == reviewv2.VersionV2 && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
+	if (version == reviewv2.VersionV2 || version == reviewv2.VersionV3) && len(report.Conflicts) == 0 && len(report.Issues) == 0 && len(report.Errors) == 0 {
 		if selectedScope {
 			// The compact machine ledger is a whole-review acceptance boundary. A
 			// selected reconcile cannot prove that excluded documents converged.
@@ -940,7 +945,7 @@ func (engine *Engine) alignCompactV2Revisions(ctx context.Context) ([]Operation,
 		if err != nil {
 			return nil, false, err
 		}
-		if len(redact.Default().Text(string(rendered)).Findings) != 0 {
+		if documentSensitive(accepted) {
 			return nil, false, ErrSensitiveContent
 		}
 		switch id {
@@ -1226,7 +1231,7 @@ func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineRe
 		}
 	}
 	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
-	if err != nil || version != reviewv2.VersionV2 {
+	if err != nil || (version != reviewv2.VersionV2 && version != reviewv2.VersionV3) {
 		return report, errors.New("machine ledger repair requires review v2")
 	}
 	snapshot, _, err := engine.loadMachineLedgerSnapshot(true)
@@ -1285,7 +1290,7 @@ func (engine *Engine) Resolve(ctx context.Context, resolution Resolution) (repor
 		return report, fmt.Errorf("review migration recovery failed: %w", err)
 	}
 	version, err := reviewv2.DetectVersionExpected(engine.options.ProjectRoot, engine.project.Info())
-	if err != nil || version != reviewv2.VersionV2 {
+	if err != nil || (version != reviewv2.VersionV2 && version != reviewv2.VersionV3) {
 		return report, errors.New("conflict resolution requires review v2")
 	}
 	transactions, err := engine.transactions.List()
@@ -1488,8 +1493,12 @@ func candidateSensitive(candidate Candidate) bool {
 	if !candidate.Present {
 		return false
 	}
-	rendered, err := candidate.Document.Render()
-	return err != nil || len(redact.Default().Text(string(rendered)).Findings) != 0
+	return documentSensitive(candidate.Document)
+}
+
+func documentSensitive(document syncdoc.Document) bool {
+	source, err := document.SensitiveScanSource()
+	return err != nil || len(redact.Default().Text(string(source)).Findings) != 0
 }
 
 func acceptedRelativePath(document syncdoc.Document, projectCandidate, vaultCandidate Candidate, base BaseRecord) string {

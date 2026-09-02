@@ -1,5 +1,5 @@
 import type { Diagnostic } from "../data/repository";
-import { ACTIVE_REVIEW_STATES, type ReviewPhase, type ReviewState, type ReviewStatus } from "../cli/runner";
+import type { ScanStatus } from "../contracts/review-v3";
 import { button, element } from "./dom";
 
 export interface StatusPresentation {
@@ -9,14 +9,14 @@ export interface StatusPresentation {
 }
 
 const PRESENTATIONS: Record<Diagnostic["code"], StatusPresentation> = {
-  migration_required: { title: "项目需要迁移", explanation: "旧版记录仍在，尚未生成两份 v2 人类文档。", action: "先预览迁移" },
+  migration_required: { title: "项目需要迁移", explanation: "旧版记录仍在，尚未生成人类文档。", action: "先预览迁移" },
   content_conflict: { title: "两边修改了同一内容", explanation: "需要比较 Project 和 Obsidian 候选内容后显式选择。", action: "处理冲突" },
   machine_ledger_modified: { title: "机器账本被改动", explanation: "用量、哈希或证据账本不再可信。", action: "修复机器账本" },
   history_parse_failed: { title: "项目历史暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目历史" },
   review_parse_failed: { title: "项目回顾暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目回顾" },
   stale_snapshot: { title: "正在显示上次可信内容", explanation: "当前文件身份、引用或 revision 不一致。", action: "重新加载" },
   sync_not_run: { title: "等待同步到代码目录", explanation: "新的人类内容已显示，机器用量仍来自上次验收。", action: "查看同步状态" },
-  cli_unavailable: { title: "未连接 SessionReviewer CLI", explanation: "阅读和 Markdown 编辑仍可用，同步与冲突处理需要配置 CLI。", action: "配置 CLI" }
+  cli_unavailable: { title: "尚未发现 SessionReviewer", explanation: "阅读和 Markdown 编辑仍可用；如需更新脉络或同步，请确保已安装 SessionReviewer。" }
 };
 
 export function statusPresentation(code: Diagnostic["code"]): StatusPresentation {
@@ -35,88 +35,64 @@ export function renderStatusBanner(diagnostic: Diagnostic, action?: () => void):
   return banner;
 }
 
-const REVIEW_PHASE_LABELS: Record<ReviewPhase, string> = {
-  preflight: "正在检查",
-  scanning: "正在扫描会话",
-  preparing: "正在准备材料",
-  reviewing: "正在总结",
-  applying: "正在写入",
+const SCAN_PHASE_LABELS: Record<string, string> = {
+  discovering: "正在发现会话",
+  extracting: "正在提取脉络",
+  reducing: "正在整合结构",
+  rendering: "正在渲染文档",
   syncing: "正在同步"
 };
 
 const REVIEW_FAILURE_TEXT: Record<string, string> = {
-  E_AGENT_UNCONFIGURED: "尚未配置 Codex，请先在设置中验证。",
-  E_AGENT_INCOMPATIBLE: "当前 Codex 版本暂不兼容自动总结。",
-  E_AGENT_AUTH: "Codex 登录已失效，请先在终端重新登录。",
-  E_AGENT_BUSY: "已有自动总结任务正在运行。",
-  E_AGENT_TIMEOUT: "自动总结等待超时，可重试。",
-  E_AGENT_TOOL_FORBIDDEN: "自动总结尝试调用工具，已安全停止。",
-  E_AGENT_CANCELLED: "自动总结已取消。",
-  E_PROPOSAL_REJECTED: "总结结果未通过校验，未写入项目。",
+  E_PROPOSAL_UNSAFE_INPUT: "Session 中仍含未清理的敏感信息，已安全停止，未写入项目。",
+  E_SESSION_SEGMENT_CONFLICT: "发现同一 Session 的重复或冲突分段，请检查 Session 文件后重试。",
   E_APPLY_RECOVERY: "写入状态需要恢复，请重试。",
-  E_SYNC_CONFLICT: "已总结，但同步存在冲突，请先处理冲突。",
-  E_SYNC_PARTIAL: "已总结，但部分内容尚未同步。"
+  E_SYNC_CONFLICT: "已更新，但同步存在冲突，请先处理冲突。",
+  E_SYNC_PARTIAL: "已更新，但部分内容尚未同步。"
 };
 
-const REVIEW_BANNER_TITLES: Record<ReviewState, string> = {
-  idle: "",
-  queued: "自动总结进行中",
-  running: "自动总结进行中",
-  retrying: "自动总结进行中",
-  cancel_requested: "正在取消自动总结",
-  completed: "总结完成",
-  failed: "自动总结失败",
-  cancelled: "自动总结已取消"
-};
-
-export interface ReviewBannerActions {
-  onCancel?: () => void;
-  onRetry?: () => void;
-  onSyncOnly?: () => void;
-}
-
-export function reviewPhaseLabel(status: Pick<ReviewStatus, "phase">): string {
-  return status.phase ? REVIEW_PHASE_LABELS[status.phase] : "正在检查";
-}
-
-export function reviewFailureText(errorCode: string | undefined, fallback: string): string {
-  return (errorCode !== undefined && REVIEW_FAILURE_TEXT[errorCode]) || fallback;
-}
-
-export function reviewActionLabel(status: ReviewStatus | undefined): string {
-  if (status && ACTIVE_REVIEW_STATES.includes(status.state)) return reviewPhaseLabel(status);
-  return "总结并同步";
-}
-
-export function renderReviewJobBanner(status: ReviewStatus, actions: ReviewBannerActions = {}): HTMLElement | null {
-  if (status.state === "idle") return null;
-  const banner = element("section", { className: "sr-review-banner", attrs: { role: "status", "data-review-state": status.state } });
-  banner.append(element("strong", { text: REVIEW_BANNER_TITLES[status.state] }));
-  banner.append(element("p", { className: "sr-review-meta", text: reviewBannerDetail(status) }));
-  const controls: HTMLButtonElement[] = [];
-  if (status.canCancel && actions.onCancel) controls.push(reviewControl("取消", "cancel", actions.onCancel));
-  if (status.canRetry && actions.onRetry) controls.push(reviewControl("重试", "retry", actions.onRetry));
-  if (status.canSyncOnly && actions.onSyncOnly) controls.push(reviewControl("仅同步已有修改", "sync-only", actions.onSyncOnly));
-  if (controls.length > 0) {
-    const group = element("div", { className: "sr-review-actions" });
-    group.append(...controls);
-    banner.append(group);
+export function scanActionLabel(status: ScanStatus | undefined): string {
+  if (status && (status.state === "queued" || status.state === "running")) {
+    return status.phase ? (SCAN_PHASE_LABELS[status.phase] ?? "正在更新") : "正在更新";
   }
+  return "更新项目脉络";
+}
+
+export const reviewActionLabel = scanActionLabel;
+
+export function renderScanJobBanner(status: ScanStatus, actions: { onCancel?: () => void; onRetry?: () => void; onSyncOnly?: () => void } = {}): HTMLElement | null {
+  if (!status.state || status.state === "completed") return null;
+  const banner = element("section", { className: "sr-review-banner", attrs: { role: "status", "data-scan-state": status.state } });
+  let title = "项目脉络更新中";
+  let detail = status.phase ? (SCAN_PHASE_LABELS[status.phase] ?? status.phase) : "正在处理";
+  if (status.state === "completed_with_issues") {
+    title = "项目脉络已更新（部分需检查）";
+    detail = `共 ${status.session_count} 个 Session · ${status.indexed_count} 已索引 · ${status.issue_count} 需检查`;
+  } else if (status.state === "failed") {
+    title = "项目脉络更新失败";
+    detail = status.error_code ? reviewFailureText(status.error_code, `错误：${status.error_code}`) : "扫描或同步遇到错误，可重试。";
+  }
+  banner.append(element("strong", { text: title }));
+  banner.append(element("p", { className: "sr-review-meta", text: detail }));
+  const actionGroup = element("div", { className: "sr-review-actions" });
+  if (actions.onCancel) {
+    const cancel = button("取消", { "data-review-action": "cancel" });
+    cancel.addEventListener("click", actions.onCancel);
+    actionGroup.append(cancel);
+  }
+  if (actions.onRetry) {
+    const retry = button("重试", { "data-review-action": "retry" });
+    retry.addEventListener("click", actions.onRetry);
+    actionGroup.append(retry);
+  }
+  banner.append(actionGroup);
   return banner;
 }
 
-function reviewBannerDetail(status: ReviewStatus): string {
-  if (status.state === "completed") {
-    return status.reviewUsage ? `本次总结使用 ${status.reviewUsage.totalTokens.toLocaleString("en-US")} tokens。` : "总结内容已写入项目回顾。";
-  }
-  if (status.state === "failed") return reviewFailureText(status.errorCode, "自动总结失败，可重试。");
-  if (status.state === "cancelled") return reviewFailureText(status.errorCode, "自动总结已取消。");
-  const phase = reviewPhaseLabel(status);
-  return status.sessionCount > 0 ? `${phase} · ${status.sessionIndex} / ${status.sessionCount} 会话` : phase;
+export function renderReviewJobBanner(status: ScanStatus, actions: { onCancel?: () => void; onRetry?: () => void; onSyncOnly?: () => void } = {}): HTMLElement | null {
+  return renderScanJobBanner(status, actions);
 }
 
-function reviewControl(label: string, action: string, handler: () => void): HTMLButtonElement {
-  const control = button(label, { "data-review-action": action });
-  control.addEventListener("click", handler);
-  return control;
+export function reviewFailureText(errorCode: string | undefined, fallback: string): string {
+  return (errorCode !== undefined && REVIEW_FAILURE_TEXT[errorCode]) || (errorCode ? `错误：${errorCode}` : fallback);
 }
