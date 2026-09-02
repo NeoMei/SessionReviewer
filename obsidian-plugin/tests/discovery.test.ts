@@ -7,7 +7,7 @@ describe("runtime discovery", () => {
     const home = "/Users/Neo";
     const cli = "/Users/Neo/.local/bin/session-reviewer";
 
-    const verifyExecutable = vi.fn().mockResolvedValue({ version: "0.3.0", reviewSchemaVersion: 3 });
+    const verifyExecutable = vi.fn().mockResolvedValue({ version: "0.3.1", reviewSchemaVersion: 3 });
     const runner = { executable: cli, verifyExecutable } as unknown as CliRunner;
 
     const runtime = await discoverRuntime({
@@ -25,7 +25,7 @@ describe("runtime discovery", () => {
   it("selects the native SessionReviewer executable on Windows", async () => {
     const localAppData = String.raw`C:\Users\Neo\AppData\Local`;
     const cli = String.raw`C:\Users\Neo\AppData\Local\SessionReviewer\session-reviewer.exe`;
-    const verifyExecutable = vi.fn().mockResolvedValue({ version: "0.3.0", reviewSchemaVersion: 3 });
+    const verifyExecutable = vi.fn().mockResolvedValue({ version: "0.3.1", reviewSchemaVersion: 3 });
     const runner = { executable: cli, verifyExecutable } as unknown as CliRunner;
 
     const runtime = await discoverRuntime({

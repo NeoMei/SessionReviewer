@@ -365,3 +365,123 @@ func cloneMapping(value config.ProjectMapping) config.ProjectMapping {
 	value.AuthenticatedAliases = append([]config.AuthenticatedProjectAlias(nil), value.AuthenticatedAliases...)
 	return value
 }
+
+func TestResolveAcceptsSeparateGitDirWithCoreWorktree(t *testing.T) {
+	parent := t.TempDir()
+	projectRoot := filepath.Join(parent, "project")
+	separateGitDir := filepath.Join(parent, "repo.git")
+	if err := os.MkdirAll(projectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(separateGitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".git"), []byte("gitdir: "+separateGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(separateGitDir, "config"), []byte("[core]\n\tworktree = "+projectRoot+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := config.ProjectMapping{ID: "project-a", Root: projectRoot}
+	binding, err := Resolve(mapping, projectRoot, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("separate git dir bootstrap: %v", err)
+	}
+	if binding.CommonDirIdentity == "" {
+		t.Fatal("common dir identity empty")
+	}
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{binding.AuthenticatedAlias}
+	if err := Reauthenticate(binding); err != nil {
+		t.Fatalf("reauthenticate separate git dir: %v", err)
+	}
+	binding2, err := Resolve(mapping, projectRoot, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("resolve with alias: %v", err)
+	}
+	if binding2.CommonDirIdentity != binding.CommonDirIdentity || binding2.NewAuthentication {
+		t.Fatalf("unexpected second binding: %#v", binding2)
+	}
+}
+
+func TestResolveRejectsSeparateGitDirWithWrongCoreWorktree(t *testing.T) {
+	parent := t.TempDir()
+	projectRoot := filepath.Join(parent, "project")
+	otherRoot := filepath.Join(parent, "other")
+	separateGitDir := filepath.Join(parent, "repo.git")
+	for _, d := range []string{projectRoot, otherRoot, separateGitDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".git"), []byte("gitdir: "+separateGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(separateGitDir, "config"), []byte("[core]\n\tworktree = "+otherRoot+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := config.ProjectMapping{ID: "project-a", Root: projectRoot}
+	if _, err := Resolve(mapping, projectRoot, runtime.GOOS); !errors.Is(err, ErrAssociationRequired) {
+		t.Fatalf("wrong core.worktree error=%v, want association required", err)
+	}
+}
+
+func TestResolveAcceptsSeparateGitDirWithBacklinkFile(t *testing.T) {
+	parent := t.TempDir()
+	projectRoot := filepath.Join(parent, "project")
+	separateGitDir := filepath.Join(parent, "repo.git")
+	if err := os.MkdirAll(projectRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(separateGitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".git"), []byte("gitdir: "+separateGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(separateGitDir, "gitdir"), []byte(filepath.Join(projectRoot, ".git")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := config.ProjectMapping{ID: "project-a", Root: projectRoot}
+	if _, err := Resolve(mapping, projectRoot, runtime.GOOS); err != nil {
+		t.Fatalf("separate git dir backlink bootstrap: %v", err)
+	}
+}
+
+func TestResolveRejectsReplacedSeparateGitDirPointer(t *testing.T) {
+	parent := t.TempDir()
+	projectRoot := filepath.Join(parent, "project")
+	separateGitDir := filepath.Join(parent, "repo.git")
+	otherRoot := filepath.Join(parent, "other")
+	otherGitDir := filepath.Join(parent, "other.git")
+	for _, d := range []string{projectRoot, separateGitDir, otherRoot, otherGitDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".git"), []byte("gitdir: "+separateGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(separateGitDir, "config"), []byte("[core]\n\tworktree = "+projectRoot+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	mapping := config.ProjectMapping{ID: "project-a", Root: projectRoot}
+	binding, err := Resolve(mapping, projectRoot, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	mapping.AuthenticatedAliases = []config.AuthenticatedProjectAlias{binding.AuthenticatedAlias}
+
+	if err := os.WriteFile(filepath.Join(projectRoot, ".git"), []byte("gitdir: "+otherGitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(otherGitDir, "config"), []byte("[core]\n\tworktree = "+otherRoot+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Reauthenticate(binding); err == nil {
+		t.Fatal("replaced separate Git pointer retained authenticated authority")
+	}
+}

@@ -3,6 +3,7 @@
 package projectidentity
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -178,12 +179,11 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 	}
 	var gitDirPath string
 	var pointerIdentity pathguard.IdentityToken
-	worktreePointer := false
+	gitPointerFile := false
 	switch {
 	case info.IsDir():
 		gitDirPath = filepath.Join(projectRoot.Path, ".git")
 	case info.Mode().IsRegular():
-		worktreePointer = true
 		file, opened, openErr := projectRoot.OpenRegular(".git")
 		if openErr != nil {
 			return "", openErr
@@ -204,6 +204,7 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 			gitDirPath = filepath.Join(projectRoot.Path, gitDirPath)
 		}
 		gitDirPath = filepath.Clean(gitDirPath)
+		gitPointerFile = true
 	default:
 		return "", errors.New("Git metadata is not a directory or regular pointer")
 	}
@@ -235,9 +236,22 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 		return "", err
 	}
 	defer common.Close()
-	if worktreePointer {
-		if err := authenticateWorktreeRegistration(projectRoot, gitDir, common, pointerIdentity); err != nil {
-			return "", errors.Join(errWorktreeRegistration, err)
+	if gitPointerFile {
+		relative, err := filepath.Rel(common.Path, gitDir.Path)
+		if err != nil || filepath.IsAbs(relative) || filepath.Clean(relative) != relative {
+			return "", errors.New("Git directory pointer is outside the common directory")
+		}
+		switch {
+		case relative == ".":
+			if err := authenticateSeparateGitDir(projectRoot, gitDir, pointerIdentity); err != nil {
+				return "", errors.Join(errWorktreeRegistration, err)
+			}
+		case isRegisteredWorktree(relative):
+			if err := authenticateWorktreeRegistration(projectRoot, gitDir, common, pointerIdentity); err != nil {
+				return "", errors.Join(errWorktreeRegistration, err)
+			}
+		default:
+			return "", errors.New("Git directory pointer is not a registered worktree")
 		}
 	}
 	token, err := common.PhysicalIdentity()
@@ -245,6 +259,149 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 		return "", err
 	}
 	return identityKey(token), nil
+}
+
+
+func isRegisteredWorktree(relative string) bool {
+	components := strings.Split(relative, string(filepath.Separator))
+	if len(components) != 2 || components[0] != "worktrees" || components[1] == "" || components[1] == "." || components[1] == ".." {
+		return false
+	}
+	return true
+}
+
+func authenticateSeparateGitDir(projectRoot, gitDir *pathguard.Directory, pointerIdentity pathguard.IdentityToken) error {
+	body, found, err := gitDir.ReadRegular("gitdir", 4096)
+	if err != nil {
+		return err
+	}
+	if found {
+		backlink := string(bytes.TrimSuffix(body, []byte("\n")))
+		backlink = strings.TrimSuffix(backlink, "\r")
+		if backlink == "" || strings.ContainsAny(backlink, "\r\n\x00") {
+			return errors.New("separate Git directory backlink is invalid")
+		}
+		if !filepath.IsAbs(backlink) {
+			backlink = filepath.Join(gitDir.Path, backlink)
+		}
+		backlink = filepath.Clean(backlink)
+		return authenticateSeparateGitDirBacklink(projectRoot, backlink, pointerIdentity)
+	}
+
+	worktree, err := readCoreWorktree(gitDir.Path)
+	if err != nil {
+		return err
+	}
+	if err := verifyDirectoryEquals(worktree, projectRoot.Path); err != nil {
+		return fmt.Errorf("core.worktree does not name project root: %w", err)
+	}
+	file, info, err := projectRoot.OpenRegular(".git")
+	if err != nil {
+		return fmt.Errorf("reopen .git pointer after core.worktree check: %w", err)
+	}
+	identity, identityErr := pathguard.PhysicalFileIdentity(file)
+	closeErr := file.Close()
+	if info == nil || identityErr != nil || closeErr != nil {
+		return errors.Join(errors.New("cannot identify .git pointer after core.worktree check"), identityErr, closeErr)
+	}
+	if identity != pointerIdentity {
+		return errors.New(".git pointer file identity changed after core.worktree check")
+	}
+	return nil
+}
+
+func authenticateSeparateGitDirBacklink(projectRoot *pathguard.Directory, backlink string, pointerIdentity pathguard.IdentityToken) error {
+	backlinkParent, err := pathguard.Open(filepath.Dir(backlink))
+	if err != nil {
+		return fmt.Errorf("open separate Git directory backlink parent: %w", err)
+	}
+	defer backlinkParent.Close()
+	projectIdentity, err := projectRoot.PhysicalIdentity()
+	if err != nil {
+		return err
+	}
+	backlinkRootIdentity, err := backlinkParent.PhysicalIdentity()
+	if err != nil || backlinkRootIdentity != projectIdentity {
+		return errors.Join(errors.New("separate Git directory backlink root identity changed"), err)
+	}
+	file, _, err := backlinkParent.OpenRegular(filepath.Base(backlink))
+	if err != nil {
+		return fmt.Errorf("open separate Git directory backlink: %w", err)
+	}
+	identity, identityErr := pathguard.PhysicalFileIdentity(file)
+	closeErr := file.Close()
+	if identityErr != nil || closeErr != nil || identity != pointerIdentity {
+		return errors.Join(errors.New("separate Git directory backlink file identity changed"), identityErr, closeErr)
+	}
+	return nil
+}
+
+func readCoreWorktree(gitDir string) (string, error) {
+	configPath := filepath.Join(gitDir, "config")
+	file, err := os.Open(configPath)
+	if err != nil {
+		return "", fmt.Errorf("open git config: %w", err)
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024), 4096)
+	section := ""
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			section = strings.ToLower(strings.TrimSpace(trimmed[1 : len(trimmed)-1]))
+			continue
+		}
+		if section != "core" {
+			continue
+		}
+		eq := strings.IndexByte(trimmed, '=')
+		if eq < 0 {
+			continue
+		}
+		key := strings.ToLower(strings.TrimSpace(trimmed[:eq]))
+		if key != "worktree" {
+			continue
+		}
+		value := strings.TrimSpace(trimmed[eq+1:])
+		value = unquoteGitConfigValue(value)
+		if value == "" || strings.ContainsAny(value, "\r\n") || strings.ContainsRune(value, 0) {
+			return "", errors.New("core.worktree is empty or invalid")
+		}
+		return filepath.Clean(value), nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read git config: %w", err)
+	}
+	return "", errors.New("core.worktree is not set")
+}
+
+func unquoteGitConfigValue(raw string) string {
+	if len(raw) >= 2 && raw[0] == raw[len(raw)-1] && (raw[0] == 34 || raw[0] == 39) {
+		return raw[1 : len(raw)-1]
+	}
+	return raw
+}
+
+func verifyDirectoryEquals(first, second string) error {
+	firstDir, err := pathguard.Open(first)
+	if err != nil {
+		return err
+	}
+	defer firstDir.Close()
+	secondDir, err := pathguard.Open(second)
+	if err != nil {
+		return err
+	}
+	defer secondDir.Close()
+	if firstDir.Path != secondDir.Path {
+		return errors.New("paths do not identify the same location")
+	}
+	return nil
 }
 
 func authenticateWorktreeRegistration(projectRoot, gitDir, common *pathguard.Directory, pointerIdentity pathguard.IdentityToken) error {

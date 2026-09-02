@@ -35,6 +35,7 @@ type PublicStatus struct {
 	IssueCount    int    `json:"issue_count"`
 	GenerationID  string `json:"generation_id,omitempty"`
 	ErrorCode     string `json:"error_code,omitempty"`
+	ErrorMessage  string `json:"error_message,omitempty"`
 }
 
 type JobRecord struct {

@@ -52,8 +52,10 @@ func Start(ctx context.Context, opts StartOptions) (PublicStatus, error) {
 				return toPublicStatus(active), ErrJobAlreadyRunning
 			}
 			active.State = StateFailed
-			active.ErrorCode = "worker_crashed"
-			active.ErrorMessage = "worker process terminated unexpectedly"
+			if active.ErrorCode == "" {
+				active.ErrorCode = "worker_crashed"
+				active.ErrorMessage = "worker process terminated unexpectedly"
+			}
 			active.UpdatedAt = now().UTC()
 			_ = store.SaveJob(active)
 		}
@@ -117,8 +119,10 @@ func Status(ctx context.Context, dataRoot, projectID string) (PublicStatus, erro
 	}
 	if (active.State == StateQueued || active.State == StateRunning) && !isProcessAlive(active.PID) {
 		active.State = StateFailed
-		active.ErrorCode = "worker_crashed"
-		active.ErrorMessage = "worker process is no longer running"
+		if active.ErrorCode == "" {
+			active.ErrorCode = "worker_crashed"
+			active.ErrorMessage = "worker process is no longer running"
+		}
 		active.UpdatedAt = time.Now().UTC()
 		_ = store.SaveJob(active)
 	}
@@ -199,6 +203,7 @@ func toPublicStatus(j JobRecord) PublicStatus {
 		IssueCount:    j.IssueCount,
 		GenerationID:  j.GenerationID,
 		ErrorCode:     j.ErrorCode,
+		ErrorMessage:  j.ErrorMessage,
 	}
 }
 
