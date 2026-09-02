@@ -53,6 +53,7 @@ func TestV3SupportedHumanEditAndUnknownBlockArePresentationInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	baselineHash := hashV3ForTest(source)
 	edited, err := PatchReviewUnit(source, EditUnit{
 		Document: ReviewRelativePath, UnitID: "project-overview", Field: "status",
 		Value: "人工状态", ExpectedSHA256: markdownSHA256(source),
@@ -70,6 +71,48 @@ func TestV3SupportedHumanEditAndUnknownBlockArePresentationInput(t *testing.T) {
 	}
 	if accepted.State.Review.Status != "人工状态" || !bytes.Contains(edited, []byte("自定义内容。")) {
 		t.Fatalf("human presentation input was rejected or lost: %+v", accepted.State.Review)
+	}
+	if hashV3ForTest(edited) == baselineHash || accepted.State.Machine.ReviewSHA256 != baselineHash {
+		t.Fatalf("current human bytes and generated baseline hash were conflated: current=%s baseline=%s ledger=%s",
+			hashV3ForTest(edited), baselineHash, accepted.State.Machine.ReviewSHA256)
+	}
+}
+
+func TestV3FrontmatterRejectsDuplicateMinimumWriterAndRenderReparses(t *testing.T) {
+	root := writeV3Fixture(t)
+	reviewPath := filepath.Join(root, filepath.FromSlash(ReviewRelativePath))
+	source, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicated := bytes.Replace(source, []byte("minimum_writer_version: "+MinimumWriterVersion+"\n"),
+		[]byte("minimum_writer_version: "+MinimumWriterVersion+"\nminimum_writer_version: 0.2.0\n"), 1)
+	if bytes.Equal(duplicated, source) {
+		t.Fatal("duplicate-writer mutation did not change fixture")
+	}
+	if err := os.WriteFile(reviewPath, duplicated, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadV3(root); err == nil || !strings.Contains(err.Error(), "duplicate YAML frontmatter key") {
+		t.Fatalf("duplicate minimum writer accepted: %v", err)
+	}
+
+	state := v3FixtureState(t)
+	review, err := RenderReviewV3(state.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewDoc, err := ParseReview(review)
+	if err != nil || reviewDoc.Model.GenerationID != state.Review.GenerationID || reviewDoc.Model.MinimumWriterVersion != MinimumWriterVersion {
+		t.Fatalf("rendered review did not reparse with v3 identity: %+v err=%v", reviewDoc.Model, err)
+	}
+	history, err := RenderHistoryV3(state.Review.ProjectID, state.Review.Revision, state.Review.GenerationID, state.Events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyDoc, err := ParseHistory(history)
+	if err != nil || historyDoc.GenerationID != state.Review.GenerationID || historyDoc.MinimumWriterVersion != MinimumWriterVersion {
+		t.Fatalf("rendered history did not reparse with v3 identity: %+v err=%v", historyDoc, err)
 	}
 }
 
@@ -210,33 +253,14 @@ func TestMachineLedgerV3SchemaMatchesContract(t *testing.T) {
 	if version["const"] != float64(SchemaVersion) || writer["const"] != MinimumWriterVersion {
 		t.Fatalf("schema identity version=%+v writer=%+v", version, writer)
 	}
+	if strings.Contains(string(body), "review-ledger-v2.schema.json#") {
+		t.Fatal("public v3 schema is not self-contained")
+	}
 }
 
 func writeV3Fixture(t *testing.T) string {
 	t.Helper()
-	state := validState(t)
-	state.Review.Name = "Schema V3 Fixture"
-	state.Review.Status = "生成状态"
-	state.Review.Risks[0].Title = "Fixture risk"
-	state.Review.Risks[0].Status = "open"
-	state.Review.Risks[0].Detail = "Fixture detail"
-	state.Review.Decisions[0].Title = "Fixture decision"
-	state.Review.Decisions[0].Rationale = "Fixture rationale"
-	state.Review.Decisions[0].Impact = "Fixture impact"
-	state.Events[0].Title = "Fixture event"
-	state.Events[0].OccurredAt = "2026-09-02T00:00:00Z"
-	state.Events[0].Kind = "verification"
-	state.Events[0].Meaning = "Fixture meaning"
-	state.Events[0].Summary = "Fixture summary"
-	state.Events[0].Why = "Fixture why"
-	state.Events[0].Changes = []string{"Fixture change"}
-	state.Events[0].Results = []string{"Fixture result"}
-	state.Events[0].Next = "Fixture next"
-	state.Review.GenerationID = "generation-3f00000000000001"
-	state.Review.MinimumWriterVersion = MinimumWriterVersion
-	for index := range state.Events {
-		state.Events[index].GenerationID = state.Review.GenerationID
-	}
+	state := v3FixtureState(t)
 	review, err := RenderReviewV3(state.Review)
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +294,34 @@ func writeV3Fixture(t *testing.T) string {
 		}
 	}
 	return root
+}
+
+func v3FixtureState(t *testing.T) State {
+	t.Helper()
+	state := validState(t)
+	state.Review.Name = "Schema V3 Fixture"
+	state.Review.Status = "生成状态"
+	state.Review.Risks[0].Title = "Fixture risk"
+	state.Review.Risks[0].Status = "open"
+	state.Review.Risks[0].Detail = "Fixture detail"
+	state.Review.Decisions[0].Title = "Fixture decision"
+	state.Review.Decisions[0].Rationale = "Fixture rationale"
+	state.Review.Decisions[0].Impact = "Fixture impact"
+	state.Events[0].Title = "Fixture event"
+	state.Events[0].OccurredAt = "2026-09-02T00:00:00Z"
+	state.Events[0].Kind = "verification"
+	state.Events[0].Meaning = "Fixture meaning"
+	state.Events[0].Summary = "Fixture summary"
+	state.Events[0].Why = "Fixture why"
+	state.Events[0].Changes = []string{"Fixture change"}
+	state.Events[0].Results = []string{"Fixture result"}
+	state.Events[0].Next = "Fixture next"
+	state.Review.GenerationID = "generation-3f00000000000001"
+	state.Review.MinimumWriterVersion = MinimumWriterVersion
+	for index := range state.Events {
+		state.Events[index].GenerationID = state.Review.GenerationID
+	}
+	return state
 }
 
 func validPatchMap() map[string]any {

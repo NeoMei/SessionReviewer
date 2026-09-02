@@ -8,7 +8,6 @@ import (
 	"os"
 	"reflect"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
@@ -33,6 +32,10 @@ type GeneratedBaselineWire struct {
 	GeneratedHash string   "json:\"generated_hash\""
 }
 
+// MachineLedgerV3 is the public projection contract. ReviewSHA256 and
+// HistorySHA256 authenticate the immutable generated baseline preimages, not
+// the current human-edited Markdown bytes; Task 3's renderer binds and verifies
+// those exact baseline bytes before publication.
 type MachineLedgerV3 struct {
 	SchemaVersion        int                       "json:\"schema_version\""
 	MinimumWriterVersion string                    "json:\"minimum_writer_version\""
@@ -257,7 +260,7 @@ func validateMachineLedgerV3(value MachineLedgerV3) error {
 	if value.SchemaVersion != SchemaVersion {
 		return fmt.Errorf("unsupported review projection schema version %d", value.SchemaVersion)
 	}
-	if !writerAtLeastV3(value.MinimumWriterVersion) {
+	if !validMinimumWriterVersion(value.MinimumWriterVersion) {
 		return fmt.Errorf("review projection writer version %q is below %s", value.MinimumWriterVersion, MinimumWriterVersion)
 	}
 	if !validStableID(value.ProjectID) || !strings.HasPrefix(value.ProjectID, "project-") {
@@ -354,21 +357,6 @@ func validGenerationID(value string) bool {
 	return validStableID(value) && strings.HasPrefix(value, "generation-")
 }
 
-func writerAtLeastV3(value string) bool {
-	parts := strings.Split(value, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	minimum := strings.Split(MinimumWriterVersion, ".")
-	for index := 0; index < 3; index++ {
-		current, currentErr := strconv.Atoi(parts[index])
-		required, requiredErr := strconv.Atoi(minimum[index])
-		if currentErr != nil || requiredErr != nil {
-			return false
-		}
-		if current != required {
-			return current > required
-		}
-	}
-	return true
+func validMinimumWriterVersion(value string) bool {
+	return value == MinimumWriterVersion
 }

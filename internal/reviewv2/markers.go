@@ -195,7 +195,7 @@ func parseFrontmatter(source []byte, expectedID, expectedType string) (frontmatt
 			return frontmatterIdentity{}, errors.New("frontmatter generation_id must be a stable generation ID")
 		}
 		writer, err := requiredFrontmatterString(mapping, "minimum_writer_version")
-		if err != nil || !writerAtLeastV3(writer) {
+		if err != nil || !validMinimumWriterVersion(writer) {
 			return frontmatterIdentity{}, fmt.Errorf("frontmatter minimum_writer_version must be at least %s", MinimumWriterVersion)
 		}
 		identity.generationID, identity.minimumWriterVersion = generation, writer

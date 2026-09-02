@@ -10,6 +10,7 @@ import (
 	"path"
 	"reflect"
 	"sort"
+	"strconv"
 
 	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -324,6 +325,7 @@ func detectVersionFromDirectory(directory *pathguard.Directory) (Version, error)
 }
 
 func frontmatterSchemaVersion(source []byte) int {
+	source = bytes.ReplaceAll(bytes.ReplaceAll(source, []byte("\r\n"), []byte("\n")), []byte("\r"), []byte("\n"))
 	if !bytes.HasPrefix(source, []byte("---\n")) {
 		return LegacySchemaVersion
 	}
@@ -331,12 +333,20 @@ func frontmatterSchemaVersion(source []byte) int {
 	if closeStart < 0 {
 		return LegacySchemaVersion
 	}
-	var document map[string]any
-	if err := yaml.Unmarshal(source[4:closeStart+4], &document); err != nil {
+	var document yaml.Node
+	if err := yaml.Unmarshal(source[4:closeStart+4], &document); err != nil || document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
 		return LegacySchemaVersion
 	}
-	value, ok := document["schema_version"].(int)
-	if !ok {
+	mapping := document.Content[0]
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return LegacySchemaVersion
+	}
+	schema, ok := frontmatterValue(mapping, "schema_version")
+	if !ok || schema.Kind != yaml.ScalarNode || schema.Tag != "!!int" {
+		return LegacySchemaVersion
+	}
+	value, err := strconv.Atoi(schema.Value)
+	if err != nil {
 		return LegacySchemaVersion
 	}
 	return value
