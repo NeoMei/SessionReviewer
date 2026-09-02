@@ -3,108 +3,261 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
-	"github.com/neomei/SessionReviewer/internal/scan"
+	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/contextupdate"
+	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/scanjob"
 )
 
 var (
-	scanCoreIDPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
-	scanCoreDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	scanIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
-type scanCoreRequest struct {
-	ProjectID    string
-	SessionsRoot string
-	DataRoot     string
+func runScan(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "start":
+			return runScanStart(args[1:], stdout, stderr)
+		case "status":
+			return runScanStatus(args[1:], stdout, stderr)
+		case "worker":
+			return runScanWorker(args[1:], stdout, stderr)
+		}
+	}
+	return runScanForeground(args, stdout, stderr)
 }
 
-type scanCoreExecutor func(context.Context, scanCoreRequest) (scan.Result, error)
+func runScanForeground(args []string, stdout, stderr io.Writer) int {
+	var projectID, sessionsRoot, dataDir string
+	jsonOut := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOut = true
+		case "--project-id":
+			if i+1 < len(args) {
+				projectID = args[i+1]
+				i++
+			}
+		case "--sessions-root":
+			if i+1 < len(args) {
+				sessionsRoot = args[i+1]
+				i++
+			}
+		case "--data-dir":
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		default:
+			fmt.Fprintf(stderr, "unknown flag: %s\n", args[i])
+			return 2
+		}
+	}
 
-// runScanCore is the private Gate-A JSON boundary. Gate B owns public command
-// composition and dispatch; callers must inject the authenticated adapter,
-// catalog, store, project binding, and trusted ProjectProbe dependency.
-func runScanCore(ctx context.Context, args []string, stdout, stderr io.Writer, execute scanCoreExecutor) int {
-	_ = stderr
-	request, ok := parseScanCoreArgs(args)
-	if !ok || execute == nil {
-		writeScanCoreResult(stdout, failedScanCoreResult())
+	dataDir = resolveDataDir(dataDir)
+	projectID = resolveProjectID(dataDir, projectID)
+	if projectID == "" {
+		fmt.Fprintln(stderr, "unable to resolve project ID")
 		return 2
 	}
-	result, err := execute(ctx, request)
-	if err != nil || !validScanCoreResult(request, result) {
-		writeScanCoreResult(stdout, failedScanCoreResult())
+
+	res, err := contextupdate.Run(context.Background(), contextupdate.Options{
+		ProjectID:    projectID,
+		SessionsRoot: sessionsRoot,
+		DataRoot:     dataDir,
+	})
+	if err != nil {
+		if jsonOut {
+			_ = json.NewEncoder(stdout).Encode(map[string]any{"error": err.Error(), "state": "failed"})
+		} else {
+			fmt.Fprintf(stderr, "scan error: %v\n", err)
+		}
 		return 1
 	}
-	if err := writeScanCoreResult(stdout, result); err != nil {
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(res)
+	} else {
+		fmt.Fprintf(stdout, "Scan completed: %s (generation %s, %d sessions)\n", res.State, res.GenerationID, res.IndexedSessions)
+	}
+	return 0
+}
+
+func runScanStart(args []string, stdout, stderr io.Writer) int {
+	var projectID, sessionsRoot, dataDir string
+	jsonOut := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOut = true
+		case "--project-id":
+			if i+1 < len(args) {
+				projectID = args[i+1]
+				i++
+			}
+		case "--sessions-root":
+			if i+1 < len(args) {
+				sessionsRoot = args[i+1]
+				i++
+			}
+		case "--data-dir":
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		default:
+			fmt.Fprintf(stderr, "unknown flag: %s\n", args[i])
+			return 2
+		}
+	}
+
+	dataDir = resolveDataDir(dataDir)
+	projectID = resolveProjectID(dataDir, projectID)
+	if projectID == "" {
+		fmt.Fprintln(stderr, "unable to resolve project ID")
+		return 2
+	}
+
+	status, err := scanjob.Start(context.Background(), scanjob.StartOptions{
+		ProjectID:    projectID,
+		SessionsRoot: sessionsRoot,
+		DataRoot:     dataDir,
+	})
+	if err != nil {
+		if errors.Is(err, scanjob.ErrJobAlreadyRunning) {
+			if jsonOut {
+				_ = json.NewEncoder(stdout).Encode(status)
+			}
+			return 0
+		}
+		fmt.Fprintf(stderr, "start scan job failed: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(status)
+	} else {
+		fmt.Fprintf(stdout, "Started scan job %s for %s (%s)\n", status.JobID, status.ProjectID, status.State)
+	}
+	return 0
+}
+
+func runScanStatus(args []string, stdout, stderr io.Writer) int {
+	var projectID, dataDir string
+	jsonOut := false
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--json":
+			jsonOut = true
+		case "--project-id":
+			if i+1 < len(args) {
+				projectID = args[i+1]
+				i++
+			}
+		case "--data-dir":
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		default:
+			fmt.Fprintf(stderr, "unknown flag: %s\n", args[i])
+			return 2
+		}
+	}
+
+	dataDir = resolveDataDir(dataDir)
+	projectID = resolveProjectID(dataDir, projectID)
+	if projectID == "" {
+		fmt.Fprintln(stderr, "unable to resolve project ID")
+		return 2
+	}
+
+	status, err := scanjob.Status(context.Background(), dataDir, projectID)
+	if err != nil && !errors.Is(err, scanjob.ErrNoActiveJob) {
+		fmt.Fprintf(stderr, "get status failed: %v\n", err)
+		return 1
+	}
+	if jsonOut {
+		_ = json.NewEncoder(stdout).Encode(status)
+	} else {
+		fmt.Fprintf(stdout, "Job: %s State: %s Phase: %s Generation: %s\n", status.JobID, status.State, status.Phase, status.GenerationID)
+	}
+	return 0
+}
+
+func runScanWorker(args []string, stdout, stderr io.Writer) int {
+	var jobID, dataDir, projectID string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--job-id":
+			if i+1 < len(args) {
+				jobID = args[i+1]
+				i++
+			}
+		case "--data-dir":
+			if i+1 < len(args) {
+				dataDir = args[i+1]
+				i++
+			}
+		case "--project-id":
+			if i+1 < len(args) {
+				projectID = args[i+1]
+				i++
+			}
+		}
+	}
+	if jobID == "" || dataDir == "" || projectID == "" {
+		fmt.Fprintln(stderr, "worker requires --job-id, --data-dir, --project-id")
+		return 2
+	}
+	if err := scanjob.RunWorker(context.Background(), dataDir, projectID, jobID); err != nil {
+		fmt.Fprintf(stderr, "worker error: %v\n", err)
 		return 1
 	}
 	return 0
 }
 
-func parseScanCoreArgs(args []string) (scanCoreRequest, bool) {
-	var result scanCoreRequest
-	seen := map[string]bool{}
-	jsonRequested := false
-	for index := 0; index < len(args); index++ {
-		name := args[index]
-		if name == "--json" {
-			if jsonRequested {
-				return scanCoreRequest{}, false
-			}
-			jsonRequested = true
-			continue
+func resolveDataDir(explicit string) string {
+	if explicit != "" {
+		abs, err := filepath.Abs(explicit)
+		if err == nil {
+			return filepath.Clean(abs)
 		}
-		if name != "--project-id" && name != "--sessions-root" && name != "--data-dir" {
-			return scanCoreRequest{}, false
-		}
-		if seen[name] || index+1 >= len(args) || args[index+1] == "" || len(args[index+1]) >= 2 && args[index+1][:2] == "--" {
-			return scanCoreRequest{}, false
-		}
-		seen[name] = true
-		index++
-		switch name {
-		case "--project-id":
-			result.ProjectID = args[index]
-		case "--sessions-root":
-			result.SessionsRoot = args[index]
-		case "--data-dir":
-			result.DataRoot = args[index]
-		}
+		return filepath.Clean(explicit)
 	}
-	if !jsonRequested || len(seen) != 3 || !scanCoreIDPattern.MatchString(result.ProjectID) {
-		return scanCoreRequest{}, false
+	dir, err := platform.DataDir(platform.CurrentEnv())
+	if err != nil {
+		return ""
 	}
-	for _, root := range []string{result.SessionsRoot, result.DataRoot} {
-		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
-			return scanCoreRequest{}, false
-		}
-	}
-	return result, true
+	return dir
 }
 
-func validScanCoreResult(request scanCoreRequest, result scan.Result) bool {
-	if result.SchemaVersion != 1 || result.ProjectID != request.ProjectID || !scanCoreIDPattern.MatchString(result.ProjectID) ||
-		!scanCoreIDPattern.MatchString(result.GenerationID) || !scanCoreDigestPattern.MatchString(result.ProjectViewDigest) ||
-		result.ReviewRunTokens != 0 || !result.Prepared ||
-		(result.State != scan.Completed && result.State != scan.CompletedWithIssues) {
-		return false
+func resolveProjectID(dataDir, explicit string) string {
+	if explicit != "" {
+		return strings.TrimSpace(explicit)
 	}
-	if result.SourceSessions < 0 || result.IndexedSessions < 0 || result.TerminalSessions < 0 || result.IssueSessions < 0 ||
-		result.SourceSessions != result.TerminalSessions || result.IndexedSessions > result.TerminalSessions || result.IssueSessions > result.TerminalSessions {
-		return false
+	cfg, err := config.Load(filepath.Join(dataDir, "config.toml"))
+	if err != nil {
+		return ""
 	}
-	return (result.State == scan.Completed) == (result.IssueSessions == 0)
-}
-
-func failedScanCoreResult() scan.Result {
-	return scan.Result{SchemaVersion: 1, State: scan.Failed, ReviewRunTokens: 0, Prepared: false}
-}
-
-func writeScanCoreResult(destination io.Writer, result scan.Result) error {
-	encoder := json.NewEncoder(destination)
-	encoder.SetEscapeHTML(true)
-	return encoder.Encode(result)
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	for _, p := range cfg.Projects {
+		if p.Root == cwd {
+			return p.ID
+		}
+	}
+	if len(cfg.Projects) == 1 {
+		return cfg.Projects[0].ID
+	}
+	return ""
 }

@@ -34,6 +34,7 @@ Commands:
   history               Render accepted cross-session history
   sync                  Synchronize editable Markdown with Obsidian
   review                Control durable Agent review jobs
+  scan                  Execute or monitor zero-token project scans
   version               Print the version
 
 Options:
@@ -48,6 +49,9 @@ Options:
         resolve --conflict ID --action <accept_project|accept_obsidian|manual_merge>
           [--file MERGED.md] [--cwd | --project-id ID] [--data-dir]
   review: agent verify|start|status|cancel|retry (JSON only)
+  scan: [--project-id ID] [--sessions-root PATH] [--data-dir PATH] [--json]
+        start [--project-id ID] [--data-dir PATH] [--json]
+        status [--project-id ID] [--data-dir PATH] [--json]
 
 Apply validates a Skill proposal against its exact bounded evidence packet.
 Ledger-only resume and history do not process pending sessions.
@@ -107,6 +111,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runSync(args[1:], stdout, stderr)
 	case "review":
 		return runReview(args[1:], stdout, stderr)
+	case "scan":
+		return runScan(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, rootHelp)
