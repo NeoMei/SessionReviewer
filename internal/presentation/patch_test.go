@@ -208,6 +208,46 @@ func TestCapturePreservesPriorOrphanAndRejectsInvalidMarkerIntent(t *testing.T) 
 	}
 }
 
+func TestCaptureUnsuppressEqualBaselineDropsPatchButExplicitMarkersWin(t *testing.T) {
+	base := NewScalarBaseline("project-overview", "status", "自动")
+	prior := Patch{EntityID: base.EntityID, Field: base.Field, Operation: Suppress, BaseGeneratedHash: base.GeneratedHash}
+	observation := FieldObservation{EntityID: base.EntityID, Field: base.Field, Present: true, Value: base.Value}
+	result, err := Capture(CaptureInput{PreviousPatches: []Patch{prior}, PreviousBaselines: []Baseline{base}, Fields: []FieldObservation{observation}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Patches) != 0 {
+		t.Fatalf("unsuppress equal to baseline froze a generated value: %+v", result.Patches)
+	}
+
+	observation.Intent = Suppress
+	result, err = Capture(CaptureInput{PreviousPatches: []Patch{prior}, PreviousBaselines: []Baseline{base}, Fields: []FieldObservation{observation}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Patches) != 1 || result.Patches[0].Operation != Suppress {
+		t.Fatalf("explicit suppress marker was not retained: %+v", result.Patches)
+	}
+
+	observation.Intent = RestoreDefault
+	result, err = Capture(CaptureInput{PreviousPatches: []Patch{prior}, PreviousBaselines: []Baseline{base}, Fields: []FieldObservation{observation}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Patches) != 1 || result.Patches[0].Operation != RestoreDefault {
+		t.Fatalf("restore equal to baseline was not retained: %+v", result.Patches)
+	}
+}
+
+func TestCaptureRejectsObservationContractMismatchAtSource(t *testing.T) {
+	base := NewListBaseline("event-a", "changes", []string{"a"})
+	observation := FieldObservation{EntityID: base.EntityID, Field: base.Field, Present: true, Value: "scalar"}
+	_, err := Capture(CaptureInput{PreviousBaselines: []Baseline{base}, Fields: []FieldObservation{observation}})
+	if err == nil || !errors.Is(err, ErrChangedFieldContract) {
+		t.Fatalf("observation contract mismatch was delayed: %v", err)
+	}
+}
+
 func TestRebaseOutputOrderIsStableRegardlessOfInputOrder(t *testing.T) {
 	first := NewScalarBaseline("project-a", "z", "1")
 	second := NewScalarBaseline("project-a", "a", "2")

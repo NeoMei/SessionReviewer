@@ -53,6 +53,49 @@ func (value Baseline) Clone() Baseline {
 	return value
 }
 
+type baselineWire struct {
+	EntityID      string          "json:\"entity_id\""
+	Field         string          "json:\"field\""
+	Kind          FieldKind       "json:\"kind\""
+	Value         string          "json:\"value,omitempty\""
+	Values        json.RawMessage "json:\"values,omitempty\""
+	GeneratedHash string          "json:\"generated_hash\""
+}
+
+func (value Baseline) MarshalJSON() ([]byte, error) {
+	var values json.RawMessage
+	if value.Values != nil {
+		encoded, err := json.Marshal(value.Values)
+		if err != nil {
+			return nil, err
+		}
+		values = encoded
+	}
+	return json.Marshal(baselineWire{
+		EntityID: value.EntityID, Field: value.Field, Kind: value.Kind,
+		Value: value.Value, Values: values,
+		GeneratedHash: value.GeneratedHash,
+	})
+}
+
+func (value *Baseline) UnmarshalJSON(body []byte) error {
+	var wire baselineWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	result := Baseline{
+		EntityID: wire.EntityID, Field: wire.Field, Kind: wire.Kind,
+		Value: wire.Value, GeneratedHash: wire.GeneratedHash,
+	}
+	if len(wire.Values) != 0 && string(wire.Values) != "null" {
+		if err := json.Unmarshal(wire.Values, &result.Values); err != nil {
+			return err
+		}
+	}
+	*value = result
+	return nil
+}
+
 func (value Baseline) key() string {
 	return value.EntityID + "\x00" + value.Field
 }

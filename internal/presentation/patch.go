@@ -1,6 +1,7 @@
 package presentation
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -157,6 +158,11 @@ func Capture(input CaptureInput) (CaptureResult, error) {
 			continue
 		}
 		observation := current[baseline.key()]
+		if observation.Present {
+			if err := observationContractMatches(observation, baseline); err != nil {
+				return CaptureResult{}, err
+			}
+		}
 		prior, hadPatch := patchByID[baseline.key()]
 		var captured Patch
 		switch {
@@ -173,6 +179,8 @@ func Capture(input CaptureInput) (CaptureResult, error) {
 			captured = prior.Clone()
 		case hadPatch && prior.Operation == RestoreDefault && observationEqual(observation.Value, observation.Values, baseline.Value, baseline.Values):
 			captured = prior.Clone()
+		case hadPatch && prior.Operation == Suppress && observationEqual(observation.Value, observation.Values, baseline.Value, baseline.Values):
+			continue
 		case !observationEqual(observation.Value, observation.Values, baseline.Value, baseline.Values):
 			captured = Patch{
 				EntityID: baseline.EntityID, Field: baseline.Field, Operation: Set,
@@ -198,6 +206,49 @@ func Capture(input CaptureInput) (CaptureResult, error) {
 	sortPatches(result.Patches)
 	sortDiagnostics(result.Diagnostics)
 	return result, nil
+}
+
+type patchWire struct {
+	EntityID          string          "json:\"entity_id\""
+	Field             string          "json:\"field\""
+	Operation         Operation       "json:\"operation\""
+	Value             string          "json:\"value,omitempty\""
+	Values            json.RawMessage "json:\"values,omitempty\""
+	BaseGeneratedHash string          "json:\"base_generated_hash\""
+}
+
+func (value Patch) MarshalJSON() ([]byte, error) {
+	var values json.RawMessage
+	if value.Values != nil {
+		encoded, err := json.Marshal(value.Values)
+		if err != nil {
+			return nil, err
+		}
+		values = encoded
+	}
+	return json.Marshal(patchWire{
+		EntityID: value.EntityID, Field: value.Field, Operation: value.Operation,
+		Value: value.Value, Values: values,
+		BaseGeneratedHash: value.BaseGeneratedHash,
+	})
+}
+
+func (value *Patch) UnmarshalJSON(body []byte) error {
+	var wire patchWire
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return err
+	}
+	result := Patch{
+		EntityID: wire.EntityID, Field: wire.Field, Operation: wire.Operation,
+		Value: wire.Value, BaseGeneratedHash: wire.BaseGeneratedHash,
+	}
+	if len(wire.Values) != 0 && string(wire.Values) != "null" {
+		if err := json.Unmarshal(wire.Values, &result.Values); err != nil {
+			return err
+		}
+	}
+	*value = result
+	return nil
 }
 
 func Apply(patches []Patch, baselines []Baseline) (map[string]AppliedField, error) {
@@ -313,6 +364,16 @@ func patchContractMatches(patch Patch, baseline Baseline) error {
 	}
 	if baseline.Kind == ListField && (patch.Value != "" || patch.Values == nil) {
 		return fmt.Errorf("%w: %s/%s", ErrChangedFieldContract, patch.EntityID, patch.Field)
+	}
+	return nil
+}
+
+func observationContractMatches(observation FieldObservation, baseline Baseline) error {
+	if baseline.Kind == ScalarField && observation.Values != nil {
+		return fmt.Errorf("%w: %s/%s", ErrChangedFieldContract, observation.EntityID, observation.Field)
+	}
+	if baseline.Kind == ListField && (observation.Value != "" || observation.Values == nil) {
+		return fmt.Errorf("%w: %s/%s", ErrChangedFieldContract, observation.EntityID, observation.Field)
 	}
 	return nil
 }

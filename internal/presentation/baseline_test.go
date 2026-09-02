@@ -44,6 +44,43 @@ func TestBaselineRejectsForgedGeneratedHash(t *testing.T) {
 	}
 }
 
+func TestEmptyListPatchesAndBaselinesSurviveJSONRoundTrip(t *testing.T) {
+	baseline := NewListBaseline("event-a", "changes", nil)
+	encoded, err := json.Marshal(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "\"values\":[]") {
+		t.Fatalf("empty baseline list was omitted: %s", encoded)
+	}
+	var decodedBaseline Baseline
+	if err := json.Unmarshal(encoded, &decodedBaseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBaseline(decodedBaseline); err != nil || decodedBaseline.Values == nil || len(decodedBaseline.Values) != 0 {
+		t.Fatalf("empty baseline did not round trip: value=%+v err=%v", decodedBaseline, err)
+	}
+
+	patch := Patch{
+		EntityID: baseline.EntityID, Field: baseline.Field, Operation: Set,
+		Values: []string{}, BaseGeneratedHash: baseline.GeneratedHash,
+	}
+	encoded, err = json.Marshal(patch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), "\"values\":[]") {
+		t.Fatalf("empty patch list was omitted: %s", encoded)
+	}
+	var decodedPatch Patch
+	if err := json.Unmarshal(encoded, &decodedPatch); err != nil {
+		t.Fatal(err)
+	}
+	if decodedPatch.Values == nil || len(decodedPatch.Values) != 0 {
+		t.Fatalf("empty patch list did not round trip: %+v", decodedPatch)
+	}
+}
+
 func TestClonePreservesBaselineAndUnknownByteSlices(t *testing.T) {
 	base := NewListBaseline("event-a", "changes", []string{"a"})
 	cloned := base.Clone()
