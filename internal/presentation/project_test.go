@@ -97,6 +97,13 @@ func TestRenderV3ProducesVerifiedThreeFileCASPlan(t *testing.T) {
 	if !bytes.Contains(review.Desired, []byte("<!-- 自定义保留块 -->")) || strings.Contains(string(review.Desired), "Agent") {
 		t.Fatal("review desired bytes did not preserve custom content without an Agent-only section")
 	}
+	for _, identity := range []string{GeneratedSectionRecentProgress, GeneratedSectionModelUsage, GeneratedSectionCustomContent} {
+		open := "<!-- presentation:section id=\"" + identity + "\" -->"
+		close := "<!-- /presentation:section id=\"" + identity + "\" -->"
+		if !bytes.Contains(review.Desired, []byte(open)) || !bytes.Contains(review.Desired, []byte(close)) {
+			t.Fatalf("generated section %s lacks stable identity markers", identity)
+		}
+	}
 	if len(review.Desired) > reviewv2.MaxDocumentBytes || len(history.Desired) > reviewv2.MaxDocumentBytes {
 		t.Fatal("rendered human document exceeds the four MiB contract")
 	}

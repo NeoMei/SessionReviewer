@@ -31,6 +31,12 @@ type RenderPlan struct {
 	Baselines         []Baseline
 }
 
+const (
+	GeneratedSectionRecentProgress = "recent-progress"
+	GeneratedSectionModelUsage     = "model-usage"
+	GeneratedSectionCustomContent  = "custom-content"
+)
+
 func Render(input ProjectInput, output ProjectOutput) (RenderPlan, error) {
 	reviewBody, err := renderReviewBody(input, output)
 	if err != nil {
@@ -64,6 +70,10 @@ func Render(input ProjectInput, output ProjectOutput) (RenderPlan, error) {
 	if _, err := reviewv2.LoadV3Bytes(reviewBody, historyBody, machineBody); err != nil {
 		return RenderPlan{}, err
 	}
+	machine, err := reviewv2.ParseMachineLedgerV3(machineBody)
+	if err != nil || machine.ReviewSHA256 != sha256Hex(reviewBody) || machine.HistorySHA256 != sha256Hex(historyBody) {
+		return RenderPlan{}, errors.New("render v3: generated baseline document hashes do not match exact rendered bytes")
+	}
 	return plan, nil
 }
 
@@ -74,17 +84,18 @@ func renderReviewBody(input ProjectInput, output ProjectOutput) ([]byte, error) 
 	}
 	var additions strings.Builder
 	if output.RecentProgress != "" {
-		additions.WriteString("\n## 近期进展\n" + output.RecentProgress + "\n")
+		writeGeneratedSection(&additions, GeneratedSectionRecentProgress, "近期进展", output.RecentProgress)
 	}
 	if output.Usage != "" {
-		additions.WriteString("\n## 模型与 Token 使用\n" + output.Usage + "\n")
+		writeGeneratedSection(&additions, GeneratedSectionModelUsage, "模型与 Token 使用", output.Usage)
 	}
 	if len(output.UnknownBlocks) != 0 {
-		additions.WriteString("\n## 自定义内容\n")
+		additions.WriteString("\n" + generatedSectionOpen(GeneratedSectionCustomContent) + "\n## 自定义内容\n")
 		for _, key := range sortedUnknownKeys(output.UnknownBlocks) {
 			additions.Write(output.UnknownBlocks[key])
 			additions.WriteByte('\n')
 		}
+		additions.WriteString(generatedSectionClose(GeneratedSectionCustomContent) + "\n")
 	}
 	if additions.Len() == 0 {
 		return body, nil
@@ -101,6 +112,19 @@ func renderReviewBody(input ProjectInput, output ProjectOutput) ([]byte, error) 
 		return nil, fmt.Errorf("render review: custom concise sections are invalid: %w", err)
 	}
 	return body, nil
+}
+
+func writeGeneratedSection(output *strings.Builder, identity, title, body string) {
+	output.WriteString("\n" + generatedSectionOpen(identity) + "\n## " + title + "\n" + body + "\n" +
+		generatedSectionClose(identity) + "\n")
+}
+
+func generatedSectionOpen(identity string) string {
+	return "<!-- presentation:section id=\"" + identity + "\" -->"
+}
+
+func generatedSectionClose(identity string) string {
+	return "<!-- /presentation:section id=\"" + identity + "\" -->"
 }
 
 func renderMachineLedger(input ProjectInput, output ProjectOutput, reviewBody, historyBody []byte) ([]byte, error) {

@@ -54,9 +54,9 @@ func Project(input ProjectInput) (ProjectOutput, error) {
 	review.GenerationID = input.GenerationID
 	review.MinimumWriterVersion = reviewv2.MinimumWriterVersion
 	review.Revision = input.Revision
-	review.Goal = appliedValue(applied, "project-overview", "goal", review.Goal)
-	review.Status = appliedValue(applied, "project-overview", "status", deterministicStatus(input.ProjectView))
-	review.NextAction = appliedValue(applied, "project-overview", "next_action", review.NextAction)
+	review.Goal = appliedValue(applied, "project-overview", "goal")
+	review.Status = appliedValue(applied, "project-overview", "status")
+	review.NextAction = appliedValue(applied, "project-overview", "next_action")
 	if review.Name == "" {
 		review.Name = input.ProjectView.ProjectID
 	}
@@ -123,7 +123,7 @@ func deterministicStatus(view memory.ProjectView) string {
 	return view.LiveState.Branch + " · 未提交路径 " + strconv.Itoa(view.LiveState.DirtyPathCount)
 }
 
-func appliedValue(fields map[string]AppliedField, entityID, field, fallback string) string {
+func appliedValue(fields map[string]AppliedField, entityID, field string) string {
 	value, exists := fields[entityID+"\x00"+field]
 	if !exists || !value.Present {
 		return ""
@@ -141,9 +141,9 @@ func appliedRisks(fields map[string]AppliedField, values []reviewv2.Risk) []revi
 		if !appliedPresent(fields, risk.ID, "visibility") {
 			continue
 		}
-		risk.Title = appliedValue(fields, risk.ID, "title", risk.Title)
-		risk.Status = appliedValue(fields, risk.ID, "status", risk.Status)
-		risk.Detail = appliedValue(fields, risk.ID, "detail", risk.Detail)
+		risk.Title = appliedValue(fields, risk.ID, "title")
+		risk.Status = appliedValue(fields, risk.ID, "status")
+		risk.Detail = appliedValue(fields, risk.ID, "detail")
 		result = append(result, risk)
 	}
 	return result
@@ -155,10 +155,10 @@ func appliedDecisions(fields map[string]AppliedField, values []reviewv2.Decision
 		if !appliedPresent(fields, decision.ID, "visibility") {
 			continue
 		}
-		decision.Title = appliedValue(fields, decision.ID, "title", decision.Title)
-		decision.Rationale = appliedValue(fields, decision.ID, "rationale", decision.Rationale)
-		decision.Impact = appliedValue(fields, decision.ID, "impact", decision.Impact)
-		decision.Status = appliedValue(fields, decision.ID, "status", decision.Status)
+		decision.Title = appliedValue(fields, decision.ID, "title")
+		decision.Rationale = appliedValue(fields, decision.ID, "rationale")
+		decision.Impact = appliedValue(fields, decision.ID, "impact")
+		decision.Status = appliedValue(fields, decision.ID, "status")
 		result = append(result, decision)
 	}
 	return result
@@ -170,19 +170,19 @@ func appliedEvents(fields map[string]AppliedField, values []reviewv2.Event) []re
 		if !appliedPresent(fields, event.ID, "visibility") {
 			continue
 		}
-		event.Title = appliedValue(fields, event.ID, "title", event.Title)
-		event.Meaning = appliedValue(fields, event.ID, "meaning", event.Meaning)
-		event.Summary = appliedValue(fields, event.ID, "summary", event.Summary)
-		event.Why = appliedValue(fields, event.ID, "why", event.Why)
-		event.Changes = appliedValues(fields, event.ID, "changes", event.Changes)
-		event.Results = appliedValues(fields, event.ID, "results", event.Results)
-		event.Next = appliedValue(fields, event.ID, "next", event.Next)
+		event.Title = appliedValue(fields, event.ID, "title")
+		event.Meaning = appliedValue(fields, event.ID, "meaning")
+		event.Summary = appliedValue(fields, event.ID, "summary")
+		event.Why = appliedValue(fields, event.ID, "why")
+		event.Changes = appliedValues(fields, event.ID, "changes")
+		event.Results = appliedValues(fields, event.ID, "results")
+		event.Next = appliedValue(fields, event.ID, "next")
 		result = append(result, event)
 	}
 	return result
 }
 
-func appliedValues(fields map[string]AppliedField, entityID, field string, fallback []string) []string {
+func appliedValues(fields map[string]AppliedField, entityID, field string) []string {
 	value, exists := fields[entityID+"\x00"+field]
 	if !exists || !value.Present {
 		return nil
