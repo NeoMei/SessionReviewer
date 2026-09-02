@@ -913,7 +913,7 @@ func cloneSession(item SessionReport) SessionReport {
 	item.Evidence = cloneEvidence(item.Evidence)
 	if item.Accounting != nil {
 		copyAccounting := *item.Accounting
-		copyAccounting.Models = append([]accounting.ModelAccounting(nil), item.Accounting.Models...)
+		copyAccounting.Models = append([]accounting.ModelAccounting{}, item.Accounting.Models...)
 		item.Accounting = &copyAccounting
 	}
 	return item

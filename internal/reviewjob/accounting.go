@@ -283,7 +283,7 @@ func ValidateReviewAccounting(value ReviewAccounting) error {
 
 func cloneReviewAccounting(value ReviewAccounting) ReviewAccounting {
 	clone := value
-	clone.Models = append([]accounting.ModelAccounting(nil), value.Models...)
+	clone.Models = append([]accounting.ModelAccounting{}, value.Models...)
 	if value.TotalCostUSD != nil {
 		cost := *value.TotalCostUSD
 		clone.TotalCostUSD = &cost

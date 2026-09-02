@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"syscall"
 	"time"
@@ -217,16 +216,4 @@ func isProcessAlive(pid int) bool {
 	}
 	err = process.Signal(syscall.Signal(0))
 	return err == nil
-}
-
-func defaultWorkerRunner(jobID, dataRoot, projectID, sessionsRoot string) (int, error) {
-	executable, err := os.Executable()
-	if err != nil {
-		return 0, err
-	}
-	cmd := exec.Command(executable, "scan", "worker", "--job-id", jobID, "--data-dir", dataRoot, "--project-id", projectID)
-	if err := cmd.Start(); err != nil {
-		return 0, err
-	}
-	return cmd.Process.Pid, nil
 }

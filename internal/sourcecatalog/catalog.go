@@ -1078,7 +1078,7 @@ func sourceLeaf(provider, sessionID string) string {
 
 func cloneRecord(value memory.SourceRecord) memory.SourceRecord {
 	value.ProjectIDs = append([]string(nil), value.ProjectIDs...)
-	value.Usage.Models = append([]accounting.ModelUsage(nil), value.Usage.Models...)
+	value.Usage.Models = append([]accounting.ModelUsage{}, value.Usage.Models...)
 	return value
 }
 

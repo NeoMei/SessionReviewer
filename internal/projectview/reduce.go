@@ -447,6 +447,7 @@ func copyNonEmpty(fields map[string]string, name, value string) {
 }
 
 func boundedField(value string, maximum int) string {
+	value = normalizeStructuredField(value)
 	if len(value) <= maximum {
 		return value
 	}
@@ -459,6 +460,20 @@ func boundedField(value string, maximum int) string {
 func cloneSummary(value memory.ObservationSummary) memory.ObservationSummary {
 	value.Fields = cloneFields(value.Fields)
 	return value
+}
+
+// normalizeStructuredField replaces C0 control characters and DEL with a
+// single space so that derived field values satisfy single-line structured text
+// validation. Values produced by tool output or redaction markers may otherwise
+// contain newlines or tabs.
+func normalizeStructuredField(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, value)
+	return strings.TrimRight(value, " ")
 }
 
 func cloneFields(values map[string]string) map[string]string {

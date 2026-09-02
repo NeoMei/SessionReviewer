@@ -18,10 +18,10 @@ describe("CLI runner", () => {
 
   it("verifies semantic version and review schema", async () => {
     const execFile = vi.fn((_file, args: string[], _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
-		callback(null, args[0] === "version" ? '{"version":"0.3.1","review_schema_version":3}' : "{}", "");
+		callback(null, args[0] === "version" ? '{"version":"0.3.2","review_schema_version":3}' : "{}", "");
     });
     const runner = new CliRunner("C:\\Tools\\session-reviewer.exe", execFile as never);
-    await expect(runner.verifyExecutable()).resolves.toEqual({ version: "0.3.1", reviewSchemaVersion: 3 });
+    await expect(runner.verifyExecutable()).resolves.toEqual({ version: "0.3.2", reviewSchemaVersion: 3 });
   });
 
   it("runs scan commands with exact argv and maps snake_case status", async () => {

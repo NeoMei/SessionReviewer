@@ -1001,7 +1001,7 @@ func cloneLegacySession(value ledger.SessionReport) ledger.SessionReport {
 	}
 	if value.Accounting != nil {
 		copy := *value.Accounting
-		copy.Models = append([]accounting.ModelAccounting(nil), copy.Models...)
+		copy.Models = append([]accounting.ModelAccounting{}, copy.Models...)
 		value.Accounting = &copy
 	}
 	return value
