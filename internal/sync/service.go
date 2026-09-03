@@ -1166,8 +1166,8 @@ func (engine *Engine) Status(ctx context.Context) (Status, error) {
 		status.Migration = "required"
 	}
 	if body, found, readErr := engine.project.ReadRegular(reviewv2.MachineLedgerRelativePath, int64(reviewv2.MaxMachineLedgerBytes)); readErr == nil && found {
-		if machine, parseErr := reviewv2.ParseMachineLedger(body); parseErr == nil && machine.ProjectID == engine.options.ProjectID {
-			status.LastSuccessfulSync = machine.LastSuccessfulSync
+		if lastSuccessfulSync, valid := machineLastSuccessfulSync(body, engine.options.ProjectID); valid {
+			status.LastSuccessfulSync = lastSuccessfulSync
 		}
 	}
 	status.Conflicted = len(report.Conflicts)
@@ -1192,6 +1192,16 @@ func (engine *Engine) Status(ctx context.Context) (Status, error) {
 		}
 	}
 	return status, err
+}
+
+func machineLastSuccessfulSync(body []byte, projectID string) (string, bool) {
+	if machine, err := reviewv2.ParseMachineLedgerV3(body); err == nil && machine.ProjectID == projectID {
+		return machine.LastSuccessfulSync, true
+	}
+	if machine, err := reviewv2.ParseMachineLedger(body); err == nil && machine.ProjectID == projectID {
+		return machine.LastSuccessfulSync, true
+	}
+	return "", false
 }
 
 func (engine *Engine) RepairMachineLedger(ctx context.Context) (report MachineReport, retErr error) {

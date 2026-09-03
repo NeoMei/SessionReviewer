@@ -21,3 +21,12 @@ type Result struct {
 	ReviewRunTokens   int64  `json:"review_run_tokens"`
 	Prepared          bool   `json:"prepared"`
 }
+
+// Progress is a bounded extraction snapshot. SourceSessions is fixed after
+// discovery; terminal counts increase as each frozen source is materialized.
+type Progress struct {
+	SourceSessions   int
+	TerminalSessions int
+	IndexedSessions  int
+	IssueSessions    int
+}

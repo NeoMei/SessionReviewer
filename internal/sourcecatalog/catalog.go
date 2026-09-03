@@ -269,7 +269,7 @@ func (c *Catalog) planBatch(mutations []BatchMutation) ([]batchJournalEntry, []B
 		}
 		desired, desiredDigest, currentDigest, idempotent, err := validateMutation(existing, found, mutation)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, fmt.Errorf("source %s/%s (%s): %w", mutation.Desired.Provider, mutation.Desired.SessionID, mutation.Relation, err)
 		}
 		results = append(results, BatchResult{Record: cloneRecord(desired), Digest: desiredDigest})
 		if idempotent {
@@ -303,7 +303,7 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 			return memory.SourceRecord{}, "", "", false, err
 		}
 		if existing.Provider != desired.Provider || existing.SessionID != desired.SessionID || existing.SourceIdentity != desired.SourceIdentity || existing.StartedAt != desired.StartedAt {
-			return memory.SourceRecord{}, "", "", false, projectidentity.ErrAssociationRequired
+			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: immutable source identity changed", projectidentity.ErrAssociationRequired)
 		}
 		desired.ProjectIDs = append(desired.ProjectIDs, existing.ProjectIDs...)
 		sort.Strings(desired.ProjectIDs)
@@ -330,7 +330,7 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 			return memory.SourceRecord{}, "", "", false, ErrCASConflict
 		}
 		if existing.EndedAt != desired.EndedAt || !reflect.DeepEqual(existing.Usage, desired.Usage) {
-			return memory.SourceRecord{}, "", "", false, projectidentity.ErrAssociationRequired
+			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: unchanged source metadata changed", projectidentity.ErrAssociationRequired)
 		}
 	case source.BoundaryAppend:
 		if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
@@ -343,7 +343,7 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 		existingEnd, oldErr := time.Parse(time.RFC3339Nano, existing.EndedAt)
 		desiredEnd, newErr := time.Parse(time.RFC3339Nano, desired.EndedAt)
 		if oldErr != nil || newErr != nil || desiredEnd.Before(existingEnd) {
-			return memory.SourceRecord{}, "", "", false, projectidentity.ErrAssociationRequired
+			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: appended source end time regressed", projectidentity.ErrAssociationRequired)
 		}
 	case source.BoundaryReplacement:
 		if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
@@ -351,7 +351,7 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 		}
 		oldLoc, newLoc := existing.FrozenBoundary.Location.JSONL, desired.FrozenBoundary.Location.JSONL
 		if oldLoc == nil || newLoc == nil || newLoc.Line > oldLoc.Line || newLoc.ByteOffset > oldLoc.ByteOffset {
-			return memory.SourceRecord{}, "", "", false, projectidentity.ErrAssociationRequired
+			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: replacement source boundary advanced", projectidentity.ErrAssociationRequired)
 		}
 	default:
 		return memory.SourceRecord{}, "", "", false, errors.New("invalid source catalog batch relation")

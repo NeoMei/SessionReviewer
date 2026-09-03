@@ -258,12 +258,18 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 
 	// Ensure sync scaffold directories and lock
 	syncDataDir := filepath.Join(opts.DataRoot, "projects", opts.ProjectID)
-	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
-		_ = os.MkdirAll(filepath.Join(syncDataDir, name), 0o700)
+	syncDataRoot, err := pathguard.Open(syncDataDir)
+	if err != nil {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("open project sync data root: %w", err))
 	}
-	syncLockPath := filepath.Join(syncDataDir, "locks", "sync.lock")
-	if _, err := os.Stat(syncLockPath); errors.Is(err, os.ErrNotExist) {
-		_ = os.WriteFile(syncLockPath, nil, 0o600)
+	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		if err := syncDataRoot.EnsureDirectory(name, 0o700); err != nil {
+			closeErr := syncDataRoot.Close()
+			return Result{}, rollbackFailure(ctx, intent, errors.Join(fmt.Errorf("ensure sync directory %q: %w", name, err), closeErr))
+		}
+	}
+	if err := syncDataRoot.Close(); err != nil {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("close project sync data root: %w", err))
 	}
 
 	trustTransition := func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
@@ -271,6 +277,19 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 			if dest.Side == "project" && dest.Relative == relative && strings.EqualFold(dest.DesiredSHA256, targetHash) {
 				if (!dest.PreimageExists && !preimageExists) || (dest.PreimageExists && preimageExists && strings.EqualFold(dest.PreimageSHA256, preimageHash)) {
 					return true, nil
+				}
+				// When the project Markdown was edited by a human after the
+				// previous sync, the merge base still matches the Vault preimage,
+				// not the captured Project preimage. The publication plan was
+				// rendered from that exact human Project preimage and is protected
+				// by the journal/CAS checks above, so authorize only this complete
+				// three-point transition: Vault/base -> human Project -> desired.
+				vaultRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, relative)
+				for _, vaultDest := range intent.Destinations {
+					if vaultDest.Side == "vault" && vaultDest.Relative == vaultRelative && vaultDest.PreimageExists == preimageExists &&
+						(!preimageExists || strings.EqualFold(vaultDest.PreimageSHA256, preimageHash)) {
+						return true, nil
+					}
 				}
 			}
 		}

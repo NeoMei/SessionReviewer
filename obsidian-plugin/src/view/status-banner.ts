@@ -15,7 +15,7 @@ const PRESENTATIONS: Record<Diagnostic["code"], StatusPresentation> = {
   history_parse_failed: { title: "项目历史暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目历史" },
   review_parse_failed: { title: "项目回顾暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目回顾" },
   stale_snapshot: { title: "正在显示上次可信内容", explanation: "当前文件身份、引用或 revision 不一致。", action: "重新加载" },
-  sync_not_run: { title: "等待同步到代码目录", explanation: "新的人类内容已显示，机器用量仍来自上次验收。", action: "查看同步状态" },
+  sync_not_run: { title: "等待同步到代码目录", explanation: "新的人类内容已显示，机器用量仍来自上次验收。", action: "立即同步" },
   cli_unavailable: { title: "尚未发现 SessionReviewer", explanation: "阅读和 Markdown 编辑仍可用；如需更新脉络或同步，请确保已安装 SessionReviewer。" }
 };
 
@@ -65,12 +65,16 @@ export function renderScanJobBanner(status: ScanStatus, actions: { onCancel?: ()
   const banner = element("section", { className: "sr-review-banner", attrs: { role: "status", "data-scan-state": status.state } });
   let title = "项目脉络更新中";
   let detail = status.phase ? (SCAN_PHASE_LABELS[status.phase] ?? status.phase) : "正在处理";
+  if ((status.state === "queued" || status.state === "running") && status.session_count > 0) {
+    detail += ` · 已处理 ${status.indexed_count}/${status.session_count}`;
+    if (status.issue_count > 0) detail += ` · ${status.issue_count} 需检查`;
+  }
   if (status.state === "completed_with_issues") {
     title = "项目脉络已更新（部分需检查）";
     detail = `共 ${status.session_count} 个 Session · ${status.indexed_count} 已索引 · ${status.issue_count} 需检查`;
   } else if (status.state === "failed") {
     title = "项目脉络更新失败";
-    detail = status.error_code ? reviewFailureText(status.error_code, `错误：${status.error_code}`) : "扫描或同步遇到错误，可重试。";
+    detail = status.error_message || (status.error_code ? reviewFailureText(status.error_code, `错误：${status.error_code}`) : "扫描或同步遇到错误，可重试。");
   }
   banner.append(element("strong", { text: title }));
   banner.append(element("p", { className: "sr-review-meta", text: detail }));

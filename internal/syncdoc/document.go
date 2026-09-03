@@ -102,6 +102,49 @@ type Document struct {
 	v2           *v2DocumentState
 }
 
+// AlignRootHeading replaces only the single H1 presentation in current with
+// the single H1 presentation in desired. It is intended for a controlled
+// generated-title migration before semantic units are merged; all other
+// current Markdown bytes remain untouched.
+func AlignRootHeading(relativePath string, current, desired []byte) ([]byte, error) {
+	currentDocument, err := Parse(relativePath, current)
+	if err != nil {
+		return nil, err
+	}
+	desiredDocument, err := Parse(relativePath, desired)
+	if err != nil {
+		return nil, err
+	}
+	currentRoot, err := singleRootHeading(currentDocument.body)
+	if err != nil {
+		return nil, err
+	}
+	desiredRoot, err := singleRootHeading(desiredDocument.body)
+	if err != nil {
+		return nil, err
+	}
+	currentDocument.body.sections[currentRoot].heading = bytes.Clone(desiredDocument.body.sections[desiredRoot].heading)
+	currentDocument.dirty = true
+	return currentDocument.Render()
+}
+
+func singleRootHeading(body Body) (int, error) {
+	root := -1
+	for index, section := range body.sections {
+		if section.level != 1 {
+			continue
+		}
+		if root >= 0 {
+			return -1, invalidDocument("document must contain exactly one root heading")
+		}
+		root = index
+	}
+	if root < 0 {
+		return -1, invalidDocument("document must contain exactly one root heading")
+	}
+	return root, nil
+}
+
 func Parse(relativePath string, content []byte) (Document, error) {
 	return parseDocument(relativePath, content, true)
 }
@@ -201,7 +244,7 @@ func (d Document) Render() ([]byte, error) {
 		return nil, invalidDocument("rendered document exceeds size limit")
 	}
 	if _, err := Parse(d.relativePath, result); err != nil {
-		return nil, invalidDocument("rendered document cannot be reparsed")
+		return nil, fmt.Errorf("%w: rendered document cannot be reparsed: %v", ErrInvalidDocument, err)
 	}
 	return result, nil
 }

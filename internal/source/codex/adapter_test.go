@@ -353,6 +353,117 @@ func TestFreezeOrdersPhysicalSegmentsAsOneBoundaryAndAppendCreatesSuccessorBound
 	}
 }
 
+func TestFreezeKeepsLogicalIdentityWhenCatalogSourceIsRewrittenByteForByte(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	first, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstReport := decodeBoundary(t, adapter, first)
+	publishDecodeProposal(t, fixture.catalog, firstReport)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	later, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.SourceIdentity != first.SourceIdentity {
+		t.Fatalf("byte-identical rewrite changed logical source identity: before=%q after=%q", first.SourceIdentity, later.SourceIdentity)
+	}
+	_, report := decodeBoundary(t, adapter, later)
+	if report.BoundaryRelation != source.BoundaryUnchanged {
+		t.Fatalf("byte-identical rewrite relation=%q", report.BoundaryRelation)
+	}
+	publishDecodeProposal(t, fixture.catalog, report)
+}
+
+func TestFreezeKeepsLogicalIdentityWhenRewrittenSourceStrictlyAppends(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	first, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstReport := decodeBoundary(t, adapter, first)
+	publishDecodeProposal(t, fixture.catalog, firstReport)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, []byte("{\"timestamp\":\"2026-08-31T10:00:11Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\"}}\n")...)
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	later, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.SourceIdentity != first.SourceIdentity {
+		t.Fatalf("strict append rewrite changed logical source identity: before=%q after=%q", first.SourceIdentity, later.SourceIdentity)
+	}
+	_, report := decodeBoundary(t, adapter, later)
+	if report.BoundaryRelation != source.BoundaryAppend {
+		t.Fatalf("strict append rewrite relation=%q", report.BoundaryRelation)
+	}
+	publishDecodeProposal(t, fixture.catalog, report)
+}
+
+func TestFreezeDoesNotReuseLogicalIdentityWhenRewrittenPrefixChanges(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	path := fixture.installFixture(t, "session-project-a.jsonl")
+	adapter := fixture.adapter(t, "v1")
+	first, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, firstReport := decodeBoundary(t, adapter, first)
+	publishDecodeProposal(t, fixture.catalog, firstReport)
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := bytes.Replace(body, []byte("## main...origin/main"), []byte("## devx...origin/devx"), 1)
+	if len(changed) != len(body) || bytes.Equal(changed, body) {
+		t.Fatal("interior fixture mutation did not preserve coordinates")
+	}
+	if err := os.Rename(path, path+".old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, changed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	later, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "session-project-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if later.SourceIdentity == first.SourceIdentity {
+		t.Fatal("changed rewrite reused the prior logical source identity")
+	}
+	_, report := decodeBoundary(t, adapter, later)
+	if _, err := fixture.catalog.ApplyBatch([]sourcecatalog.BatchMutation{{
+		Relation: report.BoundaryRelation, ExpectedDigest: report.ExpectedCatalogDigest, Desired: report.ProposedSource,
+	}}); !errors.Is(err, projectidentity.ErrAssociationRequired) {
+		t.Fatalf("changed rewrite association error=%v", err)
+	}
+}
+
 func TestDiscoverMixedValidAndCorruptSegmentsYieldsOnlyTerminalIssue(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	valid := fmt.Sprintf("{\"timestamp\":\"2026-08-31T09:00:00Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"mixed-segments\",\"cwd\":%q}}\n", filepath.ToSlash(fixture.projectA))

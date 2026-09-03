@@ -338,11 +338,20 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 		return source.Boundary{}, err
 	}
 	sourceIdentity := sourceIdentity(candidate.SessionID, firstIdentity)
+	if discovered.baseline.PriorSource != nil {
+		reuse, reuseErr := canReuseLogicalSourceIdentity(files, segments, *discovered.baseline.PriorSource, logicalHash, logicalSize, lines)
+		if reuseErr != nil {
+			return source.Boundary{}, fmt.Errorf("authenticate rewritten Codex source: %w", reuseErr)
+		}
+		if reuse {
+			sourceIdentity = discovered.baseline.PriorSource.SourceIdentity
+		}
+	}
 	segmentBoundaries := make([]source.SegmentBoundary, len(segments))
 	for index, segment := range segments {
 		segmentBoundaries[index] = source.SegmentBoundary{Ordinal: index + 1, Size: segment.size, SourceHash: segment.hash}
 	}
-	boundaryHandle := opaqueHandle("boundary", candidate.Handle, sourceIdentity, logicalHash, strconv.FormatInt(logicalSize, 10))
+	boundaryHandle := opaqueHandle("boundary", candidate.Handle, sourceIdentity, logicalHash, strconv.FormatInt(logicalSize, 10), firstIdentity.Kind, firstIdentity.Volume, firstIdentity.File)
 	boundary := source.Boundary{
 		Candidate: candidate, SourceIdentity: sourceIdentity,
 		Frozen: memory.FrozenBoundary{
@@ -374,6 +383,26 @@ func (a *adapter) Freeze(ctx context.Context, candidate source.Candidate) (sourc
 	a.evictFrozenLocked(key, candidate.SessionID)
 	a.mu.Unlock()
 	return cloneBoundary(boundary), nil
+}
+
+// canReuseLogicalSourceIdentity recognizes a physical file replacement as the
+// same logical Session only when the entire old authenticated byte prefix is
+// unchanged. This permits atomic rewrites and copies while keeping truncation
+// and interior mutation on the explicit-confirmation path.
+func canReuseLogicalSourceIdentity(files []*os.File, segments []frozenSegment, prior memory.SourceRecord, logicalHash string, logicalSize int64, lines int) (bool, error) {
+	oldLocation := prior.FrozenBoundary.Location.JSONL
+	if prior.Provider != providerCodex || prior.SourceIdentity == "" || oldLocation == nil ||
+		logicalSize < oldLocation.ByteOffset || lines < oldLocation.Line {
+		return false, nil
+	}
+	if logicalSize == oldLocation.ByteOffset && lines == oldLocation.Line {
+		return logicalHash == prior.FrozenBoundary.SourceHash, nil
+	}
+	prefixHash, err := hashLogicalPrefix(files, segments, oldLocation.ByteOffset)
+	if err != nil {
+		return false, err
+	}
+	return prefixHash == prior.FrozenBoundary.SourceHash, nil
 }
 
 func (a *adapter) newLeaseLocked(kind, handle string) string {

@@ -60,20 +60,21 @@ type MemoryStore interface {
 }
 
 type Options struct {
-	ProjectID     string
-	Binding       projectidentity.Binding
-	SessionsRoot  string
-	DataRoot      string
-	Adapter       source.Adapter
-	Catalog       *sourcecatalog.Catalog
-	Store         MemoryStore
-	Workers       int
-	Now           func() time.Time
-	Materialize   MaterializeFunc
-	Probe         ProbeFunc
-	ProbeOptions  projectprobe.Options
-	Reduce        ReduceFunc
-	spoolObserver func(observationSpoolStats)
+	ProjectID        string
+	Binding          projectidentity.Binding
+	SessionsRoot     string
+	DataRoot         string
+	Adapter          source.Adapter
+	Catalog          *sourcecatalog.Catalog
+	Store            MemoryStore
+	Workers          int
+	Now              func() time.Time
+	Materialize      MaterializeFunc
+	Probe            ProbeFunc
+	ProbeOptions     projectprobe.Options
+	Reduce           ReduceFunc
+	ProgressObserver func(Progress) error
+	spoolObserver    func(observationSpoolStats)
 }
 
 type frozenTask struct {
@@ -147,6 +148,10 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	}
 	tasks, issueSources, err := freezeDiscovery(ctx, options, discovery)
 	if err != nil {
+		return result, err
+	}
+	sourceCount := len(tasks) + len(issueSources)
+	if err := reportProgress(options, Progress{SourceSessions: sourceCount}); err != nil {
 		return result, err
 	}
 	defer abandonFrozenTasks(options.Adapter, tasks)
@@ -279,6 +284,12 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		lineageDependencies = append(lineageDependencies, memory.SessionLineageDependency{Provider: view.Provider, SessionID: view.SessionID, Digest: lineage.Digest})
 		usage = append(usage, memory.AssociatedUsage{Provider: view.Provider, SessionID: view.SessionID, UsageRecordDigest: view.UsageRecordDigest, Shared: terminal.shared})
 		incrementResult(&result, view.TerminalState, terminal.issue)
+		if err := reportProgress(options, Progress{
+			SourceSessions: sourceCount, TerminalSessions: result.TerminalSessions,
+			IndexedSessions: result.IndexedSessions, IssueSessions: result.IssueSessions,
+		}); err != nil {
+			return result, err
+		}
 	}
 	if result.SourceSessions != len(views) || result.TerminalSessions != len(views) {
 		return result, errors.New("source and terminal Session counts do not reconcile")
@@ -428,6 +439,16 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		result.State = Completed
 	}
 	return result, nil
+}
+
+func reportProgress(options Options, progress Progress) error {
+	if options.ProgressObserver == nil {
+		return nil
+	}
+	if err := options.ProgressObserver(progress); err != nil {
+		return fmt.Errorf("report scan extraction progress: %w", err)
+	}
+	return nil
 }
 
 func validateOptions(options Options) error {

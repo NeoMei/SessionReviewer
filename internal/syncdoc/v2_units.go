@@ -58,7 +58,7 @@ func validatedV2Source(mappingNode *yaml.Node, source []byte) ([]byte, []reviewv
 	}
 	normalized, spans, err := reviewv2.ValidatedMarkerDocument(source, entityType)
 	if err != nil {
-		return nil, nil, "", invalidDocument("invalid compact review document")
+		return nil, nil, "", fmt.Errorf("%w: invalid compact review document: %v", ErrInvalidDocument, err)
 	}
 	return normalized, spans, entityType, nil
 }

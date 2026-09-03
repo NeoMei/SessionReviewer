@@ -1628,6 +1628,25 @@ func TestFirstSyncOfIdenticalV2CopiesEstablishesResolvableMergeBases(t *testing.
 	}
 }
 
+func TestMachineLastSuccessfulSyncSupportsV3Ledger(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "review-v3", "ledger.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.ReplaceAll(body, []byte("generation-3f00000000000001"), []byte("scan-3f000000000000013f00000000000001"))
+	body = bytes.Replace(body, []byte("sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), []byte("dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"), 1)
+	if _, err := reviewv2.ParseMachineLedgerV3(body); err != nil {
+		t.Fatalf("fixture v3 ledger is invalid: %v", err)
+	}
+	got, ok := machineLastSuccessfulSync(body, "project-review-v2")
+	if !ok || got != "2026-08-25T08:00:00Z" {
+		t.Fatalf("v3 last successful sync=%q ok=%v", got, ok)
+	}
+	if _, ok := machineLastSuccessfulSync(body, "project-other"); ok {
+		t.Fatal("accepted a v3 machine ledger for another project")
+	}
+}
+
 func TestNewEngineRejectsProjectRootThatChangedAfterMappingResolution(t *testing.T) {
 	fixture := newEngineFixture(t)
 	writeV2EngineFixture(t, fixture)

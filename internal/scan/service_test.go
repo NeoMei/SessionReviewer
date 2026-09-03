@@ -432,6 +432,36 @@ func TestRunCompletes154SessionsWithoutAgentOrForeignFacts(t *testing.T) {
 	}
 }
 
+func TestRunReportsExtractionCoverageAndPropagatesProgressFailure(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	harness.addSource(2, memory.Unsupported, scanTestProject)
+	var progress []Progress
+	harness.options.ProgressObserver = func(value Progress) error {
+		progress = append(progress, value)
+		return nil
+	}
+	result, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 3 || progress[0].SourceSessions != 2 || progress[0].TerminalSessions != 0 {
+		t.Fatalf("discovery coverage was not reported before extraction: %+v", progress)
+	}
+	last := progress[len(progress)-1]
+	if last.SourceSessions != result.SourceSessions || last.TerminalSessions != 2 || last.IndexedSessions != 1 || last.IssueSessions != 1 {
+		t.Fatalf("terminal progress does not reconcile: progress=%+v result=%+v", last, result)
+	}
+
+	harness = newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	want := errors.New("progress store unavailable")
+	harness.options.ProgressObserver = func(Progress) error { return want }
+	if _, err := Run(context.Background(), harness.options); !errors.Is(err, want) {
+		t.Fatalf("progress observer failure was lost: %v", err)
+	}
+}
+
 func TestRunPersistsBoundedQuarantineReasonWithoutSourceDetails(t *testing.T) {
 	harness := newScanHarness(t)
 	spec := harness.addSource(1, memory.Indexed, scanTestProject)

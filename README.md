@@ -6,8 +6,8 @@ SessionReviewer turns local Codex session history into a concise, editable proje
 
 ## What it does
 
-- Streams local Codex session JSONL through a bounded, allow-listed, and redacted evidence pipeline.
-- Uses the SessionReviewer skill for semantic review while keeping deterministic parsing, validation, cursors, and writes in the local CLI.
+- Scans every Codex session associated with the project, then deterministically reduces the per-session results into one project view without an Agent call or token usage.
+- Keeps the SessionReviewer skill as an optional semantic refinement path; it is not required for the normal whole-project scan.
 - Stores human-readable project context in `docs/session-review/项目回顾.md` and `docs/session-review/项目历史.md`.
 - Synchronizes editable project notes with a configured vault using a deterministic three-way merge.
 - Provides a desktop project browser with evolution, decisions, risks, usage, pricing sources, and safe editing controls.
@@ -34,7 +34,7 @@ Download `main.js`, `manifest.json`, and `styles.css` from the [latest GitHub Re
 
 Enable **SessionReviewer** under **Settings → Community plugins**, then run **SessionReviewer: Open project evolution** from the command palette or select the history icon in the left ribbon.
 
-No executable settings are required. On startup, the plugin discovers and verifies SessionReviewer and Codex from the Agent's normal user installation locations and `PATH`; legacy saved paths are accepted once for migration and then removed. If discovery fails, run SessionReviewer once from the Agent and reload the plugin. The plugin only executes fixed, allow-listed CLI actions; it does not read executable paths or arbitrary arguments from Markdown.
+No executable settings are required. On startup, the plugin discovers and verifies SessionReviewer from normal user installation locations and `PATH`; legacy saved paths are accepted once for migration and then removed. If discovery fails, install or run SessionReviewer once and reload the plugin. The plugin only executes fixed, allow-listed CLI actions; it does not read executable paths or arbitrary arguments from Markdown.
 
 ## Initialize and synchronize a project
 
@@ -61,7 +61,26 @@ session-reviewer sync
 
 The first command previews initialization. Adding `--write` creates the stable mapping and review files. Synchronization uses per-entity base snapshots so independent edits can merge while same-field conflicts remain explicit.
 
-## Review new session evidence
+## Update the whole project with zero tokens
+
+Run a complete foreground scan from the initialized project:
+
+```bash
+session-reviewer scan --json
+```
+
+The command discovers all Codex sessions associated with the project, updates deterministic per-session memory, reduces it into a project-wide view, preserves accepted human edits and unknown Markdown sections, and synchronizes the concise projection to Obsidian. It never sends session content to an Agent and reports `review_run_tokens: 0`.
+
+The Obsidian action **更新项目脉络** starts the same work as a durable background job. The equivalent CLI controls are:
+
+```bash
+session-reviewer scan start --json
+session-reviewer scan status --json
+```
+
+Terminal states distinguish a complete scan (`completed`), a complete scan with isolated source issues (`completed_with_issues`), and a failed scan (`failed`). Starting the same project again while its worker is queued or running returns the existing job instead of launching a duplicate.
+
+## Optional Agent-assisted review
 
 Prepare a bounded evidence packet:
 
@@ -82,17 +101,15 @@ session-reviewer apply \
 
 An accepted apply updates the machine ledger and the two human-readable project files before advancing the accepted cursor. Reapplying the same accepted proposal is idempotent.
 
-### Summary-and-sync review jobs
+The manual Skill workflow prepares bounded evidence and accepts a validated semantic proposal. It remains available when deterministic project context needs human-requested interpretation or enrichment, but the Obsidian plugin does not invoke an Agent for its normal update action.
 
-The Obsidian plugin's “总结并同步” view drives the whole reviewed pipeline as one durable job: prepare a bounded packet, invoke the local Codex CLI as a proposal-only agent, validate and apply the proposal, then synchronize the vault. Jobs support retry, cancellation, and restart recovery after a killed worker. The worker's sync step repairs a machine ledger that a completed apply legitimately advanced; standalone `sync` invocations keep their conservative behavior unchanged.
-
-The agent executable fails closed unless it matches the reviewed Codex `0.150.1` contract and passes capability probes. The fixed invocation ignores user configuration and rules, disables reviewed external capabilities, runs in a private read-only sandbox, and rejects every observed tool event. Codex retains one non-disableable core execution capability, so SessionReviewer reports restricted containment rather than claiming an empty tool registry. Other Codex versions remain blocked until reviewed. The end-to-end acceptance suite exercises the same orchestration with a dedicated fake agent:
+The legacy Agent-orchestrated job remains covered by its compatibility suite:
 
 ```bash
 go test ./test/reviewjob -count=1
 ```
 
-The suite covers the multi-session happy path, failure and retry, cancellation, and kill-based restart recovery, and skips automatically on unsupported platforms.
+The suite covers its multi-session happy path, failure and retry, cancellation, and kill-based restart recovery, and skips automatically on unsupported platforms.
 
 ## Build and verify
 
@@ -109,7 +126,7 @@ Release assets are reproducible and accompanied by `SHA256SUMS`. The GitHub Acti
 
 ## Privacy and safety
 
-SessionReviewer keeps raw session logs local, limits persisted evidence by role and size, applies post-truncation redaction, binds proposals to evidence digests and accepted revisions, and fails closed on modified machine ledgers or unresolved synchronization conflicts. Human-editable fields and machine-owned accounting or evidence fields remain separate.
+SessionReviewer keeps raw session logs local, stores bounded redacted observations instead of duplicating the raw transcripts, binds optional proposals to evidence digests and accepted revisions, and fails closed on modified machine ledgers or unresolved synchronization conflicts. Human-editable fields and unknown custom Markdown remain the highest presentation authority; machine-owned accounting, evidence, and generated sections remain separate.
 
 ## License
 

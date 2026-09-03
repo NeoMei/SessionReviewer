@@ -1,6 +1,6 @@
 # SessionReviewer（中文）
 
-SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go CLI 把本机 Codex session JSONL 流式转换为有界、脱敏的 evidence packet，SessionReviewer Skill 基于该 packet 生成语义 proposal，CLI 验证并 apply 到可编辑 Markdown ledger。CLI 只负责确定性提取、验证、安全写入和 accepted-ledger 恢复，不会自行生成决策、结论或项目语义。
+SessionReviewer 默认使用零 Token 的整项目扫描：Go CLI 找出与当前项目关联的全部 Codex Session，分别生成有界、脱敏的确定性记忆，再汇总为项目级视图并同步到可编辑 Markdown。原始 Session 不会被复制，正常扫描不调用 Agent。SessionReviewer Skill 保留为按需语义调整和补齐路径，不是整项目扫描的前置条件。
 
 ## 要求与支持范围
 
@@ -13,12 +13,12 @@ SessionReviewer 已支持一条手动、无 watcher 的完整接受链路：Go C
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [GitHub Release 0.2.12](https://github.com/NeoMei/SessionReviewer/releases/tag/0.2.12) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包：
+无需 Go 工具链时，从 [最新 GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包。当前源码候选版本为 `0.3.5`：
 
-- Apple Silicon Mac：`session-reviewer_0.2.12_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.2.12_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.2.12_windows_amd64.zip`
-- Obsidian：`session-reviewer-obsidian-0.2.12.zip`
+- Apple Silicon Mac：`session-reviewer_0.3.5_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.3.5_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.3.5_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.3.5.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -148,7 +148,7 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-`0.2.12` 发布包中的 `session-reviewer-obsidian-0.2.12.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+发布包中的 `session-reviewer-obsidian-0.3.5.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
@@ -159,9 +159,9 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 页面可编辑目标、阶段、状态、下一步、风险、决策和事件叙述。保存后会立即显示新的人类内容，同时标记“等待同步到代码目录”；在同步成功前，页面不会把旧的机器用量冒充为当前数据。
 
-插件不再要求填写 SessionReviewer 或 Codex 路径。启动时会从 Agent 的常用用户级安装目录和 `PATH` 自动发现并验证两者；旧版保存的路径只用于一次升级迁移，发现成功后即删除。若未发现，请先在 Agent 中运行一次 SessionReviewer，再重新加载插件。
+插件不再要求填写 SessionReviewer 或 Codex 路径。启动时只会从常用用户级安装目录和 `PATH` 自动发现并验证 SessionReviewer；旧版保存的路径只用于一次升级迁移，发现成功后即删除。若未发现，请先安装或运行一次 SessionReviewer，再重新加载插件。
 
-插件只接受兼容 review schema v2 的语义版本 CLI，并且只会执行固定白名单动作；不会从 Markdown 读取可执行路径，也不会通过 shell 执行任意参数。看到“项目需要迁移”时先做 dry-run 预览；看到“两边修改了同一内容”时比较 Base/Project/Obsidian 三个候选再确认；看到“机器账本被改动”时，只在确认 Project 副本为权威字节后执行修复。
+插件只接受兼容 review schema v3 的语义版本 CLI，并且只会执行固定白名单动作；不会从 Markdown 读取可执行路径，也不会通过 shell 执行任意参数。看到“项目需要迁移”时先做 dry-run 预览；看到“两边修改了同一内容”时比较 Base/Project/Obsidian 三个候选再确认；看到“机器账本被改动”时，只在确认 Project 副本为权威字节后执行修复。
 
 `项目回顾.md` 和 `项目历史.md` 可在 Project 或 Obsidian 编辑。可编辑内容包括目标、阶段、状态、下一步、风险、决策和事件叙述；ID、revision、schema、hash、evidence、用量/单价和 sync metadata 不可编辑。两边不同语义单元会自动合并；同单元冲突会生成隐藏 conflict ID，用 `accept_project`、`accept_obsidian` 或带 `--file` 的 `manual_merge` 显式收敛。
 
@@ -169,11 +169,30 @@ Vault 中的机器账本被修改时，普通 sync 会以 `machine_ledger_modifi
 
 首次 `sync` 会把两份人类 Markdown 和隐藏机器账本发布到 Vault。之后任一侧的单边编辑会同步到另一侧；不同 Markdown 单元的两边编辑会合并，accepted human merge 的 `revision` 只递增一次。删除文件不表示删除实体，缺失副本会恢复；逻辑删除必须显式写为 `status: archived`。同一单元冲突会显示稳定 conflict ID 并保持候选内容不被静默覆盖，可用 `sync resolve --action accept_project|accept_obsidian|manual_merge` 显式收敛。成功解决后会立即再做一次完整协调；如果仍发现损坏或敏感内容，命令会报告 `E_SYNC_PARTIAL` 并返回非零退出码。当前版本提供显式同步，尚不安装后台 watcher。
 
+### 零 Token 更新整个项目
+
+在已初始化的项目目录运行：
+
+```bash
+session-reviewer scan --json
+```
+
+该命令扫描与项目关联的全部 Codex Session，分别更新确定性 Session 记忆，再汇总为项目级视图、生成简洁的人类可读内容并同步到 Obsidian。它不调用 Agent，结果中的 `review_run_tokens` 固定为 `0`。人类已编辑字段和未知 Markdown 章节保持最高呈现优先级；机器生成的统计区由新扫描结果刷新。
+
+Obsidian 中的“更新项目脉络”执行同一流程，但使用可恢复的后台任务。对应的手工命令是：
+
+```bash
+session-reviewer scan start --json
+session-reviewer scan status --json
+```
+
+终态分为完整成功 `completed`、扫描完成但有隔离源问题 `completed_with_issues`、失败 `failed`。同一项目已有 queued/running 任务时不会重复启动 worker。
+
 ### 恢复项目上下文
 
 项目重拾时的推荐路径只有一条：
 
-1. 在项目目录运行 `session-reviewer sync`。
+1. 在项目目录运行 `session-reviewer scan --json`，或在 Obsidian 点击“更新项目脉络”。
 2. 已安装 Obsidian 项目脉络浏览器时优先打开它；否则先读 `项目回顾.md`。
 3. 需要旧细节时再打开 `项目历史.md`；它按时间倒序保留事件流。
 4. 在 Project 或 Obsidian 编辑允许的人类字段，再运行 `session-reviewer sync`。
@@ -203,9 +222,9 @@ packet 的 `session_usage` 从 session 起点累计到本包 `next_cursor`：包
 
 session report 的双向链、revision、evidence 和 accounting 保存在隐藏 `ledger.json` 中，不再作为独立 Markdown 发布。apply 会在同一事务中更新这条链以及两份人类视图；已有 session 链接不能由后续 proposal 任意改写。
 
-### 总结并同步 review job
+### 兼容的 Agent review job
 
-Obsidian 插件的“总结并同步”视图把整条 reviewed 链路作为一个持久 job 运行：准备有界 packet、以 proposal-only 方式调用本机 Codex CLI、校验并 apply proposal，然后同步 vault。job 支持重试、取消以及 worker 被杀后的重启恢复。worker 的同步步骤会修复由已完成 apply 合法推进的 machine ledger；独立 `sync` 命令保持保守行为不变。
+旧的 Agent 编排链仍作为兼容能力保留，但 Obsidian 的正常“更新项目脉络”不会调用它。需要 Agent 语义调整时，由用户在 Agent 中显式执行 SessionReviewer Skill，再沿用 prepare/proposal/apply 验证链。
 
 agent 可执行文件默认 fail-closed：当前只接受经过审查并通过能力探测的 Codex `0.150.1`。固定调用会忽略用户配置与规则、禁用可关闭的外部能力、在私有只读沙箱运行，并拒绝任何观察到的工具事件。由于 Codex 保留一个不可关闭的核心执行能力，SessionReviewer 明确报告受限只读隔离，而不声称工具注册表为空。其他 Codex 版本在完成审查前保持阻止。端到端验收测试使用专用 fake agent 驱动同一编排：
 
@@ -252,38 +271,38 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.2.12 dist
+./scripts/build-release.sh 0.3.5 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.2.12 -Dist dist
+.\scripts\build-release.ps1 -Version 0.3.5 -Dist dist
 ```
 
 Obsidian 插件包可独立构建：
 
 ```bash
-./scripts/build-obsidian-plugin.sh 0.2.12 dist
+./scripts/build-obsidian-plugin.sh 0.3.5 dist
 ```
 
 ```powershell
-.\scripts\build-obsidian-plugin.ps1 -Version 0.2.12 -Dist dist
+.\scripts\build-obsidian-plugin.ps1 -Version 0.3.5 -Dist dist
 ```
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
 
-本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。`0.2.12` 包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
+本项目使用 Apache License 2.0，版权声明为 `Copyright 2026 NeoMei and QUUKK`。tag-triggered GitHub Release workflow 会验证根目录 `LICENSE`、`NOTICE` 与 tag/commit 一致性，再构建归档并发布 GitHub Release。发布包包含三个平台 CLI 归档、Obsidian 插件 ZIP、可供社区市场直接下载的三个独立安装文件和统一 `SHA256SUMS`。
 
 ## 当前限制与后续模型
 
-当前仓库已完成 deterministic prepare/apply/ledger-only recovery 和语义 session-review Skill。它尚不提供：
+当前仓库已完成零 Token 整项目扫描、deterministic prepare/apply/ledger-only recovery 和语义 session-review Skill。它尚不提供：
 
 - 脱离 Skill proposal 的 CLI semantic conclusions 或自动总结；
 - 后台 watcher；
 - 独立于当前 live Base/Project/Vault 状态的历史 conflict-note 归档；
 - macOS 13 与 Windows 10 22H2 最低版本实体机器上的人工端到端安装验收。
 
-当前 Obsidian 混合模型以 repository 内的 review v2 为 durable source，并对每个稳定语义单元比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）。显式 `sync` 已可处理首次发布、单边编辑、不同单元合并，以及使用隐藏 conflict ID 的三种显式解决动作；后台 watcher 仍是后续工作。
+当前 Obsidian 混合模型以 repository 内的 review v3 为 durable source，并对每个稳定语义单元比较 `Base`（上次成功同步）、`Project`（repository）和 `Vault`（Obsidian）。显式 `sync` 已可处理首次发布、单边编辑、不同单元合并，以及使用隐藏 conflict ID 的三种显式解决动作；后台 watcher 仍是后续工作。
 
 Skill/模型用于语义 session review，并生成交给引擎验证的 proposal/apply；普通的确定性 Obsidian 同步不需要模型。该模型不是无状态、逐文件互相覆盖的镜像，也不会自动执行 Git commit、push、reset、checkout 或其他 Git 变更。

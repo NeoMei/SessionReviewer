@@ -119,6 +119,7 @@ describe("review job layout", () => {
       { onCancel: () => {}, onRetry: () => {}, onSyncOnly: () => {} }
     )!;
     view.prepend(banner);
+	expect(banner.textContent).toContain("已处理 2/12");
     expect(getComputedStyle(banner).borderRadius).toBe("10px");
     expect(getComputedStyle(banner.querySelector<HTMLElement>(".sr-review-actions")!).flexWrap).toBe("wrap");
   });

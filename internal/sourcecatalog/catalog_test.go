@@ -48,6 +48,9 @@ func TestApplyBatchIsAllOrNoneAndPreservesAssociations(t *testing.T) {
 	if !errors.Is(err, ErrCASConflict) {
 		t.Fatalf("batch error=%v want CAS conflict", err)
 	}
+	if !strings.Contains(err.Error(), "codex/s2") || !strings.Contains(err.Error(), string(source.BoundaryReplacement)) {
+		t.Fatalf("batch error lacks failing source context: %v", err)
+	}
 	gotFirst, _, _ := catalog.GetSource("codex", "s1")
 	gotSecond, _, _ := catalog.GetSource("codex", "s2")
 	if !reflect.DeepEqual(gotFirst, first) || !reflect.DeepEqual(gotSecond, second) {
@@ -93,6 +96,8 @@ func TestApplyBatchUnchangedCannotRewriteTimeOrUsage(t *testing.T) {
 	changed.Usage.DurationMS = 2000
 	if _, err := catalog.ApplyBatch([]BatchMutation{{Relation: source.BoundaryUnchanged, ExpectedDigest: expected, Desired: changed}}); err == nil {
 		t.Fatal("unchanged relation rewrote time and usage")
+	} else if !errors.Is(err, projectidentity.ErrAssociationRequired) || !strings.Contains(err.Error(), "unchanged source metadata changed") {
+		t.Fatalf("unchanged relation error lacks safe reason: %v", err)
 	}
 	got, _, _ := catalog.GetSource("codex", "s1")
 	if !reflect.DeepEqual(got, record) {

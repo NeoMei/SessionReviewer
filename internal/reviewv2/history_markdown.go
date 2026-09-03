@@ -112,8 +112,17 @@ func RenderHistory(projectID string, revision int, events []Event) ([]byte, erro
 	if err != nil {
 		return nil, fmt.Errorf("render history: generated Markdown is invalid: %w", err)
 	}
-	if !reflect.DeepEqual(normalizedEvents(document.Events), normalizedEvents(ordered)) || document.ProjectID != projectID || document.Revision != revision {
-		return nil, errors.New("render history: generated Markdown changed semantic fields")
+	parsedEvents, expectedEvents := normalizedEvents(document.Events), normalizedEvents(ordered)
+	if len(parsedEvents) != len(expectedEvents) {
+		return nil, errors.New("render history: generated Markdown changed event count")
+	}
+	for index := range expectedEvents {
+		if !reflect.DeepEqual(parsedEvents[index], expectedEvents[index]) {
+			return nil, fmt.Errorf("render history: generated Markdown changed semantic fields at event %q", expectedEvents[index].ID)
+		}
+	}
+	if document.ProjectID != projectID || document.Revision != revision {
+		return nil, errors.New("render history: generated Markdown changed document identity")
 	}
 	return bytes.Clone(rendered), nil
 }

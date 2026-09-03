@@ -2,6 +2,8 @@ package zerotoken
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +58,9 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 		SessionsRoot: sessionsRoot,
 		DataRoot:     dataRoot,
 		Now:          func() time.Time { return base.Add(10 * time.Minute) },
-		PhaseObserver: func(phase string) {
+		PhaseObserver: func(phase string) error {
 			phases = append(phases, phase)
+			return nil
 		},
 	}
 
@@ -107,5 +110,65 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	}
 	if result3.GenerationID != result2.GenerationID {
 		t.Fatalf("generation changed on unchanged third run: got=%s want=%s", result3.GenerationID, result2.GenerationID)
+	}
+
+	// A direct human edit remains the highest presentation authority even when
+	// the deterministic source generation itself has not changed.
+	currentReview, err := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	editedReview, err := reviewv2.PatchReviewUnit(currentReview, reviewv2.EditUnit{
+		Document:       reviewv2.ReviewRelativePath,
+		UnitID:         "project-overview",
+		Field:          "status",
+		Value:          "人工确认状态",
+		ExpectedSHA256: fmt.Sprintf("%x", sha256.Sum256(currentReview)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)), editedReview, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result4, err := contextupdate.Run(context.Background(), cuOpts)
+	if err != nil {
+		t.Fatalf("human-edit contextupdate.Run: %v", err)
+	}
+	if result4.GenerationID != result3.GenerationID {
+		t.Fatalf("human-only edit changed source generation: got=%s want=%s", result4.GenerationID, result3.GenerationID)
+	}
+	for side, path := range map[string]string{
+		"project": filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)),
+		"vault":   filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目回顾.md"),
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s human review: %v", side, err)
+		}
+		document, err := reviewv2.ParseReview(body)
+		if err != nil || document.Model.Status != "人工确认状态" {
+			t.Fatalf("%s human status was not retained: status=%q err=%v", side, document.Model.Status, err)
+		}
+	}
+	ledgerBody, err := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := reviewv2.ParseMachineLedgerV3(ledgerBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundHumanStatus := false
+	for _, patch := range machine.HumanPatches {
+		if patch.EntityID == "project-overview" && patch.Field == "status" && patch.Operation == "set" && patch.Value == "人工确认状态" {
+			foundHumanStatus = true
+		}
+	}
+	if !foundHumanStatus {
+		t.Fatalf("human status patch was not persisted: %+v", machine.HumanPatches)
+	}
+	if _, err := contextupdate.Run(context.Background(), cuOpts); err != nil {
+		t.Fatalf("post-human-edit idempotence run: %v", err)
 	}
 }

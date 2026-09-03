@@ -7,19 +7,26 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 )
 
 type ProjectInput struct {
-	ProjectView   memory.ProjectView
-	GenerationID  string
-	Revision      int
-	Legacy        reviewv2.LegacyPresentation
-	ActivePatches []Patch
-	OrphanPatches []Patch
-	UnknownBlocks map[string][]byte
-	ExpectedFiles map[string][]byte
+	ProjectView        memory.ProjectView
+	GenerationID       string
+	Revision           int
+	ProjectName        string
+	Accounting         accounting.ProjectSummary
+	SessionReports     []ledger.SessionReport
+	LastSuccessfulSync string
+	Legacy             reviewv2.LegacyPresentation
+	ActivePatches      []Patch
+	OrphanPatches      []Patch
+	PreservedEventIDs  []string
+	UnknownBlocks      map[string][]byte
+	ExpectedFiles      map[string][]byte
 }
 
 type ProjectOutput struct {
@@ -41,6 +48,7 @@ func Project(input ProjectInput) (ProjectOutput, error) {
 	if input.GenerationID == "" || input.Revision < 1 {
 		return ProjectOutput{}, errors.New("project projection generation identity is required")
 	}
+	input.Legacy.Events = projectHistoryEvents(input.ProjectView, input.Legacy.Events, input.ActivePatches, input.PreservedEventIDs)
 	baselines := projectBaselines(input)
 	applied, err := Apply(input.ActivePatches, baselines)
 	if err != nil {
@@ -57,8 +65,12 @@ func Project(input ProjectInput) (ProjectOutput, error) {
 	review.Goal = appliedValue(applied, "project-overview", "goal")
 	review.Status = appliedValue(applied, "project-overview", "status")
 	review.NextAction = appliedValue(applied, "project-overview", "next_action")
-	if review.Name == "" {
-		review.Name = input.ProjectView.ProjectID
+	review.LastVerification = stripGeneratedPresentationMarkers(review.LastVerification)
+	if review.Name == "" || review.Name == input.ProjectView.ProjectID {
+		review.Name = strings.TrimSpace(input.ProjectName)
+		if review.Name == "" {
+			review.Name = input.ProjectView.ProjectID
+		}
 	}
 	review.Risks = appliedRisks(applied, review.Risks)
 	review.Decisions = appliedDecisions(applied, review.Decisions)
@@ -67,9 +79,97 @@ func Project(input ProjectInput) (ProjectOutput, error) {
 		Review: review, Events: events,
 		Applied: applied, Baselines: baselines,
 		ActivePatches: clonePatchSet(input.ActivePatches), OrphanPatches: clonePatchSet(input.OrphanPatches),
-		RecentProgress: recentProgress(input.ProjectView), Usage: usageSummary(input.ProjectView),
+		RecentProgress: recentProgress(input.ProjectView), Usage: usageSummary(input.ProjectView, input.Accounting),
 		UnknownBlocks: cloneUnknownBlocks(input.UnknownBlocks),
 	}, nil
+}
+
+func projectHistoryEvents(view memory.ProjectView, existing []reviewv2.Event, patches []Patch, preservedIDs []string) []reviewv2.Event {
+	records := append([]memory.DerivedRecord(nil), view.DerivedRecords...)
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].OccurredAt != records[j].OccurredAt {
+			return records[i].OccurredAt > records[j].OccurredAt
+		}
+		return records[i].ID < records[j].ID
+	})
+	existingByID := make(map[string]reviewv2.Event, len(existing))
+	for _, event := range existing {
+		existingByID[event.ID] = event
+	}
+	derivedIDs := make(map[string]struct{})
+	selected := make(map[string]struct{})
+	result := make([]reviewv2.Event, 0, len(existing)+20)
+	for _, record := range records {
+		if record.Kind != "event_ref" || record.Fields["operation"] != "user_request" {
+			continue
+		}
+		derivedIDs[record.ID] = struct{}{}
+		excerpt := humanRequestExcerpt(record.Fields["excerpt"])
+		if excerpt == "" || len(selected) >= 20 {
+			continue
+		}
+		if event, ok := existingByID[record.ID]; ok {
+			selected[record.ID] = struct{}{}
+			result = append(result, event)
+			continue
+		}
+		title := plainTimelineTitle(excerpt)
+		if title == "" {
+			continue
+		}
+		selected[record.ID] = struct{}{}
+		result = append(result, reviewv2.Event{
+			ID: record.ID, OccurredAt: record.OccurredAt, Kind: "user_request", Title: title,
+			Meaning: "项目工作请求", Summary: excerpt, Why: "用户在项目 Session 中提出",
+			Changes: []string{"记录该项目请求"}, Results: []string{"已纳入项目脉络索引"},
+			Next: "结合后续 Session 验证实际结果",
+		})
+	}
+	patched := make(map[string]struct{})
+	for _, patch := range patches {
+		patched[patch.EntityID] = struct{}{}
+	}
+	for _, id := range preservedIDs {
+		patched[id] = struct{}{}
+	}
+	for _, event := range existing {
+		if _, already := selected[event.ID]; already {
+			continue
+		}
+		_, generated := derivedIDs[event.ID]
+		_, humanEdited := patched[event.ID]
+		if !generated || humanEdited {
+			result = append(result, event)
+		}
+	}
+	return result
+}
+
+func plainTimelineTitle(value string) string {
+	value = strings.NewReplacer(
+		"`", "", "*", "", "_", "", "~", "", "[", "", "]", "",
+		"<", "", ">", "", "#", "", "\\", "",
+	).Replace(value)
+	return conciseLine(value)
+}
+
+func stripGeneratedPresentationMarkers(value string) string {
+	lines := strings.Split(value, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		generated := false
+		for _, identity := range []string{GeneratedSectionRecentProgress, GeneratedSectionModelUsage, GeneratedSectionCustomContent} {
+			if trimmed == generatedSectionOpen(identity) || trimmed == generatedSectionClose(identity) {
+				generated = true
+				break
+			}
+		}
+		if !generated {
+			kept = append(kept, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 func projectBaselines(input ProjectInput) []Baseline {
@@ -200,37 +300,88 @@ func recentProgress(view memory.ProjectView) string {
 	})
 	var output strings.Builder
 	for _, record := range records {
-		if record.Kind != "event_ref" {
+		if record.Kind != "event_ref" || (record.Fields["operation"] != "" && record.Fields["operation"] != "user_request") {
+			continue
+		}
+		excerpt := humanRequestExcerpt(record.Fields["excerpt"])
+		if excerpt == "" && record.Fields["operation"] == "" {
+			excerpt = conciseLine(record.Subject)
+		}
+		if excerpt == "" {
 			continue
 		}
 		if output.Len() > 0 {
 			output.WriteByte('\n')
 		}
-		output.WriteString("- " + record.OccurredAt + " · " + record.ID + " · " + record.Subject)
+		output.WriteString("- " + record.OccurredAt + " · " + excerpt)
+		if strings.Count(output.String(), "\n") >= 19 {
+			break
+		}
 	}
 	return output.String()
 }
 
-func usageSummary(view memory.ProjectView) string {
-	usage := append([]memory.AssociatedUsage(nil), view.AssociatedUsage...)
-	sort.Slice(usage, func(i, j int) bool {
-		if usage[i].Provider != usage[j].Provider {
-			return usage[i].Provider < usage[j].Provider
+func humanRequestExcerpt(value string) string {
+	if marker := strings.LastIndex(value, "## My request:"); marker >= 0 {
+		value = value[marker+len("## My request:"):]
+	}
+	value = strings.TrimSpace(value)
+	if platformEnvelope(value) {
+		return ""
+	}
+	return conciseLine(value)
+}
+
+func conciseLine(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	const maximumRunes = 160
+	runes := []rune(value)
+	if len(runes) > maximumRunes {
+		value = string(runes[:maximumRunes]) + "…"
+	}
+	return value
+}
+
+func platformEnvelope(value string) bool {
+	for _, prefix := range []string{"<recommended_plugins>", "<environment_context>", "<app-context>", "<skills_instructions>", "<permissions instructions>", "<collaboration_mode>", "# AGENTS.md instructions", "<INSTRUCTIONS>"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
 		}
-		return usage[i].SessionID < usage[j].SessionID
-	})
-	var output strings.Builder
-	for _, item := range usage {
-		kind := "关联使用"
+	}
+	return false
+}
+
+func usageSummary(view memory.ProjectView, summary accounting.ProjectSummary) string {
+	shared := 0
+	for _, item := range view.AssociatedUsage {
 		if item.Shared {
-			kind = "共享使用"
+			shared++
 		}
-		if output.Len() > 0 {
-			output.WriteByte('\n')
+	}
+	var output strings.Builder
+	fmt.Fprintf(&output, "- %d 个 Session", len(view.AssociatedUsage))
+	if shared > 0 {
+		fmt.Fprintf(&output, " · %d 个跨项目共享", shared)
+	}
+	models := append([]accounting.ProjectModelSummary(nil), summary.Models...)
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].TotalTokens != models[j].TotalTokens {
+			return models[i].TotalTokens > models[j].TotalTokens
 		}
-		output.WriteString("- " + kind + " · " + item.Provider + "/" + item.SessionID)
+		return models[i].Model < models[j].Model
+	})
+	for _, model := range models {
+		fmt.Fprintf(&output, "\n- %s · %s tokens · %.2f%%", model.Model, formatInteger(model.TotalTokens), model.TokenSharePct)
 	}
 	return output.String()
+}
+
+func formatInteger(value int64) string {
+	raw := strconv.FormatInt(value, 10)
+	for index := len(raw) - 3; index > 0; index -= 3 {
+		raw = raw[:index] + "," + raw[index:]
+	}
+	return raw
 }
 
 func validateOrphanPatches(values []Patch) error {

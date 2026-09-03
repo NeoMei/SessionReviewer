@@ -17,14 +17,16 @@ import (
 )
 
 const (
-	jobDirectoryMode fs.FileMode = 0o700
-	jobFileMode      fs.FileMode = 0o600
-	maxJobBytes                  = 4 << 20
-	activeJobLeaf                = "active.json"
+	jobDirectoryMode     fs.FileMode = 0o700
+	jobFileMode          fs.FileMode = 0o600
+	maxJobBytes                      = 4 << 20
+	maxErrorMessageBytes             = 4096
+	activeJobLeaf                    = "active.json"
 )
 
 var (
-	jobIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	jobIDPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	errorCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,127}$`)
 )
 
 type Store struct {
@@ -86,8 +88,8 @@ func (s *Store) SaveJob(job JobRecord) error {
 	if job.SchemaVersion == 0 {
 		job.SchemaVersion = 1
 	}
-	if !jobIDPattern.MatchString(job.JobID) {
-		return errors.New("invalid job ID")
+	if err := validateJobRecord(job, s.projectID); err != nil {
+		return err
 	}
 	body, err := encodeCanonicalJSON(job)
 	if err != nil {
@@ -117,6 +119,12 @@ func (s *Store) LoadJob(jobID string) (JobRecord, error) {
 	if err := decodeStrictJSON(body, &job); err != nil {
 		return JobRecord{}, err
 	}
+	if err := validateJobRecord(job, s.projectID); err != nil {
+		return JobRecord{}, err
+	}
+	if job.JobID != jobID {
+		return JobRecord{}, errors.New("job record identity does not match filename")
+	}
 	return job, nil
 }
 
@@ -134,7 +142,59 @@ func (s *Store) LoadActiveJob() (JobRecord, error) {
 	if err := decodeStrictJSON(body, &job); err != nil {
 		return JobRecord{}, err
 	}
+	if err := validateJobRecord(job, s.projectID); err != nil {
+		return JobRecord{}, err
+	}
 	return job, nil
+}
+
+func validateJobRecord(job JobRecord, projectID string) error {
+	if job.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported scan job schema version %d", job.SchemaVersion)
+	}
+	if !jobIDPattern.MatchString(job.JobID) {
+		return errors.New("invalid job ID")
+	}
+	if !jobIDPattern.MatchString(job.ProjectID) || job.ProjectID != projectID {
+		return errors.New("scan job project identity does not match store")
+	}
+	if job.SessionsRoot != "" && (!filepath.IsAbs(job.SessionsRoot) || filepath.Clean(job.SessionsRoot) != job.SessionsRoot) {
+		return errors.New("scan job sessions root must be an absolute clean path")
+	}
+	switch job.State {
+	case StateQueued, StateRunning, StateCompleted, StateCompletedWithIssues, StateFailed:
+	default:
+		return fmt.Errorf("invalid scan job state %q", job.State)
+	}
+	switch job.Phase {
+	case PhaseDiscovering, PhaseExtracting, PhaseReducing, PhaseRendering, PhaseSyncing:
+	default:
+		return fmt.Errorf("invalid scan job phase %q", job.Phase)
+	}
+	if job.PID < 0 {
+		return errors.New("scan job PID must not be negative")
+	}
+	if job.State == StateRunning && job.PID == 0 {
+		return errors.New("running scan job requires a worker PID")
+	}
+	if job.CreatedAt.IsZero() || job.UpdatedAt.IsZero() || job.UpdatedAt.Before(job.CreatedAt) {
+		return errors.New("scan job timestamps are invalid")
+	}
+	if job.SessionCount < 0 || job.IndexedCount < 0 || job.IssueCount < 0 ||
+		job.IndexedCount > job.SessionCount || job.IssueCount > job.SessionCount {
+		return errors.New("scan job counts are invalid")
+	}
+	if job.GenerationID != "" && !jobIDPattern.MatchString(job.GenerationID) {
+		return errors.New("scan job generation ID is invalid")
+	}
+	if job.State == StateFailed {
+		if !errorCodePattern.MatchString(job.ErrorCode) || job.ErrorMessage == "" || len(job.ErrorMessage) > maxErrorMessageBytes {
+			return errors.New("failed scan job error is invalid")
+		}
+	} else if job.ErrorCode != "" || job.ErrorMessage != "" {
+		return errors.New("non-failed scan job must not carry an error")
+	}
+	return nil
 }
 
 func encodeCanonicalJSON(v any) ([]byte, error) {

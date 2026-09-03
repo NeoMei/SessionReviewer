@@ -48,7 +48,8 @@ describe("CLI runner", () => {
       indexed_count: 3,
       issue_count: 0,
       generation_id: undefined,
-      error_code: undefined
+      error_code: undefined,
+	  error_message: undefined
     });
     expect(execFile).toHaveBeenLastCalledWith(
       "/usr/local/bin/session-reviewer",
@@ -63,5 +64,65 @@ describe("CLI runner", () => {
       expect.objectContaining({ timeout: 10_000 }),
       expect.any(Function)
     );
+  });
+
+  it("gives an explicit sync enough time for a large project", async () => {
+	const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, "synced", ""));
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
+	await runner.syncProject("project-0123456789abcdef");
+	expect(execFile).toHaveBeenLastCalledWith(
+		"/usr/local/bin/session-reviewer",
+		["sync", "--project-id", "project-0123456789abcdef"],
+		expect.objectContaining({ timeout: 120_000 }),
+		expect.any(Function)
+	);
+  });
+
+  it("retains the bounded worker error for a failed scan", async () => {
+	const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify({
+		schema_version: 1,
+		job_id: "scan-123456",
+		project_id: "project-0123456789abcdef",
+		state: "failed",
+		phase: "discovering",
+		session_count: 0,
+		indexed_count: 0,
+		issue_count: 0,
+		error_code: "scan_failed",
+		error_message: "project association requires explicit confirmation",
+	}), ""));
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
+	await expect(runner.getScanStatus("project-0123456789abcdef")).resolves.toMatchObject({
+		error_code: "scan_failed",
+		error_message: "project association requires explicit confirmation",
+	});
+  });
+
+  it.each([
+	{ label: "wrong project", patch: { project_id: "project-bbbbbbbbbbbbbbbb" } },
+	{ label: "unknown phase", patch: { phase: "teleporting" } },
+	{ label: "negative count", patch: { indexed_count: -1 } },
+	{ label: "fractional count", patch: { session_count: 1.5 } },
+	{ label: "count above total", patch: { session_count: 1, issue_count: 2 } },
+	{ label: "unsafe job ID", patch: { job_id: "../scan" } },
+	{ label: "unsafe generation ID", patch: { generation_id: "../generation" } },
+	{ label: "unknown field", patch: { unexpected: true } },
+	{ label: "unsafe error code", patch: { error_code: "BAD CODE" } },
+  ])("rejects malformed scan status: $label", async ({ patch }) => {
+	const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+		callback(null, JSON.stringify({
+			schema_version: 1,
+			job_id: "scan-123456",
+			project_id: "project-0123456789abcdef",
+			state: "running",
+			phase: "extracting",
+			session_count: 5,
+			indexed_count: 3,
+			issue_count: 0,
+			...patch,
+		}), "");
+	});
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
+	await expect(runner.getScanStatus("project-0123456789abcdef")).rejects.toThrow("SessionReviewer scan command failed");
   });
 });

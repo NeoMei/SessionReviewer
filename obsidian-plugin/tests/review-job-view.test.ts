@@ -71,6 +71,39 @@ afterEach(() => {
 });
 
 describe("scan job view", () => {
+	it("shows the preserved worker cause when a scan fails", async () => {
+		const repository = fakeRepository([PROJECT_A]);
+		const runner = fakeRunner();
+		runner.getScanStatus.mockResolvedValue(scanStatusFixture({
+			state: "failed",
+			error_code: "scan_failed",
+			error_message: "project association requires explicit confirmation"
+		}));
+		const view = await openView(runner, repository);
+		expect(view.contentEl.textContent).toContain("project association requires explicit confirmation");
+		await view.onClose();
+	});
+
+	 it("runs a real sync for a pending human edit", async () => {
+		const repository = fakeRepository([PROJECT_A]);
+		repository.load.mockResolvedValue({
+			kind: "pending_edit",
+			model: browserModelFixture(),
+			machine: {},
+			diagnostic: { code: "sync_not_run", message: "等待同步" }
+		});
+		const runner = fakeRunner();
+		const view = await openView(runner, repository);
+
+		const action = view.contentEl.querySelector<HTMLButtonElement>('[data-status-action="sync_not_run"]');
+		expect(action?.textContent).toBe("立即同步");
+		action?.click();
+		await settle();
+
+		expect(runner.syncProject).toHaveBeenCalledWith(PROJECT_A.projectId);
+		await view.onClose();
+	});
+
   it("keeps one scan action in the header meta labeled 更新项目脉络", async () => {
     const repository = fakeRepository([PROJECT_A]);
     const runner = fakeRunner();

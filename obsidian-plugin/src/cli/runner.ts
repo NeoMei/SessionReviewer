@@ -6,8 +6,16 @@ import type { ScanStatus } from "../contracts/review-v3";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
 const CONFLICT_ID = /^conflict-[a-z0-9][a-z0-9._-]{0,191}$/;
+const SCAN_JOB_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const SCAN_GENERATION_ID = /^(?:generation|scan)-[a-z0-9][a-z0-9._-]{0,127}$/;
+const SCAN_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/;
 const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
 const SCAN_STATES = ["queued", "running", "completed", "completed_with_issues", "failed"] as const;
+const SCAN_PHASES = ["discovering", "extracting", "reducing", "rendering", "syncing"] as const;
+const SCAN_STATUS_FIELDS = new Set([
+  "schema_version", "job_id", "project_id", "state", "phase", "session_count", "indexed_count",
+  "issue_count", "generation_id", "error_code", "error_message",
+]);
 
 interface ExecOptions {
   shell: false;
@@ -43,17 +51,17 @@ export class CliRunner {
 
   async startScan(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
-    return parseScanStatus(await this.runJSON(["scan", "start", "--project-id", projectId, "--json"]));
+    return parseScanStatus(await this.runJSON(["scan", "start", "--project-id", projectId, "--json"]), projectId);
   }
 
   async getScanStatus(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
-    return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]));
+    return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]), projectId);
   }
 
   async syncProject(projectId: string): Promise<string> {
     validateProject(projectId);
-    return (await this.run(["sync", "--project-id", projectId])).stdout;
+    return (await this.run(["sync", "--project-id", projectId], 120_000)).stdout;
   }
 
   async status(projectId: string): Promise<Record<string, unknown>> {
@@ -93,9 +101,8 @@ export class CliRunner {
     }
   }
 
-  private async run(args: readonly string[]): Promise<{ stdout: string; stderr: string }> {
+  private async run(args: readonly string[], timeout = 10_000): Promise<{ stdout: string; stderr: string }> {
     if (!allowedArgs(args)) throw new Error("command is not allowed");
-    const timeout = 10_000;
     return new Promise((resolve, reject) => {
       this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
         if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { stdout: stdout || (error as { stdout?: unknown }).stdout }));
@@ -155,24 +162,51 @@ function parseJson(source: string): unknown {
   try { return JSON.parse(source); } catch { throw new Error("CLI returned malformed JSON"); }
 }
 
-function parseScanStatus(value: Record<string, unknown>): ScanStatus {
+function parseScanStatus(value: Record<string, unknown>, expectedProjectId: string): ScanStatus {
+  if (Object.keys(value).some((key) => !SCAN_STATUS_FIELDS.has(key))) throw new Error(SCAN_COMMAND_FAILED);
   if (value.schema_version !== 1) throw new Error(SCAN_COMMAND_FAILED);
   const projectId = typeof value.project_id === "string" ? value.project_id : "";
   const jobId = typeof value.job_id === "string" ? value.job_id : "";
   const stateStr = typeof value.state === "string" ? value.state : "";
-  if (!projectId || !jobId || !SCAN_STATES.includes(stateStr as ScanStatus["state"])) throw new Error(SCAN_COMMAND_FAILED);
-  const phaseStr = typeof value.phase === "string" ? value.phase : "discovering";
+  const phaseStr = typeof value.phase === "string" ? value.phase : "";
+  const sessionCount = scanCount(value.session_count);
+  const indexedCount = scanCount(value.indexed_count);
+  const issueCount = scanCount(value.issue_count);
+  const generationId = scanOptionalIdentity(value.generation_id, SCAN_GENERATION_ID);
+  const errorCode = scanOptionalIdentity(value.error_code, SCAN_ERROR_CODE);
+  const errorMessage = scanOptionalText(value.error_message, 4096);
+  if (projectId !== expectedProjectId || !SCAN_JOB_ID.test(jobId) || !SCAN_STATES.includes(stateStr as ScanStatus["state"]) ||
+      !SCAN_PHASES.includes(phaseStr as ScanStatus["phase"]) || sessionCount === undefined || indexedCount === undefined ||
+      issueCount === undefined || indexedCount > sessionCount || issueCount > sessionCount || generationId === null ||
+      errorCode === null || errorMessage === null) {
+    throw new Error(SCAN_COMMAND_FAILED);
+  }
   const status: ScanStatus = {
     schema_version: 1,
     job_id: jobId,
     project_id: projectId,
     state: stateStr as ScanStatus["state"],
     phase: phaseStr as ScanStatus["phase"],
-    session_count: typeof value.session_count === "number" ? value.session_count : 0,
-    indexed_count: typeof value.indexed_count === "number" ? value.indexed_count : 0,
-    issue_count: typeof value.issue_count === "number" ? value.issue_count : 0,
-    generation_id: typeof value.generation_id === "string" ? value.generation_id : undefined,
-    error_code: typeof value.error_code === "string" ? value.error_code : undefined,
+    session_count: sessionCount,
+    indexed_count: indexedCount,
+    issue_count: issueCount,
+    generation_id: generationId,
+    error_code: errorCode,
+    error_message: errorMessage,
   };
   return status;
+}
+
+function scanCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function scanOptionalText(value: unknown, maximum: number): string | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === "string" && value.length <= maximum && !value.includes("\0") ? value : null;
+}
+
+function scanOptionalIdentity(value: unknown, pattern: RegExp): string | undefined | null {
+  if (value === undefined) return undefined;
+  return typeof value === "string" && pattern.test(value) ? value : null;
 }

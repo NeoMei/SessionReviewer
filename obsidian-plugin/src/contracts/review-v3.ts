@@ -210,4 +210,5 @@ export interface ScanStatus {
   issue_count: number;
   generation_id?: string;
   error_code?: string;
+  error_message?: string;
 }

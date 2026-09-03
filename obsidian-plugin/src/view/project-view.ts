@@ -147,7 +147,7 @@ export class ProjectEvolutionView extends ItemView {
     if (diagnostic.code === "migration_required") return () => { void this.runCliAction(() => this.runner!.migrationDryRun(this.selected!.projectId), "迁移预览已完成。"); };
     if (diagnostic.code === "machine_ledger_modified") return () => { void this.runCliAction(() => this.runner!.repairMachineLedger(this.selected!.projectId), "机器账本已修复。"); };
     if (diagnostic.code === "content_conflict") return () => { void this.openConflict(); };
-    if (diagnostic.code === "sync_not_run") return () => { void this.runCliAction(() => this.runner!.status(this.selected!.projectId), "同步状态已刷新。"); };
+    if (diagnostic.code === "sync_not_run") return () => { void this.runCliAction(() => this.runner!.syncProject(this.selected!.projectId), "已同步到代码目录。"); };
     return undefined;
   }
 
@@ -306,7 +306,7 @@ function scanTerminalAnnouncement(status: ScanStatus): string {
     return `项目脉络已更新 · ${status.session_count} 个 Session`;
   }
   if (status.state === "failed") {
-    return status.error_code ? `更新失败：${status.error_code}` : "更新失败，可重试。";
+    return status.error_message ? `更新失败：${status.error_message}` : status.error_code ? `更新失败：${status.error_code}` : "更新失败，可重试。";
   }
   return "";
 }
