@@ -94,12 +94,15 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 		return syncengine.Report{}, err
 	}
 	defer engine.Close()
-	request := syncengine.ReconcileRequest{DryRun: options.DryRun, Trigger: options.Trigger}
+	request := syncengine.ReconcileRequest{
+		DryRun: options.DryRun, Trigger: options.Trigger,
+		AllowModifiedVaultMachineLedger: options.DryRun && options.RepairMachineLedger,
+	}
 	report, err := engine.Reconcile(ctx, request)
 	if err != nil {
 		return report, err
 	}
-	if options.RepairMachineLedger && machineLedgerBlockedByVaultCopy(report) {
+	if options.RepairMachineLedger && !options.DryRun && machineLedgerBlockedByVaultCopy(report) {
 		if _, repairErr := engine.RepairMachineLedger(ctx); repairErr != nil {
 			return report, repairErr
 		}

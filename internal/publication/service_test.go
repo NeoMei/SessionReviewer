@@ -1,6 +1,7 @@
 package publication
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,9 +15,11 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
 func hexDigest(seed string) string {
@@ -340,5 +343,147 @@ func TestPublishPreimageMismatchFailsClosed(t *testing.T) {
 	content, err := os.ReadFile(reviewPath)
 	if err != nil || !strings.Contains(string(content), "Unexpected Existing Content") {
 		t.Fatalf("conflicting file was overwritten or lost: %s", content)
+	}
+}
+
+// Treating a non-converged sync report as success hides the actionable sync
+// failure behind a later Vault hash mismatch.
+func TestPublishReportsNonConvergedSyncBeforeFinalHashVerification(t *testing.T) {
+	projectID := "project-sync-blocked"
+	dataRoot, _, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
+	vaultReview := filepath.Join(vaultRoot, filepath.FromSlash(mapping.VaultReviewPath))
+	if err := os.MkdirAll(vaultReview, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	vaultOverview := filepath.Join(vaultReview, "项目回顾.md")
+	malformed := []byte("# user-owned malformed review\n")
+	if err := os.WriteFile(vaultOverview, malformed, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Publish(context.Background(), Options{
+		ProjectID:          projectID,
+		PreparedGeneration: manifest.GenerationID,
+		Plan:               plan,
+		Mapping:            mapping,
+		DataRoot:           dataRoot,
+		Now:                time.Now,
+	})
+	if err == nil || !strings.Contains(err.Error(), "sync to vault preflight did not converge") {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	if strings.Contains(err.Error(), "verify published files") {
+		t.Fatalf("Publish() hid sync failure behind final hash verification: %v", err)
+	}
+	if !strings.Contains(err.Error(), "project-overview:malformed_source") {
+		t.Fatalf("Publish() omitted the actionable sync entity error: %v", err)
+	}
+	body, readErr := os.ReadFile(vaultOverview)
+	if readErr != nil || !bytes.Equal(body, malformed) {
+		t.Fatalf("Vault preimage changed: body=%q err=%v", body, readErr)
+	}
+	baseFiles, globErr := filepath.Glob(filepath.Join(dataRoot, "projects", projectID, "merge-bases", "*.json"))
+	if globErr != nil {
+		t.Fatal(globErr)
+	}
+	if len(baseFiles) != 0 {
+		t.Fatalf("failed publication committed merge-base state: %v", baseFiles)
+	}
+	journal, openErr := OpenJournal(dataRoot, projectID)
+	if openErr != nil {
+		t.Fatal(openErr)
+	}
+	defer journal.Close()
+	intent, loadErr := journal.Load()
+	if loadErr != nil || intent.Stage != StageCommitted {
+		t.Fatalf("rollback journal stage=%q err=%v", intent.Stage, loadErr)
+	}
+}
+
+func TestRepairRolledBackBasesRequiresJournalProofAndIdenticalHumanCopies(t *testing.T) {
+	projectID := "project-rollback-base"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
+	opts := Options{ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}
+	if _, err := Publish(context.Background(), opts); err != nil {
+		t.Fatalf("initial Publish: %v", err)
+	}
+
+	var history []byte
+	for _, file := range plan.Files {
+		if file.Relative == reviewv2.HistoryRelativePath {
+			history = bytes.Clone(file.Desired)
+		}
+	}
+	if len(history) == 0 {
+		t.Fatal("history fixture is missing")
+	}
+	failedDesired := []byte("failed publication desired base\n")
+	failedHash := sha256Hex(failedDesired)
+	syncRoot, err := os.OpenRoot(filepath.Join(dataRoot, "projects", projectID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syncRoot.Close()
+	baseStore := syncengine.BaseStore{Root: syncRoot}
+	base, found, err := baseStore.Load("project-history")
+	if err != nil || !found {
+		t.Fatalf("load initial base: found=%t err=%v", found, err)
+	}
+	failedBase := syncengine.BaseRecord{
+		Version: 1, EntityID: base.EntityID, RelativePath: base.RelativePath,
+		ContentHash: failedHash, ProjectHash: failedHash, VaultHash: failedHash,
+		Content: failedDesired, SyncedAt: time.Now().UTC(),
+	}
+	if err := baseStore.Commit(base.ContentHash, failedBase); err != nil {
+		t.Fatalf("simulate partially committed base: %v", err)
+	}
+
+	journal, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	preimageHash := sha256Hex(history)
+	if err := journal.PutPreimage(preimageHash, history); err != nil {
+		t.Fatal(err)
+	}
+	intent := Intent{
+		Version: 1, ProjectID: projectID, GenerationID: "generation-rollback-proof",
+		ManifestDigest: prefixedDigest("rollback-manifest"), ProjectViewDigest: prefixedDigest("rollback-view"),
+		Stage: StagePrepared, CreatedAt: time.Now().UTC(),
+		Destinations: []Destination{
+			{Side: "project", Relative: reviewv2.HistoryRelativePath, PreimageSHA256: preimageHash, DesiredSHA256: failedHash, PreimageExists: true},
+			{Side: "vault", Relative: vaultRelativePath(mapping.VaultReviewPath, reviewv2.HistoryRelativePath), PreimageSHA256: preimageHash, DesiredSHA256: failedHash, PreimageExists: true},
+		},
+	}
+	if err := journal.Create(intent); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range [][2]Stage{
+		{StagePrepared, StageProjectWritten},
+		{StageProjectWritten, StageVaultSynced},
+		{StageVaultSynced, StageVerified},
+		{StageVerified, StageCommitted},
+	} {
+		if err := journal.Advance(transition[0], transition[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectDir, err := pathguard.Open(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectDir.Close()
+	vaultDir, err := pathguard.Open(vaultRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer vaultDir.Close()
+	if err := repairRetainedRollbackEvidence(journal, opts, projectDir, vaultDir, time.Now); err != nil {
+		t.Fatalf("repairRetainedRollbackEvidence: %v", err)
+	}
+	repaired, found, err := baseStore.Load("project-history")
+	if err != nil || !found || repaired.ContentHash != preimageHash || !bytes.Equal(repaired.Content, history) {
+		t.Fatalf("repaired base mismatch: found=%t hash=%q err=%v", found, repaired.ContentHash, err)
 	}
 }

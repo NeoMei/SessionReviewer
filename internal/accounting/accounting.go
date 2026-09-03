@@ -343,7 +343,13 @@ func (a *Accumulator) Observe(record session.Record) error {
 	if payload.Type != "token_count" {
 		return nil
 	}
-	if payload.Info == nil || payload.Info.Last == nil {
+	if payload.Info == nil {
+		// Codex emits rate-limit-only token heartbeats with an explicitly null
+		// info field before any usage is available. They carry no accounting
+		// delta and must not make an otherwise readable session look corrupt.
+		return nil
+	}
+	if payload.Info.Last == nil {
 		return errors.New("token_count omits last_token_usage")
 	}
 	usage := *payload.Info.Last

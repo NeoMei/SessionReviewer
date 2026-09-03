@@ -606,7 +606,7 @@ func TestValidateSelectedDocumentUsesValidatedV2MarkerBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	record := ConflictRecord{EntityID: identity.ID, ProjectID: identity.ProjectID}
-	if _, err := validateSelectedDocument(record, &document, identity, document); err != nil {
+	if _, err := validateSelectedDocument(record, &document, identity, document, false); err != nil {
 		t.Fatalf("validated v2 marker identity blocked the selected document: %v", err)
 	}
 }
@@ -665,6 +665,23 @@ func TestSelectResolutionValidatesEmbeddedIdentityAndReservedChanges(t *testing.
 				t.Fatalf("err=%v want=%v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSelectResolutionAcceptsExplicitMirroredGenerationRecovery(t *testing.T) {
+	t.Parallel()
+
+	const relative = "decisions/decision-sync.md"
+	base := fixtureDocument(t, "base-decision.md", relative)
+	recovered := editFrontmatterUnit(t, base, "generation_id", "scan-recovered-generation\n")
+	record := conflictRecordForDocuments(t, relative, &base, &recovered, &recovered)
+	selected, err := SelectResolution(record, Resolution{ConflictID: record.ID, Action: AcceptProject}, candidate(relative, recovered), candidate(relative, recovered), nil)
+	if err != nil {
+		t.Fatalf("mirrored generation recovery was rejected: %v", err)
+	}
+	units := selected.Units()
+	if got := string(units[syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "generation_id"}].Value); got != "scan-recovered-generation\n" {
+		t.Fatalf("generation_id=%q", got)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/prepare"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
 type Diagnostic struct {
@@ -116,6 +117,18 @@ func writeDiagnostic(w io.Writer, action string, err error) int {
 			Code:    "E_INIT_IDENTITY_CONFLICT",
 			Message: "project identity conflicts with existing state",
 			Hint:    "use the mapped --vault, or reconcile the config mapping and project review identity before retrying",
+		}
+	case errors.Is(err, syncengine.ErrStaleConflict) && action == "sync":
+		diagnostic = Diagnostic{
+			Code:    "E_SYNC_CONFLICT_STALE",
+			Message: "the selected conflict no longer matches the live documents or merge base",
+			Hint:    "run session-reviewer sync, then use the exact conflict ID returned by sync status --json",
+		}
+	case errors.Is(err, syncengine.ErrInvalidResolution) && action == "sync":
+		diagnostic = Diagnostic{
+			Code:    "E_SYNC_RESOLUTION_INVALID",
+			Message: "the conflict resolution request is invalid",
+			Hint:    "use the exact conflict ID and one supported action; manual_merge also requires --file",
 		}
 	}
 	fmt.Fprintf(w, "%s: %s\nrecovery: %s\n", diagnostic.Code, diagnostic.Message, diagnostic.Hint)

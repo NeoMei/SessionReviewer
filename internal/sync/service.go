@@ -46,9 +46,10 @@ type Options struct {
 }
 
 type ReconcileRequest struct {
-	DryRun    bool
-	EntityIDs []string
-	Trigger   Trigger
+	DryRun                          bool
+	EntityIDs                       []string
+	Trigger                         Trigger
+	AllowModifiedVaultMachineLedger bool
 }
 
 type OperationKind string
@@ -492,7 +493,7 @@ func (engine *Engine) Reconcile(ctx context.Context, request ReconcileRequest) (
 	}
 	var machine machineSnapshot
 	if version == reviewv2.VersionV2 || version == reviewv2.VersionV3 {
-		machine, report.Machine, err = engine.planMachineLedger()
+		machine, report.Machine, err = engine.loadMachineLedgerSnapshot(request.DryRun && request.AllowModifiedVaultMachineLedger)
 		if err != nil {
 			report.Machine.State = MachineBlocked
 			report.Errors = append(report.Errors, EntityError{EntityID: machineLedgerEntityID, Code: "machine_ledger_modified"})

@@ -151,6 +151,34 @@ func TestAccumulatorIgnoresContextOnlyTokenHeartbeatWhenCumulativeUsageIsUnchang
 	}
 }
 
+func TestAccumulatorIgnoresTokenHeartbeatWithExplicitlyNullUsageInfo(t *testing.T) {
+	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	accumulator := NewAccumulator(started)
+	record := session.Record{
+		Line: 1, Timestamp: "2026-08-24T10:01:00Z", Type: "event_msg",
+		Payload: json.RawMessage(`{"type":"token_count","info":null,"rate_limits":{"limit_id":"codex"}}`),
+	}
+	if err := accumulator.Observe(record); err != nil {
+		t.Fatalf("null usage heartbeat should be ignored: %v", err)
+	}
+	usage := accumulator.Snapshot()
+	if usage.TotalTokens != 0 || len(usage.Models) != 0 {
+		t.Fatalf("null usage heartbeat invented accounting: %+v", usage)
+	}
+}
+
+func TestAccumulatorRejectsNonNullUsageInfoWithoutLastUsage(t *testing.T) {
+	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	accumulator := NewAccumulator(started)
+	record := session.Record{
+		Line: 1, Timestamp: "2026-08-24T10:01:00Z", Type: "event_msg",
+		Payload: json.RawMessage(`{"type":"token_count","info":{"total_token_usage":{"total_tokens":1}}}`),
+	}
+	if err := accumulator.Observe(record); err == nil {
+		t.Fatal("accepted non-null usage info without last_token_usage")
+	}
+}
+
 func TestAccumulatorRejectsContextOnlyTokenHeartbeatWithoutMatchingCumulativeUsage(t *testing.T) {
 	started := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
 	accumulator := NewAccumulator(started)

@@ -104,6 +104,46 @@ func TestJournalLifecycleAndStageTransitions(t *testing.T) {
 	}
 }
 
+func TestJournalLoadPreviousReturnsAuthenticatedLegacyBackup(t *testing.T) {
+	dataRoot := t.TempDir()
+	projectID := "proj-previous"
+	j, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+
+	previous := testIntent(projectID, "gen-previous")
+	if err := j.Create(previous); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Advance(StagePrepared, StageRollbackRequired); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Advance(StageRollbackRequired, StageCommitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Create(testIntent(projectID, "gen-current")); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := encodeCanonicalJSON(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(dataRoot, "publication-journal", projectID, "intent-v1.json.bak")
+	if err := os.WriteFile(backup, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := j.LoadPrevious()
+	if err != nil {
+		t.Fatalf("LoadPrevious: %v", err)
+	}
+	if loaded.GenerationID != previous.GenerationID || loaded.Stage != previous.Stage {
+		t.Fatalf("previous intent mismatch: %+v", loaded)
+	}
+}
+
 func TestJournalPreimagePayloads(t *testing.T) {
 	dataRoot := t.TempDir()
 	projectID := "proj-preimage"

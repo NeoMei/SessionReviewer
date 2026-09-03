@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -428,6 +429,35 @@ func TestRunCompletes154SessionsWithoutAgentOrForeignFacts(t *testing.T) {
 	projectEntries, err := os.ReadDir(harness.options.Binding.CanonicalRoot)
 	if err != nil || len(projectEntries) != 0 {
 		t.Fatalf("Gate A wrote into Project root: entries=%v err=%v", projectEntries, err)
+	}
+}
+
+func TestRunPersistsBoundedQuarantineReasonWithoutSourceDetails(t *testing.T) {
+	harness := newScanHarness(t)
+	spec := harness.addSource(1, memory.Indexed, scanTestProject)
+	spec.report.Quarantined = []source.QuarantinedRevision{{
+		Ref: spec.observations[0].Ref, Timestamp: spec.observations[0].Timestamp,
+		Kind: "file", Subject: "PRIVATE-SUBJECT", CandidateProjectIDs: []string{scanTestProject},
+		ReasonCode: "foreign_project_root",
+	}}
+	result, err := Run(context.Background(), harness.options)
+	if err != nil || result.IssueSessions != 1 {
+		t.Fatalf("scan result=%+v err=%v", result, err)
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil || len(manifest.SessionViews) != 1 {
+		t.Fatalf("manifest=%+v err=%v", manifest, err)
+	}
+	view := loadScanSessionView(t, harness.store, manifest.SessionViews[0])
+	if len(view.Diagnostics) != 1 || view.Diagnostics[0].Code != "quarantined_foreign_project_root" || view.Diagnostics[0].Path != "" || view.Diagnostics[0].DetailHash != "" {
+		t.Fatalf("bounded quarantine diagnostic=%+v", view.Diagnostics)
+	}
+	body, err := json.Marshal(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "PRIVATE-SUBJECT") {
+		t.Fatalf("quarantine source details leaked: %s", body)
 	}
 }
 

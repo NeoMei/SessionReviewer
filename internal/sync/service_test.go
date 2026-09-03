@@ -159,6 +159,54 @@ func TestCandidateSensitiveUsesValidatedV2MarkerBoundary(t *testing.T) {
 	})
 }
 
+func TestReconcileDryRunCanPlanPastRepairableMachineLedgerWithoutMutation(t *testing.T) {
+	fixture := newEngineFixture(t)
+	writeV2EngineFixture(t, fixture)
+	engine, err := NewEngine(fixture.options())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	if _, err := engine.Reconcile(context.Background(), ReconcileRequest{Trigger: TriggerCLI}); err != nil {
+		t.Fatal(err)
+	}
+
+	vaultMachine := filepath.Join(fixture.vault, filepath.FromSlash(fixture.vaultReviewPath), ".session-reviewer", "ledger.json")
+	machineBody, err := os.ReadFile(vaultMachine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultMachine, append(machineBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectOverview := filepath.Join(fixture.project, "docs", "session-review", "项目回顾.md")
+	if err := os.WriteFile(projectOverview, []byte("# malformed review\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	beforeProject := snapshotFixtureTree(t, fixture.project)
+	beforeVault := snapshotFixtureTree(t, fixture.vault)
+	beforeData := snapshotFixtureTree(t, fixture.data)
+
+	report, err := engine.Reconcile(context.Background(), ReconcileRequest{
+		DryRun: true, Trigger: TriggerCLI, AllowModifiedVaultMachineLedger: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundMalformedOverview := false
+	for _, entityError := range report.Errors {
+		foundMalformedOverview = foundMalformedOverview || (entityError.EntityID == "project-overview" && entityError.Code == "malformed_source")
+	}
+	if !foundMalformedOverview {
+		t.Fatalf("dry-run did not inspect human documents past stale machine ledger: %+v", report)
+	}
+	if !reflect.DeepEqual(beforeProject, snapshotFixtureTree(t, fixture.project)) ||
+		!reflect.DeepEqual(beforeVault, snapshotFixtureTree(t, fixture.vault)) ||
+		!reflect.DeepEqual(beforeData, snapshotFixtureTree(t, fixture.data)) {
+		t.Fatal("repair-aware dry-run mutated state")
+	}
+}
+
 func TestReconcileDryRunPlansMigrationAndRealSyncConvergesV2(t *testing.T) {
 	fixture := newEngineFixture(t)
 	completeLegacyFixtureForMigration(t, fixture)

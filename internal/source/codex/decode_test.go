@@ -111,8 +111,8 @@ func TestDecodeParsesGitAndVerificationFactsWithoutCopyingMessagesOutputsOrUsage
 			t.Fatalf("observation persistence copied forbidden source content %q: %s", forbidden, body)
 		}
 	}
-	if report.UnsupportedRecords < 1 {
-		t.Fatalf("unsupported record count=%d", report.UnsupportedRecords)
+	if report.UnsupportedRecords != 0 {
+		t.Fatalf("known reasoning record counted as unsupported: %d", report.UnsupportedRecords)
 	}
 	if _, found, err := fixture.catalog.GetSource("codex", "session-project-a"); err != nil || found {
 		t.Fatalf("Decode mutated catalog found=%v err=%v", found, err)
@@ -374,6 +374,103 @@ func TestDecodeClassifiesUnsupportedOnlySourceAndCrossProjectSource(t *testing.T
 			t.Fatalf("cross-project source classification=%+v", report)
 		}
 	})
+}
+
+func TestDecodeIgnoresKnownNonEvidenceCodexRecordsWithoutIssue(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{
+		"id": "benign-records", "cwd": fixture.projectA,
+		"source": map[string]any{"subagent": map[string]any{"thread_spawn": map[string]any{"parent_thread_id": "parent-session"}}},
+	}) +
+		encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "parent-session", "cwd": fixture.projectA, "source": "vscode"}) +
+		encodedRecord(t, "2026-08-31T14:00:01Z", "response_item", map[string]any{"type": "message", "id": "user-message", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "continue"}}}) +
+		encodedRecord(t, "2026-08-31T14:00:02Z", "response_item", map[string]any{"type": "message", "id": "assistant-message", "role": "assistant", "content": []map[string]any{{"type": "output_text", "text": "done"}}}) +
+		encodedRecord(t, "2026-08-31T14:00:03Z", "response_item", map[string]any{"type": "reasoning", "summary": []any{}}) +
+		encodedRecord(t, "2026-08-31T14:00:04Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-browser", "name": "browser", "input": "{}"}) +
+		encodedRecord(t, "2026-08-31T14:00:05Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-browser", "output": "opaque"}) +
+		encodedRecord(t, "2026-08-31T14:00:06Z", "response_item", map[string]any{"type": "custom_tool_call_output", "call_id": "call-browser", "output": "second streamed result"}) +
+		encodedRecord(t, "2026-08-31T14:00:07Z", "event_msg", map[string]any{"type": "item_completed"}) +
+		encodedRecord(t, "2026-08-31T14:00:08Z", "world_state", map[string]any{"id": "snapshot"}) +
+		encodedRecord(t, "2026-08-31T14:00:09Z", "compacted", map[string]any{"message": "opaque summary"}) +
+		encodedRecord(t, "2026-08-31T14:00:10Z", "inter_agent_communication_metadata", map[string]any{"sender": "opaque"}) +
+		encodedRecord(t, "2026-08-31T14:00:11Z", "response_item", map[string]any{"type": "agent_message", "message": "opaque"}) +
+		encodedRecord(t, "2026-08-31T14:00:12Z", "event_msg", map[string]any{"type": "thread_settings_applied", "thread_settings": map[string]any{"model": "opaque"}}) +
+		encodedRecord(t, "2026-08-31T14:00:13Z", "event_msg", map[string]any{"type": "agent_reasoning", "text": "opaque"}) +
+		encodedRecord(t, "2026-08-31T14:00:14Z", "event_msg", map[string]any{"type": "patch_apply_end", "success": true}) +
+		encodedRecord(t, "2026-08-31T14:00:15Z", "event_msg", map[string]any{"type": "sub_agent_activity"}) +
+		encodedRecord(t, "2026-08-31T14:00:16Z", "event_msg", map[string]any{"type": "mcp_tool_call_end"}) +
+		encodedRecord(t, "2026-08-31T14:00:17Z", "event_msg", map[string]any{"type": "context_compacted"}) +
+		encodedRecord(t, "2026-08-31T14:00:18Z", "event_msg", map[string]any{"type": "web_search_end"}) +
+		encodedRecord(t, "2026-08-31T14:00:19Z", "event_msg", map[string]any{"type": "thread_rolled_back"}) +
+		encodedRecord(t, "2026-08-31T14:00:20Z", "response_item", map[string]any{"type": "web_search_call", "id": "search-1"}) +
+		usageEvent("2026-08-31T14:00:21Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "benign-records.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "benign-records"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	if report.TerminalState != memory.Indexed || report.UnsupportedRecords != 0 || len(report.Diagnostics) != 0 {
+		t.Fatalf("known non-evidence records became scan issues: %+v", report)
+	}
+	if len(observations) != 2 {
+		t.Fatalf("observations=%d want session start plus user request", len(observations))
+	}
+}
+
+func TestDecodeRejectsUnrelatedAdditionalSessionMetadata(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "metadata-mismatch", "cwd": fixture.projectA}) +
+		encodedRecord(t, "2026-08-31T14:00:01Z", "session_meta", map[string]any{"id": "unrelated-session", "cwd": fixture.projectA}) +
+		usageEvent("2026-08-31T14:00:02Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "metadata-mismatch.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "metadata-mismatch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report := decodeBoundary(t, adapter, boundary)
+	if len(report.Diagnostics) != 1 || report.Diagnostics[0].Code != "malformed_payload" {
+		t.Fatalf("unrelated metadata was accepted: %+v", report)
+	}
+}
+
+func TestDecodeCanonicalizesHistoricalCWDThatDroppedRootTrailingSpace(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	originalRoot := fixture.projectA
+	spacedRoot := originalRoot + " "
+	if err := os.Rename(originalRoot, spacedRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(originalRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture.projectA = spacedRoot
+	fixture.bindings[0] = authenticateBinding(t, "project-a", spacedRoot)
+	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "trailing-root", "cwd": spacedRoot}) +
+		encodedRecord(t, "2026-08-31T14:00:01Z", "turn_context", map[string]any{"cwd": originalRoot}) +
+		encodedRecord(t, "2026-08-31T14:00:02Z", "response_item", map[string]any{"type": "message", "id": "request-after-context", "role": "user", "content": []map[string]any{{"type": "input_text", "text": "continue"}}}) +
+		usageEvent("2026-08-31T14:00:03Z")
+	if err := os.WriteFile(filepath.Join(fixture.sessions, "trailing-root.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "trailing-root"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	if len(report.Quarantined) != 0 || len(report.Diagnostics) != 0 || report.UnsupportedRecords != 0 {
+		t.Fatalf("historical root alias was not recovered: %+v", report)
+	}
+	if len(observations) != 2 || observations[0].Operation != "session_started" || observations[1].Operation != "user_request" {
+		t.Fatalf("observations=%+v", observations)
+	}
 }
 
 func TestAmbiguousAuthenticatedRootsQuarantineOnlyAffectedRevisions(t *testing.T) {

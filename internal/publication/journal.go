@@ -154,15 +154,31 @@ func (j *Journal) Load() (Intent, error) {
 	return j.loadIntentUnlocked()
 }
 
+// LoadPrevious returns an authenticated legacy intent backup. Releases affected
+// by the partial merge-base rollback defect may have retained this evidence as
+// intent-v1.json.bak for a later exact compensation.
+func (j *Journal) LoadPrevious() (Intent, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return Intent{}, errors.New("journal is closed")
+	}
+	return j.loadNamedIntentUnlocked(intentFileLeaf + ".bak")
+}
+
 func (j *Journal) loadIntentUnlocked() (Intent, error) {
-	body, found, err := j.dir.ReadRegular(intentFileLeaf, maxIntentBytes)
+	return j.loadNamedIntentUnlocked(intentFileLeaf)
+}
+
+func (j *Journal) loadNamedIntentUnlocked(leaf string) (Intent, error) {
+	body, found, err := j.dir.ReadRegular(leaf, maxIntentBytes)
 	if err != nil {
 		return Intent{}, fmt.Errorf("read intent: %w", err)
 	}
 	if !found {
 		return Intent{}, ErrNoActiveIntent
 	}
-	if err := requirePrivateRegular(j.dir.Root, intentFileLeaf); err != nil {
+	if err := requirePrivateRegular(j.dir.Root, leaf); err != nil {
 		return Intent{}, err
 	}
 	var intent Intent
@@ -299,7 +315,7 @@ func validTransition(from, to Stage) bool {
 	case StageVaultSynced:
 		return to == StageVerified || to == StageRollbackRequired
 	case StageVerified:
-		return to == StageCommitted
+		return to == StageCommitted || to == StageRollbackRequired
 	case StageRollbackRequired:
 		return to == StageCommitted // After rollback is completed
 	default:

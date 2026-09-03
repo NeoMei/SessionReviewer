@@ -27,11 +27,13 @@ describe("Obsidian plugin package", () => {
   });
 
   it.skipIf(process.platform === "win32")("packages only installable assets with matching versions reproducibly", async () => {
+    const pluginManifest = JSON.parse(await readFile(resolve(repository, "obsidian-plugin/manifest.json"), "utf8")) as { version: string };
+    const version = pluginManifest.version;
     const first = await mkdtemp(join(tmpdir(), "sr-plugin-one-"));
     const second = await mkdtemp(join(tmpdir(), "sr-plugin-two-"));
     roots.push(first, second);
     const build = (dist: string): void => {
-      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", "0.3.2", dist], {
+      execFileSync("bash", ["scripts/build-obsidian-plugin.sh", version, dist], {
         cwd: repository,
         env: { ...process.env, SESSION_REVIEWER_PACKAGE_SKIP_CHECK: "1", SOURCE_DATE_EPOCH: "315532800" },
         stdio: "pipe"
@@ -39,13 +41,13 @@ describe("Obsidian plugin package", () => {
     };
     build(first);
     build(second);
-    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", "session-reviewer-obsidian-0.3.2.zip", "styles.css"]);
-    const archiveName = "session-reviewer-obsidian-0.3.2.zip";
+    expect((await readdir(first)).sort()).toEqual(["SHA256SUMS", "main.js", "manifest.json", `session-reviewer-obsidian-${version}.zip`, "styles.css"]);
+    const archiveName = `session-reviewer-obsidian-${version}.zip`;
     const firstArchive = join(first, archiveName);
     const entries = execFileSync("unzip", ["-Z1", firstArchive], { encoding: "utf8" }).trim().split("\n").sort();
     expect(entries).toEqual(["session-reviewer/main.js", "session-reviewer/manifest.json", "session-reviewer/styles.css"]);
     const manifest = JSON.parse(execFileSync("unzip", ["-p", firstArchive, "session-reviewer/manifest.json"], { encoding: "utf8" })) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ id: "session-reviewer", version: "0.3.2" });
+    expect(manifest).toMatchObject({ id: "session-reviewer", version });
     const mainJs = execFileSync("unzip", ["-p", firstArchive, "session-reviewer/main.js"], { encoding: "utf8" });
     expect(mainJs).not.toContain("sourceMappingURL=data:");
     expect(mainJs.includes("\\u66F4") || mainJs.includes("更新")).toBe(true);

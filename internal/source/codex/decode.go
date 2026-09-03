@@ -63,8 +63,13 @@ type recordDecoder struct {
 	currentCWD   string
 	accounting   *accounting.Accumulator
 	pending      map[string]pendingCall
+	ignoredCalls map[string]struct{}
 	seenCalls    map[string]struct{}
 	invalidCalls map[string]struct{}
+	// Subagent transcripts can carry one inherited parent session_meta record
+	// immediately after their own metadata. It is provenance, not a second
+	// logical source.
+	inheritedParentSessionID string
 	// Tool provenance is decoder-internal and is never copied into report
 	// quarantine or lineage envelopes.
 	observationToolCalls map[string]string
@@ -117,7 +122,8 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	decoder := &recordDecoder{
 		ctx: ctx, adapter: a, frozen: frozen, currentCWD: boundary.Candidate.InitialCWD,
 		accounting: accounting.NewAccumulator(startedAt), pending: make(map[string]pendingCall),
-		seenCalls: make(map[string]struct{}), invalidCalls: make(map[string]struct{}),
+		ignoredCalls: make(map[string]struct{}),
+		seenCalls:    make(map[string]struct{}), invalidCalls: make(map[string]struct{}),
 		observationToolCalls: make(map[string]string),
 		projectIDs:           make(map[string]struct{}),
 		report:               source.DecodeReport{TerminalState: memory.Indexed},
@@ -263,6 +269,10 @@ func (d *recordDecoder) add(record session.Record) error {
 		return d.addResponseItem(record)
 	case "event_msg":
 		return d.addEvent(record)
+	case "world_state", "compacted", "inter_agent_communication_metadata":
+		// State snapshots, compaction summaries, and agent routing metadata are
+		// harness context, not durable project facts.
+		return nil
 	default:
 		d.unsupported()
 		return nil
@@ -271,17 +281,43 @@ func (d *recordDecoder) add(record session.Record) error {
 
 func (d *recordDecoder) addSessionMeta(record session.Record) error {
 	var payload struct {
-		ID  string `json:"id"`
-		CWD string `json:"cwd"`
+		ID     string          `json:"id"`
+		CWD    string          `json:"cwd"`
+		Source json.RawMessage `json:"source"`
 	}
-	if json.Unmarshal(record.Payload, &payload) != nil || payload.ID != d.frozen.boundary.Candidate.SessionID || payload.CWD == "" {
+	if json.Unmarshal(record.Payload, &payload) != nil || payload.CWD == "" {
 		d.malformedPayload()
 		return nil
 	}
+	if payload.ID != d.frozen.boundary.Candidate.SessionID {
+		if payload.ID != "" && payload.ID == d.inheritedParentSessionID {
+			return nil
+		}
+		d.malformedPayload()
+		return nil
+	}
+	d.inheritedParentSessionID = parentSessionID(payload.Source)
 	d.currentCWD = payload.CWD
 	return d.observe(record, observedFact{
 		kind: "artifact", subject: payload.ID, operation: "session_started", object: payload.CWD, affinityPath: payload.CWD,
 	})
+}
+
+func parentSessionID(raw json.RawMessage) string {
+	if len(raw) == 0 || raw[0] != '{' {
+		return ""
+	}
+	var sourceMetadata struct {
+		Subagent *struct {
+			ThreadSpawn *struct {
+				ParentThreadID string `json:"parent_thread_id"`
+			} `json:"thread_spawn"`
+		} `json:"subagent"`
+	}
+	if json.Unmarshal(raw, &sourceMetadata) != nil || sourceMetadata.Subagent == nil || sourceMetadata.Subagent.ThreadSpawn == nil {
+		return ""
+	}
+	return sourceMetadata.Subagent.ThreadSpawn.ParentThreadID
 }
 
 func (d *recordDecoder) addTurnContext(record session.Record) error {
@@ -292,6 +328,7 @@ func (d *recordDecoder) addTurnContext(record session.Record) error {
 		d.malformedPayload()
 		return nil
 	}
+	payload.CWD = d.normalizeHistoricalCWD(payload.CWD)
 	if payload.CWD == "" || payload.CWD == d.currentCWD {
 		return nil
 	}
@@ -299,6 +336,37 @@ func (d *recordDecoder) addTurnContext(record session.Record) error {
 	return d.observe(record, observedFact{
 		kind: "artifact", subject: subjectID(payload.CWD), operation: "cwd_changed", object: payload.CWD, affinityPath: payload.CWD,
 	})
+}
+
+func (d *recordDecoder) normalizeHistoricalCWD(value string) string {
+	initial := d.frozen.boundary.Candidate.InitialCWD
+	if value == "" || value == initial || !filepath.IsAbs(value) || filepath.Clean(value) != value ||
+		strings.TrimRight(initial, " \t") != value || strings.TrimRight(initial, " \t") == initial {
+		return value
+	}
+	initialAuthenticated := false
+	for _, binding := range d.adapter.bindings {
+		root, err := pathguard.Open(binding.CanonicalRoot)
+		if err != nil {
+			continue
+		}
+		identity, identityErr := root.PhysicalIdentity()
+		_ = root.Close()
+		if identityErr != nil || identity != binding.RootIdentity {
+			continue
+		}
+		if binding.CanonicalRoot == value {
+			// A separately authenticated project owns the stripped path.
+			return value
+		}
+		if binding.CanonicalRoot == initial {
+			initialAuthenticated = true
+		}
+	}
+	if initialAuthenticated {
+		return initial
+	}
+	return value
 }
 
 func (d *recordDecoder) addEvent(record session.Record) error {
@@ -309,11 +377,14 @@ func (d *recordDecoder) addEvent(record session.Record) error {
 		d.malformedPayload()
 		return nil
 	}
-	if header.Type == "token_count" {
+	switch header.Type {
+	case "token_count", "item_completed", "item_started", "task_started", "task_complete", "turn_aborted", "agent_message", "user_message", "thread_settings_applied",
+		"agent_reasoning", "patch_apply_end", "sub_agent_activity", "mcp_tool_call_end", "context_compacted", "web_search_end", "thread_rolled_back":
+		return nil
+	default:
+		d.unsupported()
 		return nil
 	}
-	d.unsupported()
-	return nil
 }
 
 func (d *recordDecoder) addResponseItem(record session.Record) error {
@@ -331,6 +402,10 @@ func (d *recordDecoder) addResponseItem(record session.Record) error {
 		return d.addToolCall(record)
 	case "custom_tool_call_output":
 		return d.addToolOutput(record)
+	case "reasoning", "function_call", "function_call_output", "agent_message", "web_search_call":
+		// These records can contain private chain-of-thought or opaque tool data.
+		// They are intentionally outside the zero-token evidence vocabulary.
+		return nil
 	default:
 		d.unsupported()
 		return nil
@@ -346,9 +421,18 @@ func (d *recordDecoder) addMessage(record session.Record) error {
 			Text string `json:"text"`
 		} `json:"content"`
 	}
-	if json.Unmarshal(record.Payload, &payload) != nil || payload.Role != "user" || payload.ID == "" {
+	if json.Unmarshal(record.Payload, &payload) != nil || payload.ID == "" {
 		d.unsupported()
 		return nil
+	}
+	if payload.Role != "user" {
+		switch payload.Role {
+		case "assistant", "system", "developer":
+			return nil
+		default:
+			d.unsupported()
+			return nil
+		}
 	}
 	var parts []string
 	for _, block := range payload.Content {
@@ -388,6 +472,7 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 	}
 	if _, duplicate := d.seenCalls[callID]; duplicate {
 		delete(d.pending, callID)
+		delete(d.ignoredCalls, callID)
 		d.invalidCalls[callID] = struct{}{}
 		d.invalidateToolResults(callID)
 		d.diagnostic("duplicate_tool_call_id")
@@ -438,7 +523,7 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		d.pending[callID] = pendingCall{id: callID, kind: "patch", workdir: workdir, targets: targets}
 		return nil
 	default:
-		d.unsupported()
+		d.ignoredCalls[callID] = struct{}{}
 		return nil
 	}
 }
@@ -450,6 +535,12 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 	}
 	if json.Unmarshal(record.Payload, &payload) != nil || !toolCallIDPattern.MatchString(payload.CallID) {
 		d.malformedPayload()
+		return nil
+	}
+	if _, ignored := d.ignoredCalls[payload.CallID]; ignored {
+		// One custom tool invocation may emit multiple streamed result records.
+		// Keep the classification for the lifetime of this source decode so later
+		// chunks remain known non-evidence instead of becoming false unknowns.
 		return nil
 	}
 	if _, invalid := d.invalidCalls[payload.CallID]; invalid {

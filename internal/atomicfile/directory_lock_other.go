@@ -23,6 +23,9 @@ func lockRootDirectoryParent(parent *os.Root) (func() error, error) {
 			return nil, fmt.Errorf("inspect directory creation lock: %w", inspectErr)
 		}
 		if found && !validRootDirectoryLock(before) {
+			if repairRootDirectoryLock(parent, before) {
+				continue
+			}
 			return nil, errors.New("directory creation lock is redirected or unsafe")
 		}
 		flags := os.O_RDWR
@@ -80,6 +83,33 @@ func lockRootDirectoryParent(parent *os.Root) (func() error, error) {
 
 func validRootDirectoryLock(info os.FileInfo) bool {
 	return info != nil && info.Mode().IsRegular() && !isAtomicRedirect(info) && info.Mode().Perm() == 0o600 && info.Size() == 0
+}
+
+func repairRootDirectoryLock(parent *os.Root, expected os.FileInfo) bool {
+	if expected == nil || !expected.Mode().IsRegular() || isAtomicRedirect(expected) || expected.Size() != 0 {
+		return false
+	}
+	mode := expected.Mode()
+	if mode != mode.Perm() || mode.Perm()&0o600 != 0o600 || mode.Perm()&0o022 != 0 {
+		return false
+	}
+	file, err := parent.OpenFile(rootDirectoryLockName, os.O_RDWR, 0)
+	if err != nil {
+		return false
+	}
+	opened, statErr := file.Stat()
+	if statErr != nil || !os.SameFile(expected, opened) || opened.Size() != 0 ||
+		!opened.Mode().IsRegular() || isAtomicRedirect(opened) {
+		_ = file.Close()
+		return false
+	}
+	chmodErr := file.Chmod(0o600)
+	updated, updatedErr := file.Stat()
+	closeErr := file.Close()
+	named, namedErr := parent.Lstat(rootDirectoryLockName)
+	return chmodErr == nil && updatedErr == nil && closeErr == nil && namedErr == nil &&
+		os.SameFile(expected, updated) && os.SameFile(updated, named) &&
+		validRootDirectoryLock(updated) && validRootDirectoryLock(named)
 }
 
 // ValidateRootDirectoryLock verifies the unique POSIX operational artifact

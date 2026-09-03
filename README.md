@@ -26,7 +26,7 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
-Download `main.js`, `manifest.json`, and `styles.css` from [GitHub Release 0.3.2](https://github.com/NeoMei/SessionReviewer/releases/tag/0.3.2). Place the three files in:
+Download `main.js`, `manifest.json`, and `styles.css` from the [latest GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest). Place the three files in:
 
 ```text
 <Vault>/.obsidian/plugins/session-reviewer/

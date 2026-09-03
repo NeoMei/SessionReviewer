@@ -713,6 +713,9 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		if item.report.UnsupportedRecords > 0 {
 			diagnostics = append(diagnostics, memory.Diagnostic{Code: "unsupported_source_records"})
 		}
+		for _, quarantined := range item.report.Quarantined {
+			diagnostics = append(diagnostics, memory.Diagnostic{Code: quarantineDiagnosticCode(quarantined.ReasonCode)})
+		}
 		switch item.report.BoundaryRelation {
 		case source.BoundaryInitial, source.BoundaryUnchanged, source.BoundaryAppend, source.BoundaryReplacement:
 		default:
@@ -764,6 +767,15 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 		}
 	}
 	return terminals, nil
+}
+
+func quarantineDiagnosticCode(reason string) string {
+	switch reason {
+	case "ambiguous_project_root", "foreign_project_root":
+		return "quarantined_" + reason
+	default:
+		return "quarantined_observation"
+	}
 }
 
 func loadBaseline(store MemoryStore) (baseline, error) {

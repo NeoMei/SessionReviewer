@@ -65,6 +65,18 @@ func TestDefaultPreservesSessionAndItemIDs(t *testing.T) {
 	}
 }
 
+func TestDefaultPreservesCanonicalAgentSessionReferences(t *testing.T) {
+	input := "codex/abcdef01-2345-6789-abcd-ef0123456789 claude/fedcba98-7654-3210-fedc-ba9876543210 opencode/0123abcd-4567-89ef-0123-abcdef456789"
+	if got := Default().Text(input).Text; got != input {
+		t.Fatalf("canonical agent session references were changed: %q", got)
+	}
+
+	impostor := "codex/q7Vx2Pm9Lk4Nz8Rc1Ya6Wt3Hu5Jd0Sf7Bg2Ke9Ui"
+	if got := Default().Text(impostor); got.Text == impostor || len(got.Findings) != 1 || got.Findings[0].Rule != RuleHighEntropy {
+		t.Fatalf("non-UUID provider reference bypassed redaction: %+v", got)
+	}
+}
+
 func TestDefaultRedactsHighEntropyCanary(t *testing.T) {
 	input := "q7Vx2Pm9Lk4Nz8Rc1Ya6Wt3Hu5Jd0Sf7Bg2Ke9Ui"
 	result := Default().Text(input)

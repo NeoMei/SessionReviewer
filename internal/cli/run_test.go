@@ -24,6 +24,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/session"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
 func TestRunRequiresCommand(t *testing.T) {
@@ -531,6 +532,8 @@ func TestLedgerOperationalDiagnosticsAreStableAndPrivate(t *testing.T) {
 		{action: "apply", err: errors.New(canary), code: "E_APPLY_FAILED", hint: "original --proposal and --evidence"},
 		{action: "resume", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
 		{action: "history", err: errors.New(canary), code: "E_RECOVERY_FAILED", hint: "accepted Markdown ledger"},
+		{action: "sync", err: fmt.Errorf("%s: %w", canary, syncengine.ErrStaleConflict), code: "E_SYNC_CONFLICT_STALE", hint: "run session-reviewer sync"},
+		{action: "sync", err: fmt.Errorf("%s: %w", canary, syncengine.ErrInvalidResolution), code: "E_SYNC_RESOLUTION_INVALID", hint: "exact conflict ID"},
 	}
 	for _, test := range tests {
 		t.Run(test.action+test.code, func(t *testing.T) {

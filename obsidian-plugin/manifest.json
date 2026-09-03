@@ -1,7 +1,7 @@
 {
   "id": "session-reviewer",
   "name": "SessionReviewer",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "minAppVersion": "1.8.7",
   "description": "Browse and safely edit project evolution, decisions, risks, and model usage.",
   "author": "NeoMei",

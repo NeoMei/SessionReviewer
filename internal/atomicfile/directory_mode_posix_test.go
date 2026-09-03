@@ -590,6 +590,44 @@ func TestEnsureRootDirPreparedRejectsUnsafePersistentLockWithoutRepair(t *testin
 	}
 }
 
+// Removing compatibility repair for an empty regular lock created with a
+// conventional 0644 umask makes valid pre-0.3.3 installations unable to create
+// any new protected directory.
+func TestEnsureRootDirPreparedRepairsEmptyLegacyLockMode(t *testing.T) {
+	rootPath := t.TempDir()
+	lockPath := filepath.Join(rootPath, rootDirectoryLockName)
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(lockPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+
+	created, err := EnsureRootDirCreated(root, "child", 0o700)
+	if err != nil || !created {
+		t.Fatalf("created=%v err=%v", created, err)
+	}
+	after, err := os.Stat(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("legacy lock repair replaced the lock inode")
+	}
+	if after.Mode().Perm() != 0o600 || after.Size() != 0 {
+		t.Fatalf("repaired lock mode=%o size=%d", after.Mode().Perm(), after.Size())
+	}
+}
+
 func TestRootDirectoryCrossProcessHelper(t *testing.T) {
 	rootPath := os.Getenv("SESSION_REVIEWER_DIRECTORY_LOCK_HELPER")
 	if rootPath == "" {

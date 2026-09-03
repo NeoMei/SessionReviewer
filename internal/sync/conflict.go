@@ -936,7 +936,8 @@ func SelectResolution(record ConflictRecord, resolution Resolution, liveProject,
 	case ManualMerge:
 		selected = *manual
 	}
-	selected, err = validateSelectedDocument(record, documents.base, documents.identity, selected)
+	preserveAcceptedProvenance := documents.mirroredGenerationRecovery && resolution.Action != ManualMerge
+	selected, err = validateSelectedDocument(record, documents.base, documents.identity, selected, preserveAcceptedProvenance)
 	if err != nil {
 		return syncdoc.Document{}, err
 	}
@@ -977,8 +978,9 @@ func MarkConflictResolved(record ConflictRecord, action ResolutionAction, resolv
 }
 
 type conflictDocuments struct {
-	base, project, vault *syncdoc.Document
-	identity             syncdoc.Identity
+	base, project, vault       *syncdoc.Document
+	identity                   syncdoc.Identity
+	mirroredGenerationRecovery bool
 }
 
 func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
@@ -1040,6 +1042,7 @@ func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
 	if expected == nil {
 		return conflictDocuments{}, ErrInvalidConflict
 	}
+	mirroredGenerationRecovery := isMirroredGenerationRecovery(record, base, project, vault)
 	if base != nil {
 		if !validDocumentShape(*base) {
 			return conflictDocuments{}, syncdoc.ErrInvalidDocument
@@ -1048,7 +1051,8 @@ func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
 			if document == nil {
 				continue
 			}
-			if validationErr := document.ValidateHumanChanges(*base); validationErr != nil {
+			if validationErr := document.ValidateHumanChanges(*base); validationErr != nil &&
+				!(mirroredGenerationRecovery && errors.Is(validationErr, syncdoc.ErrProtectedProvenance)) {
 				return conflictDocuments{}, validationErr
 			}
 			if !validDocumentShape(*document) {
@@ -1062,7 +1066,31 @@ func parseConflictDocuments(record ConflictRecord) (conflictDocuments, error) {
 			}
 		}
 	}
-	return conflictDocuments{base: base, project: project, vault: vault, identity: *expected}, nil
+	return conflictDocuments{
+		base: base, project: project, vault: vault, identity: *expected,
+		mirroredGenerationRecovery: mirroredGenerationRecovery,
+	}, nil
+}
+
+func isMirroredGenerationRecovery(record ConflictRecord, base, project, vault *syncdoc.Document) bool {
+	if base == nil || project == nil || vault == nil || len(record.Project) == 0 || !bytes.Equal(record.Project, record.Vault) {
+		return false
+	}
+	generationKey := syncdoc.UnitKey{Kind: syncdoc.UnitFrontmatter, Name: "generation_id"}
+	baseUnits := base.SemanticUnits()
+	normalizedUnits := project.SemanticUnits()
+	baseGeneration, baseFound := baseUnits[generationKey]
+	projectGeneration, projectFound := normalizedUnits[generationKey]
+	if baseFound == projectFound && baseGeneration.Present == projectGeneration.Present && bytes.Equal(baseGeneration.Value, projectGeneration.Value) {
+		return false
+	}
+	if baseFound {
+		normalizedUnits[generationKey] = baseGeneration
+	} else {
+		delete(normalizedUnits, generationKey)
+	}
+	normalized, err := project.WithSemanticUnits(normalizedUnits)
+	return err == nil && normalized.ValidateHumanChanges(*base) == nil
 }
 
 func validateLiveConflictCandidate(embedded []byte, embeddedHash, relative string, live Candidate) error {
@@ -1095,7 +1123,7 @@ func validateLiveConflictCandidate(embedded []byte, embeddedHash, relative strin
 	return nil
 }
 
-func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, expectedIdentity syncdoc.Identity, selected syncdoc.Document) (syncdoc.Document, error) {
+func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, expectedIdentity syncdoc.Identity, selected syncdoc.Document, preserveAcceptedProvenance bool) (syncdoc.Document, error) {
 	identity, err := selected.Identity()
 	if err != nil || identity != expectedIdentity || identity.ID != record.EntityID || identity.ProjectID != record.ProjectID {
 		return syncdoc.Document{}, syncdoc.ErrReservedField
@@ -1112,7 +1140,11 @@ func validateSelectedDocument(record ConflictRecord, base *syncdoc.Document, exp
 	if documentSensitive(selected) {
 		return syncdoc.Document{}, ErrSensitiveContent
 	}
-	selected, err = finalizeAcceptedDocument(selected, base, true)
+	finalizationBase := base
+	if preserveAcceptedProvenance {
+		finalizationBase = nil
+	}
+	selected, err = finalizeAcceptedDocument(selected, finalizationBase, !preserveAcceptedProvenance)
 	if err != nil {
 		return syncdoc.Document{}, err
 	}

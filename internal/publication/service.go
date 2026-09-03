@@ -1,6 +1,7 @@
 package publication
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -20,6 +21,8 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
+	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
@@ -115,11 +118,26 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("open vault root: %w", err)
 	}
 	defer vaultDir.Close()
+	if err := repairRetainedRollbackEvidence(j, opts, projectDir, vaultDir, now); err != nil {
+		return Result{}, fmt.Errorf("repair legacy rolled-back merge-base state: %w", err)
+	}
+
+	rollback := func(ctx context.Context, intent Intent) error {
+		return rollbackIntent(ctx, intent, j, projectDir, vaultDir, func() error {
+			return repairRolledBackBases(intent, j, opts, projectDir, vaultDir, now)
+		})
+	}
+	rollbackFailure := func(ctx context.Context, intent Intent, primary error) error {
+		if rollbackErr := rollback(ctx, intent); rollbackErr != nil {
+			return errors.Join(primary, fmt.Errorf("rollback publication: %w", rollbackErr))
+		}
+		return primary
+	}
 
 	recovered := false
 	recoveryHandler := RecoveryHandlerFunc(func(ctx context.Context, intent Intent, j *Journal) error {
 		recovered = true
-		return rollbackIntent(ctx, intent, j, projectDir, vaultDir)
+		return rollback(ctx, intent)
 	})
 	if err := j.Recover(ctx, recoveryHandler); err != nil {
 		return Result{}, fmt.Errorf("recover active publication journal: %w", err)
@@ -227,18 +245,15 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		parentDir := filepath.ToSlash(filepath.Dir(file.Relative))
 		if parentDir != "." && parentDir != "" {
 			if err := projectDir.EnsureDirectory(parentDir, 0o755); err != nil {
-				_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-				return Result{}, fmt.Errorf("ensure project directory %q: %w", parentDir, err)
+				return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("ensure project directory %q: %w", parentDir, err))
 			}
 		}
 		if err := atomicfile.WriteRoot(projectDir.Root, file.Relative, file.Desired, file.Mode); err != nil {
-			_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-			return Result{}, fmt.Errorf("write project file %q: %w", file.Relative, err)
+			return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("write project file %q: %w", file.Relative, err))
 		}
 	}
 	if err := j.Advance(StagePrepared, StageProjectWritten); err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, err
+		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 
 	// Ensure sync scaffold directories and lock
@@ -273,29 +288,45 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		RepairMachineLedger:    true,
 		TrustAppliedTransition: trustTransition,
 	}
+	preflightOpts := syncOpts
+	preflightOpts.DryRun = true
+	// RepairMachineLedger makes dry-run tolerate a stale Vault mirror in memory
+	// so it can inspect the complete human-document plan. syncproject guarantees
+	// that the actual repair remains exclusive to the real pass below.
+	preflight, err := syncproject.Run(ctx, preflightOpts)
+	if err != nil {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("sync to vault preflight: %w", err))
+	}
+	if !syncReportReadyToApply(preflight) {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf(
+			"sync to vault preflight did not converge: conflicts=%d issues=%d errors=%d error_codes=%s queue_depth=%d derived=%s migration_required=%t machine=%s",
+			len(preflight.Conflicts), len(preflight.Issues), len(preflight.Errors), syncErrorSummary(preflight.Errors), preflight.QueueDepth,
+			preflight.Derived.State, preflight.Migration.Required, preflight.Machine.State,
+		))
+	}
 	rep, err := syncproject.Run(ctx, syncOpts)
 	if err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, fmt.Errorf("sync to vault: %w", err)
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("sync to vault: %w", err))
 	}
-	for _, op := range rep.Operations {
-		fmt.Printf("DEBUG OP: entity=%s kind=%s rel=%s\n", op.EntityID, op.Kind, op.RelativePath)
+	if !syncReportConverged(rep) {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf(
+			"sync to vault did not converge: conflicts=%d issues=%d errors=%d error_codes=%s queue_depth=%d derived=%s migration_required=%t machine=%s",
+			len(rep.Conflicts), len(rep.Issues), len(rep.Errors), syncErrorSummary(rep.Errors), rep.QueueDepth,
+			rep.Derived.State, rep.Migration.Required, rep.Machine.State,
+		))
 	}
 	if err := j.Advance(StageProjectWritten, StageVaultSynced); err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, err
+		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 
 	// Verify all 3 Project files and 3 Vault files match schema 3 and desired hashes
 	projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
 	if err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, fmt.Errorf("verify published files: %w", err)
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("verify published files: %w", err))
 	}
 
 	if err := j.Advance(StageVaultSynced, StageVerified); err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, err
+		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 
 	// Extract hashes for proof
@@ -322,14 +353,71 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		JournalVerified:   true,
 	}
 	if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
-		_ = rollbackIntent(ctx, intent, j, projectDir, vaultDir)
-		return Result{}, fmt.Errorf("commit published generation: %w", err)
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
 	}
 	if err := j.Advance(StageVerified, StageCommitted); err != nil {
 		return Result{}, err
 	}
 
 	return Result{GenerationID: opts.PreparedGeneration, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
+}
+
+func syncErrorSummary(entityErrors []syncengine.EntityError) string {
+	if len(entityErrors) == 0 {
+		return "none"
+	}
+	values := make([]string, 0, len(entityErrors))
+	for _, entityError := range entityErrors {
+		values = append(values, entityError.EntityID+":"+entityError.Code)
+	}
+	return strings.Join(values, ",")
+}
+
+func syncReportReadyToApply(report syncengine.Report) bool {
+	return len(report.Conflicts) == 0 &&
+		len(report.Issues) == 0 &&
+		len(report.Errors) == 0 &&
+		report.QueueDepth == 0 &&
+		report.Derived.State != syncengine.DerivedFailed &&
+		!report.Migration.Required &&
+		report.Machine.State != syncengine.MachineBlocked
+}
+
+// repairRetainedRollbackEvidence handles both a retained backup intent and the
+// current committed intent. Some affected releases completed journal rollback
+// after restoring the human files but before restoring a partially advanced
+// merge-base, so the committed intent itself can be the only durable proof.
+func repairRetainedRollbackEvidence(j *Journal, opts Options, projectDir, vaultDir *pathguard.Directory, now func() time.Time) error {
+	previous, err := j.LoadPrevious()
+	if err == nil {
+		if err := repairRolledBackBases(previous, j, opts, projectDir, vaultDir, now); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, ErrNoActiveIntent) {
+		return fmt.Errorf("inspect backup publication intent: %w", err)
+	}
+
+	current, err := j.Load()
+	if errors.Is(err, ErrNoActiveIntent) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect current publication intent: %w", err)
+	}
+	if current.Stage != StageCommitted {
+		return nil
+	}
+	return repairRolledBackBases(current, j, opts, projectDir, vaultDir, now)
+}
+
+func syncReportConverged(report syncengine.Report) bool {
+	return len(report.Conflicts) == 0 &&
+		len(report.Issues) == 0 &&
+		len(report.Errors) == 0 &&
+		report.QueueDepth == 0 &&
+		report.Derived.State == syncengine.DerivedCurrent &&
+		!report.Migration.Required &&
+		report.Machine.State == syncengine.MachineCurrent
 }
 
 func verifyPublishedFiles(plan presentation.RenderPlan, mapping config.ProjectMapping, projectDir, vaultDir *pathguard.Directory) ([]VerifiedFile, []VerifiedFile, error) {
@@ -362,7 +450,7 @@ func verifyPublishedFiles(plan presentation.RenderPlan, mapping config.ProjectMa
 	return projFiles, vaultFiles, nil
 }
 
-func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, vaultDir *pathguard.Directory) error {
+func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, vaultDir *pathguard.Directory, afterRestore func() error) error {
 	for _, dest := range intent.Destinations {
 		var dir *pathguard.Directory
 		if dest.Side == "project" {
@@ -374,6 +462,9 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 		}
 		if dir == nil {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		body, found, err := dir.ReadRegularOptional(dest.Relative, 64<<20)
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -389,9 +480,13 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 			}
 			pDir := filepath.ToSlash(filepath.Dir(dest.Relative))
 			if pDir != "." && pDir != "" {
-				_ = dir.EnsureDirectory(pDir, 0o755)
+				if err := dir.EnsureDirectory(pDir, 0o755); err != nil {
+					return fmt.Errorf("restore %s directory %q: %w", dest.Side, pDir, err)
+				}
 			}
-			_ = atomicfile.WriteRoot(dir.Root, dest.Relative, preimage, 0o600)
+			if err := atomicfile.WriteRoot(dir.Root, dest.Relative, preimage, 0o600); err != nil {
+				return fmt.Errorf("restore missing %s file %q: %w", dest.Side, dest.Relative, err)
+			}
 			continue
 		}
 		curSHA := sha256Hex(body)
@@ -401,9 +496,13 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 				if err != nil {
 					return err
 				}
-				_ = atomicfile.WriteRoot(dir.Root, dest.Relative, preimage, 0o600)
+				if err := atomicfile.WriteRoot(dir.Root, dest.Relative, preimage, 0o600); err != nil {
+					return fmt.Errorf("restore %s file %q: %w", dest.Side, dest.Relative, err)
+				}
 			} else {
-				_ = atomicfile.RemoveRoot(dir.Root, dest.Relative)
+				if err := atomicfile.RemoveRoot(dir.Root, dest.Relative); err != nil {
+					return fmt.Errorf("remove new %s file %q: %w", dest.Side, dest.Relative, err)
+				}
 			}
 		} else if curSHA == dest.PreimageSHA256 {
 			// already preimage
@@ -411,10 +510,133 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 			return &PublicationConflictError{Side: dest.Side, Relative: dest.Relative, Expected: dest.DesiredSHA256, Actual: curSHA}
 		}
 	}
-	if err := j.Advance(intent.Stage, StageRollbackRequired); err != nil && !errors.Is(err, ErrStageMismatch) {
+	if afterRestore != nil {
+		if err := afterRestore(); err != nil {
+			return err
+		}
+	}
+	current, err := j.Load()
+	if err != nil {
 		return err
 	}
+	if current.GenerationID != intent.GenerationID {
+		return errors.New("publication rollback journal generation changed")
+	}
+	if current.Stage == StageCommitted {
+		return nil
+	}
+	if current.Stage != StageRollbackRequired {
+		if err := j.Advance(current.Stage, StageRollbackRequired); err != nil {
+			return err
+		}
+	}
 	return j.Advance(StageRollbackRequired, StageCommitted)
+}
+
+// repairRolledBackBases compensates for releases that could commit one entity's
+// merge-base before a later entity blocked the same publication. It deliberately
+// has no general "trust identical files" escape hatch: the current Project and
+// Vault bytes must both equal the immutable journal preimage, while the current
+// Base must equal that same journal intent's desired bytes.
+func repairRolledBackBases(intent Intent, j *Journal, opts Options, projectDir, vaultDir *pathguard.Directory, now func() time.Time) error {
+	if now == nil {
+		now = time.Now
+	}
+	destinationByKey := make(map[string]Destination, len(intent.Destinations))
+	for _, destination := range intent.Destinations {
+		destinationByKey[destination.Side+"\x00"+destination.Relative] = destination
+	}
+
+	type compactDocument struct {
+		entityID string
+		relative string
+	}
+	documents := []compactDocument{
+		{entityID: "project-overview", relative: reviewv2.ReviewRelativePath},
+		{entityID: "project-history", relative: reviewv2.HistoryRelativePath},
+	}
+
+	var baseStore *syncengine.BaseStore
+	var syncData *pathguard.Directory
+	defer func() {
+		if syncData != nil {
+			_ = syncData.Close()
+		}
+	}()
+	for _, document := range documents {
+		projectDestination, projectFound := destinationByKey["project\x00"+document.relative]
+		vaultRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, document.relative)
+		vaultDestination, vaultFound := destinationByKey["vault\x00"+vaultRelative]
+		if !projectFound || !vaultFound || !projectDestination.PreimageExists || !vaultDestination.PreimageExists ||
+			!strings.EqualFold(projectDestination.PreimageSHA256, vaultDestination.PreimageSHA256) ||
+			!strings.EqualFold(projectDestination.DesiredSHA256, vaultDestination.DesiredSHA256) {
+			continue
+		}
+
+		projectBody, projectExists, err := projectDir.ReadRegularOptional(document.relative, 64<<20)
+		if err != nil {
+			return fmt.Errorf("inspect rolled-back project file %q: %w", document.relative, err)
+		}
+		vaultBody, vaultExists, err := vaultDir.ReadRegularOptional(vaultRelative, 64<<20)
+		if err != nil {
+			return fmt.Errorf("inspect rolled-back vault file %q: %w", vaultRelative, err)
+		}
+		if !projectExists || !vaultExists ||
+			!strings.EqualFold(sha256Hex(projectBody), projectDestination.PreimageSHA256) ||
+			!strings.EqualFold(sha256Hex(vaultBody), projectDestination.PreimageSHA256) {
+			continue
+		}
+		preimage, err := j.LoadPreimage(projectDestination.PreimageSHA256)
+		if err != nil {
+			return fmt.Errorf("load merge-base rollback preimage for %q: %w", document.entityID, err)
+		}
+		if !bytes.Equal(projectBody, preimage) || !bytes.Equal(vaultBody, preimage) {
+			return fmt.Errorf("merge-base rollback preimage for %q changed", document.entityID)
+		}
+		parsed, err := syncdoc.Parse(path.Base(document.relative), preimage)
+		if err != nil {
+			return fmt.Errorf("parse merge-base rollback preimage for %q: %w", document.entityID, err)
+		}
+		identity, err := parsed.Identity()
+		if err != nil || identity.ID != document.entityID || identity.ProjectID != intent.ProjectID {
+			return fmt.Errorf("merge-base rollback preimage identity for %q is invalid", document.entityID)
+		}
+
+		if baseStore == nil {
+			syncDataPath := filepath.Join(opts.DataRoot, "projects", opts.ProjectID)
+			if _, statErr := os.Stat(syncDataPath); errors.Is(statErr, os.ErrNotExist) {
+				return nil
+			} else if statErr != nil {
+				return fmt.Errorf("inspect sync state for merge-base rollback: %w", statErr)
+			}
+			syncData, err = pathguard.Open(syncDataPath)
+			if err != nil {
+				return fmt.Errorf("open sync state for merge-base rollback: %w", err)
+			}
+			store := syncengine.BaseStore{Root: syncData.Root}
+			baseStore = &store
+		}
+		base, found, err := baseStore.Load(document.entityID)
+		if err != nil {
+			return fmt.Errorf("load merge-base for rollback %q: %w", document.entityID, err)
+		}
+		if !found || strings.EqualFold(base.ContentHash, projectDestination.PreimageSHA256) {
+			continue
+		}
+		if !strings.EqualFold(base.ContentHash, projectDestination.DesiredSHA256) {
+			continue
+		}
+		preimageHash := strings.ToLower(projectDestination.PreimageSHA256)
+		next := syncengine.BaseRecord{
+			Version: 1, EntityID: document.entityID, RelativePath: path.Base(document.relative),
+			ContentHash: preimageHash, ProjectHash: preimageHash, VaultHash: preimageHash,
+			Content: bytes.Clone(preimage), SyncedAt: now().UTC(),
+		}
+		if err := baseStore.Commit(base.ContentHash, next); err != nil {
+			return fmt.Errorf("restore merge-base for %q: %w", document.entityID, err)
+		}
+	}
+	return nil
 }
 
 func vaultRelativePath(vaultReviewPath, projectRelative string) string {
