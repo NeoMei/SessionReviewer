@@ -1722,7 +1722,11 @@ func snapshotGateTree(t *testing.T, root string) map[string]gateSnapshotEntry {
 			sum := sha256.Sum256(body)
 			digest = hex.EncodeToString(sum[:])
 		}
-		result[filepath.ToSlash(relative)] = gateSnapshotEntry{mode: info.Mode(), size: info.Size(), modified: info.ModTime(), digest: digest}
+		modified := time.Time{}
+		if info.Mode().IsRegular() {
+			modified = info.ModTime()
+		}
+		result[filepath.ToSlash(relative)] = gateSnapshotEntry{mode: info.Mode(), size: info.Size(), modified: modified, digest: digest}
 		return nil
 	})
 	if err != nil {
