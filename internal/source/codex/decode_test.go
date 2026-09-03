@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -441,6 +442,9 @@ func TestDecodeRejectsUnrelatedAdditionalSessionMetadata(t *testing.T) {
 }
 
 func TestDecodeCanonicalizesHistoricalCWDThatDroppedRootTrailingSpace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not preserve trailing-space path components")
+	}
 	fixture := newAdapterFixture(t)
 	originalRoot := fixture.projectA
 	spacedRoot := originalRoot + " "

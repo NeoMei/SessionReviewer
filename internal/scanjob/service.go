@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/contextupdate"
@@ -204,16 +203,4 @@ func toPublicStatus(j JobRecord) PublicStatus {
 		ErrorCode:     j.ErrorCode,
 		ErrorMessage:  j.ErrorMessage,
 	}
-}
-
-func isProcessAlive(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = process.Signal(syscall.Signal(0))
-	return err == nil
 }

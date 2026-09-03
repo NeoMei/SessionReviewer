@@ -766,7 +766,8 @@ func (d *recordDecoder) rebuildProjectIDs() {
 }
 
 func (a *adapter) classifyAffinity(path string, fileTarget bool) ([]string, string) {
-	if path == "" || strings.IndexByte(path, 0) >= 0 || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+	path, valid := canonicalRuntimeAbsolutePath(path)
+	if !valid {
 		return nil, "foreign_project_root"
 	}
 	target := path
@@ -817,6 +818,20 @@ func (a *adapter) classifyAffinity(path string, fileTarget bool) ([]string, stri
 		return matches, "ambiguous_project_root"
 	}
 	return nil, "foreign_project_root"
+}
+
+// canonicalRuntimeAbsolutePath accepts the two separator spellings emitted by
+// Windows hosts while still rejecting traversal, relative paths, and NULs.
+func canonicalRuntimeAbsolutePath(value string) (string, bool) {
+	if value == "" || strings.IndexByte(value, 0) >= 0 {
+		return "", false
+	}
+	native := filepath.FromSlash(value)
+	clean := filepath.Clean(native)
+	if !filepath.IsAbs(clean) || filepath.ToSlash(clean) != filepath.ToSlash(native) {
+		return "", false
+	}
+	return clean, true
 }
 
 func lexicallyContains(root, target string) bool {

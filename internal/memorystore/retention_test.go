@@ -669,7 +669,7 @@ func TestRetentionGraceBoundaryAndCleanupUseCanonicalRootedCandidates(t *testing
 	memoryRoot := retentionMemoryRoot(dataRoot)
 	oldCache := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("old-cache"), retentionNow.Add(-7*24*time.Hour))
 	oldStage := writeRetentionCandidate(t, memoryRoot, "staging", ".stage", []byte("old-stage"), retentionNow.Add(-8*24*time.Hour))
-	youngCache := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("young-cache"), retentionNow.Add(-7*24*time.Hour+time.Nanosecond))
+	youngCache := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("young-cache"), retentionNow.Add(-7*24*time.Hour+2*time.Second))
 
 	report, err := store.ReportRetention(retentionNow)
 	if err != nil {
@@ -872,6 +872,9 @@ func TestRetentionRevalidatesReachabilityAnchorsBeforeEveryUnlink(t *testing.T) 
 	})
 
 	t.Run("memory-root-identity", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows prevents renaming a directory while its authenticated lock handles are open")
+		}
 		dataRoot, store, _ := newRetentionStore(t, "generation-anchor-root")
 		memoryRoot := retentionMemoryRoot(dataRoot)
 		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("root-candidate"), retentionNow.Add(-8*24*time.Hour))
@@ -888,6 +891,9 @@ func TestRetentionRevalidatesReachabilityAnchorsBeforeEveryUnlink(t *testing.T) 
 	})
 
 	t.Run("namespace-identity", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows prevents renaming a directory while its authenticated lock handles are open")
+		}
 		dataRoot, store, _ := newRetentionStore(t, "generation-anchor-namespace")
 		memoryRoot := retentionMemoryRoot(dataRoot)
 		candidate := writeRetentionCandidate(t, memoryRoot, "cache", ".cache", []byte("namespace-candidate"), retentionNow.Add(-8*24*time.Hour))
@@ -1303,7 +1309,11 @@ func retentionInventory(t *testing.T, root string) []retentionInventoryEntry {
 			digest = hex.EncodeToString(sum[:])
 		}
 		relative, _ := filepath.Rel(root, path)
-		entries = append(entries, retentionInventoryEntry{path: filepath.ToSlash(relative), size: info.Size(), mode: info.Mode(), modified: info.ModTime(), contentSum: digest})
+		modified := time.Time{}
+		if info.Mode().IsRegular() {
+			modified = info.ModTime()
+		}
+		entries = append(entries, retentionInventoryEntry{path: filepath.ToSlash(relative), size: info.Size(), mode: info.Mode(), modified: modified, contentSum: digest})
 		return nil
 	})
 	if err != nil {

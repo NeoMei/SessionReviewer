@@ -558,8 +558,9 @@ func cleanRootRelative(path string) (string, error) {
 	if path == "" || filepath.IsAbs(path) || filepath.VolumeName(path) != "" {
 		return "", fmt.Errorf("invalid rooted path")
 	}
-	clean := filepath.Clean(path)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || clean != path {
+	native := filepath.FromSlash(path)
+	clean := filepath.Clean(native)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != filepath.ToSlash(native) {
 		return "", fmt.Errorf("invalid rooted path")
 	}
 	return clean, nil

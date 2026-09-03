@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -346,7 +347,7 @@ func (spool *observationSpool) replay(ctx context.Context, visit func(memory.Obs
 		return fmt.Errorf("open observation spool replay: %w", err)
 	}
 	defer file.Close()
-	if before.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && before.Mode().Perm() != 0o600 {
 		return errors.New("observation spool file permissions changed")
 	}
 	scanner := bufio.NewScanner(&contextReader{ctx: ctx, reader: file})

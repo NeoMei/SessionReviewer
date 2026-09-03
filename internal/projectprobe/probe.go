@@ -347,8 +347,13 @@ func preserveCancellation(ctx context.Context, fallback error) error {
 
 func parseTopLevel(output []byte) (string, error) {
 	value, err := parseSingleLine(output, 4096)
-	if err != nil || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+	if err != nil {
 		return "", errors.New("invalid Git top-level")
 	}
-	return value, nil
+	native := filepath.FromSlash(value)
+	clean := filepath.Clean(native)
+	if !filepath.IsAbs(clean) || filepath.ToSlash(clean) != filepath.ToSlash(native) {
+		return "", errors.New("invalid Git top-level")
+	}
+	return clean, nil
 }

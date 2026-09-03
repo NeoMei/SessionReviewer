@@ -611,20 +611,23 @@ func TestSaveCleansOnlyByteIdenticalStaleBackup(t *testing.T) {
 
 func TestConfigUnionRoundTripPreservesEveryField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
+	fixtureRoot := filepath.Join(t.TempDir(), "work", "项目")
+	fixtureVault := filepath.Join(t.TempDir(), "notes", "知识库")
+	fixtureCommon := filepath.Join(filepath.Dir(fixtureRoot), "common")
 	want := Config{
 		Version: 1,
 		Projects: []ProjectMapping{{
 			ID:               "project-2a2a2a2a2a2a2a2a",
-			Root:             "/work/项目",
-			VaultRoot:        "/notes/知识库",
+			Root:             fixtureRoot,
+			VaultRoot:        fixtureVault,
 			VaultReviewPath:  "Projects/项目--2a2a2a2a/Session Review",
 			VaultCaseMode:    platform.CaseInsensitive,
 			RemoteIdentities: []string{"origin:https://example.invalid/repo.git"},
-			CommonDirs:       []string{"/work/common"},
+			CommonDirs:       []string{fixtureCommon},
 			Aliases:          []string{"reviewer", "会话审查"},
 			AuthenticatedAliases: []AuthenticatedProjectAlias{{
 				SchemaVersion:     1,
-				Path:              "/work/项目",
+				Path:              fixtureRoot,
 				RootIdentity:      pathguard.IdentityToken{Kind: "posix-dev-inode", Volume: "1", File: "2"},
 				CommonDirIdentity: "posix-dev-inode:1:3",
 			}},

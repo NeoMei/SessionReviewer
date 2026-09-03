@@ -608,7 +608,7 @@ func newBinding(t *testing.T) (string, projectidentity.Binding) {
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	binding, err := projectidentity.Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, "darwin")
+	binding, err := projectidentity.Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, runtime.GOOS)
 	if err != nil {
 		t.Fatalf("resolve binding: %v", err)
 	}

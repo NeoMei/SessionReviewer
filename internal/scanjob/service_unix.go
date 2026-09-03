@@ -27,3 +27,14 @@ func defaultWorkerRunner(jobID, dataRoot, projectID, sessionsRoot string) (int, 
 	go func() { _ = cmd.Wait() }()
 	return cmd.Process.Pid, nil
 }
+
+func isProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return process.Signal(syscall.Signal(0)) == nil
+}
