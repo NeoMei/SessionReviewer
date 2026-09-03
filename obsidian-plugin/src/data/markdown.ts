@@ -224,7 +224,6 @@ function requiredSection(
   const heading = requiredHeading(headings, 2, name);
   const range = sectionRange(headings, heading, source.length);
   const value = clean(source.slice(range.start, range.end));
-  if (!value) throw new Error(`${name} cannot be empty`);
   if (field && projectId && fields) fields.push({ document: "review", unitId: "project-overview", field, value, range });
   return value;
 }
