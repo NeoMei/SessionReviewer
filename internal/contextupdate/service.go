@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -224,6 +225,30 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		if err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load current project projection: %w", err)
 		}
+		if err := validateCurrentProjectionProject(acceptedV3, opts.ProjectID); err != nil {
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+		}
+		journalSettled, err := publicationJournalSettled(opts.DataRoot, opts.ProjectID, publishedID)
+		if err != nil {
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("inspect publication journal: %w", err)
+		}
+		if journalSettled {
+			unchangedPublication, unchanged, err := unchangedPublishedProjection(mapping, currentFiles, acceptedV3, manifest, publishedID)
+			if err != nil {
+				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("verify unchanged public projection: %w", err)
+			}
+			if unchanged {
+				if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
+					return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+				}
+				return Result{
+					SchemaVersion: 1, ProjectID: opts.ProjectID, State: scanResult.State,
+					GenerationID: publishedID, SourceSessions: scanResult.SourceSessions,
+					IndexedSessions: scanResult.IndexedSessions, IssueSessions: scanResult.IssueSessions,
+					Publication: unchangedPublication, ReviewRunTokens: 0,
+				}, nil
+			}
+		}
 		legacyPresentation, capturedPatches, err = captureCurrentPresentation(acceptedV3)
 		if err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("capture current human presentation: %w", err)
@@ -302,6 +327,96 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Publication:     pubResult,
 		ReviewRunTokens: 0,
 	}, nil
+}
+
+func validateCurrentProjectionProject(accepted reviewv2.AcceptedV3, projectID string) error {
+	if accepted.State.Machine.ProjectID != projectID {
+		return fmt.Errorf("current project projection belongs to %q, not %q", accepted.State.Machine.ProjectID, projectID)
+	}
+	return nil
+}
+
+func publicationJournalSettled(dataRoot, projectID, publishedID string) (bool, error) {
+	j, err := publication.OpenJournal(dataRoot, projectID)
+	if err != nil {
+		return false, err
+	}
+	_, previousErr := j.LoadPrevious()
+	if previousErr == nil {
+		return false, j.Close()
+	}
+	if !errors.Is(previousErr, publication.ErrNoActiveIntent) {
+		return false, errors.Join(previousErr, j.Close())
+	}
+	intent, loadErr := j.Load()
+	closeErr := j.Close()
+	if errors.Is(loadErr, publication.ErrNoActiveIntent) {
+		return true, closeErr
+	}
+	if loadErr != nil {
+		return false, errors.Join(loadErr, closeErr)
+	}
+	return intent.Stage == publication.StageCommitted && intent.GenerationID == publishedID, closeErr
+}
+
+// unchangedPublishedProjection recognizes a fresh private scan generation whose
+// human-facing ProjectView is byte-identical to the currently published one.
+// The new generation remains in the private audit history, while the public
+// revision and its Project/Vault mirrors stay untouched. Any human edit or
+// mirror drift deliberately falls through to the normal publication path.
+func unchangedPublishedProjection(mapping config.ProjectMapping, current currentProjectFiles, accepted reviewv2.AcceptedV3, manifest memory.GenerationManifest, publishedID string) (publication.Result, bool, error) {
+	if publishedID == "" || accepted.State.Machine.GenerationID != publishedID ||
+		strings.TrimPrefix(manifest.ProjectViewDigest, "sha256:") != accepted.State.Machine.ProjectViewDigest ||
+		!current.reviewFound || !current.historyFound || !current.ledgerFound ||
+		digestHex(current.reviewBody) != accepted.State.Machine.ReviewSHA256 ||
+		digestHex(current.historyBody) != accepted.State.Machine.HistorySHA256 {
+		return publication.Result{}, false, nil
+	}
+
+	vaultDir, err := pathguard.Open(mapping.VaultRoot)
+	if err != nil {
+		return publication.Result{}, false, fmt.Errorf("open vault root: %w", err)
+	}
+	defer vaultDir.Close()
+
+	files := []struct {
+		relative string
+		body     []byte
+	}{
+		{relative: reviewv2.ReviewRelativePath, body: current.reviewBody},
+		{relative: reviewv2.HistoryRelativePath, body: current.historyBody},
+		{relative: reviewv2.MachineLedgerRelativePath, body: current.ledgerBody},
+	}
+	result := publication.Result{GenerationID: publishedID}
+	for _, file := range files {
+		vaultRelative := vaultProjectionRelative(mapping.VaultReviewPath, file.relative)
+		vaultBody, found, err := vaultDir.ReadRegularOptional(vaultRelative, 64<<20)
+		if err != nil {
+			return publication.Result{}, false, fmt.Errorf("read vault file %q: %w", vaultRelative, err)
+		}
+		if !found || !bytes.Equal(vaultBody, file.body) {
+			return publication.Result{}, false, nil
+		}
+		digest := digestHex(file.body)
+		result.ProjectFiles = append(result.ProjectFiles, publication.VerifiedFile{Side: "project", Relative: file.relative, SHA256: digest})
+		result.VaultFiles = append(result.VaultFiles, publication.VerifiedFile{Side: "vault", Relative: vaultRelative, SHA256: digest})
+	}
+	return result, true, nil
+}
+
+func vaultProjectionRelative(vaultReviewPath, projectRelative string) string {
+	switch projectRelative {
+	case reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath:
+		return path.Join(vaultReviewPath, path.Base(projectRelative))
+	case reviewv2.MachineLedgerRelativePath:
+		return path.Join(vaultReviewPath, ".session-reviewer/ledger.json")
+	default:
+		return path.Join(vaultReviewPath, projectRelative)
+	}
+}
+
+func digestHex(body []byte) string {
+	return fmt.Sprintf("%x", sha256.Sum256(body))
 }
 
 func patchEntityIDs(patches []presentation.Patch) []string {

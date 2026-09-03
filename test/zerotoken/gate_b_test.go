@@ -1,6 +1,7 @@
 package zerotoken
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -43,6 +44,7 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	}
 
 	base := time.Date(2026, 8, 31, 9, 0, 0, 0, time.UTC)
+	scanNow := base.Add(10 * time.Minute)
 	sessionLines := []string{
 		`{"timestamp":"` + base.Format(time.RFC3339) + `","type":"session_meta","payload":{"id":"session-1","cwd":"` + filepath.ToSlash(projectRoot) + `","source":"codex"}}`,
 		`{"timestamp":"` + base.Add(time.Second).Format(time.RFC3339) + `","type":"turn_context","payload":{"cwd":"` + filepath.ToSlash(projectRoot) + `","model":"gpt-5"}}`,
@@ -57,7 +59,7 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 		ProjectID:    projectID,
 		SessionsRoot: sessionsRoot,
 		DataRoot:     dataRoot,
-		Now:          func() time.Time { return base.Add(10 * time.Minute) },
+		Now:          func() time.Time { return scanNow },
 		PhaseObserver: func(phase string) error {
 			phases = append(phases, phase)
 			return nil
@@ -170,5 +172,67 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	}
 	if _, err := contextupdate.Run(context.Background(), cuOpts); err != nil {
 		t.Fatalf("post-human-edit idempotence run: %v", err)
+	}
+
+	// A later ProbeCheck is retained as a fresh private audit generation, but
+	// must not advance or rewrite an unchanged public Project/Vault projection.
+	beforePrepared, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforePublished, _, err := store.LoadPublished()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicPaths := []string{
+		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)),
+		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.HistoryRelativePath)),
+		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)),
+		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目回顾.md"),
+		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目历史.md"),
+		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", ".session-reviewer", "ledger.json"),
+	}
+	beforePublic := make(map[string][]byte, len(publicPaths))
+	beforeModTime := make(map[string]time.Time, len(publicPaths))
+	for _, publicPath := range publicPaths {
+		beforePublic[publicPath], err = os.ReadFile(publicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(publicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeModTime[publicPath] = info.ModTime()
+	}
+	scanNow = scanNow.Add(time.Minute)
+	auditOnly, err := contextupdate.Run(context.Background(), cuOpts)
+	if err != nil {
+		t.Fatalf("audit-only contextupdate.Run: %v", err)
+	}
+	afterPrepared, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterPublished, _, err := store.LoadPublished()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterPrepared.GenerationID == beforePrepared.GenerationID || afterPublished != beforePublished || auditOnly.GenerationID != beforePublished {
+		t.Fatalf("audit-only generation leaked into public projection: before prepared=%s published=%s; after prepared=%s published=%s result=%s",
+			beforePrepared.GenerationID, beforePublished, afterPrepared.GenerationID, afterPublished, auditOnly.GenerationID)
+	}
+	for _, publicPath := range publicPaths {
+		afterBody, err := os.ReadFile(publicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(publicPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(afterBody, beforePublic[publicPath]) || !info.ModTime().Equal(beforeModTime[publicPath]) {
+			t.Fatalf("audit-only scan rewrote %s", publicPath)
+		}
 	}
 }

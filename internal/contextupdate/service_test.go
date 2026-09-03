@@ -1,6 +1,7 @@
 package contextupdate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -11,12 +12,123 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
+
+func TestUnchangedPublicationKeepsAuditGenerationPrivate(t *testing.T) {
+	vaultRoot := t.TempDir()
+	reviewBody := []byte("review\n")
+	historyBody := []byte("history\n")
+	ledgerBody := []byte("ledger\n")
+	current := currentProjectFiles{
+		reviewBody: reviewBody, reviewFound: true,
+		historyBody: historyBody, historyFound: true,
+		ledgerBody: ledgerBody, ledgerFound: true,
+	}
+	mapping := config.ProjectMapping{VaultRoot: vaultRoot, VaultReviewPath: "Projects/Demo/Session Review"}
+	for relative, body := range map[string][]byte{
+		"Projects/Demo/Session Review/项目回顾.md":                       reviewBody,
+		"Projects/Demo/Session Review/项目历史.md":                       historyBody,
+		"Projects/Demo/Session Review/.session-reviewer/ledger.json": ledgerBody,
+	} {
+		full := filepath.Join(vaultRoot, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accepted := reviewv2.AcceptedV3{State: reviewv2.StateV3{Machine: reviewv2.MachineLedgerV3{
+		GenerationID:      "scan-published",
+		ProjectViewDigest: strings.Repeat("a", 64),
+		ReviewSHA256:      fmt.Sprintf("%x", sha256.Sum256(reviewBody)),
+		HistorySHA256:     fmt.Sprintf("%x", sha256.Sum256(historyBody)),
+	}}}
+	manifest := memory.GenerationManifest{
+		GenerationID:      "scan-audit-only-successor",
+		ProjectViewDigest: "sha256:" + strings.Repeat("a", 64),
+	}
+
+	result, unchanged, err := unchangedPublishedProjection(mapping, current, accepted, manifest, "scan-published")
+	if err != nil || !unchanged || result.GenerationID != "scan-published" || len(result.ProjectFiles) != 3 || len(result.VaultFiles) != 3 {
+		t.Fatalf("audit-only successor result=%+v unchanged=%t err=%v", result, unchanged, err)
+	}
+	for index := range result.ProjectFiles {
+		if result.ProjectFiles[index].SHA256 != result.VaultFiles[index].SHA256 {
+			t.Fatalf("mirror hashes differ: project=%+v vault=%+v", result.ProjectFiles, result.VaultFiles)
+		}
+	}
+
+	edited := current
+	edited.reviewBody = bytes.ReplaceAll(reviewBody, []byte("review"), []byte("human edit"))
+	if _, unchanged, err := unchangedPublishedProjection(mapping, edited, accepted, manifest, "scan-published"); err != nil || unchanged {
+		t.Fatalf("human edit was treated as an unchanged projection: unchanged=%t err=%v", unchanged, err)
+	}
+
+	changedManifest := manifest
+	changedManifest.ProjectViewDigest = "sha256:" + strings.Repeat("b", 64)
+	if _, unchanged, err := unchangedPublishedProjection(mapping, current, accepted, changedManifest, "scan-published"); err != nil || unchanged {
+		t.Fatalf("changed project view was treated as unchanged: unchanged=%t err=%v", unchanged, err)
+	}
+
+	vaultReview := filepath.Join(vaultRoot, "Projects", "Demo", "Session Review", "项目回顾.md")
+	if err := os.WriteFile(vaultReview, []byte("vault edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, unchanged, err := unchangedPublishedProjection(mapping, current, accepted, manifest, "scan-published"); err != nil || unchanged {
+		t.Fatalf("vault edit was treated as unchanged: unchanged=%t err=%v", unchanged, err)
+	}
+}
+
+func TestValidateCurrentProjectionProjectRejectsCrossProjectFiles(t *testing.T) {
+	accepted := reviewv2.AcceptedV3{State: reviewv2.StateV3{Machine: reviewv2.MachineLedgerV3{ProjectID: "project-other"}}}
+	if err := validateCurrentProjectionProject(accepted, "project-current"); err == nil || !strings.Contains(err.Error(), "project-other") {
+		t.Fatalf("cross-project projection was accepted: %v", err)
+	}
+	accepted.State.Machine.ProjectID = "project-current"
+	if err := validateCurrentProjectionProject(accepted, "project-current"); err != nil {
+		t.Fatalf("matching projection was rejected: %v", err)
+	}
+}
+
+func TestPublicationJournalSettledRejectsRecoverableIntent(t *testing.T) {
+	dataRoot := t.TempDir()
+	projectID := "project-journal-check"
+	settled, err := publicationJournalSettled(dataRoot, projectID, "scan-published")
+	if err != nil || !settled {
+		t.Fatalf("fresh journal settled=%t err=%v", settled, err)
+	}
+
+	j, err := publication.OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	err = j.Create(publication.Intent{
+		Version: 1, ProjectID: projectID, GenerationID: "scan-recoverable",
+		ManifestDigest: digest, ProjectViewDigest: digest,
+		Stage: publication.StagePrepared, CreatedAt: time.Now().UTC(),
+		Destinations: []publication.Destination{{
+			Side: "project", Relative: reviewv2.ReviewRelativePath,
+			DesiredSHA256: strings.Repeat("b", 64),
+		}},
+	})
+	if closeErr := j.Close(); err != nil || closeErr != nil {
+		t.Fatalf("create recoverable intent: err=%v close=%v", err, closeErr)
+	}
+
+	settled, err = publicationJournalSettled(dataRoot, projectID, "scan-published")
+	if err != nil || settled {
+		t.Fatalf("recoverable journal settled=%t err=%v", settled, err)
+	}
+}
 
 func TestBuildProjectionAccountingAuthenticatesUsageAndBuildsStableSessionChain(t *testing.T) {
 	projectID := "project-accounting"
