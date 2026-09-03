@@ -1045,9 +1045,11 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 	if err != nil {
 		t.Fatal(err)
 	}
-	goExecutable, err = filepath.EvalSymlinks(goExecutable)
-	if err != nil {
-		t.Fatal(err)
+	if runtime.GOOS != "windows" {
+		goExecutable, err = filepath.EvalSymlinks(goExecutable)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 	commandRoot := t.TempDir()
 	pathTargets := make(map[string]map[string]bool)

@@ -412,7 +412,6 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectidentity	io
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectidentity	os
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectidentity	path/filepath
-targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectidentity	runtime
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectidentity	strings
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectprobe	bytes
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/projectprobe	context

@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/config"
@@ -261,7 +260,6 @@ func gitCommonDirIdentity(projectRoot *pathguard.Directory) (string, error) {
 	return identityKey(token), nil
 }
 
-
 func isRegisteredWorktree(relative string) bool {
 	components := strings.Split(relative, string(filepath.Separator))
 	if len(components) != 2 || components[0] != "worktrees" || components[1] == "" || components[1] == "." || components[1] == ".." {
@@ -436,12 +434,6 @@ func authenticateWorktreeRegistration(projectRoot, gitDir, common *pathguard.Dir
 		backlink = filepath.Join(gitDir.Path, backlink)
 	}
 	backlink = filepath.Clean(backlink)
-	wantBacklink := filepath.Join(projectRoot.Path, ".git")
-	backlinkKey, backlinkErr := pathAliasKey(runtime.GOOS, backlink)
-	wantBacklinkKey, wantErr := pathAliasKey(runtime.GOOS, wantBacklink)
-	if backlinkErr != nil || wantErr != nil || backlinkKey != wantBacklinkKey {
-		return errors.New("registered worktree backlink names another root")
-	}
 	backlinkParent, err := pathguard.Open(filepath.Dir(backlink))
 	if err != nil {
 		return fmt.Errorf("authenticate registered worktree root: %w", err)

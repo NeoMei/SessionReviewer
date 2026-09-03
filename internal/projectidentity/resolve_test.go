@@ -35,14 +35,6 @@ func TestResolveKeepsProjectIDAcrossVerifiedWorktreeAndMove(t *testing.T) {
 	worktree := filepath.Join(parent, "linked")
 	runGitFixture(t, mainRoot, "worktree", "add", "-q", "-b", "linked-branch", worktree)
 	worktreeBinding, err := Resolve(mapping, worktree, runtime.GOOS)
-	if err != nil {
-		directory, openErr := pathguard.Open(worktree)
-		if openErr == nil {
-			_, cause := gitCommonDirIdentity(directory)
-			_ = directory.Close()
-			t.Logf("worktree authentication cause: %v", cause)
-		}
-	}
 	if err != nil || worktreeBinding.ProjectID != "project-a" || worktreeBinding.CommonDirIdentity != mainBinding.CommonDirIdentity || !worktreeBinding.NewAuthentication {
 		t.Fatalf("worktree binding=%#v err=%v", worktreeBinding, err)
 	}
@@ -187,12 +179,6 @@ func TestReauthenticateDetectsWorktreeGitdirRedirection(t *testing.T) {
 	}
 	binding, err := Resolve(config.ProjectMapping{ID: "project-a", Root: root}, root, runtime.GOOS)
 	if err != nil {
-		directory, openErr := pathguard.Open(root)
-		if openErr == nil {
-			_, cause := gitCommonDirIdentity(directory)
-			_ = directory.Close()
-			t.Fatalf("%v (worktree authentication cause: %v)", err, cause)
-		}
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, ".git"), []byte("gitdir: "+secondGitDir+"\n"), 0o600); err != nil {

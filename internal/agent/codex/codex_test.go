@@ -722,7 +722,7 @@ func TestGenerateProposalTimesOutAndKillsIgnoredProcessTree(t *testing.T) {
 	// The deadline must stay comfortably above scheduler jitter on loaded
 	// machines: the fake agent records the ignored child's PID as its first
 	// action, and a kill that wins that race leaves no PID to assert on.
-	request.Deadline = time.Now().Add(200 * time.Millisecond)
+	request.Deadline = time.Now().Add(2 * time.Second)
 	result, err := adapter.GenerateProposal(context.Background(), request)
 	if !reflect.DeepEqual(result, agent.Result{}) {
 		t.Fatalf("timeout returned result: %+v", result)
