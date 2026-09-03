@@ -22,8 +22,9 @@ type Result struct {
 	Prepared          bool   `json:"prepared"`
 }
 
-// Progress is a bounded extraction snapshot. SourceSessions is fixed after
-// discovery; terminal counts increase as each frozen source is materialized.
+// Progress is a bounded extraction snapshot. SourceSessions remains zero while
+// global provider candidates are decoded, then becomes the fixed count of
+// authenticated target-project sources before they are materialized.
 type Progress struct {
 	SourceSessions   int
 	TerminalSessions int

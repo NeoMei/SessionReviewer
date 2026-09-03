@@ -436,6 +436,8 @@ func TestRunReportsExtractionCoverageAndPropagatesProgressFailure(t *testing.T) 
 	harness := newScanHarness(t)
 	harness.addSource(1, memory.Indexed, scanTestProject)
 	harness.addSource(2, memory.Unsupported, scanTestProject)
+	foreign := harness.addSource(3, memory.Indexed, scanTestForeign)
+	foreign.observations = nil
 	var progress []Progress
 	harness.options.ProgressObserver = func(value Progress) error {
 		progress = append(progress, value)
@@ -445,8 +447,11 @@ func TestRunReportsExtractionCoverageAndPropagatesProgressFailure(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(progress) < 3 || progress[0].SourceSessions != 2 || progress[0].TerminalSessions != 0 {
-		t.Fatalf("discovery coverage was not reported before extraction: %+v", progress)
+	if len(progress) < 4 || progress[0].SourceSessions != 0 || progress[0].TerminalSessions != 0 {
+		t.Fatalf("unassociated discovery candidates leaked into project progress: %+v", progress)
+	}
+	if progress[1].SourceSessions != 2 || progress[1].TerminalSessions != 0 {
+		t.Fatalf("authenticated project coverage was not reported before materialization: %+v", progress)
 	}
 	last := progress[len(progress)-1]
 	if last.SourceSessions != result.SourceSessions || last.TerminalSessions != 2 || last.IndexedSessions != 1 || last.IssueSessions != 1 {

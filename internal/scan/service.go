@@ -150,8 +150,10 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	if err != nil {
 		return result, err
 	}
-	sourceCount := len(tasks) + len(issueSources)
-	if err := reportProgress(options, Progress{SourceSessions: sourceCount}); err != nil {
+	// Discovery covers every provider candidate. Project association is only
+	// authenticated after decode, so do not expose that global candidate count
+	// as the target project's Session total.
+	if err := reportProgress(options, Progress{}); err != nil {
 		return result, err
 	}
 	defer abandonFrozenTasks(options.Adapter, tasks)
@@ -177,6 +179,10 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	}
 	if len(terminals) == 0 {
 		return result, errors.New("no authenticated target-project source sessions reached a terminal state")
+	}
+	projectSourceCount := len(terminals)
+	if err := reportProgress(options, Progress{SourceSessions: projectSourceCount}); err != nil {
+		return result, err
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -285,7 +291,7 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		usage = append(usage, memory.AssociatedUsage{Provider: view.Provider, SessionID: view.SessionID, UsageRecordDigest: view.UsageRecordDigest, Shared: terminal.shared})
 		incrementResult(&result, view.TerminalState, terminal.issue)
 		if err := reportProgress(options, Progress{
-			SourceSessions: sourceCount, TerminalSessions: result.TerminalSessions,
+			SourceSessions: projectSourceCount, TerminalSessions: result.TerminalSessions,
 			IndexedSessions: result.IndexedSessions, IssueSessions: result.IssueSessions,
 		}); err != nil {
 			return result, err
