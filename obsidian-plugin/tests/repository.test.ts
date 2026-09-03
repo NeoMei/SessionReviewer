@@ -55,6 +55,15 @@ async function configuredVault(): Promise<{ vault: FakeVault; root: string }> {
 }
 
 describe("project repository", () => {
+  it("discovers valid project files before the metadata cache is warm", async () => {
+    const { vault, root } = await configuredVault();
+    vault.frontmatter.clear();
+
+    const projects = await new ProjectRepository(vault).discover();
+
+    expect(projects).toEqual([{ projectId: "project-0123456789abcdef", root, name: "SessionReviewer v2" }]);
+  });
+
   it("discovers project_review files and keeps the last valid snapshot after corruption", async () => {
     const { vault, root } = await configuredVault();
     const repo = new ProjectRepository(vault);

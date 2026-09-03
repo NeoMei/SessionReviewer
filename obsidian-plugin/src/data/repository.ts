@@ -54,17 +54,13 @@ export class ProjectRepository {
     const markdownPaths = new Set(markdownFiles.map((file) => file.path));
     for (const file of markdownFiles) {
       if (file.basename !== "项目回顾") continue;
-      const frontmatter = this.vault.getFrontmatter(file.path);
-      if (frontmatter?.entity_type !== "project_review" || (frontmatter.schema_version !== 2 && frontmatter.schema_version !== 3) || typeof frontmatter.project_id !== "string") continue;
-      const projectId = frontmatter.project_id;
-      if (!validProjectId(projectId)) continue;
       const root = parent(file.path);
       const historyPath = `${root}/项目历史.md`;
       if (!markdownPaths.has(historyPath)) continue;
       try {
         const review = parseReview(await this.vault.read(file.path));
-        if (review.projectId !== projectId) continue;
-        descriptors.push({ projectId, root, name: review.name });
+        if (!validProjectId(review.projectId)) continue;
+        descriptors.push({ projectId: review.projectId, root, name: review.name });
       } catch {
         // Discovery never upgrades malformed candidates into selectable projects.
       }
