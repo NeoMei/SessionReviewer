@@ -91,7 +91,12 @@ function isCompatibleWriter(version: string): boolean {
 }
 
 function parseHumanPatch(value: unknown, path: string): HumanPatchWire {
-  const row = object(value, path, ["entity_id", "field", "operation", "value", "values", "base_generated_hash"]);
+  const row = object(
+    value,
+    path,
+    ["entity_id", "field", "operation", "value", "values", "base_generated_hash"],
+    ["entity_id", "field", "operation", "base_generated_hash"]
+  );
   const op = string(row.operation, `${path}.operation`);
   if (op !== "set" && op !== "suppress" && op !== "restore_default") throw new Error(`${path}.operation is invalid`);
   return {
@@ -105,7 +110,12 @@ function parseHumanPatch(value: unknown, path: string): HumanPatchWire {
 }
 
 function parseGeneratedBaseline(value: unknown, path: string, generationId: string): GeneratedBaselineWire {
-  const row = object(value, path, ["generation_id", "entity_id", "field", "kind", "value", "values", "generated_hash"]);
+  const row = object(
+    value,
+    path,
+    ["generation_id", "entity_id", "field", "kind", "value", "values", "generated_hash"],
+    ["generation_id", "entity_id", "field", "kind", "generated_hash"]
+  );
   const gen = nonempty(row.generation_id, `${path}.generation_id`);
   if (gen !== generationId) throw new Error(`${path}.generation_id does not match ledger generation ID`);
   const kind = string(row.kind, `${path}.kind`);

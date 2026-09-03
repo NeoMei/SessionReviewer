@@ -49,6 +49,33 @@ describe("review v2 machine contract", () => {
     });
   });
 
+  it("accepts omitted scalar values and valueless patch operations from the Go wire format", async () => {
+    const valid = JSON.parse(await fixture("ledger.valid.json")) as {
+      generation_id: string;
+      human_patches: Array<Record<string, unknown>>;
+      generated_baselines: Array<Record<string, unknown>>;
+    };
+    valid.generated_baselines = [{
+      generation_id: valid.generation_id,
+      entity_id: "project-overview",
+      field: "goal",
+      kind: "scalar",
+      generated_hash: "a".repeat(64)
+    }];
+    valid.human_patches = [{
+      entity_id: "project-overview",
+      field: "goal",
+      operation: "restore_default",
+      base_generated_hash: "b".repeat(64)
+    }];
+
+    const ledger = parseLedger(JSON.stringify(valid));
+
+    expect(ledger.generatedBaselines[0]?.value).toBeUndefined();
+    expect(ledger.humanPatches[0]?.value).toBeUndefined();
+    expect(ledger.humanPatches[0]?.values).toBeUndefined();
+  });
+
   it("preserves token usage and marks pricing incomplete for the host unknown-pricing sentinel", async () => {
 	const valid = JSON.parse(await fixture("ledger.valid.json")) as {
 		accounting: { total_cost_usd: number; models: Array<{ total_cost_usd: number; cost_share_pct: number }> };
