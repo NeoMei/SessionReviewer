@@ -2,102 +2,81 @@
 
 ## 结论
 
-**SUPERSEDED BY CONTRACT EXTENSION / GATE 0 REOPENED**
+**LOCAL COMPLETE / WINDOWS CI PENDING**
 
-以下记录仍证明原八组合同在当前 macOS 工作树通过，但 2026-09-04 后续确认的 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图和演进闭环扩展尚未包含在该矩阵中。Gate 0 因此重新打开；必须完成 `2026-09-04-obsidian-context-gate-0-contracts.md` Task 7 并重跑完整门禁。由于审计提交尚未推送且没有 Pull Request，`.github/workflows/ci.yml` 中 `windows-x64` / `windows-latest` 原生执行证据也仍不存在。
+本地 Gate 0 已在实现提交 `e3ff49beb6cb28d4aacb73a5ba4f45c43289b112` 上重新通过。合同矩阵现已覆盖 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图、演进闭环和通用 Agent annotation。该提交未推送，也没有原生 Windows 运行，因此 Windows CI 证据仍为 PENDING。
 
 ## 审计对象
 
 - 分支：`codex/obsidian-context-v4`
-- 实现提交：`3e8337e98a21b7cdc7a2fed0152008f4f79db87d`
-- 合并基准：`ea5b1ba950cf03ecfa26353873f10c9aeeb1ffa4` (`origin/main`, tag `0.3.5`)
-- 开始审计时 `git status --short`：无输出，工作树干净
-- 本地环境：`Darwin arm64`，`go1.26.5 darwin/arm64`，Node `v24.18.0`，npm `11.16.0`
+- 任务基准：`6421a9aad6d7a65bbaef2fa71e4d7e7be3431db6`
+- 实现提交：`e3ff49beb6cb28d4aacb73a5ba4f45c43289b112`
+- 环境：`Darwin arm64`，`go1.26.5 darwin/arm64`，Node `v24.18.0`，npm `11.16.0`
+- 实现提交统计：43 files changed，2,977 insertions，80 deletions
+- 未纳入任务提交：既有未跟踪目录 `.superpowers/brainstorm/`
+
+## TDD 边界
+
+规定 RED 命令：
+
+```text
+go test ./internal/conversationchain ./internal/problemmap ./internal/reviewv4 -count=1 && (cd obsidian-plugin && npx vitest run tests/contracts-v4.test.ts)
+```
+
+结果：FAIL（预期）。Go 编译器报告 `conversationchain.Parse/Render/Validate/Document/SourceRef`、`problemmap.ParseCandidates/ValidateCandidates/RenderCandidates/CandidateStore`、`reviewv4.ProblemNode` 和新增 v4 presentation 字段未定义；TypeScript 分支因 `&&` 未运行。
+
+相同命令在实现后 PASS：`internal/conversationchain` 0.428s、`internal/problemmap` 0.555s、`internal/reviewv4` 0.310s；Vitest 1/1 file、57/57 tests。随后增加 canonical digest tamper mirror，最终聚焦合同文件为 58/58 tests。
 
 ## 完整本地门禁
 
+按串行顺序执行：
+
 | 命令 | 结果 | 证据 |
 |---|---|---|
-| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | `go list ./...` 共 55 个 package；最慢的可见 package 为 `internal/scan` 130.429s，其次为 `internal/reviewjob` 72.177s，均低于每个测试二进制的 5 分钟超时；`test/zerotoken` 53.044s 收尾 |
+| `gofmt -w internal/conversationchain internal/problemmap internal/reviewv4 internal/cli` | PASS | 无输出 |
+| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | 57 个 package；较慢 package 包括 `internal/reviewjob` 89.595s、`internal/scan` 79.903s、`test/zerotoken` 62.772s，均低于每个测试二进制 5 分钟超时 |
 | `go vet ./...` | PASS | exit 0，无输出 |
 | `go mod tidy -diff` | PASS | exit 0，无 diff |
+| `cd obsidian-plugin && npm run check` | PASS | lint；17/17 test files、122/122 tests；TypeScript typecheck；production bundle |
 | `git diff --check` | PASS | exit 0，无输出 |
-| `cd obsidian-plugin && npm run check` | PASS | lint 通过；17/17 test files、111/111 tests；TypeScript typecheck 和 production bundle 通过 |
 
-本地完整 Go 门禁使用串行 `-p 1`，与 Gate 0 ledger 中已记录的 macOS 文件系统 I/O 争用裁决一致。CI 仍保持原生并行命令。
+独立 ordinary-flow 复核 `go test ./test/zerotoken -count=1 -run 'TestGate(A|B)' -v` PASS：Gate A 154/154 terminal、151 indexed、zero model tokens；Gate B 端到端发布与幂等测试通过。新增 deterministic candidate fixture 明确要求 `agent_run_id=null`，本任务没有启动或实现 Agent 执行。
 
-## 八组 fixture 与稳定拒绝码
+## 十组合同比对
 
-架构级 schema fixture 门禁：
+`go test ./internal/memory -run TestV4ContractFixtures -count=1 -v` 通过 10/10 命名子测试。Go 与 TypeScript 均使用封闭的五类拒绝码：`wire_input_overflow`、`wire_invalid_utf8`、`wire_json_invalid`、`wire_shape_invalid`、`wire_contract_invalid`。
 
-```text
-go test ./internal/memory -run '^TestV4ContractFixtures$' -count=1 -v
-```
+| 合同 | invalid fixture 预期码 |
+|---|---|
+| review-presentation-v4 | `wire_shape_invalid` |
+| machine-ledger-v4 | `wire_contract_invalid` |
+| session-index-v1 | `wire_contract_invalid` |
+| session-summary-v1 | `wire_shape_invalid` |
+| session-event-page-v1 | `wire_contract_invalid` |
+| agent-annotation-v1 | `wire_shape_invalid` |
+| pricing-snapshot-v1 | `wire_contract_invalid` |
+| pricing-supplement-v1 | `wire_contract_invalid` |
+| conversation-chain-v1 | `wire_contract_invalid` |
+| problem-map-candidate-v1 | `wire_contract_invalid` |
 
-结果：PASS；1 个父测试和 8/8 个命名子测试通过，每组 valid fixture 被接受，invalid fixture 被拒绝。
+独立遍历 `testdata/contracts/v4/*.json` 并对同名插件 fixture 执行 `cmp -s`，结果为 **20/20 Go/plugin fixture files byte-identical**。
 
-Go 生产解析器稳定码矩阵门禁：
+## 扩展合同与迁移边界
 
-```text
-go test ./internal/reviewv4 ./internal/sessionindex ./internal/inspect ./internal/annotation ./internal/pricing -run 'Test(FrozenInvalidReviewAndLedgerFixturesAreRejected|ParseRejectsFrozenInvalidFixture|ParsersRejectFrozenInvalidFixtures|ParseAndRenderPricingFixtureParity|PricingSupplementFixtureParityAndNullMeansUnknown)$' -count=1 -v
-```
-
-结果：PASS；8/8 invalid fixtures 通过生产解析入口返回预期的机器可比较错误码。
-
-TypeScript 精确稳定码矩阵：
-
-```text
-cd obsidian-plugin
-npx vitest run tests/contracts-v4.test.ts -t 'rejects the frozen .* invalid fixture with its Go-compatible code'
-```
-
-结果：PASS；8/8 矩阵测试通过，39 个非矩阵测试按过滤器跳过。同一文件的完整命令 `npx vitest run tests/contracts-v4.test.ts` 也通过 47/47。
-
-| 合同 | valid fixture | invalid fixture | Go / TypeScript 预期拒绝码 |
-|---|---|---|---|
-| review-presentation-v4 | `review-presentation-v4.valid.json` | `review-presentation-v4.invalid.json` | `wire_shape_invalid` |
-| machine-ledger-v4 | `machine-ledger-v4.valid.json` | `machine-ledger-v4.invalid.json` | `wire_contract_invalid` |
-| session-index-v1 | `session-index-v1.valid.json` | `session-index-v1.invalid.json` | `wire_contract_invalid` |
-| session-summary-v1 | `session-summary-v1.valid.json` | `session-summary-v1.invalid.json` | `wire_shape_invalid` |
-| session-event-page-v1 | `session-event-page-v1.valid.json` | `session-event-page-v1.invalid.json` | `wire_contract_invalid` |
-| agent-annotation-v1 | `agent-annotation-v1.valid.json` | `agent-annotation-v1.invalid.json` | `wire_shape_invalid` |
-| pricing-snapshot-v1 | `pricing-snapshot-v1.valid.json` | `pricing-snapshot-v1.invalid.json` | `wire_contract_invalid` |
-| pricing-supplement-v1 | `pricing-supplement-v1.valid.json` | `pricing-supplement-v1.invalid.json` | `wire_contract_invalid` |
-
-拒绝码属于封闭的五类合同：`wire_input_overflow`、`wire_invalid_utf8`、`wire_json_invalid`、`wire_shape_invalid`、`wire_contract_invalid`。Go 和 TypeScript 都保留 cause 链，调用方无需比较可变的人类错误文案。
-
-## Fixture 字节一致性
-
-独立遍历 `testdata/contracts/v4/*.json`，对同名 `obsidian-plugin/tests/fixtures/v4/*.json` 执行 `cmp`。结果为 16/16 字节完全一致。此门禁同时覆盖上表 8 个 valid 和 8 个 invalid fixture。
-
-## 禁止占位符检查
-
-按计划原样执行：
-
-```bash
-rg -n $'\x54\x42\x44|\x54\x4f\x44\x4f|\x46\x49\x58\x4d\x45|\x69\x6d\x70\x6c\x65\x6d\x65\x6e\x74\x20\x6c\x61\x74\x65\x72|\x66\x69\x6c\x6c\x20\x69\x6e\x20\x64\x65\x74\x61\x69\x6c\x73|\x68\x61\x6e\x64\x6c\x65\x20\x65\x64\x67\x65\x20\x63\x61\x73\x65\x73|\x73\x69\x6d\x69\x6c\x61\x72\x20\x74\x6f' schemas internal/reviewv4 internal/sessionindex internal/inspect internal/annotation internal/pricing obsidian-plugin/src/contracts/review-v4.ts
-```
-
-结果：无输出，`rg` exit 1，表示要求的路径内无命中。
+- 会话身份始终为 `(provider, session_id)`；conversation chain 只允许 user/assistant 可见 excerpt，4,096 UTF-8 bytes 上限，并绑定认证 source refs。
+- 两个新增自摘要合同只省略各自的 `digest` 字段计算 canonical digest；valid fixtures 使用非零 digest，tamper tests 同时覆盖 Go/TypeScript。
+- 正式问题图只存在于 `review-presentation-v4`；验证 parent/relation 存在、无环、每组 sibling order 唯一稳定、related/alternate 最多两个。
+- 缺失结论必须为空文本并携带 typed reason；milestone annotation 使用通用 `confirmed_entity_id`、source-turn dependency，禁止 decision-only fields。
+- v4/partial 兼容 fixture 仅增加空问题图、空 chain dependencies 和 neutral closed-loop 默认；对应 review hash 与 ledger self hash 已机械重算。v3 语义未改。
+- 64 KiB per-source ceiling 仅冻结为 CLI 常量与显式 truncation coverage 合同；未实现 SourceAdapter 读取行为。
 
 ## Windows 证据状态
 
-`.github/workflows/ci.yml` 的 `test` job 包含：
-
-```text
-name: windows-x64
-os: windows-latest
-```
-
-该原生 job 会执行 Obsidian 门禁、`go test ./...`、Windows 替换压测、race/vet、PowerShell 可重现发行包与插件打包检查。当前实现提交未推送且无 PR，因此状态为 **PENDING**。
-
-补充交叉编译：使用 `CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go test -c` 分别编译 `memory`、`reviewv4`、`sessionindex`、`inspect`、`annotation`、`pricing`、`migrationv4`、`publication`、`syncproject`和 `cli`，10/10 通过。该结果只证明 Windows amd64 可编译，不是 Windows 原生执行证据。
+`.github/workflows/ci.yml` 中的 `windows-x64` / `windows-latest` 原生 job 尚未针对实现提交运行。没有 push、PR 或原生 Windows 结果，因此 Gate 0 状态不得升级为跨平台完成。
 
 ## 明确不属于 Gate 0 的后续工作
 
-- Session index 累积发布与受限查询；
-- Obsidian “全部 Sessions”浏览器、虚拟列表与真实 Vault 验收；
-- 人工决策/约定、AI 候选提炼、CAS 确认与发布；
-- ModelPriceWatch 缓存、匹配、不可变价格快照、补价和用量卡片。
-
-上述四组仍需按各自实施计划完成，不因本地 Gate 0 验收而视为已实现。
+- conversation-chain segmentation 或 SourceAdapter 读取；
+- problem placement service/store；
+- Agent 执行；
+- Obsidian UI 和真实 Vault 验收。
