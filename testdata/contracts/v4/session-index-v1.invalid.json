@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "minimum_reader_version": "0.4.0",
+  "minimum_writer_version": "0.4.0",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "project_id": "project-p",
+  "generation_id": "generation-1",
+  "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "generated_at": "2026-09-04T00:00:00Z",
+  "sort_version": "started-at-desc-null-last-provider-session-v1",
+  "coverage": { "total": 2, "complete": 1, "partial": 0, "error": 0, "unprocessed": 0, "source_available": 1, "source_unavailable": 0, "started_at_known": 1, "ended_at_known": 1, "usage_known": 0 },
+  "sessions": []
+}

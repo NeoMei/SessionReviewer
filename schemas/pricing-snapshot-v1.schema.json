@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionreviewer.local/schemas/pricing-snapshot-v1.schema.json",
+  "title": "SessionReviewer immutable pricing snapshot v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "minimum_reader_version", "snapshot_id", "project_id", "provider", "session_id", "usage_record_digest", "billing_host", "billed_model_id", "billing_mode", "region", "priced_at", "created_at", "status", "modelpricewatch_listing_id", "source_kind", "source_url", "detail_url", "source_last_updated", "retrieved_at", "promo", "promo_until", "rates", "billable_quantities", "line_costs_usd", "missing_billing_dimensions", "known_subtotal_usd", "total_cost_usd", "pricing_complete", "supersedes_snapshot_id", "audit_reason"],
+  "properties": {
+    "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" },
+    "snapshot_id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" },
+    "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
+    "usage_record_digest": { "$ref": "#/$defs/digest" }, "billing_host": { "$ref": "#/$defs/text" },
+    "billed_model_id": { "$ref": "#/$defs/text" }, "billing_mode": { "$ref": "#/$defs/text" },
+    "region": { "type": ["string", "null"], "maxLength": 128 },
+    "priced_at": { "$ref": "#/$defs/timestamp" }, "created_at": { "$ref": "#/$defs/timestamp" },
+    "status": { "enum": ["pending", "current", "promotion", "stale_estimate", "manual_supplement", "ambiguous", "legacy_unverified", "superseded"] },
+    "modelpricewatch_listing_id": { "type": ["string", "null"], "maxLength": 256 },
+    "source_kind": { "enum": ["modelpricewatch", "official", "manual", "unresolved"] },
+    "source_url": { "type": ["string", "null"], "maxLength": 2048 }, "detail_url": { "type": ["string", "null"], "maxLength": 2048 },
+    "source_last_updated": { "$ref": "#/$defs/nullable_timestamp" }, "retrieved_at": { "$ref": "#/$defs/nullable_timestamp" },
+    "promo": { "type": "boolean" }, "promo_until": { "$ref": "#/$defs/nullable_timestamp" },
+    "rates": { "$ref": "#/$defs/rates" }, "billable_quantities": { "$ref": "#/$defs/quantities" }, "line_costs_usd": { "$ref": "#/$defs/line_costs" },
+    "missing_billing_dimensions": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/text" } },
+    "known_subtotal_usd": { "type": "number", "minimum": 0 }, "total_cost_usd": { "type": ["number", "null"], "minimum": 0 },
+    "pricing_complete": { "type": "boolean" }, "supersedes_snapshot_id": { "type": ["string", "null"], "maxLength": 256 },
+    "audit_reason": { "$ref": "#/$defs/text" }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "nullable_timestamp": { "type": ["string", "null"], "maxLength": 128 },
+    "nullable_money": { "type": ["number", "null"], "minimum": 0 },
+    "rates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cached_input", "cache_write_input", "output", "reasoning_output"],
+      "properties": { "input": { "$ref": "#/$defs/nullable_money" }, "cached_input": { "$ref": "#/$defs/nullable_money" }, "cache_write_input": { "$ref": "#/$defs/nullable_money" }, "output": { "$ref": "#/$defs/nullable_money" }, "reasoning_output": { "$ref": "#/$defs/nullable_money" } }
+    },
+    "quantities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cached_input", "cache_write_input", "output", "reasoning_output"],
+      "properties": { "input": { "$ref": "#/$defs/nonnegative" }, "cached_input": { "$ref": "#/$defs/nonnegative" }, "cache_write_input": { "$ref": "#/$defs/nonnegative" }, "output": { "$ref": "#/$defs/nonnegative" }, "reasoning_output": { "$ref": "#/$defs/nonnegative" } }
+    },
+    "line_costs": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input", "cached_input", "cache_write_input", "output", "reasoning_output"],
+      "properties": { "input": { "$ref": "#/$defs/nullable_money" }, "cached_input": { "$ref": "#/$defs/nullable_money" }, "cache_write_input": { "$ref": "#/$defs/nullable_money" }, "output": { "$ref": "#/$defs/nullable_money" }, "reasoning_output": { "$ref": "#/$defs/nullable_money" } }
+    },
+    "nonnegative": { "type": "integer", "minimum": 0 }
+  }
+}

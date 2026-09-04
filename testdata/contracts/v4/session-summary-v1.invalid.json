@@ -1,0 +1,5 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "project_id": "project-p", "provider": "opencode", "session_id": "session-1", "generation_id": "generation-1", "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "phase_boundaries": [], "key_operations": [], "verification_results": [], "errors": [], "unresolved_questions": [],
+  "rules": { "rule_id": "summary-rules", "rule_version": "v1", "dependency_digests": [] }, "coverage": { "total": 0, "shown": 0, "omitted": 0 }, "unknown": true
+}

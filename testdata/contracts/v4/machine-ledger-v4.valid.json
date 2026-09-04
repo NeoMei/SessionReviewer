@@ -1,0 +1,5 @@
+{
+  "schema_version": 4, "minimum_reader_version": "0.4.0", "minimum_writer_version": "0.4.0", "project_id": "project-p", "generation_id": "generation-1", "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "accepted_revision": 0, "review_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "history_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "accounting": { "total_duration_ms": 0, "total_tokens": 0, "total_cost_usd": 0, "models": [] }, "sessions": [], "human_patches": [], "orphan_patches": [], "generated_baselines": [], "pricing_snapshots": [], "current_pricing_snapshot_ids": [],
+  "sync_hashes": { "review_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "history_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "ledger_sha256": "0000000000000000000000000000000000000000000000000000000000000000", "session_index_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
+}
