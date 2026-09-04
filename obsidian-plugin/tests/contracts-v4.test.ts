@@ -1,0 +1,284 @@
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+import {
+  assertSnapshotBindings,
+  parseAgentAnnotationV1,
+  parseCandidateListV1,
+  parseMachineLedgerV4,
+  parsePricingSnapshotV1,
+  parsePricingSupplementV1,
+  parseReviewPresentationV4,
+  parseSessionEventPageV1,
+  parseSessionIndexV1,
+  parseSessionSummaryV1
+} from "../src/data/contracts-v4";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const pluginFixture = (name: string): Promise<string> =>
+  readFile(resolve(here, "fixtures/v4", name), "utf8");
+const sharedFixture = (name: string): Promise<Buffer> =>
+  readFile(resolve(here, "../../testdata/contracts/v4", name));
+
+type JsonObject = Record<string, unknown>;
+type Parser = (source: string) => unknown;
+
+const contracts: ReadonlyArray<Readonly<{ name: string; parser: Parser }>> = [
+  { name: "review-presentation-v4", parser: parseReviewPresentationV4 },
+  { name: "machine-ledger-v4", parser: parseMachineLedgerV4 },
+  { name: "session-index-v1", parser: parseSessionIndexV1 },
+  { name: "session-summary-v1", parser: parseSessionSummaryV1 },
+  { name: "session-event-page-v1", parser: parseSessionEventPageV1 },
+  { name: "agent-annotation-v1", parser: parseAgentAnnotationV1 },
+  { name: "pricing-snapshot-v1", parser: parsePricingSnapshotV1 },
+  { name: "pricing-supplement-v1", parser: parsePricingSupplementV1 }
+];
+
+async function fixtureObject(name: string): Promise<JsonObject> {
+  return JSON.parse(await pluginFixture(name)) as JsonObject;
+}
+
+function clone<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function decision(id: string, supersedes: string[], status = "active"): JsonObject {
+  return {
+    id,
+    kind: "decision",
+    occurred_at: "2026-09-04T00:00:00Z",
+    title: id,
+    rationale: "reason",
+    impact: "impact",
+    status,
+    reevaluate_when: "later",
+    supersedes,
+    milestone_ids: [],
+    session_refs: [],
+    provenance: "human_created",
+    pinned: false,
+    revision: 1
+  };
+}
+
+describe("frozen v4 contract fixture parity", () => {
+  for (const contract of contracts) {
+    it(`accepts the frozen ${contract.name} valid fixture through its production parser`, async () => {
+      const source = await pluginFixture(`${contract.name}.valid.json`);
+      expect(() => contract.parser(source)).not.toThrow();
+    });
+
+    it(`rejects the frozen ${contract.name} invalid fixture through its production parser`, async () => {
+      const source = await pluginFixture(`${contract.name}.invalid.json`);
+      expect(() => contract.parser(source)).toThrow();
+    });
+
+    it(`keeps both ${contract.name} fixtures byte-identical to the shared Go fixtures`, async () => {
+      for (const suffix of ["valid", "invalid"] as const) {
+        const name = `${contract.name}.${suffix}.json`;
+        await expect(readFile(resolve(here, "fixtures/v4", name))).resolves.toEqual(await sharedFixture(name));
+      }
+    });
+  }
+
+  it("exposes CandidateListV1 as the agent-annotation-v1 typed view", async () => {
+    const source = await pluginFixture("agent-annotation-v1.valid.json");
+    expect(parseCandidateListV1(source)).toEqual(parseAgentAnnotationV1(source));
+  });
+});
+
+describe("strict JSON boundary", () => {
+  it("rejects duplicate keys at nested object depth", () => {
+    const source = '{"schema_version":1,"minimum_reader_version":"0.4.0","project_id":"p","annotations":[],"extraction_runs":[{"run_id":"a","run_id":"b"}]}';
+    expect(() => parseAgentAnnotationV1(source)).toThrow(/duplicate/i);
+  });
+
+  it("rejects case aliases, unknown keys, and missing keys recursively", async () => {
+    const valid = await fixtureObject("review-presentation-v4.valid.json");
+    const alias = clone(valid) as { current_state: JsonObject };
+    alias.current_state.Goal = "alias";
+    expect(() => parseReviewPresentationV4(JSON.stringify(alias))).toThrow(/unknown|exact/i);
+
+    const unknown = clone(valid) as { current_state: JsonObject };
+    unknown.current_state.unknown = true;
+    expect(() => parseReviewPresentationV4(JSON.stringify(unknown))).toThrow(/unknown|exact/i);
+
+    const missing = clone(valid) as { current_state: JsonObject };
+    delete missing.current_state.goal;
+    expect(() => parseReviewPresentationV4(JSON.stringify(missing))).toThrow(/required|missing/i);
+  });
+
+  it("rejects literal and JSON-escaped unpaired surrogates", async () => {
+    const source = await pluginFixture("agent-annotation-v1.valid.json");
+    const literal = source.replace("project-p", "\ud800");
+    expect(() => parseAgentAnnotationV1(literal)).toThrow(/surrogate|unicode/i);
+    const escaped = source.replace("project-p", "\\ud800");
+    expect(() => parseAgentAnnotationV1(escaped)).toThrow(/surrogate|unicode/i);
+  });
+
+  it("rejects input above the 64 MiB UTF-8 boundary before decoding", () => {
+    const oversized = `"${"a".repeat((64 << 20) + 1)}"`;
+    expect(() => parseAgentAnnotationV1(oversized)).toThrow(/67108864|64 MiB|byte/i);
+  });
+
+  it("rejects unsafe integers", async () => {
+    const valid = await fixtureObject("review-presentation-v4.valid.json");
+    valid.revision = Number.MAX_SAFE_INTEGER + 1;
+    expect(() => parseReviewPresentationV4(JSON.stringify(valid))).toThrow(/safe integer/i);
+  });
+});
+
+describe("session contracts", () => {
+  it("rejects counter addition overflow without relying on a wrapped sum", async () => {
+    const summary = await fixtureObject("session-summary-v1.valid.json") as { coverage: JsonObject };
+    summary.coverage.seen = 0;
+    summary.coverage.indexed = Number.MAX_SAFE_INTEGER;
+    summary.coverage.collapsed = 1;
+    expect(() => parseSessionSummaryV1(JSON.stringify(summary))).toThrow(/overflow|reconcile/i);
+  });
+
+  it("uses provider plus session_id for uniqueness", async () => {
+    const index = await fixtureObject("session-index-v1.valid.json") as {
+      coverage: JsonObject;
+      sessions: JsonObject[];
+    };
+    index.sessions.push({ ...clone(index.sessions[0]), provider: "codex" });
+    Object.assign(index.coverage, {
+      total: 2,
+      complete: 2,
+      source_available: 2,
+      started_at_known: 2,
+      ended_at_known: 2
+    });
+    expect(() => parseSessionIndexV1(JSON.stringify(index))).not.toThrow();
+
+    index.sessions[1] = clone(index.sessions[0]);
+    expect(() => parseSessionIndexV1(JSON.stringify(index))).toThrow(/duplicate/i);
+  });
+
+  it("rejects mixed project, generation, project digest, and index digest bindings", async () => {
+    const ledger = parseMachineLedgerV4(await pluginFixture("machine-ledger-v4.valid.json"));
+    const index = parseSessionIndexV1(await pluginFixture("session-index-v1.valid.json"));
+    ledger.sync_hashes.session_index_digest = index.digest;
+    expect(() => assertSnapshotBindings(ledger, index)).not.toThrow();
+
+    for (const field of ["project_id", "generation_id", "project_view_digest"] as const) {
+      const changed = clone(index);
+      changed[field] = field === "project_view_digest" ? `sha256:${"9".repeat(64)}` : "other";
+      expect(() => assertSnapshotBindings(ledger, changed)).toThrow(/mismatch|binding/i);
+    }
+    const wrongDigest = clone(index);
+    wrongDigest.digest = `sha256:${"9".repeat(64)}`;
+    expect(() => assertSnapshotBindings(ledger, wrongDigest)).toThrow(/mismatch|binding/i);
+  });
+
+  it("rejects cyclic decision supersession graphs", async () => {
+    const review = await fixtureObject("review-presentation-v4.valid.json") as { decisions: JsonObject[] };
+    review.decisions = [decision("a", ["b"]), decision("b", ["a"])];
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/cycle/i);
+  });
+
+  it("rejects cursors on a zero-total event page", async () => {
+    const page = await fixtureObject("session-event-page-v1.valid.json");
+    page.previous_cursor = "cursor";
+    expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/empty|cursor/i);
+  });
+
+  it("verifies non-zero canonical index digests and ledger self hashes", async () => {
+    const index = await fixtureObject("session-index-v1.valid.json");
+    index.digest = "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565";
+    expect(() => parseSessionIndexV1(JSON.stringify(index))).not.toThrow();
+    index.digest = `sha256:${"9".repeat(64)}`;
+    expect(() => parseSessionIndexV1(JSON.stringify(index))).toThrow(/digest/i);
+
+    const ledger = await fixtureObject("machine-ledger-v4.valid.json") as { sync_hashes: JsonObject };
+    ledger.sync_hashes.ledger_sha256 = "2649fac1e8df09ee7857f3c337bee613d5f48bad3faa3e1e14bf75ef4651b9b7";
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
+    ledger.sync_hashes.ledger_sha256 = "9".repeat(64);
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/digest|hash/i);
+  });
+});
+
+describe("pricing and optional-field semantics", () => {
+  it("distinguishes a complete free price from an unknown price", async () => {
+    const snapshot = await fixtureObject("pricing-snapshot-v1.valid.json") as {
+      rates: JsonObject;
+      line_costs_usd: JsonObject;
+      missing_billing_dimensions: string[];
+      known_subtotal_usd: number;
+      total_cost_usd: number | null;
+      pricing_complete: boolean;
+    };
+    for (const key of ["input", "cached_input", "cache_write_input", "output", "reasoning_output"]) {
+      snapshot.rates[key] = 0;
+      snapshot.line_costs_usd[key] = 0;
+    }
+    snapshot.missing_billing_dimensions = [];
+    snapshot.known_subtotal_usd = 0;
+    snapshot.total_cost_usd = 0;
+    snapshot.pricing_complete = true;
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).not.toThrow();
+
+    snapshot.rates.input = null;
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).toThrow(/complete|unknown|availability/i);
+  });
+
+  it("requires incomplete pricing totals to remain null and report unknown billed dimensions", async () => {
+    const snapshot = await fixtureObject("pricing-snapshot-v1.valid.json") as {
+      rates: JsonObject;
+      line_costs_usd: JsonObject;
+      missing_billing_dimensions: string[];
+      total_cost_usd: number | null;
+    };
+    snapshot.total_cost_usd = 0;
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).toThrow(/incomplete|total/i);
+
+    snapshot.total_cost_usd = null;
+    snapshot.rates.output = null;
+    snapshot.line_costs_usd.output = null;
+    snapshot.missing_billing_dimensions = [];
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).toThrow(/dimension|reported/i);
+  });
+
+  it("derives aggregate completeness from current pricing snapshots only", async () => {
+    const ledger = await fixtureObject("machine-ledger-v4.valid.json") as {
+      accounting: JsonObject;
+      pricing_snapshots: JsonObject[];
+      current_pricing_snapshot_ids: string[];
+    };
+    const complete = clone(ledger.pricing_snapshots[0]);
+    complete.snapshot_id = "snapshot-current";
+    complete.pricing_complete = true;
+    complete.rates = { input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 };
+    complete.line_costs_usd = { input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 };
+    complete.billable_quantities = { input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 };
+    complete.missing_billing_dimensions = [];
+    complete.known_subtotal_usd = 0;
+    complete.total_cost_usd = 0;
+    ledger.pricing_snapshots.push(complete);
+    ledger.current_pricing_snapshot_ids = ["snapshot-current"];
+    ledger.accounting.total_cost_usd = 0;
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
+
+    ledger.current_pricing_snapshot_ids = ["snapshot-1"];
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/aggregate|incomplete|null/i);
+  });
+
+  it("preserves explicit empty optional arrays instead of erasing them", async () => {
+    const review = await fixtureObject("review-presentation-v4.valid.json") as {
+      human_patches: JsonObject[];
+    };
+    review.human_patches = [{
+      entity_id: "entity-1",
+      field: "field-1",
+      operation: "set",
+      values: [],
+      base_generated_hash: "1".repeat(64)
+    }];
+    const parsed = parseReviewPresentationV4(JSON.stringify(review));
+    expect(parsed.human_patches[0]).toHaveProperty("values");
+    expect(parsed.human_patches[0]?.values).toEqual([]);
+    expect(parsed.human_patches[0]).not.toHaveProperty("value");
+  });
+});

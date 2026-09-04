@@ -1,0 +1,4 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "project_id": "project-p", "provider": "claude", "session_id": "session-1", "generation_id": "generation-1", "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "total": 0, "range_start": 0, "range_end": 0, "items": [], "previous_cursor": "cursor", "next_cursor": null, "first_cursor": null, "last_cursor": null,
+  "coverage": { "seen": 0, "indexed": 0, "collapsed": 0, "unprojected": 0, "undecodable": 0, "truncated": 0 }
+}

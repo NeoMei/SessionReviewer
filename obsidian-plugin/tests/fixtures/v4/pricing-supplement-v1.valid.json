@@ -1,0 +1,3 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "project_id": "project-p", "provider": "codex", "session_id": "session-1", "usage_record_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "billing_host": "api.example.test", "billed_model_id": "model-1", "billing_mode": "standard", "billing_rule_version": "rules-v1", "region": null, "effective_from": "2026-09-01T00:00:00Z", "effective_until": null, "rates": { "input": 0, "cached_input": null, "cache_write_input": null, "output": 0, "reasoning_output": null }, "source_url": "https://example.test/pricing", "detail_url": null, "audit_reason": "Public pricing page confirms free route.", "supersedes_snapshot_id": null
+}
