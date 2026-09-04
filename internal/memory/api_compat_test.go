@@ -2,16 +2,17 @@ package memory
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"testing"
+	"unicode/utf8"
 )
-
-import "context"
 
 // These assignments are source-compatibility probes. A variadic parameter is
 // not assignable to the original function type even when ordinary calls still
@@ -83,6 +84,36 @@ func TestV4ContractFixtures(t *testing.T) {
 	}
 }
 
+func TestV4ContractFixtureDecoderRejectsUnsafeBoundaries(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{name: "duplicate keys", body: []byte(`{"schema_version":1,"schema_version":1}`)},
+		{name: "invalid UTF-8", body: []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}},
+		{name: "oversized input", body: bytes.Repeat([]byte{' '}, maxContractInputBytes+1)},
+		{name: "trailing JSON value", body: []byte(`{} {}`)},
+		{name: "trailing garbage", body: []byte(`{} garbage`)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := parseContractJSON(tc.body); err == nil {
+				t.Fatal("unsafe input accepted")
+			}
+		})
+	}
+}
+
+func TestPricingSnapshotCompleteRequiresResolvedAmounts(t *testing.T) {
+	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "pricing-snapshot-v1.schema.json"))
+	fixture := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "pricing-snapshot-v1.valid.json"))
+	value := fixture.(map[string]any)
+	value["pricing_complete"] = true
+	if err := validateContractSchema(schema, value, "$", schema); err == nil {
+		t.Fatal("complete snapshot with unknown amounts accepted")
+	}
+}
+
 func validateClosedSchemaObjects(value any, path string) error {
 	object, ok := value.(map[string]any)
 	if ok {
@@ -139,17 +170,111 @@ func readContractJSON(t *testing.T, path string) any {
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
+	value, err := parseContractJSON(body)
+	if err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	return value
+}
+
+const maxContractInputBytes = 64 << 20
+
+func parseContractJSON(body []byte) (any, error) {
+	if len(body) > maxContractInputBytes {
+		return nil, fmt.Errorf("input exceeds %d bytes", maxContractInputBytes)
+	}
+	if !utf8.Valid(body) {
+		return nil, fmt.Errorf("input is not valid UTF-8")
+	}
+	scan := json.NewDecoder(bytes.NewReader(body))
+	if err := rejectDuplicateJSONKeys(scan); err != nil {
+		return nil, err
+	}
+	return decodeContractJSON(body)
+}
+
+func rejectDuplicateJSONKeys(dec *json.Decoder) error {
+	if err := scanJSONValue(dec, "$"); err != nil {
+		return err
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("trailing JSON value")
+		}
+		return fmt.Errorf("trailing JSON: %w", err)
+	}
+	return nil
+}
+
+func scanJSONValue(dec *json.Decoder, path string) error {
+	token, err := dec.Token()
+	if err != nil {
+		return fmt.Errorf("decode %s: %w", path, err)
+	}
+	if delimiter, ok := token.(json.Delim); ok {
+		switch delimiter {
+		case '{':
+			seen := map[string]bool{}
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return fmt.Errorf("decode %s key: %w", path, err)
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("decode %s: object key is not a string", path)
+				}
+				if seen[key] {
+					return fmt.Errorf("duplicate JSON key %q at %s", key, path)
+				}
+				seen[key] = true
+				if err := scanJSONValue(dec, path+"."+key); err != nil {
+					return err
+				}
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim('}') {
+				return fmt.Errorf("decode %s: unterminated object", path)
+			}
+		case '[':
+			index := 0
+			for dec.More() {
+				if err := scanJSONValue(dec, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+					return err
+				}
+				index++
+			}
+			end, err := dec.Token()
+			if err != nil || end != json.Delim(']') {
+				return fmt.Errorf("decode %s: unterminated array", path)
+			}
+		}
+	}
+	return nil
+}
+
+func decodeContractJSON(body []byte) (any, error) {
+	if len(body) > maxContractInputBytes {
+		return nil, fmt.Errorf("input exceeds %d bytes", maxContractInputBytes)
+	}
+	if !utf8.Valid(body) {
+		return nil, fmt.Errorf("input is not valid UTF-8")
+	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	var value any
 	if err := dec.Decode(&value); err != nil {
-		t.Fatalf("decode %s: %v", path, err)
+		return nil, err
 	}
 	var trailing any
-	if err := dec.Decode(&trailing); err == nil {
-		t.Fatalf("%s contains trailing JSON", path)
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("trailing JSON value")
+		}
+		return nil, fmt.Errorf("trailing JSON: %w", err)
 	}
-	return value
+	return value, nil
 }
 
 func validateContractSchema(schema, value any, path string, root any) error {
@@ -159,18 +284,30 @@ func validateContractSchema(schema, value any, path string, root any) error {
 	}
 	if ref, ok := s["$ref"].(string); ok {
 		const prefix = "#/$defs/"
-		if len(ref) < len(prefix) || ref[:len(prefix)] != prefix {
+		if len(ref) >= len(prefix) && ref[:len(prefix)] == prefix {
+			defs, ok := root.(map[string]any)["$defs"].(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: missing definitions", path)
+			}
+			target, ok := defs[ref[len(prefix):]]
+			if !ok {
+				return fmt.Errorf("%s: missing ref %q", path, ref)
+			}
+			return validateContractSchema(target, value, path, root)
+		}
+		const externalPrefix = "https://sessionreviewer.local/schemas/"
+		if len(ref) < len(externalPrefix) || ref[:len(externalPrefix)] != externalPrefix {
 			return fmt.Errorf("%s: unsupported ref %q", path, ref)
 		}
-		defs, ok := root.(map[string]any)["$defs"].(map[string]any)
-		if !ok {
-			return fmt.Errorf("%s: missing definitions", path)
+		externalBody, err := os.ReadFile(filepath.Join("..", "..", "schemas", filepath.Base(ref)))
+		if err != nil {
+			return fmt.Errorf("%s: read ref %q: %w", path, ref, err)
 		}
-		target, ok := defs[ref[len(prefix):]]
-		if !ok {
-			return fmt.Errorf("%s: missing ref %q", path, ref)
+		external, err := decodeContractJSON(externalBody)
+		if err != nil {
+			return fmt.Errorf("%s: decode ref %q: %w", path, ref, err)
 		}
-		return validateContractSchema(target, value, path, root)
+		return validateContractSchema(external, value, path, external)
 	}
 	if constValue, ok := s["const"]; ok && !reflect.DeepEqual(constValue, value) {
 		return fmt.Errorf("%s: want const %v", path, constValue)
@@ -264,6 +401,29 @@ func validateContractSchema(schema, value any, path string, root any) error {
 				if err := validateContractSchema(items, child, fmt.Sprintf("%s[%d]", path, index), root); err != nil {
 					return err
 				}
+			}
+		}
+	}
+	if conditions, ok := s["allOf"].([]any); ok {
+		for _, condition := range conditions {
+			branch, ok := condition.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s: allOf entry is not an object", path)
+			}
+			if ifSchema, ok := branch["if"]; ok {
+				if validateContractSchema(ifSchema, value, path, root) == nil {
+					if thenSchema, ok := branch["then"]; ok {
+						if err := validateContractSchema(thenSchema, value, path, root); err != nil {
+							return err
+						}
+					}
+				} else if elseSchema, ok := branch["else"]; ok {
+					if err := validateContractSchema(elseSchema, value, path, root); err != nil {
+						return err
+					}
+				}
+			} else if err := validateContractSchema(branch, value, path, root); err != nil {
+				return err
 			}
 		}
 	}

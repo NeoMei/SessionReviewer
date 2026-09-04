@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" },
     "project_id": { "$ref": "#/$defs/id" }, "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" }, "generation_id": { "$ref": "#/$defs/id" }, "session_view_digest": { "$ref": "#/$defs/digest" },
-    "phase_boundaries": { "$ref": "#/$defs/block" }, "key_operations": { "$ref": "#/$defs/block" }, "verification_results": { "$ref": "#/$defs/block" }, "errors": { "$ref": "#/$defs/block" }, "unresolved_questions": { "$ref": "#/$defs/block" },
+    "phase_boundaries": { "$ref": "#/$defs/block" }, "key_operations": { "$ref": "#/$defs/block" }, "verification_results": { "$ref": "#/$defs/block" }, "errors": { "$ref": "#/$defs/error_block" }, "unresolved_questions": { "$ref": "#/$defs/block" },
     "rules": { "$ref": "#/$defs/rules" }, "coverage": { "$ref": "#/$defs/coverage" }
   },
   "$defs": {
@@ -15,26 +15,19 @@
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "text": { "type": "string", "maxLength": 512 }, "nonnegative": { "type": "integer", "minimum": 0 },
     "timestamp": { "type": "string", "maxLength": 128 },
-    "block": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/entry" } },
+    "block": { "type": "object", "additionalProperties": false, "required": ["total", "shown", "omitted", "coverage", "items"], "properties": { "total": { "$ref": "#/$defs/nonnegative" }, "shown": { "$ref": "#/$defs/nonnegative" }, "omitted": { "$ref": "#/$defs/nonnegative" }, "coverage": { "$ref": "#/$defs/coverage" }, "items": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/entry" } } } },
+    "error_block": { "type": "object", "additionalProperties": false, "required": ["total", "shown", "omitted", "coverage", "items"], "properties": { "total": { "$ref": "#/$defs/nonnegative" }, "shown": { "$ref": "#/$defs/nonnegative" }, "omitted": { "$ref": "#/$defs/nonnegative" }, "coverage": { "$ref": "#/$defs/coverage" }, "items": { "type": "array", "maxItems": 32, "items": { "$ref": "#/$defs/error_entry" } } } },
     "entry": {
       "type": "object", "additionalProperties": false,
-      "required": ["occurred_at", "sequence", "revision_id", "text", "coverage", "source_revision_ids"],
-      "properties": { "occurred_at": { "$ref": "#/$defs/timestamp" }, "sequence": { "type": "integer", "minimum": 1 }, "revision_id": { "$ref": "#/$defs/id" }, "text": { "$ref": "#/$defs/text" }, "coverage": { "$ref": "#/$defs/entry_coverage" }, "source_revision_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/id" } } }
+      "required": ["occurred_at", "sequence", "revision_id", "text", "source_revision_ids"],
+      "properties": { "occurred_at": { "$ref": "#/$defs/timestamp" }, "sequence": { "type": "integer", "minimum": 1 }, "revision_id": { "$ref": "#/$defs/id" }, "text": { "$ref": "#/$defs/text" }, "source_revision_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/id" } } }
     },
-    "entry_coverage": {
-      "type": "object", "additionalProperties": false,
-      "required": ["total", "shown", "omitted"],
-      "properties": { "total": { "$ref": "#/$defs/nonnegative" }, "shown": { "$ref": "#/$defs/nonnegative" }, "omitted": { "$ref": "#/$defs/nonnegative" } }
-    },
+    "error_entry": { "type": "object", "additionalProperties": false, "required": ["code", "occurred_at", "sequence", "revision_id", "text", "source_revision_ids"], "properties": { "code": { "$ref": "#/$defs/id" }, "occurred_at": { "$ref": "#/$defs/timestamp" }, "sequence": { "type": "integer", "minimum": 1 }, "revision_id": { "$ref": "#/$defs/id" }, "text": { "$ref": "#/$defs/text" }, "source_revision_ids": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/id" } } } },
     "rules": {
       "type": "object", "additionalProperties": false,
       "required": ["rule_id", "rule_version", "dependency_digests"],
       "properties": { "rule_id": { "$ref": "#/$defs/id" }, "rule_version": { "$ref": "#/$defs/id" }, "dependency_digests": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/digest" } } }
     },
-    "coverage": {
-      "type": "object", "additionalProperties": false,
-      "required": ["total", "shown", "omitted"],
-      "properties": { "total": { "$ref": "#/$defs/nonnegative" }, "shown": { "$ref": "#/$defs/nonnegative" }, "omitted": { "$ref": "#/$defs/nonnegative" } }
-    }
+    "coverage": { "type": "object", "additionalProperties": false, "required": ["seen", "indexed", "collapsed", "unprojected", "undecodable", "truncated"], "properties": { "seen": { "$ref": "#/$defs/nonnegative" }, "indexed": { "$ref": "#/$defs/nonnegative" }, "collapsed": { "$ref": "#/$defs/nonnegative" }, "unprojected": { "$ref": "#/$defs/nonnegative" }, "undecodable": { "$ref": "#/$defs/nonnegative" }, "truncated": { "$ref": "#/$defs/nonnegative" } } }
   }
 }

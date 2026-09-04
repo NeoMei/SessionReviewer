@@ -1,7 +1,6 @@
 {
   "schema_version": 1,
   "minimum_reader_version": "0.4.0",
-  "minimum_writer_version": "0.4.0",
   "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "project_id": "project-p",
   "generation_id": "generation-1",

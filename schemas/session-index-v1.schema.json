@@ -4,11 +4,10 @@
   "title": "SessionReviewer complete session index v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "minimum_reader_version", "minimum_writer_version", "digest", "project_id", "generation_id", "project_view_digest", "generated_at", "sort_version", "coverage", "sessions"],
+  "required": ["schema_version", "minimum_reader_version", "digest", "project_id", "generation_id", "project_view_digest", "generated_at", "sort_version", "coverage", "sessions"],
   "properties": {
     "schema_version": { "const": 1 },
     "minimum_reader_version": { "const": "0.4.0" },
-    "minimum_writer_version": { "const": "0.4.0" },
     "digest": { "$ref": "#/$defs/digest" },
     "project_id": { "$ref": "#/$defs/id" },
     "generation_id": { "$ref": "#/$defs/id" },
@@ -22,7 +21,7 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "timestamp": { "type": ["string", "null"], "maxLength": 128 },
+    "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 },
     "nonnegative": { "type": "integer", "minimum": 0 },
     "id_array": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/id" } },
     "index_coverage": {
@@ -42,7 +41,7 @@
       "properties": {
         "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
         "processing_state": { "enum": ["complete", "partial", "error", "unprocessed"] },
-        "state_reason_codes": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/id" } },
+        "state_reason_codes": { "type": "array", "maxItems": 64, "items": { "enum": ["not_discovered", "duplicate_candidate", "freeze_terminal", "malformed_source_records", "unsupported_source_records", "source_missing", "source_unreadable", "source_ambiguous", "source_unsupported", "source_unavailable", "partial_observations", "unprojected_facts", "undecodable_facts", "scan_cancelled"] } },
         "source_availability": { "enum": ["available", "unavailable"] },
         "source_terminal_state": { "type": ["string", "null"], "maxLength": 64 },
         "started_at": { "$ref": "#/$defs/timestamp" }, "ended_at": { "$ref": "#/$defs/timestamp" },
