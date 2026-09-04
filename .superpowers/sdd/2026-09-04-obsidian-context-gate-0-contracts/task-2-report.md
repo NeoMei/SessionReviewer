@@ -37,3 +37,18 @@ The ensuing implementation replaced those paths, after which the focused six-pac
 ## Concerns
 
 No unresolved Task 2 blocker. Runtime validation deliberately adds semantic invariants that JSON Schema cannot express (coverage arithmetic, graph consistency, canonical digest verification, cross-file bindings, and price reconciliation) without changing the frozen wire shape.
+
+## Fix Round 1
+
+The review found two Critical, four Important, and one Minor gap in the initial replacement. Regression tests were added before implementation. The focused RED output is retained in `evidence/task-2-fix1-red.txt`; it demonstrated acceptance of case-folded aliases, loss of explicit empty optional arrays, wrapped coverage arithmetic, contamination from historical incomplete pricing, a known aggregate beside an unknown model cost, and form-feed URL whitespace.
+
+The strict decoder now constructs exact allowed-key sets recursively for structs, embedded fields, pointers, slices, and typed map values while preserving arbitrary keys only at declared map boundaries. Patch and baseline optional arrays use presence-bearing pointers, so omitted and explicit-empty values remain distinct in canonical ledger input. Coverage equations use checked addition. Ledger aggregate completeness is derived only from validated current snapshot IDs, and any included model with unknown cost requires a null aggregate. Pricing provenance rejects all Unicode whitespace and control characters. Cross-file mutation tests now require every mutated artifact to render and validate independently, recompute dependent hashes, and fail only at the intended projection binding.
+
+Fresh verification after the fixes:
+
+- Focused six-package command: PASS.
+- Frozen Task 1 fixture boundary: PASS.
+- `go test -p 1 -timeout 5m ./...`: PASS through `test/zerotoken` in approximately 50 seconds.
+- `go vet ./...`, `go mod tidy -diff`, and `git diff --check`: PASS.
+
+No frozen schemas, fixtures, documentation, or plans were changed. No unresolved Fix Round 1 concern remains.

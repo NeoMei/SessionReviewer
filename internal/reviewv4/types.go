@@ -97,21 +97,21 @@ type OpenLoop struct {
 	CompletionCriterion string `json:"completion_criterion" required:"true"`
 }
 type Patch struct {
-	EntityID          string   `json:"entity_id" required:"true"`
-	Field             string   `json:"field" required:"true"`
-	Operation         string   `json:"operation" required:"true"`
-	Value             *string  `json:"value,omitempty"`
-	Values            []string `json:"values,omitempty"`
-	BaseGeneratedHash string   `json:"base_generated_hash" required:"true"`
+	EntityID          string    `json:"entity_id" required:"true"`
+	Field             string    `json:"field" required:"true"`
+	Operation         string    `json:"operation" required:"true"`
+	Value             *string   `json:"value,omitempty"`
+	Values            *[]string `json:"values,omitempty"`
+	BaseGeneratedHash string    `json:"base_generated_hash" required:"true"`
 }
 type Baseline struct {
-	GenerationID  string   `json:"generation_id" required:"true"`
-	EntityID      string   `json:"entity_id" required:"true"`
-	Field         string   `json:"field" required:"true"`
-	Kind          string   `json:"kind" required:"true"`
-	Value         *string  `json:"value,omitempty"`
-	Values        []string `json:"values,omitempty"`
-	GeneratedHash string   `json:"generated_hash" required:"true"`
+	GenerationID  string    `json:"generation_id" required:"true"`
+	EntityID      string    `json:"entity_id" required:"true"`
+	Field         string    `json:"field" required:"true"`
+	Kind          string    `json:"kind" required:"true"`
+	Value         *string   `json:"value,omitempty"`
+	Values        *[]string `json:"values,omitempty"`
+	GeneratedHash string    `json:"generated_hash" required:"true"`
 }
 type Presentation struct {
 	SchemaVersion        int          `json:"schema_version" required:"true"`

@@ -157,15 +157,8 @@ func normalizeLedger(ledger *MachineLedger) {
 	if ledger.OrphanPatches == nil {
 		ledger.OrphanPatches = []Patch{}
 	}
-	normalizePatches(ledger.HumanPatches)
-	normalizePatches(ledger.OrphanPatches)
 	if ledger.GeneratedBaselines == nil {
 		ledger.GeneratedBaselines = []Baseline{}
-	}
-	for index := range ledger.GeneratedBaselines {
-		if len(ledger.GeneratedBaselines[index].Values) == 0 {
-			ledger.GeneratedBaselines[index].Values = nil
-		}
 	}
 	if ledger.PricingSnapshots == nil {
 		ledger.PricingSnapshots = []pricing.Snapshot{}
@@ -179,14 +172,5 @@ func normalizeLedger(ledger *MachineLedger) {
 		ledger.CurrentPricingSnapshotIDs = []string{}
 	}
 }
-
-func normalizePatches(patches []Patch) {
-	for index := range patches {
-		if len(patches[index].Values) == 0 {
-			patches[index].Values = nil
-		}
-	}
-}
-
 func sha256Hex(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeToString(sum[:]) }
 func isZeroSHA(value string) bool  { return value == strings.Repeat("0", 64) }

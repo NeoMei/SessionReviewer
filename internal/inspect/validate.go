@@ -21,7 +21,14 @@ var eventKinds = map[string]bool{
 
 func validID(value string) bool { return len(value) <= 256 && idRE.MatchString(value) }
 func validCoverage(coverage Coverage) bool {
-	return coverage.Indexed+coverage.Collapsed+coverage.Unprojected+coverage.Undecodable+coverage.Truncated == coverage.Seen
+	total := uint64(0)
+	for _, value := range []uint64{coverage.Indexed, coverage.Collapsed, coverage.Unprojected, coverage.Undecodable, coverage.Truncated} {
+		if ^uint64(0)-total < value {
+			return false
+		}
+		total += value
+	}
+	return total == coverage.Seen
 }
 
 func validateIdentity(schemaVersion int, reader, project, provider, session, generation, digest string) error {

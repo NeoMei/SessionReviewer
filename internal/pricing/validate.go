@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
@@ -26,7 +27,15 @@ func bounded(value string, maximum int, nonempty bool) bool {
 	return len(value) <= maximum && (!nonempty || value != "")
 }
 func validURL(value string) bool {
-	return bounded(value, maxURL, true) && len(value) > len("https://") && strings.HasPrefix(value, "https://") && !strings.ContainsAny(value, " \t\r\n")
+	if !bounded(value, maxURL, true) || len(value) <= len("https://") || !strings.HasPrefix(value, "https://") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsSpace(character) || unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 func validOptional(value *string, maximum int) bool { return value == nil || len(*value) <= maximum }
 func validOptionalURL(value *string) bool           { return value == nil || validURL(*value) }

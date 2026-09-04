@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
@@ -73,7 +74,96 @@ func TestValidatePresentationRejectsDecisionCycleAndBrokenGraph(t *testing.T) {
 func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 	reviewFixture := mustRead(t, "../../testdata/contracts/v4/review-presentation-v4.valid.json")
 	indexFixture := mustRead(t, "../../testdata/contracts/v4/session-index-v1.valid.json")
-	review, err := DecodePresentation(reviewFixture)
+	ledgerFixture := mustRead(t, "../../testdata/contracts/v4/machine-ledger-v4.valid.json")
+	tests := []struct {
+		name       string
+		mutateDocs func(*Presentation, *MachineLedger, *sessionindex.Document, *[]byte)
+		breakBind  func(*MachineLedger)
+	}{
+		{name: "project ID", mutateDocs: func(_ *Presentation, ledger *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
+			ledger.ProjectID = "other"
+			for index := range ledger.PricingSnapshots {
+				ledger.PricingSnapshots[index].ProjectID = "other"
+			}
+		}},
+		{name: "generation ID", mutateDocs: func(_ *Presentation, _ *MachineLedger, index *sessionindex.Document, _ *[]byte) {
+			index.GenerationID = "other"
+		}},
+		{name: "project view digest", mutateDocs: func(p *Presentation, _ *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
+			p.ProjectViewDigest = "sha256:" + strings.Repeat("9", 64)
+		}},
+		{name: "review digest", breakBind: func(ledger *MachineLedger) {
+			ledger.ReviewSHA256 = strings.Repeat("9", 64)
+			ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
+		}},
+		{name: "history digest", breakBind: func(ledger *MachineLedger) {
+			ledger.HistorySHA256 = strings.Repeat("9", 64)
+			ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+		}},
+		{name: "index digest", breakBind: func(ledger *MachineLedger) {
+			ledger.SyncHashes.SessionIndexDigest = "sha256:" + strings.Repeat("9", 64)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			presentation, err := DecodePresentation(reviewFixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger, err := DecodeLedger(ledgerFixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			index, err := sessionindex.Parse(indexFixture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			history := []byte("# project history\n")
+			if tc.mutateDocs != nil {
+				tc.mutateDocs(&presentation, &ledger, &index, &history)
+			}
+			reviewBytes, err := json.Marshal(presentation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := DecodePresentation(reviewBytes); err != nil {
+				t.Fatalf("mutated review is independently invalid: %v", err)
+			}
+			indexBytes, err := sessionindex.Render(index)
+			if err != nil {
+				t.Fatalf("mutated index is independently invalid: %v", err)
+			}
+			validatedIndex, err := sessionindex.Parse(indexBytes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ledger.AcceptedRevision = presentation.Revision
+			ledger.ReviewSHA256 = sha256hex(reviewBytes)
+			ledger.HistorySHA256 = sha256hex(history)
+			ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
+			ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+			ledger.SyncHashes.SessionIndexDigest = validatedIndex.Digest
+			if tc.breakBind != nil {
+				tc.breakBind(&ledger)
+			}
+			ledgerBytes, err := RenderLedger(ledger)
+			if err != nil {
+				t.Fatalf("mutated ledger is independently invalid: %v", err)
+			}
+			if _, err := DecodeLedger(ledgerBytes); err != nil {
+				t.Fatalf("rendered ledger is independently invalid: %v", err)
+			}
+			if _, err := LoadProjection(reviewBytes, history, ledgerBytes, indexBytes); err == nil {
+				t.Fatal("accepted mismatched projection")
+			}
+		})
+	}
+
+	presentation, err := DecodePresentation(reviewFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := DecodeLedger(ledgerFixture)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,19 +179,11 @@ func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ledgerFixture := mustRead(t, "../../testdata/contracts/v4/machine-ledger-v4.valid.json")
-	ledger, err := DecodeLedger(ledgerFixture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ledger.AcceptedRevision = review.Revision
-	history := reviewFixture
-	ledger.ReviewSHA256 = sha256hex(reviewFixture)
-	ledger.HistorySHA256 = sha256hex(history)
-	ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
-	ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+	history := []byte("# project history\n")
+	ledger.AcceptedRevision = presentation.Revision
+	ledger.ReviewSHA256, ledger.HistorySHA256 = sha256hex(reviewFixture), sha256hex(history)
+	ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256 = ledger.ReviewSHA256, ledger.HistorySHA256
 	ledger.SyncHashes.SessionIndexDigest = index.Digest
-	ledger.SyncHashes.LedgerSHA256 = strings.Repeat("0", 64)
 	ledgerBytes, err := RenderLedger(ledger)
 	if err != nil {
 		t.Fatal(err)
@@ -110,52 +192,11 @@ func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accepted.SessionIndex.ProjectID != review.ProjectID {
-		t.Fatalf("validated index missing from Accepted: %+v", accepted.SessionIndex)
+	if accepted.SessionIndex.ProjectID != presentation.ProjectID {
+		t.Fatal("validated index missing from Accepted")
 	}
 	if _, err := LoadProjection(reviewFixture, history, ledgerBytes, nil); err == nil {
 		t.Fatal("accepted projection without required session index")
-	}
-
-	tests := []struct {
-		name   string
-		mutate func(*Presentation, *MachineLedger, *sessionindex.Document, *[]byte)
-	}{
-		{name: "project ID", mutate: func(_ *Presentation, l *MachineLedger, _ *sessionindex.Document, _ *[]byte) { l.ProjectID = "other" }},
-		{name: "generation ID", mutate: func(_ *Presentation, _ *MachineLedger, i *sessionindex.Document, _ *[]byte) { i.GenerationID = "other" }},
-		{name: "project view digest", mutate: func(p *Presentation, _ *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
-			p.ProjectViewDigest = "sha256:" + strings.Repeat("9", 64)
-		}},
-		{name: "review digest", mutate: func(_ *Presentation, l *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
-			l.ReviewSHA256 = strings.Repeat("9", 64)
-			l.SyncHashes.ReviewSHA256 = l.ReviewSHA256
-		}},
-		{name: "history digest", mutate: func(_ *Presentation, l *MachineLedger, _ *sessionindex.Document, h *[]byte) {
-			*h = append(*h, ' ')
-			l.HistorySHA256 = strings.Repeat("9", 64)
-			l.SyncHashes.HistorySHA256 = l.HistorySHA256
-		}},
-		{name: "index digest", mutate: func(_ *Presentation, l *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
-			l.SyncHashes.SessionIndexDigest = "sha256:" + strings.Repeat("9", 64)
-		}},
-		{name: "ledger top sync disagreement", mutate: func(_ *Presentation, l *MachineLedger, _ *sessionindex.Document, _ *[]byte) {
-			l.SyncHashes.ReviewSHA256 = strings.Repeat("8", 64)
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			p := review
-			l := ledger
-			i := index
-			h := append([]byte(nil), history...)
-			tc.mutate(&p, &l, &i, &h)
-			rb, _ := jsonBytes(p)
-			ib, _ := sessionindex.Render(i)
-			lb, _ := RenderLedger(l)
-			if _, err := LoadProjection(rb, h, lb, ib); err == nil {
-				t.Fatal("accepted mismatched projection")
-			}
-		})
 	}
 }
 
@@ -208,6 +249,99 @@ func TestDecodeLedgerRejectsTamperedSelfDigest(t *testing.T) {
 	if _, err := DecodeLedger(body); err == nil {
 		t.Fatal("accepted tampered ledger self digest")
 	}
+}
+
+func TestRenderLedgerPreservesExplicitEmptyOptionalArrays(t *testing.T) {
+	fixture := mustRead(t, "../../testdata/contracts/v4/machine-ledger-v4.valid.json")
+	var raw map[string]any
+	if err := json.Unmarshal(fixture, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["human_patches"] = []any{map[string]any{
+		"entity_id": "entity-1", "field": "field-1", "operation": "set",
+		"values": []any{}, "base_generated_hash": strings.Repeat("1", 64),
+	}}
+	raw["generated_baselines"] = []any{map[string]any{
+		"generation_id": "generation-1", "entity_id": "entity-1", "field": "field-1", "kind": "list",
+		"values": []any{}, "generated_hash": strings.Repeat("2", 64),
+	}}
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := DecodeLedger(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rendered, &got); err != nil {
+		t.Fatal(err)
+	}
+	patch := got["human_patches"].([]any)[0].(map[string]any)
+	baseline := got["generated_baselines"].([]any)[0].(map[string]any)
+	for name, value := range map[string]any{"patch": patch["values"], "baseline": baseline["values"]} {
+		items, present := value.([]any)
+		if !present || len(items) != 0 {
+			t.Fatalf("%s explicit empty values were not preserved: %#v", name, value)
+		}
+	}
+}
+
+func TestValidateLedgerUsesOnlyCurrentPricingForAggregateCompleteness(t *testing.T) {
+	ledger := frozenLedger(t)
+	historical := ledger.PricingSnapshots[0]
+	current := completePricingSnapshot(t, "snapshot-current")
+	zero := 0.0
+	ledger.PricingSnapshots = []pricing.Snapshot{historical, current}
+	ledger.CurrentPricingSnapshotIDs = []string{current.SnapshotID}
+	ledger.Accounting.TotalCostUSD = &zero
+	if err := ValidateLedger(ledger); err != nil {
+		t.Fatalf("incomplete historical predecessor contaminated current aggregate: %v", err)
+	}
+}
+
+func TestValidateLedgerRequiresNullAggregateWhenModelCostUnknown(t *testing.T) {
+	ledger := frozenLedger(t)
+	one := 1.0
+	ledger.PricingSnapshots = []pricing.Snapshot{}
+	ledger.CurrentPricingSnapshotIDs = []string{}
+	ledger.Accounting.TotalTokens = 1
+	ledger.Accounting.TotalCostUSD = &one
+	ledger.Accounting.Models = []Model{{Model: "model-1", TotalTokens: 1, TotalCostUSD: nil}}
+	if err := ValidateLedger(ledger); err == nil {
+		t.Fatal("accepted non-null aggregate with unknown included model cost")
+	}
+}
+
+func frozenLedger(t *testing.T) MachineLedger {
+	t.Helper()
+	ledger, err := DecodeLedger(mustRead(t, "../../testdata/contracts/v4/machine-ledger-v4.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ledger
+}
+
+func completePricingSnapshot(t *testing.T, id string) pricing.Snapshot {
+	t.Helper()
+	snapshot, err := pricing.Parse(mustRead(t, "../../testdata/contracts/v4/pricing-snapshot-v1.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	zero := 0.0
+	snapshot.SnapshotID = id
+	snapshot.Rates = pricing.Rates{Input: &zero, CachedInput: &zero, CacheWriteInput: &zero, Output: &zero, ReasoningOutput: &zero}
+	snapshot.LineCostsUSD = pricing.LineCosts{Input: &zero, CachedInput: &zero, CacheWriteInput: &zero, Output: &zero, ReasoningOutput: &zero}
+	snapshot.MissingBillingDimensions = []string{}
+	snapshot.KnownSubtotalUSD, snapshot.TotalCostUSD, snapshot.PricingComplete = 0, &zero, true
+	if err := pricing.ValidateSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 func minimumPresentation() Presentation {

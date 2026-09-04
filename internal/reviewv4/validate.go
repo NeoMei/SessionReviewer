@@ -17,6 +17,20 @@ func validID(value string) bool                    { return len(value) <= 256 &&
 func text(value string, maximum int) bool          { return len(value) <= maximum }
 func optionalText(value *string, maximum int) bool { return value == nil || text(*value, maximum) }
 func optionalDigest(value *string) bool            { return value == nil || digestRE.MatchString(*value) }
+func optionalTexts(values *[]string, maximumItems, maximumText int) bool {
+	if values == nil {
+		return true
+	}
+	if *values == nil || len(*values) > maximumItems {
+		return false
+	}
+	for _, value := range *values {
+		if !text(value, maximumText) {
+			return false
+		}
+	}
+	return true
+}
 
 func ValidatePresentation(p Presentation) error {
 	if p.SchemaVersion != 4 || p.MinimumReaderVersion != "0.4.0" || p.MinimumWriterVersion != "0.4.0" || !validID(p.ProjectID) || !validID(p.GenerationID) || !digestRE.MatchString(p.ProjectViewDigest) || p.Revision < 0 {
@@ -139,13 +153,8 @@ func ValidatePresentation(p Presentation) error {
 		}
 	}
 	for _, baseline := range p.GeneratedBaselines {
-		if !validID(baseline.GenerationID) || !validID(baseline.EntityID) || !validID(baseline.Field) || !validID(baseline.Kind) || !shaRE.MatchString(baseline.GeneratedHash) || !optionalText(baseline.Value, 16384) || len(baseline.Values) > 256 {
+		if !validID(baseline.GenerationID) || !validID(baseline.EntityID) || !validID(baseline.Field) || !validID(baseline.Kind) || !shaRE.MatchString(baseline.GeneratedHash) || !optionalText(baseline.Value, 16384) || !optionalTexts(baseline.Values, 256, 16384) {
 			return errors.New("invalid generated baseline")
-		}
-		for _, value := range baseline.Values {
-			if !text(value, 16384) {
-				return errors.New("baseline value exceeds limit")
-			}
 		}
 	}
 	return nil
@@ -163,18 +172,13 @@ func uniqueIDs(values []string) error {
 }
 
 func validatePatch(patch Patch) error {
-	if !validID(patch.EntityID) || !validID(patch.Field) || !shaRE.MatchString(patch.BaseGeneratedHash) || !optionalText(patch.Value, 16384) || len(patch.Values) > 256 {
+	if !validID(patch.EntityID) || !validID(patch.Field) || !shaRE.MatchString(patch.BaseGeneratedHash) || !optionalText(patch.Value, 16384) || !optionalTexts(patch.Values, 256, 16384) {
 		return errors.New("invalid presentation patch")
 	}
 	switch patch.Operation {
 	case "set", "suppress", "restore_default":
 	default:
 		return errors.New("invalid patch operation")
-	}
-	for _, value := range patch.Values {
-		if !text(value, 16384) {
-			return errors.New("patch value exceeds limit")
-		}
 	}
 	return nil
 }
@@ -216,7 +220,6 @@ func ValidateLedger(l MachineLedger) error {
 	if !money(l.Accounting.TotalCostUSD) {
 		return errors.New("invalid aggregate cost")
 	}
-	incompletePricing := false
 	pricingByID := map[string]pricing.Snapshot{}
 	for _, snapshot := range l.PricingSnapshots {
 		if err := pricing.ValidateSnapshot(snapshot); err != nil {
@@ -229,10 +232,6 @@ func ValidateLedger(l MachineLedger) error {
 			return errors.New("duplicate pricing snapshot")
 		}
 		pricingByID[snapshot.SnapshotID] = snapshot
-		incompletePricing = incompletePricing || !snapshot.PricingComplete
-	}
-	if incompletePricing && l.Accounting.TotalCostUSD != nil {
-		return errors.New("aggregate price must be null when a snapshot is incomplete")
 	}
 	modelNames := map[string]bool{}
 	var modelTokens uint64
@@ -255,6 +254,9 @@ func ValidateLedger(l MachineLedger) error {
 	}
 	if len(l.Accounting.Models) > 0 && modelTokens != l.Accounting.TotalTokens {
 		return errors.New("accounting token total does not reconcile")
+	}
+	if len(l.Accounting.Models) > 0 && !modelCostsComplete && l.Accounting.TotalCostUSD != nil {
+		return errors.New("aggregate price must be null when an included model cost is unknown")
 	}
 	if len(l.Accounting.Models) > 0 && modelCostsComplete && l.Accounting.TotalCostUSD != nil && !nearlyEqual(*l.Accounting.TotalCostUSD, modelCost) {
 		return errors.New("accounting cost total does not reconcile")
@@ -283,17 +285,22 @@ func ValidateLedger(l MachineLedger) error {
 		}
 	}
 	for _, baseline := range l.GeneratedBaselines {
-		if !validID(baseline.GenerationID) || !validID(baseline.EntityID) || !validID(baseline.Field) || !validID(baseline.Kind) || !shaRE.MatchString(baseline.GeneratedHash) || !optionalText(baseline.Value, 16384) || len(baseline.Values) > 256 {
+		if !validID(baseline.GenerationID) || !validID(baseline.EntityID) || !validID(baseline.Field) || !validID(baseline.Kind) || !shaRE.MatchString(baseline.GeneratedHash) || !optionalText(baseline.Value, 16384) || !optionalTexts(baseline.Values, 256, 16384) {
 			return errors.New("invalid ledger baseline")
 		}
 	}
 	seenCurrent := map[string]bool{}
+	currentPricingIncomplete := false
 	for _, id := range l.CurrentPricingSnapshotIDs {
 		snapshot, exists := pricingByID[id]
 		if !validID(id) || !exists || seenCurrent[id] || snapshot.Status == pricing.PriceSuperseded {
 			return errors.New("invalid current pricing snapshot reference")
 		}
 		seenCurrent[id] = true
+		currentPricingIncomplete = currentPricingIncomplete || !snapshot.PricingComplete
+	}
+	if currentPricingIncomplete && l.Accounting.TotalCostUSD != nil {
+		return errors.New("aggregate price must be null when a current snapshot is incomplete")
 	}
 	if !shaRE.MatchString(l.SyncHashes.ReviewSHA256) || !shaRE.MatchString(l.SyncHashes.HistorySHA256) || !shaRE.MatchString(l.SyncHashes.LedgerSHA256) || !digestRE.MatchString(l.SyncHashes.SessionIndexDigest) {
 		return errors.New("invalid synchronization hashes")

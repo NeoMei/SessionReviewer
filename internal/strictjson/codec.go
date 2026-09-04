@@ -223,29 +223,28 @@ func validateShapeValue(raw any, destination reflect.Value, path string, nullabl
 		if !ok {
 			return fmt.Errorf("%s must be an object", path)
 		}
-		t := destination.Type()
-		for i := 0; i < t.NumField(); i++ {
-			field := t.Field(i)
-			jsonName := strings.Split(field.Tag.Get("json"), ",")[0]
-			if jsonName == "" {
-				jsonName = field.Name
+		fields := collectJSONFields(destination.Type(), nil)
+		byName := make(map[string]jsonField, len(fields))
+		for _, field := range fields {
+			byName[field.name] = field
+		}
+		for name := range object {
+			if _, allowed := byName[name]; !allowed {
+				return fmt.Errorf("%s.%s is not an exact JSON field", path, name)
 			}
-			if jsonName == "-" {
-				continue
-			}
-			value, exists := object[jsonName]
-			required := field.Tag.Get("required") == "true"
-			fieldNullable := field.Tag.Get("nullable") == "true"
+		}
+		for _, field := range fields {
+			value, exists := object[field.name]
 			if !exists {
-				if required {
-					return fmt.Errorf("%s.%s is required", path, jsonName)
+				if field.required {
+					return fmt.Errorf("%s.%s is required", path, field.name)
 				}
 				continue
 			}
-			if !required && field.Type.Kind() == reflect.Pointer && value == nil {
-				return fmt.Errorf("%s.%s must be omitted instead of null", path, jsonName)
+			if !field.required && field.typ.Kind() == reflect.Pointer && value == nil {
+				return fmt.Errorf("%s.%s must be omitted instead of null", path, field.name)
 			}
-			if err := validateShapeValue(value, destination.Field(i), path+"."+jsonName, fieldNullable); err != nil {
+			if err := validateShapeValue(value, fieldByIndex(destination, field.index), path+"."+field.name, field.nullable); err != nil {
 				return err
 			}
 		}
@@ -265,6 +264,86 @@ func validateShapeValue(raw any, destination reflect.Value, path string, nullabl
 				return err
 			}
 		}
+	case reflect.Map:
+		object, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be an object", path)
+		}
+		if destination.Type().Key().Kind() != reflect.String {
+			return fmt.Errorf("%s must use string map keys", path)
+		}
+		for key, value := range object {
+			element := reflect.New(destination.Type().Elem()).Elem()
+			if current := destination.MapIndex(reflect.ValueOf(key).Convert(destination.Type().Key())); current.IsValid() {
+				element = current
+			}
+			if err := validateShapeValue(value, element, path+"."+key, false); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+type jsonField struct {
+	name               string
+	index              []int
+	typ                reflect.Type
+	required, nullable bool
+}
+
+func collectJSONFields(t reflect.Type, prefix []int) []jsonField {
+	fields := make([]jsonField, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if field.PkgPath != "" && !field.Anonymous {
+			continue
+		}
+		tag := field.Tag.Get("json")
+		name := strings.Split(tag, ",")[0]
+		if name == "-" {
+			continue
+		}
+		index := append(append([]int(nil), prefix...), i)
+		embeddedType := field.Type
+		if embeddedType.Kind() == reflect.Pointer {
+			embeddedType = embeddedType.Elem()
+		}
+		if field.Anonymous && name == "" && embeddedType.Kind() == reflect.Struct {
+			fields = append(fields, collectJSONFields(embeddedType, index)...)
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		fields = append(fields, jsonField{
+			name: name, index: index, typ: field.Type,
+			required: field.Tag.Get("required") == "true",
+			nullable: field.Tag.Get("nullable") == "true",
+		})
+	}
+	return fields
+}
+
+func fieldByIndex(value reflect.Value, index []int) reflect.Value {
+	for offset, fieldIndex := range index {
+		for value.Kind() == reflect.Pointer {
+			if value.IsNil() {
+				return reflect.New(fieldTypeAt(value.Type(), index[offset:])).Elem()
+			}
+			value = value.Elem()
+		}
+		value = value.Field(fieldIndex)
+	}
+	return value
+}
+
+func fieldTypeAt(t reflect.Type, index []int) reflect.Type {
+	for _, fieldIndex := range index {
+		for t.Kind() == reflect.Pointer {
+			t = t.Elem()
+		}
+		t = t.Field(fieldIndex).Type
+	}
+	return t
 }

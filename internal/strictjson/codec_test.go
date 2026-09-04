@@ -82,3 +82,37 @@ func TestDecodeEnforcesRequiredAndNullableWireShape(t *testing.T) {
 		t.Fatalf("rejected required nullable field: %v", err)
 	}
 }
+
+func TestDecodeRejectsCaseFoldedAliasesAtEveryStructBoundary(t *testing.T) {
+	type EmbeddedFields struct {
+		Exact string `json:"exact" required:"true"`
+	}
+	type Child struct {
+		ProjectID string `json:"project_id" required:"true"`
+	}
+	type Wire struct {
+		EmbeddedFields
+		Child          Child             `json:"child" required:"true"`
+		Children       []Child           `json:"children" required:"true"`
+		Pointer        *Child            `json:"pointer" required:"true"`
+		ChildrenByName map[string]Child  `json:"children_by_name" required:"true"`
+		Labels         map[string]string `json:"labels" required:"true"`
+	}
+	valid := `{"exact":"ok","child":{"project_id":"child"},"children":[{"project_id":"slice"}],"pointer":{"project_id":"pointer"},"children_by_name":{"map-key":{"project_id":"map-value"}},"labels":{"Arbitrary-Key":"value"}}`
+	var got Wire
+	if err := Decode([]byte(valid), &got); err != nil {
+		t.Fatalf("valid embedded fields or explicit map rejected: %v", err)
+	}
+	for _, body := range []string{
+		`{"exact":"ok","EXACT":"overwrite","child":{"project_id":"child"},"children":[{"project_id":"slice"}],"pointer":{"project_id":"pointer"},"children_by_name":{},"labels":{}}`,
+		`{"exact":"ok","child":{"project_id":"child","PROJECT_ID":"overwrite"},"children":[{"project_id":"slice"}],"pointer":{"project_id":"pointer"},"children_by_name":{},"labels":{}}`,
+		`{"exact":"ok","child":{"project_id":"child"},"children":[{"project_id":"slice","PROJECT_ID":"overwrite"}],"pointer":{"project_id":"pointer"},"children_by_name":{},"labels":{}}`,
+		`{"exact":"ok","child":{"project_id":"child"},"children":[{"project_id":"slice"}],"pointer":{"project_id":"pointer","PROJECT_ID":"overwrite"},"children_by_name":{},"labels":{}}`,
+		`{"exact":"ok","child":{"project_id":"child"},"children":[{"project_id":"slice"}],"pointer":{"project_id":"pointer"},"children_by_name":{"map-key":{"project_id":"map-value","PROJECT_ID":"overwrite"}},"labels":{}}`,
+	} {
+		var decoded Wire
+		if err := Decode([]byte(body), &decoded); err == nil {
+			t.Fatalf("accepted case-folded alias: %s", body)
+		}
+	}
+}

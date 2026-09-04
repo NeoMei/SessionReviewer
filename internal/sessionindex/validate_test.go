@@ -1,6 +1,7 @@
 package sessionindex
 
 import (
+	"math"
 	"os"
 	"testing"
 )
@@ -12,6 +13,15 @@ func TestParseFrozenValidFixture(t *testing.T) {
 	}
 	if _, e = Parse(b); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
+	document := oneSessionDocument()
+	document.Sessions[0].Coverage = Coverage{Seen: 0, Indexed: math.MaxUint64, Collapsed: 1}
+	document.Sessions[0].IndexedEventCount = math.MaxUint64
+	if err := Validate(document); err == nil {
+		t.Fatal("accepted wrapped session coverage")
 	}
 }
 

@@ -1,9 +1,11 @@
 package inspect
 
 import (
-	"github.com/neomei/SessionReviewer/internal/strictjson"
+	"math"
 	"os"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestRenderFrozenValidSummaryFixture(t *testing.T) {
@@ -17,6 +19,14 @@ func TestRenderFrozenValidSummaryFixture(t *testing.T) {
 	}
 	if _, e = RenderSummary(s); e != nil {
 		t.Fatal(e)
+	}
+}
+
+func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
+	summary := minimumSummary()
+	summary.Coverage = Coverage{Seen: 0, Indexed: math.MaxUint64, Collapsed: 1}
+	if err := ValidateSummary(summary); err == nil {
+		t.Fatal("accepted wrapped summary coverage")
 	}
 }
 

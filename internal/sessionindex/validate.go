@@ -28,7 +28,19 @@ func validID(value string) bool                     { return len(value) <= 256 &
 func validOptional(value *string, maximum int) bool { return value == nil || len(*value) <= maximum }
 func validDigest(value *string) bool                { return value == nil || digestRE.MatchString(*value) }
 func reconcileCoverage(coverage Coverage) bool {
-	return coverage.Indexed+coverage.Collapsed+coverage.Unprojected+coverage.Undecodable+coverage.Truncated == coverage.Seen
+	total, ok := checkedSum(coverage.Indexed, coverage.Collapsed, coverage.Unprojected, coverage.Undecodable, coverage.Truncated)
+	return ok && total == coverage.Seen
+}
+
+func checkedSum(values ...uint64) (uint64, bool) {
+	var total uint64
+	for _, value := range values {
+		if ^uint64(0)-total < value {
+			return 0, false
+		}
+		total += value
+	}
+	return total, true
 }
 
 func Validate(document Document) error {
@@ -95,7 +107,9 @@ func Validate(document Document) error {
 			return fmt.Errorf("session %s has an invalid digest or generation reference", entry.SessionID)
 		}
 	}
-	if calculated != document.Coverage || document.Coverage.Complete+document.Coverage.Partial+document.Coverage.Error+document.Coverage.Unprocessed != document.Coverage.Total || document.Coverage.SourceAvailable+document.Coverage.SourceUnavailable != document.Coverage.Total {
+	states, statesOK := checkedSum(document.Coverage.Complete, document.Coverage.Partial, document.Coverage.Error, document.Coverage.Unprocessed)
+	sources, sourcesOK := checkedSum(document.Coverage.SourceAvailable, document.Coverage.SourceUnavailable)
+	if calculated != document.Coverage || !statesOK || states != document.Coverage.Total || !sourcesOK || sources != document.Coverage.Total {
 		return errors.New("index coverage does not reconcile")
 	}
 	if !sort.SliceIsSorted(document.Sessions, func(i, j int) bool {

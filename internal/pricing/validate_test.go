@@ -117,6 +117,17 @@ func TestPricingSupplementFixtureParityAndNullMeansUnknown(t *testing.T) {
 	}
 }
 
+func TestValidatePricingURLRejectsAllJSONSchemaWhitespace(t *testing.T) {
+	for _, whitespace := range []string{"\f", "\v"} {
+		snapshot := completeSnapshot()
+		url := "https://example.test/" + whitespace + "path"
+		snapshot.SourceURL = &url
+		if err := ValidateSnapshot(snapshot); err == nil {
+			t.Fatalf("accepted URL containing %q", whitespace)
+		}
+	}
+}
+
 func completeSnapshot() Snapshot {
 	v := 1.0
 	five := 5.0
