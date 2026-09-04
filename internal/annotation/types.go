@@ -21,8 +21,9 @@ type StoreRecord struct {
 type Annotation struct {
 	ID                  string          `json:"id" required:"true"`
 	ProjectID           string          `json:"project_id" required:"true"`
-	EntityID            string          `json:"entity_id" required:"true"`
-	Field               string          `json:"field" required:"true"`
+	AnnotationKind      string          `json:"annotation_kind" required:"true"`
+	EntityID            *string         `json:"entity_id,omitempty"`
+	Field               *string         `json:"field,omitempty"`
 	Status              CandidateStatus `json:"status" required:"true"`
 	Text                string          `json:"text" required:"true"`
 	GenerationID        string          `json:"generation_id" required:"true"`
@@ -32,7 +33,9 @@ type Annotation struct {
 	Dependencies        []Dependency    `json:"dependencies" required:"true"`
 	Revision            int             `json:"revision" required:"true"`
 	CreatedAt           string          `json:"created_at" required:"true"`
-	ConfirmedDecisionID *string         `json:"confirmed_decision_id" required:"true" nullable:"true"`
+	ConfirmedEntityID   *string         `json:"confirmed_entity_id" required:"true" nullable:"true"`
+	TargetMilestoneID   *string         `json:"target_milestone_id,omitempty"`
+	PromptSchemaVersion *string         `json:"prompt_schema_version,omitempty"`
 }
 
 type Dependency struct {

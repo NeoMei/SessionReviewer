@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionreviewer.local/schemas/conversation-chain-v1.schema.json",
+  "title": "SessionReviewer private conversation chain v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "minimum_reader_version", "digest", "project_id", "provider", "session_id", "session_view_digest", "dependency_digest", "segmentation_rule_version", "coverage", "turn_units"],
+  "properties": {
+    "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" }, "digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/id" }, "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
+    "session_view_digest": { "$ref": "#/$defs/digest" }, "dependency_digest": { "$ref": "#/$defs/digest" },
+    "segmentation_rule_version": { "$ref": "#/$defs/id" }, "coverage": { "$ref": "#/$defs/coverage" },
+    "turn_units": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/turn_unit" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 }, "excerpt": { "type": "string", "maxLength": 4096 },
+    "source_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"],
+      "properties": { "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" }, "source_identity": { "$ref": "#/$defs/id" }, "record_ordinal": { "type": "integer", "minimum": 0 }, "source_hash": { "$ref": "#/$defs/sha256" } }
+    },
+    "message": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "revision_id", "source_ref", "occurred_at", "visible_excerpt", "truncated"],
+      "properties": { "role": { "enum": ["user", "assistant"] }, "revision_id": { "$ref": "#/$defs/id" }, "source_ref": { "$ref": "#/$defs/source_ref" }, "occurred_at": { "$ref": "#/$defs/timestamp" }, "visible_excerpt": { "$ref": "#/$defs/excerpt" }, "truncated": { "type": "boolean" } }
+    },
+    "action": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision_id", "source_ref", "kind", "tool_name", "excerpt"],
+      "properties": { "revision_id": { "$ref": "#/$defs/id" }, "source_ref": { "$ref": "#/$defs/source_ref" }, "kind": { "$ref": "#/$defs/id" }, "tool_name": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }, "excerpt": { "$ref": "#/$defs/excerpt" } }
+    },
+    "result": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revision_id", "source_ref", "kind", "verification_state", "excerpt"],
+      "properties": { "revision_id": { "$ref": "#/$defs/id" }, "source_ref": { "$ref": "#/$defs/source_ref" }, "kind": { "$ref": "#/$defs/id" }, "verification_state": { "enum": ["unknown", "passed", "failed", "partial"] }, "excerpt": { "$ref": "#/$defs/excerpt" } }
+    },
+    "turn_unit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turn_unit_id", "ordinal", "started_at", "ended_at", "user_message", "assistant_messages", "actions", "results", "answer_state"],
+      "properties": {
+        "turn_unit_id": { "$ref": "#/$defs/id" }, "ordinal": { "type": "integer", "minimum": 1 }, "started_at": { "$ref": "#/$defs/timestamp" },
+        "ended_at": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 }, "user_message": { "$ref": "#/$defs/message" },
+        "assistant_messages": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/message" } },
+        "actions": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/action" } },
+        "results": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/result" } },
+        "answer_state": { "enum": ["no_answer", "answered", "partial"] }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_messages", "captured_messages", "turn_units", "unanswered_units", "truncated_messages"],
+      "properties": { "source_messages": { "type": "integer", "minimum": 0 }, "captured_messages": { "type": "integer", "minimum": 0 }, "turn_units": { "type": "integer", "minimum": 0 }, "unanswered_units": { "type": "integer", "minimum": 0 }, "truncated_messages": { "type": "integer", "minimum": 0 } }
+    }
+  }
+}

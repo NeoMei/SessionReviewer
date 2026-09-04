@@ -46,42 +46,62 @@ func Validate(store StoreRecord) error {
 	}
 	annotations := make(map[string]struct{}, len(store.Annotations))
 	for index, annotation := range store.Annotations {
-		if annotation.SchemaVersion != 1 || annotation.ProjectID != store.ProjectID || !validID(annotation.ID) || !validID(annotation.EntityID) || !validID(annotation.Field) || !validID(annotation.GenerationID) || !validID(annotation.AnalysisProfile) || !validID(annotation.AgentRunID) || !validText(annotation.Text, 4096) || annotation.Revision < 1 || !validText(annotation.CreatedAt, 128) || len(annotation.Dependencies) > 256 {
+		if annotation.SchemaVersion != 1 || annotation.ProjectID != store.ProjectID || !validID(annotation.ID) || !validID(annotation.GenerationID) || !validID(annotation.AnalysisProfile) || !validID(annotation.AgentRunID) || !validText(annotation.Text, 4096) || annotation.Revision < 1 || !validText(annotation.CreatedAt, 128) || len(annotation.Dependencies) > 256 {
 			return fmt.Errorf("invalid annotation %d", index)
 		}
 		if _, exists := annotations[annotation.ID]; exists {
 			return fmt.Errorf("duplicate annotation %q", annotation.ID)
 		}
 		annotations[annotation.ID] = struct{}{}
+		switch annotation.AnnotationKind {
+		case "decision_candidate", "agreement_candidate":
+			if !validOptionalID(annotation.EntityID) || !validOptionalID(annotation.Field) || annotation.EntityID == nil || annotation.Field == nil || annotation.TargetMilestoneID != nil || annotation.PromptSchemaVersion != nil {
+				return fmt.Errorf("decision or agreement candidate %q has invalid conditional fields", annotation.ID)
+			}
+		case "milestone_conclusion_candidate":
+			if annotation.EntityID != nil || annotation.Field != nil || !validRequiredOptionalID(annotation.TargetMilestoneID) || !validRequiredOptionalID(annotation.PromptSchemaVersion) {
+				return fmt.Errorf("milestone conclusion candidate %q has invalid conditional fields", annotation.ID)
+			}
+		default:
+			return fmt.Errorf("invalid annotation kind %q", annotation.AnnotationKind)
+		}
 		if _, exists := runs[annotation.AgentRunID]; !exists {
 			return fmt.Errorf("annotation %q references missing extraction run", annotation.ID)
 		}
 		switch annotation.Status {
 		case CandidatePending, CandidateIgnored, CandidateNotDecision, CandidateStale:
-			if annotation.ConfirmedDecisionID != nil {
-				return fmt.Errorf("candidate %q is not confirmed but has a decision", annotation.ID)
+			if annotation.ConfirmedEntityID != nil {
+				return fmt.Errorf("candidate %q is not confirmed but has an entity", annotation.ID)
 			}
 		case CandidateConfirmed:
-			if annotation.ConfirmedDecisionID == nil || !validID(*annotation.ConfirmedDecisionID) {
-				return fmt.Errorf("confirmed candidate %q has no valid decision", annotation.ID)
+			if annotation.ConfirmedEntityID == nil || !validID(*annotation.ConfirmedEntityID) {
+				return fmt.Errorf("confirmed candidate %q has no valid entity", annotation.ID)
 			}
 		default:
 			return fmt.Errorf("invalid annotation status %q", annotation.Status)
 		}
 		dependencies := map[string]bool{}
+		hasSourceTurn := false
 		for _, dependency := range annotation.Dependencies {
-			if (dependency.Kind != "observation" && dependency.Kind != "session_view") || !validID(dependency.RevisionID) || !digestRE.MatchString(dependency.Digest) {
+			if (dependency.Kind != "observation" && dependency.Kind != "session_view" && dependency.Kind != "source_turn") || !validID(dependency.RevisionID) || !digestRE.MatchString(dependency.Digest) {
 				return errors.New("invalid annotation dependency")
 			}
+			hasSourceTurn = hasSourceTurn || dependency.Kind == "source_turn"
 			key := dependency.Kind + "\x00" + dependency.RevisionID
 			if dependencies[key] {
 				return errors.New("duplicate annotation dependency")
 			}
 			dependencies[key] = true
 		}
+		if annotation.AnnotationKind == "milestone_conclusion_candidate" && !hasSourceTurn {
+			return fmt.Errorf("milestone conclusion candidate %q has no source-turn dependency", annotation.ID)
+		}
 	}
 	return nil
 }
+
+func validOptionalID(value *string) bool         { return value == nil || validID(*value) }
+func validRequiredOptionalID(value *string) bool { return value != nil && validID(*value) }
 
 func Parse(data []byte) (StoreRecord, error) {
 	var store StoreRecord

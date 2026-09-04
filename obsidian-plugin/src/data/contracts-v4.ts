@@ -6,6 +6,11 @@ import type {
   AnnotationExtractionRunV1,
   BillableQuantitiesV1,
   CandidateListV1,
+  ChainDependencyV4,
+  ClosedLoopV4,
+  ConversationChainV1,
+  ConversationMessageV1,
+  ConversationSourceRefV1,
   CoverageV1,
   DecisionV4,
   GeneratedBaselineV4,
@@ -18,6 +23,8 @@ import type {
   PricingRatesV1,
   PricingSnapshotV1,
   PricingSupplementV1,
+  ProblemMapCandidateV1,
+  ProblemNodeV4,
   ReviewPresentationV4,
   SessionEventItemV1,
   SessionEventPageV1,
@@ -32,6 +39,7 @@ import type {
   SessionSummaryErrorEntryV1,
   SessionSummaryRulesV1,
   SessionSummaryV1,
+  SourceTurnRefV4,
   TimelineEntryV4
 } from "../contracts/review-v4";
 
@@ -88,6 +96,7 @@ function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "minimum_writer_version", "project_id", "generation_id",
     "project_view_digest", "revision", "current_state", "timeline", "decisions", "risks", "open_loops",
+    "problem_map_revision", "problem_root_ids", "problem_nodes", "chain_dependencies",
     "human_patches", "orphan_patches", "generated_baselines"
   ]);
   constant(row.schema_version, 4, "$.schema_version");
@@ -148,6 +157,25 @@ function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
   parseUniqueEntityArray(row.open_loops, "$.open_loops", 65536,
     ["id", "title", "status", "question", "next_experiment", "completion_criterion"],
     ["title", "status", "question", "next_experiment", "completion_criterion"]);
+  integer(row.problem_map_revision, "$.problem_map_revision");
+  const rootIDs = idArray(row.problem_root_ids, "$.problem_root_ids", 65536, true);
+  const nodes = boundedArray(row.problem_nodes, "$.problem_nodes", 65536)
+    .map((node, index) => parseProblemNode(node, `$.problem_nodes[${index}]`));
+  assertProblemGraphCore(nodes, rootIDs);
+  const dependencies = boundedArray(row.chain_dependencies, "$.chain_dependencies", 65536)
+    .map((dependency, index) => parseChainDependency(dependency, `$.chain_dependencies[${index}]`));
+  const sourceTurns = new Set<string>();
+  const sessions = new Set<string>();
+  for (const dependency of dependencies) {
+    addUnique(sessions, identityKey(dependency.provider, dependency.session_id), "chain dependency identity");
+    for (const turnID of dependency.turn_unit_ids) {
+      addUnique(sourceTurns, sourceTurnKey(dependency.provider, dependency.session_id, turnID), "chain source turn");
+    }
+  }
+  for (const node of nodes) assertSourceTurns(node.source_turn_refs, sourceTurns, `problem ${node.id}`);
+  for (const item of timeline as TimelineEntryV4[]) {
+    assertClosedLoopSourceTurns(item.closed_loop, sourceTurns, `timeline ${item.id}`);
+  }
   parsePatchArray(row.human_patches, "$.human_patches");
   parsePatchArray(row.orphan_patches, "$.orphan_patches");
   parseBaselineArray(row.generated_baselines, "$.generated_baselines");
@@ -318,6 +346,136 @@ export function parseSessionEventPageV1(source: string): SessionEventPageV1 {
   return atWireBoundary(() => parseSessionEventPageDocument(source));
 }
 
+export function parseConversationChainV1(source: string): ConversationChainV1 {
+  return atWireBoundary(() => {
+    const row = documentObject(source, "conversation chain");
+    exact(row, "$", [
+      "schema_version", "minimum_reader_version", "digest", "project_id", "provider", "session_id",
+      "session_view_digest", "dependency_digest", "segmentation_rule_version", "coverage", "turn_units"
+    ]);
+    constant(row.schema_version, 1, "$.schema_version");
+    version(row.minimum_reader_version, "$.minimum_reader_version");
+    const claimedDigest = digest(row.digest, "$.digest");
+    id(row.project_id, "$.project_id");
+    const provider = id(row.provider, "$.provider");
+    const sessionID = id(row.session_id, "$.session_id");
+    digest(row.session_view_digest, "$.session_view_digest");
+    digest(row.dependency_digest, "$.dependency_digest");
+    id(row.segmentation_rule_version, "$.segmentation_rule_version");
+    const coverage = object(row.coverage, "$.coverage");
+    const coverageKeys = ["source_messages", "captured_messages", "turn_units", "unanswered_units", "truncated_messages"] as const;
+    exact(coverage, "$.coverage", coverageKeys);
+    for (const key of coverageKeys) integer(coverage[key], `$.coverage.${key}`);
+    const turns = boundedArray(row.turn_units, "$.turn_units", 65536);
+    const turnIDs = new Set<string>();
+    let captured = 0;
+    let unanswered = 0;
+    let truncated = 0;
+    for (let index = 0; index < turns.length; index += 1) {
+      const path = `$.turn_units[${index}]`;
+      const turn = object(turns[index], path);
+      exact(turn, path, ["turn_unit_id", "ordinal", "started_at", "ended_at", "user_message", "assistant_messages", "actions", "results", "answer_state"]);
+      addUnique(turnIDs, id(turn.turn_unit_id, `${path}.turn_unit_id`), "turn unit");
+      if (positiveInteger(turn.ordinal, `${path}.ordinal`) !== index + 1) throw new Error(`${path}.ordinal is not canonical`);
+      text(turn.started_at, `${path}.started_at`, 128, true);
+      nullableText(turn.ended_at, `${path}.ended_at`, 128);
+      const user = parseConversationMessage(turn.user_message, `${path}.user_message`, "user", provider, sessionID);
+      captured += 1;
+      truncated += user.truncated ? 1 : 0;
+      const assistants = boundedArray(turn.assistant_messages, `${path}.assistant_messages`, 65536);
+      for (let item = 0; item < assistants.length; item += 1) {
+        const message = parseConversationMessage(assistants[item], `${path}.assistant_messages[${item}]`, "assistant", provider, sessionID);
+        captured += 1;
+        truncated += message.truncated ? 1 : 0;
+      }
+      const actions = boundedArray(turn.actions, `${path}.actions`, 65536);
+      for (let item = 0; item < actions.length; item += 1) parseConversationAction(actions[item], `${path}.actions[${item}]`, provider, sessionID);
+      const results = boundedArray(turn.results, `${path}.results`, 65536);
+      for (let item = 0; item < results.length; item += 1) parseConversationResult(results[item], `${path}.results[${item}]`, provider, sessionID);
+      const answerState = oneOf(turn.answer_state, `${path}.answer_state`, ["no_answer", "answered", "partial"]);
+      if (answerState === "no_answer") {
+        if (assistants.length !== 0) throw new Error(`${path} claims no answer but has assistant messages`);
+        unanswered += 1;
+      } else if (assistants.length === 0) throw new Error(`${path} claims an answer without assistant messages`);
+    }
+    if (coverage.turn_units !== turns.length || coverage.captured_messages !== captured ||
+      (coverage.source_messages as number) < captured || coverage.unanswered_units !== unanswered || coverage.truncated_messages !== truncated) {
+      throw new Error("conversation chain coverage does not reconcile");
+    }
+    const result = row as unknown as ConversationChainV1;
+    if (claimedDigest !== ZERO_DIGEST && canonicalConversationChainDigest(result) !== claimedDigest) {
+      throw new Error("conversation chain digest mismatch");
+    }
+    return result;
+  });
+}
+
+export function parseProblemMapCandidateV1(source: string): ProblemMapCandidateV1 {
+  return atWireBoundary(() => {
+    const row = documentObject(source, "problem map candidate store");
+    exact(row, "$", ["schema_version", "minimum_reader_version", "digest", "project_id", "candidates"]);
+    constant(row.schema_version, 1, "$.schema_version");
+    version(row.minimum_reader_version, "$.minimum_reader_version");
+    const claimedDigest = digest(row.digest, "$.digest");
+    const projectID = id(row.project_id, "$.project_id");
+    const candidates = boundedArray(row.candidates, "$.candidates", 65536);
+    const seen = new Set<string>();
+    for (let index = 0; index < candidates.length; index += 1) {
+      const path = `$.candidates[${index}]`;
+      const candidate = object(candidates[index], path);
+      exact(candidate, path, [
+        "candidate_id", "project_id", "question", "source_turn_refs", "recommended_relation", "recommended_target_id",
+        "alternate_target_ids", "related_node_ids", "grounds", "confidence", "status", "dependency_digests",
+        "analysis_mode", "agent_run_id", "revision", "created_at", "updated_at"
+      ]);
+      addUnique(seen, id(candidate.candidate_id, `${path}.candidate_id`), "problem candidate");
+      if (id(candidate.project_id, `${path}.project_id`) !== projectID) throw new Error(`${path}.project_id does not match store`);
+      text(candidate.question, `${path}.question`, 4096, true);
+      const refs = boundedArray(candidate.source_turn_refs, `${path}.source_turn_refs`, 256);
+      if (refs.length === 0) throw new Error(`${path}.source_turn_refs must not be empty`);
+      parseSourceTurnRefs(refs, `${path}.source_turn_refs`);
+      const relation = oneOf(candidate.recommended_relation, `${path}.recommended_relation`, ["child", "sibling", "merge", "keep_pending"]);
+      const target = nullableID(candidate.recommended_target_id, `${path}.recommended_target_id`);
+      if (relation === "keep_pending" ? target !== null : target === null) throw new Error(`${path} has an invalid target for its relation`);
+      const alternates = idArray(candidate.alternate_target_ids, `${path}.alternate_target_ids`, 2, true);
+      const related = idArray(candidate.related_node_ids, `${path}.related_node_ids`, 2, true);
+      if (target !== null && alternates.includes(target)) throw new Error(`${path} alternate target repeats primary target`);
+      void related;
+      const grounds = boundedArray(candidate.grounds, `${path}.grounds`, 256);
+      for (let groundIndex = 0; groundIndex < grounds.length; groundIndex += 1) {
+        const groundPath = `${path}.grounds[${groundIndex}]`;
+        const ground = object(grounds[groundIndex], groundPath);
+        exact(ground, groundPath, ["rule_id", "rule_version", "matched_fact_refs", "explanation"]);
+        id(ground.rule_id, `${groundPath}.rule_id`);
+        id(ground.rule_version, `${groundPath}.rule_version`);
+        idArray(ground.matched_fact_refs, `${groundPath}.matched_fact_refs`, 256, true);
+        text(ground.explanation, `${groundPath}.explanation`, 4096);
+      }
+      oneOf(candidate.confidence, `${path}.confidence`, ["high", "medium", "low"]);
+      oneOf(candidate.status, `${path}.status`, ["pending", "applied", "merged", "kept_pending", "stale", "dismissed"]);
+      const dependencies = boundedArray(candidate.dependency_digests, `${path}.dependency_digests`, 256);
+      if (dependencies.length === 0) throw new Error(`${path}.dependency_digests must not be empty`);
+      let previous = "";
+      for (let item = 0; item < dependencies.length; item += 1) {
+        const current = digest(dependencies[item], `${path}.dependency_digests[${item}]`);
+        if (previous !== "" && compareGoStrings(previous, current) >= 0) throw new Error(`${path}.dependency_digests must be unique and sorted`);
+        previous = current;
+      }
+      const mode = oneOf(candidate.analysis_mode, `${path}.analysis_mode`, ["deterministic", "agent_requested"]);
+      const runID = nullableID(candidate.agent_run_id, `${path}.agent_run_id`);
+      if (mode === "deterministic" ? runID !== null : runID === null) throw new Error(`${path} has invalid Agent run provenance`);
+      positiveInteger(candidate.revision, `${path}.revision`);
+      text(candidate.created_at, `${path}.created_at`, 128, true);
+      text(candidate.updated_at, `${path}.updated_at`, 128, true);
+    }
+    const result = row as unknown as ProblemMapCandidateV1;
+    if (claimedDigest !== ZERO_DIGEST && canonicalProblemMapCandidateDigest(result) !== claimedDigest) {
+      throw new Error("problem map candidate digest mismatch");
+    }
+    return result;
+  });
+}
+
 function parseSessionEventPageDocument(source: string): SessionEventPageV1 {
   const row = documentObject(source, "session event page");
   exact(row, "$", [
@@ -431,7 +589,7 @@ export function assertSnapshotBindings(ledger: MachineLedgerV4, index: SessionIn
 
 function parseTimeline(value: unknown, path: string, generationID: string): TimelineEntryV4 {
   const row = object(value, path);
-  exact(row, path, ["id", "generation_id", "occurred_at", "kind", "title", "summary", "decision_ids"]);
+  exact(row, path, ["id", "generation_id", "occurred_at", "kind", "title", "summary", "decision_ids", "closed_loop"]);
   const parsedGeneration = id(row.generation_id, `${path}.generation_id`);
   if (parsedGeneration !== generationID) throw new Error(`${path}.generation_id does not match presentation`);
   id(row.id, `${path}.id`);
@@ -440,6 +598,7 @@ function parseTimeline(value: unknown, path: string, generationID: string): Time
   text(row.title, `${path}.title`, 16384);
   text(row.summary, `${path}.summary`, 16384);
   idArray(row.decision_ids, `${path}.decision_ids`, 256, true);
+  parseClosedLoop(row.closed_loop, `${path}.closed_loop`);
   return row as unknown as TimelineEntryV4;
 }
 
@@ -477,6 +636,174 @@ function parseSessionReference(value: unknown, path: string): SessionReferenceV4
   id(row.provider, `${path}.provider`);
   id(row.session_id, `${path}.session_id`);
   return row as unknown as SessionReferenceV4;
+}
+
+function parseSourceTurnRef(value: unknown, path: string): SourceTurnRefV4 {
+  const row = object(value, path);
+  exact(row, path, ["provider", "session_id", "turn_unit_id"]);
+  id(row.provider, `${path}.provider`);
+  id(row.session_id, `${path}.session_id`);
+  id(row.turn_unit_id, `${path}.turn_unit_id`);
+  return row as unknown as SourceTurnRefV4;
+}
+
+function parseSourceTurnRefs(values: readonly unknown[], path: string): SourceTurnRefV4[] {
+  const seen = new Set<string>();
+  return values.map((value, index) => {
+    const ref = parseSourceTurnRef(value, `${path}[${index}]`);
+    addUnique(seen, sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id), "source turn reference");
+    return ref;
+  });
+}
+
+function parseClosedLoop(value: unknown, path: string): ClosedLoopV4 {
+  const row = object(value, path);
+  exact(row, path, ["trigger_question", "conclusion", "execution", "verification", "impact_and_follow_up", "source_turn_refs", "coverage"]);
+  for (const key of ["trigger_question", "execution", "verification", "impact_and_follow_up"] as const) {
+    parseClosedLoopSegment(row[key], `${path}.${key}`);
+  }
+  parseClosedLoopConclusion(row.conclusion, `${path}.conclusion`);
+  const aggregate = parseSourceTurnRefs(boundedArray(row.source_turn_refs, `${path}.source_turn_refs`, 256), `${path}.source_turn_refs`);
+  const aggregateSet = new Set(aggregate.map((ref) => sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id)));
+  for (const key of ["trigger_question", "conclusion", "execution", "verification", "impact_and_follow_up"] as const) {
+    const part = row[key] as JsonObject;
+    for (const ref of part.source_turn_refs as SourceTurnRefV4[]) {
+      if (!aggregateSet.has(sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id))) {
+        throw new Error(`${path}.${key} references a turn absent from aggregate references`);
+      }
+    }
+  }
+  const coverage = object(row.coverage, `${path}.coverage`);
+  const keys = ["source_turns", "captured_turns", "truncated_turns", "source_unavailable_turns"] as const;
+  exact(coverage, `${path}.coverage`, keys);
+  for (const key of keys) integer(coverage[key], `${path}.coverage.${key}`);
+  if (coverage.captured_turns !== aggregate.length || (coverage.source_turns as number) < aggregate.length ||
+    checkedSum(`${path}.coverage`, coverage.truncated_turns as number, coverage.source_unavailable_turns as number) > (coverage.source_turns as number)) {
+    throw new Error(`${path}.coverage does not reconcile`);
+  }
+  return row as unknown as ClosedLoopV4;
+}
+
+function parseClosedLoopSegment(value: unknown, path: string): void {
+  const row = object(value, path);
+  exact(row, path, ["state", "text", "missing_reason", "source_turn_refs"]);
+  const state = oneOf(row.state, `${path}.state`, ["present", "partial", "missing"]);
+  const body = text(row.text, `${path}.text`, 16384);
+  const reason = parseMissingReason(row.missing_reason, `${path}.missing_reason`);
+  parseSourceTurnRefs(boundedArray(row.source_turn_refs, `${path}.source_turn_refs`, 256), `${path}.source_turn_refs`);
+  if (state === "missing" ? body !== "" || reason === null : body.trim() === "" || reason !== null) {
+    throw new Error(`${path} has invalid missing/text semantics`);
+  }
+}
+
+function parseClosedLoopConclusion(value: unknown, path: string): void {
+  const row = object(value, path);
+  exact(row, path, ["kind", "text", "missing_reason", "source_turn_refs"]);
+  const kind = oneOf(row.kind, `${path}.kind`, ["visible_answer_excerpt", "human_confirmed", "ai_candidate_confirmed", "missing"]);
+  const body = text(row.text, `${path}.text`, 16384);
+  const reason = parseMissingReason(row.missing_reason, `${path}.missing_reason`);
+  parseSourceTurnRefs(boundedArray(row.source_turn_refs, `${path}.source_turn_refs`, 256), `${path}.source_turn_refs`);
+  if (kind === "missing") {
+    if (body !== "" || reason === null) throw new Error(`${path} missing conclusion must have empty text and a typed reason`);
+  } else if (body.trim() === "" || reason !== null) throw new Error(`${path} confirmed conclusion requires text and no missing reason`);
+  if (kind === "visible_answer_excerpt" && Buffer.byteLength(body, "utf8") > 4096) throw new Error(`${path}.text exceeds 4096 UTF-8 bytes`);
+}
+
+function parseMissingReason(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  return oneOf(value, path, ["not_captured", "no_visible_answer", "no_execution_evidence", "not_verified", "source_unavailable", "partial_coverage"]);
+}
+
+function parseProblemNode(value: unknown, path: string): ProblemNodeV4 {
+  const row = object(value, path);
+  exact(row, path, [
+    "id", "question", "primary_parent_id", "related_node_ids", "workflow_state", "answer_state",
+    "completion_criterion", "current_conclusion", "source_turn_refs", "provenance", "first_proposed_at",
+    "sibling_order", "confirmed_at", "revision"
+  ]);
+  id(row.id, `${path}.id`);
+  text(row.question, `${path}.question`, 4096, true);
+  nullableID(row.primary_parent_id, `${path}.primary_parent_id`);
+  idArray(row.related_node_ids, `${path}.related_node_ids`, 2, true);
+  oneOf(row.workflow_state, `${path}.workflow_state`, ["not_started", "in_progress", "paused", "resolved"]);
+  oneOf(row.answer_state, `${path}.answer_state`, ["no_answer", "answered_unverified", "execution_verified"]);
+  text(row.completion_criterion, `${path}.completion_criterion`, 16384);
+  text(row.current_conclusion, `${path}.current_conclusion`, 16384);
+  parseSourceTurnRefs(boundedArray(row.source_turn_refs, `${path}.source_turn_refs`, 256), `${path}.source_turn_refs`);
+  oneOf(row.provenance, `${path}.provenance`, ["human_created", "migrated", "candidate_confirmed"]);
+  text(row.first_proposed_at, `${path}.first_proposed_at`, 128, true);
+  integer(row.sibling_order, `${path}.sibling_order`);
+  nullableText(row.confirmed_at, `${path}.confirmed_at`, 128);
+  positiveInteger(row.revision, `${path}.revision`);
+  return row as unknown as ProblemNodeV4;
+}
+
+function parseChainDependency(value: unknown, path: string): ChainDependencyV4 {
+  const row = object(value, path);
+  exact(row, path, ["provider", "session_id", "session_view_digest", "dependency_digest", "turn_unit_ids"]);
+  id(row.provider, `${path}.provider`);
+  id(row.session_id, `${path}.session_id`);
+  digest(row.session_view_digest, `${path}.session_view_digest`);
+  digest(row.dependency_digest, `${path}.dependency_digest`);
+  idArray(row.turn_unit_ids, `${path}.turn_unit_ids`, 65536, true);
+  return row as unknown as ChainDependencyV4;
+}
+
+export function assertProblemGraph(nodes: readonly ProblemNodeV4[]): void {
+  const parsed = nodes.map((node, index) => parseProblemNode(node, `$[${index}]`));
+  assertProblemGraphCore(parsed);
+}
+
+function assertProblemGraphCore(nodes: readonly ProblemNodeV4[], declaredRoots?: readonly string[]): void {
+  const byID = new Map<string, ProblemNodeV4>();
+  for (const node of nodes) {
+    if (byID.has(node.id)) throw new Error(`duplicate problem node "${node.id}"`);
+    byID.set(node.id, node);
+  }
+  const siblingOrders = new Map<string, Set<number>>();
+  for (const node of nodes) {
+    const parentKey = node.primary_parent_id ?? "\u0000root";
+    if (node.primary_parent_id !== null && !byID.has(node.primary_parent_id)) throw new Error(`problem "${node.id}" has missing parent`);
+    if (node.primary_parent_id === node.id) throw new Error("problem cannot parent itself");
+    const orders = siblingOrders.get(parentKey) ?? new Set<number>();
+    if (orders.has(node.sibling_order)) throw new Error(`duplicate sibling order beneath "${parentKey}"`);
+    orders.add(node.sibling_order);
+    siblingOrders.set(parentKey, orders);
+    for (const related of node.related_node_ids) {
+      if (related === node.id || !byID.has(related)) throw new Error(`problem "${node.id}" has missing or self related relation`);
+    }
+  }
+  const state = new Map<string, number>();
+  const visit = (nodeID: string): void => {
+    if (state.get(nodeID) === 1) throw new Error("problem graph contains cycle");
+    if (state.get(nodeID) === 2) return;
+    state.set(nodeID, 1);
+    const parent = byID.get(nodeID)?.primary_parent_id;
+    if (parent !== null && parent !== undefined) visit(parent);
+    state.set(nodeID, 2);
+  };
+  for (const id of byID.keys()) visit(id);
+  if (declaredRoots !== undefined) {
+    const actual = nodes.filter((node) => node.primary_parent_id === null)
+      .sort((left, right) => left.sibling_order - right.sibling_order || compareGoStrings(left.id, right.id))
+      .map((node) => node.id);
+    if (declaredRoots.length !== actual.length || declaredRoots.some((id, index) => id !== actual[index])) {
+      throw new Error("declared problem roots do not match graph roots");
+    }
+  }
+}
+
+function assertSourceTurns(refs: readonly SourceTurnRefV4[], available: ReadonlySet<string>, kind: string): void {
+  for (const ref of refs) {
+    if (!available.has(sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id))) throw new Error(`${kind} references a missing source turn`);
+  }
+}
+
+function assertClosedLoopSourceTurns(loop: ClosedLoopV4, available: ReadonlySet<string>, kind: string): void {
+  assertSourceTurns(loop.source_turn_refs, available, kind);
+  for (const part of [loop.trigger_question, loop.conclusion, loop.execution, loop.verification, loop.impact_and_follow_up]) {
+    assertSourceTurns(part.source_turn_refs, available, kind);
+  }
 }
 
 function parseUniqueEntityArray(
@@ -643,6 +970,61 @@ function parseFactCounts(value: unknown, path: string): SessionFactCountsV1 {
   return row as unknown as SessionFactCountsV1;
 }
 
+function parseConversationMessage(
+  value: unknown,
+  path: string,
+  expectedRole: "user" | "assistant",
+  provider: string,
+  sessionID: string
+): ConversationMessageV1 {
+  const row = object(value, path);
+  exact(row, path, ["role", "revision_id", "source_ref", "occurred_at", "visible_excerpt", "truncated"]);
+  if (oneOf(row.role, `${path}.role`, ["user", "assistant"]) !== expectedRole) throw new Error(`${path}.role is not ${expectedRole}`);
+  id(row.revision_id, `${path}.revision_id`);
+  parseConversationSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionID);
+  text(row.occurred_at, `${path}.occurred_at`, 128, true);
+  text(row.visible_excerpt, `${path}.visible_excerpt`, 4096);
+  boolean(row.truncated, `${path}.truncated`);
+  return row as unknown as ConversationMessageV1;
+}
+
+function parseConversationSourceRef(
+  value: unknown,
+  path: string,
+  provider: string,
+  sessionID: string
+): ConversationSourceRefV1 {
+  const row = object(value, path);
+  exact(row, path, ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"]);
+  if (id(row.provider, `${path}.provider`) !== provider || id(row.session_id, `${path}.session_id`) !== sessionID) {
+    throw new Error(`${path} is not authenticated to the conversation identity`);
+  }
+  id(row.source_identity, `${path}.source_identity`);
+  integer(row.record_ordinal, `${path}.record_ordinal`);
+  sha256(row.source_hash, `${path}.source_hash`);
+  return row as unknown as ConversationSourceRefV1;
+}
+
+function parseConversationAction(value: unknown, path: string, provider: string, sessionID: string): void {
+  const row = object(value, path);
+  exact(row, path, ["revision_id", "source_ref", "kind", "tool_name", "excerpt"]);
+  id(row.revision_id, `${path}.revision_id`);
+  parseConversationSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionID);
+  id(row.kind, `${path}.kind`);
+  nullableID(row.tool_name, `${path}.tool_name`);
+  text(row.excerpt, `${path}.excerpt`, 4096);
+}
+
+function parseConversationResult(value: unknown, path: string, provider: string, sessionID: string): void {
+  const row = object(value, path);
+  exact(row, path, ["revision_id", "source_ref", "kind", "verification_state", "excerpt"]);
+  id(row.revision_id, `${path}.revision_id`);
+  parseConversationSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionID);
+  id(row.kind, `${path}.kind`);
+  oneOf(row.verification_state, `${path}.verification_state`, ["unknown", "passed", "failed", "partial"]);
+  text(row.excerpt, `${path}.excerpt`, 4096);
+}
+
 function parseInspectionIdentity(row: JsonObject): void {
   constant(row.schema_version, 1, "$.schema_version");
   version(row.minimum_reader_version, "$.minimum_reader_version");
@@ -764,13 +1146,27 @@ function parseExtractionRun(value: unknown, path: string, projectID: string): An
 function parseAnnotation(value: unknown, path: string, projectID: string): AgentAnnotationEntryV1 {
   const row = object(value, path);
   exact(row, path, [
-    "id", "project_id", "entity_id", "field", "status", "text", "generation_id", "schema_version",
-    "analysis_profile", "agent_run_id", "dependencies", "revision", "created_at", "confirmed_decision_id"
+    "id", "project_id", "annotation_kind", "entity_id", "field", "status", "text", "generation_id", "schema_version",
+    "analysis_profile", "agent_run_id", "dependencies", "revision", "created_at", "confirmed_entity_id",
+    "target_milestone_id", "prompt_schema_version"
+  ], [
+    "id", "project_id", "annotation_kind", "status", "text", "generation_id", "schema_version", "analysis_profile",
+    "agent_run_id", "dependencies", "revision", "created_at", "confirmed_entity_id"
   ]);
   const annotationID = id(row.id, `${path}.id`);
   if (id(row.project_id, `${path}.project_id`) !== projectID) throw new Error(`${path}.project_id does not match store`);
-  id(row.entity_id, `${path}.entity_id`);
-  id(row.field, `${path}.field`);
+  const kind = oneOf(row.annotation_kind, `${path}.annotation_kind`, ["decision_candidate", "agreement_candidate", "milestone_conclusion_candidate"]);
+  const hasEntity = Object.prototype.hasOwnProperty.call(row, "entity_id");
+  const hasField = Object.prototype.hasOwnProperty.call(row, "field");
+  const hasMilestone = Object.prototype.hasOwnProperty.call(row, "target_milestone_id");
+  const hasPrompt = Object.prototype.hasOwnProperty.call(row, "prompt_schema_version");
+  if (hasEntity) id(row.entity_id, `${path}.entity_id`);
+  if (hasField) id(row.field, `${path}.field`);
+  if (hasMilestone) id(row.target_milestone_id, `${path}.target_milestone_id`);
+  if (hasPrompt) id(row.prompt_schema_version, `${path}.prompt_schema_version`);
+  if (kind === "milestone_conclusion_candidate" ? hasEntity || hasField || !hasMilestone || !hasPrompt : !hasEntity || !hasField || hasMilestone || hasPrompt) {
+    throw new Error(`${path} has invalid conditional entity or milestone fields`);
+  }
   const status = oneOf(row.status, `${path}.status`, ["pending", "confirmed", "ignored", "not_decision", "stale"]);
   text(row.text, `${path}.text`, 4096);
   id(row.generation_id, `${path}.generation_id`);
@@ -779,17 +1175,20 @@ function parseAnnotation(value: unknown, path: string, projectID: string): Agent
   id(row.agent_run_id, `${path}.agent_run_id`);
   const dependencies = boundedArray(row.dependencies, `${path}.dependencies`, 256);
   const seenDependencies = new Set<string>();
+  let hasSourceTurn = false;
   for (let index = 0; index < dependencies.length; index += 1) {
     const dependency = parseAnnotationDependency(dependencies[index], `${path}.dependencies[${index}]`);
     addUnique(seenDependencies, `${dependency.kind}\u0000${dependency.revision_id}`, "annotation dependency");
+    hasSourceTurn ||= dependency.kind === "source_turn";
   }
+  if (kind === "milestone_conclusion_candidate" && !hasSourceTurn) throw new Error(`${path} milestone conclusion has no source-turn dependency`);
   positiveInteger(row.revision, `${path}.revision`);
   text(row.created_at, `${path}.created_at`, 128);
-  const confirmedID = nullableText(row.confirmed_decision_id, `${path}.confirmed_decision_id`, 256);
+  const confirmedID = nullableID(row.confirmed_entity_id, `${path}.confirmed_entity_id`);
   if (status === "confirmed") {
-    if (confirmedID === null || !ID.test(confirmedID)) throw new Error(`confirmed candidate "${annotationID}" has no valid decision`);
+    if (confirmedID === null) throw new Error(`confirmed candidate "${annotationID}" has no valid entity`);
   } else if (confirmedID !== null) {
-    throw new Error(`candidate "${annotationID}" is not confirmed but has a decision`);
+    throw new Error(`candidate "${annotationID}" is not confirmed but has an entity`);
   }
   return row as unknown as AgentAnnotationEntryV1;
 }
@@ -797,7 +1196,7 @@ function parseAnnotation(value: unknown, path: string, projectID: string): Agent
 function parseAnnotationDependency(value: unknown, path: string): AnnotationDependencyV1 {
   const row = object(value, path);
   exact(row, path, ["kind", "revision_id", "digest"]);
-  oneOf(row.kind, `${path}.kind`, ["observation", "session_view"]);
+  oneOf(row.kind, `${path}.kind`, ["observation", "session_view", "source_turn"]);
   id(row.revision_id, `${path}.revision_id`);
   digest(row.digest, `${path}.digest`);
   return row as unknown as AnnotationDependencyV1;
@@ -1008,6 +1407,11 @@ function nullableText(value: unknown, path: string, maximum: number): string | n
   return text(value, path, maximum);
 }
 
+function nullableID(value: unknown, path: string): string | null {
+  if (value === null) return null;
+  return id(value, path);
+}
+
 function id(value: unknown, path: string): string {
   const result = text(value, path, 256, true);
   if (!ID.test(result)) throw new Error(`${path} must be a valid ID`);
@@ -1102,6 +1506,10 @@ function addUnique(seen: Set<string>, value: string, kind: string): void {
 
 function identityKey(provider: string, sessionID: string): string {
   return `${provider}\u0000${sessionID}`;
+}
+
+function sourceTurnKey(provider: string, sessionID: string, turnID: string): string {
+  return `${provider}\u0000${sessionID}\u0000${turnID}`;
 }
 
 function checkedAdd(left: number, right: number, path: string): number {
@@ -1207,6 +1615,84 @@ function canonicalLedgerSHA256(ledger: MachineLedgerV4): string {
     }
   };
   return sha256Text(goJSON(body));
+}
+
+function canonicalConversationChainDigest(chain: ConversationChainV1): string {
+  const sourceRef = (ref: ConversationSourceRefV1): JsonObject => ({
+    provider: ref.provider, session_id: ref.session_id, source_identity: ref.source_identity,
+    record_ordinal: ref.record_ordinal, source_hash: ref.source_hash
+  });
+  const message = (item: ConversationMessageV1): JsonObject => ({
+    role: item.role, revision_id: item.revision_id, source_ref: sourceRef(item.source_ref),
+    occurred_at: item.occurred_at, visible_excerpt: item.visible_excerpt, truncated: item.truncated
+  });
+  const body = {
+    schema_version: chain.schema_version,
+    minimum_reader_version: chain.minimum_reader_version,
+    project_id: chain.project_id,
+    provider: chain.provider,
+    session_id: chain.session_id,
+    session_view_digest: chain.session_view_digest,
+    dependency_digest: chain.dependency_digest,
+    segmentation_rule_version: chain.segmentation_rule_version,
+    coverage: {
+      source_messages: chain.coverage.source_messages,
+      captured_messages: chain.coverage.captured_messages,
+      turn_units: chain.coverage.turn_units,
+      unanswered_units: chain.coverage.unanswered_units,
+      truncated_messages: chain.coverage.truncated_messages
+    },
+    turn_units: chain.turn_units.map((turn) => ({
+      turn_unit_id: turn.turn_unit_id,
+      ordinal: turn.ordinal,
+      started_at: turn.started_at,
+      ended_at: turn.ended_at,
+      user_message: message(turn.user_message),
+      assistant_messages: turn.assistant_messages.map(message),
+      actions: turn.actions.map((item) => ({
+        revision_id: item.revision_id, source_ref: sourceRef(item.source_ref), kind: item.kind,
+        tool_name: item.tool_name, excerpt: item.excerpt
+      })),
+      results: turn.results.map((item) => ({
+        revision_id: item.revision_id, source_ref: sourceRef(item.source_ref), kind: item.kind,
+        verification_state: item.verification_state, excerpt: item.excerpt
+      })),
+      answer_state: turn.answer_state
+    }))
+  };
+  return `sha256:${sha256Text(goJSON(body))}`;
+}
+
+function canonicalProblemMapCandidateDigest(store: ProblemMapCandidateV1): string {
+  const sourceTurn = (ref: SourceTurnRefV4): JsonObject => ({ provider: ref.provider, session_id: ref.session_id, turn_unit_id: ref.turn_unit_id });
+  const body = {
+    schema_version: store.schema_version,
+    minimum_reader_version: store.minimum_reader_version,
+    project_id: store.project_id,
+    candidates: store.candidates.map((candidate) => ({
+      candidate_id: candidate.candidate_id,
+      project_id: candidate.project_id,
+      question: candidate.question,
+      source_turn_refs: candidate.source_turn_refs.map(sourceTurn),
+      recommended_relation: candidate.recommended_relation,
+      recommended_target_id: candidate.recommended_target_id,
+      alternate_target_ids: candidate.alternate_target_ids,
+      related_node_ids: candidate.related_node_ids,
+      grounds: candidate.grounds.map((ground) => ({
+        rule_id: ground.rule_id, rule_version: ground.rule_version,
+        matched_fact_refs: ground.matched_fact_refs, explanation: ground.explanation
+      })),
+      confidence: candidate.confidence,
+      status: candidate.status,
+      dependency_digests: candidate.dependency_digests,
+      analysis_mode: candidate.analysis_mode,
+      agent_run_id: candidate.agent_run_id,
+      revision: candidate.revision,
+      created_at: candidate.created_at,
+      updated_at: candidate.updated_at
+    }))
+  };
+  return `sha256:${sha256Text(goJSON(body))}`;
 }
 
 function orderedIndexCoverage(value: SessionIndexCoverageV1): SessionIndexCoverageV1 {

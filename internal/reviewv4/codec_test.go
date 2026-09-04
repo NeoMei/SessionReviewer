@@ -310,6 +310,72 @@ func TestRenderLedgerPreservesExplicitEmptyOptionalArrays(t *testing.T) {
 	}
 }
 
+func TestValidatePresentationRequiresHonestClosedLoopConclusion(t *testing.T) {
+	presentation := minimumPresentation()
+	presentation.Timeline = []Timeline{{
+		ID: "milestone-1", GenerationID: presentation.GenerationID, OccurredAt: "2026-09-04T00:00:00Z", Kind: "milestone", Title: "Milestone", Summary: "Summary", DecisionIDs: []string{},
+		ClosedLoop: neutralClosedLoop(),
+	}}
+	presentation.Timeline[0].ClosedLoop.Conclusion.Text = "invented answer"
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted missing conclusion with non-empty text")
+	}
+	presentation.Timeline[0].ClosedLoop.Conclusion = ClosedLoopConclusion{Kind: ConclusionVisibleAnswerExcerpt, Text: "", MissingReason: nil, SourceTurnRefs: []SourceTurnRef{}}
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted a non-missing conclusion without text")
+	}
+}
+
+func TestValidatePresentationChecksDeclaredProblemRootsAndSourceTurns(t *testing.T) {
+	presentation := minimumPresentation()
+	presentation.ProblemMapRevision = 1
+	presentation.ProblemNodes = []ProblemNode{{
+		ID: "problem-1", Question: "Why?", PrimaryParentID: nil, RelatedNodeIDs: []string{}, WorkflowState: "not_started", AnswerState: "no_answer",
+		CompletionCriterion: "", CurrentConclusion: "", SourceTurnRefs: []SourceTurnRef{{Provider: "claude", SessionID: "session-1", TurnUnitID: "turn-1"}},
+		Provenance: "human_created", FirstProposedAt: "2026-09-04T00:00:00Z", SiblingOrder: 0, ConfirmedAt: nil, Revision: 1,
+	}}
+	presentation.ProblemRootIDs = []string{"problem-1"}
+	presentation.ChainDependencies = []ChainDependency{{
+		Provider: "claude", SessionID: "session-1", SessionViewDigest: "sha256:" + strings.Repeat("1", 64),
+		DependencyDigest: "sha256:" + strings.Repeat("2", 64), TurnUnitIDs: []string{"turn-1"},
+	}}
+	if err := ValidatePresentation(presentation); err != nil {
+		t.Fatalf("valid formal problem graph rejected: %v", err)
+	}
+	duplicateDependency := presentation
+	duplicateDependency.ChainDependencies = append(append([]ChainDependency{}, presentation.ChainDependencies...), presentation.ChainDependencies[0])
+	duplicateDependency.ChainDependencies[1].DependencyDigest = "sha256:" + strings.Repeat("3", 64)
+	if err := ValidatePresentation(duplicateDependency); err == nil {
+		t.Fatal("accepted two chain dependencies for one provider/session identity")
+	}
+	presentation.ProblemRootIDs = []string{}
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted root declaration inconsistent with null parents")
+	}
+	presentation.ProblemRootIDs = []string{"problem-1"}
+	presentation.ProblemNodes[0].SourceTurnRefs[0].TurnUnitID = "missing"
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted problem source turn absent from retained chain dependencies")
+	}
+}
+
+func TestValidatePresentationRequiresCanonicalProblemRootOrder(t *testing.T) {
+	presentation := minimumPresentation()
+	presentation.ProblemMapRevision = 1
+	presentation.ProblemNodes = []ProblemNode{
+		{ID: "problem-later", Question: "Later?", RelatedNodeIDs: []string{}, WorkflowState: "not_started", AnswerState: "no_answer", SourceTurnRefs: []SourceTurnRef{}, Provenance: "human_created", FirstProposedAt: "now", SiblingOrder: 1, Revision: 1},
+		{ID: "problem-first", Question: "First?", RelatedNodeIDs: []string{}, WorkflowState: "not_started", AnswerState: "no_answer", SourceTurnRefs: []SourceTurnRef{}, Provenance: "human_created", FirstProposedAt: "now", SiblingOrder: 0, Revision: 1},
+	}
+	presentation.ProblemRootIDs = []string{"problem-later", "problem-first"}
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted problem roots outside sibling order")
+	}
+	presentation.ProblemRootIDs = []string{"problem-first", "problem-later"}
+	if err := ValidatePresentation(presentation); err != nil {
+		t.Fatalf("canonical problem root order rejected: %v", err)
+	}
+}
+
 func TestValidateLedgerUsesOnlyCurrentPricingForAggregateCompleteness(t *testing.T) {
 	ledger := frozenLedger(t)
 	historical := ledger.PricingSnapshots[0]
@@ -364,7 +430,19 @@ func completePricingSnapshot(t *testing.T, id string) pricing.Snapshot {
 }
 
 func minimumPresentation() Presentation {
-	return Presentation{SchemaVersion: 4, MinimumReaderVersion: "0.4.0", MinimumWriterVersion: "0.4.0", ProjectID: "p", GenerationID: "g", ProjectViewDigest: "sha256:" + strings.Repeat("1", 64), CurrentState: CurrentState{}, Timeline: []Timeline{}, Decisions: []Decision{}, Risks: []Risk{}, OpenLoops: []OpenLoop{}, HumanPatches: []Patch{}, OrphanPatches: []Patch{}, GeneratedBaselines: []Baseline{}}
+	return Presentation{SchemaVersion: 4, MinimumReaderVersion: "0.4.0", MinimumWriterVersion: "0.4.0", ProjectID: "p", GenerationID: "g", ProjectViewDigest: "sha256:" + strings.Repeat("1", 64), CurrentState: CurrentState{}, Timeline: []Timeline{}, Decisions: []Decision{}, Risks: []Risk{}, OpenLoops: []OpenLoop{}, ProblemMapRevision: 0, ProblemRootIDs: []string{}, ProblemNodes: []ProblemNode{}, ChainDependencies: []ChainDependency{}, HumanPatches: []Patch{}, OrphanPatches: []Patch{}, GeneratedBaselines: []Baseline{}}
+}
+
+func neutralClosedLoop() ClosedLoop {
+	missing := "not_captured"
+	return ClosedLoop{
+		TriggerQuestion:   ClosedLoopSegment{State: "missing", Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}},
+		Conclusion:        ClosedLoopConclusion{Kind: ConclusionMissing, Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}},
+		Execution:         ClosedLoopSegment{State: "missing", Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}},
+		Verification:      ClosedLoopSegment{State: "missing", Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}},
+		ImpactAndFollowUp: ClosedLoopSegment{State: "missing", Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}},
+		SourceTurnRefs:    []SourceTurnRef{}, Coverage: ClosedLoopCoverage{},
+	}
 }
 
 func minimumDecision(id string, supersedes []string) Decision {

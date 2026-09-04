@@ -49,7 +49,7 @@ var (
 // the one cross-document invariant that JSON Schema cannot express: index
 // coverage counts must reconcile with the entries array.
 func TestV4ContractFixtures(t *testing.T) {
-	names := []string{"review-presentation-v4", "machine-ledger-v4", "session-index-v1", "session-summary-v1", "session-event-page-v1", "agent-annotation-v1", "pricing-snapshot-v1", "pricing-supplement-v1"}
+	names := []string{"review-presentation-v4", "machine-ledger-v4", "session-index-v1", "session-summary-v1", "session-event-page-v1", "agent-annotation-v1", "pricing-snapshot-v1", "pricing-supplement-v1", "conversation-chain-v1", "problem-map-candidate-v1"}
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			schema := readContractJSON(t, filepath.Join("..", "..", "schemas", name+".schema.json"))
@@ -308,6 +308,32 @@ func validateContractSchema(schema, value any, path string, root any) error {
 			return fmt.Errorf("%s: decode ref %q: %w", path, ref, err)
 		}
 		return validateContractSchema(external, value, path, external)
+	}
+	if alternatives, ok := s["oneOf"].([]any); ok {
+		matches := 0
+		for _, alternative := range alternatives {
+			if validateContractSchema(alternative, value, path, root) == nil {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("%s: oneOf matched %d alternatives", path, matches)
+		}
+	}
+	if alternatives, ok := s["anyOf"].([]any); ok {
+		matched := false
+		for _, alternative := range alternatives {
+			if validateContractSchema(alternative, value, path, root) == nil {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%s: anyOf did not match", path)
+		}
+	}
+	if negated, ok := s["not"]; ok && validateContractSchema(negated, value, path, root) == nil {
+		return fmt.Errorf("%s: forbidden schema matched", path)
 	}
 	if constValue, ok := s["const"]; ok && !reflect.DeepEqual(constValue, value) {
 		return fmt.Errorf("%s: want const %v", path, constValue)

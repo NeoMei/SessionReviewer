@@ -111,10 +111,11 @@ func migratePresentation(source reviewv2.AcceptedV3, generationID, projectDigest
 		ProjectID: state.Review.ProjectID, GenerationID: generationID, ProjectViewDigest: projectDigest, Revision: state.Review.Revision,
 		CurrentState: reviewv4.CurrentState{Goal: state.Review.Goal, Stage: state.Review.Stage, Status: state.Review.Status, NextAction: state.Review.NextAction, LastVerification: state.Review.LastVerification},
 		Timeline:     []reviewv4.Timeline{}, Decisions: []reviewv4.Decision{}, Risks: []reviewv4.Risk{}, OpenLoops: []reviewv4.OpenLoop{},
+		ProblemMapRevision: 0, ProblemRootIDs: []string{}, ProblemNodes: []reviewv4.ProblemNode{}, ChainDependencies: []reviewv4.ChainDependency{},
 		HumanPatches: migratePatches(state.Machine.HumanPatches), OrphanPatches: migratePatches(state.Machine.OrphanPatches), GeneratedBaselines: migrateBaselines(state.Machine.GeneratedBaselines, generationID),
 	}
 	for _, event := range state.Events {
-		result.Timeline = append(result.Timeline, reviewv4.Timeline{ID: event.ID, GenerationID: generationID, OccurredAt: event.OccurredAt, Kind: event.Kind, Title: event.Title, Summary: event.Summary, DecisionIDs: append([]string{}, event.DecisionIDs...)})
+		result.Timeline = append(result.Timeline, reviewv4.Timeline{ID: event.ID, GenerationID: generationID, OccurredAt: event.OccurredAt, Kind: event.Kind, Title: event.Title, Summary: event.Summary, DecisionIDs: append([]string{}, event.DecisionIDs...), ClosedLoop: reviewv4.NeutralClosedLoop()})
 	}
 	for _, decision := range state.Review.Decisions {
 		status, err := migrateDecisionStatus(decision.Status)

@@ -10,11 +10,12 @@ import (
 )
 
 const (
-	MaxInspectPageSize      = 100
-	MaxInspectQueryBytes    = 256
-	MaxDecisionInputBytes   = 64 << 10
-	MaxOpaqueCursorBytes    = 4096
-	MaxInspectResponseBytes = 1 << 20
+	MaxInspectPageSize             = 100
+	MaxInspectQueryBytes           = 256
+	MaxDecisionInputBytes          = 64 << 10
+	MaxOpaqueCursorBytes           = 4096
+	MaxInspectResponseBytes        = 1 << 20
+	MaxConversationSourceReadBytes = 64 << 10
 )
 
 const InspectExecutionTimeout = 5 * time.Second
@@ -64,6 +65,43 @@ type InspectRequest struct {
 	Limit                int
 	QueryKind            string
 	Query                string
+	TurnUnitID           string
+	MessageCursor        string
+}
+
+type ConversationSourceCoverage struct {
+	SourceBytes   int
+	ReturnedBytes int
+	Truncated     bool
+}
+
+type EvolutionRequest struct {
+	Command                   string
+	Subcommand                string
+	ProjectID                 string
+	MilestoneID               string
+	Status                    string
+	ExpectedGenerationID      string
+	CandidateID               string
+	ExpectedCandidateRevision int
+	ExpectedReviewSHA256      string
+	Action                    string
+}
+
+type ProblemRequest struct {
+	Command                    string
+	Subcommand                 string
+	ProjectID                  string
+	Status                     string
+	CandidateID                string
+	ExpectedCandidateRevision  int
+	ExpectedProblemMapRevision int
+	ExpectedReviewSHA256       string
+	Action                     string
+	TargetProblemID            string
+	ProblemID                  string
+	NewParentID                string
+	ParentID                   string
 }
 
 type DecisionRequest struct {
@@ -225,9 +263,268 @@ func ParseInspectContract(args []string) (InspectRequest, error) {
 		return parseSessionEventsContract(args[1:])
 	case "session-search":
 		return parseSessionSearchContract(args[1:])
+	case "conversation-chain":
+		return parseConversationChainContract(args[1:])
 	default:
 		return InspectRequest{}, contractError("unknown inspect subcommand")
 	}
+}
+
+func parseConversationChainContract(args []string) (InspectRequest, error) {
+	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "turn-unit-id": true, "message-cursor": true, "limit": true, "json": true}
+	flags, err := parseContractFlags(args, allowed)
+	if err != nil {
+		return InspectRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "provider", "session-id", "expected-generation-id", "limit"); err != nil {
+		return InspectRequest{}, err
+	}
+	if err = requireSafeIDs(flags, "project-id", "provider", "session-id", "expected-generation-id"); err != nil {
+		return InspectRequest{}, err
+	}
+	if flags.values["turn-unit-id"] != "" {
+		if err = requireSafeIDs(flags, "turn-unit-id"); err != nil {
+			return InspectRequest{}, err
+		}
+	}
+	if flags.values["message-cursor"] != "" {
+		if flags.values["turn-unit-id"] == "" {
+			return InspectRequest{}, contractError("message cursor requires a turn unit")
+		}
+		if err = requireBoundedUTF8(flags.values["message-cursor"], MaxOpaqueCursorBytes, "message cursor"); err != nil {
+			return InspectRequest{}, err
+		}
+	}
+	limit, err := requirePositiveInt(flags.values["limit"])
+	if err != nil || limit > 64 {
+		return InspectRequest{}, contractError("limit must be between 1 and 64")
+	}
+	return InspectRequest{Command: "conversation-chain", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], TurnUnitID: flags.values["turn-unit-id"], MessageCursor: flags.values["message-cursor"], Limit: limit}, nil
+}
+
+func ValidateConversationSourceCoverage(coverage ConversationSourceCoverage) error {
+	if coverage.SourceBytes < 0 || coverage.ReturnedBytes < 0 || coverage.ReturnedBytes > MaxConversationSourceReadBytes || coverage.ReturnedBytes > coverage.SourceBytes || coverage.Truncated != (coverage.ReturnedBytes < coverage.SourceBytes) {
+		return contractError("conversation source truncation coverage is inconsistent")
+	}
+	return nil
+}
+
+func ParseEvolutionContract(args []string) (EvolutionRequest, error) {
+	if len(args) == 0 {
+		return EvolutionRequest{}, contractError("evolution command is required")
+	}
+	switch args[0] {
+	case "summary-candidates":
+		if len(args) < 2 || args[1] != "list" {
+			return EvolutionRequest{}, contractError("unknown summary-candidates command")
+		}
+		flags, err := parseContractFlags(args[2:], map[string]bool{"project-id": true, "milestone-id": true, "status": true, "json": true})
+		if err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "milestone-id"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "milestone-id"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		if status := flags.values["status"]; status != "" {
+			switch status {
+			case "pending", "confirmed", "ignored", "not_decision", "stale":
+			default:
+				return EvolutionRequest{}, contractError("status is invalid")
+			}
+		}
+		return EvolutionRequest{Command: "summary-candidates", Subcommand: "list", ProjectID: flags.values["project-id"], MilestoneID: flags.values["milestone-id"], Status: flags.values["status"]}, nil
+	case "summarize":
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "milestone-id": true, "expected-generation-id": true, "json": true})
+		if err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "milestone-id", "expected-generation-id"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "milestone-id", "expected-generation-id"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		return EvolutionRequest{Command: "summarize", ProjectID: flags.values["project-id"], MilestoneID: flags.values["milestone-id"], ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
+	case "summary-candidate":
+		if len(args) < 2 || args[1] != "transition" {
+			return EvolutionRequest{}, contractError("unknown summary-candidate command")
+		}
+		flags, err := parseContractFlags(args[2:], map[string]bool{"project-id": true, "milestone-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-review-sha256": true, "action": true, "json": true})
+		if err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "milestone-id", "candidate-id", "expected-candidate-revision", "expected-review-sha256", "action"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "milestone-id", "candidate-id"); err != nil {
+			return EvolutionRequest{}, err
+		}
+		revision, err := requirePositiveInt(flags.values["expected-candidate-revision"])
+		if err != nil {
+			return EvolutionRequest{}, err
+		}
+		if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+			return EvolutionRequest{}, err
+		}
+		switch flags.values["action"] {
+		case "confirm", "ignore", "restore":
+		default:
+			return EvolutionRequest{}, contractError("action is invalid")
+		}
+		return EvolutionRequest{Command: "summary-candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], MilestoneID: flags.values["milestone-id"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"], Action: flags.values["action"]}, nil
+	default:
+		return EvolutionRequest{}, contractError("unknown evolution command")
+	}
+}
+
+func ParseProblemContract(args []string) (ProblemRequest, error) {
+	if len(args) == 0 {
+		return ProblemRequest{}, contractError("problems command is required")
+	}
+	switch args[0] {
+	case "candidates":
+		if len(args) < 2 || args[1] != "list" {
+			return ProblemRequest{}, contractError("unknown problems candidates command")
+		}
+		flags, err := parseContractFlags(args[2:], map[string]bool{"project-id": true, "status": true, "json": true})
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if status := flags.values["status"]; status != "" {
+			switch status {
+			case "pending", "applied", "merged", "kept_pending", "stale", "dismissed":
+			default:
+				return ProblemRequest{}, contractError("status is invalid")
+			}
+		}
+		return ProblemRequest{Command: "candidates", Subcommand: "list", ProjectID: flags.values["project-id"], Status: flags.values["status"]}, nil
+	case "candidate":
+		return parseProblemTransition(args[1:])
+	case "move":
+		return parseProblemMove(args[1:])
+	case "reorder":
+		return parseProblemReorder(args[1:])
+	default:
+		return ProblemRequest{}, contractError("unknown problems command")
+	}
+}
+
+func parseProblemTransition(args []string) (ProblemRequest, error) {
+	if len(args) == 0 || args[0] != "transition" {
+		return ProblemRequest{}, contractError("unknown problem candidate command")
+	}
+	flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "action": true, "target-problem-id": true, "json": true})
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "candidate-id", "expected-candidate-revision", "expected-problem-map-revision", "expected-review-sha256", "action"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireSafeIDs(flags, "project-id", "candidate-id"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if flags.values["target-problem-id"] != "" {
+		if err = requireSafeIDs(flags, "target-problem-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+	}
+	candidateRevision, err := requirePositiveInt(flags.values["expected-candidate-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	mapRevision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+		return ProblemRequest{}, err
+	}
+	target := flags.values["target-problem-id"]
+	switch flags.values["action"] {
+	case "apply_child", "apply_sibling", "merge":
+		if target == "" {
+			return ProblemRequest{}, contractError("target problem ID is required for apply or merge")
+		}
+	case "keep_pending", "dismiss", "restore":
+		if target != "" {
+			return ProblemRequest{}, contractError("target problem ID is forbidden for this action")
+		}
+	default:
+		return ProblemRequest{}, contractError("action is invalid")
+	}
+	return ProblemRequest{Command: "candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedReviewSHA256: flags.values["expected-review-sha256"], Action: flags.values["action"], TargetProblemID: target}, nil
+}
+
+func parseProblemMove(args []string) (ProblemRequest, error) {
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "new-parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "json": true})
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "problem-id", "new-parent-id", "expected-problem-map-revision", "expected-review-sha256"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireSafeIDs(flags, "project-id", "problem-id", "new-parent-id"); err != nil {
+		return ProblemRequest{}, err
+	}
+	revision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+		return ProblemRequest{}, err
+	}
+	return ProblemRequest{Command: "move", ProjectID: flags.values["project-id"], ProblemID: flags.values["problem-id"], NewParentID: flags.values["new-parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+}
+
+func parseProblemReorder(args []string) (ProblemRequest, error) {
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "json": true})
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "parent-id", "expected-problem-map-revision", "expected-review-sha256"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireSafeIDs(flags, "project-id", "parent-id"); err != nil {
+		return ProblemRequest{}, err
+	}
+	revision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+		return ProblemRequest{}, err
+	}
+	return ProblemRequest{Command: "reorder", ProjectID: flags.values["project-id"], ParentID: flags.values["parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+}
+
+func ValidateCompleteSiblingOrder(current, ordered []string) error {
+	if len(current) != len(ordered) {
+		return contractError("sibling order must include every direct child exactly once")
+	}
+	expected := map[string]bool{}
+	for _, id := range current {
+		if !safeContractID(id) || expected[id] {
+			return contractError("current sibling set is invalid")
+		}
+		expected[id] = true
+	}
+	seen := map[string]bool{}
+	for _, id := range ordered {
+		if !safeContractID(id) || !expected[id] || seen[id] {
+			return contractError("sibling order contains a missing, duplicate, or foreign child")
+		}
+		seen[id] = true
+	}
+	return nil
 }
 
 func parseSessionSummaryContract(args []string) (InspectRequest, error) {

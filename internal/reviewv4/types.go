@@ -54,13 +54,78 @@ type CurrentState struct {
 	LastVerification string `json:"last_verification" required:"true"`
 }
 type Timeline struct {
-	ID           string   `json:"id" required:"true"`
-	GenerationID string   `json:"generation_id" required:"true"`
-	OccurredAt   string   `json:"occurred_at" required:"true"`
-	Kind         string   `json:"kind" required:"true"`
-	Title        string   `json:"title" required:"true"`
-	Summary      string   `json:"summary" required:"true"`
-	DecisionIDs  []string `json:"decision_ids" required:"true"`
+	ID           string     `json:"id" required:"true"`
+	GenerationID string     `json:"generation_id" required:"true"`
+	OccurredAt   string     `json:"occurred_at" required:"true"`
+	Kind         string     `json:"kind" required:"true"`
+	Title        string     `json:"title" required:"true"`
+	Summary      string     `json:"summary" required:"true"`
+	DecisionIDs  []string   `json:"decision_ids" required:"true"`
+	ClosedLoop   ClosedLoop `json:"closed_loop" required:"true"`
+}
+type SourceTurnRef struct {
+	Provider   string `json:"provider" required:"true"`
+	SessionID  string `json:"session_id" required:"true"`
+	TurnUnitID string `json:"turn_unit_id" required:"true"`
+}
+type ClosedLoopSegment struct {
+	State          string          `json:"state" required:"true"`
+	Text           string          `json:"text" required:"true"`
+	MissingReason  *string         `json:"missing_reason" required:"true" nullable:"true"`
+	SourceTurnRefs []SourceTurnRef `json:"source_turn_refs" required:"true"`
+}
+type ConclusionKind string
+
+const (
+	ConclusionVisibleAnswerExcerpt ConclusionKind = "visible_answer_excerpt"
+	ConclusionHumanConfirmed       ConclusionKind = "human_confirmed"
+	ConclusionAICandidateConfirmed ConclusionKind = "ai_candidate_confirmed"
+	ConclusionMissing              ConclusionKind = "missing"
+)
+
+type ClosedLoopConclusion struct {
+	Kind           ConclusionKind  `json:"kind" required:"true"`
+	Text           string          `json:"text" required:"true"`
+	MissingReason  *string         `json:"missing_reason" required:"true" nullable:"true"`
+	SourceTurnRefs []SourceTurnRef `json:"source_turn_refs" required:"true"`
+}
+type ClosedLoopCoverage struct {
+	SourceTurns            uint64 `json:"source_turns" required:"true"`
+	CapturedTurns          uint64 `json:"captured_turns" required:"true"`
+	TruncatedTurns         uint64 `json:"truncated_turns" required:"true"`
+	SourceUnavailableTurns uint64 `json:"source_unavailable_turns" required:"true"`
+}
+type ClosedLoop struct {
+	TriggerQuestion   ClosedLoopSegment    `json:"trigger_question" required:"true"`
+	Conclusion        ClosedLoopConclusion `json:"conclusion" required:"true"`
+	Execution         ClosedLoopSegment    `json:"execution" required:"true"`
+	Verification      ClosedLoopSegment    `json:"verification" required:"true"`
+	ImpactAndFollowUp ClosedLoopSegment    `json:"impact_and_follow_up" required:"true"`
+	SourceTurnRefs    []SourceTurnRef      `json:"source_turn_refs" required:"true"`
+	Coverage          ClosedLoopCoverage   `json:"coverage" required:"true"`
+}
+type ProblemNode struct {
+	ID                  string          `json:"id" required:"true"`
+	Question            string          `json:"question" required:"true"`
+	PrimaryParentID     *string         `json:"primary_parent_id" required:"true" nullable:"true"`
+	RelatedNodeIDs      []string        `json:"related_node_ids" required:"true"`
+	WorkflowState       string          `json:"workflow_state" required:"true"`
+	AnswerState         string          `json:"answer_state" required:"true"`
+	CompletionCriterion string          `json:"completion_criterion" required:"true"`
+	CurrentConclusion   string          `json:"current_conclusion" required:"true"`
+	SourceTurnRefs      []SourceTurnRef `json:"source_turn_refs" required:"true"`
+	Provenance          string          `json:"provenance" required:"true"`
+	FirstProposedAt     string          `json:"first_proposed_at" required:"true"`
+	SiblingOrder        int             `json:"sibling_order" required:"true"`
+	ConfirmedAt         *string         `json:"confirmed_at" required:"true" nullable:"true"`
+	Revision            int             `json:"revision" required:"true"`
+}
+type ChainDependency struct {
+	Provider          string   `json:"provider" required:"true"`
+	SessionID         string   `json:"session_id" required:"true"`
+	SessionViewDigest string   `json:"session_view_digest" required:"true"`
+	DependencyDigest  string   `json:"dependency_digest" required:"true"`
+	TurnUnitIDs       []string `json:"turn_unit_ids" required:"true"`
 }
 type SessionRef struct {
 	Provider  string `json:"provider" required:"true"`
@@ -114,21 +179,25 @@ type Baseline struct {
 	GeneratedHash string    `json:"generated_hash" required:"true"`
 }
 type Presentation struct {
-	SchemaVersion        int          `json:"schema_version" required:"true"`
-	MinimumReaderVersion string       `json:"minimum_reader_version" required:"true"`
-	MinimumWriterVersion string       `json:"minimum_writer_version" required:"true"`
-	ProjectID            string       `json:"project_id" required:"true"`
-	GenerationID         string       `json:"generation_id" required:"true"`
-	ProjectViewDigest    string       `json:"project_view_digest" required:"true"`
-	Revision             int          `json:"revision" required:"true"`
-	CurrentState         CurrentState `json:"current_state" required:"true"`
-	Timeline             []Timeline   `json:"timeline" required:"true"`
-	Decisions            []Decision   `json:"decisions" required:"true"`
-	Risks                []Risk       `json:"risks" required:"true"`
-	OpenLoops            []OpenLoop   `json:"open_loops" required:"true"`
-	HumanPatches         []Patch      `json:"human_patches" required:"true"`
-	OrphanPatches        []Patch      `json:"orphan_patches" required:"true"`
-	GeneratedBaselines   []Baseline   `json:"generated_baselines" required:"true"`
+	SchemaVersion        int               `json:"schema_version" required:"true"`
+	MinimumReaderVersion string            `json:"minimum_reader_version" required:"true"`
+	MinimumWriterVersion string            `json:"minimum_writer_version" required:"true"`
+	ProjectID            string            `json:"project_id" required:"true"`
+	GenerationID         string            `json:"generation_id" required:"true"`
+	ProjectViewDigest    string            `json:"project_view_digest" required:"true"`
+	Revision             int               `json:"revision" required:"true"`
+	CurrentState         CurrentState      `json:"current_state" required:"true"`
+	Timeline             []Timeline        `json:"timeline" required:"true"`
+	Decisions            []Decision        `json:"decisions" required:"true"`
+	Risks                []Risk            `json:"risks" required:"true"`
+	OpenLoops            []OpenLoop        `json:"open_loops" required:"true"`
+	ProblemMapRevision   int               `json:"problem_map_revision" required:"true"`
+	ProblemRootIDs       []string          `json:"problem_root_ids" required:"true"`
+	ProblemNodes         []ProblemNode     `json:"problem_nodes" required:"true"`
+	ChainDependencies    []ChainDependency `json:"chain_dependencies" required:"true"`
+	HumanPatches         []Patch           `json:"human_patches" required:"true"`
+	OrphanPatches        []Patch           `json:"orphan_patches" required:"true"`
+	GeneratedBaselines   []Baseline        `json:"generated_baselines" required:"true"`
 }
 type Accounting struct {
 	TotalDurationMS uint64   `json:"total_duration_ms" required:"true"`

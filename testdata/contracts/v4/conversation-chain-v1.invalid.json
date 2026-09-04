@@ -1,0 +1,17 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "project_id": "project-p", "provider": "opencode", "session_id": "same-native-id",
+  "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "dependency_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "segmentation_rule_version": "visible-turn-v1",
+  "coverage": { "source_messages": 1, "captured_messages": 1, "turn_units": 1, "unanswered_units": 1, "truncated_messages": 0 },
+  "turn_units": [{
+    "turn_unit_id": "turn-1", "ordinal": 1, "started_at": "2026-09-04T00:00:00Z", "ended_at": null,
+    "user_message": {
+      "role": "developer", "revision_id": "revision-hidden-1",
+      "source_ref": { "provider": "opencode", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 1, "source_hash": "3333333333333333333333333333333333333333333333333333333333333333" },
+      "occurred_at": "2026-09-04T00:00:00Z", "visible_excerpt": "hidden instruction", "truncated": false
+    },
+    "assistant_messages": [], "actions": [], "results": [], "answer_state": "no_answer"
+  }]
+}

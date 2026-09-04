@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"sort"
+	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/pricing"
 )
@@ -41,8 +43,12 @@ func ValidatePresentation(p Presentation) error {
 			return errors.New("current state text exceeds limit")
 		}
 	}
-	if len(p.Timeline) > 65536 || len(p.Decisions) > 65536 || len(p.Risks) > 65536 || len(p.OpenLoops) > 65536 || len(p.HumanPatches) > 65536 || len(p.OrphanPatches) > 65536 || len(p.GeneratedBaselines) > 65536 {
+	if len(p.Timeline) > 65536 || len(p.Decisions) > 65536 || len(p.Risks) > 65536 || len(p.OpenLoops) > 65536 || len(p.ProblemRootIDs) > 65536 || len(p.ProblemNodes) > 65536 || len(p.ChainDependencies) > 65536 || len(p.HumanPatches) > 65536 || len(p.OrphanPatches) > 65536 || len(p.GeneratedBaselines) > 65536 {
 		return errors.New("review presentation exceeds array limit")
+	}
+	chainTurns, err := validateChainDependencies(p.ChainDependencies)
+	if err != nil {
+		return err
 	}
 	timelineIDs := map[string]bool{}
 	for i, timeline := range p.Timeline {
@@ -52,6 +58,9 @@ func ValidatePresentation(p Presentation) error {
 		timelineIDs[timeline.ID] = true
 		if err := uniqueIDs(timeline.DecisionIDs); err != nil {
 			return err
+		}
+		if err := validateClosedLoop(timeline.ClosedLoop, chainTurns); err != nil {
+			return fmt.Errorf("timeline %q closed loop: %w", timeline.ID, err)
 		}
 	}
 	decisions := map[string]Decision{}
@@ -147,6 +156,20 @@ func ValidatePresentation(p Presentation) error {
 		}
 		loopIDs[loop.ID] = true
 	}
+	if p.ProblemMapRevision < 0 || (len(p.ProblemNodes) > 0 && p.ProblemMapRevision < 1) {
+		return errors.New("invalid problem map revision")
+	}
+	if err := ValidateProblemGraph(p.ProblemNodes); err != nil {
+		return err
+	}
+	if err := validateProblemRoots(p.ProblemNodes, p.ProblemRootIDs); err != nil {
+		return err
+	}
+	for _, node := range p.ProblemNodes {
+		if err := validateSourceTurnRefs(node.SourceTurnRefs, chainTurns); err != nil {
+			return fmt.Errorf("problem %q: %w", node.ID, err)
+		}
+	}
 	for _, patch := range append(append([]Patch{}, p.HumanPatches...), p.OrphanPatches...) {
 		if err := validatePatch(patch); err != nil {
 			return err
@@ -155,6 +178,258 @@ func ValidatePresentation(p Presentation) error {
 	for _, baseline := range p.GeneratedBaselines {
 		if !validID(baseline.GenerationID) || !validID(baseline.EntityID) || !validID(baseline.Field) || !validID(baseline.Kind) || !shaRE.MatchString(baseline.GeneratedHash) || !optionalText(baseline.Value, 16384) || !optionalTexts(baseline.Values, 256, 16384) {
 			return errors.New("invalid generated baseline")
+		}
+	}
+	return nil
+}
+
+func ValidateConclusion(conclusion ClosedLoopConclusion) error {
+	if len(conclusion.SourceTurnRefs) > 256 || !text(conclusion.Text, 16384) || !validMissingReason(conclusion.MissingReason) {
+		return errors.New("invalid conclusion")
+	}
+	switch conclusion.Kind {
+	case ConclusionMissing:
+		if conclusion.Text != "" || conclusion.MissingReason == nil {
+			return errors.New("missing conclusion must have empty text and a typed reason")
+		}
+	case ConclusionVisibleAnswerExcerpt:
+		if strings.TrimSpace(conclusion.Text) == "" || len([]byte(conclusion.Text)) > 4096 || conclusion.MissingReason != nil {
+			return errors.New("visible answer conclusion must contain a bounded excerpt")
+		}
+	case ConclusionHumanConfirmed, ConclusionAICandidateConfirmed:
+		if strings.TrimSpace(conclusion.Text) == "" || conclusion.MissingReason != nil {
+			return errors.New("confirmed conclusion text is required")
+		}
+	default:
+		return errors.New("invalid conclusion kind")
+	}
+	return nil
+}
+
+func validateClosedLoop(loop ClosedLoop, chainTurns map[string]bool) error {
+	if err := validateSegment(loop.TriggerQuestion); err != nil {
+		return fmt.Errorf("trigger question: %w", err)
+	}
+	if err := ValidateConclusion(loop.Conclusion); err != nil {
+		return err
+	}
+	for name, segment := range map[string]ClosedLoopSegment{"execution": loop.Execution, "verification": loop.Verification, "impact and follow-up": loop.ImpactAndFollowUp} {
+		if err := validateSegment(segment); err != nil {
+			return fmt.Errorf("%s: %w", name, err)
+		}
+	}
+	if len(loop.SourceTurnRefs) > 256 || loop.Coverage.CapturedTurns != uint64(len(loop.SourceTurnRefs)) || loop.Coverage.SourceTurns < loop.Coverage.CapturedTurns || loop.Coverage.TruncatedTurns+loop.Coverage.SourceUnavailableTurns > loop.Coverage.SourceTurns {
+		return errors.New("closed-loop coverage does not reconcile")
+	}
+	if err := validateSourceTurnRefs(loop.SourceTurnRefs, chainTurns); err != nil {
+		return err
+	}
+	top := map[string]bool{}
+	for _, ref := range loop.SourceTurnRefs {
+		top[sourceTurnKey(ref)] = true
+	}
+	groups := [][]SourceTurnRef{loop.TriggerQuestion.SourceTurnRefs, loop.Conclusion.SourceTurnRefs, loop.Execution.SourceTurnRefs, loop.Verification.SourceTurnRefs, loop.ImpactAndFollowUp.SourceTurnRefs}
+	for _, refs := range groups {
+		if err := validateSourceTurnRefs(refs, chainTurns); err != nil {
+			return err
+		}
+		for _, ref := range refs {
+			if !top[sourceTurnKey(ref)] {
+				return errors.New("closed-loop segment references a turn absent from aggregate references")
+			}
+		}
+	}
+	return nil
+}
+
+func validateSegment(segment ClosedLoopSegment) error {
+	if len(segment.SourceTurnRefs) > 256 || !text(segment.Text, 16384) || !validMissingReason(segment.MissingReason) {
+		return errors.New("invalid closed-loop segment")
+	}
+	switch segment.State {
+	case "missing":
+		if segment.Text != "" || segment.MissingReason == nil {
+			return errors.New("missing segment must have empty text and a typed reason")
+		}
+	case "present", "partial":
+		if strings.TrimSpace(segment.Text) == "" || segment.MissingReason != nil {
+			return errors.New("present or partial segment must have text and no missing reason")
+		}
+	default:
+		return errors.New("invalid closed-loop segment state")
+	}
+	return nil
+}
+
+func validMissingReason(reason *string) bool {
+	if reason == nil {
+		return true
+	}
+	switch *reason {
+	case "not_captured", "no_visible_answer", "no_execution_evidence", "not_verified", "source_unavailable", "partial_coverage":
+		return true
+	default:
+		return false
+	}
+}
+
+func NeutralClosedLoop() ClosedLoop {
+	reason := "not_captured"
+	segment := func() ClosedLoopSegment {
+		value := reason
+		return ClosedLoopSegment{State: "missing", Text: "", MissingReason: &value, SourceTurnRefs: []SourceTurnRef{}}
+	}
+	conclusionReason := reason
+	return ClosedLoop{
+		TriggerQuestion: segment(),
+		Conclusion:      ClosedLoopConclusion{Kind: ConclusionMissing, Text: "", MissingReason: &conclusionReason, SourceTurnRefs: []SourceTurnRef{}},
+		Execution:       segment(), Verification: segment(), ImpactAndFollowUp: segment(),
+		SourceTurnRefs: []SourceTurnRef{}, Coverage: ClosedLoopCoverage{},
+	}
+}
+
+func validateChainDependencies(dependencies []ChainDependency) (map[string]bool, error) {
+	turns := map[string]bool{}
+	seen := map[string]bool{}
+	for _, dependency := range dependencies {
+		key := dependency.Provider + "\x00" + dependency.SessionID
+		if !validID(dependency.Provider) || !validID(dependency.SessionID) || !digestRE.MatchString(dependency.SessionViewDigest) || !digestRE.MatchString(dependency.DependencyDigest) || len(dependency.TurnUnitIDs) > 65536 || seen[key] {
+			return nil, errors.New("invalid or duplicate chain dependency")
+		}
+		seen[key] = true
+		local := map[string]bool{}
+		for _, turnID := range dependency.TurnUnitIDs {
+			if !validID(turnID) || local[turnID] {
+				return nil, errors.New("invalid or duplicate chain turn identity")
+			}
+			local[turnID] = true
+			turns[dependency.Provider+"\x00"+dependency.SessionID+"\x00"+turnID] = true
+		}
+	}
+	return turns, nil
+}
+
+func validateSourceTurnRefs(refs []SourceTurnRef, available map[string]bool) error {
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		key := sourceTurnKey(ref)
+		if !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.TurnUnitID) || seen[key] {
+			return errors.New("invalid or duplicate source turn reference")
+		}
+		seen[key] = true
+		if !available[key] {
+			return errors.New("source turn reference is absent from retained chain dependencies")
+		}
+	}
+	return nil
+}
+
+func sourceTurnKey(ref SourceTurnRef) string {
+	return ref.Provider + "\x00" + ref.SessionID + "\x00" + ref.TurnUnitID
+}
+
+func ValidateProblemGraph(nodes []ProblemNode) error {
+	byID := make(map[string]ProblemNode, len(nodes))
+	for _, node := range nodes {
+		if !validID(node.ID) || node.Question == "" || !text(node.Question, 4096) || node.SiblingOrder < 0 || node.Revision < 1 || !text(node.CompletionCriterion, 16384) || !text(node.CurrentConclusion, 16384) || node.FirstProposedAt == "" || !text(node.FirstProposedAt, 128) || !optionalText(node.ConfirmedAt, 128) || len(node.RelatedNodeIDs) > 2 || len(node.SourceTurnRefs) > 256 {
+			return fmt.Errorf("invalid problem node %q", node.ID)
+		}
+		if _, exists := byID[node.ID]; exists {
+			return fmt.Errorf("duplicate problem node %q", node.ID)
+		}
+		switch node.WorkflowState {
+		case "not_started", "in_progress", "paused", "resolved":
+		default:
+			return fmt.Errorf("invalid problem workflow state %q", node.WorkflowState)
+		}
+		switch node.AnswerState {
+		case "no_answer", "answered_unverified", "execution_verified":
+		default:
+			return fmt.Errorf("invalid problem answer state %q", node.AnswerState)
+		}
+		switch node.Provenance {
+		case "human_created", "migrated", "candidate_confirmed":
+		default:
+			return fmt.Errorf("invalid problem provenance %q", node.Provenance)
+		}
+		byID[node.ID] = node
+	}
+	siblingOrders := map[string]map[int]bool{}
+	for _, node := range nodes {
+		parentKey := "\x00root"
+		if node.PrimaryParentID != nil {
+			if *node.PrimaryParentID == node.ID {
+				return errors.New("problem cannot parent itself")
+			}
+			if _, exists := byID[*node.PrimaryParentID]; !exists {
+				return fmt.Errorf("problem %q has missing parent %q", node.ID, *node.PrimaryParentID)
+			}
+			parentKey = *node.PrimaryParentID
+		}
+		if siblingOrders[parentKey] == nil {
+			siblingOrders[parentKey] = map[int]bool{}
+		}
+		if siblingOrders[parentKey][node.SiblingOrder] {
+			return fmt.Errorf("duplicate sibling order %d under %q", node.SiblingOrder, parentKey)
+		}
+		siblingOrders[parentKey][node.SiblingOrder] = true
+		related := map[string]bool{}
+		for _, relation := range node.RelatedNodeIDs {
+			if relation == node.ID || !validID(relation) || related[relation] {
+				return fmt.Errorf("problem %q has invalid related node", node.ID)
+			}
+			if _, exists := byID[relation]; !exists {
+				return fmt.Errorf("problem %q has missing related node %q", node.ID, relation)
+			}
+			related[relation] = true
+		}
+	}
+	state := map[string]uint8{}
+	var visit func(string) bool
+	visit = func(id string) bool {
+		if state[id] == 1 {
+			return true
+		}
+		if state[id] == 2 {
+			return false
+		}
+		state[id] = 1
+		if parent := byID[id].PrimaryParentID; parent != nil && visit(*parent) {
+			return true
+		}
+		state[id] = 2
+		return false
+	}
+	for id := range byID {
+		if visit(id) {
+			return errors.New("problem graph contains cycle")
+		}
+	}
+	return nil
+}
+
+func validateProblemRoots(nodes []ProblemNode, declared []string) error {
+	if err := uniqueIDs(declared); err != nil {
+		return fmt.Errorf("problem roots: %w", err)
+	}
+	actual := make([]ProblemNode, 0, len(declared))
+	for _, node := range nodes {
+		if node.PrimaryParentID == nil {
+			actual = append(actual, node)
+		}
+	}
+	if len(actual) != len(declared) {
+		return errors.New("problem root declarations do not match null parents")
+	}
+	sort.Slice(actual, func(i, j int) bool {
+		if actual[i].SiblingOrder != actual[j].SiblingOrder {
+			return actual[i].SiblingOrder < actual[j].SiblingOrder
+		}
+		return actual[i].ID < actual[j].ID
+	})
+	for index, id := range declared {
+		if actual[index].ID != id {
+			return errors.New("problem root declarations do not match null parents")
 		}
 	}
 	return nil

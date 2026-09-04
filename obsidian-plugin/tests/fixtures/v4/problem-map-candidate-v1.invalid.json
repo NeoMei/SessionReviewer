@@ -1,0 +1,12 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "project_id": "project-p",
+  "candidates": [{
+    "candidate_id": "candidate-1", "project_id": "project-p", "question": "Where should this question be placed?",
+    "source_turn_refs": [{ "provider": "opencode", "session_id": "same-native-id", "turn_unit_id": "turn-1" }],
+    "recommended_relation": "keep_pending", "recommended_target_id": null, "alternate_target_ids": [], "related_node_ids": [], "grounds": [],
+    "confidence": "low", "status": "pending",
+    "dependency_digests": ["sha256:1111111111111111111111111111111111111111111111111111111111111111"],
+    "analysis_mode": "deterministic", "agent_run_id": "run-must-be-null", "revision": 1,
+    "created_at": "2026-09-04T00:00:00Z", "updated_at": "2026-09-04T00:00:00Z"
+  }]
+}

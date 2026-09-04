@@ -3,13 +3,16 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  assertProblemGraph,
   assertSnapshotBindings,
   codeOf,
   parseAgentAnnotationV1,
   parseCandidateListV1,
+  parseConversationChainV1,
   parseMachineLedgerV4,
   parsePricingSnapshotV1,
   parsePricingSupplementV1,
+  parseProblemMapCandidateV1,
   parseReviewPresentationV4,
   parseSessionEventPageV1,
   parseSessionIndexV1,
@@ -17,6 +20,7 @@ import {
   WireRejectionError,
   type WireRejectionCode
 } from "../src/data/contracts-v4";
+import type { ViewKind } from "../src/contracts/review-v4";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginFixture = (name: string): Promise<string> =>
@@ -39,7 +43,9 @@ const contracts: ReadonlyArray<Readonly<{
   { name: "session-event-page-v1", parser: parseSessionEventPageV1, invalidCode: "wire_contract_invalid" },
   { name: "agent-annotation-v1", parser: parseAgentAnnotationV1, invalidCode: "wire_shape_invalid" },
   { name: "pricing-snapshot-v1", parser: parsePricingSnapshotV1, invalidCode: "wire_contract_invalid" },
-  { name: "pricing-supplement-v1", parser: parsePricingSupplementV1, invalidCode: "wire_contract_invalid" }
+  { name: "pricing-supplement-v1", parser: parsePricingSupplementV1, invalidCode: "wire_contract_invalid" },
+  { name: "conversation-chain-v1", parser: parseConversationChainV1, invalidCode: "wire_contract_invalid" },
+  { name: "problem-map-candidate-v1", parser: parseProblemMapCandidateV1, invalidCode: "wire_contract_invalid" }
 ];
 
 function captureRejection(action: () => unknown): WireRejectionError {
@@ -337,6 +343,71 @@ describe("session contracts", () => {
     expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
     ledger.sync_hashes.ledger_sha256 = "9".repeat(64);
     expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/digest|hash/i);
+  });
+});
+
+describe("conversation chain and problem map contracts", () => {
+  it("keeps five view kinds including the formal problems view", () => {
+    const kinds: ViewKind[] = ["evolution", "problems", "decisions", "sessions", "usage"];
+    expect(kinds).toHaveLength(5);
+  });
+
+  it("rejects hidden roles, oversized UTF-8 excerpts, and raw tool output keys", async () => {
+    const chain = await fixtureObject("conversation-chain-v1.valid.json") as { turn_units: JsonObject[] };
+    const turn = chain.turn_units[0] as { user_message: JsonObject; actions: JsonObject[] };
+    turn.user_message.role = "system";
+    expect(() => parseConversationChainV1(JSON.stringify(chain))).toThrow(/role|enum|user/i);
+    turn.user_message.role = "user";
+    turn.user_message.visible_excerpt = "界".repeat(1366);
+    expect(() => parseConversationChainV1(JSON.stringify(chain))).toThrow(/4096|byte/i);
+    turn.user_message.visible_excerpt = "question";
+    turn.actions[0].raw_tool_output = { secret: true };
+    expect(codeOf(captureRejection(() => parseConversationChainV1(JSON.stringify(chain))))).toBe("wire_shape_invalid");
+  });
+
+  it("binds both new contracts to canonical digests that omit only their digest field", async () => {
+    const chain = await fixtureObject("conversation-chain-v1.valid.json");
+    chain.segmentation_rule_version = "visible-turn-v2";
+    expect(() => parseConversationChainV1(JSON.stringify(chain))).toThrow(/digest/i);
+
+    const candidates = await fixtureObject("problem-map-candidate-v1.valid.json") as { candidates: JsonObject[] };
+    candidates.candidates[0].question = "Tampered question?";
+    expect(() => parseProblemMapCandidateV1(JSON.stringify(candidates))).toThrow(/digest/i);
+  });
+
+  it("enforces formal problem graph cycles, relations, and sibling order", () => {
+    const node = (id: string, parent: string | null, order: number): JsonObject => ({
+      id, question: `${id}?`, primary_parent_id: parent, related_node_ids: [], workflow_state: "not_started",
+      answer_state: "no_answer", completion_criterion: "", current_conclusion: "", source_turn_refs: [],
+      provenance: "human_created", first_proposed_at: "2026-09-04T00:00:00Z", sibling_order: order,
+      confirmed_at: null, revision: 1
+    });
+    const cycle = [node("a", "b", 0), node("b", "a", 0)];
+    expect(() => assertProblemGraph(cycle as never)).toThrow(/cycle/i);
+    const missing = [node("a", null, 0), { ...node("b", "a", 0), related_node_ids: ["missing"] }];
+    expect(() => assertProblemGraph(missing as never)).toThrow(/missing|related/i);
+    const siblings = [node("a", null, 0), node("b", "a", 0), node("c", "a", 0)];
+    expect(() => assertProblemGraph(siblings as never)).toThrow(/sibling|order|duplicate/i);
+  });
+
+  it("requires honest missing conclusions and source-turn-backed milestone annotations", async () => {
+    const review = await fixtureObject("review-presentation-v4.valid.json") as { timeline: JsonObject[] };
+    review.timeline = [{
+      id: "m", generation_id: "generation-1", occurred_at: "2026-09-04T00:00:00Z", kind: "milestone", title: "M", summary: "S", decision_ids: [],
+      closed_loop: {
+        trigger_question: { state: "missing", text: "", missing_reason: "not_captured", source_turn_refs: [] },
+        conclusion: { kind: "missing", text: "invented", missing_reason: "not_captured", source_turn_refs: [] },
+        execution: { state: "missing", text: "", missing_reason: "not_captured", source_turn_refs: [] },
+        verification: { state: "missing", text: "", missing_reason: "not_captured", source_turn_refs: [] },
+        impact_and_follow_up: { state: "missing", text: "", missing_reason: "not_captured", source_turn_refs: [] },
+        source_turn_refs: [], coverage: { source_turns: 0, captured_turns: 0, truncated_turns: 0, source_unavailable_turns: 0 }
+      }
+    }];
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/missing|conclusion|text/i);
+
+    const annotation = await fixtureObject("agent-annotation-v1.valid.json") as { annotations: JsonObject[] };
+    annotation.annotations[0].entity_id = "decision-only";
+    expect(() => parseAgentAnnotationV1(JSON.stringify(annotation))).toThrow(/entity|milestone|unknown/i);
   });
 });
 

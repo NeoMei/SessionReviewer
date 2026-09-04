@@ -2,27 +2,65 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sessionreviewer.local/schemas/agent-annotation-v1.schema.json",
   "title": "SessionReviewer agent annotation store v1",
-  "type": "object", "additionalProperties": false,
+  "type": "object",
+  "additionalProperties": false,
   "required": ["schema_version", "minimum_reader_version", "project_id", "annotations", "extraction_runs"],
   "properties": {
-    "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" }, "project_id": { "$ref": "#/$defs/id" },
+    "schema_version": { "const": 1 },
+    "minimum_reader_version": { "const": "0.4.0" },
+    "project_id": { "$ref": "#/$defs/id" },
     "annotations": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/annotation" } },
     "extraction_runs": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/run" } }
   },
   "$defs": {
-    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" }, "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "text": { "type": "string", "maxLength": 4096 }, "timestamp": { "type": "string", "maxLength": 128 },
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "text": { "type": "string", "maxLength": 4096 },
+    "timestamp": { "type": "string", "maxLength": 128 },
     "annotation": {
-      "type": "object", "additionalProperties": false,
-      "required": ["id", "project_id", "entity_id", "field", "status", "text", "generation_id", "schema_version", "analysis_profile", "agent_run_id", "dependencies", "revision", "created_at", "confirmed_decision_id"],
-      "properties": { "id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" }, "entity_id": { "$ref": "#/$defs/id" }, "field": { "$ref": "#/$defs/id" }, "status": { "enum": ["pending", "confirmed", "ignored", "not_decision", "stale"] }, "text": { "$ref": "#/$defs/text" }, "generation_id": { "$ref": "#/$defs/id" }, "schema_version": { "const": 1 }, "analysis_profile": { "$ref": "#/$defs/id" }, "agent_run_id": { "$ref": "#/$defs/id" }, "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/dependency" } }, "revision": { "type": "integer", "minimum": 1 }, "created_at": { "$ref": "#/$defs/timestamp" }, "confirmed_decision_id": { "type": ["string", "null"], "maxLength": 256 } }
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "project_id", "annotation_kind", "status", "text", "generation_id", "schema_version", "analysis_profile", "agent_run_id", "dependencies", "revision", "created_at", "confirmed_entity_id"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" },
+        "annotation_kind": { "enum": ["decision_candidate", "agreement_candidate", "milestone_conclusion_candidate"] },
+        "entity_id": { "$ref": "#/$defs/id" }, "field": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["pending", "confirmed", "ignored", "not_decision", "stale"] },
+        "text": { "$ref": "#/$defs/text" }, "generation_id": { "$ref": "#/$defs/id" },
+        "schema_version": { "const": 1 }, "analysis_profile": { "$ref": "#/$defs/id" },
+        "agent_run_id": { "$ref": "#/$defs/id" },
+        "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/dependency" } },
+        "revision": { "type": "integer", "minimum": 1 }, "created_at": { "$ref": "#/$defs/timestamp" },
+        "confirmed_entity_id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
+        "target_milestone_id": { "$ref": "#/$defs/id" }, "prompt_schema_version": { "$ref": "#/$defs/id" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "annotation_kind": { "const": "milestone_conclusion_candidate" } }, "required": ["annotation_kind"] },
+          "then": { "required": ["target_milestone_id", "prompt_schema_version"], "not": { "anyOf": [{ "required": ["entity_id"] }, { "required": ["field"] }] } },
+          "else": { "required": ["entity_id", "field"], "not": { "anyOf": [{ "required": ["target_milestone_id"] }, { "required": ["prompt_schema_version"] }] } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "confirmed" } }, "required": ["status"] },
+          "then": { "properties": { "confirmed_entity_id": { "$ref": "#/$defs/id" } } },
+          "else": { "properties": { "confirmed_entity_id": { "type": "null" } } }
+        }
+      ]
     },
     "dependency": {
       "type": "object", "additionalProperties": false, "required": ["kind", "revision_id", "digest"],
-      "properties": { "kind": { "enum": ["observation", "session_view"] }, "revision_id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
+      "properties": { "kind": { "enum": ["observation", "session_view", "source_turn"] }, "revision_id": { "$ref": "#/$defs/id" }, "digest": { "$ref": "#/$defs/digest" } }
     },
     "run": {
-      "type": "object", "additionalProperties": false, "required": ["run_id", "project_id", "status", "extractor_version", "prompt_schema_version", "dependency_digests", "created_at", "updated_at"],
-      "properties": { "run_id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" }, "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] }, "extractor_version": { "$ref": "#/$defs/id" }, "prompt_schema_version": { "$ref": "#/$defs/id" }, "dependency_digests": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/digest" } }, "created_at": { "$ref": "#/$defs/timestamp" }, "updated_at": { "$ref": "#/$defs/timestamp" } }
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "project_id", "status", "extractor_version", "prompt_schema_version", "dependency_digests", "created_at", "updated_at"],
+      "properties": {
+        "run_id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" },
+        "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] },
+        "extractor_version": { "$ref": "#/$defs/id" }, "prompt_schema_version": { "$ref": "#/$defs/id" },
+        "dependency_digests": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/digest" } },
+        "created_at": { "$ref": "#/$defs/timestamp" }, "updated_at": { "$ref": "#/$defs/timestamp" }
+      }
     }
   }
 }

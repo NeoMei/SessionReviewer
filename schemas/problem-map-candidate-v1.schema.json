@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionreviewer.local/schemas/problem-map-candidate-v1.schema.json",
+  "title": "SessionReviewer private problem placement candidates v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "minimum_reader_version", "digest", "project_id", "candidates"],
+  "properties": {
+    "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" }, "digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/id" }, "candidates": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/candidate" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "text": { "type": "string", "maxLength": 4096 }, "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "id_array": { "type": "array", "maxItems": 2, "items": { "$ref": "#/$defs/id" } },
+    "source_turn_ref": { "type": "object", "additionalProperties": false, "required": ["provider", "session_id", "turn_unit_id"], "properties": { "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" }, "turn_unit_id": { "$ref": "#/$defs/id" } } },
+    "ground": { "type": "object", "additionalProperties": false, "required": ["rule_id", "rule_version", "matched_fact_refs", "explanation"], "properties": { "rule_id": { "$ref": "#/$defs/id" }, "rule_version": { "$ref": "#/$defs/id" }, "matched_fact_refs": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/id" } }, "explanation": { "$ref": "#/$defs/text" } } },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_id", "project_id", "question", "source_turn_refs", "recommended_relation", "recommended_target_id", "alternate_target_ids", "related_node_ids", "grounds", "confidence", "status", "dependency_digests", "analysis_mode", "agent_run_id", "revision", "created_at", "updated_at"],
+      "properties": {
+        "candidate_id": { "$ref": "#/$defs/id" }, "project_id": { "$ref": "#/$defs/id" }, "question": { "$ref": "#/$defs/text" },
+        "source_turn_refs": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/source_turn_ref" } },
+        "recommended_relation": { "enum": ["child", "sibling", "merge", "keep_pending"] },
+        "recommended_target_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+        "alternate_target_ids": { "$ref": "#/$defs/id_array" }, "related_node_ids": { "$ref": "#/$defs/id_array" },
+        "grounds": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ground" } },
+        "confidence": { "enum": ["high", "medium", "low"] }, "status": { "enum": ["pending", "applied", "merged", "kept_pending", "stale", "dismissed"] },
+        "dependency_digests": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/digest" } },
+        "analysis_mode": { "enum": ["deterministic", "agent_requested"] },
+        "agent_run_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+        "revision": { "type": "integer", "minimum": 1 }, "created_at": { "$ref": "#/$defs/timestamp" }, "updated_at": { "$ref": "#/$defs/timestamp" }
+      },
+      "allOf": [
+        { "if": { "properties": { "analysis_mode": { "const": "deterministic" } } }, "then": { "properties": { "agent_run_id": { "const": null } } }, "else": { "properties": { "agent_run_id": { "type": "string" } } } },
+        { "if": { "properties": { "recommended_relation": { "const": "keep_pending" } } }, "then": { "properties": { "recommended_target_id": { "const": null } } }, "else": { "properties": { "recommended_target_id": { "type": "string" } } } }
+      ]
+    }
+  }
+}

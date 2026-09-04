@@ -519,6 +519,106 @@ func TestContractParsersEnforceEveryDigestFormat(t *testing.T) {
 	}
 }
 
+func TestConversationChainContractRequiresTurnForMessageCursorAndCapsSourceReads(t *testing.T) {
+	args := []string{"conversation-chain", "--project-id", "p", "--provider", "claude", "--session-id", "same", "--expected-generation-id", "g", "--turn-unit-id", "turn-1", "--message-cursor", "opaque", "--limit", "64", "--json"}
+	request, err := ParseInspectContract(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Provider != "claude" || request.SessionID != "same" || request.TurnUnitID != "turn-1" || request.MessageCursor != "opaque" || request.Limit != 64 {
+		t.Fatalf("unexpected conversation-chain request: %+v", request)
+	}
+	withoutTurn := removeContractFlag(t, args, "--turn-unit-id")
+	if _, err := ParseInspectContract(withoutTurn); err == nil {
+		t.Fatal("accepted message cursor without a turn unit")
+	}
+	tooLarge := replaceContractFlagValue(t, args, "--limit", "65")
+	if _, err := ParseInspectContract(tooLarge); err == nil {
+		t.Fatal("accepted conversation page above 64 items")
+	}
+	if MaxConversationSourceReadBytes != 64<<10 {
+		t.Fatalf("source read ceiling = %d", MaxConversationSourceReadBytes)
+	}
+	if err := ValidateConversationSourceCoverage(ConversationSourceCoverage{SourceBytes: MaxConversationSourceReadBytes + 1, ReturnedBytes: MaxConversationSourceReadBytes, Truncated: false}); err == nil {
+		t.Fatal("accepted silent source clipping without truncation coverage")
+	}
+	if err := ValidateConversationSourceCoverage(ConversationSourceCoverage{SourceBytes: MaxConversationSourceReadBytes + 1, ReturnedBytes: MaxConversationSourceReadBytes, Truncated: true}); err != nil {
+		t.Fatalf("valid explicit truncation coverage rejected: %v", err)
+	}
+}
+
+func TestEvolutionContractsFreezeListSummarizeAndTransitionGrammar(t *testing.T) {
+	list, err := ParseEvolutionContract([]string{"summary-candidates", "list", "--project-id", "p", "--milestone-id", "m", "--status", "pending", "--json"})
+	if err != nil || list.Command != "summary-candidates" || list.Subcommand != "list" {
+		t.Fatalf("summary candidate list = %+v err=%v", list, err)
+	}
+	summarize, err := ParseEvolutionContract([]string{"summarize", "--project-id", "p", "--milestone-id", "m", "--expected-generation-id", "g", "--json"})
+	if err != nil || summarize.Command != "summarize" || summarize.ExpectedGenerationID != "g" {
+		t.Fatalf("summarize = %+v err=%v", summarize, err)
+	}
+	transition, err := ParseEvolutionContract([]string{"summary-candidate", "transition", "--project-id", "p", "--milestone-id", "m", "--candidate-id", "c", "--expected-candidate-revision", "2", "--expected-review-sha256", contractTestSHA, "--action", "confirm", "--json"})
+	if err != nil || transition.ExpectedCandidateRevision != 2 || transition.Action != "confirm" {
+		t.Fatalf("summary transition = %+v err=%v", transition, err)
+	}
+	for _, action := range []string{"confirm", "ignore", "restore"} {
+		args := []string{"summary-candidate", "transition", "--project-id", "p", "--milestone-id", "m", "--candidate-id", "c", "--expected-candidate-revision", "1", "--expected-review-sha256", contractTestSHA, "--action", action, "--json"}
+		if _, err := ParseEvolutionContract(args); err != nil {
+			t.Fatalf("action %q rejected: %v", action, err)
+		}
+	}
+}
+
+func TestProblemContractsEnforceTargetAndCASGrammar(t *testing.T) {
+	if _, err := ParseProblemContract([]string{"candidates", "list", "--project-id", "p", "--status", "pending", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"candidate", "transition", "--project-id", "p", "--candidate-id", "c", "--expected-candidate-revision", "1", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--action", "apply_child", "--json"}
+	if _, err := ParseProblemContract(base); err == nil {
+		t.Fatal("accepted apply without target problem ID")
+	}
+	withTarget := append(append([]string(nil), base[:len(base)-1]...), "--target-problem-id", "target", "--json")
+	if request, err := ParseProblemContract(withTarget); err != nil || request.TargetProblemID != "target" {
+		t.Fatalf("targeted apply = %+v err=%v", request, err)
+	}
+	for _, action := range []string{"keep_pending", "dismiss"} {
+		args := replaceContractFlagValue(t, withTarget, "--action", action)
+		if _, err := ParseProblemContract(args); err == nil {
+			t.Fatalf("accepted target problem ID for %s", action)
+		}
+	}
+	for _, action := range []string{"apply_child", "apply_sibling", "merge"} {
+		args := replaceContractFlagValue(t, withTarget, "--action", action)
+		if _, err := ParseProblemContract(args); err != nil {
+			t.Fatalf("targeted action %q rejected: %v", action, err)
+		}
+	}
+	for _, action := range []string{"keep_pending", "dismiss", "restore"} {
+		args := replaceContractFlagValue(t, base, "--action", action)
+		if _, err := ParseProblemContract(args); err != nil {
+			t.Fatalf("targetless action %q rejected: %v", action, err)
+		}
+	}
+}
+
+func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
+	move, err := ParseProblemContract([]string{"move", "--project-id", "p", "--problem-id", "child", "--new-parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
+	if err != nil || move.NewParentID != "root" {
+		t.Fatalf("move = %+v err=%v", move, err)
+	}
+	reorder, err := ParseProblemContract([]string{"reorder", "--project-id", "p", "--parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
+	if err != nil || reorder.ParentID != "root" {
+		t.Fatalf("reorder = %+v err=%v", reorder, err)
+	}
+	for _, ordered := range [][]string{{"a"}, {"a", "a"}, {"a", "foreign", "b"}} {
+		if err := ValidateCompleteSiblingOrder([]string{"a", "b"}, ordered); err == nil {
+			t.Fatalf("accepted incomplete or foreign sibling order: %#v", ordered)
+		}
+	}
+	if err := ValidateCompleteSiblingOrder([]string{"a", "b"}, []string{"b", "a"}); err != nil {
+		t.Fatalf("complete sibling order rejected: %v", err)
+	}
+}
+
 func TestContractParsersRejectForbiddenInputSurfacesAndPositionals(t *testing.T) {
 	tests := []struct {
 		name  string

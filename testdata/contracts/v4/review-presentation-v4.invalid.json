@@ -1,5 +1,5 @@
 {
   "schema_version": 4, "minimum_reader_version": "0.4.0", "minimum_writer_version": "0.4.0", "project_id": "project-p", "generation_id": "generation-1", "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "revision": 1,
   "current_state": { "goal": "Build", "stage": "implementation", "status": "active", "next_action": "Test", "last_verification": "2026-09-04", "unknown": true },
-  "timeline": [], "decisions": [], "risks": [], "open_loops": [], "human_patches": [], "orphan_patches": [], "generated_baselines": []
+  "timeline": [], "decisions": [], "risks": [], "open_loops": [], "problem_map_revision": 0, "problem_root_ids": [], "problem_nodes": [], "chain_dependencies": [], "human_patches": [], "orphan_patches": [], "generated_baselines": []
 }

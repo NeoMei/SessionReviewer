@@ -1,4 +1,4 @@
-export type ViewKind = "evolution" | "decisions" | "sessions" | "usage";
+export type ViewKind = "evolution" | "problems" | "decisions" | "sessions" | "usage";
 
 export type SessionIdentity = Readonly<{ provider: string; sessionId: string }>;
 
@@ -37,6 +37,67 @@ export interface TimelineEntryV4 {
   title: string;
   summary: string;
   decision_ids: string[];
+  closed_loop: ClosedLoopV4;
+}
+
+export interface SourceTurnRefV4 {
+  provider: string;
+  session_id: string;
+  turn_unit_id: string;
+}
+
+export interface ClosedLoopSegmentV4 {
+  state: "present" | "partial" | "missing";
+  text: string;
+  missing_reason: "not_captured" | "no_visible_answer" | "no_execution_evidence" | "not_verified" | "source_unavailable" | "partial_coverage" | null;
+  source_turn_refs: SourceTurnRefV4[];
+}
+
+export interface ClosedLoopConclusionV4 {
+  kind: "visible_answer_excerpt" | "human_confirmed" | "ai_candidate_confirmed" | "missing";
+  text: string;
+  missing_reason: "not_captured" | "no_visible_answer" | "no_execution_evidence" | "not_verified" | "source_unavailable" | "partial_coverage" | null;
+  source_turn_refs: SourceTurnRefV4[];
+}
+
+export interface ClosedLoopV4 {
+  trigger_question: ClosedLoopSegmentV4;
+  conclusion: ClosedLoopConclusionV4;
+  execution: ClosedLoopSegmentV4;
+  verification: ClosedLoopSegmentV4;
+  impact_and_follow_up: ClosedLoopSegmentV4;
+  source_turn_refs: SourceTurnRefV4[];
+  coverage: {
+    source_turns: number;
+    captured_turns: number;
+    truncated_turns: number;
+    source_unavailable_turns: number;
+  };
+}
+
+export interface ProblemNodeV4 {
+  id: string;
+  question: string;
+  primary_parent_id: string | null;
+  related_node_ids: string[];
+  workflow_state: string;
+  answer_state: string;
+  completion_criterion: string;
+  current_conclusion: string;
+  source_turn_refs: SourceTurnRefV4[];
+  provenance: string;
+  first_proposed_at: string;
+  sibling_order: number;
+  confirmed_at: string | null;
+  revision: number;
+}
+
+export interface ChainDependencyV4 {
+  provider: string;
+  session_id: string;
+  session_view_digest: string;
+  dependency_digest: string;
+  turn_unit_ids: string[];
 }
 
 export interface DecisionV4 {
@@ -104,6 +165,10 @@ export interface ReviewPresentationV4 {
   decisions: DecisionV4[];
   risks: RiskV4[];
   open_loops: OpenLoopV4[];
+  problem_map_revision: number;
+  problem_root_ids: string[];
+  problem_nodes: ProblemNodeV4[];
+  chain_dependencies: ChainDependencyV4[];
   human_patches: HumanPatchV4[];
   orphan_patches: HumanPatchV4[];
   generated_baselines: GeneratedBaselineV4[];
@@ -390,7 +455,7 @@ export interface SessionEventPageV1 {
 }
 
 export interface AnnotationDependencyV1 {
-  kind: "observation" | "session_view";
+  kind: "observation" | "session_view" | "source_turn";
   revision_id: string;
   digest: string;
 }
@@ -398,8 +463,9 @@ export interface AnnotationDependencyV1 {
 export interface AgentAnnotationEntryV1 {
   id: string;
   project_id: string;
-  entity_id: string;
-  field: string;
+  annotation_kind: "decision_candidate" | "agreement_candidate" | "milestone_conclusion_candidate";
+  entity_id?: string;
+  field?: string;
   status: CandidateStatus;
   text: string;
   generation_id: string;
@@ -409,7 +475,9 @@ export interface AgentAnnotationEntryV1 {
   dependencies: AnnotationDependencyV1[];
   revision: number;
   created_at: string;
-  confirmed_decision_id: string | null;
+  confirmed_entity_id: string | null;
+  target_milestone_id?: string;
+  prompt_schema_version?: string;
 }
 
 export interface AnnotationExtractionRunV1 {
@@ -432,6 +500,91 @@ export interface AgentAnnotationV1 {
 }
 
 export type CandidateListV1 = AgentAnnotationV1;
+
+export interface ConversationSourceRefV1 {
+  provider: string;
+  session_id: string;
+  source_identity: string;
+  record_ordinal: number;
+  source_hash: string;
+}
+
+export interface ConversationMessageV1 {
+  role: "user" | "assistant";
+  revision_id: string;
+  source_ref: ConversationSourceRefV1;
+  occurred_at: string;
+  visible_excerpt: string;
+  truncated: boolean;
+}
+
+export interface ConversationChainV1 {
+  schema_version: 1;
+  minimum_reader_version: "0.4.0";
+  digest: string;
+  project_id: string;
+  provider: string;
+  session_id: string;
+  session_view_digest: string;
+  dependency_digest: string;
+  segmentation_rule_version: string;
+  coverage: {
+    source_messages: number;
+    captured_messages: number;
+    turn_units: number;
+    unanswered_units: number;
+    truncated_messages: number;
+  };
+  turn_units: Array<{
+    turn_unit_id: string;
+    ordinal: number;
+    started_at: string;
+    ended_at: string | null;
+    user_message: ConversationMessageV1;
+    assistant_messages: ConversationMessageV1[];
+    actions: Array<{
+      revision_id: string;
+      source_ref: ConversationSourceRefV1;
+      kind: string;
+      tool_name: string | null;
+      excerpt: string;
+    }>;
+    results: Array<{
+      revision_id: string;
+      source_ref: ConversationSourceRefV1;
+      kind: string;
+      verification_state: string;
+      excerpt: string;
+    }>;
+    answer_state: "no_answer" | "answered" | "partial";
+  }>;
+}
+
+export interface ProblemMapCandidateV1 {
+  schema_version: 1;
+  minimum_reader_version: "0.4.0";
+  digest: string;
+  project_id: string;
+  candidates: Array<{
+    candidate_id: string;
+    project_id: string;
+    question: string;
+    source_turn_refs: SourceTurnRefV4[];
+    recommended_relation: "child" | "sibling" | "merge" | "keep_pending";
+    recommended_target_id: string | null;
+    alternate_target_ids: string[];
+    related_node_ids: string[];
+    grounds: Array<{ rule_id: string; rule_version: string; matched_fact_refs: string[]; explanation: string }>;
+    confidence: "high" | "medium" | "low";
+    status: "pending" | "applied" | "merged" | "kept_pending" | "stale" | "dismissed";
+    dependency_digests: string[];
+    analysis_mode: "deterministic" | "agent_requested";
+    agent_run_id: string | null;
+    revision: number;
+    created_at: string;
+    updated_at: string;
+  }>;
+}
 
 export interface PricingSupplementV1 {
   schema_version: 1;
