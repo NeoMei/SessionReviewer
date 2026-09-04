@@ -4,7 +4,7 @@
 
 **LOCAL COMPLETE / WINDOWS CI PENDING**
 
-本地 Gate 0 已在实现边界提交 `b30876db1d61026eb52f5d6d6533c052fd7a93b7` 上重新通过。合同矩阵现已覆盖 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图、演进闭环和通用 Agent annotation，并完成了 Fix Round 1 的五项跨语言契约修正。该提交未推送，也没有原生 Windows 运行，因此 Windows CI 证据仍为 PENDING。
+本地 Gate 0 已在最终实现提交 `d81e68a9fe4bc656ce5c29cb7369a4924a2d3a7b` 上重新通过。最终修正同步封闭了 Session 时间未知态、v3 人类决策状态无损迁移和价格替代图完整性三项 Important 问题。该提交未推送，也没有原生 Windows 运行，因此 Windows CI 证据仍为 PENDING。
 
 ## 审计对象
 
@@ -12,8 +12,10 @@
 - 任务基准：`6421a9aad6d7a65bbaef2fa71e4d7e7be3431db6`
 - 初始实现提交：`e3ff49beb6cb28d4aacb73a5ba4f45c43289b112`
 - Fix Round 1 实现提交：`b30876db1d61026eb52f5d6d6533c052fd7a93b7`
+- Final fix 实现提交：`d81e68a9fe4bc656ce5c29cb7369a4924a2d3a7b`
 - 环境：`Darwin arm64`，`go1.26.5 darwin/arm64`，Node `v24.18.0`，npm `11.16.0`
 - Fix Round 1 提交统计：18 files changed，279 insertions，39 deletions
+- Final fix 提交统计：20 files changed，628 insertions，72 deletions
 - 未纳入任务提交：既有未跟踪目录 `.superpowers/brainstorm/`
 
 ## TDD 边界
@@ -30,17 +32,19 @@ go test ./internal/conversationchain ./internal/problemmap ./internal/reviewv4 -
 
 Fix Round 1 先新增回归测试并获得预期 RED：CLI 编译报告 `ParseProblemContractWithInput` 未定义；Go 分别证明零 digest、超过 JavaScript safe integer 上限以及 schema 的非空图 revision-zero 会被错误接受；TypeScript 为 2 failed / 57 passed。修正后聚焦 Go 五个 package 全部 PASS，`contracts-v4.test.ts` 为 59/59 PASS。完整 RED/GREEN 原始输出保存在 Task 7 report 的 `Fix Round 1` 节。
 
+Final fix 先分别获得聚焦 RED：Go Session index 拒绝 `started_at:null`；v3 `已采用` 状态报告无精确 v4 mapping，v4 reader 拒绝未知的 `legacy_status_text`；整本账本验证错误接受缺失前驱、自指、环、身份不符和多有效叶子。TypeScript 对应为 3 failed / 59 skipped。修正后聚焦 Go `sessionindex/reviewv4/migrationv4/syncproject/memory` 全部 PASS，`contracts-v4.test.ts` 为 62/62 PASS。完整 RED/GREEN 原始输出保存在 final-fix report。
+
 ## 完整本地门禁
 
 按串行顺序执行：
 
 | 命令 | 结果 | 证据 |
 |---|---|---|
-| `gofmt -w internal/conversationchain internal/problemmap internal/reviewv4 internal/cli` | PASS | 无输出 |
-| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | Fix Round 1 后全 package 重跑；较慢 package 包括 `internal/scan` 114.532s、`internal/reviewjob` 55.855s、`test/zerotoken` 34.961s，均低于每个测试二进制 5 分钟超时 |
+| `gofmt -w` 所有变更的 Go 文件 | PASS | `gofmt` 后聚焦 Go 包和完整串行门禁均通过 |
+| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | 在 Final fix 精确提交树上全 package 重跑；较慢 package 包括 `internal/scan` 221.908s、`internal/reviewjob` 119.880s、`test/zerotoken` 103.223s、`internal/apply` 101.111s，均低于每个测试二进制 5 分钟超时 |
 | `go vet ./...` | PASS | exit 0，无输出 |
 | `go mod tidy -diff` | PASS | exit 0，无 diff |
-| `cd obsidian-plugin && npm run check` | PASS | lint；17/17 test files、123/123 tests；TypeScript typecheck；production bundle |
+| `cd obsidian-plugin && npm run check` | PASS | lint；17/17 test files、126/126 tests；TypeScript typecheck；production bundle |
 | `git diff --check` | PASS | exit 0，无输出 |
 
 独立 ordinary-flow 复核 `go test ./test/zerotoken -count=1 -run 'TestGate(A|B)' -v` PASS：Gate A 154/154 terminal、151 indexed、zero model tokens；Gate B 端到端发布与幂等测试通过。新增 deterministic candidate fixture 明确要求 `agent_run_id=null`，本任务没有启动或实现 Agent 执行。
@@ -62,9 +66,13 @@ Fix Round 1 先新增回归测试并获得预期 RED：CLI 编译报告 `ParsePr
 | conversation-chain-v1 | `wire_contract_invalid` |
 | problem-map-candidate-v1 | `wire_contract_invalid` |
 
-独立遍历 `testdata/contracts/v4/*.json` 并对同名插件 fixture 执行 `cmp -s`，结果为 **20/20 Go/plugin fixture files byte-identical**。
+独立遍历 `testdata/contracts/v4/*.json` 并对同名插件 fixture 执行 `cmp -s`，结果为 **21/21 Go/plugin fixture files byte-identical**。
 
 ## 扩展合同与迁移边界
+
+- `session-index-v1.started_at/ended_at` 现为显式可空；Go/schema/TypeScript 只把非 `null` 值计入 known coverage，并使用 null-last 规范排序。迁移投影把缺失时间写为 `null`，不补造时间。
+- v4 Decision 新增封闭 `legacy_unmapped` 兼容状态和必填可空字段 `legacy_status_text`；兼容状态要求该字段保存精确原文且 `provenance=migrated`，原生 v4 状态要求它为 `null`。v3 只对精确 `active/archived` 做同名映射，其他文本不做语义猜测。
+- `machine-ledger-v4` 的 Go/TypeScript 整本账本验证现在要求价格前驱存在、非自指、无环、无分叉、边两端用量身份一致，且每条用量最多一个被选中的有效叶子。历史快照仍不可变，未知成本仍为 `null`。
 
 - 会话身份始终为 `(provider, session_id)`；conversation chain 只允许 user/assistant 可见 excerpt，4,096 UTF-8 bytes 上限，并绑定认证 source refs。
 - 两个新增自摘要合同只省略各自的 `digest` 字段计算 canonical digest；valid fixtures 使用非零 digest，tamper tests 同时覆盖 Go/TypeScript。
