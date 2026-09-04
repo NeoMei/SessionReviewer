@@ -176,6 +176,19 @@ describe("stable wire rejection codes", () => {
     expect(codeOf(new Error("ordinary failure"))).toBeUndefined();
     expect(codeOf("not an error")).toBeUndefined();
   });
+
+  it("preserves the native parser error behind malformed JSON string context", () => {
+    const rejection = captureRejection(() => parseAgentAnnotationV1('{"schema_version":"\\q"}'));
+    expect(codeOf(rejection)).toBe("wire_json_invalid");
+    expect(rejection.message).toMatch(/decode JSON: malformed string/i);
+    const causes: unknown[] = [];
+    let current: unknown = rejection;
+    while (typeof current === "object" && current !== null && !causes.includes(current)) {
+      causes.push(current);
+      current = (current as { cause?: unknown }).cause;
+    }
+    expect(causes.some((cause) => cause instanceof SyntaxError)).toBe(true);
+  });
 });
 
 describe("strict JSON boundary", () => {

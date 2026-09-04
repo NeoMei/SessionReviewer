@@ -933,6 +933,12 @@ function reject(code: WireRejectionCode, detail: string): never {
   throw new WireRejectionError(code, new Error(detail));
 }
 
+function contextualError(detail: string, cause: unknown): Error {
+  const error = new Error(detail);
+  Object.defineProperty(error, "cause", { value: cause, writable: true, configurable: true });
+  return error;
+}
+
 function documentObject(source: string, kind: string): JsonObject {
   const bytes = Buffer.byteLength(source, "utf8");
   if (bytes > MAX_JSON_BYTES) reject("wire_input_overflow", `${kind} exceeds ${MAX_JSON_BYTES} bytes`);
@@ -946,7 +952,7 @@ function documentObject(source: string, kind: string): JsonObject {
   try {
     value = JSON.parse(source);
   } catch (error) {
-    throw rejection("wire_json_invalid", new Error(`decode ${kind}: ${message(error)}`));
+    throw rejection("wire_json_invalid", contextualError(`decode ${kind}: ${message(error)}`, error));
   }
   assertJsonUnicode(value, "$", new Set<unknown>());
   return object(value, "$" );
@@ -1437,7 +1443,7 @@ function rejectDuplicateJsonKeys(source: string): void {
         } catch (error) {
           throw rejection("wire_json_invalid", error instanceof WireRejectionError
             ? error
-            : new Error(`decode JSON: malformed string: ${message(error)}`));
+            : contextualError(`decode JSON: malformed string: ${message(error)}`, error));
         }
       }
       cursor += 1;
