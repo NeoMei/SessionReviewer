@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   assertSnapshotBindings,
+  codeOf,
   parseAgentAnnotationV1,
   parseCandidateListV1,
   parseMachineLedgerV4,
@@ -12,7 +13,9 @@ import {
   parseReviewPresentationV4,
   parseSessionEventPageV1,
   parseSessionIndexV1,
-  parseSessionSummaryV1
+  parseSessionSummaryV1,
+  WireRejectionError,
+  type WireRejectionCode
 } from "../src/data/contracts-v4";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,16 +27,30 @@ const sharedFixture = (name: string): Promise<Buffer> =>
 type JsonObject = Record<string, unknown>;
 type Parser = (source: string) => unknown;
 
-const contracts: ReadonlyArray<Readonly<{ name: string; parser: Parser }>> = [
-  { name: "review-presentation-v4", parser: parseReviewPresentationV4 },
-  { name: "machine-ledger-v4", parser: parseMachineLedgerV4 },
-  { name: "session-index-v1", parser: parseSessionIndexV1 },
-  { name: "session-summary-v1", parser: parseSessionSummaryV1 },
-  { name: "session-event-page-v1", parser: parseSessionEventPageV1 },
-  { name: "agent-annotation-v1", parser: parseAgentAnnotationV1 },
-  { name: "pricing-snapshot-v1", parser: parsePricingSnapshotV1 },
-  { name: "pricing-supplement-v1", parser: parsePricingSupplementV1 }
+const contracts: ReadonlyArray<Readonly<{
+  name: string;
+  parser: Parser;
+  invalidCode: WireRejectionCode;
+}>> = [
+  { name: "review-presentation-v4", parser: parseReviewPresentationV4, invalidCode: "wire_shape_invalid" },
+  { name: "machine-ledger-v4", parser: parseMachineLedgerV4, invalidCode: "wire_contract_invalid" },
+  { name: "session-index-v1", parser: parseSessionIndexV1, invalidCode: "wire_contract_invalid" },
+  { name: "session-summary-v1", parser: parseSessionSummaryV1, invalidCode: "wire_shape_invalid" },
+  { name: "session-event-page-v1", parser: parseSessionEventPageV1, invalidCode: "wire_contract_invalid" },
+  { name: "agent-annotation-v1", parser: parseAgentAnnotationV1, invalidCode: "wire_shape_invalid" },
+  { name: "pricing-snapshot-v1", parser: parsePricingSnapshotV1, invalidCode: "wire_contract_invalid" },
+  { name: "pricing-supplement-v1", parser: parsePricingSupplementV1, invalidCode: "wire_contract_invalid" }
 ];
+
+function captureRejection(action: () => unknown): WireRejectionError {
+  try {
+    action();
+  } catch (error) {
+    expect(error).toBeInstanceOf(WireRejectionError);
+    return error as WireRejectionError;
+  }
+  throw new Error("expected parser rejection");
+}
 
 async function fixtureObject(name: string): Promise<JsonObject> {
   return JSON.parse(await pluginFixture(name)) as JsonObject;
@@ -82,9 +99,9 @@ describe("frozen v4 contract fixture parity", () => {
       expect(() => contract.parser(source)).not.toThrow();
     });
 
-    it(`rejects the frozen ${contract.name} invalid fixture through its production parser`, async () => {
+    it(`rejects the frozen ${contract.name} invalid fixture with its Go-compatible code`, async () => {
       const source = await pluginFixture(`${contract.name}.invalid.json`);
-      expect(() => contract.parser(source)).toThrow();
+      expect(codeOf(captureRejection(() => contract.parser(source)))).toBe(contract.invalidCode);
     });
 
     it(`keeps both ${contract.name} fixtures byte-identical to the shared Go fixtures`, async () => {
@@ -98,6 +115,66 @@ describe("frozen v4 contract fixture parity", () => {
   it("exposes CandidateListV1 as the agent-annotation-v1 typed view", async () => {
     const source = await pluginFixture("agent-annotation-v1.valid.json");
     expect(parseCandidateListV1(source)).toEqual(parseAgentAnnotationV1(source));
+  });
+});
+
+describe("stable wire rejection codes", () => {
+  it("classifies every JavaScript-representable wire rejection phase", async () => {
+    const annotation = await pluginFixture("agent-annotation-v1.valid.json");
+    const annotationObject = JSON.parse(annotation) as JsonObject;
+    const unknown = { ...annotationObject, unknown: true };
+    const invalidID = { ...annotationObject, project_id: "invalid project id" };
+    const missing = { ...annotationObject };
+    delete missing.project_id;
+    const tooManyAnnotations = { ...annotationObject, annotations: Array(65537).fill(null) };
+    const review = await fixtureObject("review-presentation-v4.valid.json");
+    review.revision = -1;
+    const pricing = await pluginFixture("pricing-snapshot-v1.invalid.json");
+    const cases: ReadonlyArray<Readonly<{
+      name: string;
+      source: string;
+      code: WireRejectionCode;
+      parser?: Parser;
+    }>> = [
+      { name: "input overflow", source: `"${"a".repeat((64 << 20) + 1)}"`, code: "wire_input_overflow" },
+      { name: "literal unpaired surrogate", source: annotation.replace("project-p", "\ud800"), code: "wire_invalid_utf8" },
+      { name: "escaped unpaired surrogate", source: annotation.replace("project-p", "\\ud800"), code: "wire_invalid_utf8" },
+      { name: "malformed JSON", source: "{", code: "wire_json_invalid" },
+      { name: "duplicate key", source: '{"schema_version":1,"schema_version":1}', code: "wire_json_invalid" },
+      { name: "trailing JSON value", source: `${annotation} {}`, code: "wire_json_invalid" },
+      { name: "wrong root container", source: "[]", code: "wire_shape_invalid" },
+      { name: "unknown exact key", source: JSON.stringify(unknown), code: "wire_shape_invalid" },
+      { name: "missing required key", source: JSON.stringify(missing), code: "wire_shape_invalid" },
+      { name: "null in required scalar", source: JSON.stringify({ ...annotationObject, project_id: null }), code: "wire_shape_invalid" },
+      { name: "wrong scalar type", source: JSON.stringify({ ...annotationObject, project_id: 7 }), code: "wire_shape_invalid" },
+      { name: "correctly typed invalid format", source: JSON.stringify(invalidID), code: "wire_contract_invalid" },
+      { name: "scalar byte limit", source: JSON.stringify({ ...annotationObject, project_id: "a".repeat(257) }), code: "wire_contract_invalid" },
+      { name: "array item limit", source: JSON.stringify(tooManyAnnotations), code: "wire_contract_invalid" },
+      { name: "numeric range", source: JSON.stringify(review), code: "wire_contract_invalid", parser: parseReviewPresentationV4 },
+      { name: "closed enum", source: pricing, code: "wire_contract_invalid", parser: parsePricingSnapshotV1 }
+    ];
+    for (const testCase of cases) {
+      expect(codeOf(captureRejection(() => (testCase.parser ?? parseAgentAnnotationV1)(testCase.source))), testCase.name)
+        .toBe(testCase.code);
+    }
+  });
+
+  it("preserves the production diagnostic message and cause", async () => {
+    const annotation = await fixtureObject("agent-annotation-v1.valid.json");
+    annotation.project_id = "invalid project id";
+    const rejection = captureRejection(() => parseAgentAnnotationV1(JSON.stringify(annotation)));
+    expect(rejection.cause).toBeInstanceOf(Error);
+    expect(rejection.message).toBe((rejection.cause as Error).message);
+    expect(codeOf(rejection)).toBe("wire_contract_invalid");
+  });
+
+  it("preserves a nested specific code and ignores unrelated errors", async () => {
+    const source = await pluginFixture("agent-annotation-v1.valid.json");
+    const malformed = source.replace("project-p", "\\ud800");
+    const rejection = captureRejection(() => parseCandidateListV1(malformed));
+    expect(codeOf(rejection)).toBe("wire_invalid_utf8");
+    expect(codeOf(new Error("ordinary failure"))).toBeUndefined();
+    expect(codeOf("not an error")).toBeUndefined();
   });
 });
 
@@ -205,7 +282,9 @@ describe("session contracts", () => {
     }
     const wrongDigest = clone(index);
     wrongDigest.digest = `sha256:${"9".repeat(64)}`;
-    expect(() => assertSnapshotBindings(ledger, wrongDigest)).toThrow(/mismatch|binding/i);
+    const rejection = captureRejection(() => assertSnapshotBindings(ledger, wrongDigest));
+    expect(rejection.message).toMatch(/mismatch|binding/i);
+    expect(codeOf(rejection)).toBe("wire_contract_invalid");
   });
 
   it("rejects placeholder digests at the accepted snapshot binding boundary", async () => {

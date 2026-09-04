@@ -48,7 +48,42 @@ const PRICE_DIMENSIONS = ["input", "cached_input", "cache_write_input", "output"
 
 type JsonObject = Record<string, unknown>;
 
+export type WireRejectionCode =
+  | "wire_input_overflow"
+  | "wire_invalid_utf8"
+  | "wire_json_invalid"
+  | "wire_shape_invalid"
+  | "wire_contract_invalid";
+
+export class WireRejectionError extends Error {
+  public readonly cause: unknown;
+  public readonly code: WireRejectionCode;
+
+  public constructor(code: WireRejectionCode, cause: unknown) {
+    super(message(cause));
+    this.name = "WireRejectionError";
+    this.code = code;
+    this.cause = cause;
+  }
+}
+
+export function codeOf(error: unknown): WireRejectionCode | undefined {
+  const seen = new Set<unknown>();
+  let current = error;
+  while ((typeof current === "object" && current !== null) || typeof current === "function") {
+    if (current instanceof WireRejectionError) return current.code;
+    if (seen.has(current)) return undefined;
+    seen.add(current);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
+}
+
 export function parseReviewPresentationV4(source: string): ReviewPresentationV4 {
+  return atWireBoundary(() => parseReviewPresentationDocument(source));
+}
+
+function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
   const row = documentObject(source, "review presentation");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "minimum_writer_version", "project_id", "generation_id",
@@ -120,6 +155,10 @@ export function parseReviewPresentationV4(source: string): ReviewPresentationV4 
 }
 
 export function parseMachineLedgerV4(source: string): MachineLedgerV4 {
+  return atWireBoundary(() => parseMachineLedgerDocument(source));
+}
+
+function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
   const row = documentObject(source, "machine ledger");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "minimum_writer_version", "project_id", "generation_id",
@@ -187,6 +226,10 @@ export function parseMachineLedgerV4(source: string): MachineLedgerV4 {
 }
 
 export function parseSessionIndexV1(source: string): SessionIndexV1 {
+  return atWireBoundary(() => parseSessionIndexDocument(source));
+}
+
+function parseSessionIndexDocument(source: string): SessionIndexV1 {
   const row = documentObject(source, "session index");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "digest", "project_id", "generation_id", "project_view_digest",
@@ -250,6 +293,10 @@ export function parseSessionIndexV1(source: string): SessionIndexV1 {
 }
 
 export function parseSessionSummaryV1(source: string): SessionSummaryV1 {
+  return atWireBoundary(() => parseSessionSummaryDocument(source));
+}
+
+function parseSessionSummaryDocument(source: string): SessionSummaryV1 {
   const row = documentObject(source, "session summary");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "project_id", "provider", "session_id", "generation_id",
@@ -268,6 +315,10 @@ export function parseSessionSummaryV1(source: string): SessionSummaryV1 {
 }
 
 export function parseSessionEventPageV1(source: string): SessionEventPageV1 {
+  return atWireBoundary(() => parseSessionEventPageDocument(source));
+}
+
+function parseSessionEventPageDocument(source: string): SessionEventPageV1 {
   const row = documentObject(source, "session event page");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "project_id", "provider", "session_id", "generation_id",
@@ -300,6 +351,10 @@ export function parseSessionEventPageV1(source: string): SessionEventPageV1 {
 }
 
 export function parseAgentAnnotationV1(source: string): AgentAnnotationV1 {
+  return atWireBoundary(() => parseAgentAnnotationDocument(source));
+}
+
+function parseAgentAnnotationDocument(source: string): AgentAnnotationV1 {
   const row = documentObject(source, "agent annotation");
   exact(row, "$", ["schema_version", "minimum_reader_version", "project_id", "annotations", "extraction_runs"]);
   constant(row.schema_version, 1, "$.schema_version");
@@ -328,10 +383,14 @@ export function parseCandidateListV1(source: string): CandidateListV1 {
 }
 
 export function parsePricingSnapshotV1(source: string): PricingSnapshotV1 {
-  return validatePricingSnapshot(documentObject(source, "pricing snapshot"), "$" );
+  return atWireBoundary(() => validatePricingSnapshot(documentObject(source, "pricing snapshot"), "$"));
 }
 
 export function parsePricingSupplementV1(source: string): PricingSupplementV1 {
+  return atWireBoundary(() => parsePricingSupplementDocument(source));
+}
+
+function parsePricingSupplementDocument(source: string): PricingSupplementV1 {
   const row = documentObject(source, "pricing supplement");
   exact(row, "$", [
     "schema_version", "minimum_reader_version", "project_id", "provider", "session_id", "usage_record_digest",
@@ -360,12 +419,14 @@ export function parsePricingSupplementV1(source: string): PricingSupplementV1 {
 }
 
 export function assertSnapshotBindings(ledger: MachineLedgerV4, index: SessionIndexV1): void {
-  if (index.digest === ZERO_DIGEST) throw new Error("session index digest is unset");
-  if (ledger.sync_hashes.ledger_sha256 === ZERO_SHA256) throw new Error("machine ledger self hash is unset");
-  if (ledger.project_id !== index.project_id || ledger.generation_id !== index.generation_id ||
-    ledger.project_view_digest !== index.project_view_digest || ledger.sync_hashes.session_index_digest !== index.digest) {
-    throw new Error("ledger and session index snapshot binding mismatch");
-  }
+  atWireBoundary(() => {
+    if (index.digest === ZERO_DIGEST) throw new Error("session index digest is unset");
+    if (ledger.sync_hashes.ledger_sha256 === ZERO_SHA256) throw new Error("machine ledger self hash is unset");
+    if (ledger.project_id !== index.project_id || ledger.generation_id !== index.generation_id ||
+      ledger.project_view_digest !== index.project_view_digest || ledger.sync_hashes.session_index_digest !== index.digest) {
+      throw new Error("ledger and session index snapshot binding mismatch");
+    }
+  });
 }
 
 function parseTimeline(value: unknown, path: string, generationID: string): TimelineEntryV4 {
@@ -855,37 +916,62 @@ function parseLineCosts(value: unknown, path: string): PricingLineCostsV1 {
   return row as unknown as PricingLineCostsV1;
 }
 
+function atWireBoundary<T>(action: () => T): T {
+  try {
+    return action();
+  } catch (error) {
+    throw rejection("wire_contract_invalid", error);
+  }
+}
+
+function rejection(code: WireRejectionCode, cause: unknown): WireRejectionError {
+  if (cause instanceof WireRejectionError) return cause;
+  return new WireRejectionError(codeOf(cause) ?? code, cause);
+}
+
+function reject(code: WireRejectionCode, detail: string): never {
+  throw new WireRejectionError(code, new Error(detail));
+}
+
 function documentObject(source: string, kind: string): JsonObject {
-  assertValidUnicode(source, "JSON source");
   const bytes = Buffer.byteLength(source, "utf8");
-  if (bytes > MAX_JSON_BYTES) throw new Error(`${kind} exceeds ${MAX_JSON_BYTES} bytes`);
-  rejectDuplicateJsonKeys(source);
+  if (bytes > MAX_JSON_BYTES) reject("wire_input_overflow", `${kind} exceeds ${MAX_JSON_BYTES} bytes`);
+  assertValidUnicode(source, "JSON source");
+  try {
+    rejectDuplicateJsonKeys(source);
+  } catch (error) {
+    throw rejection("wire_json_invalid", error);
+  }
   let value: unknown;
   try {
     value = JSON.parse(source);
   } catch (error) {
-    throw new Error(`decode ${kind}: ${message(error)}`);
+    throw rejection("wire_json_invalid", new Error(`decode ${kind}: ${message(error)}`));
   }
   assertJsonUnicode(value, "$", new Set<unknown>());
   return object(value, "$" );
 }
 
 function object(value: unknown, path: string): JsonObject {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${path} must be an object`);
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    reject("wire_shape_invalid", `${path} must be an object`);
+  }
   return value as JsonObject;
 }
 
 function exact(value: JsonObject, path: string, allowed: readonly string[], required: readonly string[] = allowed): void {
   for (const key of Object.keys(value)) {
-    if (!allowed.includes(key)) throw new Error(`unknown exact JSON object key "${key}" at ${path}`);
+    if (!allowed.includes(key)) reject("wire_shape_invalid", `unknown exact JSON object key "${key}" at ${path}`);
   }
   for (const key of required) {
-    if (!Object.prototype.hasOwnProperty.call(value, key)) throw new Error(`missing required JSON object key "${key}" at ${path}`);
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      reject("wire_shape_invalid", `missing required JSON object key "${key}" at ${path}`);
+    }
   }
 }
 
 function boundedArray(value: unknown, path: string, maximum: number): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  if (!Array.isArray(value)) reject("wire_shape_invalid", `${path} must be an array`);
   if (value.length > maximum) throw new Error(`${path} exceeds ${maximum} items`);
   return value;
 }
@@ -905,7 +991,7 @@ function idArray(value: unknown, path: string, maximum: number, unique = false):
 }
 
 function text(value: unknown, path: string, maximum: number, nonempty = false): string {
-  if (typeof value !== "string") throw new Error(`${path} must be a string`);
+  if (typeof value !== "string") reject("wire_shape_invalid", `${path} must be a string`);
   if (nonempty && value.length === 0) throw new Error(`${path} must not be empty`);
   if (Buffer.byteLength(value, "utf8") > maximum) throw new Error(`${path} exceeds ${maximum} UTF-8 bytes`);
   return value;
@@ -923,7 +1009,8 @@ function id(value: unknown, path: string): string {
 }
 
 function digest(value: unknown, path: string): string {
-  if (typeof value !== "string" || !DIGEST.test(value)) throw new Error(`${path} must be a sha256 digest`);
+  if (typeof value !== "string") reject("wire_shape_invalid", `${path} must be a string`);
+  if (!DIGEST.test(value)) throw new Error(`${path} must be a sha256 digest`);
   return value;
 }
 
@@ -933,12 +1020,14 @@ function nullableDigest(value: unknown, path: string): string | null {
 }
 
 function sha256(value: unknown, path: string): string {
-  if (typeof value !== "string" || !SHA256.test(value)) throw new Error(`${path} must be a lowercase SHA-256 value`);
+  if (typeof value !== "string") reject("wire_shape_invalid", `${path} must be a string`);
+  if (!SHA256.test(value)) throw new Error(`${path} must be a lowercase SHA-256 value`);
   return value;
 }
 
 function integer(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${path} must be a safe integer`);
+  if (typeof value !== "number") reject("wire_shape_invalid", `${path} must be a number`);
+  if (!Number.isSafeInteger(value)) throw new Error(`${path} must be a safe integer`);
   if (value < 0) throw new Error(`${path} must be nonnegative`);
   return value;
 }
@@ -955,7 +1044,8 @@ function nullableInteger(value: unknown, path: string): number | null {
 }
 
 function money(value: unknown, path: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+  if (typeof value !== "number") reject("wire_shape_invalid", `${path} must be a number`);
+  if (!Number.isFinite(value) || value < 0) {
     throw new Error(`${path} must be finite and nonnegative`);
   }
   return value;
@@ -967,11 +1057,12 @@ function nullableMoney(value: unknown, path: string): number | null {
 }
 
 function boolean(value: unknown, path: string): boolean {
-  if (typeof value !== "boolean") throw new Error(`${path} must be a boolean`);
+  if (typeof value !== "boolean") reject("wire_shape_invalid", `${path} must be a boolean`);
   return value;
 }
 
 function constant(value: unknown, expected: unknown, path: string): void {
+  if (typeof value !== typeof expected) reject("wire_shape_invalid", `${path} has the wrong JSON type`);
   if (value !== expected) throw new Error(`${path} must equal ${String(expected)}`);
 }
 
@@ -980,7 +1071,8 @@ function version(value: unknown, path: string): void {
 }
 
 function oneOf<T extends string>(value: unknown, path: string, allowed: readonly T[]): T {
-  if (typeof value !== "string" || !allowed.includes(value as T)) throw new Error(`${path} is not in the closed enum`);
+  if (typeof value !== "string") reject("wire_shape_invalid", `${path} must be a string`);
+  if (!allowed.includes(value as T)) throw new Error(`${path} is not in the closed enum`);
   return value as T;
 }
 
@@ -1294,10 +1386,12 @@ function assertValidUnicode(value: string, path: string): void {
     const code = value.charCodeAt(index);
     if (code >= 0xd800 && code <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error(`${path} contains an unpaired Unicode surrogate`);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        reject("wire_invalid_utf8", `${path} contains an unpaired Unicode surrogate`);
+      }
       index += 1;
     } else if (code >= 0xdc00 && code <= 0xdfff) {
-      throw new Error(`${path} contains an unpaired Unicode surrogate`);
+      reject("wire_invalid_utf8", `${path} contains an unpaired Unicode surrogate`);
     }
   }
 }
@@ -1341,7 +1435,9 @@ function rejectDuplicateJsonKeys(source: string): void {
           assertValidUnicode(decoded, "JSON string");
           return decoded;
         } catch (error) {
-          throw new Error(`decode JSON: malformed string: ${message(error)}`);
+          throw rejection("wire_json_invalid", error instanceof WireRejectionError
+            ? error
+            : new Error(`decode JSON: malformed string: ${message(error)}`));
         }
       }
       cursor += 1;
