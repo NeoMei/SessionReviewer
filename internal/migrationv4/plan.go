@@ -93,18 +93,18 @@ func validatePreview(preview MigrationPreview) error {
 }
 
 func normalizePreview(preview *MigrationPreview) {
+	preview.PreservedDecisionIDs = append([]string(nil), preview.PreservedDecisionIDs...)
 	sort.Strings(preview.PreservedDecisionIDs)
 	if preview.PreservedDecisionIDs == nil {
 		preview.PreservedDecisionIDs = []string{}
 	}
-	if preview.DefaultedFields == nil {
-		preview.DefaultedFields = map[string][]string{}
-	}
+	defaults := make(map[string][]string, len(preview.DefaultedFields))
 	for key, values := range preview.DefaultedFields {
 		copyValues := append([]string(nil), values...)
 		sort.Strings(copyValues)
-		preview.DefaultedFields[key] = copyValues
+		defaults[key] = copyValues
 	}
+	preview.DefaultedFields = defaults
 	preview.SessionViewDependencyDigests = sortedUnique(preview.SessionViewDependencyDigests)
 }
 

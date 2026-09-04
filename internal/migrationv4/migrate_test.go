@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -34,33 +35,18 @@ type compatibilityFixture struct {
 	Expected             string   `json:"expected"`
 }
 
-func TestCompatibilityMatrixFixturesExerciseRealReaders(t *testing.T) {
+func TestCompatibilityMatrixFixturesExerciseProductionReaders(t *testing.T) {
 	fixtures := loadCompatibilityFixtures(t)
 	if got := fixtures["v2"]; got.SourceVersion != 2 || got.ExpectedReader != "reviewv2" || got.ExpectedRoute != "migrationv3" {
 		t.Fatalf("unexpected v2 fixture: %+v", got)
 	}
-	for _, path := range []string{"../../testdata/review-v2/项目回顾.valid.md", "../../testdata/review-v2/项目历史.valid.md", "../../testdata/review-v2/ledger.valid.json"} {
-		body, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		switch filepath.Base(path) {
-		case "项目回顾.valid.md":
-			if _, err := reviewv2.ParseReview(body); err != nil {
-				t.Fatalf("v2 review fixture is no longer readable: %v", err)
-			}
-		case "项目历史.valid.md":
-			if _, err := reviewv2.ParseHistory(body); err != nil {
-				t.Fatalf("v2 history fixture is no longer readable: %v", err)
-			}
-		default:
-			if _, err := reviewv2.ParseMachineLedger(body); err != nil {
-				t.Fatalf("v2 ledger fixture is no longer readable: %v", err)
-			}
-		}
+	v2Root := materializeCompatibilityFixture(t, "v2", false)
+	if _, err := reviewv2.Load(v2Root); err != nil {
+		t.Fatalf("complete v2 artifact set is no longer readable: %v", err)
 	}
 
-	review, history, machine, index := migrationFixture(t)
+	review, history, machine := compatibilityArtifact(t, "v3", reviewv2.ReviewRelativePath), compatibilityArtifact(t, "v3", reviewv2.HistoryRelativePath), compatibilityArtifact(t, "v3", reviewv2.MachineLedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
 	v3 := fixtures["v3"]
 	if v3.SourceVersion != 3 || v3.TargetVersion != 4 || v3.OrdinarySyncError != "migration_required" || !v3.ConfirmationRequired {
 		t.Fatalf("unexpected v3 fixture: %+v", v3)
@@ -76,16 +62,19 @@ func TestCompatibilityMatrixFixturesExerciseRealReaders(t *testing.T) {
 	if v4.ReviewVersion != 4 || v4.LedgerVersion != 4 || v4.IndexVersion != 1 || v4.ExpectedReader != "reviewv4.LoadProjection" {
 		t.Fatalf("unexpected v4 fixture: %+v", v4)
 	}
-	if _, err := reviewv4.LoadProjection(result.Review, result.History, result.Ledger, result.SessionIndex); err != nil {
+	v4Review, v4History, v4Ledger := compatibilityArtifact(t, "v4", ReviewRelativePath), compatibilityArtifact(t, "v4", HistoryRelativePath), compatibilityArtifact(t, "v4", LedgerRelativePath)
+	if _, err := reviewv4.LoadProjection(v4Review, v4History, v4Ledger, index); err != nil {
 		t.Fatalf("v4 direct open failed: %v", err)
+	}
+	if _, err := reviewv4.LoadProjection(result.Review, result.History, result.Ledger, result.SessionIndex); err != nil {
+		t.Fatalf("production migration result is not readable as v4: %v", err)
 	}
 
 	newer := fixtures["newer"]
-	newerReview := bytes.Replace(review, []byte("schema_version: 3"), []byte(fmt.Sprintf("schema_version: %d", newer.SourceVersion)), 1)
 	if newer.Expected != "reject" || newer.SourceVersion <= 4 {
 		t.Fatalf("unexpected newer fixture: %+v", newer)
 	}
-	if _, err := PreviewMigration(newerReview, history, machine); err == nil {
+	if _, err := reviewv4.LoadProjection(compatibilityArtifact(t, "newer", ReviewRelativePath), compatibilityArtifact(t, "newer", HistoryRelativePath), compatibilityArtifact(t, "newer", LedgerRelativePath), compatibilityArtifact(t, "newer", SessionIndexRelativePath)); err == nil {
 		t.Fatal("newer fixture was accepted")
 	}
 
@@ -93,18 +82,45 @@ func TestCompatibilityMatrixFixturesExerciseRealReaders(t *testing.T) {
 	if partial.Expected != "reject" || partial.Missing != "session_index" || len(partial.Present) != 3 {
 		t.Fatalf("unexpected partial fixture: %+v", partial)
 	}
-	if _, err := MigrateAcceptedV3(review, history, machine, nil); err == nil {
+	if _, err := reviewv4.LoadProjection(compatibilityArtifact(t, "partial", ReviewRelativePath), compatibilityArtifact(t, "partial", HistoryRelativePath), compatibilityArtifact(t, "partial", LedgerRelativePath), nil); err == nil {
 		t.Fatal("partial fixture was accepted")
 	}
 
 	mixed := fixtures["mixed"]
-	mixedLedger := bytes.Replace(machine, []byte(`"schema_version": 3`), []byte(fmt.Sprintf(`"schema_version": %d`, mixed.LedgerVersion)), 1)
 	if mixed.Expected != "reject" || mixed.ReviewVersion != 3 || mixed.HistoryVersion != 3 || mixed.LedgerVersion != 4 || mixed.IndexVersion != 1 {
 		t.Fatalf("unexpected mixed fixture: %+v", mixed)
 	}
-	if _, err := PreviewMigration(review, history, mixedLedger); err == nil {
+	if _, err := reviewv4.LoadProjection(compatibilityArtifact(t, "mixed", ReviewRelativePath), compatibilityArtifact(t, "mixed", HistoryRelativePath), compatibilityArtifact(t, "mixed", LedgerRelativePath), compatibilityArtifact(t, "mixed", SessionIndexRelativePath)); err == nil {
 		t.Fatal("mixed fixture was accepted")
 	}
+}
+
+func compatibilityArtifact(t *testing.T, fixture, relative string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("../../testdata/contracts/migration", fixture, relative))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func materializeCompatibilityFixture(t *testing.T, fixture string, includeIndex bool) string {
+	t.Helper()
+	root := t.TempDir()
+	paths := []string{ReviewRelativePath, HistoryRelativePath, LedgerRelativePath}
+	if includeIndex {
+		paths = append(paths, SessionIndexRelativePath)
+	}
+	for _, relative := range paths {
+		destination := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, compatibilityArtifact(t, fixture, relative), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
 }
 
 func loadCompatibilityFixtures(t *testing.T) map[string]compatibilityFixture {
@@ -250,6 +266,25 @@ func TestMigrationPreviewBindsEveryFreshnessInputAndIsDeterministic(t *testing.T
 		if got.Preview.PreviewDigest == first.Preview.PreviewDigest {
 			t.Fatalf("freshness mutation %d did not change preview digest", i)
 		}
+	}
+}
+
+func TestMigrationPreviewDigestDoesNotMutateNestedCallerState(t *testing.T) {
+	preview := MigrationPreview{
+		PreservedDecisionIDs:         []string{"decision-z", "decision-a"},
+		DefaultedFields:              map[string][]string{"decision-z": {"z", "a"}},
+		SessionViewDependencyDigests: []string{"sha256:" + strings.Repeat("2", 64), "sha256:" + strings.Repeat("1", 64)},
+	}
+	want := MigrationPreview{
+		PreservedDecisionIDs:         append([]string(nil), preview.PreservedDecisionIDs...),
+		DefaultedFields:              map[string][]string{"decision-z": append([]string(nil), preview.DefaultedFields["decision-z"]...)},
+		SessionViewDependencyDigests: append([]string(nil), preview.SessionViewDependencyDigests...),
+	}
+	if digest := MigrationPreviewDigest(preview); digest == "" {
+		t.Fatal("digest is empty")
+	}
+	if !reflect.DeepEqual(preview, want) {
+		t.Fatalf("digest mutated caller state:\n got %+v\nwant %+v", preview, want)
 	}
 }
 

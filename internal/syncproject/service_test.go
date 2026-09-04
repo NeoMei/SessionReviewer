@@ -21,6 +21,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
@@ -33,14 +34,31 @@ func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T
 	options := MigrationOptions{
 		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
 		Mode:    MigrationDryRun,
-		build: func(*MappingPin) (migrationv4.Result, error) {
+		build: func(pin *MappingPin) (migrationv4.Result, error) {
 			buildCalls++
+			contender, err := publicationlock.Acquire(pin.data.Path, pin.mapping.ID, 0)
+			if contender != nil {
+				_ = contender.Release()
+			}
+			if !errors.Is(err, project.ErrProjectLocked) {
+				t.Fatalf("preview recomputation ran without publication lock: %v", err)
+			}
 			return migrationv4.Result{Preview: preview}, nil
 		},
 		Publish: func(_ context.Context, publication MigrationPublication) error {
 			publishCalls++
 			if publication.Preview.PreviewDigest != preview.PreviewDigest {
 				t.Fatalf("publication preview = %+v", publication.Preview)
+			}
+			if publication.PublicationLock == nil {
+				t.Fatal("publisher did not receive publication lock ownership")
+			}
+			contender, publicationErr := publicationlock.Acquire(publication.DataRoot, publication.ProjectID, 0)
+			if contender != nil {
+				_ = contender.Release()
+			}
+			if !errors.Is(publicationErr, project.ErrProjectLocked) {
+				t.Fatalf("publisher ran without publication lock: %v", publicationErr)
 			}
 			lock, err := project.AcquireProjectLock(publication.syncDataRoot, "locks/sync.lock", 0)
 			if lock != nil {

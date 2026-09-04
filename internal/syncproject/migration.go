@@ -15,6 +15,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
@@ -37,6 +38,7 @@ type MigrationPublication struct {
 	Mapping            config.ProjectMapping
 	DataRoot           string
 	Preview            migrationv4.MigrationPreview
+	PublicationLock    *publicationlock.Owner
 
 	syncDataRoot *os.Root
 }
@@ -75,6 +77,11 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 		return MigrationResult{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, pin.Close()) }()
+	publicationOwner, err := publicationlock.Acquire(pin.data.Path, pin.mapping.ID, 10*time.Second)
+	if err != nil {
+		return MigrationResult{}, errors.New("public projection is locked or unsafe")
+	}
+	defer func() { retErr = errors.Join(retErr, publicationOwner.Release()) }()
 	lock, err := project.AcquireProjectLock(pin.syncData.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
 		return MigrationResult{}, errors.New("sync project is locked or unsafe")
@@ -112,7 +119,8 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 			Files:             migrationFilePlan(plan),
 		},
 		Mapping: pin.mapping, DataRoot: pin.data.Path, Preview: plan.Preview,
-		syncDataRoot: pin.syncData.Root,
+		PublicationLock: publicationOwner,
+		syncDataRoot:    pin.syncData.Root,
 	}
 	if err := options.Publish(ctx, publication); err != nil {
 		return MigrationResult{}, err

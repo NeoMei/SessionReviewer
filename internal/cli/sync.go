@@ -235,11 +235,11 @@ func runSyncMigration(args []string, stdout, stderr io.Writer) int {
 
 func defaultSyncMigrationProject(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
 	options.Publish = func(ctx context.Context, plan syncproject.MigrationPublication) error {
-		_, err := publication.Publish(ctx, publication.Options{
+		_, err := publication.PublishLocked(ctx, publication.Options{
 			ProjectID: plan.ProjectID, PreparedGeneration: plan.PreparedGeneration,
 			Plan: plan.Plan, Mapping: plan.Mapping, DataRoot: plan.DataRoot,
 			Now: options.Now,
-		})
+		}, plan.PublicationLock)
 		return err
 	}
 	return syncproject.RunMigration(ctx, options)

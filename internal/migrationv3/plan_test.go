@@ -2,6 +2,8 @@ package migrationv3
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
@@ -40,20 +42,34 @@ func TestMigrationV3PlanDeterministic(t *testing.T) {
 }
 
 func TestCompatibilityV2StillUsesMigrationV3Plan(t *testing.T) {
+	root := t.TempDir()
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath} {
+		body, err := os.ReadFile(filepath.Join("../../testdata/contracts/migration/v2", relative))
+		if err != nil {
+			t.Fatal(err)
+		}
+		destination := filepath.Join(root, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(destination, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	accepted, err := reviewv2.Load(root)
+	if err != nil {
+		t.Fatalf("load complete v2 artifact set: %v", err)
+	}
 	in := Input{
-		ProjectID:          "project-v2-compatibility",
+		ProjectID:          accepted.State.Review.ProjectID,
 		PreparedGeneration: "generation-v3-target",
-		AcceptedV2: reviewv2.Accepted{State: reviewv2.State{Review: reviewv2.Review{
-			ProjectID: "project-v2-compatibility",
-			Revision:  2,
-			Decisions: []reviewv2.Decision{{ID: "decision-v2", Title: "Preserve v2 route", Status: "active"}},
-		}}},
+		AcceptedV2:         accepted,
 	}
 	plan, err := BuildPlan(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.SourceRevision != 2 || plan.PreparedGeneration != "generation-v3-target" || len(plan.LegacyItems) != 1 || plan.LegacyItems[0].EntityID != "decision-v2" {
+	if plan.SourceRevision != 2 || plan.PreparedGeneration != "generation-v3-target" || len(plan.LegacyItems) != 0 {
 		t.Fatalf("legacy v2/v3 compatibility plan changed: %+v", plan)
 	}
 }

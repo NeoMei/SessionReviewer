@@ -17,10 +17,13 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
@@ -314,17 +317,10 @@ func TestPublishCleanRunSucceeds(t *testing.T) {
 	}
 }
 
-func TestPublishFourFilePlanVerifiesSessionIndexBeforePointerCommit(t *testing.T) {
+func TestPublishFourFilePlanAuthenticatesValidProjectionBeforePointerCommit(t *testing.T) {
 	projectID := "project-four-file"
 	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
-	// A v4 review is JSON, not a syncdoc Markdown document. If the generic
-	// four-file path accidentally delegates to the legacy sync engine this
-	// publication fails before the Vault files can be verified.
-	plan.Files[0].Desired = []byte("{\"schema_version\":4}\n")
-	indexBody := []byte("{\"schema_version\":1}\n")
-	plan.Files = append(plan.Files, presentation.FilePlan{
-		Relative: "docs/session-review/.session-reviewer/session-index.json", Desired: indexBody, Mode: 0o600,
-	})
+	plan = validV4PublicationPlan(t, manifest, plan)
 	result, err := Publish(context.Background(), Options{
 		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
 		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
@@ -340,7 +336,7 @@ func TestPublishFourFilePlanVerifiesSessionIndexBeforePointerCommit(t *testing.T
 		filepath.Join(vaultRoot, filepath.FromSlash(mapping.VaultReviewPath), ".session-reviewer", "session-index.json"),
 	} {
 		got, err := os.ReadFile(target)
-		if err != nil || !bytes.Equal(got, indexBody) {
+		if err != nil || !bytes.Equal(got, plan.Files[3].Desired) {
 			t.Fatalf("session index at %s = %q, %v", target, got, err)
 		}
 	}
@@ -354,19 +350,96 @@ func TestPublishFourFilePlanVerifiesSessionIndexBeforePointerCommit(t *testing.T
 	}
 }
 
+func TestPublishRejectsUnauthenticatedProjectionBeforeIntent(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*presentation.RenderPlan)
+	}{
+		{name: "v3 schema stub", mutate: func(plan *presentation.RenderPlan) { plan.Files[0].Desired = []byte("---\nschema_version: 3\n---\n") }},
+		{name: "v4 schema stub", mutate: func(plan *presentation.RenderPlan) { plan.Files[0].Desired = []byte("{\"schema_version\":4}\n") }},
+		{name: "mixed index", mutate: func(plan *presentation.RenderPlan) { plan.Files[3].Desired = []byte("{\"schema_version\":1}\n") }},
+		{name: "plan project view mismatch", mutate: func(plan *presentation.RenderPlan) { plan.ProjectViewDigest = prefixedDigest("other-view") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			projectID := "project-auth-" + strings.ReplaceAll(test.name, " ", "-")
+			dataRoot, _, _, mapping, manifest, v3Plan := setupPublishEnv(t, projectID)
+			plan := v3Plan
+			if test.name != "v3 schema stub" {
+				plan = validV4PublicationPlan(t, manifest, v3Plan)
+			}
+			test.mutate(&plan)
+			_, err := Publish(context.Background(), Options{
+				ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+				Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+			})
+			if err == nil {
+				t.Fatal("unauthenticated projection was published")
+			}
+			journal, openErr := OpenJournal(dataRoot, projectID)
+			if openErr != nil {
+				t.Fatal(openErr)
+			}
+			defer journal.Close()
+			if _, loadErr := journal.Load(); !errors.Is(loadErr, ErrNoActiveIntent) {
+				t.Fatalf("invalid projection created an intent: %v", loadErr)
+			}
+		})
+	}
+}
+
+func TestPublishSerializesEveryCallerWithProjectPublicationLock(t *testing.T) {
+	projectID := "project-publication-lock"
+	dataRoot, _, _, mapping, manifest, v3Plan := setupPublishEnv(t, projectID)
+	plan := validV4PublicationPlan(t, manifest, v3Plan)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := Publish(context.Background(), Options{
+			ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+			Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+			checkpoint: func(stage publishCheckpoint, side, relative string) error {
+				if stage == checkpointAfterDestination && side == "project" {
+					select {
+					case <-entered:
+					default:
+						close(entered)
+						<-release
+					}
+				}
+				return nil
+			},
+		})
+		firstDone <- err
+	}()
+	<-entered
+	_, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now, publicationLockTimeout: -1,
+	})
+	if !errors.Is(err, project.ErrProjectLocked) {
+		close(release)
+		t.Fatalf("concurrent publisher error = %v", err)
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PublishLocked(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	}, nil); err == nil {
+		t.Fatal("PublishLocked accepted a missing ownership token")
+	}
+}
+
 // Moving the published-generation commit above complete destination
 // verification makes this test expose a new generation while the public atom
 // has already been rolled back to its old preimages.
 func TestPublishFourFilePlanCommitsPointerLast(t *testing.T) {
 	projectID := "project-pointer-last"
 	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
-	for index := range plan.Files {
-		plan.Files[index].Desired = []byte(fmt.Sprintf("v4-target-%d\n", index))
-	}
-	plan.Files = append(plan.Files, presentation.FilePlan{
-		Relative: "docs/session-review/.session-reviewer/session-index.json",
-		Desired:  []byte("v4-target-index\n"), Mode: 0o600,
-	})
+	plan = validV4PublicationPlan(t, manifest, plan)
 	stop := errors.New("stop before published pointer")
 	opts := Options{
 		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
@@ -401,17 +474,207 @@ func TestPublishFourFilePlanCommitsPointerLast(t *testing.T) {
 	}
 }
 
+func TestPublishFourFilePlanRecoversForwardAfterPointerCommit(t *testing.T) {
+	projectID := "project-forward-recovery"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, v3Plan := setupPublishEnv(t, projectID)
+	plan := validV4PublicationPlan(t, manifest, v3Plan)
+	stop := errors.New("simulated crash after pointer commit")
+	_, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+		checkpoint: func(stage publishCheckpoint, side, relative string) error {
+			if stage == checkpointAfterPointerCommit {
+				return stop
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("Publish error = %v, want post-pointer checkpoint", err)
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, err := store.LoadPublished()
+	if closeErr := store.Close(); err != nil || closeErr != nil || published != manifest.GenerationID {
+		t.Fatalf("durable pointer = %q load=%v close=%v", published, err, closeErr)
+	}
+	assertV4PublicationTargets(t, projectRoot, vaultRoot, mapping, plan)
+	journal, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := journal.Load()
+	if closeErr := journal.Close(); err != nil || closeErr != nil || intent.Stage != StageVerified {
+		t.Fatalf("crash journal = %+v load=%v close=%v", intent, err, closeErr)
+	}
+
+	result, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	})
+	if err != nil || !result.Recovered || result.GenerationID != manifest.GenerationID {
+		t.Fatalf("forward recovery result=%+v err=%v", result, err)
+	}
+	assertV4PublicationTargets(t, projectRoot, vaultRoot, mapping, plan)
+	journal, err = OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	intent, err = journal.Load()
+	if err != nil || intent.Stage != StageCommitted {
+		t.Fatalf("forward recovery journal = %+v err=%v", intent, err)
+	}
+}
+
+func TestPublishForwardRecoveryFailsClosedWhenPublishedAtomDiffers(t *testing.T) {
+	projectID := "project-forward-recovery-mismatch"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, v3Plan := setupPublishEnv(t, projectID)
+	plan := validV4PublicationPlan(t, manifest, v3Plan)
+	stop := errors.New("simulated crash after pointer commit")
+	_, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+		checkpoint: func(stage publishCheckpoint, side, relative string) error {
+			if stage == checkpointAfterPointerCommit {
+				return stop
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, stop) {
+		t.Fatalf("Publish error = %v, want post-pointer checkpoint", err)
+	}
+	tamperedPath := filepath.Join(projectRoot, filepath.FromSlash(plan.Files[0].Relative))
+	tampered := []byte("tampered after durable pointer\n")
+	if err := os.WriteFile(tamperedPath, tampered, plan.Files[0].Mode); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	}); err == nil {
+		t.Fatal("forward recovery accepted a destination that differs from the durable published atom")
+	}
+	if body, err := os.ReadFile(tamperedPath); err != nil || !bytes.Equal(body, tampered) {
+		t.Fatalf("mismatch was rolled back behind the published pointer: body=%q err=%v", body, err)
+	}
+	untampered := filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, plan.Files[1].Relative)))
+	if body, err := os.ReadFile(untampered); err != nil || !bytes.Equal(body, plan.Files[1].Desired) {
+		t.Fatalf("desired destination was rolled back behind the published pointer: body=%q err=%v", body, err)
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, loadErr := store.LoadPublished()
+	closeErr := store.Close()
+	if loadErr != nil || closeErr != nil || published != manifest.GenerationID {
+		t.Fatalf("published pointer changed during failed recovery: generation=%q load=%v close=%v", published, loadErr, closeErr)
+	}
+	journal, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, loadErr := journal.Load()
+	closeErr = journal.Close()
+	if loadErr != nil || closeErr != nil || intent.Stage != StageVerified {
+		t.Fatalf("failed recovery changed durable journal: intent=%+v load=%v close=%v", intent, loadErr, closeErr)
+	}
+}
+
+func TestPublishForwardRecoveryFailsClosedWhenPublishedPointerNamesDifferentGeneration(t *testing.T) {
+	projectID := "project-forward-recovery-newer-pointer"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, v3Plan := setupPublishEnv(t, projectID)
+	plan := validV4PublicationPlan(t, manifest, v3Plan)
+	if _, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	journal, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations := make([]Destination, 0, len(plan.Files)*2)
+	for _, file := range plan.Files {
+		preimage := []byte("stale generation preimage for " + file.Relative + "\n")
+		preimageSHA := sha256Hex(preimage)
+		if err := journal.PutPreimage(preimageSHA, preimage); err != nil {
+			journal.Close()
+			t.Fatal(err)
+		}
+		destinations = append(destinations,
+			Destination{Side: "project", Relative: file.Relative, PreimageSHA256: preimageSHA, DesiredSHA256: sha256Hex(file.Desired), PreimageExists: true},
+			Destination{Side: "vault", Relative: vaultRelativePath(mapping.VaultReviewPath, file.Relative), PreimageSHA256: preimageSHA, DesiredSHA256: sha256Hex(file.Desired), PreimageExists: true},
+		)
+	}
+	sort.Slice(destinations, func(i, j int) bool {
+		if destinations[i].Side != destinations[j].Side {
+			return destinations[i].Side < destinations[j].Side
+		}
+		return destinations[i].Relative < destinations[j].Relative
+	})
+	intent := Intent{
+		Version: 1, ProjectID: projectID, GenerationID: "generation-stale-publication",
+		ManifestDigest: prefixedDigest("stale-manifest"), ProjectViewDigest: prefixedDigest("stale-project-view"),
+		Stage: StagePrepared, CreatedAt: time.Now().UTC(), Destinations: destinations,
+	}
+	if err := journal.Create(intent); err != nil {
+		journal.Close()
+		t.Fatal(err)
+	}
+	for _, transition := range [][2]Stage{{StagePrepared, StageProjectWritten}, {StageProjectWritten, StageVaultSynced}, {StageVaultSynced, StageVerified}} {
+		if err := journal.Advance(transition[0], transition[1]); err != nil {
+			journal.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	}); err == nil {
+		t.Fatal("recovery accepted a verified intent behind a different published generation")
+	}
+	assertV4PublicationTargets(t, projectRoot, vaultRoot, mapping, plan)
+
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, loadErr := store.LoadPublished()
+	closeErr := store.Close()
+	if loadErr != nil || closeErr != nil || published != manifest.GenerationID {
+		t.Fatalf("published pointer changed during failed recovery: generation=%q load=%v close=%v", published, loadErr, closeErr)
+	}
+	journal, err = OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, loadErr = journal.Load()
+	closeErr = journal.Close()
+	if loadErr != nil || closeErr != nil || intent.Stage != StageVerified || intent.GenerationID != "generation-stale-publication" {
+		t.Fatalf("failed recovery changed durable journal: intent=%+v load=%v close=%v", intent, loadErr, closeErr)
+	}
+}
+
 func TestPublishFourFilePlanRecoversGenericIntentAfterRestart(t *testing.T) {
 	projectID := "project-four-file-recovery"
 	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
-	plan.Files = append(plan.Files, presentation.FilePlan{
-		Relative: sessionIndexRelativePath, Desired: []byte("v4-index-target\n"), Mode: 0o600,
-	})
+	plan = validV4PublicationPlan(t, manifest, plan)
 	for index := range plan.Files {
 		old := []byte(fmt.Sprintf("old-four-file-%d\n", index))
 		plan.Files[index].ExpectedExists = true
 		plan.Files[index].Expected = old
-		plan.Files[index].Desired = []byte(fmt.Sprintf("new-four-file-%d\n", index))
 		for _, target := range []string{
 			filepath.Join(projectRoot, filepath.FromSlash(plan.Files[index].Relative)),
 			filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, plan.Files[index].Relative))),
@@ -530,6 +793,55 @@ func TestPublishFourFilePlanRecoversGenericIntentAfterRestart(t *testing.T) {
 	}
 	if fmt.Sprint(repeated.ProjectFiles) != fmt.Sprint(result.ProjectFiles) || fmt.Sprint(repeated.VaultFiles) != fmt.Sprint(result.VaultFiles) {
 		t.Fatalf("repeat v4 publication changed verified hashes: first=%+v/%+v second=%+v/%+v", result.ProjectFiles, result.VaultFiles, repeated.ProjectFiles, repeated.VaultFiles)
+	}
+}
+
+func validV4PublicationPlan(t *testing.T, manifest memory.GenerationManifest, v3Plan presentation.RenderPlan) presentation.RenderPlan {
+	t.Helper()
+	byPath := make(map[string]presentation.FilePlan, len(v3Plan.Files))
+	for _, file := range v3Plan.Files {
+		byPath[file.Relative] = file
+	}
+	indexBody, err := sessionindex.Render(sessionindex.Document{
+		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: manifest.ProjectID,
+		GenerationID: manifest.GenerationID, ProjectViewDigest: manifest.ProjectViewDigest,
+		GeneratedAt: manifest.CreatedAt, SortVersion: sessionindex.SortVersion,
+		Coverage: sessionindex.IndexCoverage{}, Sessions: []sessionindex.Entry{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := migrationv4.BuildPreview(migrationv4.Input{
+		Review: byPath[reviewv2.ReviewRelativePath].Desired, History: byPath[reviewv2.HistoryRelativePath].Desired,
+		Ledger: byPath[reviewv2.MachineLedgerRelativePath].Desired, SessionIndex: indexBody,
+		GenerationID: manifest.GenerationID, TargetPreimages: map[string]migrationv4.Preimage{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return presentation.RenderPlan{
+		ProjectID: manifest.ProjectID, GenerationID: manifest.GenerationID, ProjectViewDigest: manifest.ProjectViewDigest,
+		Files: []presentation.FilePlan{
+			{Relative: migrationv4.ReviewRelativePath, Desired: migrated.Review, Mode: 0o644},
+			{Relative: migrationv4.HistoryRelativePath, Desired: migrated.History, Mode: 0o644},
+			{Relative: migrationv4.LedgerRelativePath, Desired: migrated.Ledger, Mode: 0o600},
+			{Relative: migrationv4.SessionIndexRelativePath, Desired: migrated.SessionIndex, Mode: 0o600},
+		},
+	}
+}
+
+func assertV4PublicationTargets(t *testing.T, projectRoot, vaultRoot string, mapping config.ProjectMapping, plan presentation.RenderPlan) {
+	t.Helper()
+	for _, file := range plan.Files {
+		for _, target := range []string{
+			filepath.Join(projectRoot, filepath.FromSlash(file.Relative)),
+			filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, file.Relative))),
+		} {
+			body, err := os.ReadFile(target)
+			if err != nil || !bytes.Equal(body, file.Desired) {
+				t.Fatalf("publication target %s = %q, %v", target, body, err)
+			}
+		}
 	}
 }
 

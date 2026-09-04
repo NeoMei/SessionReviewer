@@ -17,10 +17,13 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
@@ -35,7 +38,8 @@ type Options struct {
 	DataRoot           string
 	Now                func() time.Time
 
-	checkpoint func(publishCheckpoint, string, string) error
+	checkpoint             func(publishCheckpoint, string, string) error
+	publicationLockTimeout time.Duration
 }
 
 type publishCheckpoint string
@@ -43,6 +47,7 @@ type publishCheckpoint string
 const (
 	checkpointAfterDestination    publishCheckpoint = "after_destination"
 	checkpointBeforePointerCommit publishCheckpoint = "before_pointer_commit"
+	checkpointAfterPointerCommit  publishCheckpoint = "after_pointer_commit"
 )
 
 // VerifiedFile captures one verified file on disk after publication.
@@ -78,8 +83,46 @@ var (
 
 const sessionIndexRelativePath = "docs/session-review/.session-reviewer/session-index.json"
 
-// Publish executes the complete durable cross-root publication workflow.
-func Publish(ctx context.Context, opts Options) (Result, error) {
+// Publish acquires the per-project public-projection lock and executes the
+// complete durable cross-root publication workflow.
+func Publish(ctx context.Context, opts Options) (_ Result, retErr error) {
+	if opts.ProjectID == "" || !journalIDPattern.MatchString(opts.ProjectID) {
+		return Result{}, errors.New("valid project ID is required")
+	}
+	if !filepath.IsAbs(opts.DataRoot) || filepath.Clean(opts.DataRoot) != opts.DataRoot {
+		return Result{}, errors.New("SessionReviewer data root must be an absolute clean path")
+	}
+	timeout := opts.publicationLockTimeout
+	if timeout == 0 {
+		// Zero is reserved for the nonblocking test seam. Production callers
+		// that do not set it receive the normal bounded wait.
+		timeout = 10 * time.Second
+	}
+	if opts.publicationLockTimeout < 0 {
+		timeout = 0
+	}
+	owner, err := publicationlock.Acquire(opts.DataRoot, opts.ProjectID, timeout)
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, owner.Release()) }()
+	return PublishLocked(ctx, opts, owner)
+}
+
+// PublishLocked publishes with an already-held ownership token. It exists so
+// migration can keep the same OS lock from preview recomputation through the
+// durable pointer commit without recursively acquiring it.
+func PublishLocked(ctx context.Context, opts Options, owner *publicationlock.Owner) (Result, error) {
+	var result Result
+	err := owner.Use(opts.DataRoot, opts.ProjectID, func() error {
+		var err error
+		result, err = publishWithOwnership(ctx, opts)
+		return err
+	})
+	return result, err
+}
+
+func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("publication context is required")
 	}
@@ -129,6 +172,18 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("open vault root: %w", err)
 	}
 	defer vaultDir.Close()
+
+	prepared, manifest, err := store.LoadPrepared()
+	if err != nil {
+		return Result{}, fmt.Errorf("load prepared generation: %w", err)
+	}
+	if prepared.GenerationID != opts.PreparedGeneration {
+		return Result{}, fmt.Errorf("prepared generation ID %q does not match requested %q", prepared.GenerationID, opts.PreparedGeneration)
+	}
+	projectionVersion, err := authenticatePublicationPlan(opts, prepared, manifest)
+	if err != nil {
+		return Result{}, fmt.Errorf("authenticate publication projection: %w", err)
+	}
 	if err := repairRetainedRollbackEvidence(j, opts, projectDir, vaultDir, now); err != nil {
 		return Result{}, fmt.Errorf("repair legacy rolled-back merge-base state: %w", err)
 	}
@@ -148,6 +203,22 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 	recovered := false
 	recoveryHandler := RecoveryHandlerFunc(func(ctx context.Context, intent Intent, j *Journal) error {
 		recovered = true
+		publishedID, _, publishedErr := store.LoadPublished()
+		if publishedErr == nil {
+			if publishedID != intent.GenerationID {
+				return fmt.Errorf("published generation %q does not match active publication intent %q", publishedID, intent.GenerationID)
+			}
+			if intent.Stage != StageVerified {
+				return errors.New("published generation has a publication journal that was not verified")
+			}
+			if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
+				return fmt.Errorf("published generation destinations do not match verified intent: %w", err)
+			}
+			return j.Advance(StageVerified, StageCommitted)
+		}
+		if publishedErr != nil && !errors.Is(publishedErr, memorystore.ErrNoPublishedGeneration) {
+			return fmt.Errorf("inspect published generation during recovery: %w", publishedErr)
+		}
 		return rollback(ctx, intent)
 	})
 	if err := j.Recover(ctx, recoveryHandler); err != nil {
@@ -161,14 +232,6 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		if err == nil {
 			return Result{GenerationID: pubID, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
 		}
-	}
-
-	prepared, manifest, err := store.LoadPrepared()
-	if err != nil {
-		return Result{}, fmt.Errorf("load prepared generation: %w", err)
-	}
-	if prepared.GenerationID != opts.PreparedGeneration {
-		return Result{}, fmt.Errorf("prepared generation ID %q does not match requested %q", prepared.GenerationID, opts.PreparedGeneration)
 	}
 
 	// Pre-flight check Project files against expected plan preimages
@@ -249,11 +312,6 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 	}
 	if err := j.Create(intent); err != nil {
 		return Result{}, fmt.Errorf("create journal intent: %w", err)
-	}
-
-	projectionVersion, err := planProjectionVersion(opts.Plan)
-	if err != nil {
-		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 
 	// Write Project files
@@ -350,6 +408,9 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 	}
 	if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
 		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
+	}
+	if err := runPublishCheckpoint(opts, checkpointAfterPointerCommit, "", ""); err != nil {
+		return Result{}, err
 	}
 	if err := j.Advance(StageVerified, StageCommitted); err != nil {
 		return Result{}, err
@@ -494,6 +555,45 @@ func planProjectionVersion(plan presentation.RenderPlan) (int, error) {
 		return 0, errors.New("legacy v3 publication plan must contain exactly three files")
 	}
 	return 3, nil
+}
+
+func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, manifest memory.GenerationManifest) (int, error) {
+	version, err := planProjectionVersion(opts.Plan)
+	if err != nil {
+		return 0, err
+	}
+	if manifest.ProjectID != opts.ProjectID || manifest.GenerationID != opts.PreparedGeneration ||
+		prepared.GenerationID != manifest.GenerationID || prepared.ProjectViewDigest != manifest.ProjectViewDigest ||
+		opts.Plan.ProjectID != manifest.ProjectID || opts.Plan.GenerationID != manifest.GenerationID ||
+		opts.Plan.ProjectViewDigest != manifest.ProjectViewDigest {
+		return 0, errors.New("publication plan, prepared pointer, and manifest identity do not match")
+	}
+	files := make(map[string][]byte, len(opts.Plan.Files))
+	for _, file := range opts.Plan.Files {
+		files[file.Relative] = file.Desired
+	}
+	var projectID, generationID, projectViewDigest string
+	if version == 3 {
+		accepted, err := reviewv2.LoadV3Bytes(files[reviewv2.ReviewRelativePath], files[reviewv2.HistoryRelativePath], files[reviewv2.MachineLedgerRelativePath])
+		if err != nil {
+			return 0, fmt.Errorf("load v3 projection: %w", err)
+		}
+		projectID = accepted.State.Machine.ProjectID
+		generationID = accepted.State.Machine.GenerationID
+		projectViewDigest = "sha256:" + accepted.State.Machine.ProjectViewDigest
+	} else {
+		accepted, err := reviewv4.LoadProjection(files[reviewv2.ReviewRelativePath], files[reviewv2.HistoryRelativePath], files[reviewv2.MachineLedgerRelativePath], files[sessionIndexRelativePath])
+		if err != nil {
+			return 0, fmt.Errorf("load v4 projection: %w", err)
+		}
+		projectID = accepted.Review.ProjectID
+		generationID = accepted.Review.GenerationID
+		projectViewDigest = accepted.Review.ProjectViewDigest
+	}
+	if projectID != manifest.ProjectID || generationID != manifest.GenerationID || projectViewDigest != manifest.ProjectViewDigest {
+		return 0, errors.New("projection identity does not match prepared manifest")
+	}
+	return version, nil
 }
 
 func syncReportReadyToApply(report syncengine.Report) bool {
@@ -795,6 +895,35 @@ func verifyDestinationPreimage(destinations []Destination, directory *pathguard.
 		return nil
 	}
 	return errors.New("publication destination is missing from intent")
+}
+
+func verifyIntentDesired(ctx context.Context, intent Intent, projectDir, vaultDir *pathguard.Directory) error {
+	for _, destination := range intent.Destinations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var directory *pathguard.Directory
+		switch destination.Side {
+		case "project":
+			directory = projectDir
+		case "vault":
+			directory = vaultDir
+		default:
+			return errors.New("publication intent contains an unknown destination side")
+		}
+		body, found, err := directory.ReadRegularOptional(destination.Relative, 64<<20)
+		if err != nil {
+			return err
+		}
+		actual := "missing"
+		if found {
+			actual = sha256Hex(body)
+		}
+		if !found || !strings.EqualFold(actual, destination.DesiredSHA256) {
+			return fmt.Errorf("%w: %w", ErrPublicationConflict, &PublicationConflictError{Side: destination.Side, Relative: destination.Relative, Expected: destination.DesiredSHA256, Actual: actual})
+		}
+	}
+	return nil
 }
 
 func sha256Hex(data []byte) string {
