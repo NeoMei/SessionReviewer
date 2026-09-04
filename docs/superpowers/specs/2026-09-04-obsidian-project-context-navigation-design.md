@@ -1,6 +1,6 @@
 # SessionReviewer Obsidian 项目脉络、决策与价格查询设计
 
-- 状态：用户复核通过，进入实施计划阶段
+- 状态：Gate 0 本地验收通过；Windows CI 待运行
 - 日期：2026-09-04
 - 适用范围：SessionReviewer 零 Token 扫描、macOS/Windows Obsidian Desktop 项目脉络浏览器、Project/Vault 投影
 - 扩展：`2026-08-25-session-reviewer-project-evolution-browser-design.md`
