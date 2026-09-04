@@ -89,7 +89,7 @@ func Parse(data []byte) (StoreRecord, error) {
 		return store, err
 	}
 	if err := Validate(store); err != nil {
-		return store, err
+		return store, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	return store, nil
 }

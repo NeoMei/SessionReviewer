@@ -166,7 +166,7 @@ func Parse(data []byte) (Snapshot, error) {
 		return snapshot, err
 	}
 	if err := ValidateSnapshot(snapshot); err != nil {
-		return snapshot, err
+		return snapshot, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	return snapshot, nil
 }
@@ -187,7 +187,7 @@ func ParseSupplement(data []byte) (Supplement, error) {
 		return supplement, err
 	}
 	if err := ValidateSupplement(supplement); err != nil {
-		return supplement, err
+		return supplement, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	return supplement, nil
 }

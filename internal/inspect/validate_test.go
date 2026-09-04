@@ -32,12 +32,13 @@ func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
 
 func TestParsersRejectFrozenInvalidFixtures(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		path  string
-		parse func([]byte) error
+		name     string
+		path     string
+		wantCode string
+		parse    func([]byte) error
 	}{
-		{name: "summary", path: "../../testdata/contracts/v4/session-summary-v1.invalid.json", parse: func(b []byte) error { _, err := ParseSummary(b); return err }},
-		{name: "event page", path: "../../testdata/contracts/v4/session-event-page-v1.invalid.json", parse: func(b []byte) error { _, err := ParseEventPage(b); return err }},
+		{name: "summary", path: "../../testdata/contracts/v4/session-summary-v1.invalid.json", wantCode: "wire_shape_invalid", parse: func(b []byte) error { _, err := ParseSummary(b); return err }},
+		{name: "event page", path: "../../testdata/contracts/v4/session-event-page-v1.invalid.json", wantCode: "wire_contract_invalid", parse: func(b []byte) error { _, err := ParseEventPage(b); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, err := os.ReadFile(tc.path)
@@ -46,6 +47,8 @@ func TestParsersRejectFrozenInvalidFixtures(t *testing.T) {
 			}
 			if err := tc.parse(b); err == nil {
 				t.Fatal("accepted frozen invalid fixture")
+			} else if got := strictjson.CodeOf(err); got != tc.wantCode {
+				t.Fatalf("rejection code = %q, want %s: %v", got, tc.wantCode, err)
 			}
 		})
 	}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestRenderFrozenValidLedgerFixture(t *testing.T) {
@@ -30,17 +31,20 @@ func TestRenderFrozenValidLedgerFixture(t *testing.T) {
 func TestReviewParseRejectsUnknownFields(t *testing.T) {
 	if _, err := Parse([]byte(`{"unknown":true}`), []byte(`{}`), []byte(`{}`)); err == nil {
 		t.Fatal("accepted unknown review fields")
+	} else if got := strictjson.CodeOf(err); got != "wire_shape_invalid" {
+		t.Fatalf("rejection code = %q, want wire_shape_invalid: %v", got, err)
 	}
 }
 
 func TestFrozenInvalidReviewAndLedgerFixturesAreRejected(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		path string
-		fn   func([]byte) error
+		name     string
+		path     string
+		wantCode string
+		fn       func([]byte) error
 	}{
-		{name: "review", path: "../../testdata/contracts/v4/review-presentation-v4.invalid.json", fn: func(b []byte) error { _, err := DecodePresentation(b); return err }},
-		{name: "ledger", path: "../../testdata/contracts/v4/machine-ledger-v4.invalid.json", fn: func(b []byte) error { _, err := DecodeLedger(b); return err }},
+		{name: "review", path: "../../testdata/contracts/v4/review-presentation-v4.invalid.json", wantCode: "wire_shape_invalid", fn: func(b []byte) error { _, err := DecodePresentation(b); return err }},
+		{name: "ledger", path: "../../testdata/contracts/v4/machine-ledger-v4.invalid.json", wantCode: "wire_contract_invalid", fn: func(b []byte) error { _, err := DecodeLedger(b); return err }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b, err := os.ReadFile(tc.path)
@@ -49,6 +53,8 @@ func TestFrozenInvalidReviewAndLedgerFixturesAreRejected(t *testing.T) {
 			}
 			if err := tc.fn(b); err == nil {
 				t.Fatal("accepted frozen invalid fixture")
+			} else if got := strictjson.CodeOf(err); got != tc.wantCode {
+				t.Fatalf("rejection code = %q, want %s: %v", got, tc.wantCode, err)
 			}
 		})
 	}
@@ -155,6 +161,8 @@ func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 			}
 			if _, err := LoadProjection(reviewBytes, history, ledgerBytes, indexBytes); err == nil {
 				t.Fatal("accepted mismatched projection")
+			} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+				t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 			}
 		})
 	}
@@ -195,8 +203,15 @@ func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 	if accepted.SessionIndex.ProjectID != presentation.ProjectID {
 		t.Fatal("validated index missing from Accepted")
 	}
+	if _, err := Parse(reviewFixture, append(append([]byte(nil), history...), 'x'), ledgerBytes); err == nil {
+		t.Fatal("accepted mismatched history binding")
+	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
+	}
 	if _, err := LoadProjection(reviewFixture, history, ledgerBytes, nil); err == nil {
 		t.Fatal("accepted projection without required session index")
+	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 	}
 }
 
@@ -224,6 +239,8 @@ func TestParseAcceptsRawMarkdownHistoryAndRejectsInvalidUTF8(t *testing.T) {
 	ledgerBytes, _ = RenderLedger(ledger)
 	if _, err := Parse(review, invalid, ledgerBytes); err == nil {
 		t.Fatal("accepted invalid UTF-8 history")
+	} else if got := strictjson.CodeOf(err); got != "wire_invalid_utf8" {
+		t.Fatalf("rejection code = %q, want wire_invalid_utf8: %v", got, err)
 	}
 }
 
@@ -248,6 +265,8 @@ func TestDecodeLedgerRejectsTamperedSelfDigest(t *testing.T) {
 	}
 	if _, err := DecodeLedger(body); err == nil {
 		t.Fatal("accepted tampered ledger self digest")
+	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 	}
 }
 

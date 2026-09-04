@@ -3,6 +3,8 @@ package annotation
 import (
 	"os"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestParseFrozenValidFixture(t *testing.T) {
@@ -28,6 +30,8 @@ func TestParseRejectsFrozenInvalidFixture(t *testing.T) {
 	}
 	if _, err := Parse(b); err == nil {
 		t.Fatal("accepted frozen invalid fixture")
+	} else if got := strictjson.CodeOf(err); got != "wire_shape_invalid" {
+		t.Fatalf("rejection code = %q, want wire_shape_invalid: %v", got, err)
 	}
 }
 

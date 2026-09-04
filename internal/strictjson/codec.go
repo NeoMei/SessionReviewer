@@ -17,32 +17,35 @@ const MaxBytes = 64 << 20
 
 func Decode(data []byte, dst any) error {
 	if len(data) > MaxBytes {
-		return fmt.Errorf("json exceeds %d bytes", MaxBytes)
+		return NewRejection(CodeInputOverflow, fmt.Errorf("json exceeds %d bytes", MaxBytes))
 	}
 	if !utf8.Valid(data) {
-		return errors.New("json is not valid UTF-8")
+		return NewRejection(CodeInvalidUTF8, errors.New("json is not valid UTF-8"))
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	if err := scanValue(dec); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return NewRejection(CodeJSONInvalid, fmt.Errorf("invalid JSON: %w", err))
 	}
 	if err := expectEOF(dec); err != nil {
-		return err
+		return NewRejection(CodeJSONInvalid, err)
 	}
 	var raw any
 	rawDecoder := json.NewDecoder(bytes.NewReader(data))
 	rawDecoder.UseNumber()
 	if err := rawDecoder.Decode(&raw); err != nil {
-		return fmt.Errorf("decode JSON shape: %w", err)
+		return NewRejection(CodeJSONInvalid, fmt.Errorf("decode JSON shape: %w", err))
 	}
 	dec = json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("decode JSON: %w", err)
+		return NewRejection(CodeShapeInvalid, fmt.Errorf("decode JSON: %w", err))
 	}
-	return validateWireShape(raw, reflect.ValueOf(dst))
+	if err := validateWireShape(raw, reflect.ValueOf(dst)); err != nil {
+		return NewRejection(CodeShapeInvalid, err)
+	}
+	return nil
 }
 
 func Encode(v any) ([]byte, error) {

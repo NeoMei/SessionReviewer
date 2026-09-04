@@ -2,9 +2,58 @@ package strictjson
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+func TestDecodeReturnsStableRejectionCodes(t *testing.T) {
+	type wire struct {
+		Required string `json:"required" required:"true"`
+	}
+	tests := []struct {
+		name string
+		body []byte
+		want string
+	}{
+		{name: "bounded input overflow", body: bytes.Repeat([]byte{' '}, MaxBytes+1), want: "wire_input_overflow"},
+		{name: "invalid UTF-8", body: []byte{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'}, want: "wire_invalid_utf8"},
+		{name: "malformed JSON", body: []byte(`{"required":`), want: "wire_json_invalid"},
+		{name: "duplicate key", body: []byte(`{"required":"first","required":"second"}`), want: "wire_json_invalid"},
+		{name: "trailing JSON value", body: []byte(`{"required":"ok"} {"required":"extra"}`), want: "wire_json_invalid"},
+		{name: "trailing garbage", body: []byte(`{"required":"ok"} garbage`), want: "wire_json_invalid"},
+		{name: "unknown field", body: []byte(`{"required":"ok","unknown":true}`), want: "wire_shape_invalid"},
+		{name: "missing field", body: []byte(`{}`), want: "wire_shape_invalid"},
+		{name: "type mismatch", body: []byte(`{"required":1}`), want: "wire_shape_invalid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var got wire
+			err := Decode(tc.body, &got)
+			if code := CodeOf(err); code != tc.want {
+				t.Fatalf("rejection code = %q, want %q: %v", code, tc.want, err)
+			}
+			var rejection *RejectionError
+			if !errors.As(err, &rejection) {
+				t.Fatalf("error is not a typed rejection: %T %v", err, err)
+			}
+		})
+	}
+}
+
+func TestRejectionErrorPreservesCause(t *testing.T) {
+	cause := errors.New("semantic detail")
+	err := NewRejection(CodeContractInvalid, cause)
+	if got := CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q", got)
+	}
+	if err.Error() != cause.Error() {
+		t.Fatalf("human message changed: %q", err.Error())
+	}
+	if !errors.Is(err, cause) {
+		t.Fatal("typed rejection does not unwrap to its cause")
+	}
+}
 
 func TestDecodeRejectsDuplicateNestedKeys(t *testing.T) {
 	var v map[string]any

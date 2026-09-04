@@ -136,10 +136,10 @@ func Parse(data []byte) (Document, error) {
 		return document, err
 	}
 	if err := Validate(document); err != nil {
-		return document, err
+		return document, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	if !isZeroDigest(document.Digest) && CanonicalDigest(document) != document.Digest {
-		return document, errors.New("session index digest mismatch")
+		return document, strictjson.NewRejection(strictjson.CodeContractInvalid, errors.New("session index digest mismatch"))
 	}
 	return document, nil
 }

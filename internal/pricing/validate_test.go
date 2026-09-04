@@ -4,6 +4,8 @@ import (
 	"math"
 	"os"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestParseFrozenValidFixture(t *testing.T) {
@@ -90,6 +92,8 @@ func TestParseAndRenderPricingFixtureParity(t *testing.T) {
 	}
 	if _, err := Parse(invalid); err == nil {
 		t.Fatal("accepted frozen invalid fixture")
+	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 	}
 }
 
@@ -114,6 +118,8 @@ func TestPricingSupplementFixtureParityAndNullMeansUnknown(t *testing.T) {
 	}
 	if _, err := ParseSupplement(invalid); err == nil {
 		t.Fatal("accepted frozen invalid supplement fixture")
+	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
+		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 	}
 }
 

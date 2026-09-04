@@ -172,7 +172,7 @@ func ParseSummary(data []byte) (SessionSummary, error) {
 		return summary, err
 	}
 	if err := ValidateSummary(summary); err != nil {
-		return summary, err
+		return summary, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	return summary, nil
 }
@@ -183,7 +183,7 @@ func ParseEventPage(data []byte) (SessionEventPage, error) {
 		return page, err
 	}
 	if err := ValidateEventPage(page); err != nil {
-		return page, err
+		return page, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
 	return page, nil
 }
