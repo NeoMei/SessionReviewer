@@ -598,6 +598,10 @@ func TestProblemContractsEnforceTargetAndCASGrammar(t *testing.T) {
 			t.Fatalf("targetless action %q rejected: %v", action, err)
 		}
 	}
+	initialApply := replaceContractFlagValue(t, withTarget, "--expected-problem-map-revision", "0")
+	if request, err := ParseProblemContract(initialApply); err != nil || request.ExpectedProblemMapRevision != 0 {
+		t.Fatalf("initial-map apply = %+v err=%v", request, err)
+	}
 }
 
 func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
@@ -605,9 +609,23 @@ func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
 	if err != nil || move.NewParentID != "root" {
 		t.Fatalf("move = %+v err=%v", move, err)
 	}
-	reorder, err := ParseProblemContract([]string{"reorder", "--project-id", "p", "--parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
-	if err != nil || reorder.ParentID != "root" {
+	reorderArgs := []string{"reorder", "--project-id", "p", "--parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"}
+	if _, err := ParseProblemContract(reorderArgs); err == nil {
+		t.Fatal("accepted reorder without its versioned stdin payload")
+	}
+	payload := []byte(`{"schema_version":1,"ordered_child_ids":["b","a"]}`)
+	reorder, err := ParseProblemContractWithInput(reorderArgs, payload, []string{"a", "b"})
+	if err != nil || reorder.ParentID != "root" || !reflect.DeepEqual(reorder.OrderedChildIDs, []string{"b", "a"}) {
 		t.Fatalf("reorder = %+v err=%v", reorder, err)
+	}
+	if _, err := ParseProblemContractWithInput(reorderArgs, []byte(`{"schema_version":1,"ordered_child_ids":["a"]}`), []string{"a", "b"}); err == nil {
+		t.Fatal("accepted an incomplete parsed sibling order")
+	}
+	if _, err := ParseProblemContractWithInput(reorderArgs, []byte(`{"schema_version":1,"ordered_child_ids":["b","a"],"file":"x"}`), []string{"a", "b"}); err == nil {
+		t.Fatal("accepted an arbitrary input field")
+	}
+	if _, err := ParseProblemContractWithInput(reorderArgs, []byte(strings.Repeat(" ", MaxDecisionInputBytes+1)), []string{"a", "b"}); err == nil {
+		t.Fatal("accepted an oversized reorder payload")
 	}
 	for _, ordered := range [][]string{{"a"}, {"a", "a"}, {"a", "foreign", "b"}} {
 		if err := ValidateCompleteSiblingOrder([]string{"a", "b"}, ordered); err == nil {

@@ -19,7 +19,7 @@ func Parse(data []byte) (Document, error) {
 	if err := Validate(document); err != nil {
 		return document, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
-	if !isZeroDigest(document.Digest) && CanonicalDigest(document) != document.Digest {
+	if CanonicalDigest(document) != document.Digest {
 		return document, strictjson.NewRejection(strictjson.CodeContractInvalid, errors.New("conversation chain digest mismatch"))
 	}
 	return document, nil
@@ -85,5 +85,4 @@ func normalize(document *Document) {
 	}
 }
 
-func zeroDigest() string             { return "sha256:" + strings.Repeat("0", 64) }
-func isZeroDigest(value string) bool { return value == zeroDigest() }
+func zeroDigest() string { return "sha256:" + strings.Repeat("0", 64) }

@@ -157,10 +157,11 @@ function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
   parseUniqueEntityArray(row.open_loops, "$.open_loops", 65536,
     ["id", "title", "status", "question", "next_experiment", "completion_criterion"],
     ["title", "status", "question", "next_experiment", "completion_criterion"]);
-  integer(row.problem_map_revision, "$.problem_map_revision");
+	const problemMapRevision = integer(row.problem_map_revision, "$.problem_map_revision");
   const rootIDs = idArray(row.problem_root_ids, "$.problem_root_ids", 65536, true);
   const nodes = boundedArray(row.problem_nodes, "$.problem_nodes", 65536)
     .map((node, index) => parseProblemNode(node, `$.problem_nodes[${index}]`));
+	if (nodes.length > 0 && problemMapRevision === 0) throw new Error("problem_map_revision must be positive when problem_nodes is non-empty");
   assertProblemGraphCore(nodes, rootIDs);
   const dependencies = boundedArray(row.chain_dependencies, "$.chain_dependencies", 65536)
     .map((dependency, index) => parseChainDependency(dependency, `$.chain_dependencies[${index}]`));
@@ -403,7 +404,7 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
       throw new Error("conversation chain coverage does not reconcile");
     }
     const result = row as unknown as ConversationChainV1;
-    if (claimedDigest !== ZERO_DIGEST && canonicalConversationChainDigest(result) !== claimedDigest) {
+	if (canonicalConversationChainDigest(result) !== claimedDigest) {
       throw new Error("conversation chain digest mismatch");
     }
     return result;
@@ -469,7 +470,7 @@ export function parseProblemMapCandidateV1(source: string): ProblemMapCandidateV
       text(candidate.updated_at, `${path}.updated_at`, 128, true);
     }
     const result = row as unknown as ProblemMapCandidateV1;
-    if (claimedDigest !== ZERO_DIGEST && canonicalProblemMapCandidateDigest(result) !== claimedDigest) {
+	if (canonicalProblemMapCandidateDigest(result) !== claimedDigest) {
       throw new Error("problem map candidate digest mismatch");
     }
     return result;

@@ -15,6 +15,8 @@ var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 var shaRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+const maxWireInteger int64 = 1<<53 - 1
+
 func validID(value string) bool                    { return len(value) <= 256 && idRE.MatchString(value) }
 func text(value string, maximum int) bool          { return len(value) <= maximum }
 func optionalText(value *string, maximum int) bool { return value == nil || text(*value, maximum) }
@@ -156,7 +158,7 @@ func ValidatePresentation(p Presentation) error {
 		}
 		loopIDs[loop.ID] = true
 	}
-	if p.ProblemMapRevision < 0 || (len(p.ProblemNodes) > 0 && p.ProblemMapRevision < 1) {
+	if p.ProblemMapRevision < 0 || int64(p.ProblemMapRevision) > maxWireInteger || (len(p.ProblemNodes) > 0 && p.ProblemMapRevision < 1) {
 		return errors.New("invalid problem map revision")
 	}
 	if err := ValidateProblemGraph(p.ProblemNodes); err != nil {
@@ -218,7 +220,7 @@ func validateClosedLoop(loop ClosedLoop, chainTurns map[string]bool) error {
 			return fmt.Errorf("%s: %w", name, err)
 		}
 	}
-	if len(loop.SourceTurnRefs) > 256 || loop.Coverage.CapturedTurns != uint64(len(loop.SourceTurnRefs)) || loop.Coverage.SourceTurns < loop.Coverage.CapturedTurns || loop.Coverage.TruncatedTurns+loop.Coverage.SourceUnavailableTurns > loop.Coverage.SourceTurns {
+	if len(loop.SourceTurnRefs) > 256 || loop.Coverage.SourceTurns > uint64(maxWireInteger) || loop.Coverage.CapturedTurns > uint64(maxWireInteger) || loop.Coverage.TruncatedTurns > uint64(maxWireInteger) || loop.Coverage.SourceUnavailableTurns > uint64(maxWireInteger) || loop.Coverage.CapturedTurns != uint64(len(loop.SourceTurnRefs)) || loop.Coverage.SourceTurns < loop.Coverage.CapturedTurns || loop.Coverage.SourceUnavailableTurns > loop.Coverage.SourceTurns || loop.Coverage.TruncatedTurns > loop.Coverage.SourceTurns-loop.Coverage.SourceUnavailableTurns {
 		return errors.New("closed-loop coverage does not reconcile")
 	}
 	if err := validateSourceTurnRefs(loop.SourceTurnRefs, chainTurns); err != nil {
@@ -331,7 +333,7 @@ func sourceTurnKey(ref SourceTurnRef) string {
 func ValidateProblemGraph(nodes []ProblemNode) error {
 	byID := make(map[string]ProblemNode, len(nodes))
 	for _, node := range nodes {
-		if !validID(node.ID) || node.Question == "" || !text(node.Question, 4096) || node.SiblingOrder < 0 || node.Revision < 1 || !text(node.CompletionCriterion, 16384) || !text(node.CurrentConclusion, 16384) || node.FirstProposedAt == "" || !text(node.FirstProposedAt, 128) || !optionalText(node.ConfirmedAt, 128) || len(node.RelatedNodeIDs) > 2 || len(node.SourceTurnRefs) > 256 {
+		if !validID(node.ID) || node.Question == "" || !text(node.Question, 4096) || node.SiblingOrder < 0 || int64(node.SiblingOrder) > maxWireInteger || node.Revision < 1 || int64(node.Revision) > maxWireInteger || !text(node.CompletionCriterion, 16384) || !text(node.CurrentConclusion, 16384) || node.FirstProposedAt == "" || !text(node.FirstProposedAt, 128) || !optionalText(node.ConfirmedAt, 128) || len(node.RelatedNodeIDs) > 2 || len(node.SourceTurnRefs) > 256 {
 			return fmt.Errorf("invalid problem node %q", node.ID)
 		}
 		if _, exists := byID[node.ID]; exists {

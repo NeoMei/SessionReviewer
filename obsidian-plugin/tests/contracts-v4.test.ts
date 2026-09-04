@@ -370,9 +370,41 @@ describe("conversation chain and problem map contracts", () => {
     chain.segmentation_rule_version = "visible-turn-v2";
     expect(() => parseConversationChainV1(JSON.stringify(chain))).toThrow(/digest/i);
 
+	const zeroChain = await fixtureObject("conversation-chain-v1.valid.json");
+	zeroChain.digest = `sha256:${"0".repeat(64)}`;
+	expect(() => parseConversationChainV1(JSON.stringify(zeroChain))).toThrow(/digest/i);
+
     const candidates = await fixtureObject("problem-map-candidate-v1.valid.json") as { candidates: JsonObject[] };
     candidates.candidates[0].question = "Tampered question?";
     expect(() => parseProblemMapCandidateV1(JSON.stringify(candidates))).toThrow(/digest/i);
+
+	const zeroCandidates = await fixtureObject("problem-map-candidate-v1.valid.json");
+	zeroCandidates.digest = `sha256:${"0".repeat(64)}`;
+	expect(() => parseProblemMapCandidateV1(JSON.stringify(zeroCandidates))).toThrow(/digest/i);
+  });
+
+  it("keeps revision-zero and integer maxima identical across v4 parsers", async () => {
+	const review = await fixtureObject("review-presentation-v4.valid.json") as {
+	  problem_map_revision: number;
+	  problem_root_ids: string[];
+	  problem_nodes: JsonObject[];
+	};
+	review.problem_nodes = [{
+	  id: "problem-1", question: "Why?", primary_parent_id: null, related_node_ids: [],
+	  workflow_state: "not_started", answer_state: "no_answer", completion_criterion: "",
+	  current_conclusion: "", source_turn_refs: [], provenance: "human_created",
+	  first_proposed_at: "2026-09-04T00:00:00Z", sibling_order: 0, confirmed_at: null, revision: 1
+	}];
+	review.problem_root_ids = ["problem-1"];
+	expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/revision|zero|positive/i);
+
+	const chain = await fixtureObject("conversation-chain-v1.valid.json") as { coverage: JsonObject };
+	chain.coverage.source_messages = Number.MAX_SAFE_INTEGER + 1;
+	expect(() => parseConversationChainV1(JSON.stringify(chain))).toThrow(/integer|safe/i);
+
+	const candidates = await fixtureObject("problem-map-candidate-v1.valid.json") as { candidates: JsonObject[] };
+	candidates.candidates[0].revision = Number.MAX_SAFE_INTEGER + 1;
+	expect(() => parseProblemMapCandidateV1(JSON.stringify(candidates))).toThrow(/integer|safe/i);
   });
 
   it("enforces formal problem graph cycles, relations, and sibling order", () => {

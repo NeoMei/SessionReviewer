@@ -84,6 +84,35 @@ func TestV4ContractFixtures(t *testing.T) {
 	}
 }
 
+func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) {
+	reviewSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "review-presentation-v4.schema.json"))
+	review := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "review-presentation-v4.valid.json")).(map[string]any)
+	review["problem_nodes"] = []any{map[string]any{
+		"id": "problem-1", "question": "Why?", "primary_parent_id": nil, "related_node_ids": []any{},
+		"workflow_state": "not_started", "answer_state": "no_answer", "completion_criterion": "", "current_conclusion": "",
+		"source_turn_refs": []any{}, "provenance": "human_created", "first_proposed_at": "2026-09-04T00:00:00Z",
+		"sibling_order": json.Number("0"), "confirmed_at": nil, "revision": json.Number("1"),
+	}}
+	review["problem_root_ids"] = []any{"problem-1"}
+	if err := validateContractSchema(reviewSchema, review, "$", reviewSchema); err == nil {
+		t.Fatal("review schema accepted a non-empty problem map at revision zero")
+	}
+
+	chainSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "conversation-chain-v1.schema.json"))
+	chain := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "conversation-chain-v1.valid.json")).(map[string]any)
+	chain["coverage"].(map[string]any)["source_messages"] = json.Number("9007199254740992")
+	if err := validateContractSchema(chainSchema, chain, "$", chainSchema); err == nil {
+		t.Fatal("conversation schema accepted an integer above the JavaScript safe maximum")
+	}
+
+	candidateSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "problem-map-candidate-v1.schema.json"))
+	candidates := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "problem-map-candidate-v1.valid.json")).(map[string]any)
+	candidates["candidates"].([]any)[0].(map[string]any)["revision"] = json.Number("9007199254740992")
+	if err := validateContractSchema(candidateSchema, candidates, "$", candidateSchema); err == nil {
+		t.Fatal("candidate schema accepted a revision above the JavaScript safe maximum")
+	}
+}
+
 func TestV4ContractFixtureDecoderRejectsUnsafeBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
@@ -419,6 +448,9 @@ func validateContractSchema(schema, value any, path string, root any) error {
 		}
 	}
 	if array, ok := value.([]any); ok {
+		if min, ok := s["minItems"].(json.Number); ok && len(array) < int(numberInt(min)) {
+			return fmt.Errorf("%s: too few items", path)
+		}
 		if max, ok := s["maxItems"].(json.Number); ok && len(array) > int(numberInt(max)) {
 			return fmt.Errorf("%s: too many items", path)
 		}

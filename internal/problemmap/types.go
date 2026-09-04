@@ -2,6 +2,8 @@ package problemmap
 
 import "github.com/neomei/SessionReviewer/internal/reviewv4"
 
+const MaxWireInteger int64 = 1<<53 - 1
+
 type Relation string
 
 const (

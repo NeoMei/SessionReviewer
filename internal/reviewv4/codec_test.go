@@ -376,6 +376,28 @@ func TestValidatePresentationRequiresCanonicalProblemRootOrder(t *testing.T) {
 	}
 }
 
+func TestValidatePresentationProblemMapRevisionAndSafeIntegerBoundary(t *testing.T) {
+	presentation := minimumPresentation()
+	if err := ValidatePresentation(presentation); err != nil {
+		t.Fatalf("empty problem map at revision zero rejected: %v", err)
+	}
+	presentation.ProblemMapRevision = 1 << 53
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted problem map revision above JavaScript safe integer maximum")
+	}
+	presentation = minimumPresentation()
+	presentation.ProblemMapRevision = 1
+	presentation.ProblemNodes = []ProblemNode{{
+		ID: "problem-1", Question: "Why?", RelatedNodeIDs: []string{}, WorkflowState: "not_started", AnswerState: "no_answer",
+		SourceTurnRefs: []SourceTurnRef{}, Provenance: "human_created", FirstProposedAt: "2026-09-04T00:00:00Z", SiblingOrder: 0, Revision: 1,
+	}}
+	presentation.ProblemRootIDs = []string{"problem-1"}
+	presentation.ProblemMapRevision = 0
+	if err := ValidatePresentation(presentation); err == nil {
+		t.Fatal("accepted non-empty problem map at revision zero")
+	}
+}
+
 func TestValidateLedgerUsesOnlyCurrentPricingForAggregateCompleteness(t *testing.T) {
 	ledger := frozenLedger(t)
 	historical := ledger.PricingSnapshots[0]

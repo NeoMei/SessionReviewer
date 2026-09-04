@@ -25,6 +25,9 @@ func Validate(document Document) error {
 	if len(document.TurnUnits) > 65536 {
 		return errors.New("conversation chain exceeds turn limit")
 	}
+	if document.Coverage.SourceMessages > MaxWireInteger || document.Coverage.CapturedMessages > MaxWireInteger || document.Coverage.TurnUnits > MaxWireInteger || document.Coverage.UnansweredUnits > MaxWireInteger || document.Coverage.TruncatedMessages > MaxWireInteger {
+		return errors.New("conversation chain coverage exceeds the wire integer maximum")
+	}
 	var captured, unanswered, truncated uint64
 	turnIDs := make(map[string]bool, len(document.TurnUnits))
 	for index, turn := range document.TurnUnits {
@@ -38,17 +41,25 @@ func Validate(document Document) error {
 		if err := validateMessage(document, turn.UserMessage, RoleUser); err != nil {
 			return fmt.Errorf("turn unit %q user message: %w", turn.TurnUnitID, err)
 		}
-		captured++
+		if !incrementWireCount(&captured) {
+			return errors.New("captured message count exceeds the wire integer maximum")
+		}
 		if turn.UserMessage.Truncated {
-			truncated++
+			if !incrementWireCount(&truncated) {
+				return errors.New("truncated message count exceeds the wire integer maximum")
+			}
 		}
 		for _, message := range turn.AssistantMessages {
 			if err := validateMessage(document, message, RoleAssistant); err != nil {
 				return fmt.Errorf("turn unit %q assistant message: %w", turn.TurnUnitID, err)
 			}
-			captured++
+			if !incrementWireCount(&captured) {
+				return errors.New("captured message count exceeds the wire integer maximum")
+			}
 			if message.Truncated {
-				truncated++
+				if !incrementWireCount(&truncated) {
+					return errors.New("truncated message count exceeds the wire integer maximum")
+				}
 			}
 		}
 		for _, action := range turn.Actions {
@@ -77,7 +88,9 @@ func Validate(document Document) error {
 			if len(turn.AssistantMessages) != 0 {
 				return fmt.Errorf("turn unit %q claims no answer but has assistant messages", turn.TurnUnitID)
 			}
-			unanswered++
+			if !incrementWireCount(&unanswered) {
+				return errors.New("unanswered unit count exceeds the wire integer maximum")
+			}
 		case AnswerAnswered, AnswerPartial:
 			if len(turn.AssistantMessages) == 0 {
 				return fmt.Errorf("turn unit %q claims an answer without assistant messages", turn.TurnUnitID)
@@ -100,10 +113,18 @@ func validateMessage(document Document, message Message, expected Role) error {
 }
 
 func validateSourceRef(document Document, ref SourceRef) error {
-	if ref.Provider != document.Provider || ref.SessionID != document.SessionID || !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.SourceIdentity) || !shaPattern.MatchString(ref.SourceHash) {
+	if ref.Provider != document.Provider || ref.SessionID != document.SessionID || !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.SourceIdentity) || ref.RecordOrdinal > MaxWireInteger || !shaPattern.MatchString(ref.SourceHash) {
 		return errors.New("source reference is not authenticated to the conversation identity")
 	}
 	return nil
+}
+
+func incrementWireCount(value *uint64) bool {
+	if *value == MaxWireInteger {
+		return false
+	}
+	*value++
+	return true
 }
 
 func validTimestamp(value string) bool { return value != "" && validText(value, 128) }

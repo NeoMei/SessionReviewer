@@ -29,7 +29,7 @@ func ValidateCandidates(store CandidateStore) error {
 	}
 	seen := make(map[string]bool, len(store.Candidates))
 	for index, candidate := range store.Candidates {
-		if !validID(candidate.CandidateID) || seen[candidate.CandidateID] || candidate.ProjectID != store.ProjectID || candidate.Question == "" || !validText(candidate.Question, 4096) || len(candidate.SourceTurnRefs) == 0 || len(candidate.SourceTurnRefs) > 256 || len(candidate.AlternateTargetIDs) > 2 || len(candidate.RelatedNodeIDs) > 2 || len(candidate.Grounds) > 256 || len(candidate.DependencyDigests) == 0 || len(candidate.DependencyDigests) > 256 || candidate.Revision < 1 || candidate.CreatedAt == "" || !validText(candidate.CreatedAt, 128) || candidate.UpdatedAt == "" || !validText(candidate.UpdatedAt, 128) {
+		if !validID(candidate.CandidateID) || seen[candidate.CandidateID] || candidate.ProjectID != store.ProjectID || candidate.Question == "" || !validText(candidate.Question, 4096) || len(candidate.SourceTurnRefs) == 0 || len(candidate.SourceTurnRefs) > 256 || len(candidate.AlternateTargetIDs) > 2 || len(candidate.RelatedNodeIDs) > 2 || len(candidate.Grounds) > 256 || len(candidate.DependencyDigests) == 0 || len(candidate.DependencyDigests) > 256 || candidate.Revision < 1 || int64(candidate.Revision) > MaxWireInteger || candidate.CreatedAt == "" || !validText(candidate.CreatedAt, 128) || candidate.UpdatedAt == "" || !validText(candidate.UpdatedAt, 128) {
 			return fmt.Errorf("invalid or duplicate problem candidate %d", index)
 		}
 		seen[candidate.CandidateID] = true

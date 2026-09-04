@@ -75,6 +75,33 @@ func TestRenderProblemCandidatesNormalizesCollectionsAndBindsDigest(t *testing.T
 	}
 }
 
+func TestParseProblemCandidatesRejectsZeroDigest(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/problem-map-candidate-v1.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(fixture, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["digest"] = "sha256:" + strings.Repeat("0", 64)
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseCandidates(body); err == nil {
+		t.Fatal("accepted an unbound all-zero persisted digest")
+	}
+}
+
+func TestProblemCandidatesRejectRevisionAboveJavaScriptSafeMaximum(t *testing.T) {
+	store := frozenCandidates()
+	store.Candidates[0].Revision = 1 << 53
+	if err := ValidateCandidates(store); err == nil {
+		t.Fatal("accepted candidate revision above JavaScript safe integer maximum")
+	}
+}
+
 func TestProblemGraphRejectsCycle(t *testing.T) {
 	nodes := []reviewv4.ProblemNode{
 		{ID: "p-a", PrimaryParentID: stringPtr("p-b")},

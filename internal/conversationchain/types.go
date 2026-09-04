@@ -1,5 +1,7 @@
 package conversationchain
 
+const MaxWireInteger uint64 = 1<<53 - 1
+
 type Role string
 
 const (

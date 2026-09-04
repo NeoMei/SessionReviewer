@@ -7,15 +7,18 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 const (
-	MaxInspectPageSize             = 100
-	MaxInspectQueryBytes           = 256
-	MaxDecisionInputBytes          = 64 << 10
-	MaxOpaqueCursorBytes           = 4096
-	MaxInspectResponseBytes        = 1 << 20
-	MaxConversationSourceReadBytes = 64 << 10
+	MaxInspectPageSize                   = 100
+	MaxInspectQueryBytes                 = 256
+	MaxDecisionInputBytes                = 64 << 10
+	MaxOpaqueCursorBytes                 = 4096
+	MaxInspectResponseBytes              = 1 << 20
+	MaxConversationSourceReadBytes       = 64 << 10
+	MaxJSONSafeInteger             int64 = 1<<53 - 1
 )
 
 const InspectExecutionTimeout = 5 * time.Second
@@ -102,6 +105,12 @@ type ProblemRequest struct {
 	ProblemID                  string
 	NewParentID                string
 	ParentID                   string
+	OrderedChildIDs            []string
+}
+
+type problemReorderInput struct {
+	SchemaVersion   int      `json:"schema_version" required:"true"`
+	OrderedChildIDs []string `json:"ordered_child_ids" required:"true"`
 }
 
 type DecisionRequest struct {
@@ -231,8 +240,19 @@ func parsePositiveInt(value string) (int, bool) {
 
 func requirePositiveInt(value string) (int, error) {
 	n, ok := parsePositiveInt(value)
-	if !ok {
+	if !ok || int64(n) > MaxJSONSafeInteger {
 		return 0, contractError("integer must be a positive decimal number")
+	}
+	return n, nil
+}
+
+func requireNonnegativeInt(value string) (int, error) {
+	if value == "0" {
+		return 0, nil
+	}
+	n, err := requirePositiveInt(value)
+	if err != nil {
+		return 0, contractError("integer must be a nonnegative decimal number")
 	}
 	return n, nil
 }
@@ -412,7 +432,7 @@ func ParseProblemContract(args []string) (ProblemRequest, error) {
 	case "move":
 		return parseProblemMove(args[1:])
 	case "reorder":
-		return parseProblemReorder(args[1:])
+		return ProblemRequest{}, contractError("problem reorder requires a versioned stdin payload")
 	default:
 		return ProblemRequest{}, contractError("unknown problems command")
 	}
@@ -441,7 +461,7 @@ func parseProblemTransition(args []string) (ProblemRequest, error) {
 	if err != nil {
 		return ProblemRequest{}, err
 	}
-	mapRevision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	mapRevision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -475,7 +495,7 @@ func parseProblemMove(args []string) (ProblemRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "problem-id", "new-parent-id"); err != nil {
 		return ProblemRequest{}, err
 	}
-	revision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	revision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -496,7 +516,7 @@ func parseProblemReorder(args []string) (ProblemRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "parent-id"); err != nil {
 		return ProblemRequest{}, err
 	}
-	revision, err := requirePositiveInt(flags.values["expected-problem-map-revision"])
+	revision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -504,6 +524,34 @@ func parseProblemReorder(args []string) (ProblemRequest, error) {
 		return ProblemRequest{}, err
 	}
 	return ProblemRequest{Command: "reorder", ProjectID: flags.values["project-id"], ParentID: flags.values["parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+}
+
+// ParseProblemContractWithInput parses the only problem command with a stdin
+// body. The v1 payload is bounded, exact, and carries the complete desired
+// direct-child order; argv never accepts a path or arbitrary input flag.
+func ParseProblemContractWithInput(args []string, input []byte, currentDirectChildIDs []string) (ProblemRequest, error) {
+	if len(args) == 0 || args[0] != "reorder" {
+		return ProblemRequest{}, contractError("versioned stdin is only valid for problem reorder")
+	}
+	if len(input) > MaxDecisionInputBytes {
+		return ProblemRequest{}, contractError("problem reorder stdin exceeds its byte limit")
+	}
+	request, err := parseProblemReorder(args[1:])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	var payload problemReorderInput
+	if err := strictjson.Decode(input, &payload); err != nil {
+		return ProblemRequest{}, contractError("problem reorder stdin is not valid versioned JSON")
+	}
+	if payload.SchemaVersion != 1 || payload.OrderedChildIDs == nil {
+		return ProblemRequest{}, contractError("problem reorder stdin must be schema version 1 with an ordered child array")
+	}
+	if err := ValidateCompleteSiblingOrder(currentDirectChildIDs, payload.OrderedChildIDs); err != nil {
+		return ProblemRequest{}, err
+	}
+	request.OrderedChildIDs = append([]string{}, payload.OrderedChildIDs...)
+	return request, nil
 }
 
 func ValidateCompleteSiblingOrder(current, ordered []string) error {

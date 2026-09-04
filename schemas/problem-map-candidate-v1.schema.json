@@ -28,7 +28,7 @@
         "dependency_digests": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/digest" } },
         "analysis_mode": { "enum": ["deterministic", "agent_requested"] },
         "agent_run_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
-        "revision": { "type": "integer", "minimum": 1 }, "created_at": { "$ref": "#/$defs/timestamp" }, "updated_at": { "$ref": "#/$defs/timestamp" }
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "created_at": { "$ref": "#/$defs/timestamp" }, "updated_at": { "$ref": "#/$defs/timestamp" }
       },
       "allOf": [
         { "if": { "properties": { "analysis_mode": { "const": "deterministic" } } }, "then": { "properties": { "agent_run_id": { "const": null } } }, "else": { "properties": { "agent_run_id": { "type": "string" } } } },

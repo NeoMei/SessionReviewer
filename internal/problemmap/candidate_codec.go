@@ -20,7 +20,7 @@ func ParseCandidates(data []byte) (CandidateStore, error) {
 	if err := ValidateCandidates(store); err != nil {
 		return store, strictjson.NewRejection(strictjson.CodeContractInvalid, err)
 	}
-	if !isZeroDigest(store.Digest) && CanonicalDigest(store) != store.Digest {
+	if CanonicalDigest(store) != store.Digest {
 		return store, strictjson.NewRejection(strictjson.CodeContractInvalid, errors.New("problem candidate store digest mismatch"))
 	}
 	return store, nil
@@ -91,5 +91,4 @@ func normalizeCandidates(store *CandidateStore) {
 	}
 }
 
-func zeroDigest() string             { return "sha256:" + strings.Repeat("0", 64) }
-func isZeroDigest(value string) bool { return value == zeroDigest() }
+func zeroDigest() string { return "sha256:" + strings.Repeat("0", 64) }

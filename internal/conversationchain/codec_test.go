@@ -61,6 +61,38 @@ func TestRenderConversationChainNormalizesCollectionsAndBindsDigest(t *testing.T
 	}
 }
 
+func TestParseConversationChainRejectsZeroDigest(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(fixture, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["digest"] = "sha256:" + strings.Repeat("0", 64)
+	body, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(body); err == nil {
+		t.Fatal("accepted an unbound all-zero persisted digest")
+	}
+}
+
+func TestConversationChainRejectsIntegersAboveJavaScriptSafeMaximum(t *testing.T) {
+	document := frozenChain()
+	document.TurnUnits[0].UserMessage.SourceRef.RecordOrdinal = 1 << 53
+	if err := Validate(document); err == nil {
+		t.Fatal("accepted record ordinal above JavaScript safe integer maximum")
+	}
+	document = frozenChain()
+	document.Coverage.SourceMessages = 1 << 53
+	if err := Validate(document); err == nil {
+		t.Fatal("accepted coverage count above JavaScript safe integer maximum")
+	}
+}
+
 func TestConversationChainRejectsOversizedVisibleExcerptAndUnauthenticatedSource(t *testing.T) {
 	document := frozenChain()
 	document.TurnUnits[0].UserMessage.VisibleExcerpt = strings.Repeat("界", 1366)
