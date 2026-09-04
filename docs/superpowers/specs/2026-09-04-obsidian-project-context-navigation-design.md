@@ -1,6 +1,6 @@
 # SessionReviewer Obsidian 项目脉络、决策与价格查询设计
 
-- 状态：Gate 0 本地验收通过；Windows CI 待运行
+- 状态：扩展设计已确认；因新增会话因果链、问题脉络与演进闭环合同，Gate 0 重新打开
 - 日期：2026-09-04
 - 适用范围：SessionReviewer 零 Token 扫描、macOS/Windows Obsidian Desktop 项目脉络浏览器、Project/Vault 投影
 - 扩展：`2026-08-25-session-reviewer-project-evolution-browser-design.md`
@@ -13,6 +13,8 @@ SessionReviewer 0.3.0 已将可验证的零 Token 扫描与人类语义总结分
 2. 新的零 Token 扫描可以记录发生过的事实，但不会臆造“为什么这样决定”。因此新项目的“关键决策”为空，现有界面却没有说明这是能力边界而非扫描失败。
 3. 当前投影可把大量原子事件 ID 直接写进人类可读页面。这保留了索引，但破坏了“打开项目后快速恢复上下文”的产品目标。
 4. 模型价格变化频繁，本地固定价格表容易过期；未匹配价格又不应被当作零成本。
+5. 当前“项目演进”把单条用户请求直接投影成节点，右侧只复述问题并填入统一占位文案，看不到 Agent 回答、执行动作或实际验证；这既不是完整会话回顾，也不构成项目里程碑。
+6. 项目讨论通常从一个大问题逐步拆成多个子问题，现有界面没有保存这种细化脉络，也无法建议新问题应归入哪个已确认节点。
 
 ## 2. 产品原则
 
@@ -24,6 +26,8 @@ SessionReviewer 0.3.0 已将可验证的零 Token 扫描与人类语义总结分
 - **AI 只负责候选**：AI 可按用户要求从新 Sessions 提炼决策候选，但不能自动升级为正式项目事实。
 - **截断必须显式**：任何列表、分页、摘要或保留策略都必须显示总量、当前范围和未展示数量，禁止静默丢弃。
 - **价格可追溯且不阻断扫描**：用量事实与价格查询分离；价格不可用时仍保留 Token 统计，但费用不得伪装为 `$0`。
+- **结构整理零 Token 优先**：问答分段、同 Session 因果绑定、显式引用匹配、执行与验证归属均使用确定性规则；只有用户主动要求处理规则无法判定的语义歧义时才调用 Agent。
+- **只处理可见内容**：人类消息、Agent 可见回答和工具事实可进入因果链；隐藏推理、系统或开发者指令、加密或不透明压缩内容永远不能成为问题、结论或关联依据。
 
 ## 3. Obsidian 信息架构
 
@@ -39,9 +43,10 @@ SessionReviewer 0.3.0 已将可验证的零 Token 扫描与人类语义总结分
 主视图固定为以下顺序：
 
 1. **项目演进**
-2. **决策与约定**
-3. **全部 Sessions**
-4. **用量**
+2. **问题脉络**
+3. **决策与约定**
+4. **全部 Sessions**
+5. **用量**
 
 这个顺序先提供恢复判断所需的高层信息，再提供完整证据下钻，最后展示资源使用。
 
@@ -61,11 +66,76 @@ SessionReviewer 0.3.0 已将可验证的零 Token 扫描与人类语义总结分
 
 项目首页中的原子事件 ID 列表被取消。事实索引通过“全部 Sessions”和私有 Observation Store 保留。
 
-## 5. 决策与约定
+### 4.1 演进详情的闭环摘要
+
+演进节点右侧不再使用“节点意义、摘要、为什么会走到这里、发生了什么、结果与验证、下一步”的空泛模板。固定按以下顺序展示：
+
+1. 触发问题；
+2. Agent 结论；
+3. 执行与变更；
+4. 结果与验证；
+5. 对项目的影响与后续。
+
+默认“Agent 结论”来自可见 Agent 最终回答的限长原文摘录，不调用模型重新总结。人工确认或编辑的结论优先于原文摘录；只有用户主动要求整理时才允许 Agent 生成候选摘要，并标记“AI 整理，待确认”，确认后才能成为正式 HumanPresentation。界面提供“查看回答正文”“打开原 Session”“查看关联问题”下钻；回答正文按需从经过哈希认证的原 Session 读取、过滤和脱敏，不持久化到 Vault 或私有派生链。单条源记录最多读取 64 KiB，超限时明确标记截断并以“打开原 Session”作为唯一完整来源。原始工具输出不在此入口返回。
+
+确定性结论摘录选择该问答单元最后一条非空可见 Agent 消息；展开时按原顺序显示该单元的全部可见 Agent 消息。如果 Session 在该单元结束前中断、最后消息未完成或 adapter 只能证明稳定前缀，则结论标记“回答可能不完整”，不能展示成已完成答复。
+
+一个里程碑可以引用多个 provider-neutral 问答单元，因此最初提问、后续实施和再次验证可以跨 Session 组成闭环。每一段都必须显示真实 `(provider, session_id, turn_unit_id)`、时间和证据类型，不能把后续 Session 的回答伪装成原 Session 回答。回答、执行、验证或来源缺失时保留已有段，并明确显示“未捕获 Agent 回答”“未发现执行证据”“待验证”或“来源不可用”，不得用统一占位文案补齐。
+
+### 4.2 旧演进节点迁移
+
+v3 自动生成且未被人编辑的 `user_request` 占位节点在显式 v4 迁移时重新分类：有实施、验证、发布或人工确认依据的升级为里程碑并生成闭环摘要；只有提问、没有形成关键项目变化的转入问题脉络。所有源问答和 Session 引用继续保留。
+
+人工编辑过的旧演进节点原样保留，并标记 `provenance=migrated`；迁移不得用新规则覆盖其标题或正文。dry-run 必须分别报告“升级为里程碑、转入问题脉络、保留人工节点、无法归类”的数量和稳定 ID，确认迁移后才能发布，且重复执行结果必须一致。
+
+## 5. 问题脉络
+
+“问题脉络”使用顶部独立 Tab。左侧只显示真实问题句及其父子层级，不重复“项目演进、决策与约定、模型价格”等顶部栏目。主体区域显示当前问题的父路径、直接子问题和有限相关问题；右侧显示所选问题关联的问答与执行因果链；底部抽屉处理待归类问题。
+
+项目只有一张跨 Sessions、跨 Codex/Claude Code/OpenCode 的问题图。界面可按 Session、provider 和状态筛选，但筛选不改变图的权威结构。正式图属于 `review-presentation-v4` 的 HumanPresentation；AI 或规则推荐只能进入私有 `problem-map-candidate-v1`，未经用户确认不得改变父子关系。
+
+### 5.1 问答单元与因果链
+
+最小问答单元从一条可见用户消息开始，到同 Session 的下一条可见用户消息之前结束，包含期间所有可见 Agent 回复、工具调用、工具结果和文件变化引用。系统消息、开发者消息、隐藏推理和不透明压缩内容不参与分段。连续的多条 Agent 消息属于同一单元；没有 Agent 回复的单元合法存在，回答状态为 `no_answer`。
+
+同一 Session 内的顺序绑定是确定性的。跨 Session 只在出现稳定问题 ID、显式引用、相同文件/符号/提交/错误签名等可复核信号时自动关联；仅靠语义相似只能生成待确认候选。每个问答单元使用 `(provider, session_id, turn_unit_id)` 身份，不能仅以原生 Session ID 或消息文本去重。
+
+### 5.2 正式问题节点
+
+每个正式问题节点包含：
+
+~~~text
+id
+question
+primary_parent_id | null
+related_node_ids[]
+workflow_state = not_started | in_progress | paused | resolved
+answer_state = no_answer | answered_unverified | execution_verified
+completion_criterion
+current_conclusion
+source_turn_refs[] { provider, session_id, turn_unit_id }
+provenance = human_created | migrated | candidate_confirmed
+first_proposed_at
+sibling_order
+confirmed_at | null
+revision
+~~~
+
+节点只能有一个主父节点，但最多可以有两个相关节点交叉引用。主父关系必须无环；坐标和临时折叠状态不持久化。兄弟节点默认按首次提出时间和稳定 ID 排序，用户可以显式调整顺序。
+
+`execution_verified` 只表示存在受支持的测试、构建、命令退出码、产物或真实环境证据；它不等于项目问题已经解决。`workflow_state=resolved` 必须来自用户确认或已接受的项目验收事实。仅有 Agent 回答且没有验证时显示“已有回答，待验证”。
+
+### 5.3 新问题归位建议
+
+零 Token 规则先使用编号、标题层级、显式引用、共享文件/符号/提交/错误签名和连续追问关系产生归位建议。建议必须包含一个推荐主父节点、最多两个备选节点、最多两个相关节点、命中的可读依据和 `high|medium|low` 置信等级；不得展示无法复核的伪精确概率。
+
+用户可以选择“作为子问题”“作为同级问题”“合并到已有问题”或“继续待归类”。合并必须保留所有源问答引用；移动有子树的节点时，确认对话框显示旧路径、新路径和受影响子树。规则无法可靠归位时默认进入“待归类问题”，不自动调用 Agent。用户主动要求 Agent 协助时，调用结果仍只是候选，并以排序后的 dependency digests 缓存，依赖未变化时不得重复消耗 Token。
+
+## 6. 决策与约定
 
 “关键决策”更名为“决策与约定”，并分为两个区域。
 
-### 5.1 已确认
+### 6.1 已确认
 
 正式条目只能来自：
 
@@ -85,7 +155,7 @@ SessionReviewer 0.3.0 已将可验证的零 Token 扫描与人类语义总结分
 
 默认只展示“生效中”条目。旧决策不物理删除，而是用“已被某决策替代”保留演进关系。
 
-### 5.2 待确认候选
+### 6.2 待确认候选
 
 零 Token 扫描不自动生成决策候选。只有用户主动点击“从新 Sessions 提炼候选”时，系统才可调用受限 Agent：
 
@@ -102,9 +172,9 @@ Agent 候选保存在私有、依赖绑定的语义注释存储中。Obsidian �
 
 并提供“新增决策或约定”与“从新 Sessions 提炼候选”两个入口。项目首页最多展示三条当前生效的决策：人工置顶条目优先，其余按发生时间倒序和稳定 ID 排序。置顶是人类可编辑展示字段，不改变决策身份或证据。
 
-## 6. 全部 Sessions
+## 7. 全部 Sessions
 
-### 6.1 列表完整性
+### 7.1 列表完整性
 
 每个被发现且可归属项目的 Session 必须占据一个索引项。损坏、未完成、部分可读、来源不可用或存在警告的 Session 不得从列表中消失。
 
@@ -133,7 +203,7 @@ Session 索引是“项目已接受 Session 集合”的累积视图。新世代
 
 默认按时间倒序分组，稳定排序键为 `started_at desc nulls last, provider asc, session_id asc`。日期、来源、处理状态和来源可用性可直接由紧凑索引筛选；分支、文件和错误特征通过受限只读 CLI 查询，避免为搜索而把大量路径或错误文本复制到 Vault。
 
-### 6.2 Session 索引项
+### 7.2 Session 索引项
 
 每个索引项最少包含：
 
@@ -149,7 +219,7 @@ Session 索引是“项目已接受 Session 集合”的累积视图。新世代
 
 不在 Vault 中默认复制完整原始对话或工具输出。
 
-### 6.3 下钻与分页
+### 7.3 下钻与分页
 
 点击 Session 后，右侧详情展示该 Session 的阶段、关键操作、验证结果、错误和留下的问题。这些摘要必须是已脱敏且有来源绑定的确定性投影。
 
@@ -157,7 +227,7 @@ Session 索引是“项目已接受 Session 集合”的累积视图。新世代
 
 每页最多 100 条。界面显示“当前 1–100 / 共 2,438 条”等完整性信息。顺序浏览使用不透明 `previous_cursor` 和 `next_cursor`；跳转首页、末页或指定页时，插件把一基 ordinal 交给 CLI 换取当前世代的页锚点。cursor 必须绑定 project ID、provider、Session ID、generation ID、排序版本、筛选摘要和 page size。任一绑定不一致或世代过期时返回类型化 `stale_cursor`，插件刷新索引后回到最接近的可用位置，不静默读取另一个 Session 或世代。
 
-### 6.4 投影文件
+### 7.4 投影文件
 
 新增隐藏的：
 
@@ -171,9 +241,9 @@ docs/session-review/.session-reviewer/session-index.json
 
 旧插件可忽略该隐藏文件；新插件在索引缺失时显示“需要重新扫描以建立完整 Session 索引”，不将缺失解释为零个 Sessions。
 
-## 7. 用量与价格
+## 8. 用量与价格
 
-### 7.1 展示
+### 8.1 展示
 
 保留每个模型一张横向占满的卡片。卡片展示：
 
@@ -187,7 +257,7 @@ docs/session-review/.session-reviewer/session-index.json
 
 界面明确标注“公开 API 标价估算”，订阅包含量、实际账单折扣、税费与企业协议价不参与计算。
 
-### 7.2 ModelPriceWatch 查询
+### 8.2 ModelPriceWatch 查询
 
 默认使用 [ModelPriceWatch API](https://modelpricewatch.com/api/) 作为价格主查询目录。受信 CLI 对 `https://modelpricewatch.com/api/v1/models.json` 和 `https://modelpricewatch.com/api/v1/price-history.json` 分别做每 24 小时最多一次的全局缓存刷新，可使用 ETag 或等价条件请求。不按项目或模型频繁请求。
 
@@ -208,7 +278,7 @@ ModelPriceWatch 的 `provider` 和模型名称不能脱离 listing ID 直接当�
 
 公开 API 未提供的计费维度，例如独立 cache-write 价格，必须由官方价格来源或有来源 URL 和生效日期的本地审核补充表提供。不自行推算缺失价格。`price_note` 等非结构化说明只作为审核提示，不由程序解析成计费规则；只要条目依赖尚未结构化支持的上下文档位、区域、批处理、促销或其他条件，就不得自动定价。
 
-### 7.3 价格快照与降级
+### 8.3 价格快照与降级
 
 价格绑定到每个 Session 的用量记录，并作为不可变历史快照。价格目录更新只影响之后新接受的用量，不追溯重算旧 Session 成本。
 
@@ -229,20 +299,24 @@ ModelPriceWatch 的 provider + model 精确匹配
 
 无可用价格或只有部分计费维度可定价时，逐维度显示缺失原因。数据合同保存 `known_subtotal_usd`、可空的 `total_cost_usd`、`pricing_complete` 和 `missing_billing_dimensions`；只有 `pricing_complete=true` 时才允许写入总成本。未知价格和未知成本均为 `null`，不得保存为数值零。
 
-## 8. 端到端数据流
+## 9. 端到端数据流
 
 ~~~text
 Agent Session 来源
     → SourceAdapter 发现与解码
     → Observation Store（机器观察事实）
     → SessionView（单 Session 确定性物化视图）
+    → conversation-chain-v1（私有可见问答/执行因果链）
     → ProjectView（项目级归并）
        ├─→ 项目演进投影
+       ├─→ 问题归位规则 → problem-map-candidate-v1
        ├─→ session-index-v1
        ├─→ 用量记录 → 价格快照
        └─→ 受限只读事件查询
 
-用户人工编辑 ──→ HumanPresentation ──→ 决策与约定
+用户人工编辑 ──→ HumanPresentation ──┬─→ 项目演进闭环
+                                      ├─→ 正式问题图
+                                      └─→ 决策与约定
 受限 AI 提炼   ──→ AgentAnnotation ──→ 待确认候选
                                               └─→ 用户确认 → HumanPresentation
 ~~~
@@ -255,7 +329,7 @@ HumanPresentation > 确定性 ProjectView
 
 AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参与正式项目语义的优先级计算。用户确认后会创建 HumanPresentation 条目，不再以 AgentAnnotation 身份覆盖项目。该优先级只适用于人类语义与展示字段，不能改写 Session 身份、时间戳、Token 计数、命令退出码或来源哈希等机器事实。
 
-## 9. 失败与恢复
+## 10. 失败与恢复
 
 各子系统独立失败，不相互放大：
 
@@ -267,20 +341,25 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 - 价格模型歧义：禁止模糊自动匹配，需要审核别名或人工补充。
 - Project/Vault 并发编辑：发布预像不一致时进入既有冲突处理，不覆盖人工内容。
 - 插件或 CLI 版本过旧：发布绑定 minimum writer/reader 能力，不将新投影静默降级成旧格式。
+- 问答链部分缺失：保留已捕获段和 coverage，明确显示断点，不把相邻 Session 文本强行拼成回答。
+- 问题归位歧义：候选留在待归类区，不改变正式问题图，也不自动启动 Agent。
+- 问题图冲突或成环：整个结构变更 CAS 失败，保留当前正式图和候选，返回旧路径、新路径及冲突修订。
 
-## 10. 迁移与兼容
+## 11. 迁移与兼容
 
 - v2/v3 已有人工目标、状态、风险、决策和演进节点原样保留，不重新推断其语义。
+- v3 未经人工编辑的 `user_request` 占位演进节点按 4.2 的显式迁移规则重新分类；它们不因“已纳入索引”占位结果而被视为人工语义。
 - 现有 v3 `recent-progress` 原子事件列表在下一次成功发布时从人类页面移除，对应观察事实仍在私有存储中可查。
 - `项目历史.md` 继续作为无插件时的语义里程碑降级入口，不扩展为全量原子事件库。
 - 新的 `session-index-v1` 使用独立隐藏合同，避免只因增加 Session 浏览能力就改写现有人类 Markdown 语义。
 - 不支持 Session 索引的旧插件在 v2/v3 数据保持未迁移时仍可解析项目回顾和历史；新插件对缺失索引的旧项目提供重新扫描入口。
 - 价格历史不因迁移或目录刷新被追溯重算。
+- 新问题图不保存画布坐标；迁移只建立确认过的层级和源问答引用，无法确定父节点的旧问题进入待归类区。
 - 人类 Markdown 的决策字段扩展使用新的 presentation schema；迁移到 v4 后，旧插件属于不受支持的只读组合，不保证能解析新 schema，也不得写入。两个 Markdown 仍可由用户作为普通文档阅读；若需要在升级前获得明确的不兼容提示，应先发布能够识别 `minimum_reader_version` 的桥接版插件。
 
-## 11. 验证策略
+## 12. 验证策略
 
-### 11.1 单元与合同测试
+### 12.1 单元与合同测试
 
 - Session 索引稳定排序、身份唯一性、世代绑定和 coverage 统计；
 - 四种处理状态严格分区、未知值不伪装为零、来源消失后索引累积保留；
@@ -294,8 +373,14 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 - 分档、区域、批处理、跨价格边界和缺少 cache-write 等条件不能被静默简化；
 - 价格快照在后续目录变更后保持字节不变；
 - 未定价成本不被纳入“完整总成本”。
+- 问答单元边界、连续多 Agent 消息、无回答、工具调用/结果归属和超长可见回答分块；
+- 隐藏推理、系统/开发者指令和原始工具输出不能进入 conversation chain；
+- 问题图单主父、无环、兄弟稳定排序、相关节点上限、状态正交和 source turn identity 唯一性；
+- 归位建议主推荐、两个备选、两个相关节点、可读依据和置信等级的封闭合同；
+- 同 dependency digest 重复整理不得启动 Agent，依赖变化后旧候选必须 stale；
+- 闭环摘要只有具备明确里程碑资格时才进入项目演进，缺段不得生成占位结论。
 
-### 11.2 集成与性能测试
+### 12.2 集成与性能测试
 
 - 单个 Session 含数千事件，可访问第一条、末条和中间页；
 - 单项目含至少 154 个 Sessions，顶部总数与列表数量一致；
@@ -304,12 +389,15 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 - 网络断开、HTTP 429、超时和无匹配模型不影响扫描世代提交；
 - Project/Vault 在扫描期间并发编辑时，预像检查拒绝覆盖人工修改；
 - v2、现有 v3 和全新项目的迁移、重扫和恢复路径。
+- 同一问题跨三个 provider、多个 Session 的显式引用拼接，以及只有语义相似时保持候选；
+- 旧自动 `user_request` 节点升级、转入问题脉络、保留人工节点和重复迁移幂等；
+- 普通零 Token 扫描的 Agent 子进程调用次数严格为零。
 
-### 11.3 真实 Obsidian 验收
+### 12.3 真实 Obsidian 验收
 
 每次界面或合同修改后，都必须安装当前构建包到真实 Vault 并验证：
 
-1. 四个标签顺序正确；
+1. 五个标签顺序正确；
 2. 项目演进默认简洁且可打开全部里程碑；
 3. Session 总数、异常数、列表和最后一个 Session 一致；
 4. 超长 Session 分页无静默缺口；
@@ -317,10 +405,13 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 6. 价格日期、数据页、官方来源、促销或待定状态可读；
 7. 插件重启、Vault 重开和同步后状态不丢失；
 8. 无 CLI、无网络和来源消失的降级提示准确。
+9. 第一个演进节点右侧可见 Agent 回答摘录、执行、验证和来源，或明确说明对应段未捕获；
+10. 问题树左侧只显示真实问题及层级，待归类问题不会未经确认进入主树；
+11. 键盘可以选择问题、展开闭环证据、确认归位和返回原 Session。
 
 无 CLI 时，“全部 Sessions”仍必须显示 `session-index-v1` 中的完整清单和基础筛选；仅 Session 摘要、深层事件和分支/文件/错误搜索被禁用，并给出安装或配置 CLI 的单一恢复入口。
 
-## 12. 验收条件
+## 13. 验收条件
 
 交付必须同时满足：
 
@@ -334,10 +425,15 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 8. 历史费用使用接受时价格快照，后续价格刷新不修改旧记录。
 9. 价格服务不可用时扫描仍成功，费用以“待定”降级而不是 `$0`。
 10. v2/v3 已有人工内容、决策替代关系和历史价格不因升级丢失或被重算。
-11. 已启用的 Codex、Claude Code 和 OpenCode Sessions 在同一四栏界面中具有相同的索引、下钻、状态和降级体验。
+11. 已启用的 Codex、Claude Code 和 OpenCode Sessions 在同一五栏界面中具有相同的索引、下钻、状态和降级体验。
 12. Session 来源消失后，其已接受索引和摘要仍可见；恢复来源后，新世代能重新关联而不产生重复 Session。
+13. 项目演进只包含合格里程碑；右侧闭环摘要按“触发问题、Agent 结论、执行与变更、结果与验证、项目影响与后续”展示并可追溯。
+14. 默认 Agent 结论来自可见回答的确定性摘录；普通扫描不调用 Agent，AI 整理未经确认不能进入正式表现。
+15. 正式问题图跨 Sessions 和 provider 合并，但每个节点只有一个主父节点，模糊归位只进入待确认候选。
+16. `execution_verified` 不自动把问题标为 `resolved`；问题解决需要用户确认或已接受验收事实。
+17. v3 自动占位节点迁移可预览、可核对、幂等且不覆盖任何人工编辑。
 
-## 13. 非目标
+## 14. 非目标
 
 - 不把全部原始 Session 文本或完整工具输出复制到 Vault。
 - 不让零 Token 规则自动推断意图、理由或正式决策。
@@ -345,23 +441,30 @@ AgentAnnotation 在被确认前只出现在“待确认候选”区域，不参�
 - 不将 ModelPriceWatch 价格视为用户真实账单或不可复核的唯一真相。
 - 不在本设计中实现实际账单对账、订阅额度扣减或企业合同价。
 - 不增加用户可见的项目文档数量。
+- 不保存、分析或展示隐藏推理、系统提示词或开发者指令。
+- 不把每个问答单元都提升为项目演进节点。
+- 不允许自由拖拽直接改写问题层级；结构变更必须经过明确动作和 CAS 确认。
 
-## 14. 建议实施边界
+## 15. 建议实施边界
 
-实施计划先完成合同与基线 Gate 0，再分成可独立验证的四组：
+实施计划先完成合同与基线 Gate 0，再分成可独立验证的六组：
 
 0. 固定 0.3.5 v3 实施基线，落地 schema、CLI、状态机、版本矩阵和迁移夹具；
 
 1. `session-index-v1` 生成、发布、同步和只读分页查询；
-2. Obsidian 四视图顺序、全部 Sessions 列表与超长 Session 下钻；
+2. Obsidian 五视图顺序、全部 Sessions 列表与超长 Session 下钻；
 3. 决策与约定的空状态、人工新增、AI 候选与确认转换；
 4. ModelPriceWatch 目录缓存、精确匹配、价格快照和用量卡片状态。
+5. `conversation-chain-v1`、跨 Session 因果拼接和项目演进闭环摘要；
+6. 正式问题图、`problem-map-candidate-v1`、归位建议和待确认交互。
 
-四组共享 Gate 0 固定的合同与世代身份，不得在 UI 实施过程中临时改变核心 schema。每组都必须在进入下一组前通过单元测试、集成测试和针对性真实 Obsidian 验收。本文件是总设计；四组分别生成实施计划，不合并成一个难以评审和回滚的巨型计划。
+六组共享 Gate 0 固定的合同与世代身份，不得在 UI 实施过程中临时改变核心 schema。每组都必须在进入下一组前通过单元测试、集成测试和针对性真实 Obsidian 验收。本文件是总设计；六组分别使用独立实施计划，不合并成一个难以评审和回滚的巨型计划。
 
-## 15. 实施基线与版本合同
+依赖顺序固定为：扩展 Gate 0 完成后，Session 索引发布与会话因果链可以独立实施；问题脉络依赖会话因果链；“全部 Sessions”最终界面整合依赖 Session 索引和问题脉络；决策与约定依赖五 Tab shell；价格服务依赖 Session 索引，价格 UI 依赖五 Tab shell。未满足前置门禁时不得用占位数据宣称对应功能完成。
 
-### 15.1 基线
+## 16. 实施基线与版本合同
+
+### 16.1 基线
 
 项目所有者在实施前确认使用远端最新发布标签 `0.3.5`（`ea5b1ba`）的零 Token v3 架构作为唯一实现基线，以保留 0.3.1–0.3.5 的扫描、Windows 和发布恢复修复。原工作区中的回退、删除或未完成跨版本修改保留原状；实现只在隔离分支 `codex/obsidian-context-v4` 中进行，不覆盖这些既有修改。
 
@@ -372,21 +475,24 @@ Gate 0 固定以下版本边界：
 - `session-index-v1`：完整 Session 紧凑索引；
 - `session-summary-v1`：单 Session 的确定性、已脱敏详情响应；
 - `session-event-page-v1`：Observation Store 的分页读取响应；
-- `agent-annotation-v1`：私有候选决策与提炼运行状态；
+- `agent-annotation-v1`：私有候选决策、约定或里程碑结论摘要及其提炼运行状态；
 - `pricing-snapshot-v1`：不可变价格快照，作为 `machine-ledger-v4` 的受校验成员。
 - `pricing-supplement-v1`：人工补价/纠错的受限标准输入合同；服务端计算费用，不持久化调用方提交的计算结果。
+- `conversation-chain-v1`：私有、provider-neutral 的单 Session 问答单元与执行因果链，绑定 SessionView dependency digest；不写入 Vault。
+- `problem-map-candidate-v1`：私有问题归位候选与可复核规则依据；未经确认不进入 HumanPresentation。
+- `review-presentation-v4` 增加正式 `problem_nodes[]`、问题图修订和演进 `closed_loop`；继续使用两个 Markdown，不增加第三个用户可见文档。
 
-每个持久化合同必须同时提供 JSON Schema、Go 运行时校验、TypeScript 解析器、有效/无效 fixture 和规范化字节测试。新增字段不得只依赖 TypeScript 类型或 UI 判空。
+每个持久化合同必须同时提供 JSON Schema、Go 运行时校验、TypeScript 解析器、有效/无效 fixture 和规范化字节测试。新增字段不得只依赖 TypeScript 类型或 UI 判空。由于这些合同不在已完成的八组 fixture 中，原 Gate 0 本地证据不再覆盖当前完整设计；必须扩展并重跑 Gate 0，Windows 原生 CI 仍需在推送后单独验证。
 
-### 15.2 Provider 范围
+### 16.2 Provider 范围
 
 上述合同必须是 provider-neutral：`provider` 使用受限 safe ID，不在通用 schema 中写死为 `codex`。已启用的 Codex、Claude Code 和 OpenCode SourceAdapter 使用相同的 Session 索引、状态、分页和 Obsidian 表现合同；某个 provider 尚未安装或不兼容时，以来源级诊断呈现，不能让其他 provider 的 Session 消失。
 
 本设计不重新定义三种 SourceAdapter 的解码细节。若实施基线尚未包含 Claude Code 或 OpenCode Adapter，它们是对应端到端验收的前置工作，不能通过在 UI 中显示 provider 名称冒充同等支持。
 
-## 16. 持久化合同
+## 17. 持久化合同
 
-### 16.1 `session-index-v1`
+### 17.1 `session-index-v1`
 
 顶层至少包含：
 
@@ -456,7 +562,7 @@ last_successful_generation_id | null
 
 所有数组有明确最大项数，所有字符串有 UTF-8 字节上限。`state_reason_codes` 只能使用版本化枚举；用户可见说明由插件本地化，机器文件中不保存任意错误文本。
 
-### 16.2 Session 摘要
+### 17.2 Session 摘要
 
 `session-summary-v1` 不写入 Vault，由 CLI 从当前 SessionView 和其依赖生成。它包含：
 
@@ -470,7 +576,65 @@ last_successful_generation_id | null
 
 每个区块最多 32 项，每项正文最多 512 UTF-8 字节，按 `occurred_at asc, sequence asc, revision_id asc` 稳定排序。超出部分保存总数和未展示数。摘要只能使用确定性规则和受限脱敏 excerpt；不得生成原因、意图或未被事实支持的“下一步”。规则 ID、规则版本和依赖摘要进入响应，以便重现。
 
-### 16.3 文件所有权与发布
+### 17.3 会话因果链与问题图合同
+
+`conversation-chain-v1` 是私有派生记录，按 `(project_id, provider, session_id, session_view_digest)` 唯一绑定，至少包含：
+
+~~~text
+schema_version
+project_id
+provider
+session_id
+session_view_digest
+dependency_digest
+segmentation_rule_version
+coverage { source_messages, captured_messages, turn_units, unanswered_units, truncated_messages }
+turn_units[] {
+  turn_unit_id
+  ordinal
+  started_at
+  ended_at | null
+  user_message { revision_id, source_ref, occurred_at, visible_excerpt, truncated }
+  assistant_messages[] { revision_id, source_ref, occurred_at, visible_excerpt, truncated }
+  actions[] { revision_id, kind, tool_name | null, excerpt }
+  results[] { revision_id, kind, verification_state, excerpt }
+  answer_state
+}
+~~~
+
+可见用户和 Agent 摘录最多 4,096 UTF-8 字节；超限必须设置 `truncated=true`、增加 `truncated_messages` 并在 UI 明示。需要正文时，受限查询通过 `source_ref` 调用 SourceAdapter 的认证读取能力，每条最多 64 KiB，读取后只解码对应可见 user/assistant 正文并再次脱敏，不保存查询结果。工具调用和结果只保存受限脱敏 excerpt 与 revision ID，不保存原始高熵输出。链的生成完全确定性；任一输入 revision、规则版本或脱敏版本变化都必须改变 dependency digest。
+
+`review-presentation-v4.timeline[].closed_loop` 至少包含触发问题、结论表现类型、结论正文、执行摘要、验证摘要、项目影响、后续、`source_turn_refs[]` 和分段 coverage。`conclusion_kind` 固定为 `visible_answer_excerpt|human_confirmed|ai_candidate_confirmed|missing`；`missing` 时正文必须为空并提供类型化缺失原因。只有 `human_confirmed` 和 `ai_candidate_confirmed` 可表达不能从可见原文直接得出的语义。
+
+`agent-annotation-v1` 增加 `annotation_kind=decision_candidate|agreement_candidate|milestone_conclusion_candidate` 和通用的 `confirmed_entity_id|null`。里程碑结论候选必须引用目标 milestone ID、source turn dependencies 和 prompt schema version；确认时只 patch 对应 `closed_loop.conclusion` 并将 `conclusion_kind` 设为 `ai_candidate_confirmed`，不得顺带修改验证、影响、下一步或问题状态。
+
+`review-presentation-v4.problem_nodes[]` 使用 5.2 的正式节点字段。图校验必须证明：ID 唯一、父节点存在、无环、根节点集合与空父节点一致、每个相关节点存在且不自指、相关节点不超过两个、source turn refs 存在于当前或保留的 chain dependency 中、同级 `sibling_order` 唯一且稳定。
+
+`problem-map-candidate-v1` 是私有 CAS 记录，至少包含：
+
+~~~text
+candidate_id
+project_id
+question
+source_turn_refs[]
+recommended_relation = child | sibling | merge | keep_pending
+recommended_target_id | null
+alternate_target_ids[]
+related_node_ids[]
+grounds[] { rule_id, rule_version, matched_fact_refs[], explanation }
+confidence = high | medium | low
+status = pending | applied | merged | kept_pending | stale | dismissed
+dependency_digests[]
+analysis_mode = deterministic | agent_requested
+agent_run_id | null
+revision
+created_at
+updated_at
+~~~
+
+备选节点和相关节点各不超过两个。`analysis_mode=deterministic` 时 `agent_run_id` 必须为 `null`；`agent_requested` 必须引用一个受限 Agent run。相同排序 dependency digests、规则版本和问题规范化文本产生同一候选身份，重复整理不得重复调用 Agent。
+
+### 17.4 文件所有权与发布
 
 | 产物 | 权威写入方 | Project | Vault | 人工可编辑 | 发布事务 |
 |---|---|---:|---:|---:|---:|
@@ -479,18 +643,20 @@ last_successful_generation_id | null
 | `.session-reviewer/ledger.json` | 受信 CLI | 是 | 是 | 否 | 是 |
 | `.session-reviewer/session-index.json` | 扫描投影器 | 是 | 是 | 否 | 是 |
 | Observation Store | 扫描引擎 | 私有 | 否 | 否 | 扫描世代事务 |
-| AgentAnnotation Store | 决策候选服务 | 私有 | 否 | 否 | 独立 CAS |
+| Conversation Chain Store | 确定性链生成器 | 私有 | 否 | 否 | 扫描世代事务 |
+| AgentAnnotation Store | 受限语义候选服务 | 私有 | 否 | 否 | 独立 CAS |
+| Problem Map Candidate Store | 归位建议服务 | 私有 | 否 | 否 | 独立 CAS |
 | 全局价格目录缓存 | 价格服务 | 平台用户缓存 | 否 | 否 | 原子缓存刷新 |
 
 一次扫描发布的原子集合是两个 Markdown、`ledger.json` 和 `session-index.json`。journal 必须保存四者的目标哈希、预像哈希、临时文件和恢复阶段；任一写入、同步或发布后校验失败时，不能暴露混合世代。
 
 人工编辑或候选确认的发布集合是两个 Markdown 和 `ledger.json`；事务开始前必须验证 `session-index.json` 仍绑定预期 generation，但无需重写其规范字节。普通 Project/Vault sync 比较和验证全部四个文件，机器文件仍只允许 Project 权威副本单向发布。
 
-AgentAnnotation Store 和全局价格目录缓存不属于 Project/Vault 同步集合。候选确认会创建 HumanPresentation patch，随后才通过正常发布事务进入 Markdown 和 ledger。价格目录只是输入缓存；一旦价格被接受，`pricing-snapshot-v1` 作为 `machine-ledger-v4.pricing_snapshots[]` 成员随机器账本发布，之后不依赖缓存继续存在。
+Conversation Chain Store、AgentAnnotation Store、Problem Map Candidate Store 和全局价格目录缓存不属于 Project/Vault 同步集合。问题归位、决策候选或里程碑结论候选确认会创建 HumanPresentation patch，随后才通过正常发布事务进入 Markdown 和 ledger。价格目录只是输入缓存；一旦价格被接受，`pricing-snapshot-v1` 作为 `machine-ledger-v4.pricing_snapshots[]` 成员随机器账本发布，之后不依赖缓存继续存在。
 
-## 17. 状态机与 CLI 合同
+## 18. 状态机与 CLI 合同
 
-### 17.1 Session 状态机
+### 18.1 Session 状态机
 
 ~~~text
 discovered/unprocessed
@@ -503,7 +669,7 @@ source_available ⇄ source_unavailable
 
 处理状态是某个世代的结果，不在同一世代原地回退；重扫产生新世代。来源可用性可以在保留旧处理结果的前提下变化。失败或取消且未成功发布的扫描不改变当前有效索引。
 
-### 17.2 决策候选状态机
+### 18.2 决策候选状态机
 
 候选状态固定为：
 
@@ -516,7 +682,7 @@ ignored ────────────→ stale
 ~~~
 
 - `confirmed`、`not_decision` 和 `stale` 是该候选修订的终态；
-- 确认后创建新的 HumanPresentation 决策，候选只保存其 `confirmed_decision_id`，不再参与正式展示优先级；
+- 确认后创建或 patch 对应 HumanPresentation 实体，候选只保存通用 `confirmed_entity_id`，不再参与正式展示优先级；决策/约定候选创建新条目，里程碑结论候选只能修改目标闭环的结论字段；
 - 对正式决策的后续修改创建 HumanPresentation 新修订，不回写候选正文；
 - `ignored` 默认隐藏但允许用户恢复；
 - `not_decision` 持久保留，阻止相同提炼运行再次提出同一候选；
@@ -545,7 +711,29 @@ revision
 
 替代关系必须无环；`status=superseded` 时至少存在一个后继条目直接引用该条目，后继自身可以在以后继续被替代。迁移无法恢复的新增字段使用空值、空数组或 `false`，并保留 `provenance=migrated`，不得推断理由或关系。
 
-### 17.3 只读 CLI
+### 18.3 问题节点与归位候选状态机
+
+正式问题节点的两个状态维度正交：
+
+~~~text
+workflow_state: not_started ⇄ in_progress ⇄ paused → resolved
+answer_state:   no_answer → answered_unverified → execution_verified
+~~~
+
+重新打开已解决问题需要显式人工操作并创建新修订；新的执行证据可以提升 `answer_state`，但不得自动设置 `workflow_state=resolved`。归位候选状态固定为：
+
+~~~text
+pending ─→ applied
+   ├─────→ merged
+   ├─────→ kept_pending ─→ pending
+   ├─────→ dismissed
+   └─────→ stale
+kept_pending ───────────→ stale
+~~~
+
+`applied` 表示已按 child 或 sibling 关系写入正式图；`merged` 必须把候选的全部 source turn refs 并入目标节点；`stale` 表示任一依赖、目标节点修订或规则版本变化。任何应用、移动、合并或排序操作都验证 presentation 预像、问题图修订和候选修订，失败时不产生部分写入。
+
+### 18.4 只读 CLI
 
 插件只允许以 `shell=false` 和固定参数数组调用以下只读合同：
 
@@ -566,6 +754,18 @@ session-reviewer inspect session-search
   [--cursor <opaque>] --limit <1..100> --json
 
 session-reviewer decisions candidates list
+  --project-id <id> [--status <enum>] --json
+
+session-reviewer evolution summary-candidates list
+  --project-id <id> --milestone-id <id> [--status <enum>] --json
+
+session-reviewer inspect conversation-chain
+  --project-id <id> --provider <id> --session-id <id>
+  --expected-generation-id <id>
+  [--turn-unit-id <id>] [--message-cursor <opaque>]
+  --limit <1..64> --json
+
+session-reviewer problems candidates list
   --project-id <id> [--status <enum>] --json
 ~~~
 
@@ -595,7 +795,9 @@ coverage
 
 事件项只包含类型化字段、有限脱敏 excerpt、revision ID、sequence 和 occurred_at。CLI 不返回原始系统/开发者指令、隐藏推理、令牌、绝对路径或未脱敏工具输出。cursor 最大长度、响应最大字节数和执行超时必须进入合同测试。
 
-### 17.4 写入与异步 CLI
+`conversation-chain` 默认返回问答单元索引和有限摘录；指定 `--turn-unit-id` 后按需从认证 source refs 读取该单元的可见人类/Agent 正文、动作和结果。`--message-cursor` 只用于同一问答单元的后续可见消息，绑定 project、provider、session、generation、turn unit、脱敏版本和 limit；绑定不符返回 `stale_cursor`。每条源读取仍受 64 KiB 上限和总响应上限约束，超限必须返回 coverage。即使私有源包含其他角色，该命令也只能返回 user/assistant 可见正文和受限工具摘要。
+
+### 18.5 写入与异步 CLI
 
 写操作固定为：
 
@@ -622,13 +824,39 @@ session-reviewer pricing supplement
   --project-id <id> --provider <id> --session-id <id>
   --usage-record-digest <digest>
   --expected-ledger-sha256 <digest> --json
+
+session-reviewer evolution summarize
+  --project-id <id> --milestone-id <id>
+  --expected-generation-id <id> --json
+
+session-reviewer evolution summary-candidate transition
+  --project-id <id> --milestone-id <id> --candidate-id <id>
+  --expected-candidate-revision <n> --expected-review-sha256 <digest>
+  --action <confirm|ignore|restore> --json
+
+session-reviewer problems candidate transition
+  --project-id <id> --candidate-id <id>
+  --expected-candidate-revision <n> --expected-problem-map-revision <n>
+  --expected-review-sha256 <digest>
+  --action <apply_child|apply_sibling|merge|keep_pending|dismiss|restore>
+  [--target-problem-id <id>] --json
+
+session-reviewer problems move
+  --project-id <id> --problem-id <id> --new-parent-id <id|root>
+  --expected-problem-map-revision <n> --expected-review-sha256 <digest> --json
+
+session-reviewer problems reorder
+  --project-id <id> --parent-id <id|root>
+  --expected-problem-map-revision <n> --expected-review-sha256 <digest> --json
 ~~~
 
 `create`、带编辑内容的 `confirm` 和 `pricing supplement` 从标准输入读取最大 64 KiB 的版本化 JSON，不接受用户指定文件路径。补价输入使用 `pricing-supplement-v1`，必须完整声明计费路由、适用时间、可空费率、来源 URL、审计理由，以及可选的 `supersedes_snapshot_id`；服务端重新计算 billable quantities、line costs、subtotal 和 total，拒绝插件直接提交计算结果。`extract` 使用 SessionReviewer 已配置并验证的 proposal-only Agent，不接受 Markdown、候选正文或插件传入的任意可执行文件；它返回 job ID，状态查询复用现有受限异步任务模式。
 
 所有写命令在修改前重新验证 project、generation、candidate revision 和 review 预像。CAS 失败返回当前摘要和类型化错误，不覆盖较新的扫描或人工编辑。任何候选或价格失败都不得推进扫描 generation。
 
-### 17.5 价格状态机与快照
+`problems reorder` 从标准输入读取该父节点下每个直接子节点 ID 恰好一次的完整有序数组；缺失、重复、外来节点或并非直接子节点均拒绝。`problems move` 在应用前返回旧路径、新路径和受影响子树摘要供插件确认；服务端重新验证无环和 related-node 上限。界面不得用自由拖拽绕过这些命令。
+
+### 18.6 价格状态机与快照
 
 价格解析状态固定为：
 
@@ -683,7 +911,7 @@ audit_reason
 
 目录刷新不修改快照。补价或纠错创建新快照，并通过 `supersedes_snapshot_id` 指向旧快照；聚合只选择每条用量的最新有效快照，但审计视图可以查看完整链。ModelPriceWatch、官方来源和人工补充的优先级不覆盖适用条件检查：任何条件不明都先进入 `pending` 或 `ambiguous`。
 
-## 18. 兼容与迁移矩阵
+## 19. 兼容与迁移矩阵
 
 | 项目数据 | CLI | 插件 | 行为 |
 |---|---|---|---|
@@ -718,5 +946,8 @@ dry-run 返回版本化迁移预览、将保留或补默认值的语义单元、
 5. 旧价格保留为迁移快照，无法证明来源或日期时标为 `legacy_unverified`，不重算；
 6. 迁移备份和 journal 遵循既有私有路径、原子替换和恢复规则；
 7. 迁移后连续两次 render、sync 和重启不得产生字节、哈希或 revision 漂移。
+8. dry-run 分别列出自动 `user_request` 节点中升级为里程碑、转入问题脉络、保留人工编辑和无法归类的稳定 ID；确认迁移后才移除旧占位文案。
+9. 迁移建立的正式问题节点不推断父子关系；只有明确旧层级或人工确认关系可以进入主树，其余进入待归类候选。
+10. `conversation-chain-v1` 从当前 SessionView dependencies 重建，不把旧 Markdown 的摘要反向当成 Agent 原文。
 
-Gate 0 完成标准是：上述所有 schema、状态枚举、CLI allowlist、兼容 fixture 和失败码均已固定并通过合同测试。只有此后才能进入四个功能实施计划。
+Gate 0 完成标准是：上述所有 schema、状态枚举、CLI allowlist、兼容 fixture 和失败码均已固定并通过合同测试。原八组 fixture 的本地通过记录仍是历史证据，但不能覆盖新增合同；扩展 Gate 0 和 Windows 原生 CI 通过后，才能进入六个功能实施计划。

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Prerequisites: Gate 0 and Session index publication are complete. Obsidian usage work can follow after the four-tab shell exists.
+- Prerequisites: reopened Gate 0 and Session index publication are complete. Obsidian usage work follows after the five-tab shell exists.
 - Verified live API shapes on 2026-09-04: `models.json` is `{count, updated, data: Listing[]}` and includes `id`, `provider`, `model`, nullable price fields, `promo`, `promo_until`, `price_note`, `pricing_url`, `last_updated`, and `detail_url`; `price-history.json` is `{count, updated, data: {listingID: {model, provider, history[]}}}`. Treat this as an adapter version, not a perpetual guarantee.
 - Endpoints are fixed HTTPS URLs: `https://modelpricewatch.com/api/v1/models.json` and `https://modelpricewatch.com/api/v1/price-history.json`. Redirects may remain only on the same origin and must end at HTTPS.
 - Each response has a 128 MiB download and parse ceiling, must have successful status, JSON content type, supported schema, unique fields, and complete EOF.

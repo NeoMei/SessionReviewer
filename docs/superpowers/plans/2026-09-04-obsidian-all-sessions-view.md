@@ -12,8 +12,8 @@
 
 ## Global Constraints
 
-- Prerequisites: Gate 0 and `2026-09-04-session-index-publication-query.md` are complete.
-- Tab order and labels are exactly `项目演进`, `决策与约定`, `全部 Sessions`, `用量`.
+- Prerequisites: reopened Gate 0, `2026-09-04-conversation-chain-evolution-closure.md`, `2026-09-04-problem-map-placement.md`, and `2026-09-04-session-index-publication-query.md` are complete.
+- Tab order and labels are exactly `项目演进`, `问题脉络`, `决策与约定`, `全部 Sessions`, `用量`.
 - The index list is complete. Virtualization changes DOM node count only; it never slices the data model or hides total/current-range counts.
 - Without a verified CLI, date/provider/processing/source-availability filters and the full index still work. Only summary, deep events, and branch/file/error searches are disabled, with one recovery action.
 - CLI calls use `execFile` with `shell:false`, absolute executable, fixed arrays, 10-second timeout, and bounded stdout/stderr. No user string becomes a path or executable.
@@ -26,7 +26,7 @@
 - `obsidian-plugin/src/data/repository.ts`: four-file snapshot loading, hash/generation validation, watchers.
 - `obsidian-plugin/src/cli/runner.ts`: fixed inspect methods and strict response parsing.
 - `obsidian-plugin/src/state/store.ts`: persisted filter/selection/page state, no event payload cache.
-- `obsidian-plugin/src/view/render-shell.ts`: four-tab navigation.
+- `obsidian-plugin/src/view/render-shell.ts`: five-tab navigation.
 - `obsidian-plugin/src/view/render-sessions.ts`: coverage, filters, list, detail, paging and recovery states.
 - `obsidian-plugin/src/view/virtual-list.ts`: bounded DOM window over a complete array.
 
@@ -134,7 +134,7 @@ export interface SessionFilter {
   startedTo?: string;
 }
 export interface ViewState {
-  view: "evolution"|"decisions"|"sessions"|"usage";
+  view: "evolution"|"problems"|"decisions"|"sessions"|"usage";
   selectedSession?: SessionIdentity;
   sessionFilter: SessionFilter;
   sessionOrdinal: number;
@@ -159,30 +159,31 @@ export function sameSession(left?: SessionIdentity, right?: SessionIdentity): bo
   return left !== undefined && right !== undefined && left.provider === right.provider && left.sessionId === right.sessionId;
 }
 ```
-- [ ] **Step 4: Change shell tabs to the exact four-item order** with ArrowLeft/Right/Home/End keyboard behavior and `sessions` panel dispatch.
+- [ ] **Step 4: Preserve the exact five-item shell order** with ArrowLeft/Right/Home/End keyboard behavior and add `sessions` panel dispatch without changing the existing problem view state.
 - [ ] **Step 5: Run `npm run check` and commit when authorized** with message `feat: model complete session navigation state`.
 
 ---
 
-### Task 4: Preserve readable Project Evolution progressive disclosure
+### Task 4: Preserve the existing Problem and Evolution views while adding Sessions
 
 **Files:**
 - Modify: `obsidian-plugin/src/view/render-evolution.ts`
+- Modify: `obsidian-plugin/src/view/render-problems.ts`
 - Modify: `obsidian-plugin/src/view/render-shell.ts`
 - Modify: `obsidian-plugin/tests/large-history.test.ts`, `view.test.ts`
-- Modify: `internal/presentation/project.go`, `project_test.go`
 
-- [ ] **Step 1: Write RED projection tests** proving deterministic machine evidence creates only neutral milestones (verification, commit, release, rollback, major error) and never invents reason, meaning, direction, or next action.
+- [ ] **Step 1: Write RED regression tests** proving Session state changes do not reset the selected problem path, collapse the problem tree, change an expanded evolution closure, or alter the five-tab keyboard order.
 
-```go
-func TestProjectDoesNotPromoteAtomicFactsOrInventMeaning(t *testing.T) {
-    output := projectFromFacts(t, 40, withNoHumanSemantics())
-    if len(output.Events) >= 40 { t.Fatalf("atomic facts leaked as milestones: %d", len(output.Events)) }
-    for _, event := range output.Events { if event.Why != "" || event.Next != "" { t.Fatalf("invented semantics: %+v", event) } }
-}
+```ts
+it("keeps problem and evolution state when opening Sessions", () => {
+  const before = state({ selectedProblemId: "p-2", selectedEventId: "m-3" });
+  const after = reduceView(before, { type: "select-view", view: "sessions" });
+  expect(after.selectedProblemId).toBe("p-2");
+  expect(after.selectedEventId).toBe("m-3");
+});
 ```
 
-- [ ] **Step 2: Write RED UI tests** for recent mode showing milestone total plus omitted count, “查看全部”, complete search/virtual list mode, and distinct `机器验证`/`人工确认` source labels.
+- [ ] **Step 2: Write RED UI tests** for recent milestone total, “查看全部”, closure answer expansion, problem tree depth and source links before and after a Sessions repository refresh.
 
 ```ts
 it("shows the milestone total when recent mode is compact", () => {
@@ -192,16 +193,20 @@ it("shows the milestone total when recent mode is compact", () => {
 });
 ```
 
-- [ ] **Step 3: Run RED:** `go test ./internal/presentation -run Milestone -count=1 && (cd obsidian-plugin && npm test -- large-history.test.ts view.test.ts)`.
-- [ ] **Step 4: Implement typed milestone selection and explicit totals.** Remove atomic event-ID lists from human Markdown and browser cards; keep evidence identity behind the Session query surface.
+- [ ] **Step 3: Run RED:** `cd obsidian-plugin && npm test -- large-history.test.ts view.test.ts`; expect state loss or missing Sessions dispatch before the integration change.
+- [ ] **Step 4: Add Sessions state without replacing existing view subtrees.** Keep selection keys by stable IDs, dispatch each of the five panels independently and update only the active panel on Session paging.
 
 ```ts
-const visibleMilestones = state.fullHistory ? filteredMilestones : filteredMilestones.slice(0, RECENT_MILESTONE_LIMIT);
-heading.append(element("span", { text: `共 ${filteredMilestones.length} 个里程碑` }));
-if (!state.fullHistory && visibleMilestones.length < filteredMilestones.length) heading.append(showAllButton(update));
+const renderers: Record<ViewKind, () => HTMLElement> = {
+  evolution: () => renderEvolution(model, state, update, actions),
+  problems: () => renderProblems(model, state, actions),
+  decisions: () => renderDecisions(model, state, actions),
+  sessions: () => renderSessions(model, state, actions),
+  usage: () => renderUsage(model, state)
+};
 ```
 
-- [ ] **Step 5: Run Go/plugin full gates and commit when authorized** with message `feat: keep project evolution complete and readable`.
+- [ ] **Step 5: Run `npm run check` and commit when authorized** with message `feat: integrate complete session navigation`.
 
 ---
 

@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Prerequisites: Gate 0, Session index/query, and Obsidian four-tab shell are complete.
+- Prerequisites: reopened Gate 0, Session index/query, and the Obsidian five-tab shell are complete.
 - Formal decisions originate only from `human_created`, `migrated`, or `ai_candidate_confirmed` provenance.
 - Extraction failure, cancellation, invalid output, or candidate CAS conflict never changes the scan generation or extraction watermark.
 - Candidates cite `(provider, session_id, session_view_digest, revision_id)` dependencies and contain no unverifiable confidence score.
@@ -20,6 +20,7 @@
 - Decision supersession is acyclic. No physical delete is exposed; archive/supersede creates a new revision.
 - Write commands read at most 64 KiB versioned JSON from stdin, validate review SHA and expected revision, and accept no caller-supplied file path.
 - Human publication verifies `session-index.json` generation/digest but keeps its bytes unchanged.
+- Decision commands and UI filter `annotation_kind` to `decision_candidate|agreement_candidate`; they never list, confirm, ignore or stale a `milestone_conclusion_candidate` through the decision workflow.
 
 ## File Structure and Ownership
 
@@ -82,11 +83,11 @@ func ValidateDecisionSet(values []Decision) error {
 
 ---
 
-### Task 2: Implement private AgentAnnotation CAS storage
+### Task 2: Extend private AgentAnnotation CAS storage for decisions
 
 **Files:**
-- Create: `internal/annotation/store.go`, `store_test.go`
-- Create: `internal/annotation/paths.go`, `paths_test.go`
+- Modify: `internal/annotation/store.go`, `store_test.go`
+- Modify: `internal/annotation/paths.go`, `paths_test.go`
 - Modify: `internal/atomicfile/` only if a missing reusable lock primitive is proven
 
 **Interfaces:**
@@ -98,13 +99,13 @@ type Store interface {
 }
 type ProjectState struct {
     SchemaVersion, Revision int
-    Candidates []CandidateRevision
+    Annotations []AnnotationRevision
     Runs []ExtractionRun
-    LastSuccessfulExtractionDependencies []string
+    LastSuccessfulDependencies map[AnnotationKind][]string
 }
 ```
 
-- [ ] **Step 1: Write RED tests** for private permissions, project ID path confinement, atomic replace, concurrent revision conflict, duplicate candidate revision, terminal-state mutation rejection, stale marking, and crash recovery.
+- [ ] **Step 1: Write RED tests** for private permissions, project ID path confinement, atomic replace, concurrent revision conflict, duplicate annotation revision, kind-specific filtering, terminal-state mutation rejection, stale marking, and crash recovery. Include an existing milestone conclusion candidate and prove decision operations leave it byte-identical.
 
 ```go
 func TestStoreCompareAndSwapRejectsStaleRevision(t *testing.T) {
@@ -261,7 +262,7 @@ it("explains an empty decision set and exposes two explicit actions", () => {
 ```
 - [ ] **Step 2: Add RED candidate interactions** for start/status/cancel, pending cards with evidence, edit-confirm, ignore, not-decision, restore, stale disabled confirmation, CAS refresh, and zero confidence display.
 - [ ] **Step 3: Run RED:** `cd obsidian-plugin && npm test -- decisions-v4-view.test.ts cli.test.ts`.
-- [ ] **Step 4: Implement full CLI methods and UI states** using fixed argv and bounded stdin. On a write success reload the four-file repository; on typed conflict show current summary and preserve unsaved form text.
+- [ ] **Step 4: Implement full CLI methods and UI states** using fixed argv and bounded stdin. On a write success reload the four-file repository; on typed conflict show current summary and preserve unsaved form text. Keep the five-tab order and problem view state unchanged.
 
 ```ts
 async function confirmCandidate(candidate: CandidateRevision, input: DecisionInput): Promise<void> {

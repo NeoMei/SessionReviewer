@@ -2,9 +2,9 @@
 
 ## 结论
 
-**LOCAL COMPLETE / WINDOWS CI PENDING**
+**SUPERSEDED BY CONTRACT EXTENSION / GATE 0 REOPENED**
 
-Gate 0 在当前 macOS 工作树的实现与合同验收均通过。由于审计提交尚未推送且没有 Pull Request，`.github/workflows/ci.yml` 中 `windows-x64` / `windows-latest` 原生执行证据尚不存在。因此本记录不宣称 Gate 0 整体完成，也不以 Windows 交叉编译代替原生 CI。
+以下记录仍证明原八组合同在当前 macOS 工作树通过，但 2026-09-04 后续确认的 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图和演进闭环扩展尚未包含在该矩阵中。Gate 0 因此重新打开；必须完成 `2026-09-04-obsidian-context-gate-0-contracts.md` Task 7 并重跑完整门禁。由于审计提交尚未推送且没有 Pull Request，`.github/workflows/ci.yml` 中 `windows-x64` / `windows-latest` 原生执行证据也仍不存在。
 
 ## 审计对象
 
