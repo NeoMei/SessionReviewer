@@ -360,6 +360,8 @@ export function parsePricingSupplementV1(source: string): PricingSupplementV1 {
 }
 
 export function assertSnapshotBindings(ledger: MachineLedgerV4, index: SessionIndexV1): void {
+  if (index.digest === ZERO_DIGEST) throw new Error("session index digest is unset");
+  if (ledger.sync_hashes.ledger_sha256 === ZERO_SHA256) throw new Error("machine ledger self hash is unset");
   if (ledger.project_id !== index.project_id || ledger.generation_id !== index.generation_id ||
     ledger.project_view_digest !== index.project_view_digest || ledger.sync_hashes.session_index_digest !== index.digest) {
     throw new Error("ledger and session index snapshot binding mismatch");
@@ -905,7 +907,7 @@ function idArray(value: unknown, path: string, maximum: number, unique = false):
 function text(value: unknown, path: string, maximum: number, nonempty = false): string {
   if (typeof value !== "string") throw new Error(`${path} must be a string`);
   if (nonempty && value.length === 0) throw new Error(`${path} must not be empty`);
-  if (Array.from(value).length > maximum) throw new Error(`${path} exceeds ${maximum} characters`);
+  if (Buffer.byteLength(value, "utf8") > maximum) throw new Error(`${path} exceeds ${maximum} UTF-8 bytes`);
   return value;
 }
 

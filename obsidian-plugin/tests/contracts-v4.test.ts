@@ -62,6 +62,19 @@ function decision(id: string, supersedes: string[], status = "active"): JsonObje
   };
 }
 
+async function nonzeroBoundSnapshots(): Promise<{
+  ledger: ReturnType<typeof parseMachineLedgerV4>;
+  index: ReturnType<typeof parseSessionIndexV1>;
+}> {
+  const indexRaw = await fixtureObject("session-index-v1.valid.json");
+  indexRaw.digest = "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565";
+  const index = parseSessionIndexV1(JSON.stringify(indexRaw));
+  const ledgerRaw = await fixtureObject("machine-ledger-v4.valid.json") as { sync_hashes: JsonObject };
+  ledgerRaw.sync_hashes.session_index_digest = index.digest;
+  ledgerRaw.sync_hashes.ledger_sha256 = "5330d4167966e653a320cb3e3582ad7c82fe568639f0b358d67124548d27f5b7";
+  return { ledger: parseMachineLedgerV4(JSON.stringify(ledgerRaw)), index };
+}
+
 describe("frozen v4 contract fixture parity", () => {
   for (const contract of contracts) {
     it(`accepts the frozen ${contract.name} valid fixture through its production parser`, async () => {
@@ -127,6 +140,30 @@ describe("strict JSON boundary", () => {
     valid.revision = Number.MAX_SAFE_INTEGER + 1;
     expect(() => parseReviewPresentationV4(JSON.stringify(valid))).toThrow(/safe integer/i);
   });
+
+  it("applies string ceilings to UTF-8 bytes for CJK and emoji", async () => {
+    const review = await fixtureObject("review-presentation-v4.valid.json") as { current_state: JsonObject };
+    review.current_state.goal = `${"界".repeat(5461)}a`;
+    expect(Buffer.byteLength(review.current_state.goal as string, "utf8")).toBe(16384);
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).not.toThrow();
+    review.current_state.goal = `${review.current_state.goal as string}界`;
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/16384|byte/i);
+
+    review.current_state.goal = "🙂".repeat(4096);
+    expect(Buffer.byteLength(review.current_state.goal as string, "utf8")).toBe(16384);
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).not.toThrow();
+    review.current_state.goal = `${review.current_state.goal as string}🙂`;
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/16384|byte/i);
+  });
+
+  it("applies pricing text ceilings to UTF-8 bytes", async () => {
+    const snapshot = await fixtureObject("pricing-snapshot-v1.valid.json");
+    snapshot.audit_reason = `${"价".repeat(1365)}a`;
+    expect(Buffer.byteLength(snapshot.audit_reason as string, "utf8")).toBe(4096);
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).not.toThrow();
+    snapshot.audit_reason = `${snapshot.audit_reason as string}价`;
+    expect(() => parsePricingSnapshotV1(JSON.stringify(snapshot))).toThrow(/4096|byte/i);
+  });
 });
 
 describe("session contracts", () => {
@@ -158,9 +195,7 @@ describe("session contracts", () => {
   });
 
   it("rejects mixed project, generation, project digest, and index digest bindings", async () => {
-    const ledger = parseMachineLedgerV4(await pluginFixture("machine-ledger-v4.valid.json"));
-    const index = parseSessionIndexV1(await pluginFixture("session-index-v1.valid.json"));
-    ledger.sync_hashes.session_index_digest = index.digest;
+    const { ledger, index } = await nonzeroBoundSnapshots();
     expect(() => assertSnapshotBindings(ledger, index)).not.toThrow();
 
     for (const field of ["project_id", "generation_id", "project_view_digest"] as const) {
@@ -171,6 +206,19 @@ describe("session contracts", () => {
     const wrongDigest = clone(index);
     wrongDigest.digest = `sha256:${"9".repeat(64)}`;
     expect(() => assertSnapshotBindings(ledger, wrongDigest)).toThrow(/mismatch|binding/i);
+  });
+
+  it("rejects placeholder digests at the accepted snapshot binding boundary", async () => {
+    const zeroLedger = parseMachineLedgerV4(await pluginFixture("machine-ledger-v4.valid.json"));
+    const zeroIndex = parseSessionIndexV1(await pluginFixture("session-index-v1.valid.json"));
+    zeroLedger.sync_hashes.session_index_digest = zeroIndex.digest;
+    expect(() => assertSnapshotBindings(zeroLedger, zeroIndex)).toThrow(/unset|zero|placeholder|digest/i);
+
+    const { ledger, index } = await nonzeroBoundSnapshots();
+    const zeroSelfHash = clone(ledger);
+    zeroSelfHash.sync_hashes.ledger_sha256 = "0".repeat(64);
+    expect(() => assertSnapshotBindings(zeroSelfHash, index)).toThrow(/unset|zero|placeholder|hash/i);
+    expect(() => assertSnapshotBindings(ledger, index)).not.toThrow();
   });
 
   it("rejects cyclic decision supersession graphs", async () => {
