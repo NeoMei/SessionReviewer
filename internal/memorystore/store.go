@@ -537,10 +537,19 @@ func (s *Store) CommitPublished(generationID string, proof memory.PublicationPro
 	if !proof.JournalVerified {
 		return fmt.Errorf("%w: journal verified proof is required", ErrPublicationProofInvalid)
 	}
+	if proof.Version != 0 && proof.Version != 4 {
+		return fmt.Errorf("%w: unsupported publication proof version", ErrPublicationProofInvalid)
+	}
 	if !sha256HexPattern.MatchString(strings.ToLower(proof.ReviewSHA256)) ||
 		!sha256HexPattern.MatchString(strings.ToLower(proof.HistorySHA256)) ||
 		!sha256HexPattern.MatchString(strings.ToLower(proof.LedgerSHA256)) {
 		return fmt.Errorf("%w: public projection file hashes are invalid", ErrPublicationProofInvalid)
+	}
+	if proof.Version == 4 && !sha256HexPattern.MatchString(strings.ToLower(proof.SessionIndexSHA256)) {
+		return fmt.Errorf("%w: v4 session index hash is required", ErrPublicationProofInvalid)
+	}
+	if proof.Version == 0 && proof.SessionIndexSHA256 != "" {
+		return fmt.Errorf("%w: legacy publication proof cannot include a session index hash", ErrPublicationProofInvalid)
 	}
 
 	return s.withStoreLock(func() error {

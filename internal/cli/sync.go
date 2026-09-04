@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -14,16 +15,20 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/publication"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
 var syncProject = syncproject.Run
+var syncMigrationProject = defaultSyncMigrationProject
 
 const syncHelp = `Synchronize editable Session Review Markdown with the configured Obsidian vault.
 
 Usage:
   session-reviewer sync [--dry-run] [--cwd PROJECT | --project-id ID] [--data-dir DATA]
+  session-reviewer sync --dry-run [--project-id ID] [--data-dir DATA] --json
+  session-reviewer sync --confirm-migration --expected-preview-digest SHA256 [--project-id ID] [--data-dir DATA] --json
   session-reviewer sync status [--json] [--cwd PROJECT | --project-id ID] [--data-dir DATA]
   session-reviewer sync resolve --conflict ID --action accept_project|accept_obsidian [--cwd PROJECT | --project-id ID] [--data-dir DATA]
   session-reviewer sync resolve --conflict ID --action manual_merge --file PATH [--cwd PROJECT | --project-id ID] [--data-dir DATA]
@@ -46,6 +51,9 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && isHelpToken(args[0]) {
 		fmt.Fprint(stdout, syncHelp)
 		return 0
+	}
+	if explicitMigrationArgs(args) {
+		return runSyncMigration(args, stdout, stderr)
 	}
 	mode := "sync"
 	if len(args) > 0 && (args[0] == "status" || args[0] == "resolve" || args[0] == "repair-machine-ledger") {
@@ -177,6 +185,80 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	default:
 		panic("unreachable sync mode")
 	}
+}
+
+func explicitMigrationArgs(args []string) bool {
+	hasDryRun, hasJSON := false, false
+	for _, arg := range args {
+		switch arg {
+		case "--confirm-migration":
+			return true
+		case "--dry-run":
+			hasDryRun = true
+		case "--json":
+			hasJSON = true
+		}
+	}
+	return hasDryRun && hasJSON
+}
+
+func runSyncMigration(args []string, stdout, stderr io.Writer) int {
+	request, err := ParseSyncMigrationContract(args)
+	if err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
+	dataDir, err := resolveSyncDataDir(request.DataDir)
+	if err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
+	mode := syncproject.MigrationDryRun
+	if request.Mode == "confirm-migration" {
+		mode = syncproject.MigrationConfirm
+	}
+	result, err := syncMigrationProject(context.Background(), syncproject.MigrationOptions{
+		Options: syncproject.Options{
+			ProjectID: request.ProjectID, DataDir: dataDir, GOOS: runtime.GOOS,
+			Now: time.Now, Trigger: syncengine.TriggerCLI,
+		},
+		Mode: mode, ExpectedPreviewDigest: request.ExpectedPreviewDigest,
+	})
+	if err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(result); err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
+	return 0
+}
+
+func defaultSyncMigrationProject(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+	options.Publish = func(ctx context.Context, plan syncproject.MigrationPublication) error {
+		_, err := publication.Publish(ctx, publication.Options{
+			ProjectID: plan.ProjectID, PreparedGeneration: plan.PreparedGeneration,
+			Plan: plan.Plan, Mapping: plan.Mapping, DataRoot: plan.DataRoot,
+			Now: options.Now,
+		})
+		return err
+	}
+	return syncproject.RunMigration(ctx, options)
+}
+
+func writeSyncMigrationError(output io.Writer, err error) int {
+	code := "migration_failed"
+	message := "migration failed"
+	var contract ContractError
+	switch {
+	case errors.As(err, &contract):
+		code, message = contract.Code, contract.Message
+	case errors.Is(err, syncproject.ErrMigrationPreviewStale):
+		code, message = ContractCodeMigrationPreviewStale, "migration preview changed"
+	case errors.Is(err, syncproject.ErrMigrationRequired):
+		code, message = "migration_required", "explicit v3 to v4 migration is required"
+	}
+	_ = json.NewEncoder(output).Encode(map[string]string{"code": code, "message": message})
+	return 1
 }
 
 func resolveSyncDataDir(dataDir string) (string, error) {

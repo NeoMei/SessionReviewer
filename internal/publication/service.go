@@ -34,7 +34,16 @@ type Options struct {
 	Mapping            config.ProjectMapping
 	DataRoot           string
 	Now                func() time.Time
+
+	checkpoint func(publishCheckpoint, string, string) error
 }
+
+type publishCheckpoint string
+
+const (
+	checkpointAfterDestination    publishCheckpoint = "after_destination"
+	checkpointBeforePointerCommit publishCheckpoint = "before_pointer_commit"
+)
 
 // VerifiedFile captures one verified file on disk after publication.
 type VerifiedFile struct {
@@ -66,6 +75,8 @@ func (e *PublicationConflictError) Error() string {
 var (
 	ErrPublicationConflict = errors.New("publication conflict")
 )
+
+const sessionIndexRelativePath = "docs/session-review/.session-reviewer/session-index.json"
 
 // Publish executes the complete durable cross-root publication workflow.
 func Publish(ctx context.Context, opts Options) (Result, error) {
@@ -240,8 +251,16 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("create journal intent: %w", err)
 	}
 
+	projectionVersion, err := planProjectionVersion(opts.Plan)
+	if err != nil {
+		return Result{}, rollbackFailure(ctx, intent, err)
+	}
+
 	// Write Project files
 	for _, file := range opts.Plan.Files {
+		if err := verifyDestinationPreimage(intent.Destinations, projectDir, "project", file.Relative); err != nil {
+			return Result{}, rollbackFailure(ctx, intent, err)
+		}
 		parentDir := filepath.ToSlash(filepath.Dir(file.Relative))
 		if parentDir != "." && parentDir != "" {
 			if err := projectDir.EnsureDirectory(parentDir, 0o755); err != nil {
@@ -251,25 +270,109 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		if err := atomicfile.WriteRoot(projectDir.Root, file.Relative, file.Desired, file.Mode); err != nil {
 			return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("write project file %q: %w", file.Relative, err))
 		}
+		if err := runPublishCheckpoint(opts, checkpointAfterDestination, "project", file.Relative); err != nil {
+			return Result{}, rollbackFailure(ctx, intent, err)
+		}
 	}
 	if err := j.Advance(StagePrepared, StageProjectWritten); err != nil {
 		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 
-	// Ensure sync scaffold directories and lock
+	if projectionVersion == 3 {
+		if err := publishLegacyV3(ctx, opts, intent, rollbackFailure, now); err != nil {
+			return Result{}, err
+		}
+	} else {
+		for _, file := range opts.Plan.Files {
+			vaultRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, file.Relative)
+			if err := verifyDestinationPreimage(intent.Destinations, vaultDir, "vault", vaultRelative); err != nil {
+				return Result{}, rollbackFailure(ctx, intent, err)
+			}
+			parentDir := filepath.ToSlash(filepath.Dir(vaultRelative))
+			if parentDir != "." && parentDir != "" {
+				if err := vaultDir.EnsureDirectory(parentDir, 0o755); err != nil {
+					return Result{}, rollbackFailure(ctx, intent, err)
+				}
+			}
+			if err := atomicfile.WriteRoot(vaultDir.Root, vaultRelative, file.Desired, file.Mode); err != nil {
+				return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("write Vault file %q: %w", vaultRelative, err))
+			}
+			if err := runPublishCheckpoint(opts, checkpointAfterDestination, "vault", vaultRelative); err != nil {
+				return Result{}, rollbackFailure(ctx, intent, err)
+			}
+		}
+	}
+	if err := j.Advance(StageProjectWritten, StageVaultSynced); err != nil {
+		return Result{}, rollbackFailure(ctx, intent, err)
+	}
+
+	// Verify every Project and Vault target before the pointer is committed.
+	projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
+	if err != nil {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("verify published files: %w", err))
+	}
+
+	if err := j.Advance(StageVaultSynced, StageVerified); err != nil {
+		return Result{}, rollbackFailure(ctx, intent, err)
+	}
+
+	// Extract hashes for proof
+	var reviewSHA, historySHA, ledgerSHA, sessionIndexSHA string
+	for _, f := range projFiles {
+		switch f.Relative {
+		case reviewv2.ReviewRelativePath:
+			reviewSHA = f.SHA256
+		case reviewv2.HistoryRelativePath:
+			historySHA = f.SHA256
+		case reviewv2.MachineLedgerRelativePath:
+			ledgerSHA = f.SHA256
+		case sessionIndexRelativePath:
+			sessionIndexSHA = f.SHA256
+		}
+	}
+
+	proof := PublicationProof{
+		ProjectID:         opts.ProjectID,
+		GenerationID:      opts.PreparedGeneration,
+		ManifestDigest:    prepared.ManifestDigest,
+		ProjectViewDigest: manifest.ProjectViewDigest,
+		ReviewSHA256:      reviewSHA,
+		HistorySHA256:     historySHA,
+		LedgerSHA256:      ledgerSHA,
+		JournalVerified:   true,
+	}
+	if projectionVersion == 4 {
+		proof.Version = 4
+		proof.SessionIndexSHA256 = sessionIndexSHA
+	}
+	if err := runPublishCheckpoint(opts, checkpointBeforePointerCommit, "", ""); err != nil {
+		return Result{}, rollbackFailure(ctx, intent, err)
+	}
+	if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
+		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
+	}
+	if err := j.Advance(StageVerified, StageCommitted); err != nil {
+		return Result{}, err
+	}
+
+	return Result{GenerationID: opts.PreparedGeneration, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
+}
+
+func publishLegacyV3(ctx context.Context, opts Options, intent Intent, rollbackFailure func(context.Context, Intent, error) error, now func() time.Time) error {
+	// Ensure sync scaffold directories and lock.
 	syncDataDir := filepath.Join(opts.DataRoot, "projects", opts.ProjectID)
 	syncDataRoot, err := pathguard.Open(syncDataDir)
 	if err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("open project sync data root: %w", err))
+		return rollbackFailure(ctx, intent, fmt.Errorf("open project sync data root: %w", err))
 	}
 	for _, name := range []string{"merge-bases", "queue", "transactions", "locks"} {
 		if err := syncDataRoot.EnsureDirectory(name, 0o700); err != nil {
 			closeErr := syncDataRoot.Close()
-			return Result{}, rollbackFailure(ctx, intent, errors.Join(fmt.Errorf("ensure sync directory %q: %w", name, err), closeErr))
+			return rollbackFailure(ctx, intent, errors.Join(fmt.Errorf("ensure sync directory %q: %w", name, err), closeErr))
 		}
 	}
 	if err := syncDataRoot.Close(); err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("close project sync data root: %w", err))
+		return rollbackFailure(ctx, intent, fmt.Errorf("close project sync data root: %w", err))
 	}
 
 	trustTransition := func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error) {
@@ -305,6 +408,7 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 		Now:                    now,
 		Trigger:                "cli",
 		RepairMachineLedger:    true,
+		AllowV3Publication:     true,
 		TrustAppliedTransition: trustTransition,
 	}
 	preflightOpts := syncOpts
@@ -314,10 +418,10 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 	// that the actual repair remains exclusive to the real pass below.
 	preflight, err := syncproject.Run(ctx, preflightOpts)
 	if err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("sync to vault preflight: %w", err))
+		return rollbackFailure(ctx, intent, fmt.Errorf("sync to vault preflight: %w", err))
 	}
 	if !syncReportReadyToApply(preflight) {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf(
+		return rollbackFailure(ctx, intent, fmt.Errorf(
 			"sync to vault preflight did not converge: conflicts=%d issues=%d errors=%d error_codes=%s queue_depth=%d derived=%s migration_required=%t machine=%s",
 			len(preflight.Conflicts), len(preflight.Issues), len(preflight.Errors), syncErrorSummary(preflight.Errors), preflight.QueueDepth,
 			preflight.Derived.State, preflight.Migration.Required, preflight.Machine.State,
@@ -325,60 +429,16 @@ func Publish(ctx context.Context, opts Options) (Result, error) {
 	}
 	rep, err := syncproject.Run(ctx, syncOpts)
 	if err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("sync to vault: %w", err))
+		return rollbackFailure(ctx, intent, fmt.Errorf("sync to vault: %w", err))
 	}
 	if !syncReportConverged(rep) {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf(
+		return rollbackFailure(ctx, intent, fmt.Errorf(
 			"sync to vault did not converge: conflicts=%d issues=%d errors=%d error_codes=%s queue_depth=%d derived=%s migration_required=%t machine=%s",
 			len(rep.Conflicts), len(rep.Issues), len(rep.Errors), syncErrorSummary(rep.Errors), rep.QueueDepth,
 			rep.Derived.State, rep.Migration.Required, rep.Machine.State,
 		))
 	}
-	if err := j.Advance(StageProjectWritten, StageVaultSynced); err != nil {
-		return Result{}, rollbackFailure(ctx, intent, err)
-	}
-
-	// Verify all 3 Project files and 3 Vault files match schema 3 and desired hashes
-	projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
-	if err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("verify published files: %w", err))
-	}
-
-	if err := j.Advance(StageVaultSynced, StageVerified); err != nil {
-		return Result{}, rollbackFailure(ctx, intent, err)
-	}
-
-	// Extract hashes for proof
-	var reviewSHA, historySHA, ledgerSHA string
-	for _, f := range projFiles {
-		switch f.Relative {
-		case reviewv2.ReviewRelativePath:
-			reviewSHA = f.SHA256
-		case reviewv2.HistoryRelativePath:
-			historySHA = f.SHA256
-		case reviewv2.MachineLedgerRelativePath:
-			ledgerSHA = f.SHA256
-		}
-	}
-
-	proof := PublicationProof{
-		ProjectID:         opts.ProjectID,
-		GenerationID:      opts.PreparedGeneration,
-		ManifestDigest:    prepared.ManifestDigest,
-		ProjectViewDigest: manifest.ProjectViewDigest,
-		ReviewSHA256:      reviewSHA,
-		HistorySHA256:     historySHA,
-		LedgerSHA256:      ledgerSHA,
-		JournalVerified:   true,
-	}
-	if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
-	}
-	if err := j.Advance(StageVerified, StageCommitted); err != nil {
-		return Result{}, err
-	}
-
-	return Result{GenerationID: opts.PreparedGeneration, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
+	return nil
 }
 
 func syncErrorSummary(entityErrors []syncengine.EntityError) string {
@@ -390,6 +450,50 @@ func syncErrorSummary(entityErrors []syncengine.EntityError) string {
 		values = append(values, entityError.EntityID+":"+entityError.Code)
 	}
 	return strings.Join(values, ",")
+}
+
+func runPublishCheckpoint(opts Options, stage publishCheckpoint, side, relative string) error {
+	if opts.checkpoint == nil {
+		return nil
+	}
+	return opts.checkpoint(stage, side, relative)
+}
+
+func planProjectionVersion(plan presentation.RenderPlan) (int, error) {
+	required := map[string]bool{
+		reviewv2.ReviewRelativePath:        false,
+		reviewv2.HistoryRelativePath:       false,
+		reviewv2.MachineLedgerRelativePath: false,
+	}
+	hasIndex := false
+	seen := make(map[string]bool, len(plan.Files))
+	for _, file := range plan.Files {
+		if file.Relative == "" || seen[file.Relative] {
+			return 0, errors.New("publication plan contains an empty or duplicate destination")
+		}
+		seen[file.Relative] = true
+		if _, ok := required[file.Relative]; ok {
+			required[file.Relative] = true
+		}
+		if file.Relative == sessionIndexRelativePath {
+			hasIndex = true
+		}
+	}
+	for relative, found := range required {
+		if !found {
+			return 0, fmt.Errorf("publication plan is missing required file %q", relative)
+		}
+	}
+	if hasIndex {
+		if len(plan.Files) != 4 {
+			return 0, errors.New("v4 publication plan must contain exactly four files")
+		}
+		return 4, nil
+	}
+	if len(plan.Files) != 3 {
+		return 0, errors.New("legacy v3 publication plan must contain exactly three files")
+	}
+	return 3, nil
 }
 
 func syncReportReadyToApply(report syncengine.Report) bool {
@@ -558,6 +662,13 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 // Vault bytes must both equal the immutable journal preimage, while the current
 // Base must equal that same journal intent's desired bytes.
 func repairRolledBackBases(intent Intent, j *Journal, opts Options, projectDir, vaultDir *pathguard.Directory, now func() time.Time) error {
+	// Four-file v4 publication never uses the legacy sync merge-base store.
+	// Its generic Intent preimages are the complete recovery authority.
+	for _, destination := range intent.Destinations {
+		if destination.Side == "project" && destination.Relative == sessionIndexRelativePath {
+			return nil
+		}
+	}
 	if now == nil {
 		now = time.Now
 	}
@@ -659,16 +770,31 @@ func repairRolledBackBases(intent Intent, j *Journal, opts Options, projectDir, 
 }
 
 func vaultRelativePath(vaultReviewPath, projectRelative string) string {
-	switch projectRelative {
-	case reviewv2.ReviewRelativePath:
-		return path.Join(vaultReviewPath, path.Base(reviewv2.ReviewRelativePath))
-	case reviewv2.HistoryRelativePath:
-		return path.Join(vaultReviewPath, path.Base(reviewv2.HistoryRelativePath))
-	case reviewv2.MachineLedgerRelativePath:
-		return path.Join(vaultReviewPath, ".session-reviewer/ledger.json")
-	default:
-		return path.Join(vaultReviewPath, projectRelative)
+	if relative, ok := strings.CutPrefix(projectRelative, "docs/session-review/"); ok {
+		return path.Join(vaultReviewPath, relative)
 	}
+	return path.Join(vaultReviewPath, projectRelative)
+}
+
+func verifyDestinationPreimage(destinations []Destination, directory *pathguard.Directory, side, relative string) error {
+	for _, destination := range destinations {
+		if destination.Side != side || destination.Relative != relative {
+			continue
+		}
+		body, found, err := directory.ReadRegularOptional(relative, 64<<20)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		actual := "missing"
+		if found {
+			actual = sha256Hex(body)
+		}
+		if found != destination.PreimageExists || (found && !strings.EqualFold(actual, destination.PreimageSHA256)) {
+			return fmt.Errorf("%w: %w", ErrPublicationConflict, &PublicationConflictError{Side: side, Relative: relative, Expected: destination.PreimageSHA256, Actual: actual})
+		}
+		return nil
+	}
+	return errors.New("publication destination is missing from intent")
 }
 
 func sha256Hex(data []byte) string {

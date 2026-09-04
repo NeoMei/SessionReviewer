@@ -1,0 +1,7 @@
+{
+  "case": "v3",
+  "source_version": 3,
+  "target_version": 4,
+  "ordinary_sync_error": "migration_required",
+  "confirmation_required": true
+}

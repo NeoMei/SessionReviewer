@@ -1331,12 +1331,14 @@ func validTerminalAvailability(state TerminalState, availability SourceAvailabil
 
 // PublicationProof verifies that all public projections match before committing.
 type PublicationProof struct {
-	ProjectID         string `json:"project_id"`
-	GenerationID      string `json:"generation_id"`
-	ManifestDigest    string `json:"manifest_digest"`
-	ProjectViewDigest string `json:"project_view_digest"`
-	ReviewSHA256      string `json:"review_sha256"`
-	HistorySHA256     string `json:"history_sha256"`
-	LedgerSHA256      string `json:"ledger_sha256"`
-	JournalVerified   bool   `json:"journal_verified"`
+	ProjectID          string `json:"project_id"`
+	GenerationID       string `json:"generation_id"`
+	ManifestDigest     string `json:"manifest_digest"`
+	ProjectViewDigest  string `json:"project_view_digest"`
+	ReviewSHA256       string `json:"review_sha256"`
+	HistorySHA256      string `json:"history_sha256"`
+	LedgerSHA256       string `json:"ledger_sha256"`
+	JournalVerified    bool   `json:"journal_verified"`
+	Version            int    `json:"version,omitempty"`
+	SessionIndexSHA256 string `json:"session_index_sha256,omitempty"`
 }

@@ -1,0 +1,6 @@
+{
+  "case": "partial",
+  "present": ["review", "history", "ledger"],
+  "missing": "session_index",
+  "expected": "reject"
+}

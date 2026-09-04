@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -309,6 +311,225 @@ func TestPublishCleanRunSucceeds(t *testing.T) {
 	}
 	if result2.GenerationID != manifest.GenerationID {
 		t.Fatalf("second publish generation mismatch")
+	}
+}
+
+func TestPublishFourFilePlanVerifiesSessionIndexBeforePointerCommit(t *testing.T) {
+	projectID := "project-four-file"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
+	// A v4 review is JSON, not a syncdoc Markdown document. If the generic
+	// four-file path accidentally delegates to the legacy sync engine this
+	// publication fails before the Vault files can be verified.
+	plan.Files[0].Desired = []byte("{\"schema_version\":4}\n")
+	indexBody := []byte("{\"schema_version\":1}\n")
+	plan.Files = append(plan.Files, presentation.FilePlan{
+		Relative: "docs/session-review/.session-reviewer/session-index.json", Desired: indexBody, Mode: 0o600,
+	})
+	result, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ProjectFiles) != 4 || len(result.VaultFiles) != 4 {
+		t.Fatalf("verified files = %d/%d", len(result.ProjectFiles), len(result.VaultFiles))
+	}
+	for _, target := range []string{
+		filepath.Join(projectRoot, filepath.FromSlash("docs/session-review/.session-reviewer/session-index.json")),
+		filepath.Join(vaultRoot, filepath.FromSlash(mapping.VaultReviewPath), ".session-reviewer", "session-index.json"),
+	} {
+		got, err := os.ReadFile(target)
+		if err != nil || !bytes.Equal(got, indexBody) {
+			t.Fatalf("session index at %s = %q, %v", target, got, err)
+		}
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if published, _, err := store.LoadPublished(); err != nil || published != manifest.GenerationID {
+		t.Fatalf("published pointer = %q, %v", published, err)
+	}
+}
+
+// Moving the published-generation commit above complete destination
+// verification makes this test expose a new generation while the public atom
+// has already been rolled back to its old preimages.
+func TestPublishFourFilePlanCommitsPointerLast(t *testing.T) {
+	projectID := "project-pointer-last"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
+	for index := range plan.Files {
+		plan.Files[index].Desired = []byte(fmt.Sprintf("v4-target-%d\n", index))
+	}
+	plan.Files = append(plan.Files, presentation.FilePlan{
+		Relative: "docs/session-review/.session-reviewer/session-index.json",
+		Desired:  []byte("v4-target-index\n"), Mode: 0o600,
+	})
+	stop := errors.New("stop before published pointer")
+	opts := Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+		checkpoint: func(stage publishCheckpoint, side, relative string) error {
+			if stage == checkpointBeforePointerCommit {
+				return stop
+			}
+			return nil
+		},
+	}
+	if _, err := Publish(context.Background(), opts); !errors.Is(err, stop) {
+		t.Fatalf("Publish error = %v, want checkpoint error", err)
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, _, err := store.LoadPublished(); !errors.Is(err, memorystore.ErrNoPublishedGeneration) {
+		t.Fatalf("published pointer advanced before final checkpoint: %v", err)
+	}
+	for _, file := range plan.Files {
+		for _, target := range []string{
+			filepath.Join(projectRoot, filepath.FromSlash(file.Relative)),
+			filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, file.Relative))),
+		} {
+			if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("rolled-back target %s remains: %v", target, err)
+			}
+		}
+	}
+}
+
+func TestPublishFourFilePlanRecoversGenericIntentAfterRestart(t *testing.T) {
+	projectID := "project-four-file-recovery"
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, plan := setupPublishEnv(t, projectID)
+	plan.Files = append(plan.Files, presentation.FilePlan{
+		Relative: sessionIndexRelativePath, Desired: []byte("v4-index-target\n"), Mode: 0o600,
+	})
+	for index := range plan.Files {
+		old := []byte(fmt.Sprintf("old-four-file-%d\n", index))
+		plan.Files[index].ExpectedExists = true
+		plan.Files[index].Expected = old
+		plan.Files[index].Desired = []byte(fmt.Sprintf("new-four-file-%d\n", index))
+		for _, target := range []string{
+			filepath.Join(projectRoot, filepath.FromSlash(plan.Files[index].Relative)),
+			filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, plan.Files[index].Relative))),
+		} {
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, old, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, _, err := store.LoadPrepared()
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	j, err := OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations := make([]Destination, 0, len(plan.Files)*2)
+	for _, file := range plan.Files {
+		preimageSHA := sha256Hex(file.Expected)
+		if err := j.PutPreimage(preimageSHA, file.Expected); err != nil {
+			j.Close()
+			t.Fatal(err)
+		}
+		destinations = append(destinations,
+			Destination{Side: "project", Relative: file.Relative, PreimageSHA256: preimageSHA, DesiredSHA256: sha256Hex(file.Desired), PreimageExists: true},
+			Destination{Side: "vault", Relative: vaultRelativePath(mapping.VaultReviewPath, file.Relative), PreimageSHA256: preimageSHA, DesiredSHA256: sha256Hex(file.Desired), PreimageExists: true},
+		)
+	}
+	sort.Slice(destinations, func(i, j int) bool {
+		if destinations[i].Side != destinations[j].Side {
+			return destinations[i].Side < destinations[j].Side
+		}
+		return destinations[i].Relative < destinations[j].Relative
+	})
+	intent := Intent{
+		Version: 1, ProjectID: projectID, GenerationID: manifest.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		Stage: StagePrepared, CreatedAt: time.Now().UTC(), Destinations: destinations,
+	}
+	if err := j.Create(intent); err != nil {
+		j.Close()
+		t.Fatal(err)
+	}
+	// Model a process exit after all Project writes and two Vault writes. The
+	// next Publish invocation must recover from the generic destination list;
+	// no legacy fixed three-file journal participates.
+	for _, file := range plan.Files {
+		if err := os.WriteFile(filepath.Join(projectRoot, filepath.FromSlash(file.Relative)), file.Desired, file.Mode); err != nil {
+			j.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := j.Advance(StagePrepared, StageProjectWritten); err != nil {
+		j.Close()
+		t.Fatal(err)
+	}
+	for _, file := range plan.Files[:2] {
+		if err := os.WriteFile(filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, file.Relative))), file.Desired, file.Mode); err != nil {
+			j.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := j.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Recovered || len(result.ProjectFiles) != 4 || len(result.VaultFiles) != 4 {
+		t.Fatalf("recovery result = %+v", result)
+	}
+	for _, file := range plan.Files {
+		for _, target := range []string{
+			filepath.Join(projectRoot, filepath.FromSlash(file.Relative)),
+			filepath.Join(vaultRoot, filepath.FromSlash(vaultRelativePath(mapping.VaultReviewPath, file.Relative))),
+		} {
+			body, err := os.ReadFile(target)
+			if err != nil || !bytes.Equal(body, file.Desired) {
+				t.Fatalf("recovered target %s = %q, %v", target, body, err)
+			}
+		}
+	}
+	store, err = memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	published, publishedManifest, err := store.LoadPublished()
+	if err != nil || published != manifest.GenerationID || publishedManifest.GenerationID != manifest.GenerationID {
+		t.Fatalf("published recovery = generation %q manifest %+v err %v", published, publishedManifest, err)
+	}
+	repeated, err := Publish(context.Background(), Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+	})
+	if err != nil {
+		t.Fatalf("repeat v4 publication: %v", err)
+	}
+	if fmt.Sprint(repeated.ProjectFiles) != fmt.Sprint(result.ProjectFiles) || fmt.Sprint(repeated.VaultFiles) != fmt.Sprint(result.VaultFiles) {
+		t.Fatalf("repeat v4 publication changed verified hashes: first=%+v/%+v second=%+v/%+v", result.ProjectFiles, result.VaultFiles, repeated.ProjectFiles, repeated.VaultFiles)
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
 type Diagnostic struct {
@@ -22,6 +23,12 @@ type Diagnostic struct {
 func writeDiagnostic(w io.Writer, action string, err error) int {
 	diagnostic := fallbackDiagnostic(action)
 	switch {
+	case errors.Is(err, syncproject.ErrMigrationRequired) && action == "sync":
+		diagnostic = Diagnostic{
+			Code:    "migration_required",
+			Message: "explicit v3 to v4 migration is required",
+			Hint:    "run session-reviewer sync --dry-run --json, then confirm with the returned preview digest",
+		}
 	case errors.As(err, new(*reviewv2.ErrMigrationRequired)) && action == "apply":
 		diagnostic = Diagnostic{
 			Code:    "E_APPLY_MIGRATION_REQUIRED",

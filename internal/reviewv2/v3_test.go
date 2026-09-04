@@ -49,6 +49,32 @@ func TestV2WriterFailsClosedBeforeMutatingV3(t *testing.T) {
 	assertV3TreeEqual(t, before, snapshotV3Tree(t, root))
 }
 
+func TestCompatibilityV2AndV3ReadersRemainDistinct(t *testing.T) {
+	v2Review, err := ParseReview(mustFixture(t, "../../testdata/review-v2/项目回顾.valid.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2History, err := ParseHistory(mustFixture(t, "../../testdata/review-v2/项目历史.valid.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Ledger, err := ParseMachineLedger(mustFixture(t, "../../testdata/review-v2/ledger.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v2Review.Model.GenerationID != "" || v2History.GenerationID != "" || v2Ledger.SchemaVersion != 2 {
+		t.Fatalf("v2 reader identity changed: review_generation=%q history_generation=%q ledger_version=%d", v2Review.Model.GenerationID, v2History.GenerationID, v2Ledger.SchemaVersion)
+	}
+
+	root := writeV3Fixture(t)
+	if _, err := LoadV3(root); err != nil {
+		t.Fatalf("strict v3 read failed: %v", err)
+	}
+	if _, err := Load(root); err == nil {
+		t.Fatal("v2 compatibility reader skipped directly over the v3 boundary")
+	}
+}
+
 func TestV3SupportedHumanEditAndUnknownBlockArePresentationInput(t *testing.T) {
 	root := writeV3Fixture(t)
 	reviewPath := filepath.Join(root, filepath.FromSlash(ReviewRelativePath))
