@@ -23,6 +23,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
@@ -167,6 +168,26 @@ func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
 	})
 	if err != nil || !confirmed.Applied || published != 1 || confirmed.Preview.PreviewDigest != dry.Preview.PreviewDigest {
 		t.Fatalf("confirmed=%+v published=%d err=%v", confirmed, published, err)
+	}
+}
+
+func TestMigrationSessionIndexPreservesUnknownTimestamps(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	entry, err := migrationIndexEntry(memory.SessionView{
+		Provider: "codex", SessionID: "unknown-times", TerminalState: memory.Indexed,
+		SourceAvailability: memory.SourceAvailable, UsageRecordDigest: digest,
+		ObservationSummaries: []memory.ObservationSummary{}, ActiveRevisionIDs: []string{}, Diagnostics: []memory.Diagnostic{},
+	}, memory.SessionViewDependency{Digest: digest}, "generation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.StartedAt != nil || entry.EndedAt != nil || entry.DurationMS != nil {
+		t.Fatalf("migration fabricated unknown timestamps: %+v", entry)
+	}
+	coverage := sessionindex.IndexCoverage{Total: 1}
+	addIndexCoverage(&coverage, entry)
+	if coverage.StartedAtKnown != 0 || coverage.EndedAtKnown != 0 {
+		t.Fatalf("migration counted unknown timestamps as known: %+v", coverage)
 	}
 }
 

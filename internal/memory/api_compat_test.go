@@ -113,6 +113,34 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	}
 }
 
+func TestV4SchemasAllowHonestUnknownSessionTimesAndLosslessLegacyDecisionStatus(t *testing.T) {
+	indexSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-index-v1.schema.json"))
+	index := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-index-v1.unknown.valid.json"))
+	if err := validateContractSchema(indexSchema, index, "$", indexSchema); err != nil {
+		t.Fatalf("schema rejected unknown session timestamps: %v", err)
+	}
+	if err := validateSessionIndexCoverage(index); err != nil {
+		t.Fatalf("schema fixture coverage rejected unknown session timestamps: %v", err)
+	}
+
+	reviewSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "review-presentation-v4.schema.json"))
+	review := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "review-presentation-v4.valid.json")).(map[string]any)
+	legacy := map[string]any{
+		"id": "legacy-decision", "kind": "decision", "occurred_at": "2026-08-25", "title": "Keep human status",
+		"rationale": "preserve", "impact": "compatibility", "status": "legacy_unmapped", "legacy_status_text": "已采用",
+		"reevaluate_when": "", "supersedes": []any{}, "milestone_ids": []any{}, "session_refs": []any{},
+		"provenance": "migrated", "pinned": false, "revision": json.Number("1"),
+	}
+	review["decisions"] = []any{legacy}
+	if err := validateContractSchema(reviewSchema, review, "$", reviewSchema); err != nil {
+		t.Fatalf("schema rejected lossless legacy status: %v", err)
+	}
+	legacy["status"] = "active"
+	if err := validateContractSchema(reviewSchema, review, "$", reviewSchema); err == nil {
+		t.Fatal("schema accepted legacy status text on a native v4 decision")
+	}
+}
+
 func TestV4ContractFixtureDecoderRejectsUnsafeBoundaries(t *testing.T) {
 	cases := []struct {
 		name string
@@ -581,7 +609,46 @@ func validateSessionIndexCoverage(value any) error {
 	if err != nil {
 		return err
 	}
-	if complete+partial+errCount+unprocessed != total || available+unavailable != total || int64(len(sessions)) != total {
+	calculatedStates := map[string]int64{"complete": 0, "partial": 0, "error": 0, "unprocessed": 0}
+	calculatedSources := map[string]int64{"available": 0, "unavailable": 0}
+	var startedKnown, endedKnown, usageKnown int64
+	for _, item := range sessions {
+		session, ok := item.(map[string]any)
+		if !ok {
+			return fmt.Errorf("session entry is not an object")
+		}
+		state, stateOK := session["processing_state"].(string)
+		availability, availabilityOK := session["source_availability"].(string)
+		if !stateOK || !availabilityOK {
+			return fmt.Errorf("session state or availability is not a string")
+		}
+		calculatedStates[state]++
+		calculatedSources[availability]++
+		if session["started_at"] != nil {
+			startedKnown++
+		}
+		if session["ended_at"] != nil {
+			endedKnown++
+		}
+		if session["usage_record_digest"] != nil {
+			usageKnown++
+		}
+	}
+	claimedStarted, err := get("started_at_known")
+	if err != nil {
+		return err
+	}
+	claimedEnded, err := get("ended_at_known")
+	if err != nil {
+		return err
+	}
+	claimedUsage, err := get("usage_known")
+	if err != nil {
+		return err
+	}
+	if complete != calculatedStates["complete"] || partial != calculatedStates["partial"] || errCount != calculatedStates["error"] || unprocessed != calculatedStates["unprocessed"] ||
+		available != calculatedSources["available"] || unavailable != calculatedSources["unavailable"] || claimedStarted != startedKnown || claimedEnded != endedKnown || claimedUsage != usageKnown ||
+		complete+partial+errCount+unprocessed != total || available+unavailable != total || int64(len(sessions)) != total {
 		return fmt.Errorf("coverage counts do not reconcile")
 	}
 	return nil

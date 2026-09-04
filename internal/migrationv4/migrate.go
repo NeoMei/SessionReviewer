@@ -118,13 +118,11 @@ func migratePresentation(source reviewv2.AcceptedV3, generationID, projectDigest
 		result.Timeline = append(result.Timeline, reviewv4.Timeline{ID: event.ID, GenerationID: generationID, OccurredAt: event.OccurredAt, Kind: event.Kind, Title: event.Title, Summary: event.Summary, DecisionIDs: append([]string{}, event.DecisionIDs...), ClosedLoop: reviewv4.NeutralClosedLoop()})
 	}
 	for _, decision := range state.Review.Decisions {
-		status, err := migrateDecisionStatus(decision.Status)
-		if err != nil {
-			return reviewv4.Presentation{}, fmt.Errorf("decision %q: %w", decision.ID, err)
-		}
+		status, legacyStatusText := migrateDecisionStatus(decision.Status)
 		result.Decisions = append(result.Decisions, reviewv4.Decision{
 			ID: decision.ID, Kind: "decision", OccurredAt: decision.OccurredAt, Title: decision.Title, Rationale: decision.Rationale, Impact: decision.Impact, Status: status,
-			ReevaluateWhen: "", Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []reviewv4.SessionRef{}, Provenance: "migrated", Pinned: false, Revision: 1,
+			LegacyStatusText: legacyStatusText,
+			ReevaluateWhen:   "", Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []reviewv4.SessionRef{}, Provenance: "migrated", Pinned: false, Revision: 1,
 		})
 	}
 	for _, risk := range state.Review.Risks {
@@ -139,16 +137,14 @@ func migratePresentation(source reviewv2.AcceptedV3, generationID, projectDigest
 	return result, nil
 }
 
-func migrateDecisionStatus(status string) (reviewv4.DecisionStatus, error) {
+func migrateDecisionStatus(status string) (reviewv4.DecisionStatus, *string) {
 	switch status {
-	case "", "active":
+	case "active":
 		return reviewv4.DecisionActive, nil
 	case "archived":
 		return reviewv4.DecisionArchived, nil
-	case "superseded":
-		return "", errors.New("superseded status cannot be represented without inventing a successor")
 	default:
-		return "", fmt.Errorf("legacy decision status %q has no exact v4 mapping", status)
+		return reviewv4.DecisionLegacyUnmapped, &status
 	}
 }
 

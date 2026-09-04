@@ -4,7 +4,7 @@ export type SessionIdentity = Readonly<{ provider: string; sessionId: string }>;
 
 export type ProcessingState = "complete" | "partial" | "error" | "unprocessed";
 export type SourceAvailability = "available" | "unavailable";
-export type DecisionStatus = "active" | "superseded" | "archived";
+export type DecisionStatus = "active" | "superseded" | "archived" | "legacy_unmapped";
 export type CandidateStatus = "pending" | "confirmed" | "ignored" | "not_decision" | "stale";
 export type PriceStatus =
   | "pending"
@@ -108,6 +108,7 @@ export interface DecisionV4 {
   rationale: string;
   impact: string;
   status: DecisionStatus;
+  legacy_status_text: string | null;
   reevaluate_when: string;
   supersedes: string[];
   milestone_ids: string[];
@@ -335,8 +336,8 @@ export interface SessionIndexEntryV1 {
   state_reason_codes: SessionStateReasonCodeV1[];
   source_availability: SourceAvailability;
   source_terminal_state: string | null;
-  started_at: string;
-  ended_at: string;
+  started_at: string | null;
+  ended_at: string | null;
   duration_ms: number | null;
   warning_count: number;
   record_count: number | null;

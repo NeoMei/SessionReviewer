@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sessionreviewer.local/schemas/machine-ledger-v4.schema.json",
   "title": "SessionReviewer machine ledger v4",
+  "$comment": "Runtime validators additionally enforce a non-branching, acyclic pricing supersession graph, identical provider/session/usage identity across each edge, and at most one selected effective leaf per usage record.",
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "minimum_reader_version", "minimum_writer_version", "project_id", "generation_id", "project_view_digest", "accepted_revision", "review_sha256", "history_sha256", "accounting", "sessions", "human_patches", "orphan_patches", "generated_baselines", "pricing_snapshots", "current_pricing_snapshot_ids", "sync_hashes"],
   "properties": {

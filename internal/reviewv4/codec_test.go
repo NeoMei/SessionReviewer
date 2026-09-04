@@ -77,6 +77,61 @@ func TestValidatePresentationRejectsDecisionCycleAndBrokenGraph(t *testing.T) {
 	}
 }
 
+func TestDecodePresentationAcceptsOnlyLosslessLegacyDecisionStatusShape(t *testing.T) {
+	presentation := minimumPresentation()
+	body, err := json.Marshal(presentation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	legacy := map[string]any{
+		"id": "legacy-decision", "kind": "decision", "occurred_at": "2026-08-25", "title": "Keep human status",
+		"rationale": "preserve", "impact": "compatibility", "status": "legacy_unmapped", "legacy_status_text": "已采用",
+		"reevaluate_when": "", "supersedes": []any{}, "milestone_ids": []any{}, "session_refs": []any{},
+		"provenance": "migrated", "pinned": false, "revision": float64(1),
+	}
+	raw["decisions"] = []any{legacy}
+	valid, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePresentation(valid); err != nil {
+		t.Fatalf("lossless legacy decision status was rejected: %v", err)
+	}
+
+	for name, mutate := range map[string]func(map[string]any){
+		"missing original text": func(value map[string]any) { value["legacy_status_text"] = nil },
+		"native provenance":     func(value map[string]any) { value["provenance"] = "human_created" },
+		"native status carries legacy text": func(value map[string]any) {
+			value["status"] = "active"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			copy := cloneMap(legacy)
+			mutate(copy)
+			raw["decisions"] = []any{copy}
+			invalid, marshalErr := json.Marshal(raw)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if _, decodeErr := DecodePresentation(invalid); decodeErr == nil {
+				t.Fatal("accepted invalid legacy decision representation")
+			}
+		})
+	}
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	result := make(map[string]any, len(value))
+	for key, item := range value {
+		result[key] = item
+	}
+	return result
+}
+
 func TestLoadProjectionEnforcesAllIdentityAndDigestBindings(t *testing.T) {
 	reviewFixture := mustRead(t, "../../testdata/contracts/v4/review-presentation-v4.valid.json")
 	indexFixture := mustRead(t, "../../testdata/contracts/v4/session-index-v1.valid.json")
@@ -401,7 +456,9 @@ func TestValidatePresentationProblemMapRevisionAndSafeIntegerBoundary(t *testing
 func TestValidateLedgerUsesOnlyCurrentPricingForAggregateCompleteness(t *testing.T) {
 	ledger := frozenLedger(t)
 	historical := ledger.PricingSnapshots[0]
+	historical.Status = pricing.PriceSuperseded
 	current := completePricingSnapshot(t, "snapshot-current")
+	current.SupersedesSnapshotID = stringPointer(historical.SnapshotID)
 	zero := 0.0
 	ledger.PricingSnapshots = []pricing.Snapshot{historical, current}
 	ledger.CurrentPricingSnapshotIDs = []string{current.SnapshotID}
@@ -410,6 +467,73 @@ func TestValidateLedgerUsesOnlyCurrentPricingForAggregateCompleteness(t *testing
 		t.Fatalf("incomplete historical predecessor contaminated current aggregate: %v", err)
 	}
 }
+
+func TestValidateLedgerEnforcesPricingSupersessionGraphAndCurrentLeaf(t *testing.T) {
+	validChain := frozenLedger(t)
+	predecessor := validChain.PricingSnapshots[0]
+	predecessor.Status = pricing.PriceSuperseded
+	successor := completePricingSnapshot(t, "snapshot-successor")
+	successor.SupersedesSnapshotID = stringPointer(predecessor.SnapshotID)
+	validChain.PricingSnapshots = []pricing.Snapshot{predecessor, successor}
+	validChain.CurrentPricingSnapshotIDs = []string{successor.SnapshotID}
+	zero := 0.0
+	validChain.Accounting.TotalCostUSD = &zero
+	if err := ValidateLedger(validChain); err != nil {
+		t.Fatalf("valid linear pricing history rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*MachineLedger)
+	}{
+		{name: "missing predecessor", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[1].SupersedesSnapshotID = stringPointer("missing")
+		}},
+		{name: "self reference", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[1].SupersedesSnapshotID = stringPointer(ledger.PricingSnapshots[1].SnapshotID)
+		}},
+		{name: "cycle", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[0].SupersedesSnapshotID = stringPointer(ledger.PricingSnapshots[1].SnapshotID)
+		}},
+		{name: "identity mismatch", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[1].SessionID = "other-session"
+		}},
+		{name: "provider mismatch", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[1].Provider = "claude"
+		}},
+		{name: "usage record mismatch", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[1].UsageRecordDigest = "sha256:" + strings.Repeat("2", 64)
+		}},
+		{name: "branching successors", mutate: func(ledger *MachineLedger) {
+			branch := ledger.PricingSnapshots[1]
+			branch.SnapshotID = "snapshot-branch"
+			ledger.PricingSnapshots = append(ledger.PricingSnapshots, branch)
+		}},
+		{name: "non-leaf selected", mutate: func(ledger *MachineLedger) {
+			ledger.PricingSnapshots[0].Status = pricing.PriceCurrent
+			ledger.CurrentPricingSnapshotIDs = []string{ledger.PricingSnapshots[0].SnapshotID}
+		}},
+		{name: "multiple effective leaves", mutate: func(ledger *MachineLedger) {
+			branch := ledger.PricingSnapshots[1]
+			branch.SnapshotID = "snapshot-branch"
+			branch.SupersedesSnapshotID = nil
+			ledger.PricingSnapshots = append(ledger.PricingSnapshots, branch)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := validChain
+			ledger.PricingSnapshots = append([]pricing.Snapshot(nil), validChain.PricingSnapshots...)
+			ledger.CurrentPricingSnapshotIDs = append([]string(nil), validChain.CurrentPricingSnapshotIDs...)
+			tc.mutate(&ledger)
+			if err := ValidateLedger(ledger); err == nil {
+				t.Fatal("accepted malformed pricing supersession ledger")
+			}
+		})
+	}
+}
+
+func stringPointer(value string) *string { return &value }
 
 func TestValidateLedgerRequiresNullAggregateWhenModelCostUnknown(t *testing.T) {
 	ledger := frozenLedger(t)

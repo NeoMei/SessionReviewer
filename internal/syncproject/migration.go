@@ -218,8 +218,16 @@ func migrationSessionIndex(store *memorystore.Store, manifest memory.GenerationM
 		addIndexCoverage(&coverage, entry)
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].StartedAt != entries[j].StartedAt {
-			return entries[i].StartedAt > entries[j].StartedAt
+		if entries[i].StartedAt != nil || entries[j].StartedAt != nil {
+			if entries[i].StartedAt == nil {
+				return false
+			}
+			if entries[j].StartedAt == nil {
+				return true
+			}
+			if *entries[i].StartedAt != *entries[j].StartedAt {
+				return *entries[i].StartedAt > *entries[j].StartedAt
+			}
 		}
 		if entries[i].Provider != entries[j].Provider {
 			return entries[i].Provider < entries[j].Provider
@@ -287,7 +295,7 @@ func migrationIndexEntry(view memory.SessionView, dependency memory.SessionViewD
 	return sessionindex.Entry{
 		Provider: view.Provider, SessionID: view.SessionID, ProcessingState: state,
 		StateReasonCodes: reasons, SourceAvailability: availability, SourceTerminalState: &terminal,
-		StartedAt: view.StartedAt, EndedAt: view.EndedAt, DurationMS: duration,
+		StartedAt: nullableTimestamp(view.StartedAt), EndedAt: nullableTimestamp(view.EndedAt), DurationMS: duration,
 		WarningCount: uint64(len(view.Diagnostics)), RecordCount: &recordCount,
 		IndexedEventCount: entryCoverage.Indexed, Coverage: entryCoverage, FactCounts: facts,
 		SessionViewDigest: &sessionDigest, UsageRecordDigest: &usageDigest,
@@ -302,6 +310,13 @@ func migrationDuration(startedAt, endedAt string) *uint64 {
 		return nil
 	}
 	value := uint64(end.Sub(start) / time.Millisecond)
+	return &value
+}
+
+func nullableTimestamp(value string) *string {
+	if value == "" {
+		return nil
+	}
 	return &value
 }
 
@@ -321,8 +336,12 @@ func addIndexCoverage(coverage *sessionindex.IndexCoverage, entry sessionindex.E
 	} else {
 		coverage.SourceUnavailable++
 	}
-	coverage.StartedAtKnown++
-	coverage.EndedAtKnown++
+	if entry.StartedAt != nil {
+		coverage.StartedAtKnown++
+	}
+	if entry.EndedAt != nil {
+		coverage.EndedAtKnown++
+	}
 	if entry.UsageRecordDigest != nil {
 		coverage.UsageKnown++
 	}

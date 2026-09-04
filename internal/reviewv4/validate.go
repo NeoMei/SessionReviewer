@@ -67,7 +67,7 @@ func ValidatePresentation(p Presentation) error {
 	}
 	decisions := map[string]Decision{}
 	for i, decision := range p.Decisions {
-		if !validID(decision.ID) || len(decision.OccurredAt) > 128 || !text(decision.Title, 16384) || !text(decision.Rationale, 16384) || !text(decision.Impact, 16384) || !text(decision.ReevaluateWhen, 16384) || decision.Revision < 1 || len(decision.Supersedes) > 256 || len(decision.MilestoneIDs) > 256 || len(decision.SessionRefs) > 256 {
+		if !validID(decision.ID) || len(decision.OccurredAt) > 128 || !text(decision.Title, 16384) || !text(decision.Rationale, 16384) || !text(decision.Impact, 16384) || !optionalText(decision.LegacyStatusText, 16384) || !text(decision.ReevaluateWhen, 16384) || decision.Revision < 1 || len(decision.Supersedes) > 256 || len(decision.MilestoneIDs) > 256 || len(decision.SessionRefs) > 256 {
 			return fmt.Errorf("invalid decision %d", i)
 		}
 		if _, exists := decisions[decision.ID]; exists {
@@ -80,6 +80,13 @@ func ValidatePresentation(p Presentation) error {
 		}
 		switch decision.Status {
 		case DecisionActive, DecisionSuperseded, DecisionArchived:
+			if decision.LegacyStatusText != nil {
+				return errors.New("native decision status cannot carry legacy status text")
+			}
+		case DecisionLegacyUnmapped:
+			if decision.LegacyStatusText == nil || decision.Provenance != "migrated" {
+				return errors.New("legacy unmapped decision requires migrated provenance and exact status text")
+			}
 		default:
 			return errors.New("invalid decision status")
 		}
@@ -568,13 +575,28 @@ func ValidateLedger(l MachineLedger) error {
 	}
 	seenCurrent := map[string]bool{}
 	currentPricingIncomplete := false
+	successorCounts, err := validatePricingSupersessionGraph(pricingByID)
+	if err != nil {
+		return err
+	}
+	currentByIdentity := map[string]string{}
 	for _, id := range l.CurrentPricingSnapshotIDs {
 		snapshot, exists := pricingByID[id]
-		if !validID(id) || !exists || seenCurrent[id] || snapshot.Status == pricing.PriceSuperseded {
+		if !validID(id) || !exists || seenCurrent[id] || snapshot.Status == pricing.PriceSuperseded || successorCounts[id] != 0 {
 			return errors.New("invalid current pricing snapshot reference")
 		}
 		seenCurrent[id] = true
+		identity := pricingIdentity(snapshot)
+		if _, exists := currentByIdentity[identity]; exists {
+			return errors.New("multiple current pricing snapshots for one usage record")
+		}
+		currentByIdentity[identity] = id
 		currentPricingIncomplete = currentPricingIncomplete || !snapshot.PricingComplete
+	}
+	for id, snapshot := range pricingByID {
+		if selected, exists := currentByIdentity[pricingIdentity(snapshot)]; exists && successorCounts[id] == 0 && selected != id {
+			return errors.New("multiple effective pricing leaves for one usage record")
+		}
 	}
 	if currentPricingIncomplete && l.Accounting.TotalCostUSD != nil {
 		return errors.New("aggregate price must be null when a current snapshot is incomplete")
@@ -586,6 +608,63 @@ func ValidateLedger(l MachineLedger) error {
 		return errors.New("top-level and synchronization hashes disagree")
 	}
 	return nil
+}
+
+func pricingIdentity(snapshot pricing.Snapshot) string {
+	return snapshot.Provider + "\x00" + snapshot.SessionID + "\x00" + snapshot.UsageRecordDigest
+}
+
+func validatePricingSupersessionGraph(byID map[string]pricing.Snapshot) (map[string]int, error) {
+	successors := make(map[string]int, len(byID))
+	for id, snapshot := range byID {
+		if snapshot.SupersedesSnapshotID == nil {
+			continue
+		}
+		predecessorID := *snapshot.SupersedesSnapshotID
+		predecessor, exists := byID[predecessorID]
+		if !exists {
+			return nil, fmt.Errorf("pricing snapshot %q has missing predecessor %q", id, predecessorID)
+		}
+		if predecessorID == id {
+			return nil, errors.New("pricing snapshot cannot supersede itself")
+		}
+		if pricingIdentity(predecessor) != pricingIdentity(snapshot) {
+			return nil, errors.New("pricing predecessor and successor identity mismatch")
+		}
+		successors[predecessorID]++
+		if successors[predecessorID] > 1 {
+			return nil, errors.New("pricing supersession graph branches into multiple leaves")
+		}
+	}
+	state := map[string]uint8{}
+	var visit func(string) error
+	visit = func(id string) error {
+		if state[id] == 1 {
+			return errors.New("pricing supersession graph contains cycle")
+		}
+		if state[id] == 2 {
+			return nil
+		}
+		state[id] = 1
+		if predecessor := byID[id].SupersedesSnapshotID; predecessor != nil {
+			if err := visit(*predecessor); err != nil {
+				return err
+			}
+		}
+		state[id] = 2
+		return nil
+	}
+	for id := range byID {
+		if err := visit(id); err != nil {
+			return nil, err
+		}
+	}
+	for id, snapshot := range byID {
+		if (successors[id] > 0) != (snapshot.Status == pricing.PriceSuperseded) {
+			return nil, errors.New("pricing supersession status does not match graph position")
+		}
+	}
+	return successors, nil
 }
 
 func money(value *float64) bool {

@@ -560,6 +560,8 @@ last_successful_generation_id | null
 
 索引身份是 `(project_id, provider, session_id)`。`session_id` 只需在同一 provider 内唯一，界面和所有 CLI 命令始终同时携带 provider。相同身份在新世代中形成新索引修订，不改写旧世代的规范字节。
 
+`started_at` 和 `ended_at` 只有在来源真实提供时才写入字符串；不可知时必须为 `null`，不得从另一时间、扫描时间或迁移时间补写。`started_at_known` 和 `ended_at_known` 分别只统计非 `null` 值；规范排序为 `started_at desc nulls last, provider asc, session_id asc`。
+
 所有数组有明确最大项数，所有字符串有 UTF-8 字节上限。`state_reason_codes` 只能使用版本化枚举；用户可见说明由插件本地化，机器文件中不保存任意错误文本。
 
 ### 17.2 Session 摘要
@@ -699,7 +701,8 @@ occurred_at
 title
 rationale
 impact
-status = active | superseded | archived
+status = active | superseded | archived | legacy_unmapped
+legacy_status_text | null
 reevaluate_when
 supersedes[]
 milestone_ids[]
@@ -709,7 +712,7 @@ pinned
 revision
 ~~~
 
-替代关系必须无环；`status=superseded` 时至少存在一个后继条目直接引用该条目，后继自身可以在以后继续被替代。迁移无法恢复的新增字段使用空值、空数组或 `false`，并保留 `provenance=migrated`，不得推断理由或关系。
+替代关系必须无环；`status=superseded` 时至少存在一个后继条目直接引用该条目，后继自身可以在以后继续被替代。原生 v4 决策只使用 `active|superseded|archived`，且 `legacy_status_text=null`。v3 状态只有在原文精确为 `active` 或 `archived` 时映射到同名 v4 状态；其他任意原文（包括空串、`superseded` 和人类语言文本）都表示为 `status=legacy_unmapped`、`provenance=migrated`，并在 `legacy_status_text` 中逐字保存原值。`legacy_unmapped` 必须携带非 `null` 的 `legacy_status_text`，不允许用于原生决策。迁移无法恢复的其他新增字段使用空值、空数组或 `false`，不得推断理由或关系。
 
 ### 18.3 问题节点与归位候选状态机
 
@@ -909,7 +912,7 @@ audit_reason
 
 两个价格目录响应分别设置 128 MiB 下载与解析上限，要求成功 HTTP 状态、JSON content type、受支持 schema、无重复字段和完整响应体；使用平台私有权限目录、进程锁和原子替换保存。刷新失败时保留上一份已验证缓存，不用半文件覆盖，也不把失败时间写成新的 `retrieved_at`。
 
-目录刷新不修改快照。补价或纠错创建新快照，并通过 `supersedes_snapshot_id` 指向旧快照；聚合只选择每条用量的最新有效快照，但审计视图可以查看完整链。ModelPriceWatch、官方来源和人工补充的优先级不覆盖适用条件检查：任何条件不明都先进入 `pending` 或 `ambiguous`。
+目录刷新不修改快照。补价或纠错创建新快照，并通过 `supersedes_snapshot_id` 指向旧快照；聚合只选择每条用量的最新有效快照，但审计视图可以查看完整链。`machine-ledger-v4` 必须对整本账本验证价格替代图：前驱必须存在，不得自指、成环或分叉；前驱与后继必须共享完全相同的 `(provider, session_id, usage_record_digest)`；有后继的快照必须为 `superseded`，`superseded` 也必须有后继。`current_pricing_snapshot_ids` 只能选择非 `superseded` 叶子，每个用量身份最多一个；一旦某身份被选中，该身份不得还存在另一个断开的有效叶子。未选中的历史快照仍是不可变审计证据；未知费率和成本继续用 `null`，不得因图校验升级为零。ModelPriceWatch、官方来源和人工补充的优先级不覆盖适用条件检查：任何条件不明都先进入 `pending` 或 `ambiguous`。
 
 ## 19. 兼容与迁移矩阵
 
@@ -940,7 +943,7 @@ dry-run 返回版本化迁移预览、将保留或补默认值的语义单元、
 迁移必须满足：
 
 1. dry-run 列出将新增、升级和保留的合同，不写文件；
-2. v2/v3 决策的标题、理由、影响、状态、稳定 ID 和现有来源关系逐字节保留；
+2. v2/v3 决策的标题、理由、影响、稳定 ID 和现有来源关系逐字节保留；状态原文若不能按上述封闭规则精确映射，用 `legacy_unmapped + legacy_status_text` 无损表示；
 3. 新字段只填显式默认值，不由机器补写理由、重评条件或替代关系；
 4. v3 `recent-progress` 仅在四文件新世代成功发布后从人类页面移除；
 5. 旧价格保留为迁移快照，无法证明来源或日期时标为 `legacy_unverified`，不重算；

@@ -75,6 +75,7 @@ function decision(id: string, supersedes: string[], status = "active"): JsonObje
     rationale: "reason",
     impact: "impact",
     status,
+    legacy_status_text: null,
     reevaluate_when: "later",
     supersedes,
     milestone_ids: [],
@@ -290,6 +291,20 @@ describe("session contracts", () => {
     expect(() => parseSessionIndexV1(JSON.stringify(index))).toThrow(/duplicate/i);
   });
 
+  it("accepts null session timestamps, counts only known values, and sorts null last", async () => {
+    const source = await pluginFixture("session-index-v1.unknown.valid.json");
+    const parsed = parseSessionIndexV1(source);
+    expect(parsed.coverage.started_at_known).toBe(1);
+    expect(parsed.coverage.ended_at_known).toBe(1);
+    expect(parsed.sessions.map((session) => session.started_at)).toEqual(["2026-09-04T00:00:00Z", null]);
+    await expect(readFile(resolve(here, "fixtures/v4/session-index-v1.unknown.valid.json")))
+      .resolves.toEqual(await sharedFixture("session-index-v1.unknown.valid.json"));
+
+    const malformed = JSON.parse(source) as { coverage: JsonObject };
+    malformed.coverage.started_at_known = 2;
+    expect(() => parseSessionIndexV1(JSON.stringify(malformed))).toThrow(/coverage|known|reconcile/i);
+  });
+
   it("rejects mixed project, generation, project digest, and index digest bindings", async () => {
     const { ledger, index } = await nonzeroBoundSnapshots();
     expect(() => assertSnapshotBindings(ledger, index)).not.toThrow();
@@ -323,6 +338,21 @@ describe("session contracts", () => {
     const review = await fixtureObject("review-presentation-v4.valid.json") as { decisions: JsonObject[] };
     review.decisions = [decision("a", ["b"]), decision("b", ["a"])];
     expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/cycle/i);
+  });
+
+  it("accepts only the lossless legacy decision status representation", async () => {
+    const review = await fixtureObject("review-presentation-v4.valid.json") as { decisions: JsonObject[] };
+    const legacy = decision("legacy", [], "legacy_unmapped");
+    legacy.provenance = "migrated";
+    legacy.legacy_status_text = "已采用";
+    review.decisions = [legacy];
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).not.toThrow();
+
+    legacy.legacy_status_text = null;
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/legacy|status|text/i);
+    legacy.legacy_status_text = "已采用";
+    legacy.status = "active";
+    expect(() => parseReviewPresentationV4(JSON.stringify(review))).toThrow(/legacy|status|text/i);
   });
 
   it("rejects cursors on a zero-total event page", async () => {
@@ -491,7 +521,9 @@ describe("pricing and optional-field semantics", () => {
       current_pricing_snapshot_ids: string[];
     };
     const complete = clone(ledger.pricing_snapshots[0]);
+    ledger.pricing_snapshots[0].status = "superseded";
     complete.snapshot_id = "snapshot-current";
+    complete.supersedes_snapshot_id = ledger.pricing_snapshots[0].snapshot_id;
     complete.pricing_complete = true;
     complete.rates = { input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 };
     complete.line_costs_usd = { input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 };
@@ -505,7 +537,48 @@ describe("pricing and optional-field semantics", () => {
     expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
 
     ledger.current_pricing_snapshot_ids = ["snapshot-1"];
-    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/aggregate|incomplete|null/i);
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/aggregate|incomplete|null|current/i);
+  });
+
+  it("enforces a single identity-bound current leaf in each pricing history", async () => {
+    const ledger = await fixtureObject("machine-ledger-v4.valid.json") as {
+      pricing_snapshots: JsonObject[];
+      current_pricing_snapshot_ids: string[];
+    };
+    const predecessor = clone(ledger.pricing_snapshots[0]);
+    predecessor.status = "superseded";
+    const successor = clone(ledger.pricing_snapshots[0]);
+    successor.snapshot_id = "snapshot-successor";
+    successor.supersedes_snapshot_id = predecessor.snapshot_id;
+    ledger.pricing_snapshots = [predecessor, successor];
+    ledger.current_pricing_snapshot_ids = [successor.snapshot_id as string];
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
+
+    for (const testCase of [
+      { name: "missing predecessor", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[1].supersedes_snapshot_id = "missing"; } },
+      { name: "self reference", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[1].supersedes_snapshot_id = copy.pricing_snapshots[1].snapshot_id; } },
+      { name: "cycle", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[0].supersedes_snapshot_id = copy.pricing_snapshots[1].snapshot_id; } },
+      { name: "identity mismatch", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[1].session_id = "other-session"; } },
+      { name: "provider mismatch", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[1].provider = "claude"; } },
+      { name: "usage record mismatch", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[1].usage_record_digest = `sha256:${"2".repeat(64)}`; } },
+      { name: "branching successors", mutate: (copy: typeof ledger) => {
+        const branch = clone(copy.pricing_snapshots[1]);
+        branch.snapshot_id = "snapshot-branch";
+        copy.pricing_snapshots.push(branch);
+      } },
+      { name: "non-leaf selected", mutate: (copy: typeof ledger) => { copy.pricing_snapshots[0].status = "current"; copy.current_pricing_snapshot_ids = [copy.pricing_snapshots[0].snapshot_id as string]; } },
+      { name: "multiple effective leaves", mutate: (copy: typeof ledger) => {
+        const branch = clone(copy.pricing_snapshots[1]);
+        branch.snapshot_id = "snapshot-branch";
+        branch.supersedes_snapshot_id = null;
+        copy.pricing_snapshots.push(branch);
+      } }
+    ] as const) {
+      const malformed = clone(ledger);
+      testCase.mutate(malformed);
+      expect(() => parseMachineLedgerV4(JSON.stringify(malformed)), testCase.name)
+        .toThrow(/pricing|snapshot|predecessor|cycle|identity|leaf|current|branch/i);
+    }
   });
 
   it("preserves explicit empty optional arrays instead of erasing them", async () => {

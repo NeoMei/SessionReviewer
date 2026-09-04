@@ -159,11 +159,26 @@ func TestMigrateAcceptedV3PreservesDecisionWithoutInventingFields(t *testing.T) 
 	decision := result.Accepted.Review.Decisions[0]
 	if decision.ID != "decision-1" || decision.Title != "Keep v3" || decision.Rationale != "because" || decision.Impact != "scope" ||
 		decision.Kind != "decision" || decision.Status != reviewv4.DecisionActive || decision.Provenance != "migrated" || decision.Pinned || decision.Revision != 1 ||
-		decision.ReevaluateWhen != "" || len(decision.Supersedes) != 0 || len(decision.MilestoneIDs) != 0 || len(decision.SessionRefs) != 0 {
+		decision.LegacyStatusText != nil || decision.ReevaluateWhen != "" || len(decision.Supersedes) != 0 || len(decision.MilestoneIDs) != 0 || len(decision.SessionRefs) != 0 {
 		t.Fatalf("migration lost or invented decision data: %+v", decision)
 	}
 	if _, err := reviewv4.LoadProjection(result.Review, result.History, result.Ledger, result.SessionIndex); err != nil {
 		t.Fatalf("migrated four-file projection is not mutually bound: %v", err)
+	}
+}
+
+func TestMigrateDecisionStatusOnlyMapsExactNativeStates(t *testing.T) {
+	for _, status := range []string{"", "superseded", "已采用", "ACTIVE"} {
+		mapped, original := migrateDecisionStatus(status)
+		if mapped != reviewv4.DecisionLegacyUnmapped || original == nil || *original != status {
+			t.Fatalf("legacy status %q was guessed or lost: mapped=%q original=%v", status, mapped, original)
+		}
+	}
+	for _, status := range []string{"active", "archived"} {
+		mapped, original := migrateDecisionStatus(status)
+		if string(mapped) != status || original != nil {
+			t.Fatalf("exact native status %q was not mapped exactly: mapped=%q original=%v", status, mapped, original)
+		}
 	}
 }
 
@@ -198,7 +213,7 @@ func TestMigrateAcceptedV3PreservesLegacyUsageAsUnverifiedPricingEvidence(t *tes
 	index.Sessions = []sessionindex.Entry{{
 		Provider: "codex", SessionID: "session-legacy", ProcessingState: sessionindex.ProcessingComplete,
 		StateReasonCodes: []string{}, SourceAvailability: "available", SourceTerminalState: &terminal,
-		StartedAt: account.StartedAt, EndedAt: account.EndedAt, DurationMS: &duration, RecordCount: &records,
+		StartedAt: stringPtr(account.StartedAt), EndedAt: stringPtr(account.EndedAt), DurationMS: &duration, RecordCount: &records,
 		Coverage: sessionindex.Coverage{}, FactCounts: sessionindex.FactCounts{}, SessionViewDigest: &sessionDigest, UsageRecordDigest: &usageDigest,
 		LastSeenGenerationID: &lastGeneration, LastSuccessfulGenerationID: &lastGeneration,
 	}}
@@ -336,7 +351,7 @@ func TestMigrationPreviewRejectsStaleDigestAndInvalidBindings(t *testing.T) {
 	}
 }
 
-func TestMigrateAcceptedV3RejectsMixedProjectGenerationAndUnmappableStatus(t *testing.T) {
+func TestMigrateAcceptedV3RejectsMixedProjectAndGeneration(t *testing.T) {
 	review, history, machine, index := migrationFixture(t)
 	parsedIndex, err := sessionindex.Parse(index)
 	if err != nil {
@@ -360,11 +375,6 @@ func TestMigrateAcceptedV3RejectsMixedProjectGenerationAndUnmappableStatus(t *te
 		t.Fatal("mixed generation index was accepted")
 	}
 
-	badStatus := bytes.Replace(review, []byte("#### \u72b6\u6001\nactive"), []byte("#### \u72b6\u6001\nmaybe"), 1)
-	badMachine := rebindV3ReviewHash(t, machine, badStatus)
-	if _, err := MigrateAcceptedV3(badStatus, history, badMachine, index); err == nil {
-		t.Fatal("unmappable decision status was accepted")
-	}
 }
 
 func rebindV3ReviewHash(t *testing.T, machine, review []byte) []byte {
@@ -379,6 +389,35 @@ func rebindV3ReviewHash(t *testing.T, machine, review []byte) []byte {
 		t.Fatal(err)
 	}
 	return body
+}
+
+func TestMigrateAcceptedV3PreservesReleasedHumanDecisionStatus(t *testing.T) {
+	released, err := os.ReadFile("../../testdata/review-v3/项目回顾.valid.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(released, []byte("#### 状态\n已采用")) {
+		t.Fatal("released compatibility fixture no longer carries the expected human status")
+	}
+
+	review, history, machine, index := migrationFixture(t)
+	review = bytes.Replace(review, []byte("#### \u72b6\u6001\nactive"), []byte("#### \u72b6\u6001\n已采用"), 1)
+	machine = rebindV3ReviewHash(t, machine, review)
+	result, err := MigrateAcceptedV3Result(review, history, machine, index)
+	if err != nil {
+		t.Fatalf("released human decision status blocked migration: %v", err)
+	}
+	var presentation map[string]any
+	if err := json.Unmarshal(result.Review, &presentation); err != nil {
+		t.Fatal(err)
+	}
+	decision := presentation["decisions"].([]any)[0].(map[string]any)
+	if decision["status"] != "legacy_unmapped" || decision["legacy_status_text"] != "已采用" {
+		t.Fatalf("legacy status was not represented losslessly: %+v", decision)
+	}
+	if _, err := reviewv4.LoadProjection(result.Review, result.History, result.Ledger, result.SessionIndex); err != nil {
+		t.Fatalf("migrated legacy status is not readable as v4: %v", err)
+	}
 }
 
 func cloneInput(input Input) Input {
@@ -435,3 +474,5 @@ func migrationFixture(t *testing.T) ([]byte, []byte, []byte, []byte) {
 }
 
 func bareHash(body []byte) string { return fmt.Sprintf("%x", sha256.Sum256(body)) }
+
+func stringPtr(value string) *string { return &value }

@@ -1,0 +1,18 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000", "project_id": "project-p", "generation_id": "generation-1", "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111", "generated_at": "2026-09-04T00:00:00Z", "sort_version": "started-at-desc-null-last-provider-session-v1",
+  "coverage": { "total": 2, "complete": 2, "partial": 0, "error": 0, "unprocessed": 0, "source_available": 2, "source_unavailable": 0, "started_at_known": 1, "ended_at_known": 1, "usage_known": 0 },
+  "sessions": [
+    {
+      "provider": "codex", "session_id": "known", "processing_state": "complete", "state_reason_codes": [], "source_availability": "available", "source_terminal_state": "indexed",
+      "started_at": "2026-09-04T00:00:00Z", "ended_at": "2026-09-04T00:01:00Z", "duration_ms": 60000, "warning_count": 0, "record_count": 1, "indexed_event_count": 1,
+      "coverage": { "seen": 1, "indexed": 1, "collapsed": 0, "unprojected": 0, "undecodable": 0, "truncated": 0 }, "fact_counts": { "file_change": 0, "command": 1, "verification": 0, "error": 0, "artifact": 0 },
+      "session_view_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222", "usage_record_digest": null, "summary_digest": null, "last_seen_generation_id": "generation-1", "last_successful_generation_id": "generation-1"
+    },
+    {
+      "provider": "claude", "session_id": "unknown", "processing_state": "complete", "state_reason_codes": [], "source_availability": "available", "source_terminal_state": "indexed",
+      "started_at": null, "ended_at": null, "duration_ms": null, "warning_count": 0, "record_count": 0, "indexed_event_count": 0,
+      "coverage": { "seen": 0, "indexed": 0, "collapsed": 0, "unprojected": 0, "undecodable": 0, "truncated": 0 }, "fact_counts": { "file_change": 0, "command": 0, "verification": 0, "error": 0, "artifact": 0 },
+      "session_view_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333", "usage_record_digest": null, "summary_digest": null, "last_seen_generation_id": "generation-1", "last_successful_generation_id": "generation-1"
+    }
+  ]
+}

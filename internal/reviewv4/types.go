@@ -18,9 +18,10 @@ const (
 type DecisionStatus string
 
 const (
-	DecisionActive     DecisionStatus = "active"
-	DecisionSuperseded DecisionStatus = "superseded"
-	DecisionArchived   DecisionStatus = "archived"
+	DecisionActive         DecisionStatus = "active"
+	DecisionSuperseded     DecisionStatus = "superseded"
+	DecisionArchived       DecisionStatus = "archived"
+	DecisionLegacyUnmapped DecisionStatus = "legacy_unmapped"
 )
 
 type CandidateStatus string
@@ -132,20 +133,21 @@ type SessionRef struct {
 	SessionID string `json:"session_id" required:"true"`
 }
 type Decision struct {
-	ID             string         `json:"id" required:"true"`
-	Kind           string         `json:"kind" required:"true"`
-	OccurredAt     string         `json:"occurred_at" required:"true"`
-	Title          string         `json:"title" required:"true"`
-	Rationale      string         `json:"rationale" required:"true"`
-	Impact         string         `json:"impact" required:"true"`
-	Status         DecisionStatus `json:"status" required:"true"`
-	ReevaluateWhen string         `json:"reevaluate_when" required:"true"`
-	Supersedes     []string       `json:"supersedes" required:"true"`
-	MilestoneIDs   []string       `json:"milestone_ids" required:"true"`
-	SessionRefs    []SessionRef   `json:"session_refs" required:"true"`
-	Provenance     string         `json:"provenance" required:"true"`
-	Pinned         bool           `json:"pinned" required:"true"`
-	Revision       int            `json:"revision" required:"true"`
+	ID               string         `json:"id" required:"true"`
+	Kind             string         `json:"kind" required:"true"`
+	OccurredAt       string         `json:"occurred_at" required:"true"`
+	Title            string         `json:"title" required:"true"`
+	Rationale        string         `json:"rationale" required:"true"`
+	Impact           string         `json:"impact" required:"true"`
+	Status           DecisionStatus `json:"status" required:"true"`
+	LegacyStatusText *string        `json:"legacy_status_text" required:"true" nullable:"true"`
+	ReevaluateWhen   string         `json:"reevaluate_when" required:"true"`
+	Supersedes       []string       `json:"supersedes" required:"true"`
+	MilestoneIDs     []string       `json:"milestone_ids" required:"true"`
+	SessionRefs      []SessionRef   `json:"session_refs" required:"true"`
+	Provenance       string         `json:"provenance" required:"true"`
+	Pinned           bool           `json:"pinned" required:"true"`
+	Revision         int            `json:"revision" required:"true"`
 }
 type Risk struct {
 	ID     string `json:"id" required:"true"`

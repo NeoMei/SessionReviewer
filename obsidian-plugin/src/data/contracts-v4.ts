@@ -225,13 +225,52 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
     pricingByID.set(snapshot.snapshot_id, snapshot);
   }
   const currentIDs = idArray(row.current_pricing_snapshot_ids, "$.current_pricing_snapshot_ids", 65536);
+  const pricingIdentity = (snapshot: PricingSnapshotV1): string =>
+    identityKey(snapshot.provider, `${snapshot.session_id}\u0000${snapshot.usage_record_digest}`);
+  const successorCounts = new Map<string, number>();
+  for (const [snapshotID, snapshot] of pricingByID) {
+    const predecessorID = snapshot.supersedes_snapshot_id;
+    if (predecessorID === null) continue;
+    const predecessor = pricingByID.get(predecessorID);
+    if (!predecessor) throw new Error(`pricing snapshot "${snapshotID}" has missing predecessor "${predecessorID}"`);
+    if (predecessorID === snapshotID) throw new Error("pricing snapshot cannot supersede itself");
+    if (pricingIdentity(predecessor) !== pricingIdentity(snapshot)) throw new Error("pricing predecessor and successor identity mismatch");
+    const successors = (successorCounts.get(predecessorID) ?? 0) + 1;
+    if (successors > 1) throw new Error("pricing supersession graph branches into multiple leaves");
+    successorCounts.set(predecessorID, successors);
+  }
+  const graphState = new Map<string, number>();
+  const visitPricing = (snapshotID: string): void => {
+    if (graphState.get(snapshotID) === 1) throw new Error("pricing supersession graph contains cycle");
+    if (graphState.get(snapshotID) === 2) return;
+    graphState.set(snapshotID, 1);
+    const predecessorID = pricingByID.get(snapshotID)?.supersedes_snapshot_id;
+    if (predecessorID !== null && predecessorID !== undefined) visitPricing(predecessorID);
+    graphState.set(snapshotID, 2);
+  };
+  for (const snapshotID of pricingByID.keys()) visitPricing(snapshotID);
+  for (const [snapshotID, snapshot] of pricingByID) {
+    if (((successorCounts.get(snapshotID) ?? 0) > 0) !== (snapshot.status === "superseded")) {
+      throw new Error("pricing supersession status does not match graph position");
+    }
+  }
   const seenCurrent = new Set<string>();
+  const currentByIdentity = new Map<string, string>();
   let currentPricingIncomplete = false;
   for (const snapshotID of currentIDs) {
     addUnique(seenCurrent, snapshotID, "current pricing snapshot reference");
     const snapshot = pricingByID.get(snapshotID);
-    if (!snapshot || snapshot.status === "superseded") throw new Error("invalid current pricing snapshot reference");
+    if (!snapshot || snapshot.status === "superseded" || (successorCounts.get(snapshotID) ?? 0) !== 0) throw new Error("invalid current pricing snapshot reference");
+    const identity = pricingIdentity(snapshot);
+    if (currentByIdentity.has(identity)) throw new Error("multiple current pricing snapshots for one usage record");
+    currentByIdentity.set(identity, snapshotID);
     currentPricingIncomplete ||= !snapshot.pricing_complete;
+  }
+  for (const [snapshotID, snapshot] of pricingByID) {
+    const selected = currentByIdentity.get(pricingIdentity(snapshot));
+    if (selected !== undefined && (successorCounts.get(snapshotID) ?? 0) === 0 && selected !== snapshotID) {
+      throw new Error("multiple effective pricing leaves for one usage record");
+    }
   }
   if (currentPricingIncomplete && accounting.total_cost_usd !== null) {
     throw new Error("aggregate price must be null when a current snapshot is incomplete");
@@ -294,8 +333,8 @@ function parseSessionIndexDocument(source: string): SessionIndexV1 {
     calculated[session.processing_state] += 1;
     if (session.source_availability === "available") calculated.source_available += 1;
     else calculated.source_unavailable += 1;
-    calculated.started_at_known += 1;
-    calculated.ended_at_known += 1;
+    if (session.started_at !== null) calculated.started_at_known += 1;
+    if (session.ended_at !== null) calculated.ended_at_known += 1;
     if (session.usage_record_digest !== null) calculated.usage_known += 1;
     parsedSessions.push(session);
   }
@@ -606,7 +645,7 @@ function parseTimeline(value: unknown, path: string, generationID: string): Time
 function parseDecision(value: unknown, path: string): DecisionV4 {
   const row = object(value, path);
   exact(row, path, [
-    "id", "kind", "occurred_at", "title", "rationale", "impact", "status", "reevaluate_when", "supersedes",
+    "id", "kind", "occurred_at", "title", "rationale", "impact", "status", "legacy_status_text", "reevaluate_when", "supersedes",
     "milestone_ids", "session_refs", "provenance", "pinned", "revision"
   ]);
   id(row.id, `${path}.id`);
@@ -615,7 +654,8 @@ function parseDecision(value: unknown, path: string): DecisionV4 {
   text(row.title, `${path}.title`, 16384);
   text(row.rationale, `${path}.rationale`, 16384);
   text(row.impact, `${path}.impact`, 16384);
-  oneOf(row.status, `${path}.status`, ["active", "superseded", "archived"]);
+  const status = oneOf(row.status, `${path}.status`, ["active", "superseded", "archived", "legacy_unmapped"]);
+  nullableText(row.legacy_status_text, `${path}.legacy_status_text`, 16384);
   text(row.reevaluate_when, `${path}.reevaluate_when`, 16384);
   idArray(row.supersedes, `${path}.supersedes`, 256, true);
   idArray(row.milestone_ids, `${path}.milestone_ids`, 256, true);
@@ -625,7 +665,12 @@ function parseDecision(value: unknown, path: string): DecisionV4 {
     const ref = parseSessionReference(refs[index], `${path}.session_refs[${index}]`);
     addUnique(identities, identityKey(ref.provider, ref.session_id), "decision session reference");
   }
-  oneOf(row.provenance, `${path}.provenance`, ["human_created", "migrated", "ai_candidate_confirmed"]);
+  const provenance = oneOf(row.provenance, `${path}.provenance`, ["human_created", "migrated", "ai_candidate_confirmed"]);
+  if (status === "legacy_unmapped") {
+    if (row.legacy_status_text === null || provenance !== "migrated") throw new Error(`${path} legacy unmapped status requires migrated provenance and exact status text`);
+  } else if (row.legacy_status_text !== null) {
+    throw new Error(`${path} native decision status cannot carry legacy status text`);
+  }
   boolean(row.pinned, `${path}.pinned`);
   positiveInteger(row.revision, `${path}.revision`);
   return row as unknown as DecisionV4;
@@ -946,8 +991,8 @@ function parseIndexEntry(value: unknown, path: string): SessionIndexEntryV1 {
   }
   oneOf(row.source_availability, `${path}.source_availability`, ["available", "unavailable"]);
   nullableText(row.source_terminal_state, `${path}.source_terminal_state`, 64);
-  text(row.started_at, `${path}.started_at`, 128, true);
-  text(row.ended_at, `${path}.ended_at`, 128, true);
+  if (row.started_at !== null) text(row.started_at, `${path}.started_at`, 128, true);
+  if (row.ended_at !== null) text(row.ended_at, `${path}.ended_at`, 128, true);
   nullableInteger(row.duration_ms, `${path}.duration_ms`);
   integer(row.warning_count, `${path}.warning_count`);
   nullableInteger(row.record_count, `${path}.record_count`);
@@ -1534,8 +1579,12 @@ function compareGoStrings(left: string, right: string): number {
 }
 
 function compareIndexEntries(left: SessionIndexEntryV1, right: SessionIndexEntryV1): number {
-  const started = compareGoStrings(right.started_at, left.started_at);
-  if (started !== 0) return started;
+  if (left.started_at !== null || right.started_at !== null) {
+    if (left.started_at === null) return 1;
+    if (right.started_at === null) return -1;
+    const started = compareGoStrings(right.started_at, left.started_at);
+    if (started !== 0) return started;
+  }
   const provider = compareGoStrings(left.provider, right.provider);
   return provider !== 0 ? provider : compareGoStrings(left.session_id, right.session_id);
 }

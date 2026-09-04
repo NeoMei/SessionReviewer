@@ -53,8 +53,8 @@ type Entry struct {
 	StateReasonCodes           []string        `json:"state_reason_codes" required:"true"`
 	SourceAvailability         string          `json:"source_availability" required:"true"`
 	SourceTerminalState        *string         `json:"source_terminal_state" required:"true" nullable:"true"`
-	StartedAt                  string          `json:"started_at" required:"true"`
-	EndedAt                    string          `json:"ended_at" required:"true"`
+	StartedAt                  *string         `json:"started_at" required:"true" nullable:"true"`
+	EndedAt                    *string         `json:"ended_at" required:"true" nullable:"true"`
 	DurationMS                 *uint64         `json:"duration_ms" required:"true" nullable:"true"`
 	WarningCount               uint64          `json:"warning_count" required:"true"`
 	RecordCount                *uint64         `json:"record_count" required:"true" nullable:"true"`

@@ -44,7 +44,7 @@
         "state_reason_codes": { "type": "array", "maxItems": 64, "items": { "enum": ["not_discovered", "duplicate_candidate", "freeze_terminal", "malformed_source_records", "unsupported_source_records", "source_missing", "source_unreadable", "source_ambiguous", "source_unsupported", "source_unavailable", "partial_observations", "unprojected_facts", "undecodable_facts", "scan_cancelled"] } },
         "source_availability": { "enum": ["available", "unavailable"] },
         "source_terminal_state": { "type": ["string", "null"], "maxLength": 64 },
-        "started_at": { "$ref": "#/$defs/timestamp" }, "ended_at": { "$ref": "#/$defs/timestamp" },
+        "started_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "ended_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
         "duration_ms": { "type": ["integer", "null"], "minimum": 0 }, "warning_count": { "$ref": "#/$defs/nonnegative" },
         "record_count": { "type": ["integer", "null"], "minimum": 0 }, "indexed_event_count": { "$ref": "#/$defs/nonnegative" },
         "coverage": { "$ref": "#/$defs/session_coverage" }, "fact_counts": { "$ref": "#/$defs/fact_counts" },

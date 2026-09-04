@@ -81,11 +81,15 @@ func Validate(document Document) error {
 		default:
 			return fmt.Errorf("invalid source availability at %d", index)
 		}
-		if entry.StartedAt == "" || len(entry.StartedAt) > 128 || entry.EndedAt == "" || len(entry.EndedAt) > 128 || !validOptional(entry.SourceTerminalState, 64) {
+		if !validTimestamp(entry.StartedAt) || !validTimestamp(entry.EndedAt) || !validOptional(entry.SourceTerminalState, 64) {
 			return fmt.Errorf("invalid session timestamps at %d", index)
 		}
-		calculated.StartedAtKnown++
-		calculated.EndedAtKnown++
+		if entry.StartedAt != nil {
+			calculated.StartedAtKnown++
+		}
+		if entry.EndedAt != nil {
+			calculated.EndedAtKnown++
+		}
 		if entry.UsageRecordDigest != nil {
 			calculated.UsageKnown++
 		}
@@ -121,13 +125,25 @@ func Validate(document Document) error {
 }
 
 func less(left, right Entry) bool {
-	if left.StartedAt != right.StartedAt {
-		return left.StartedAt > right.StartedAt
+	if left.StartedAt != nil || right.StartedAt != nil {
+		if left.StartedAt == nil {
+			return false
+		}
+		if right.StartedAt == nil {
+			return true
+		}
+		if *left.StartedAt != *right.StartedAt {
+			return *left.StartedAt > *right.StartedAt
+		}
 	}
 	if left.Provider != right.Provider {
 		return left.Provider < right.Provider
 	}
 	return left.SessionID < right.SessionID
+}
+
+func validTimestamp(value *string) bool {
+	return value == nil || (*value != "" && len(*value) <= 128)
 }
 
 func Parse(data []byte) (Document, error) {

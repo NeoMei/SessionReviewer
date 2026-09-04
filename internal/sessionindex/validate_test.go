@@ -1,6 +1,7 @@
 package sessionindex
 
 import (
+	"encoding/json"
 	"math"
 	"os"
 	"testing"
@@ -29,7 +30,7 @@ func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
 
 func TestValidateIdentityUsesProviderAndSessionIDPair(t *testing.T) {
 	d := minimumDocument()
-	d.Sessions = []Entry{{Provider: "claude", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: "now", EndedAt: "now"}, {Provider: "codex", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: "now", EndedAt: "now"}}
+	d.Sessions = []Entry{{Provider: "claude", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: strptr("now"), EndedAt: strptr("now")}, {Provider: "codex", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: strptr("now"), EndedAt: strptr("now")}}
 	d.Coverage.Total = 2
 	d.Coverage.Complete = 2
 	d.Coverage.SourceAvailable = 2
@@ -49,6 +50,33 @@ func TestValidateCoverageAndDigest(t *testing.T) {
 	d.Coverage.Total = 1
 	if err := Validate(d); err == nil {
 		t.Fatal("accepted coverage mismatch")
+	}
+}
+
+func TestParseAcceptsUnknownTimestampsAndCountsOnlyKnownValues(t *testing.T) {
+	body, err := os.ReadFile("../../testdata/contracts/v4/session-index-v1.unknown.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Parse(body)
+	if err != nil {
+		t.Fatalf("unknown timestamps were rejected: %v", err)
+	}
+	if document.Coverage.StartedAtKnown != 1 || document.Coverage.EndedAtKnown != 1 {
+		t.Fatalf("unknown timestamps were counted as known: %+v", document.Coverage)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	raw["coverage"].(map[string]any)["started_at_known"] = float64(2)
+	malformed, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Parse(malformed); err == nil {
+		t.Fatal("accepted coverage that counted a null timestamp as known")
 	}
 }
 
@@ -107,7 +135,7 @@ func TestRenderCalculatesDigestAndIsDeterministic(t *testing.T) {
 
 func oneSessionDocument() Document {
 	d := minimumDocument()
-	d.Sessions = []Entry{{Provider: "codex", SessionID: "same", ProcessingState: ProcessingComplete, StateReasonCodes: []string{}, SourceAvailability: "available", StartedAt: "now", EndedAt: "now", Coverage: Coverage{}}}
+	d.Sessions = []Entry{{Provider: "codex", SessionID: "same", ProcessingState: ProcessingComplete, StateReasonCodes: []string{}, SourceAvailability: "available", StartedAt: strptr("now"), EndedAt: strptr("now"), Coverage: Coverage{}}}
 	d.Coverage = IndexCoverage{Total: 1, Complete: 1, SourceAvailable: 1, StartedAtKnown: 1, EndedAtKnown: 1}
 	return d
 }
