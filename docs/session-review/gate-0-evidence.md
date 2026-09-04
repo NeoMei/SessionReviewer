@@ -4,15 +4,16 @@
 
 **LOCAL COMPLETE / WINDOWS CI PENDING**
 
-本地 Gate 0 已在实现提交 `e3ff49beb6cb28d4aacb73a5ba4f45c43289b112` 上重新通过。合同矩阵现已覆盖 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图、演进闭环和通用 Agent annotation。该提交未推送，也没有原生 Windows 运行，因此 Windows CI 证据仍为 PENDING。
+本地 Gate 0 已在实现边界提交 `b30876db1d61026eb52f5d6d6533c052fd7a93b7` 上重新通过。合同矩阵现已覆盖 `conversation-chain-v1`、`problem-map-candidate-v1`、正式问题图、演进闭环和通用 Agent annotation，并完成了 Fix Round 1 的五项跨语言契约修正。该提交未推送，也没有原生 Windows 运行，因此 Windows CI 证据仍为 PENDING。
 
 ## 审计对象
 
 - 分支：`codex/obsidian-context-v4`
 - 任务基准：`6421a9aad6d7a65bbaef2fa71e4d7e7be3431db6`
-- 实现提交：`e3ff49beb6cb28d4aacb73a5ba4f45c43289b112`
+- 初始实现提交：`e3ff49beb6cb28d4aacb73a5ba4f45c43289b112`
+- Fix Round 1 实现提交：`b30876db1d61026eb52f5d6d6533c052fd7a93b7`
 - 环境：`Darwin arm64`，`go1.26.5 darwin/arm64`，Node `v24.18.0`，npm `11.16.0`
-- 实现提交统计：43 files changed，2,977 insertions，80 deletions
+- Fix Round 1 提交统计：18 files changed，279 insertions，39 deletions
 - 未纳入任务提交：既有未跟踪目录 `.superpowers/brainstorm/`
 
 ## TDD 边界
@@ -27,6 +28,8 @@ go test ./internal/conversationchain ./internal/problemmap ./internal/reviewv4 -
 
 相同命令在实现后 PASS：`internal/conversationchain` 0.428s、`internal/problemmap` 0.555s、`internal/reviewv4` 0.310s；Vitest 1/1 file、57/57 tests。随后增加 canonical digest tamper mirror，最终聚焦合同文件为 58/58 tests。
 
+Fix Round 1 先新增回归测试并获得预期 RED：CLI 编译报告 `ParseProblemContractWithInput` 未定义；Go 分别证明零 digest、超过 JavaScript safe integer 上限以及 schema 的非空图 revision-zero 会被错误接受；TypeScript 为 2 failed / 57 passed。修正后聚焦 Go 五个 package 全部 PASS，`contracts-v4.test.ts` 为 59/59 PASS。完整 RED/GREEN 原始输出保存在 Task 7 report 的 `Fix Round 1` 节。
+
 ## 完整本地门禁
 
 按串行顺序执行：
@@ -34,10 +37,10 @@ go test ./internal/conversationchain ./internal/problemmap ./internal/reviewv4 -
 | 命令 | 结果 | 证据 |
 |---|---|---|
 | `gofmt -w internal/conversationchain internal/problemmap internal/reviewv4 internal/cli` | PASS | 无输出 |
-| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | 57 个 package；较慢 package 包括 `internal/reviewjob` 89.595s、`internal/scan` 79.903s、`test/zerotoken` 62.772s，均低于每个测试二进制 5 分钟超时 |
+| `go test -p 1 -timeout 5m -count=1 ./...` | PASS | Fix Round 1 后全 package 重跑；较慢 package 包括 `internal/scan` 114.532s、`internal/reviewjob` 55.855s、`test/zerotoken` 34.961s，均低于每个测试二进制 5 分钟超时 |
 | `go vet ./...` | PASS | exit 0，无输出 |
 | `go mod tidy -diff` | PASS | exit 0，无 diff |
-| `cd obsidian-plugin && npm run check` | PASS | lint；17/17 test files、122/122 tests；TypeScript typecheck；production bundle |
+| `cd obsidian-plugin && npm run check` | PASS | lint；17/17 test files、123/123 tests；TypeScript typecheck；production bundle |
 | `git diff --check` | PASS | exit 0，无输出 |
 
 独立 ordinary-flow 复核 `go test ./test/zerotoken -count=1 -run 'TestGate(A|B)' -v` PASS：Gate A 154/154 terminal、151 indexed、zero model tokens；Gate B 端到端发布与幂等测试通过。新增 deterministic candidate fixture 明确要求 `agent_run_id=null`，本任务没有启动或实现 Agent 执行。
@@ -69,6 +72,9 @@ go test ./internal/conversationchain ./internal/problemmap ./internal/reviewv4 -
 - 缺失结论必须为空文本并携带 typed reason；milestone annotation 使用通用 `confirmed_entity_id`、source-turn dependency，禁止 decision-only fields。
 - v4/partial 兼容 fixture 仅增加空问题图、空 chain dependencies 和 neutral closed-loop 默认；对应 review hash 与 ledger self hash 已机械重算。v3 语义未改。
 - 64 KiB per-source ceiling 仅冻结为 CLI 常量与显式 truncation coverage 合同；未实现 SourceAdapter 读取行为。
+- `problem reorder` 的完整直接子节点顺序由最大 64 KiB、封闭且带 `schema_version=1` 的 stdin JSON 载荷携带；命令行仍不接受任意文件或路径输入。
+- 空正式问题图允许 revision 0 并可作为第一次 apply 的 CAS 前像；非空图在 Go、TypeScript 和 JSON Schema 中都要求正 revision。
+- 两个新增持久化合同在 parse 边界无条件验证 canonical digest，全零 digest 不再作为绕过值；新增/扩展整数线统一上限为 `9007199254740991`。
 
 ## Windows 证据状态
 
