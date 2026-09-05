@@ -98,13 +98,20 @@ export function renderMarkdownV4View(
       element("p", { text: `下一步：${presentation.current_state.next_action}` })
     ]);
     const milestone = presentation.timeline.at(-1);
-    if (milestone) summary.append(element("section", { className: "sr-v4-milestone" }, [
-      element("h2", { text: "最近里程碑" }),
-      element("h3", { text: milestone.title }),
-      element("p", { text: milestone.summary }),
-      element("p", { text: `结论：${milestone.closed_loop.conclusion.text || "未记录"}` }),
-      element("p", { text: `验证状态：${milestone.closed_loop.verification.state}` })
-    ]));
+    if (milestone) {
+      const verification = milestone.closed_loop.verification;
+      const details = [
+        element("h2", { text: "最近里程碑" }),
+        element("h3", { text: milestone.title }),
+        element("p", { text: milestone.summary }),
+        element("p", { text: `结论：${milestone.closed_loop.conclusion.text || "未记录"}` }),
+        element("p", { text: `验证状态：${verification.state}` })
+      ];
+      if (verification.text) details.push(element("p", { text: `验证文本：${verification.text}` }));
+      if (verification.missing_reason) details.push(element("p", { text: `验证缺失原因：${verification.missing_reason}` }));
+      for (const ref of verification.source_turn_refs) details.push(element("p", { text: `验证引用：${ref.provider}/${ref.session_id}#${ref.turn_unit_id}` }));
+      summary.append(element("section", { className: "sr-v4-milestone" }, details));
+    }
     root.append(summary);
   }
   const actions = element("div", { className: "sr-v4-actions" });

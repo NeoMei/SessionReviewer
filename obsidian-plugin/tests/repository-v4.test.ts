@@ -140,12 +140,35 @@ describe("v4 project repository", () => {
     expect(view.textContent).toContain("项目目标夹具");
     expect(view.textContent).toContain("人工字段可编辑，结构仍需显式操作。");
     expect(view.textContent).toContain("验证状态：missing");
+    expect(view.textContent).toContain("验证缺失原因：not_verified");
     expect(view.textContent).toContain("CLI 不可用");
     expect(view.querySelector("[data-action='edit-v4']")).toBeNull();
     view.querySelectorAll<HTMLButtonElement>("button")[0].click();
     view.querySelectorAll<HTMLButtonElement>("button")[1].click();
     expect(opens).toEqual(["Projects/V4/项目回顾.md", "Projects/V4/项目历史.md"]);
     expect(vault.process).not.toHaveBeenCalled();
+  });
+
+  it("renders populated milestone verification text and source references", async () => {
+    const { vault } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    const snapshot = await repository.load(project);
+    if (snapshot.kind !== "markdown-v4" || snapshot.state.kind !== "public_valid") throw new Error("expected public-valid v4");
+    const presentation = structuredClone(snapshot.state.value.presentation);
+    presentation.timeline[0].closed_loop.verification = {
+      state: "present",
+      text: "完整回归已通过",
+      missing_reason: null,
+      source_turn_refs: [{ provider: "codex", session_id: "session-1", turn_unit_id: "turn-1" }]
+    };
+    const populated: MarkdownSnapshotReady = { ...snapshot, state: { ...snapshot.state, value: { ...snapshot.state.value, presentation } } };
+
+    const { renderMarkdownV4View } = await import("../src/view/presentation");
+    const view = renderMarkdownV4View(populated, () => {});
+
+    expect(view.textContent).toContain("验证文本：完整回归已通过");
+    expect(view.textContent).toContain("验证引用：codex/session-1#turn-1");
   });
 
   it("routes a v4 repository snapshot through ProjectEvolutionView without the v3 editor", async () => {

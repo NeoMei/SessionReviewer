@@ -142,7 +142,7 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 	if err := strictjson.Decode(mustRead(t, "../../testdata/contracts/v4/markdown/cases.json"), &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 12 {
+	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 23 {
 		t.Fatalf("invalid corpus identity: %+v", corpus)
 	}
 	foundRevisionMismatch := false

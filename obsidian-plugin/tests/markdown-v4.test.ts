@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { codeOf, parseMachineLedgerV4 } from "../src/data/contracts-v4";
-import { markdownCodeOf, parseMarkdownV4 } from "../src/data/markdown-v4";
+import { markdownCodeOf, parseMarkdownV4, renderProblemTreeV4 } from "../src/data/markdown-v4";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/contracts/v4/markdown");
 const read = (name: string): string => readFileSync(resolve(root, name), "utf8");
@@ -113,5 +113,84 @@ describe("v4 human Markdown codec", () => {
     const history = pair.history.replace("人工字段可编辑，结构仍需显式操作。", "");
 
     expect(() => parseMarkdownV4({ ...pair, history }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_structure_edit_requires_command" }));
+  });
+
+  it("updates one valid existing patch without mutating the accepted ledger", () => {
+    const ledger = parseMachineLedgerV4(read("ledger-existing-patch.json"));
+    const before = structuredClone(ledger);
+
+    const result = parseMarkdownV4({ review: read("review-existing-patch-draft.md"), history: read("history.md") }, ledger);
+
+    expect(result.presentation.current_state.goal).toBe("再次人工编辑目标");
+    expect(result.presentation.human_patches).toHaveLength(1);
+    expect(result.presentation.human_patches[0]).toMatchObject({ entity_id: "project-overview", field: "goal", operation: "set", value: "再次人工编辑目标" });
+    expect(result.presentation.generated_baselines).toEqual(before.generated_baselines);
+    expect(ledger).toEqual(before);
+  });
+
+  it("removes an existing human patch when the field returns to its generated baseline", () => {
+    const ledger = parseMachineLedgerV4(read("ledger-existing-patch.json"));
+
+    const result = parseMarkdownV4({ review: read("review.md"), history: read("history.md") }, ledger);
+
+    expect(result.presentation.current_state.goal).toBe("项目目标夹具");
+    expect(result.presentation.human_patches).toEqual([]);
+    expect(result.presentation.generated_baselines).toEqual(ledger.generated_baselines);
+  });
+
+  it("validates Go baseline hashes containing HTML and line-separator characters", () => {
+    const ledger = parseMachineLedgerV4(read("ledger-special-baseline.json"));
+    expect(ledger.generated_baselines[0].generated_hash).toBe("112173e9eb315eaffc9ce7b55ca9fc1a768be05486a426a2365c1354301476bd");
+
+    const result = parseMarkdownV4({ review: read("review-special-baseline-draft.md"), history: read("history.md") }, ledger);
+
+    expect(result.presentation.current_state.goal).toBe("再次特殊字符覆盖");
+    expect(result.presentation.human_patches[0]).toMatchObject({ value: "再次特殊字符覆盖", base_generated_hash: "112173e9eb315eaffc9ce7b55ca9fc1a768be05486a426a2365c1354301476bd" });
+  });
+
+  it.each([
+    ["ledger-duplicate-baseline.json", "review.md"],
+    ["ledger-invalid-baseline-hash.json", "review.md"],
+    ["ledger-baseline-generation-mismatch.json", "review.md"],
+    ["ledger-baseline-kind-mismatch.json", "review.md"],
+    ["ledger-baseline-value-missing.json", "review.md"],
+    ["ledger-baseline-values-present.json", "review.md"],
+    ["ledger-duplicate-human-patch.json", "review-existing-patch.md"],
+    ["ledger-orphan-patch-collision.json", "review-existing-patch.md"]
+  ])("does not reject malformed patch metadata for an untouched field in %s", (ledgerName, reviewName) => {
+    const ledger = parseMachineLedgerV4(read(ledgerName));
+
+    const result = parseMarkdownV4({ review: read(reviewName), history: read("history.md") }, ledger);
+
+    expect(result.changedFields).toEqual([]);
+  });
+
+  it("renders a deep legal problem chain iteratively within the document bound", () => {
+    const ledger = parseMachineLedgerV4(read("ledger.json"));
+    const presentation = structuredClone(ledger.document_projection!.presentation_base);
+    const template = presentation.problem_nodes[0];
+    presentation.problem_nodes = Array.from({ length: 5_000 }, (_, index) => ({
+      ...template,
+      id: `deep-${index}`,
+      primary_parent_id: index === 0 ? null : `deep-${index - 1}`
+    }));
+
+    const rendered = renderProblemTreeV4(presentation);
+
+    expect(rendered.split("\n")).toHaveLength(5_000);
+    expect(rendered).toContain("#problem-x646565702d34393939");
+  });
+
+  it("rejects a legal-depth problem chain once bounded rendering would exceed 64 MiB", () => {
+    const ledger = parseMachineLedgerV4(read("ledger.json"));
+    const presentation = structuredClone(ledger.document_projection!.presentation_base);
+    const template = presentation.problem_nodes[0];
+    presentation.problem_nodes = Array.from({ length: 9_000 }, (_, index) => ({
+      ...template,
+      id: `oversize-${index}`,
+      primary_parent_id: index === 0 ? null : `oversize-${index - 1}`
+    }));
+
+    expect(() => renderProblemTreeV4(presentation)).toThrowError(expect.objectContaining({ code: "markdown_format_invalid" }));
   });
 });

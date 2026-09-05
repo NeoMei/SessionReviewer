@@ -2078,7 +2078,7 @@ function orderedPriceDimensions(value: PricingRatesV1 | BillableQuantitiesV1 | P
   };
 }
 
-function goJSON(value: unknown): string {
+export function encodeGoCanonicalJSON(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "string") return goJSONString(value);
   if (typeof value === "number") {
@@ -2087,13 +2087,15 @@ function goJSON(value: unknown): string {
     return String(value);
   }
   if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) return `[${value.map(goJSON).join(",")}]`;
+  if (Array.isArray(value)) return `[${value.map(encodeGoCanonicalJSON).join(",")}]`;
   if (typeof value === "object" && value !== null) {
     const entries = Object.entries(value as JsonObject).filter(([, child]) => child !== undefined);
-    return `{${entries.map(([key, child]) => `${goJSONString(key)}:${goJSON(child)}`).join(",")}}`;
+    return `{${entries.map(([key, child]) => `${goJSONString(key)}:${encodeGoCanonicalJSON(child)}`).join(",")}}`;
   }
   throw new Error("canonical JSON contains an unsupported value");
 }
+
+const goJSON = encodeGoCanonicalJSON;
 
 function goJSONString(value: string): string {
   return JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => {

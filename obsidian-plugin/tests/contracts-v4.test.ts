@@ -215,7 +215,7 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(corpus.schema_version).toBe(1);
     expect(corpus.format).toBe("review-markdown-v1");
     const cases = corpus.cases as JsonObject[];
-    expect(cases).toHaveLength(12);
+    expect(cases).toHaveLength(23);
     expect(Object.keys(cases[0].expected_fields as JsonObject)).toHaveLength(24);
     for (const testCase of cases) {
       const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_markdown_code", "expected_fields"];

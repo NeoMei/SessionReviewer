@@ -5,6 +5,12 @@ const directory = new URL("./", import.meta.url);
 const base = JSON.parse(await readFile(new URL("ledger.json", directory), "utf8"));
 const write = async (name, value) => writeFile(new URL(name, directory), `${JSON.stringify(value, null, 2)}\n`);
 const copy = () => structuredClone(base);
+const hash = (value) => createHash("sha256").update(value).digest("hex");
+const goJSON = (value) => JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => ({
+  "<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029"
+})[character]);
+const baselineHash = (entity_id, field, kind, value, values = null) =>
+  hash(goJSON({ schema_version: 1, entity_id, field, kind, value, values }));
 
 const canonicalLedgerHash = (ledger) => {
   const body = {
@@ -31,7 +37,7 @@ const canonicalLedgerHash = (ledger) => {
       session_index_digest: ledger.sync_hashes.session_index_digest
     }
   };
-  return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+  return createHash("sha256").update(goJSON(body)).digest("hex");
 };
 
 const review = await readFile(new URL("review.md", directory), "utf8");
@@ -110,3 +116,127 @@ patchMismatch.document_projection.presentation_base.human_patches = [{
   base_generated_hash: "1111111111111111111111111111111111111111111111111111111111111111"
 }];
 await write("ledger-patch-mismatch.json", patchMismatch);
+
+const goalEntity = "project-overview";
+const goalField = "goal";
+const originalGoal = "项目目标夹具";
+const acceptedGoal = "已有人工目标";
+const draftGoal = "再次人工编辑目标";
+const goalBaseline = {
+  generation_id: base.generation_id,
+  entity_id: goalEntity,
+  field: goalField,
+  kind: "scalar",
+  value: originalGoal,
+  generated_hash: baselineHash(goalEntity, goalField, "scalar", originalGoal)
+};
+const goalPatch = {
+  entity_id: goalEntity,
+  field: goalField,
+  operation: "set",
+  value: acceptedGoal,
+  base_generated_hash: goalBaseline.generated_hash
+};
+const setPatchState = (ledger, human, orphan, baselines) => {
+  ledger.human_patches = structuredClone(human);
+  ledger.orphan_patches = structuredClone(orphan);
+  ledger.generated_baselines = structuredClone(baselines);
+  const presentation = ledger.document_projection.presentation_base;
+  presentation.human_patches = structuredClone(human);
+  presentation.orphan_patches = structuredClone(orphan);
+  presentation.generated_baselines = structuredClone(baselines);
+};
+const acceptedPatchReview = review.replace(originalGoal, acceptedGoal);
+const draftPatchReview = review.replace(originalGoal, draftGoal);
+await writeFile(new URL("review-existing-patch.md", directory), acceptedPatchReview);
+await writeFile(new URL("review-existing-patch-draft.md", directory), draftPatchReview);
+await writeFile(new URL("review-goal-edit.md", directory), draftPatchReview);
+
+const existingPatch = copy();
+existingPatch.document_projection.presentation_base.current_state.goal = acceptedGoal;
+setPatchState(existingPatch, [goalPatch], [], [goalBaseline]);
+existingPatch.review_sha256 = hash(acceptedPatchReview);
+existingPatch.sync_hashes.review_sha256 = existingPatch.review_sha256;
+existingPatch.sync_hashes.ledger_sha256 = canonicalLedgerHash(existingPatch);
+await write("ledger-existing-patch.json", existingPatch);
+
+const specialBaselineValue = "<目标>&\u2028\u2029";
+const specialAcceptedGoal = "已有特殊字符覆盖";
+const specialDraftGoal = "再次特殊字符覆盖";
+const specialBaseline = {
+  generation_id: base.generation_id,
+  entity_id: goalEntity,
+  field: goalField,
+  kind: "scalar",
+  value: specialBaselineValue,
+  generated_hash: baselineHash(goalEntity, goalField, "scalar", specialBaselineValue)
+};
+const specialPatch = {
+  entity_id: goalEntity,
+  field: goalField,
+  operation: "set",
+  value: specialAcceptedGoal,
+  base_generated_hash: specialBaseline.generated_hash
+};
+const specialAcceptedReview = review.replace(originalGoal, specialAcceptedGoal);
+const specialDraftReview = review.replace(originalGoal, specialDraftGoal);
+await writeFile(new URL("review-special-baseline.md", directory), specialAcceptedReview);
+await writeFile(new URL("review-special-baseline-draft.md", directory), specialDraftReview);
+const specialBaselineLedger = copy();
+specialBaselineLedger.document_projection.presentation_base.current_state.goal = specialAcceptedGoal;
+setPatchState(specialBaselineLedger, [specialPatch], [], [specialBaseline]);
+specialBaselineLedger.review_sha256 = hash(specialAcceptedReview);
+specialBaselineLedger.sync_hashes.review_sha256 = specialBaselineLedger.review_sha256;
+specialBaselineLedger.sync_hashes.ledger_sha256 = canonicalLedgerHash(specialBaselineLedger);
+await write("ledger-special-baseline.json", specialBaselineLedger);
+
+const duplicateBaseline = copy();
+setPatchState(duplicateBaseline, [], [], [goalBaseline, goalBaseline]);
+duplicateBaseline.sync_hashes.ledger_sha256 = canonicalLedgerHash(duplicateBaseline);
+await write("ledger-duplicate-baseline.json", duplicateBaseline);
+
+const invalidBaselineHash = copy();
+setPatchState(invalidBaselineHash, [], [], [{ ...goalBaseline, generated_hash: "0".repeat(64) }]);
+invalidBaselineHash.sync_hashes.ledger_sha256 = canonicalLedgerHash(invalidBaselineHash);
+await write("ledger-invalid-baseline-hash.json", invalidBaselineHash);
+
+const baselineVariants = [
+  ["ledger-baseline-generation-mismatch.json", { ...goalBaseline, generation_id: "other-generation" }],
+  ["ledger-baseline-kind-mismatch.json", { ...goalBaseline, kind: "list", generated_hash: baselineHash(goalEntity, goalField, "list", originalGoal) }],
+  ["ledger-baseline-value-missing.json", (({ value: _value, ...baseline }) => baseline)(goalBaseline)],
+  ["ledger-baseline-values-present.json", {
+    generation_id: goalBaseline.generation_id,
+    entity_id: goalBaseline.entity_id,
+    field: goalBaseline.field,
+    kind: goalBaseline.kind,
+    value: goalBaseline.value,
+    values: [],
+    generated_hash: goalBaseline.generated_hash
+  }]
+];
+for (const [name, baseline] of baselineVariants) {
+  const ledger = copy();
+  setPatchState(ledger, [], [], [baseline]);
+  ledger.sync_hashes.ledger_sha256 = canonicalLedgerHash(ledger);
+  await write(name, ledger);
+}
+
+const duplicatePatch = copy();
+duplicatePatch.document_projection.presentation_base.current_state.goal = acceptedGoal;
+setPatchState(duplicatePatch, [goalPatch, goalPatch], [], [goalBaseline]);
+duplicatePatch.review_sha256 = hash(acceptedPatchReview);
+duplicatePatch.sync_hashes.review_sha256 = duplicatePatch.review_sha256;
+duplicatePatch.sync_hashes.ledger_sha256 = canonicalLedgerHash(duplicatePatch);
+await write("ledger-duplicate-human-patch.json", duplicatePatch);
+
+const orphanCollision = copy();
+orphanCollision.document_projection.presentation_base.current_state.goal = acceptedGoal;
+setPatchState(orphanCollision, [goalPatch], [goalPatch], [goalBaseline]);
+orphanCollision.review_sha256 = hash(acceptedPatchReview);
+orphanCollision.sync_hashes.review_sha256 = orphanCollision.review_sha256;
+orphanCollision.sync_hashes.ledger_sha256 = canonicalLedgerHash(orphanCollision);
+await write("ledger-orphan-patch-collision.json", orphanCollision);
+
+const oversizedID = "a".repeat(257);
+await writeFile(new URL("review-oversized-marker-id.md", directory), review.replaceAll("decision:decision:alpha", `decision:${oversizedID}`));
+await writeFile(new URL("review-project-overview-colon.md", directory), review.replaceAll('entity="project-overview" name="goal"', 'entity="project-overview:" name="goal"'));

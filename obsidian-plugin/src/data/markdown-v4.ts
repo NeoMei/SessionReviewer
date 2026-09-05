@@ -1,6 +1,6 @@
 import { isAlias, isMap, isNode, isScalar, parseAllDocuments } from "yaml";
 import type { MachineLedgerV4, ReviewPresentationV4 } from "../contracts/review-v4";
-import { parseReviewPresentationV4 } from "./contracts-v4";
+import { encodeGoCanonicalJSON, parseReviewPresentationV4 } from "./contracts-v4";
 import { sha256Text } from "./hash";
 
 const MAX_DOCUMENT_BYTES = 64 << 20;
@@ -46,7 +46,7 @@ export function readMarkdownIdentityV4(source: string): { projectId: string; doc
   if (frontmatter.get("schema_version") !== 4 || frontmatter.get("document_format") !== "review-markdown-v1") fail("markdown_format_invalid");
   const projectId = frontmatter.get("project_id");
   const entityType = frontmatter.get("entity_type");
-  if (typeof projectId !== "string" || !ID.test(projectId) || (entityType !== "project-review" && entityType !== "project-history")) fail("markdown_format_invalid");
+  if (typeof projectId !== "string" || !validID(projectId) || (entityType !== "project-review" && entityType !== "project-history")) fail("markdown_format_invalid");
   return { projectId, document: entityType === "project-review" ? "review" : "history" };
 }
 
@@ -64,6 +64,7 @@ export function parseMarkdownV4(pair: MarkdownPair, ledger: MachineLedgerV4): Ma
   const expectedFields = new Map(expected.filter((block) => !block.generated).map((block) => [`${block.entity}\0${block.name}`, block.value]));
   const presentation = structuredClone(base);
   const entities = presentationEntities(presentation);
+  const patches = patchState(presentation);
   const changedFields: { entity: string; name: string }[] = [];
   for (const field of fields) {
     const before = expectedFields.get(`${field.entity}\0${field.name}`);
@@ -71,10 +72,11 @@ export function parseMarkdownV4(pair: MarkdownPair, ledger: MachineLedgerV4): Ma
     if (normalizeLines(before) !== normalizeLines(field.value)) {
       changedFields.push({ entity: field.entity, name: field.name });
       setPresentationField(presentation, entities, field.entity, field.name, field.value);
-      recordPatch(presentation, field.entity, field.name, before, field.value);
+      recordPatch(presentation, patches, field.entity, field.name, before, field.value);
     }
   }
   if (changedFields.length > 0) {
+    if (patches.removedHuman.size > 0) presentation.human_patches = presentation.human_patches.filter((_patch, index) => !patches.removedHuman.has(index));
     presentation.revision += 1;
     const changed = new Set(changedFields.map((field) => field.entity));
     for (const item of presentation.decisions) if (changed.has(`decision:${item.id}`)) item.revision += 1;
@@ -225,7 +227,7 @@ function expectedBlocks(p: ReviewPresentationV4): Block[] {
   const out: Block[] = [];
   const field = (entity: string, name: string, value: string): void => { out.push({ entity, name, value, generated: false }); };
   for (const name of ["goal", "stage", "status", "next_action", "last_verification"] as const) field("project-overview", name, p.current_state[name]);
-  out.push({ entity: "project-overview", name: "problem-tree", value: renderProblemTree(p), generated: true });
+  out.push({ entity: "project-overview", name: "problem-tree", value: renderProblemTreeV4(p), generated: true });
   out.push({ entity: "project-overview", name: "pinned-decisions", value: renderPinned(p), generated: true });
   out.push({ entity: "project-overview", name: "recent-milestones", value: renderRecent(p), generated: true });
   for (const x of p.decisions) for (const name of ["title", "rationale", "impact", "reevaluate_when"] as const) field(`decision:${x.id}`, name, x[name]);
@@ -248,11 +250,42 @@ interface PresentationEntities {
   milestones: Map<string, ReviewPresentationV4["timeline"][number]>;
 }
 
+interface PatchState {
+  baselines: Map<string, { first: ReviewPresentationV4["generated_baselines"][number]; duplicate: boolean }>;
+  human: Map<string, { index: number; duplicate: boolean }>;
+  orphan: Set<string>;
+  removedHuman: Set<number>;
+}
+
 function presentationEntities(p: ReviewPresentationV4): PresentationEntities {
   return {
     decisions: new Map(p.decisions.map((item) => [item.id, item])), risks: new Map(p.risks.map((item) => [item.id, item])),
     openLoops: new Map(p.open_loops.map((item) => [item.id, item])), problems: new Map(p.problem_nodes.map((item) => [item.id, item])),
     milestones: new Map(p.timeline.map((item) => [item.id, item]))
+  };
+}
+
+function patchState(p: ReviewPresentationV4): PatchState {
+  const baselines = new Map<string, { first: ReviewPresentationV4["generated_baselines"][number]; duplicate: boolean }>();
+  for (const baseline of p.generated_baselines) {
+    const key = patchKey(baseline.entity_id, baseline.field);
+    const prior = baselines.get(key);
+    if (prior) prior.duplicate = true;
+    else baselines.set(key, { first: baseline, duplicate: false });
+  }
+  const human = new Map<string, { index: number; duplicate: boolean }>();
+  for (let index = 0; index < p.human_patches.length; index += 1) {
+    const patch = p.human_patches[index];
+    const key = patchKey(patch.entity_id, patch.field);
+    const prior = human.get(key);
+    if (prior) prior.duplicate = true;
+    else human.set(key, { index, duplicate: false });
+  }
+  return {
+    baselines,
+    human,
+    orphan: new Set(p.orphan_patches.map((patch) => patchKey(patch.entity_id, patch.field))),
+    removedHuman: new Set()
   };
 }
 
@@ -276,18 +309,34 @@ function setPresentationField(p: ReviewPresentationV4, entities: PresentationEnt
   item[name] = value;
 }
 
-function recordPatch(p: ReviewPresentationV4, entity: string, field: string, before: string, after: string): void {
-  let baseline = p.generated_baselines.find((item) => item.entity_id === entity && item.field === field);
+function recordPatch(p: ReviewPresentationV4, state: PatchState, entity: string, field: string, before: string, after: string): void {
+  const key = patchKey(entity, field);
+  const baselineEntry = state.baselines.get(key);
+  if (baselineEntry?.duplicate) fail("markdown_baseline_missing");
+  let baseline = baselineEntry?.first;
   if (!baseline) {
     const identity = { schema_version: 1, entity_id: entity, field, kind: "scalar", value: before, values: null };
-    baseline = { generation_id: p.generation_id, entity_id: entity, field, kind: "scalar", value: before, generated_hash: sha256Text(JSON.stringify(identity)) };
+    baseline = { generation_id: p.generation_id, entity_id: entity, field, kind: "scalar", value: before, generated_hash: sha256Text(encodeGoCanonicalJSON(identity)) };
     p.generated_baselines.push(baseline);
+    state.baselines.set(key, { first: baseline, duplicate: false });
   }
-  const patchIndex = p.human_patches.findIndex((item) => item.entity_id === entity && item.field === field);
-  if (after === baseline.value) { if (patchIndex >= 0) p.human_patches.splice(patchIndex, 1); return; }
+  if (baseline.generation_id !== p.generation_id || baseline.kind !== "scalar" || baseline.value === undefined || baseline.values !== undefined ||
+    baseline.generated_hash !== sha256Text(encodeGoCanonicalJSON({ schema_version: 1, entity_id: baseline.entity_id, field: baseline.field, kind: baseline.kind, value: baseline.value, values: null }))) {
+    fail("markdown_baseline_missing");
+  }
+  const humanEntry = state.human.get(key);
+  if (humanEntry?.duplicate || state.orphan.has(key)) fail("markdown_field_duplicate");
+  const patchIndex = humanEntry?.index ?? -1;
+  if (after === baseline.value) {
+    if (patchIndex >= 0) state.removedHuman.add(patchIndex);
+    return;
+  }
   const patch = { entity_id: entity, field, operation: "set" as const, value: after, base_generated_hash: baseline.generated_hash };
-  if (patchIndex >= 0) p.human_patches[patchIndex] = patch; else p.human_patches.push(patch);
+  if (patchIndex >= 0) p.human_patches[patchIndex] = patch;
+  else { state.human.set(key, { index: p.human_patches.length, duplicate: false }); p.human_patches.push(patch); }
 }
+
+function patchKey(entity: string, field: string): string { return `${entity}\0${field}`; }
 
 function comparePatchLike(left: { entity_id: string; field: string }, right: { entity_id: string; field: string }): number {
   if (left.entity_id !== right.entity_id) return left.entity_id < right.entity_id ? -1 : 1;
@@ -295,12 +344,27 @@ function comparePatchLike(left: { entity_id: string; field: string }, right: { e
   return 0;
 }
 
-function renderProblemTree(p: ReviewPresentationV4): string {
+export function renderProblemTreeV4(p: ReviewPresentationV4): string {
   if (!p.problem_nodes.length) return "- 暂无正式问题";
   const children = new Map<string, typeof p.problem_nodes>();
   for (const node of p.problem_nodes) { const key = node.primary_parent_id ?? ""; const siblings = children.get(key); if (siblings) siblings.push(node); else children.set(key, [node]); }
-  const lines: string[] = []; const walk = (parent: string, depth: number): void => { for (const node of children.get(parent) ?? []) { lines.push(`${"  ".repeat(depth)}- [正式问题](#problem-${anchor(node.id)})`); walk(node.id, depth + 1); } };
-  walk("", 0); return lines.join("\n");
+  const lines: string[] = [];
+  const roots = children.get("") ?? [];
+  const stack: { node: ReviewPresentationV4["problem_nodes"][number]; depth: number }[] = [];
+  for (let index = roots.length - 1; index >= 0; index -= 1) stack.push({ node: roots[index], depth: 0 });
+  let bytes = 0;
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) break;
+    const suffix = `- [正式问题](#problem-${anchor(current.node.id)})`;
+    const lineBytes = current.depth * 2 + Buffer.byteLength(suffix, "utf8") + (lines.length ? 1 : 0);
+    if (lineBytes > MAX_DOCUMENT_BYTES - bytes) fail("markdown_format_invalid");
+    bytes += lineBytes;
+    lines.push(`${"  ".repeat(current.depth)}${suffix}`);
+    const descendants = children.get(current.node.id) ?? [];
+    for (let index = descendants.length - 1; index >= 0; index -= 1) stack.push({ node: descendants[index], depth: current.depth + 1 });
+  }
+  return lines.join("\n");
 }
 function renderPinned(p: ReviewPresentationV4): string { const values = p.decisions.filter((x) => x.pinned).map((x) => `- [决策](#decision-${anchor(x.id)})`); return values.length ? values.join("\n") : "- 暂无置顶决策"; }
 function renderRecent(p: ReviewPresentationV4): string { const shown = Math.min(5, p.timeline.length); return [`共 ${p.timeline.length} 条，显示 ${shown} 条；[查看完整历史](项目历史.md)。`, ...p.timeline.slice(-shown).map((x) => `- [里程碑](项目历史.md#milestone-${anchor(x.id)})`)].join("\n"); }
@@ -320,11 +384,16 @@ function renderEvidence(item: ReviewPresentationV4["timeline"][number]): string 
 function anchor(value: string): string { return `x${Buffer.from(value, "utf8").toString("hex")}`; }
 function documentFor(entity: string): "review" | "history" { return entity.startsWith("milestone:") ? "history" : "review"; }
 function validKey(entity: string, name: string, generated: boolean): boolean {
-  const [kind, ...rest] = entity.split(":"); const hasId = rest.length > 0 && ID.test(rest.join(":"));
-  if (generated) return kind === "project-overview" && !hasId && ["problem-tree", "pinned-decisions", "recent-milestones"].includes(name) || kind === "milestone" && hasId && name === "evidence";
+  const separator = entity.indexOf(":");
+  const hasId = separator >= 0;
+  const kind = hasId ? entity.slice(0, separator) : entity;
+  const id = hasId ? entity.slice(separator + 1) : "";
+  const validEntityId = hasId && validID(id);
+  if (generated) return kind === "project-overview" && !hasId && ["problem-tree", "pinned-decisions", "recent-milestones"].includes(name) || kind === "milestone" && validEntityId && name === "evidence";
   const fields: Record<string, string[]> = { "project-overview": ["goal", "stage", "status", "next_action", "last_verification"], decision: ["title", "rationale", "impact", "reevaluate_when"], risk: ["title", "detail", "status"], "open-loop": ["title", "question", "next_experiment", "completion_criterion", "status"], problem: ["question", "completion_criterion", "current_conclusion"], milestone: ["title", "summary", "conclusion", "impact_and_follow_up"] };
-  return !!fields[kind]?.includes(name) && (kind === "project-overview" ? !hasId : hasId);
+  return !!fields[kind]?.includes(name) && (kind === "project-overview" ? !hasId : validEntityId);
 }
+function validID(value: string): boolean { return Buffer.byteLength(value, "utf8") <= 256 && ID.test(value); }
 function physicalLines(source: string): { text: string; start: number; next: number }[] { const out = []; for (let start = 0; start < source.length;) { const lf = source.indexOf("\n", start); const next = lf < 0 ? source.length : lf + 1; let end = lf < 0 ? source.length : lf; if (end > start && source[end - 1] === "\r") end--; out.push({ text: source.slice(start, end), start, next }); start = next; } return out; }
 function fenceOpen(line: string): { char: string; length: number } | undefined { const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line); if (!match || (match[1][0] === "`" && match[2].includes("`"))) return undefined; return { char: match[1][0], length: match[1].length }; }
 function fenceClose(line: string, fence: { char: string; length: number }): boolean { return new RegExp(`^ {0,3}${fence.char}{${fence.length},}[ \\t]*$`).test(line); }
