@@ -12,13 +12,19 @@
 
 ## Global Constraints
 
-- Prerequisite: `2026-09-04-obsidian-context-gate-0-contracts.md` is complete.
+- Prerequisite: the original `2026-09-04-obsidian-context-gate-0-contracts.md` contracts are implemented; ordinary v4 publication additionally requires the approved Markdown supplement and implementation plan `2026-09-05-v4-human-markdown-codec.md`. The supplement is planned, not implemented.
 - Begin from released 0.3.5 v3 (`ea5b1ba`) in the isolated implementation worktree and preserve the original dirty user changes. No destructive Git cleanup.
 - `session-index.json` is complete or not published. Limits are 65,536 entries and 64 MiB; overflow returns `session_index_capacity_exceeded` and retains the previous accepted generation.
 - Index order is `started_at desc nulls last, provider asc, session_id asc`. Identity is always `(project_id, provider, session_id)`.
 - Raw messages, hidden reasoning, instructions, absolute paths, secrets, and full tool output never enter the index, Vault, or inspect response.
 - Claude Code and OpenCode end-to-end acceptance is blocked until their real SourceAdapters exist. If absent, execute Tasks 5 and 6 of `docs/superpowers/plans/2026-08-30-multi-agent-session-review.md`; UI labels alone do not satisfy this plan.
 - Every task runs focused tests, all Go gates, and conditional authorized commits as described in Gate 0.
+
+### 2026-09-05 execution reconciliation
+
+Continue in `codex/session-index-v1` from the current HEAD, not from the historical `ea5b1ba` starting point. Tasks 1–2 were implemented and reviewed through `2753827` (provider fan-in and cumulative index reconciliation). Their actual interfaces and scoped verification are recorded in `.superpowers/sdd/2026-09-04-session-index-publication-query/progress.md`; earlier pseudocode below is not an instruction to replace the current implementation. Task 2 has no post-fix whole-branch full-suite run. Tasks 3–7 and real provider acceptance remain incomplete.
+
+Task 3's original fourth-file-mapping instructions are superseded below: Gate 0 already supplied four-file publication, while the ordinary scan path still renders v3 and the v4 review codec still expects JSON. Do not repeat completed journal plumbing or publish JSON under a Markdown filename.
 
 ## File Structure and Ownership
 
@@ -134,41 +140,17 @@ doc.Coverage = calculateCoverage(doc.Sessions)
 
 ### Task 3: Publish and recover the four-file atomic set
 
-**Files:**
-- Modify: `internal/reviewv2/types.go` or its post-Gate-0 compatibility shim
-- Modify: `internal/presentation/render.go`, `render_test.go`
-- Modify: `internal/publication/types.go`, `service.go`, `journal.go`
-- Modify: `internal/publication/service_test.go`, `recovery_test.go`, `journal_test.go`
-- Modify: `internal/contextupdate/service.go`
+**Status:** pending. The user approved the full Markdown supplement on 2026-09-05; plan approval is not implementation evidence.
 
-**Interfaces:**
+**Implementation owner:** `docs/superpowers/plans/2026-09-05-v4-human-markdown-codec.md`, tasks M1–M9. That plan contains exact file ownership, interfaces, RED/GREEN tests, migration prerequisites and failure-recovery gates. Its M6 produces `presentation.RenderV4(V4RenderInput) (RenderPlan, error)` using the current cumulative index and the existing transaction engine.
 
-```go
-const SessionIndexRelativePath = "docs/session-review/.session-reviewer/session-index.json"
+- [ ] M1–M3: add the optional ledger baseline contract and real readable/editable Markdown codec; keep old JSON fixtures compatible.
+- [ ] M4–M5: merge against the common sync ancestor, authenticate private bindings, and publish human changes as three guarded files without rewriting the index.
+- [ ] M6: route eligible ordinary scans to the four-file Markdown renderer; legacy formats require explicit migration, not automatic conversion.
+- [ ] M7: complete explicit upgrade/preview/confirm and the legacy private index binding bridge; report missing chain/classification dependencies rather than fabricating successful migration.
+- [ ] M8–M9: verify Go/TS parity, plugin draft states, stable-HEAD regression and real Vault acceptance. Record local implementation separately from native CI, real legacy migration and final delivery.
 
-type RenderInput struct {
-    // existing fields
-    SessionIndex []byte
-}
-```
-
-- [ ] **Step 1: Extend render tests** to require exactly four scan files and exact expected/preimage bytes for `session-index.json`.
-
-```go
-func TestRenderIncludesSessionIndexAsFourthAtomicFile(t *testing.T) {
-    plan := renderPlan(t, []byte(`{"schema_version":1}`))
-    if len(plan.Files) != 4 || plan.Files[3].Relative != reviewv4.SessionIndexRelativePath { t.Fatalf("files=%+v", plan.Files) }
-}
-```
-- [ ] **Step 2: Extend journal crash-point tests** across each write, Project→Vault sync, verification, and rollback. Assert no observable mixed generation after recovery.
-- [ ] **Step 3: Run RED:** `go test ./internal/presentation ./internal/publication ./internal/contextupdate -run 'SessionIndex|FourFile|Recovery' -count=1`.
-- [ ] **Step 4: Implement the fourth mapping.** Add `.session-reviewer/session-index.json` to `vaultRelativePath`, proof hashes, verification, repair/status diagnostics, and the existing 64 MiB safe read ceiling. Replace comments and assertions that say “3 files”.
-
-```go
-case reviewv4.SessionIndexRelativePath:
-    return path.Join(vaultReviewPath, ".session-reviewer/session-index.json")
-```
-- [ ] **Step 5: Run GREEN and commit when authorized:** `gofmt -w internal/presentation internal/publication internal/contextupdate internal/reviewv2 && go test ./internal/presentation ./internal/publication ./internal/contextupdate -count=1 && go test ./... && go vet ./... && go mod tidy -diff`; then commit `feat: publish session index atomically`.
+**Exit criterion for resuming this plan:** M1–M7 integration and M9 local regression pass, with unresolved external/UI/platform acceptance explicitly listed. Full Task 3 product acceptance also requires M8 and applicable real-Vault/migration/native gates. Then resume Task 4 below; do not infer authorization to push, merge or release.
 
 ---
 
