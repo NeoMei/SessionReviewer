@@ -98,6 +98,9 @@ func buildV2DocumentState(document Document, source []byte, spans []reviewv2.Mar
 // in ordinary Markdown or fenced code remains visible to the sensitive-content
 // scanner.
 func (d Document) SensitiveScanSource() ([]byte, error) {
+	if d.v4 != nil {
+		return d.v4SensitiveScanSource()
+	}
 	rendered, err := d.Render()
 	if err != nil {
 		return nil, err

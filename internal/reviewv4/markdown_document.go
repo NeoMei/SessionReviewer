@@ -18,8 +18,11 @@ const (
 )
 
 type MarkdownDocument struct {
-	raw    []byte
-	blocks []MarkdownBlock
+	raw                []byte
+	blocks             []MarkdownBlock
+	trustedAnchorIDs   map[string]struct{}
+	trustedAnchorSpans []markdownAnchorSpan
+	authenticated      bool
 }
 
 func ParseMarkdownDocument(relative string, raw []byte) (MarkdownDocument, error) {
@@ -50,6 +53,186 @@ func ParseMarkdownDocument(relative string, raw []byte) (MarkdownDocument, error
 }
 
 func (d MarkdownDocument) Bytes() []byte { return bytes.Clone(d.raw) }
+
+func (d MarkdownDocument) Blocks() []MarkdownBlock {
+	return append([]MarkdownBlock(nil), d.blocks...)
+}
+
+// SensitiveScanSource masks only structural identities authenticated against
+// the ledger baseline. Human field values and marker-looking ordinary content
+// remain byte-for-byte visible to the caller's scanner.
+func (d MarkdownDocument) SensitiveScanSource() ([]byte, error) {
+	if !d.authenticated {
+		return nil, markdownError(MarkdownBaselineMissing, "", FieldKey{})
+	}
+	type sensitiveSpan struct {
+		start, end int
+		kind       byte
+		key        FieldKey
+	}
+	const (
+		markerSpan byte = iota
+		generatedSpan
+		anchorSpan
+	)
+	blockSpans := make([]sensitiveSpan, 0, len(d.blocks)*3)
+	for _, block := range d.blocks {
+		blockSpans = append(blockSpans, sensitiveSpan{start: block.Start, end: block.ValueStart, kind: markerSpan, key: block.Key})
+		if block.Generated && block.ValueStart < block.ValueEnd {
+			blockSpans = append(blockSpans, sensitiveSpan{start: block.ValueStart, end: block.ValueEnd, kind: generatedSpan})
+		}
+		blockSpans = append(blockSpans, sensitiveSpan{start: block.ValueEnd, end: block.End, kind: markerSpan, key: block.Key})
+	}
+	var out bytes.Buffer
+	cursor := 0
+	blockIndex, anchorIndex := 0, 0
+	for blockIndex < len(blockSpans) || anchorIndex < len(d.trustedAnchorSpans) {
+		span := sensitiveSpan{start: len(d.raw), end: len(d.raw)}
+		if blockIndex < len(blockSpans) {
+			span = blockSpans[blockIndex]
+		}
+		if anchorIndex < len(d.trustedAnchorSpans) && d.trustedAnchorSpans[anchorIndex].start < span.start {
+			anchor := d.trustedAnchorSpans[anchorIndex]
+			span = sensitiveSpan{start: anchor.start, end: anchor.end, kind: anchorSpan}
+			anchorIndex++
+		} else {
+			blockIndex++
+		}
+		if span.start < cursor || span.end < span.start || span.end > len(d.raw) {
+			return nil, markdownError(MarkdownFormatInvalid, "", FieldKey{})
+		}
+		out.Write(d.raw[cursor:span.start])
+		switch span.kind {
+		case markerSpan:
+			out.Write(maskMarkdownMarkerIdentity(d.raw[span.start:span.end], span.key))
+		case generatedSpan:
+			out.Write(maskTrustedMarkdownAnchorIDs(d.raw[span.start:span.end], d.trustedAnchorIDs))
+		case anchorSpan:
+			out.WriteString(`<a id="validated-marker"></a>`)
+		}
+		cursor = span.end
+	}
+	out.Write(d.raw[cursor:])
+	return bytes.Clone(out.Bytes()), nil
+}
+
+func maskTrustedMarkdownAnchorIDs(source []byte, trusted map[string]struct{}) []byte {
+	var out bytes.Buffer
+	cursor := 0
+	for cursor < len(source) {
+		offset := bytes.IndexByte(source[cursor:], '#')
+		if offset < 0 {
+			break
+		}
+		start := cursor + offset
+		end := start + 1
+		for end < len(source) && markdownIDByte(source[end]) {
+			end++
+		}
+		if _, ok := trusted[string(source[start+1:end])]; ok {
+			out.Write(source[cursor:start])
+			out.WriteString("#validated-marker")
+			cursor = end
+			continue
+		}
+		out.Write(source[cursor : start+1])
+		cursor = start + 1
+	}
+	out.Write(source[cursor:])
+	return out.Bytes()
+}
+
+func markdownIDByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || value == '.' || value == '_' || value == ':' || value == '-'
+}
+
+func maskMarkdownMarkerIdentity(source []byte, key FieldKey) []byte {
+	identity := []byte("entity=\"" + key.Entity + "\" name=\"" + key.Name + "\"")
+	return bytes.ReplaceAll(source, identity, []byte(`entity="validated-marker" name="validated-marker"`))
+}
+
+func ParseMarkdownDocumentAgainstLedger(relative string, raw []byte, ledger MachineLedger) (MarkdownDocument, error) {
+	if err := validateMarkdownLedger(ledger); err != nil {
+		return MarkdownDocument{}, err
+	}
+	base := ledger.DocumentProjection.PresentationBase
+	document, err := ParseMarkdownDocument(relative, raw)
+	if err != nil {
+		return MarkdownDocument{}, err
+	}
+	if err := validateMarkdownFrontmatterIdentity(relative, raw, base); err != nil {
+		return MarkdownDocument{}, err
+	}
+	expectedPair, err := renderFreshMarkdown(base)
+	if err != nil {
+		return MarkdownDocument{}, err
+	}
+	expectedRaw := expectedPair.Review
+	if relative == markdownHistoryRelative {
+		expectedRaw = expectedPair.History
+	}
+	expected, err := ParseMarkdownDocument(relative, expectedRaw)
+	if err != nil {
+		return MarkdownDocument{}, err
+	}
+	if err := validateMarkdownStructure(document, expected); err != nil {
+		return MarkdownDocument{}, err
+	}
+	if err := validateMarkdownAnchors(relative, document.raw, expected.raw); err != nil {
+		return MarkdownDocument{}, err
+	}
+	expectedAnchorIndex, err := newMarkdownDocumentIndex(relative, expected)
+	if err != nil {
+		return MarkdownDocument{}, err
+	}
+	actualAnchorIndex, err := newMarkdownDocumentIndex(relative, document)
+	if err != nil {
+		return MarkdownDocument{}, err
+	}
+	document.authenticated = true
+	document.trustedAnchorIDs = make(map[string]struct{})
+	for _, expectedDocumentInput := range []struct {
+		relative string
+		raw      []byte
+	}{{markdownReviewRelative, expectedPair.Review}, {markdownHistoryRelative, expectedPair.History}} {
+		expectedDocument, parseErr := ParseMarkdownDocument(expectedDocumentInput.relative, expectedDocumentInput.raw)
+		if parseErr != nil {
+			return MarkdownDocument{}, parseErr
+		}
+		index, indexErr := newMarkdownDocumentIndex(relative, expectedDocument)
+		if indexErr != nil {
+			return MarkdownDocument{}, indexErr
+		}
+		for anchor := range index.anchors {
+			if id, ok := parseMarkdownAnchorLineID(anchor); ok {
+				document.trustedAnchorIDs[id] = struct{}{}
+			}
+		}
+	}
+	for _, anchor := range actualAnchorIndex.anchorSpans {
+		if expectedAnchorIndex.anchors[anchor.line] == 1 {
+			document.trustedAnchorSpans = append(document.trustedAnchorSpans, anchor)
+		}
+	}
+	expectedIndex := expectedAnchorIndex
+	for _, block := range document.blocks {
+		if !block.Generated {
+			continue
+		}
+		expectedBlock := expectedIndex.blocks[block.Key]
+		if !markdownSemanticEqual(markdownBlockValue(document, block), markdownBlockValue(expected, expectedBlock)) {
+			return MarkdownDocument{}, &MarkdownError{Code: MarkdownGeneratedRegionModified, Relative: relative, Entity: block.Key.Entity, Field: block.Key.Name}
+		}
+	}
+	return document, nil
+}
+
+func parseMarkdownAnchorLineID(anchor string) (string, bool) {
+	if !strings.HasPrefix(anchor, `<a id="`) || !strings.HasSuffix(anchor, `"></a>`) {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(anchor, `<a id="`), `"></a>`), true
+}
 
 func (d MarkdownDocument) Fields() map[FieldKey]string {
 	fields := make(map[FieldKey]string)

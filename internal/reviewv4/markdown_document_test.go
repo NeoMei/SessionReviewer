@@ -48,6 +48,84 @@ func TestMarkdownDocumentPreservesAndDefensivelyCopiesBytesAndFields(t *testing.
 	}
 }
 
+func TestMarkdownDocumentAgainstLedgerAllowsHumanDraftAndRejectsMachineChanges(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	pair := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	document, err := ParseMarkdownDocument("项目回顾.md", pair.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goal := FieldKey{Entity: "project-overview", Name: "goal"}
+	edited, err := document.ReplaceFields(map[FieldKey]string{goal: "human draft"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	validated, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", edited, ledger)
+	if err != nil || validated.Fields()[goal] != "human draft" {
+		t.Fatalf("human draft rejected: fields=%v err=%v", validated.Fields(), err)
+	}
+
+	blocks := validated.Blocks()
+	if len(blocks) == 0 {
+		t.Fatal("validated document exposed no spans")
+	}
+	first := blocks[0]
+	blocks[0].Key.Name = "mutated"
+	if validated.Blocks()[0].Key != first.Key {
+		t.Fatal("Blocks returned shared storage")
+	}
+
+	generated := document.Blocks()
+	for _, block := range generated {
+		if !block.Generated {
+			continue
+		}
+		modified := append(bytes.Clone(pair.Review[:block.ValueStart]), bytes.Repeat([]byte("x"), block.ValueEnd-block.ValueStart)...)
+		modified = append(modified, pair.Review[block.ValueEnd:]...)
+		if _, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", modified, ledger); MarkdownCodeOf(err) != MarkdownGeneratedRegionModified {
+			t.Fatalf("generated change err=%v", err)
+		}
+		return
+	}
+	t.Fatal("fixture has no generated region")
+}
+
+func TestMarkdownDocumentAgainstLedgerRequiresCompleteInventory(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	pair := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	document, err := ParseMarkdownDocument("项目回顾.md", pair.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := document.Blocks()[0]
+	missing := append(bytes.Clone(pair.Review[:block.Start]), pair.Review[block.End:]...)
+	if _, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", missing, ledger); MarkdownCodeOf(err) != MarkdownFieldMissing {
+		t.Fatalf("missing field err=%v", err)
+	}
+}
+
+func TestMarkdownDocumentSensitiveSourceKeepsKnownAnchorIDInHumanCode(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	review := mustRead(t, "../../testdata/contracts/v4/markdown/review.md")
+	const known = "milestone-x6d696c6573746f6e653a616c706861"
+	human := []byte("\n```markdown\n[human example](项目历史.md#" + known + ")\n```\n")
+	review = append(bytes.Clone(review), human...)
+	document, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", review, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := document.SensitiveScanSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(source, human) {
+		t.Fatal("known anchor ID in human fenced code was masked")
+	}
+	if bytes.Contains(source, []byte("项目历史.md#"+known+"\n")) {
+		t.Fatal("authenticated generated reference was not masked")
+	}
+}
+
 func TestMarkdownDocumentReplaceFieldsPreservesShellAndStructure(t *testing.T) {
 	raw := validMarkdownDocument("before\r\n<!-- session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\r\nold\r\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\r\nafter\r\n")
 	document, err := ParseMarkdownDocument("项目回顾.md", raw)

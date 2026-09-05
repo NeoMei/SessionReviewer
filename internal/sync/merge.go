@@ -878,12 +878,16 @@ func reasonForHumanValidation(err error) string {
 }
 
 func mergeUnitSets(base, project, vault syncdoc.UnitSet) (syncdoc.UnitSet, []UnitConflict) {
+	return mergeUnitSetsWithEqual(base, project, vault, unitsEqual)
+}
+
+func mergeUnitSetsWithEqual(base, project, vault syncdoc.UnitSet, equal func(syncdoc.Unit, syncdoc.Unit) bool) (syncdoc.UnitSet, []UnitConflict) {
 	keys := sortedUnitKeys(base, project, vault)
 	merged := make(syncdoc.UnitSet, len(keys))
 	conflicts := make([]UnitConflict, 0)
 	for _, key := range keys {
 		baseUnit, projectUnit, vaultUnit := base[key], project[key], vault[key]
-		unit, conflict := mergeUnit(baseUnit, projectUnit, vaultUnit)
+		unit, conflict := mergeUnitWithEqual(baseUnit, projectUnit, vaultUnit, equal)
 		if conflict {
 			conflicts = append(conflicts, UnitConflict{Key: key, Base: cloneUnit(baseUnit), Project: cloneUnit(projectUnit), Vault: cloneUnit(vaultUnit)})
 			continue
@@ -975,11 +979,15 @@ func conflictResult(reason string, conflicts []UnitConflict) MergeResult {
 // mergeUnit performs a three-way merge of one complete document unit. The
 // presentation bytes are part of the value and are never shared with callers.
 func mergeUnit(base, project, vault syncdoc.Unit) (syncdoc.Unit, bool) {
-	projectChanged := !unitsEqual(project, base)
-	vaultChanged := !unitsEqual(vault, base)
+	return mergeUnitWithEqual(base, project, vault, unitsEqual)
+}
+
+func mergeUnitWithEqual(base, project, vault syncdoc.Unit, equal func(syncdoc.Unit, syncdoc.Unit) bool) (syncdoc.Unit, bool) {
+	projectChanged := !equal(project, base)
+	vaultChanged := !equal(vault, base)
 	switch {
 	case projectChanged && vaultChanged:
-		if !unitsEqual(project, vault) {
+		if !equal(project, vault) {
 			return syncdoc.Unit{}, true
 		}
 		return cloneUnit(project), false

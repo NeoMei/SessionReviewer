@@ -100,6 +100,7 @@ type Document struct {
 	body         Body
 	dirty        bool
 	v2           *v2DocumentState
+	v4           *v4DocumentState
 }
 
 // AlignRootHeading replaces only the single H1 presentation in current with
@@ -150,10 +151,14 @@ func Parse(relativePath string, content []byte) (Document, error) {
 }
 
 func parseDocument(relativePath string, content []byte, buildV2State bool) (Document, error) {
+	return parseDocumentBounded(relativePath, content, buildV2State, MaxDocumentBytes)
+}
+
+func parseDocumentBounded(relativePath string, content []byte, buildV2State bool, maximumBytes int) (Document, error) {
 	if err := validateRelativePath(relativePath); err != nil {
 		return Document{}, err
 	}
-	if len(content) > MaxDocumentBytes {
+	if maximumBytes < 0 || len(content) > maximumBytes {
 		return Document{}, invalidDocument("document exceeds size limit")
 	}
 	if !utf8.Valid(content) {
@@ -210,6 +215,9 @@ func parseDocument(relativePath string, content []byte, buildV2State bool) (Docu
 }
 
 func (d Document) Render() ([]byte, error) {
+	if d.v4 != nil {
+		return bytes.Clone(d.raw), nil
+	}
 	if d.frontmatter == nil {
 		return nil, invalidDocument("nil document")
 	}
@@ -288,6 +296,9 @@ func (d Document) Units() UnitSet {
 // navigation sections are reproducible projections of the accepted ledger and
 // therefore never participate in revision or conflict decisions.
 func (d Document) SemanticUnits() UnitSet {
+	if d.v4 != nil {
+		return cloneUnitSet(d.v4.semantic)
+	}
 	if _, v2 := d.v2EntityType(); v2 {
 		if d.v2 == nil {
 			panic("syncdoc: compact review document missing validated semantic state")
@@ -312,6 +323,9 @@ func (d Document) genericSemanticUnits() UnitSet {
 // This avoids orphaning a generated H2 subtree when a human renames its H1
 // ancestor. The post-merge derived publication restores canonical sections.
 func (d Document) WithSemanticUnits(units UnitSet) (Document, error) {
+	if d.v4 != nil {
+		return d.withV4SemanticUnits(units)
+	}
 	if _, v2 := d.v2EntityType(); v2 {
 		return d.withV2SemanticUnits(units)
 	}
@@ -920,7 +934,7 @@ func validateGeneratedOwnership(document Document) error {
 }
 
 func cloneDocument(document Document) Document {
-	return Document{relativePath: document.relativePath, raw: bytes.Clone(document.raw), frontmatter: cloneNode(document.frontmatter), body: cloneBody(document.body), dirty: document.dirty, v2: cloneV2DocumentState(document.v2)}
+	return Document{relativePath: document.relativePath, raw: bytes.Clone(document.raw), frontmatter: cloneNode(document.frontmatter), body: cloneBody(document.body), dirty: document.dirty, v2: cloneV2DocumentState(document.v2), v4: cloneV4DocumentState(document.v4)}
 }
 
 func cloneBody(body Body) Body {

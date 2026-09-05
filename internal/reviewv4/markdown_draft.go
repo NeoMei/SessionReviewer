@@ -131,8 +131,14 @@ func validateMarkdownLedger(ledger MachineLedger) error {
 }
 
 type markdownDocumentIndex struct {
-	blocks  map[FieldKey]MarkdownBlock
-	anchors map[string]int
+	blocks      map[FieldKey]MarkdownBlock
+	anchors     map[string]int
+	anchorSpans []markdownAnchorSpan
+}
+
+type markdownAnchorSpan struct {
+	start, end int
+	line       string
 }
 
 func newMarkdownDocumentIndex(relative string, document MarkdownDocument) (markdownDocumentIndex, error) {
@@ -146,11 +152,40 @@ func newMarkdownDocumentIndex(relative string, document MarkdownDocument) (markd
 		}
 		index.blocks[block.Key] = block
 	}
+	var fence byte
+	fenceLength := 0
+	indentedCode := false
 	for start := 0; start < len(document.raw); {
 		end, next := markdownPhysicalLine(document.raw, start)
 		line := document.raw[start:end]
+		if indentedCode {
+			if len(line) == 0 || markdownIndented(line) {
+				start = next
+				continue
+			}
+			indentedCode = false
+		}
+		if fence != 0 {
+			if markdownFenceClose(line, fence, fenceLength) {
+				fence, fenceLength = 0, 0
+			}
+			start = next
+			continue
+		}
+		if character, length, ok := markdownFenceOpen(line); ok {
+			fence, fenceLength = character, length
+			start = next
+			continue
+		}
+		if markdownIndented(line) {
+			indentedCode = true
+			start = next
+			continue
+		}
 		if bytes.HasPrefix(line, []byte(`<a id="`)) && bytes.HasSuffix(line, []byte(`"></a>`)) {
-			index.anchors[string(line)]++
+			anchor := string(line)
+			index.anchors[anchor]++
+			index.anchorSpans = append(index.anchorSpans, markdownAnchorSpan{start: start, end: end, line: anchor})
 		}
 		start = next
 	}
