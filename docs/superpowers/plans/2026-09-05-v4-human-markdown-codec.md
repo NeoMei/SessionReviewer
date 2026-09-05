@@ -441,7 +441,7 @@ if len(result.Preview.BlockingReasons) != 0 {
 
 ## Task 8 (M8)：Go/TypeScript 格式一致与插件草稿/降级状态
 
-状态：从 `6edc664` 开始实施，尚未完成验证或审查。
+状态：实现 `8117d27`、修复 `327f4a0`，独立审查及一轮限范围复审通过。插件完整检查 186 项测试、lint、构建通过，Go 共享样本通过；覆盖原生文档入口、草稿/只读/过期状态、四文件监听、旧编辑器拒绝及 Go/TS 基线与深树边界一致性。文件读取失败诊断的小项留最终整分支审查。真实 Vault、私有认证实机与原生 CI 仍待 M9/最终验收。
 
 **Files:** Create `obsidian-plugin/src/data/markdown-v4.ts`、`repository-v4.ts`、`obsidian-plugin/tests/markdown-v4.test.ts`、`repository-v4.test.ts`；Modify `obsidian-plugin/src/data/repository.ts`、`editor.ts`、`vault-port.ts`、`obsidian-plugin/src/view/presentation.ts`、`obsidian-plugin/src/main.ts`（仅路由/状态）、`obsidian-plugin/package.json`、`package-lock.json`；Create `internal/reviewv4/markdown_corpus_test.go`。
 
