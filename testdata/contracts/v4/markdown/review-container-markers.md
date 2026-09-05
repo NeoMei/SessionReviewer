@@ -44,10 +44,13 @@ go test ./internal/reviewv4
 - [决策](#decision-decisionalpha)
 <!-- /session-reviewer:v4-generated entity="project-overview" name="pinned-decisions" -->
 <!-- session-reviewer:v4-generated entity="project-overview" name="recent-milestones" -->
+共 1 条，显示 1 条；[查看完整历史](项目历史.md)。
 - [里程碑](项目历史.md#milestone-milestonealpha)
 <!-- /session-reviewer:v4-generated entity="project-overview" name="recent-milestones" -->
 
 ## 决策
+<a id="decision-decisionalpha"></a>
+
 <!-- session-reviewer:v4-field entity="decision:decision:alpha" name="title" -->
 选择 [Markdown] 作为人工编辑面。
 <!-- /session-reviewer:v4-field entity="decision:decision:alpha" name="title" -->
@@ -63,6 +66,8 @@ go test ./internal/reviewv4
 <!-- /session-reviewer:v4-field entity="decision:decision:alpha" name="reevaluate_when" -->
 
 ## 风险
+<a id="risk-riskalpha"></a>
+
 <!-- session-reviewer:v4-field entity="risk:risk:alpha" name="title" -->
 无损性回归
 <!-- /session-reviewer:v4-field entity="risk:risk:alpha" name="title" -->
@@ -74,6 +79,8 @@ open
 <!-- /session-reviewer:v4-field entity="risk:risk:alpha" name="status" -->
 
 ## 未决
+<a id="open-loop-loopalpha"></a>
+
 <!-- session-reviewer:v4-field entity="open-loop:loop:alpha" name="title" -->
 CRLF 保留
 <!-- /session-reviewer:v4-field entity="open-loop:loop:alpha" name="title" -->
@@ -91,6 +98,8 @@ open
 <!-- /session-reviewer:v4-field entity="open-loop:loop:alpha" name="status" -->
 
 ## 正式问题
+<a id="problem-problemalpha"></a>
+
 <!-- session-reviewer:v4-field entity="problem:problem:alpha" name="question" -->
 如何确保同一字段只有一个权威位置？
 <!-- /session-reviewer:v4-field entity="problem:problem:alpha" name="question" -->

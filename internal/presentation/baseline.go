@@ -4,10 +4,10 @@
 package presentation
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/neomei/SessionReviewer/internal/baselinehash"
 )
 
 type FieldKind string
@@ -101,20 +101,7 @@ func (value Baseline) key() string {
 }
 
 func baselineHash(value Baseline) string {
-	identity := struct {
-		SchemaVersion int       "json:\"schema_version\""
-		EntityID      string    "json:\"entity_id\""
-		Field         string    "json:\"field\""
-		Kind          FieldKind "json:\"kind\""
-		Value         string    "json:\"value\""
-		Values        []string  "json:\"values\""
-	}{1, value.EntityID, value.Field, value.Kind, value.Value, value.Values}
-	body, err := json.Marshal(identity)
-	if err != nil {
-		return ""
-	}
-	digest := sha256.Sum256(body)
-	return hex.EncodeToString(digest[:])
+	return baselinehash.SHA256(value.EntityID, value.Field, string(value.Kind), value.Value, value.Values)
 }
 
 func validateBaseline(value Baseline) error {

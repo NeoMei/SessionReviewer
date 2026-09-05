@@ -12,6 +12,8 @@ minimum_writer_version: 0.4.1
 # 项目历史
 
 ## 里程碑
+<a id="milestone-milestonealpha"></a>
+
 <!-- session-reviewer:v4-field entity="milestone:milestone:alpha" name="title" -->
 冻结 Markdown 合同
 <!-- /session-reviewer:v4-field entity="milestone:milestone:alpha" name="title" -->
@@ -28,7 +30,24 @@ minimum_writer_version: 0.4.1
 
 <!-- /session-reviewer:v4-field entity="milestone:milestone:alpha" name="impact_and_follow_up" -->
 <!-- session-reviewer:v4-generated entity="milestone:milestone:alpha" name="evidence" -->
-- `go test`: passed
+- 发生时间：2026-09-05T00:00:00Z
+- 类型：milestone
+- 触发状态：missing
+  - 缺失原因：not_captured
+- 触发引用：无
+- 结论来源：human_confirmed
+- 结论引用：无
+- 执行状态：missing
+  - 缺失原因：no_execution_evidence
+- 执行引用：无
+- 验证状态：missing
+  - 缺失原因：not_verified
+- 验证引用：无
+- 影响/后续状态：present
+- 影响/后续引用：无
+- Coverage：source=0, captured=0, truncated=0, unavailable=0
+- 全部引用：无
+- 关联决策：decision:alpha
 <!-- /session-reviewer:v4-generated entity="milestone:milestone:alpha" name="evidence" -->
 
 历史自定义附注保留。

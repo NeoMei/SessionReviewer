@@ -52,20 +52,32 @@ func LoadProjection(review, history, ledger, index []byte) (Accepted, error) {
 func parse(reviewBytes, historyBytes, ledgerBytes, indexBytes []byte) (Accepted, error) {
 	var accepted Accepted
 	var err error
-	accepted.Review, err = DecodePresentation(reviewBytes)
-	if err != nil {
-		return accepted, fmt.Errorf("review: %w", err)
-	}
-	if len(historyBytes) > strictjson.MaxBytes {
-		return accepted, strictjson.NewRejection(strictjson.CodeInputOverflow, errors.New("history exceeds the byte limit"))
-	}
-	if !utf8.Valid(historyBytes) {
-		return accepted, strictjson.NewRejection(strictjson.CodeInvalidUTF8, errors.New("history is not UTF-8"))
-	}
-	accepted.History = append([]byte(nil), historyBytes...)
 	accepted.Ledger, err = DecodeLedger(ledgerBytes)
 	if err != nil {
 		return accepted, fmt.Errorf("ledger: %w", err)
+	}
+	if accepted.Ledger.DocumentProjection != nil {
+		draft, draftErr := ParseMarkdownDraft(MarkdownPair{Review: reviewBytes, History: historyBytes}, accepted.Ledger)
+		if draftErr != nil {
+			return accepted, draftErr
+		}
+		if len(draft.Edits) != 0 {
+			return accepted, strictjson.NewRejection(strictjson.CodeContractInvalid, errors.New("Markdown documents contain an unaccepted draft"))
+		}
+		accepted.Review = draft.Presentation
+		accepted.History = append([]byte(nil), historyBytes...)
+	} else {
+		accepted.Review, err = DecodePresentation(reviewBytes)
+		if err != nil {
+			return accepted, fmt.Errorf("review: %w", err)
+		}
+		if len(historyBytes) > strictjson.MaxBytes {
+			return accepted, strictjson.NewRejection(strictjson.CodeInputOverflow, errors.New("history exceeds the byte limit"))
+		}
+		if !utf8.Valid(historyBytes) {
+			return accepted, strictjson.NewRejection(strictjson.CodeInvalidUTF8, errors.New("history is not UTF-8"))
+		}
+		accepted.History = append([]byte(nil), historyBytes...)
 	}
 	if err := ValidateAccepted(accepted); err != nil {
 		return accepted, strictjson.NewRejection(strictjson.CodeContractInvalid, err)

@@ -251,10 +251,10 @@ func TestMarkdownDocumentContainerFixtureHasPinnedBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := sha256Hex(review), "0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c"; got != want || ledger.ReviewSHA256 != want {
+	if got, want := sha256Hex(review), "eb1e7268fa3eed513478aa9c39c540d35f50f849b99613da6972ad62fe9ff529"; got != want || ledger.ReviewSHA256 != want {
 		t.Fatalf("review hash=%s ledger=%s want=%s", got, ledger.ReviewSHA256, want)
 	}
-	if got, want := CanonicalLedgerSHA256(ledger), "377cd1d9939da273b7ebbdeb90f2d95a1ed7a0a8420bd64fa7626fe0b5888a6c"; got != want || ledger.SyncHashes.LedgerSHA256 != want {
+	if got, want := CanonicalLedgerSHA256(ledger), "8737d6c698fbb91cffa1886c81053361604b0b3843bc41a9d050db586e9d36a7"; got != want || ledger.SyncHashes.LedgerSHA256 != want {
 		t.Fatalf("ledger hash=%s embedded=%s want=%s", got, ledger.SyncHashes.LedgerSHA256, want)
 	}
 }

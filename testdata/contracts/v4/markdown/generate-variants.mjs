@@ -76,7 +76,7 @@ const resignedReviewHash = createHash("sha256").update(resignedReview).digest("h
 publiclyResigned.review_sha256 = resignedReviewHash;
 publiclyResigned.sync_hashes.review_sha256 = resignedReviewHash;
 publiclyResigned.document_projection.presentation_base.current_state.goal = resignedGoal;
-publiclyResigned.sync_hashes.ledger_sha256 = "1ff8f204b5dffbffe4a55e9b6557a4e4a9d25cecf581c86a64c2ccb3b5769a84";
+publiclyResigned.sync_hashes.ledger_sha256 = canonicalLedgerHash(publiclyResigned);
 await write("ledger-rehashed-public.json", publiclyResigned);
 
 const wrongVersion = copy();

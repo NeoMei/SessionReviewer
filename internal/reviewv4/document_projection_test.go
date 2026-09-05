@@ -119,7 +119,7 @@ func TestDocumentProjectionSharedLedgerHasPinnedCanonicalDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "913ed91d59ef92fa0d683a7c5e4879b6ad87524c91b763b5126912a4facb087d"
+	const want = "1f45d3c3d500f46ae656efc03acd7d174e157c6cfc1ecf3f41f021ebcad9dea7"
 	if got := CanonicalLedgerSHA256(ledger); got != want {
 		t.Fatalf("canonical digest = %s, want %s", got, want)
 	}
@@ -131,7 +131,7 @@ func TestDocumentProjectionPubliclyResignedFixtureHasPinnedCanonicalDigest(t *te
 	if err := strictjson.Decode(body, &ledger); err != nil {
 		t.Fatal(err)
 	}
-	const want = "1ff8f204b5dffbffe4a55e9b6557a4e4a9d25cecf581c86a64c2ccb3b5769a84"
+	const want = "7364479204d7c01a69227947e08085d86b4aa6a8193597b1ad2139707d91a1a8"
 	if got := CanonicalLedgerSHA256(ledger); got != want {
 		t.Fatalf("canonical digest = %s, want %s", got, want)
 	}

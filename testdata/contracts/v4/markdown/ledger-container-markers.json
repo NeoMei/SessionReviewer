@@ -6,8 +6,8 @@
   "generation_id": "generation-1",
   "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
   "accepted_revision": 1,
-  "review_sha256": "0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c",
-  "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
+  "review_sha256": "eb1e7268fa3eed513478aa9c39c540d35f50f849b99613da6972ad62fe9ff529",
+  "history_sha256": "029414dae85bf2cb5111753299531c83a9d7a14b69174a75c626bf1d7e787bb9",
   "accounting": {
     "total_duration_ms": 0,
     "total_tokens": 0,
@@ -158,9 +158,9 @@
     }
   },
   "sync_hashes": {
-    "review_sha256": "0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c",
-    "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
-    "ledger_sha256": "377cd1d9939da273b7ebbdeb90f2d95a1ed7a0a8420bd64fa7626fe0b5888a6c",
+    "review_sha256": "eb1e7268fa3eed513478aa9c39c540d35f50f849b99613da6972ad62fe9ff529",
+    "history_sha256": "029414dae85bf2cb5111753299531c83a9d7a14b69174a75c626bf1d7e787bb9",
+    "ledger_sha256": "8737d6c698fbb91cffa1886c81053361604b0b3843bc41a9d050db586e9d36a7",
     "session_index_digest": "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565"
   }
 }
