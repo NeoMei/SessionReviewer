@@ -231,6 +231,8 @@ if edit.Key.Name == "conclusion" && edit.After != edit.Before {
 
 ## Task 4 (M4)：接入语义单元与共同祖先三方合并
 
+状态：实现 `e410cd2`、修复 `f677d4b`，独立审查与两项修复复审通过。最终相关 Go 包（reviewv4/syncdoc/sync）回归通过；完整仓库、发布恢复与真实 Vault 验收尚待后续任务。通用扫描入口不推定 v4 信任，M5 先认证私有基线，再显式调用 v4 文档及敏感内容适配。
+
 **Files:** Create `internal/syncdoc/v4_units.go`、`v4_units_test.go`、`internal/sync/v4_merge.go`、`v4_merge_test.go`；Modify `internal/syncdoc/document.go`、`scan.go`、`internal/sync/merge.go`（只接分发与共享单位算法）。
 
 **Interfaces:** consumes MarkdownPair/MarkdownDraft；produces：
