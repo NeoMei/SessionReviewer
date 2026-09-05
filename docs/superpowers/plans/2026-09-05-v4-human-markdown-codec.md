@@ -286,6 +286,8 @@ func MergeV4Units(in V4MergeInput) V4MergeResult {
 
 ## Task 5 (M5)：私有认证与人工三文件事务接入
 
+状态：实现 `253118e`、修复 `aac65b1`，独立审查和修复复审通过。相关包与竞态检查通过；覆盖三文件17个崩溃检查点、同世代四文件指针前后恢复、真实锁等待后的编辑计划、无写入预览和私有凭据拒绝。新世代指针已推进但接受凭据缺失的混合状态明确拒绝读取，不声称健康回滚。接受校验未沿用调用方 context 的小项留待最终整分支审查。CLI/扫描/迁移/插件接入及最终整链验收仍待 M6–M9。
+
 **Files:** Create `internal/syncproject/markdown.go`、`markdown_test.go`、`internal/publication/markdown.go`、`markdown_test.go`；Modify `internal/syncproject/service.go`、`internal/publication/service.go`、`journal.go`、`internal/sync/service.go`；测试扩展 `internal/publication/recovery_test.go`。
 
 **Interfaces:** consumes `LoadProjection`、M4、既有 `memorystore.Store.LoadPublished/LoadObject`、`presentation.RenderPlan` 和 publication lock；produces：
@@ -335,6 +337,8 @@ if manifest.SessionIndexDigest == "" ||
 - [ ] **6. GREEN 与提交。** `go test ./internal/syncproject ./internal/publication ./internal/sync -count=1`；`go test -race ./internal/publication ./internal/syncproject -count=1`。提交 `feat: publish v4 human edits through the guarded transaction`。
 
 ## Task 6 (M6)：接入普通扫描的四文件渲染
+
+状态：从 `aac65b1` 开始实施，尚未完成验证或审查。
 
 **Files:** Create `internal/presentation/render_v4.go`、`render_v4_test.go`、`internal/contextupdate/v4.go`、`v4_test.go`；Modify `internal/contextupdate/service.go`；仅必要时修改 `internal/publication/service.go` 与 `internal/cli/scan_test.go`。
 
