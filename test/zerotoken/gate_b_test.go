@@ -3,9 +3,13 @@ package zerotoken
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,8 +20,12 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/publication"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
 func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
@@ -135,13 +143,16 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	if result3.GenerationID != result2.GenerationID {
 		t.Fatalf("generation changed on unchanged third run: got=%s want=%s", result3.GenerationID, result2.GenerationID)
 	}
+	seededMilestone := seedGateBV4Timeline(t, dataRoot, projectID, mapping, scanNow)
 
 	// Distinct Project/Vault human edits are merged while a genuinely new
 	// source session advances the machine index in the same scan publication.
 	projectReviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
 	vaultReviewPath := filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目回顾.md")
+	vaultHistoryPath := filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目历史.md")
 	editV4Field(t, projectReviewPath, reviewv2.ReviewRelativePath, reviewv4.FieldKey{Entity: "project-overview", Name: "status"}, "人工确认状态")
 	editV4Field(t, vaultReviewPath, reviewv2.ReviewRelativePath, reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}, "Vault 人工目标")
+	editV4Field(t, vaultHistoryPath, reviewv2.HistoryRelativePath, reviewv4.FieldKey{Entity: "milestone:" + seededMilestone.ID, Name: "conclusion"}, "人工确认的历史结论")
 	session2 := []string{
 		`{"timestamp":"` + base.Add(5*time.Minute).Format(time.RFC3339) + `","type":"session_meta","payload":{"id":"session-155","cwd":"` + filepath.ToSlash(projectRoot) + `","source":"codex"}}`,
 		`{"timestamp":"` + base.Add(5*time.Minute+time.Second).Format(time.RFC3339) + `","type":"turn_context","payload":{"cwd":"` + filepath.ToSlash(projectRoot) + `","model":"gpt-5"}}`,
@@ -156,12 +167,32 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	if result4.GenerationID == result3.GenerationID {
 		t.Fatal("new source session did not advance the scan generation")
 	}
+	projectionPaths := gateBProjectionPaths(projectRoot, vaultRoot, projectID)
+	beforeSync := readGateBFiles(t, projectionPaths)
+	publishes := 0
+	syncOptions := syncproject.Options{ProjectID: projectID, CWD: projectRoot, DataDir: dataRoot, GOOS: runtime.GOOS, Now: func() time.Time { return scanNow }, Trigger: syncengine.TriggerPeriodic}
+	syncOptions.RecoverMarkdown = func(ctx context.Context, owner *publicationlock.Owner) error {
+		return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: func() time.Time { return scanNow }}, owner)
+	}
+	syncOptions.PublishMarkdown = func(ctx context.Context, plan syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) error {
+		publishes++
+		_, err := publication.PublishMarkdownEditLocked(ctx, publication.Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: func() time.Time { return scanNow }}, plan, owner)
+		return err
+	}
+	syncReport, err := syncproject.RunMarkdown(context.Background(), syncOptions)
+	if err != nil || publishes != 0 || len(syncReport.Operations) != 0 {
+		t.Fatalf("post-scan Markdown sync was not a no-op: publishes=%d operations=%+v err=%v", publishes, syncReport.Operations, err)
+	}
+	if afterSync := readGateBFiles(t, projectionPaths); !reflect.DeepEqual(afterSync, beforeSync) {
+		t.Fatal("post-scan Markdown sync changed Project/Vault projection bytes")
+	}
 	for side, root := range map[string]string{
 		"project": filepath.Join(projectRoot, "docs", "session-review"),
 		"vault":   filepath.Join(vaultRoot, "Projects", projectID, "Session Review"),
 	} {
 		accepted := loadGateBV4(t, root)
-		if accepted.Review.CurrentState.Status != "人工确认状态" || accepted.Review.CurrentState.Goal != "Vault 人工目标" || len(accepted.SessionIndex.Sessions) != 155 {
+		milestone := gateBMilestone(t, accepted, seededMilestone.ID)
+		if accepted.Review.CurrentState.Status != "人工确认状态" || accepted.Review.CurrentState.Goal != "Vault 人工目标" || len(accepted.SessionIndex.Sessions) != 155 || milestone.ClosedLoop.Conclusion.Kind != reviewv4.ConclusionHumanConfirmed || milestone.ClosedLoop.Conclusion.Text != "人工确认的历史结论" || !reflect.DeepEqual(milestone.ClosedLoop.Verification, seededMilestone.ClosedLoop.Verification) || !reflect.DeepEqual(milestone.ClosedLoop.SourceTurnRefs, seededMilestone.ClosedLoop.SourceTurnRefs) {
 			t.Fatalf("%s merged scan lost human edits or source facts: review=%+v sessions=%d", side, accepted.Review.CurrentState, len(accepted.SessionIndex.Sessions))
 		}
 	}
@@ -200,9 +231,11 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath)),
 		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.HistoryRelativePath)),
 		filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)),
+		filepath.Join(projectRoot, filepath.FromSlash(presentation.SessionIndexRelativePath)),
 		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目回顾.md"),
 		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", "项目历史.md"),
 		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", ".session-reviewer", "ledger.json"),
+		filepath.Join(vaultRoot, "Projects", projectID, "Session Review", ".session-reviewer", "session-index.json"),
 	}
 	beforePublic := make(map[string][]byte, len(publicPaths))
 	beforeModTime := make(map[string]time.Time, len(publicPaths))
@@ -247,6 +280,88 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 			t.Fatalf("audit-only scan rewrote %s", publicPath)
 		}
 	}
+}
+
+func seedGateBV4Timeline(t *testing.T, dataRoot, projectID string, mapping config.ProjectMapping, now time.Time) reviewv4.Timeline {
+	t.Helper()
+	owner, err := publicationlock.Acquire(dataRoot, projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := syncproject.ReadMarkdownForScan(context.Background(), syncproject.Options{ProjectID: projectID, CWD: mapping.Root, DataDir: dataRoot, GOOS: runtime.GOOS, Now: func() time.Time { return now }, Trigger: syncengine.TriggerPeriodic}, owner)
+	if releaseErr := owner.Release(); err != nil || releaseErr != nil {
+		t.Fatalf("read accepted Markdown for seed: err=%v release=%v", err, releaseErr)
+	}
+	next := read.OldAccepted.Review
+	closed := reviewv4.NeutralClosedLoop()
+	closed.Verification.State = "present"
+	closed.Verification.Text = "seed verification stays exact"
+	closed.Verification.MissingReason = nil
+	milestone := reviewv4.Timeline{ID: "gate-b-seeded", GenerationID: next.GenerationID, OccurredAt: "2026-09-05T00:00:00Z", Kind: "milestone", Title: "Seeded accepted history", Summary: "Trusted typed seed for the human-edit chain.", DecisionIDs: []string{}, ClosedLoop: closed}
+	next.Timeline = append(next.Timeline, milestone)
+	next.Revision++
+	pair, err := reviewv4.RenderMarkdown(next, read.OldAccepted.Ledger, &read.AcceptedPair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := read.OldAccepted.Ledger
+	ledger.AcceptedRevision = next.Revision
+	ledger.DocumentProjection.PresentationBase = next
+	ledger.ReviewSHA256, ledger.HistorySHA256 = gateBHash(pair.Review), gateBHash(pair.History)
+	ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256 = ledger.ReviewSHA256, ledger.HistorySHA256
+	ledgerBody, err := reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath}
+	desired := map[string][]byte{reviewv2.ReviewRelativePath: pair.Review, reviewv2.HistoryRelativePath: pair.History, reviewv2.MachineLedgerRelativePath: ledgerBody, presentation.SessionIndexRelativePath: read.ProjectExpected[presentation.SessionIndexRelativePath]}
+	files := make([]presentation.FilePlan, 0, len(paths))
+	for _, relative := range paths {
+		files = append(files, presentation.FilePlan{Relative: relative, Expected: read.ProjectExpected[relative], ExpectedExists: true, Desired: desired[relative], Mode: 0o600})
+	}
+	plan := syncproject.MarkdownSyncPlan{Plan: presentation.RenderPlan{ProjectID: projectID, GenerationID: next.GenerationID, ProjectViewDigest: next.ProjectViewDigest, Files: files}, Index: desired[presentation.SessionIndexRelativePath], ExpectedGenerationID: next.GenerationID, ExpectedIndexDigest: read.OldAccepted.SessionIndex.Digest, ProjectExpected: read.ProjectExpected, VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest}
+	if _, err := publication.PublishMarkdownScan(context.Background(), publication.Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: func() time.Time { return now }}, plan); err != nil {
+		t.Fatalf("seed accepted typed history: %v", err)
+	}
+	return milestone
+}
+
+func gateBMilestone(t *testing.T, accepted reviewv4.Accepted, id string) reviewv4.Timeline {
+	t.Helper()
+	for _, milestone := range accepted.Review.Timeline {
+		if milestone.ID == id {
+			return milestone
+		}
+	}
+	t.Fatalf("milestone %q missing", id)
+	return reviewv4.Timeline{}
+}
+
+func gateBHash(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func gateBProjectionPaths(projectRoot, vaultRoot, projectID string) []string {
+	paths := make([]string, 0, 8)
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath} {
+		paths = append(paths, filepath.Join(projectRoot, filepath.FromSlash(relative)))
+		paths = append(paths, filepath.Join(vaultRoot, "Projects", projectID, "Session Review", filepath.FromSlash(strings.TrimPrefix(relative, "docs/session-review/"))))
+	}
+	return paths
+}
+
+func readGateBFiles(t *testing.T, paths []string) map[string]string {
+	t.Helper()
+	result := make(map[string]string, len(paths))
+	for _, path := range paths {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[path] = string(body)
+	}
+	return result
 }
 
 func TestGateBLegacyV3ProjectionStaysOnTheLegacyScanPath(t *testing.T) {

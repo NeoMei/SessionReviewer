@@ -113,6 +113,21 @@ func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {
 	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), wrongBase); err == nil || !strings.Contains(err.Error(), "receipt changed") {
 		t.Fatalf("same-generation no-op ignored Base preimage: %v", err)
 	}
+	projectReview := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	originalProject := readTestFile(t, projectReview)
+	lateProject := append(bytes.Clone(originalProject), []byte("\nlate project edit\n")...)
+	if err := os.WriteFile(projectReview, lateProject, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), scan); !errors.Is(err, ErrPublicationConflict) {
+		t.Fatalf("late Project edit was not rejected by scan CAS: %v", err)
+	}
+	if got := readTestFile(t, projectReview); !bytes.Equal(got, lateProject) {
+		t.Fatal("late Project edit was overwritten after scan CAS conflict")
+	}
+	if err := os.WriteFile(projectReview, originalProject, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	vaultReview := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
 	if err := os.WriteFile(vaultReview, append(readTestFile(t, vaultReview), []byte("\nlate vault edit\n")...), 0o644); err != nil {
 		t.Fatal(err)

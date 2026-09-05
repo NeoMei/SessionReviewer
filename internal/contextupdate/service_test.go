@@ -2,10 +2,12 @@ package contextupdate
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,12 +16,135 @@ import (
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
+
+func TestRunRecoversPartialInitialMarkdownBeforeClassifyingPublicFiles(t *testing.T) {
+	for _, stopAfter := range []int{1, 2} {
+		t.Run(fmt.Sprintf("project-destination-%d", stopAfter), func(t *testing.T) {
+			dataRoot, projectRoot, vaultRoot, sessionsRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+			projectID := fmt.Sprintf("project-initial-recovery-%d", stopAfter)
+			mapping := config.ProjectMapping{ID: projectID, Root: projectRoot, VaultRoot: vaultRoot, VaultReviewPath: "Projects/Recovery/Session Review", VaultCaseMode: platform.CaseSensitive}
+			if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{mapping}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(projectRoot, "README.md"), []byte("# recovery\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}, {"add", "README.md"}, {"commit", "-m", "seed"}} {
+				command := exec.Command("git", args...)
+				command.Dir = projectRoot
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, output)
+				}
+			}
+			started := time.Date(2026, 9, 5, 2, 0, 0, 0, time.UTC)
+			session := strings.Join([]string{
+				`{"timestamp":"` + started.Format(time.RFC3339) + `","type":"session_meta","payload":{"id":"recovery-session","cwd":"` + filepath.ToSlash(projectRoot) + `","source":"codex"}}`,
+				`{"timestamp":"` + started.Add(time.Second).Format(time.RFC3339) + `","type":"turn_context","payload":{"cwd":"` + filepath.ToSlash(projectRoot) + `","model":"gpt-5"}}`,
+			}, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(sessionsRoot, "recovery.jsonl"), []byte(session), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			emptyJournal, err := publication.OpenJournal(dataRoot, projectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := emptyJournal.Close(); err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("simulated initial Markdown crash")
+			written := 0
+			opts := Options{ProjectID: projectID, SessionsRoot: sessionsRoot, DataRoot: dataRoot, Now: func() time.Time { return started.Add(time.Minute) }}
+			opts.afterDestination = func(side, _ string) error {
+				if side == "project" {
+					written++
+					if written == stopAfter {
+						panic(failure)
+					}
+				}
+				return nil
+			}
+			var firstErr error
+			func() {
+				defer func() {
+					if recovered, ok := recover().(error); !ok || !errors.Is(recovered, failure) {
+						t.Fatalf("initial publication panic=%v error=%v, want injected crash", recovered, firstErr)
+					}
+				}()
+				_, firstErr = Run(context.Background(), opts)
+			}()
+			if written != stopAfter {
+				t.Fatalf("Project destinations written=%d, want %d", written, stopAfter)
+			}
+			opts.afterDestination = nil
+			result, err := Run(context.Background(), opts)
+			if err != nil {
+				t.Fatalf("restart did not recover partial initial publication: %v", err)
+			}
+			if result.GenerationID == "" {
+				t.Fatal("restart recovered no published generation")
+			}
+			projectBodies := make(map[string][]byte, 4)
+			vaultBodies := make(map[string][]byte, 4)
+			for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath} {
+				projectBodies[relative], err = os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(relative)))
+				if err != nil {
+					t.Fatalf("read recovered Project file %s: %v", relative, err)
+				}
+				vaultRelative := filepath.ToSlash(filepath.Join(mapping.VaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))
+				vaultBodies[relative], err = os.ReadFile(filepath.Join(vaultRoot, filepath.FromSlash(vaultRelative)))
+				if err != nil || !bytes.Equal(projectBodies[relative], vaultBodies[relative]) {
+					t.Fatalf("recovered mirror %s differs or is missing: %v", relative, err)
+				}
+			}
+			accepted, err := reviewv4.LoadProjection(projectBodies[reviewv2.ReviewRelativePath], projectBodies[reviewv2.HistoryRelativePath], projectBodies[reviewv2.MachineLedgerRelativePath], projectBodies[presentation.SessionIndexRelativePath])
+			if err != nil {
+				t.Fatalf("recovered projection is invalid: %v", err)
+			}
+			private, err := memorystore.OpenReadOnly(dataRoot, projectID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, manifest, loadErr := private.LoadPublished()
+			closeErr := private.Close()
+			if loadErr != nil || closeErr != nil {
+				t.Fatalf("load recovered private publication: err=%v close=%v", loadErr, closeErr)
+			}
+			if err := syncproject.VerifyMarkdownBinding(accepted, manifest); err != nil {
+				t.Fatalf("recovered projection lost private binding: %v", err)
+			}
+		})
+	}
+}
+
+func TestRecoverActiveMarkdownBeforeScanFailsClosedOnCorruptIntent(t *testing.T) {
+	dataRoot, projectRoot, vaultRoot := t.TempDir(), t.TempDir(), t.TempDir()
+	projectID := "project-corrupt-recovery"
+	journal, err := publication.OpenJournal(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	intentPath := filepath.Join(dataRoot, "publication-journal", projectID, "intent-v1.json")
+	if err := os.WriteFile(intentPath, []byte("{\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: projectID, Root: projectRoot, VaultRoot: vaultRoot, VaultReviewPath: "Projects/Corrupt/Session Review", VaultCaseMode: platform.CaseSensitive}
+	if err := recoverActiveMarkdownBeforeScan(context.Background(), dataRoot, projectID, mapping, time.Now); err == nil {
+		t.Fatal("corrupt journal was treated as no active intent")
+	}
+}
 
 func TestUnchangedPublicationKeepsAuditGenerationPrivate(t *testing.T) {
 	vaultRoot := t.TempDir()
@@ -206,6 +331,96 @@ func TestLoadCurrentProjectFilesRejectsUnreadableExistingFile(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), reviewv2.ReviewRelativePath) {
 		t.Fatalf("expected a path-specific read error, got %v", err)
 	}
+}
+
+func TestLoadCurrentProjectFilesRejectsOldV4JSONWithUpgradeRequired(t *testing.T) {
+	projectRoot := t.TempDir()
+	ledgerBody, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "v4", "machine-ledger-v4.valid.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for relative, body := range map[string][]byte{reviewv2.ReviewRelativePath: []byte("legacy review\n"), reviewv2.HistoryRelativePath: []byte("legacy history\n"), reviewv2.MachineLedgerRelativePath: ledgerBody} {
+		full := filepath.Join(projectRoot, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectDir, err := pathguard.Open(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectDir.Close()
+	if _, err := loadCurrentProjectFiles(projectDir); !errors.Is(err, syncproject.ErrMigrationRequired) {
+		t.Fatalf("old v4 JSON route error=%v, want migration_required", err)
+	}
+}
+
+func TestLoadCurrentProjectFilesKeepsLegacyDocumentLimit(t *testing.T) {
+	projectRoot := t.TempDir()
+	reviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	if err := os.MkdirAll(filepath.Dir(reviewPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, bytes.Repeat([]byte("x"), reviewv2.MaxDocumentBytes+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	projectDir, err := pathguard.Open(projectRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer projectDir.Close()
+	if _, err := loadCurrentProjectFiles(projectDir); err == nil || !strings.Contains(err.Error(), reviewv2.ReviewRelativePath) || !strings.Contains(err.Error(), "read limit") {
+		t.Fatalf("oversized legacy review error=%v", err)
+	}
+}
+
+func TestLoadCurrentProjectFilesKeepsLegacyLedgerLimitAndWidensOnlyProvenMarkdown(t *testing.T) {
+	t.Run("legacy ledger", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		ledgerPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+		if err := os.MkdirAll(filepath.Dir(ledgerPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(ledgerPath, bytes.Repeat([]byte("x"), reviewv2.MaxMachineLedgerBytes+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		projectDir, err := pathguard.Open(projectRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer projectDir.Close()
+		if _, err := loadCurrentProjectFiles(projectDir); err == nil || !strings.Contains(err.Error(), fmt.Sprint(reviewv2.MaxMachineLedgerBytes)) {
+			t.Fatalf("oversized legacy ledger error=%v", err)
+		}
+	})
+	t.Run("projected Markdown", func(t *testing.T) {
+		projectRoot := t.TempDir()
+		ledgerBody, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "v4", "markdown", "ledger.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for relative, body := range map[string][]byte{reviewv2.ReviewRelativePath: bytes.Repeat([]byte("x"), reviewv2.MaxDocumentBytes+1), reviewv2.MachineLedgerRelativePath: ledgerBody} {
+			full := filepath.Join(projectRoot, filepath.FromSlash(relative))
+			if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(full, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		projectDir, err := pathguard.Open(projectRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer projectDir.Close()
+		files, err := loadCurrentProjectFiles(projectDir)
+		if err != nil || len(files.reviewBody) != reviewv2.MaxDocumentBytes+1 {
+			t.Fatalf("proven Markdown did not receive Markdown ceiling: bytes=%d err=%v", len(files.reviewBody), err)
+		}
+	})
 }
 
 func TestNextProjectionRevisionDetectsHumanBytesWithoutChurningNoOpScan(t *testing.T) {

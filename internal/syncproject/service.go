@@ -47,6 +47,7 @@ type Options struct {
 	pinCheckpoint       func(pinCheckpointStage) error
 	beforeEngine        func() error
 	acquireMarkdownLock func(string, string, time.Duration) (*publicationlock.Owner, error)
+	afterMarkdownBuild  func() error
 }
 
 // Run authenticates one configured Project mapping, constructs the existing

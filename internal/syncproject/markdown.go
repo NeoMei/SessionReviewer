@@ -37,6 +37,7 @@ type MarkdownSyncPlan struct {
 	Index                   []byte
 	ExpectedGenerationID    string
 	ExpectedIndexDigest     string
+	ProjectExpected         map[string][]byte
 	VaultExpected           map[string][]byte
 	ExpectedReceiptRevision string
 	ExpectedBaseDigest      string
@@ -320,8 +321,11 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 	if bytes.Equal(projectReview, desiredPair.Review) && bytes.Equal(vaultReview, desiredPair.Review) && bytes.Equal(projectHistory, desiredPair.History) && bytes.Equal(vaultHistory, desiredPair.History) && bytes.Equal(ledgerBody, desiredLedger) {
 		plan.Files = nil
 	}
-	return MarkdownSyncPlan{Plan: plan, Pending: reviewv4.MarkdownPair{Review: bytes.Clone(draftPair.Review), History: bytes.Clone(draftPair.History)}, Index: bytes.Clone(indexBody), ExpectedGenerationID: publishedID, ExpectedIndexDigest: manifest.SessionIndexDigest, ExpectedReceiptRevision: receipt.RevisionID, ExpectedBaseDigest: baseRecord.ContentHash, VaultExpected: map[string][]byte{
-		reviewv2.ReviewRelativePath: bytes.Clone(vaultReview), reviewv2.HistoryRelativePath: bytes.Clone(vaultHistory), reviewv2.MachineLedgerRelativePath: bytes.Clone(vaultLedger),
+	indexRelative := filepath.ToSlash(filepath.Join("docs/session-review", markdownIndexRelative))
+	return MarkdownSyncPlan{Plan: plan, Pending: reviewv4.MarkdownPair{Review: bytes.Clone(draftPair.Review), History: bytes.Clone(draftPair.History)}, Index: bytes.Clone(indexBody), ExpectedGenerationID: publishedID, ExpectedIndexDigest: manifest.SessionIndexDigest, ExpectedReceiptRevision: receipt.RevisionID, ExpectedBaseDigest: baseRecord.ContentHash, ProjectExpected: map[string][]byte{
+		reviewv2.ReviewRelativePath: bytes.Clone(projectReview), reviewv2.HistoryRelativePath: bytes.Clone(projectHistory), reviewv2.MachineLedgerRelativePath: bytes.Clone(ledgerBody), indexRelative: bytes.Clone(indexBody),
+	}, VaultExpected: map[string][]byte{
+		reviewv2.ReviewRelativePath: bytes.Clone(vaultReview), reviewv2.HistoryRelativePath: bytes.Clone(vaultHistory), reviewv2.MachineLedgerRelativePath: bytes.Clone(vaultLedger), indexRelative: bytes.Clone(vaultIndex),
 	}}, baseRecord, nil
 }
 

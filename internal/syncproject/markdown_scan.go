@@ -59,37 +59,15 @@ func ReadMarkdownForScan(ctx context.Context, options Options, owner *publicatio
 		if err != nil {
 			return err
 		}
+		if options.afterMarkdownBuild != nil {
+			if err := options.afterMarkdownBuild(); err != nil {
+				return err
+			}
+		}
 
-		readProject := func(relative string) ([]byte, error) {
-			body, found, err := pin.project.ReadRegularOptional(relative, 64<<20)
-			if err != nil || !found {
-				return nil, errors.Join(fmt.Errorf("required Project file %q is missing", relative), err)
-			}
-			return body, nil
-		}
-		readVault := func(relative string) ([]byte, error) {
-			vaultRelative := filepath.ToSlash(filepath.Join(pin.mapping.VaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))
-			body, found, err := pin.vault.ReadRegularOptional(vaultRelative, 64<<20)
-			if err != nil || !found {
-				return nil, errors.Join(fmt.Errorf("required Vault file %q is missing", relative), err)
-			}
-			return body, nil
-		}
 		paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, filepath.ToSlash(filepath.Join("docs/session-review", markdownIndexRelative))}
-		projectExpected := make(map[string][]byte, len(paths))
-		vaultExpected := make(map[string][]byte, len(paths))
-		for _, relative := range paths {
-			projectBody, err := readProject(relative)
-			if err != nil {
-				return err
-			}
-			vaultBody, err := readVault(relative)
-			if err != nil {
-				return err
-			}
-			projectExpected[relative] = bytes.Clone(projectBody)
-			vaultExpected[relative] = bytes.Clone(vaultBody)
-		}
+		projectExpected := cloneMarkdownExpected(humanPlan.ProjectExpected)
+		vaultExpected := cloneMarkdownExpected(humanPlan.VaultExpected)
 
 		ledger, err := reviewv4.DecodeLedger(projectExpected[reviewv2.MachineLedgerRelativePath])
 		if err != nil {
@@ -126,4 +104,12 @@ func ReadMarkdownForScan(ctx context.Context, options Options, owner *publicatio
 		return nil
 	})
 	return result, errors.Join(err, retErr)
+}
+
+func cloneMarkdownExpected(source map[string][]byte) map[string][]byte {
+	result := make(map[string][]byte, len(source))
+	for relative, body := range source {
+		result[relative] = bytes.Clone(body)
+	}
+	return result
 }

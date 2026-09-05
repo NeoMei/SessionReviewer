@@ -243,6 +243,15 @@ func (r *Reader) Close() error {
 	return errors.Join(r.journal.Close(), r.data.Close())
 }
 
+// Intent returns the validated durable publication intent without creating or
+// mutating journal state.
+func (r *Reader) Intent() (Intent, error) {
+	if r == nil {
+		return Intent{}, errors.New("publication state reader is required")
+	}
+	return ReadIntent(r.journal.Root, r.projectID)
+}
+
 func (r *Reader) Accepted() (AcceptedReceipt, error) {
 	intent, err := ReadIntent(r.journal.Root, r.projectID)
 	if err != nil {

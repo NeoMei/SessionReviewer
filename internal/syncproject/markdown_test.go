@@ -70,6 +70,44 @@ func TestReadMarkdownForScanKeepsOldAcceptanceSeparateFromVaultOnlyDraft(t *test
 	}
 }
 
+func TestReadMarkdownForScanDoesNotBlessAnEditAfterMerge(t *testing.T) {
+	fixture, accepted := newMarkdownLockFixture(t)
+	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	before, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var late []byte
+	options := Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerPeriodic}
+	options.afterMarkdownBuild = func() error {
+		document, err := reviewv4.ParseMarkdownDocument("项目回顾.md", before)
+		if err != nil {
+			return err
+		}
+		late, err = document.ReplaceFields(map[reviewv4.FieldKey]string{{Entity: "project-overview", Name: "goal"}: "late edit after merge"})
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(reviewPath, late, 0o644)
+	}
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Release()
+	read, err := ReadMarkdownForScan(context.Background(), options, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(before, late) || !bytes.Equal(read.ProjectExpected[reviewv2.ReviewRelativePath], before) || bytes.Equal(read.ProjectExpected[reviewv2.ReviewRelativePath], late) {
+		t.Fatal("post-merge edit was blessed as the publication CAS preimage")
+	}
+	current, err := os.ReadFile(reviewPath)
+	if err != nil || !bytes.Equal(current, late) || read.Pending.Presentation.CurrentState.Goal != accepted.Review.CurrentState.Goal {
+		t.Fatalf("late edit was lost or merged retroactively: current=%q pending=%q err=%v", current, read.Pending.Presentation.CurrentState.Goal, err)
+	}
+}
+
 func TestMarkdownDryRunReportsPendingWritesAndNoOp(t *testing.T) {
 	fixture, accepted := newMarkdownLockFixture(t)
 	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))

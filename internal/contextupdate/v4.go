@@ -4,7 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +18,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -78,11 +83,11 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 	}
 	ledger.ProjectID, ledger.GenerationID, ledger.ProjectViewDigest = in.Index.ProjectID, in.Index.GenerationID, in.Index.ProjectViewDigest
 	ledger.AcceptedRevision = presentation.Revision
-	ledger.Accounting = mapV4Accounting(in.Accounting)
 	ledger.Sessions = make([]reviewv4.LedgerSession, 0, len(in.Index.Sessions))
 	for _, entry := range in.Index.Sessions {
 		ledger.Sessions = append(ledger.Sessions, reviewv4.LedgerSession{Provider: entry.Provider, SessionID: entry.SessionID, ProcessingState: reviewv4.ProcessingState(entry.ProcessingState), SourceAvailability: entry.SourceAvailability, SessionViewDigest: cloneV4String(entry.SessionViewDigest), UsageRecordDigest: cloneV4String(entry.UsageRecordDigest)})
 	}
+	ledger.Accounting = mapV4Accounting(in.Accounting, in.Accepted.Ledger.Accounting, in.Accepted.Ledger.Sessions, ledger.Sessions)
 	ledger.HumanPatches = presentation.HumanPatches
 	ledger.OrphanPatches = presentation.OrphanPatches
 	ledger.GeneratedBaselines = presentation.GeneratedBaselines
@@ -91,7 +96,7 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 	return presentation, ledger, nil
 }
 
-func mapV4Accounting(value accounting.ProjectSummary) reviewv4.Accounting {
+func mapV4Accounting(value accounting.ProjectSummary, accepted reviewv4.Accounting, acceptedSessions, nextSessions []reviewv4.LedgerSession) reviewv4.Accounting {
 	result := reviewv4.Accounting{Models: make([]reviewv4.Model, 0, len(value.Models))}
 	if value.TotalDurationMS > 0 {
 		result.TotalDurationMS = uint64(value.TotalDurationMS)
@@ -106,7 +111,60 @@ func mapV4Accounting(value accounting.ProjectSummary) reviewv4.Accounting {
 		}
 		result.Models = append(result.Models, reviewv4.Model{Model: model.Model, TotalTokens: tokens})
 	}
+	if sameV4UsageIdentity(acceptedSessions, nextSessions) && sameV4AccountingTokens(accepted, result) {
+		result.TotalCostUSD = cloneV4Cost(accepted.TotalCostUSD)
+		acceptedCosts := make(map[string]*float64, len(accepted.Models))
+		for _, model := range accepted.Models {
+			acceptedCosts[model.Model] = model.TotalCostUSD
+		}
+		for index := range result.Models {
+			result.Models[index].TotalCostUSD = cloneV4Cost(acceptedCosts[result.Models[index].Model])
+		}
+	}
 	return result
+}
+
+func sameV4UsageIdentity(left, right []reviewv4.LedgerSession) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	identity := func(sessions []reviewv4.LedgerSession) []string {
+		values := make([]string, 0, len(sessions))
+		for _, session := range sessions {
+			digest := "<null>"
+			if session.UsageRecordDigest != nil {
+				digest = *session.UsageRecordDigest
+			}
+			values = append(values, session.Provider+"\x00"+session.SessionID+"\x00"+digest)
+		}
+		sort.Strings(values)
+		return values
+	}
+	return slices.Equal(identity(left), identity(right))
+}
+
+func sameV4AccountingTokens(left, right reviewv4.Accounting) bool {
+	if left.TotalTokens != right.TotalTokens || len(left.Models) != len(right.Models) {
+		return false
+	}
+	leftTokens := make(map[string]uint64, len(left.Models))
+	for _, model := range left.Models {
+		leftTokens[model.Model] = model.TotalTokens
+	}
+	for _, model := range right.Models {
+		if tokens, found := leftTokens[model.Model]; !found || tokens != model.TotalTokens {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneV4Cost(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func cloneV4String(value *string) *string {
@@ -115,6 +173,37 @@ func cloneV4String(value *string) *string {
 	}
 	copy := *value
 	return &copy
+}
+
+func recoverActiveMarkdownBeforeScan(ctx context.Context, dataRoot, projectID string, mapping config.ProjectMapping, now func() time.Time) (retErr error) {
+	info, err := os.Stat(filepath.Join(dataRoot, "publication-journal", projectID))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || !info.IsDir() {
+		return errors.Join(errors.New("inspect Markdown publication journal"), err)
+	}
+	reader, err := publicationstate.OpenReadOnly(dataRoot, projectID)
+	if err != nil {
+		return err
+	}
+	intent, intentErr := reader.Intent()
+	closeErr := reader.Close()
+	if errors.Is(intentErr, os.ErrNotExist) {
+		return closeErr
+	}
+	if intentErr != nil || closeErr != nil {
+		return errors.Join(intentErr, closeErr)
+	}
+	if intent.Stage == publicationstate.StageCommitted || intent.Version != 2 || intent.Kind != publicationstate.KindMarkdown {
+		return nil
+	}
+	owner, err := publicationlock.Acquire(dataRoot, projectID, 10*time.Second)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, owner.Release()) }()
+	return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: now}, owner)
 }
 
 type v4PublishInput struct {
@@ -126,10 +215,11 @@ type v4PublishInput struct {
 	Accounting         accounting.ProjectSummary
 	Now                func() time.Time
 	Existing           bool
+	AfterDestination   func(side, relative string) error
 }
 
 func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result, retErr error) {
-	pubOpts := publication.Options{ProjectID: in.ProjectID, PreparedGeneration: in.PreparedGeneration, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now}
+	pubOpts := publication.Options{ProjectID: in.ProjectID, PreparedGeneration: in.PreparedGeneration, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now, AfterDestination: in.AfterDestination}
 	if !in.Existing {
 		p, ledger, err := mapV4Scan(v4MapInput{Index: in.Index, Accounting: in.Accounting})
 		if err != nil {

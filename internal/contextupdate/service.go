@@ -36,6 +36,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
 // Options configures foreground or worker context updates.
@@ -46,6 +47,7 @@ type Options struct {
 	Now                func() time.Time
 	PhaseObserver      func(phase string) error
 	ExtractionObserver func(scan.Progress) error
+	afterDestination   func(side, relative string) error
 }
 
 // Result contains the outcome of a context update scan and publication.
@@ -116,6 +118,9 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, fmt.Errorf("open project root: %w", err)
 	}
 	defer projectDir.Close()
+	if err := recoverActiveMarkdownBeforeScan(ctx, opts.DataRoot, opts.ProjectID, mapping, now); err != nil {
+		return Result{}, fmt.Errorf("recover Markdown publication before scan: %w", err)
+	}
 
 	store, err := memorystore.Open(opts.DataRoot, opts.ProjectID)
 	if err != nil {
@@ -230,7 +235,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 		}
-		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now})
+		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, AfterDestination: opts.afterDestination})
 		if err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 		}
@@ -242,7 +247,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 			}
-			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, Existing: true})
+			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, Existing: true, AfterDestination: opts.afterDestination})
 			if err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 			}
@@ -677,15 +682,36 @@ func loadCurrentProjectFiles(projectDir *pathguard.Directory) (currentProjectFil
 		return currentProjectFiles{}, errors.New("project directory is required")
 	}
 	result := currentProjectFiles{expected: make(map[string][]byte, 4)}
+	ledgerBody, ledgerFound, err := projectDir.ReadRegularOptional(reviewv2.MachineLedgerRelativePath, 64<<20)
+	if err != nil {
+		return currentProjectFiles{}, fmt.Errorf("read current project file %s: %w", reviewv2.MachineLedgerRelativePath, err)
+	}
+	result.ledgerBody, result.ledgerFound = ledgerBody, ledgerFound
+	markdownProjection := false
+	if ledgerFound {
+		ledger, decodeErr := reviewv4.DecodeLedger(ledgerBody)
+		if decodeErr == nil {
+			if ledger.DocumentProjection == nil {
+				return currentProjectFiles{}, fmt.Errorf("old v4 JSON projection requires explicit format upgrade: %w", syncproject.ErrMigrationRequired)
+			}
+			markdownProjection = true
+		} else if len(ledgerBody) > reviewv2.MaxMachineLedgerBytes {
+			return currentProjectFiles{}, fmt.Errorf("read current project file %s: machine ledger exceeds %d bytes", reviewv2.MachineLedgerRelativePath, reviewv2.MaxMachineLedgerBytes)
+		}
+		result.expected[reviewv2.MachineLedgerRelativePath] = append([]byte(nil), ledgerBody...)
+	}
+	documentMaximum := int64(reviewv2.MaxDocumentBytes)
+	if markdownProjection {
+		documentMaximum = 64 << 20
+	}
 	files := []struct {
 		relative string
 		maximum  int64
 		body     *[]byte
 		found    *bool
 	}{
-		{reviewv2.ReviewRelativePath, 64 << 20, &result.reviewBody, &result.reviewFound},
-		{reviewv2.HistoryRelativePath, 64 << 20, &result.historyBody, &result.historyFound},
-		{reviewv2.MachineLedgerRelativePath, 64 << 20, &result.ledgerBody, &result.ledgerFound},
+		{reviewv2.ReviewRelativePath, documentMaximum, &result.reviewBody, &result.reviewFound},
+		{reviewv2.HistoryRelativePath, documentMaximum, &result.historyBody, &result.historyFound},
 		{presentation.SessionIndexRelativePath, 64 << 20, &result.indexBody, &result.indexFound},
 	}
 	for _, file := range files {

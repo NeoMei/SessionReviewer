@@ -31,12 +31,15 @@ import (
 
 // Options configures a full publication run across Project, Vault, and Store.
 type Options struct {
-	ProjectID               string
-	PreparedGeneration      string
-	Plan                    presentation.RenderPlan
-	Mapping                 config.ProjectMapping
-	DataRoot                string
-	Now                     func() time.Time
+	ProjectID          string
+	PreparedGeneration string
+	Plan               presentation.RenderPlan
+	Mapping            config.ProjectMapping
+	DataRoot           string
+	Now                func() time.Time
+	// AfterDestination is an internal diagnostic/fault-injection seam invoked
+	// only after a Project or Vault destination has been durably written.
+	AfterDestination        func(side, relative string) error
 	markdownIndex           []byte
 	markdownIndexDigest     string
 	markdownVaultExpected   map[string][]byte
@@ -671,6 +674,11 @@ func syncErrorSummary(entityErrors []syncengine.EntityError) string {
 }
 
 func runPublishCheckpoint(opts Options, stage publishCheckpoint, side, relative string) error {
+	if stage == checkpointAfterDestination && opts.AfterDestination != nil {
+		if err := opts.AfterDestination(side, relative); err != nil {
+			return err
+		}
+	}
 	if opts.checkpoint == nil {
 		return nil
 	}
