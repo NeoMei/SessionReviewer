@@ -52,7 +52,7 @@
 
 给现有入口加小型分发；不要把整个旧 service.go 移动或顺手重构。下面的新增接口是实施目标，不是对当前实现的描述。现有 `Accepted` 仅代表公共文件合同，通过私有 store 校验后才可升级为服务接受态。
 
-## M1：冻结扩展、版本组合与字段目录
+## Task 1 (M1)：冻结扩展、版本组合与字段目录
 
 **Files:**
 - Modify: `internal/reviewv4/types.go`、`codec.go`、`validate.go`。
@@ -110,7 +110,7 @@ if l.DocumentProjection != nil &&
 - [ ] **4. 固定共享夹具。** `cases.json` 每项包含 `name`、输入文件相对路径、`expected_code`（成功为空）、期望 field values；包括变更扩展却重算公共自摘要的样本，后续 M5 必须仍拒绝未经私有认证的机器更改。Go/TS 测试直接读仓库这一份；不手工维护两份 Markdown 黄金文件。对照目录完整检查 25 字段，不仅检查数量。
 - [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 ./internal/strictjson -count=1`；在 `obsidian-plugin` 运行 `npm test -- tests/contracts-v4.test.ts`。记录旧 fixtures 的前后哈希。仅 stage 本任务文件，提交 `feat: define v4 markdown projection contract`。
 
-## M2：实现有界标记词法与无损文档壳
+## Task 2 (M2)：实现有界标记词法与无损文档壳
 
 **Files:** Create `internal/reviewv4/markdown_lex.go`、`markdown_document.go`、`markdown_lex_test.go`、`markdown_document_test.go`；扩充 M1 的共享 cases。
 
@@ -163,7 +163,7 @@ out.Write(d.raw[cursor:])
 - [ ] **4. 收紧文档壳。** 复用现有 yaml.v3 的 Node 检查方式，不使用宽松 map 解码；只为新格式采用 64 MiB，旧 `syncdoc.MaxDocumentBytes=4 MiB` 不全局放宽。沿用 frontmatter 1 MiB、10,000 节点/100 深度上限。frontmatter 必备键、safe ID、保留前缀和版本校验按 spec；Bytes/Fields 都返回独立副本，防止调用者修改认证输入。
 - [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 -run Markdown -count=1`；新增 `FuzzMarkdownBlocks` 用同一 corpus 检查无 panic、跨度单调、不越界，执行 `go test ./internal/reviewv4 -run '^$' -fuzz '^FuzzMarkdownBlocks$' -fuzztime=10s`。提交 `feat: parse v4 markdown without losing human bytes`。
 
-## M3：渲染两份正文、识别草稿与受信字段应用
+## Task 3 (M3)：渲染两份正文、识别草稿与受信字段应用
 
 **Files:** Create `internal/reviewv4/markdown_render.go`、`markdown_draft.go`、`markdown_render_test.go`、`markdown_draft_test.go`；Modify `internal/reviewv4/codec.go`；扩充共享 cases。
 
@@ -223,7 +223,7 @@ if edit.Key.Name == "conclusion" && edit.After != edit.Before {
 - [ ] **5a. 修订与 patch 测试。** 每批实际人工变更只推进一次 Presentation revision；只对有既存 revision 字段且实际变化的 decision/problem 推进实体修订，不给 timeline/risk 临时发明字段。使用现有 Patch/GeneratedBaseline 哈希规则记录原值和人工覆盖，active/orphan 与嵌入基线保持相同；零变更不新增 patch、不推进 revision。先以不含修订变化的内容比较确定是否发生变更，再统一设置新修订和哈希，避免自增触发自增。
 - [ ] **6. GREEN 与提交。** `go test ./internal/reviewv4 -count=1`。保留旧 JSON 测试、增加混合格式拒绝测试。提交 `feat: render and read editable v4 review documents`。
 
-## M4：接入语义单元与共同祖先三方合并
+## Task 4 (M4)：接入语义单元与共同祖先三方合并
 
 **Files:** Create `internal/syncdoc/v4_units.go`、`v4_units_test.go`、`internal/sync/v4_merge.go`、`v4_merge_test.go`；Modify `internal/syncdoc/document.go`、`scan.go`、`internal/sync/merge.go`（只接分发与共享单位算法）。
 
@@ -276,7 +276,7 @@ func MergeV4Units(in V4MergeInput) V4MergeResult {
 - [ ] **4. 验证首次同步。** 独立测试缺项、单侧自定义新增、两端不同和两端全同；仅双方同值可以自动建立共同 Base，单侧差异进入初始化预览。比较前 Value 只做 CRLF/LF 语义规范化，重建仍使用原 physical spans。两端分别用自身认证接受态检查结构，再用共同 Base 合并人工单位，不能用新 Project revision 作为共同祖先。
 - [ ] **5. GREEN 与提交。** `go test ./internal/syncdoc ./internal/sync -count=1`；追加 5 MiB 合法新格式文档对照旧格式上限、CRLF/混合换行/段落重排/marker 注入回归。提交 `feat: merge v4 human fields against the sync ancestor`。
 
-## M5：私有认证与人工三文件事务接入
+## Task 5 (M5)：私有认证与人工三文件事务接入
 
 **Files:** Create `internal/syncproject/markdown.go`、`markdown_test.go`、`internal/publication/markdown.go`、`markdown_test.go`；Modify `internal/syncproject/service.go`、`internal/publication/service.go`、`journal.go`、`internal/sync/service.go`；测试扩展 `internal/publication/recovery_test.go`。
 
@@ -326,7 +326,7 @@ if manifest.SessionIndexDigest == "" ||
 - [ ] **5. 故障矩阵。** 每个 Project/Vault 文件写入后、Vault 同步前后、guard 检查前后、公共验证后、接受指针前后注入故障；断言重新打开时一致接受或明确拒绝，index 原字节不变、generation 不变。新增并发等待锁期间编辑、人工更新时 index 改变、丢失 ledger、单侧机器 ledger 重算摘要测试。用已有 checkpoint seam 扩展枚举，不 sleep 猜时间。
 - [ ] **6. GREEN 与提交。** `go test ./internal/syncproject ./internal/publication ./internal/sync -count=1`；`go test -race ./internal/publication ./internal/syncproject -count=1`。提交 `feat: publish v4 human edits through the guarded transaction`。
 
-## M6：接入普通扫描的四文件渲染
+## Task 6 (M6)：接入普通扫描的四文件渲染
 
 **Files:** Create `internal/presentation/render_v4.go`、`render_v4_test.go`、`internal/contextupdate/v4.go`、`v4_test.go`；Modify `internal/contextupdate/service.go`；仅必要时修改 `internal/publication/service.go` 与 `internal/cli/scan_test.go`。
 
@@ -374,7 +374,7 @@ paths := []string{
 - [ ] **5. 测试真实链路。** 用现有 Codex fixture 跑 scan→改 review goal/history conclusion→scan→sync→重开；总 Session 数超过最近列表长度仍完整。增加相同输入但 Now 前进的重复扫描、既有 154 Session cumulative fixture、人工孤儿字段与旧 pricing/chain/graph 保留断言。新生成机器内容不误报 readonly edit，真正手改生成区则停止发布。
 - [ ] **6. GREEN 与提交。** `go test ./internal/presentation ./internal/contextupdate ./internal/publication ./internal/sessionindex -count=1`；`go test ./test/zerotoken -run '^TestGateB' -count=1`。提交 `feat: publish editable markdown on the v4 scan path`。
 
-## M7：显式升级与旧私有 index 认证衔接
+## Task 7 (M7)：显式升级与旧私有 index 认证衔接
 
 **Files:** Create `internal/migrationv4/markdown.go`、`markdown_test.go`；Modify `internal/migrationv4/types.go`、`plan.go`、`migrate.go`、`internal/syncproject/migration.go`、`internal/cli/sync.go`、`internal/memorystore/store.go`；各自相邻测试。
 
@@ -425,7 +425,7 @@ if len(result.Preview.BlockingReasons) != 0 {
 - [ ] **5. 无写入与 stale 验证。** 从 `newMigrationServiceFixture`/`seedMigrationPreparedGeneration` 扩展夹具；在 dry-run 前后比较 Project/Vault/private 全树文件清单、内容和 prepared/published 指针。不能只比较四个公共文件；不得创建新的持久锁文件作为 dry-run 副作用。dry-run 从不调用有创建副作用的 Acquire/Prepare/repair/recovery：只读现有对象，构建前后重新验证全套精确哈希及指针；观察到变化则返回 stale，不循环重试。confirm 才使用既有锁内重建路径。修改正文、index、依赖或目标预像后用旧 preview confirm 必须失败。模拟确认过程中崩溃，恢复后 M5 私有绑定可验证。
 - [ ] **6. GREEN 与提交。** `go test ./internal/migrationv4 ./internal/memorystore ./internal/syncproject ./internal/publication ./internal/cli -count=1`。提交 `feat: migrate legacy projections to authenticated markdown`。保留缺分类能力的明确状态，不把迁移适配测试成功当作实际旧项目完成迁移。
 
-## M8：Go/TypeScript 格式一致与插件草稿/降级状态
+## Task 8 (M8)：Go/TypeScript 格式一致与插件草稿/降级状态
 
 **Files:** Create `obsidian-plugin/src/data/markdown-v4.ts`、`repository-v4.ts`、`obsidian-plugin/tests/markdown-v4.test.ts`、`repository-v4.test.ts`；Modify `obsidian-plugin/src/data/repository.ts`、`editor.ts`、`vault-port.ts`、`obsidian-plugin/src/view/presentation.ts`、`obsidian-plugin/src/main.ts`（仅路由/状态）、`obsidian-plugin/package.json`、`package-lock.json`；Create `internal/reviewv4/markdown_corpus_test.go`。
 
@@ -495,7 +495,7 @@ return { kind: "public_valid", value: read, index };
 - [ ] **4. 接入现有 UI 的最小边界。** 从 repository 分发 v4 状态；能打开两份 Markdown、展示“有未同步修改”/只读证据/缺 CLI 原因。完整五 Tab 与问题树视觉由原前端计划接入，不在此重做。现有 editor 不得将 v4 文档送进 v3 写入器；对无 v4 支持的按钮禁用并说明，通过 Obsidian 原生正文编辑可完成白名单文本修改。源码/阅读模式都保留稳定锚点。结构按钮只有已有受信 CLI 支持时才可用。
 - [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 -run MarkdownCorpus -count=1`；插件 `npm run check`。共享 fixtures 全覆盖同一语义/错误码，测试无 `vault.modify`/ledger 写入。提交 `feat: read v4 markdown drafts safely in Obsidian`。
 
-## M9：整链回归、真实 Vault 验收与原 Task 3 交接
+## Task 9 (M9)：整链回归、真实 Vault 验收与原 Task 3 交接
 
 **Files:** Create `test/zerotoken/markdown_v4_test.go`、`docs/verification/2026-09-05-v4-human-markdown.md`；Modify `test/zerotoken/gate_b_test.go`、`.github/workflows/ci.yml`（仅补原矩阵中的测试选择）、本计划和原 Session Index 计划状态。
 
@@ -548,4 +548,4 @@ git diff --check
 
 本计划不把代码片段中的接口当现成实现。所有测试例子需使用真实当前合同值，新增夹具必须先经现有 validators 验证，禁止放宽验证器使测试变绿。M7 的外部分类能力、M9 的原生 CI/真实 Vault 是明确检查点；M8 的 YAML 依赖已指定现有锁定版本，实施时检查打包结果与许可。发现需要扩大合同或授权时报告具体差异。
 
-执行方式待用户选择；选定后从 M1 开始，每任务 RED→实现→GREEN→审查→提交。当前仅计划完成，没有任务实现/测试通过声明。
+用户于 2026-09-05 授权开始执行，采用逐任务子代理实现与独立审查。从 M1 开始，每任务 RED→实现→GREEN→审查→提交；状态与证据保存在本计划专属 SDD ledger。此处记录启动，不代表任何任务实现/测试已通过。
