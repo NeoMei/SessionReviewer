@@ -247,6 +247,18 @@ describe("strict JSON boundary", () => {
     expect(() => parseReviewPresentationV4(JSON.stringify(valid))).toThrow(/safe integer/i);
   });
 
+  it("rejects raw integer literals that JSON.parse would round into valid integers", async () => {
+    const review = await pluginFixture("review-presentation-v4.valid.json");
+    const roundedRevision = review.replace('"revision": 1', '"revision": 9007199254740991.1');
+    expect(roundedRevision).not.toBe(review);
+    expect(() => parseReviewPresentationV4(roundedRevision)).toThrow(/exact|safe integer/i);
+
+    const chain = await pluginFixture("conversation-chain-v1.valid.json");
+    const roundedOrdinal = chain.replace('"ordinal": 1', '"ordinal": 1.0000000000000001');
+    expect(roundedOrdinal).not.toBe(chain);
+    expect(() => parseConversationChainV1(roundedOrdinal)).toThrow(/exact|safe integer/i);
+  });
+
   it("applies string ceilings to UTF-8 bytes for CJK and emoji", async () => {
     const review = await fixtureObject("review-presentation-v4.valid.json") as { current_state: JsonObject };
     review.current_state.goal = `${"界".repeat(5461)}a`;

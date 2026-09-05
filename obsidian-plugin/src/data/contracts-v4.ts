@@ -53,6 +53,19 @@ const ZERO_SHA256 = "0".repeat(64);
 const SORT_VERSION = "started-at-desc-null-last-provider-session-v1";
 const COVERAGE_KEYS = ["seen", "indexed", "collapsed", "unprojected", "undecodable", "truncated"] as const;
 const PRICE_DIMENSIONS = ["input", "cached_input", "cache_write_input", "output", "reasoning_output"] as const;
+const UNAMBIGUOUS_INTEGER_KEYS = new Set([
+  "schema_version", "revision", "accepted_revision", "problem_map_revision", "sibling_order",
+  "source_turns", "captured_turns", "truncated_turns", "source_unavailable_turns",
+  "total_duration_ms", "total_tokens", "duration_ms", "warning_count", "record_count",
+  "indexed_event_count", "total", "shown", "omitted", "sequence", "range_start", "range_end",
+  "record_ordinal", "ordinal", "source_messages", "captured_messages", "turn_units",
+  "unanswered_units", "truncated_messages"
+]);
+const COVERAGE_INTEGER_KEYS = new Set([
+  ...COVERAGE_KEYS, "complete", "partial", "error", "unprocessed", "source_available",
+  "source_unavailable", "started_at_known", "ended_at_known", "usage_known"
+]);
+const FACT_COUNT_INTEGER_KEYS = new Set(["file_change", "command", "verification", "error", "artifact"]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -1986,7 +1999,7 @@ function rejectDuplicateJsonKeys(source: string): void {
     }
     throw new Error("decode JSON: unterminated string");
   };
-  const parseValue = (): void => {
+  const parseValue = (path: Array<string | number>): void => {
     whitespace();
     const token = source[cursor];
     if (token === "{") {
@@ -2006,7 +2019,7 @@ function rejectDuplicateJsonKeys(source: string): void {
         whitespace();
         if (source[cursor] !== ":") throw new Error("decode JSON: missing object colon");
         cursor += 1;
-        parseValue();
+        parseValue([...path, key]);
         whitespace();
         if (source[cursor] === "}") {
           cursor += 1;
@@ -2024,8 +2037,10 @@ function rejectDuplicateJsonKeys(source: string): void {
         cursor += 1;
         return;
       }
+      let index = 0;
       while (cursor < source.length) {
-        parseValue();
+        parseValue([...path, index]);
+        index += 1;
         whitespace();
         if (source[cursor] === "]") {
           cursor += 1;
@@ -2042,11 +2057,58 @@ function rejectDuplicateJsonKeys(source: string): void {
     }
     const primitive = /^(?:-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)/.exec(source.slice(cursor));
     if (!primitive) throw new Error("decode JSON: malformed value");
+    if (isWireIntegerPath(path) && /^-?\d/.test(primitive[0])) {
+      assertExactSafeIntegerLexeme(primitive[0], path);
+    }
     cursor += primitive[0].length;
   };
-  parseValue();
+  parseValue([]);
   whitespace();
   if (cursor !== source.length) throw new Error("decode JSON: trailing data");
+}
+
+function isWireIntegerPath(path: ReadonlyArray<string | number>): boolean {
+  const key = path[path.length - 1];
+  if (typeof key !== "string") return false;
+  if (UNAMBIGUOUS_INTEGER_KEYS.has(key)) return true;
+  const parent = path[path.length - 2];
+  if (parent === "coverage" && COVERAGE_INTEGER_KEYS.has(key)) return true;
+  if (parent === "fact_counts" && FACT_COUNT_INTEGER_KEYS.has(key)) return true;
+  return parent === "billable_quantities" && PRICE_DIMENSIONS.includes(key as typeof PRICE_DIMENSIONS[number]);
+}
+
+function assertExactSafeIntegerLexeme(source: string, path: ReadonlyArray<string | number>): void {
+  const match = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(source);
+  if (!match) reject("wire_shape_invalid", `${jsonPath(path)} must be an exact safe integer`);
+  const negative = match[1] === "-";
+  const fraction = match[3] ?? "";
+  const exponent = Number(match[4] ?? "0");
+  let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
+  if (digits === "") return;
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1024) {
+    reject("wire_shape_invalid", `${jsonPath(path)} must be an exact safe integer`);
+  }
+  const scale = fraction.length - exponent;
+  if (scale > 0) {
+    if (scale >= digits.length || !/^0+$/.test(digits.slice(-scale))) {
+      reject("wire_shape_invalid", `${jsonPath(path)} must be an exact safe integer`);
+    }
+    digits = digits.slice(0, -scale);
+  } else if (scale < 0) {
+    const zeros = -scale;
+    if (digits.length + zeros > 16) {
+      reject("wire_shape_invalid", `${jsonPath(path)} must be a safe integer`);
+    }
+    digits += "0".repeat(zeros);
+  }
+  const exact = BigInt(`${negative ? "-" : ""}${digits}`);
+  if (exact > BigInt(MAX_SAFE) || exact < BigInt(-MAX_SAFE) || Number(source) !== Number(exact)) {
+    reject("wire_shape_invalid", `${jsonPath(path)} must be a safe integer`);
+  }
+}
+
+function jsonPath(path: ReadonlyArray<string | number>): string {
+  return `$${path.map((part) => typeof part === "number" ? `[${part}]` : `.${part}`).join("")}`;
 }
 
 function message(error: unknown): string {
