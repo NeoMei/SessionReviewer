@@ -2083,15 +2083,18 @@ function assertExactSafeIntegerLexeme(source: string, path: ReadonlyArray<string
   const negative = match[1] === "-";
   const fraction = match[3] ?? "";
   const exponentSource = match[4] ?? "0";
-  const exponent = Number(exponentSource);
+  const exponentNegative = exponentSource.startsWith("-");
+  const exponentDigits = exponentSource.replace(/^[+-]?0*/, "") || "0";
   let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
   if (digits === "") return;
-  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1024) {
-    if (exponentSource.startsWith("-")) {
+  if (exponentDigits.length > String(MAX_JSON_BYTES).length) {
+    if (exponentNegative) {
       reject("wire_shape_invalid", `${jsonPath(path)} must be an exact integer`);
     }
     return;
   }
+  const exponentMagnitude = Number(exponentDigits);
+  const exponent = exponentNegative ? -exponentMagnitude : exponentMagnitude;
   const scale = fraction.length - exponent;
   if (scale > 0) {
     if (scale >= digits.length || !/^0+$/.test(digits.slice(-scale))) {

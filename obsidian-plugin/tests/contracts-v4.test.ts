@@ -259,6 +259,10 @@ describe("strict JSON boundary", () => {
     const roundedOrdinal = chain.replace('"ordinal": 1', '"ordinal": 1.0000000000000001');
     expect(roundedOrdinal).not.toBe(chain);
     expect(codeOf(captureRejection(() => parseConversationChainV1(roundedOrdinal)))).toBe("wire_shape_invalid");
+
+    const underflowRevision = review.replace('"revision": 1', `"revision": 0.${"0".repeat(2000)}1e1025`);
+    expect(underflowRevision).not.toBe(review);
+    expect(codeOf(captureRejection(() => parseReviewPresentationV4(underflowRevision)))).toBe("wire_shape_invalid");
   });
 
   it("applies string ceilings to UTF-8 bytes for CJK and emoji", async () => {
