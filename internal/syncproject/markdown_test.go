@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -31,6 +32,43 @@ func TestMarkdownBindingRejectsLoosePublicIndex(t *testing.T) {
 	err := VerifyMarkdownBinding(reviewv4.Accepted{}, memory.GenerationManifest{})
 	if err == nil {
 		t.Fatal("accepted public files without a private binding")
+	}
+}
+
+func TestMarkdownDryRunReportsPendingWritesAndNoOp(t *testing.T) {
+	fixture, accepted := newMarkdownLockFixture(t)
+	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	before, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := bytes.Replace(before, []byte("\n"+accepted.Review.CurrentState.Goal+"\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->"), []byte("\ndry-run goal\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->"), 1)
+	if bytes.Equal(before, after) {
+		t.Fatal("Markdown fixture has no editable goal block")
+	}
+	if err := os.WriteFile(reviewPath, after, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	report, err := RunMarkdown(context.Background(), Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Operations) != 6 {
+		t.Fatalf("pending dry-run operations = %#v, want six writes", report.Operations)
+	}
+	repeated, err := RunMarkdown(context.Background(), Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: true})
+	if err != nil || !reflect.DeepEqual(repeated.Operations, report.Operations) {
+		t.Fatalf("dry-run operations are not deterministic: first=%#v repeated=%#v err=%v", report.Operations, repeated.Operations, err)
+	}
+	if err := os.WriteFile(reviewPath, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	noOp, err := RunMarkdown(context.Background(), Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noOp.Operations) != 0 {
+		t.Fatalf("no-op dry-run operations = %#v", noOp.Operations)
 	}
 }
 
@@ -223,6 +261,8 @@ func newMarkdownLockFixture(t *testing.T) (migrationServiceFixture, reviewv4.Acc
 		IndexGuard:        &publicationstate.IndexGuard{Relative: indexRelative, VaultRelative: filepath.ToSlash(filepath.Join(vaultReviewPath, ".session-reviewer/session-index.json")), ProjectSHA256: indexHash, VaultSHA256: indexHash, Digest: manifest.SessionIndexDigest, GenerationID: manifest.GenerationID},
 		BaseDesiredDigest: base.ContentHash, RequiresPointer: true,
 	}
+	pointerPreimage := ""
+	intent.PointerPreimage = &pointerPreimage
 	for relative, body := range files {
 		intent.Destinations = append(intent.Destinations,
 			publicationstate.Destination{Side: "project", Relative: relative, DesiredSHA256: markdownTestHash(body)},

@@ -88,7 +88,7 @@ func RecoverMarkdownLocked(ctx context.Context, opts Options, owner *publication
 			}
 			defer store.Close()
 			published, _, err := store.LoadPublished()
-			if err == nil && published == intent.GenerationID {
+			if err == nil && markdownPointerCrossed(intent, published) {
 				complete = true
 			}
 		}
@@ -107,6 +107,10 @@ func RecoverMarkdownLocked(ctx context.Context, opts Options, owner *publication
 		opts.Plan = presentation.RenderPlan{ProjectID: intent.ProjectID, GenerationID: intent.GenerationID, ProjectViewDigest: intent.ProjectViewDigest, Files: files}
 		return completeMarkdownAcceptance(intent, journal, opts, projectDir, vaultDir)
 	})
+}
+
+func markdownPointerCrossed(intent Intent, published string) bool {
+	return intent.RequiresPointer && intent.PointerPreimage != nil && *intent.PointerPreimage != intent.GenerationID && published == intent.GenerationID
 }
 
 func markdownPlanFromIntent(intent Intent, projectDir *pathguard.Directory) ([]presentation.FilePlan, error) {

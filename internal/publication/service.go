@@ -234,7 +234,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 					return rollback(ctx, intent)
 				}
 			}
-			if intent.Stage == StageBaseCommitted || (intent.RequiresPointer && intent.Stage == StageVerified && publishedErr == nil && publishedID == intent.GenerationID) {
+			if intent.Stage == StageBaseCommitted || (intent.Stage == StageVerified && publishedErr == nil && markdownPointerCrossed(intent, publishedID)) {
 				if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
 					return err
 				}
@@ -356,6 +356,16 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if opts.markdownIndex != nil {
 		intent.Version, intent.Kind = 2, KindMarkdown
 		intent.RequiresPointer = len(opts.Plan.Files) == 4
+		if intent.RequiresPointer {
+			pointerPreimage := ""
+			published, _, publishedErr := store.LoadPublished()
+			if publishedErr == nil {
+				pointerPreimage = published
+			} else if !errors.Is(publishedErr, memorystore.ErrNoPublishedGeneration) {
+				return Result{}, fmt.Errorf("capture published pointer preimage: %w", publishedErr)
+			}
+			intent.PointerPreimage = &pointerPreimage
+		}
 		if err := runPublishCheckpoint(opts, checkpointBeforeIndexGuard, "initial", ""); err != nil {
 			return Result{}, err
 		}

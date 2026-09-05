@@ -89,6 +89,7 @@ type Intent struct {
 	BaseHistoryPreimage string        `json:"base_history_preimage_sha256,omitempty"`
 	BaseDesiredDigest   string        `json:"base_desired_digest,omitempty"`
 	RequiresPointer     bool          `json:"requires_pointer,omitempty"`
+	PointerPreimage     *string       `json:"pointer_preimage_generation_id,omitempty"`
 }
 
 type AcceptedReceipt struct {
@@ -102,6 +103,7 @@ type AcceptedReceipt struct {
 	IndexGuard        *IndexGuard   `json:"index_guard,omitempty"`
 	BaseDigest        string        `json:"base_digest"`
 	RequiresPointer   bool          `json:"requires_pointer,omitempty"`
+	PointerPreimage   *string       `json:"pointer_preimage_generation_id,omitempty"`
 }
 
 var (
@@ -117,12 +119,14 @@ func MarkdownRevisionID(intent Intent) string {
 		IndexGuard                                                 *IndexGuard
 		BaseDesiredDigest                                          string
 		RequiresPointer                                            bool
+		PointerPreimage                                            *string `json:"PointerPreimage,omitempty"`
 	}
 	body, err := canonical(revision{
 		ProjectID: intent.ProjectID, GenerationID: intent.GenerationID,
 		ManifestDigest: intent.ManifestDigest, ProjectViewDigest: intent.ProjectViewDigest,
 		Destinations: intent.Destinations, IndexGuard: intent.IndexGuard,
 		BaseDesiredDigest: intent.BaseDesiredDigest, RequiresPointer: intent.RequiresPointer,
+		PointerPreimage: cloneString(intent.PointerPreimage),
 	})
 	if err != nil {
 		return ""
@@ -143,6 +147,7 @@ func ReceiptFromIntent(intent Intent) (AcceptedReceipt, error) {
 		ManifestDigest: intent.ManifestDigest, ProjectViewDigest: intent.ProjectViewDigest,
 		RevisionID: intent.RevisionID, Destinations: cloneDestinations(intent.Destinations),
 		IndexGuard: cloneGuard(intent.IndexGuard), BaseDigest: intent.BaseDesiredDigest, RequiresPointer: intent.RequiresPointer,
+		PointerPreimage: cloneString(intent.PointerPreimage),
 	}, nil
 }
 
@@ -264,7 +269,7 @@ func ValidateIntent(intent Intent, projectID string) error {
 		return errors.New("invalid publication intent identity")
 	}
 	if intent.Version == 1 {
-		if intent.Kind != "" || intent.RevisionID != "" || intent.Outcome != "" || intent.IndexGuard != nil || intent.BasePreimageDigest != "" || intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "" || intent.BaseDesiredDigest != "" || intent.RequiresPointer {
+		if intent.Kind != "" || intent.RevisionID != "" || intent.Outcome != "" || intent.IndexGuard != nil || intent.BasePreimageDigest != "" || intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "" || intent.BaseDesiredDigest != "" || intent.RequiresPointer || intent.PointerPreimage != nil {
 			return errors.New("legacy journal contains v2 fields")
 		}
 		if intent.Stage != StagePrepared && intent.Stage != StageProjectWritten && intent.Stage != StageVaultSynced && intent.Stage != StageVerified && intent.Stage != StageCommitted && intent.Stage != StageRollbackRequired {
@@ -274,6 +279,13 @@ func ValidateIntent(intent Intent, projectID string) error {
 	}
 	if intent.Kind != KindMarkdown || !digestPattern.MatchString(intent.RevisionID) || intent.RevisionID != MarkdownRevisionID(intent) || !bareHashPattern.MatchString(intent.BaseDesiredDigest) || (intent.BasePreimageDigest != "" && !bareHashPattern.MatchString(intent.BasePreimageDigest)) || intent.IndexGuard == nil {
 		return errors.New("invalid Markdown publication intent")
+	}
+	if intent.RequiresPointer {
+		if intent.PointerPreimage == nil || (*intent.PointerPreimage != "" && !idPattern.MatchString(*intent.PointerPreimage)) {
+			return errors.New("invalid Markdown pointer preimage")
+		}
+	} else if intent.PointerPreimage != nil {
+		return errors.New("unexpected Markdown pointer preimage")
 	}
 	if (intent.BasePreimageDigest == "" && (intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "")) ||
 		(intent.BasePreimageDigest != "" && (!bareHashPattern.MatchString(intent.BaseReviewPreimage) || !bareHashPattern.MatchString(intent.BaseHistoryPreimage))) {
@@ -304,7 +316,14 @@ func ValidateReceipt(receipt AcceptedReceipt, projectID string) error {
 	if err := validateDestinations(receipt.Destinations); err != nil {
 		return err
 	}
-	probe := Intent{ProjectID: receipt.ProjectID, GenerationID: receipt.GenerationID, ManifestDigest: receipt.ManifestDigest, ProjectViewDigest: receipt.ProjectViewDigest, Destinations: receipt.Destinations, IndexGuard: receipt.IndexGuard, BaseDesiredDigest: receipt.BaseDigest, RequiresPointer: receipt.RequiresPointer}
+	if receipt.RequiresPointer {
+		if receipt.PointerPreimage == nil || (*receipt.PointerPreimage != "" && !idPattern.MatchString(*receipt.PointerPreimage)) {
+			return errors.New("invalid accepted Markdown pointer preimage")
+		}
+	} else if receipt.PointerPreimage != nil {
+		return errors.New("unexpected accepted Markdown pointer preimage")
+	}
+	probe := Intent{ProjectID: receipt.ProjectID, GenerationID: receipt.GenerationID, ManifestDigest: receipt.ManifestDigest, ProjectViewDigest: receipt.ProjectViewDigest, Destinations: receipt.Destinations, IndexGuard: receipt.IndexGuard, BaseDesiredDigest: receipt.BaseDigest, RequiresPointer: receipt.RequiresPointer, PointerPreimage: cloneString(receipt.PointerPreimage)}
 	if MarkdownRevisionID(probe) != receipt.RevisionID {
 		return errors.New("accepted Markdown receipt digest mismatch")
 	}
@@ -408,6 +427,14 @@ func cloneDestinations(source []Destination) []Destination {
 	return append([]Destination(nil), source...)
 }
 func cloneGuard(source *IndexGuard) *IndexGuard {
+	if source == nil {
+		return nil
+	}
+	copy := *source
+	return &copy
+}
+
+func cloneString(source *string) *string {
 	if source == nil {
 		return nil
 	}

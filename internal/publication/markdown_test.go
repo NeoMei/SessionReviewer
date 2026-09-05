@@ -3,6 +3,8 @@ package publication
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -176,12 +178,141 @@ func TestMarkdownDryRunLeavesProjectVaultAndPrivateTreesUnchanged(t *testing.T) 
 		called = true
 		return nil
 	}
-	if _, err := syncproject.RunMarkdown(context.Background(), opts); err != nil {
+	report, err := syncproject.RunMarkdown(context.Background(), opts)
+	if err != nil {
 		t.Fatalf("dry-run: %v", err)
+	}
+	if len(report.Operations) != 6 {
+		t.Fatalf("dry-run operations = %#v, want six Project/Vault writes", report.Operations)
+	}
+	wantPaths := []struct {
+		target syncengine.Side
+		path   string
+		entity string
+		kind   syncengine.OperationKind
+		before []byte
+	}{
+		{syncengine.SideProject, "项目回顾.md", "project-overview", syncengine.OperationUpdateProject, updated},
+		{syncengine.SideVault, "项目回顾.md", "project-overview", syncengine.OperationUpdateVault, readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath))))},
+		{syncengine.SideProject, "项目历史.md", "project-history", syncengine.OperationUpdateProject, readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.HistoryRelativePath)))},
+		{syncengine.SideVault, "项目历史.md", "project-history", syncengine.OperationUpdateVault, readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.HistoryRelativePath))))},
+		{syncengine.SideProject, ".session-reviewer/ledger.json", "machine-ledger", syncengine.OperationUpdateProject, readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))},
+		{syncengine.SideVault, ".session-reviewer/ledger.json", "machine-ledger", syncengine.OperationUpdateVault, readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.MachineLedgerRelativePath))))},
+	}
+	for index, want := range wantPaths {
+		operation := report.Operations[index]
+		sum := sha256.Sum256(want.before)
+		if operation.Target != want.target || operation.RelativePath != want.path || operation.EntityID != want.entity || operation.Kind != want.kind || operation.BeforeHash != hex.EncodeToString(sum[:]) || len(operation.AfterHash) != 64 || operation.BeforeHash == operation.AfterHash {
+			t.Fatalf("dry-run operation[%d] = %#v, want target=%q path=%q and changed hashes", index, operation, want.target, want.path)
+		}
 	}
 	after := []string{snapshotMarkdownTree(t, env.projectRoot), snapshotMarkdownTree(t, env.vaultRoot), snapshotMarkdownTree(t, env.dataRoot)}
 	if called || !reflect.DeepEqual(before, after) {
 		t.Fatalf("dry-run mutated state or invoked callbacks: called=%t changed=%t", called, !reflect.DeepEqual(before, after))
+	}
+}
+
+func TestMarkdownSameGenerationFourFileRecoveryRequiresExactReceipt(t *testing.T) {
+	for _, point := range []publishCheckpoint{checkpointBeforePointerCommit, checkpointAfterPointerCommit} {
+		t.Run(string(point), func(t *testing.T) {
+			env := setupMarkdownPublication(t, "project-same-generation-"+strings.ReplaceAll(string(point), "_", "-"))
+			priorReceipt := loadAcceptedReceiptForTest(t, env)
+			priorBase := loadMarkdownBaseForTest(t, env)
+			plan := env.plan
+			for index := range plan.Files {
+				plan.Files[index].Expected = bytes.Clone(plan.Files[index].Desired)
+				plan.Files[index].ExpectedExists = true
+			}
+			failure := errors.New("simulated same-generation pointer crash")
+			opts := env.publishOptions()
+			opts.Plan = plan
+			opts.checkpoint = func(stage publishCheckpoint, _, _ string) error {
+				if stage == point {
+					panic(failure)
+				}
+				return nil
+			}
+			func() {
+				defer func() {
+					recovered, ok := recover().(error)
+					if !ok || !errors.Is(recovered, failure) {
+						t.Fatalf("publication panic = %v", recovered)
+					}
+				}()
+				_, _ = Publish(context.Background(), opts)
+			}()
+			owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := RecoverMarkdownLocked(context.Background(), env.publishOptions(), owner); err != nil {
+				_ = owner.Release()
+				t.Fatalf("RecoverMarkdownLocked: %v", err)
+			}
+			if err := owner.Release(); err != nil {
+				t.Fatal(err)
+			}
+			if got := loadAcceptedReceiptForTest(t, env); got.RevisionID != priorReceipt.RevisionID {
+				t.Fatalf("same-generation pointer equality replaced exact accepted receipt: %s -> %s", priorReceipt.RevisionID, got.RevisionID)
+			}
+			if got := loadMarkdownBaseForTest(t, env); got.ContentHash != priorBase.ContentHash {
+				t.Fatalf("same-generation pointer equality advanced Base: %s -> %s", priorBase.ContentHash, got.ContentHash)
+			}
+		})
+	}
+}
+
+func TestMarkdownNewGenerationBaseCommittedWithoutReceiptRemainsBlocked(t *testing.T) {
+	projectID := "project-new-generation-mixed"
+	dataRoot, _, _, mapping, manifest, legacy := setupPublishEnvWithIndex(t, projectID, true)
+	plan := validMarkdownPublicationPlanForTest(t, dataRoot, manifest, legacy)
+	failure := errors.New("simulated crash before first accepted receipt")
+	opts := Options{
+		ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan,
+		Mapping: mapping, DataRoot: dataRoot, Now: time.Now,
+		checkpoint: func(stage publishCheckpoint, _, _ string) error {
+			if stage == checkpointBeforeReceiptCommit {
+				panic(failure)
+			}
+			return nil
+		},
+	}
+	func() {
+		defer func() {
+			recovered, ok := recover().(error)
+			if !ok || !errors.Is(recovered, failure) {
+				t.Fatalf("publication panic = %v", recovered)
+			}
+		}()
+		_, _ = Publish(context.Background(), opts)
+	}()
+	owner, err := publicationlock.Acquire(dataRoot, projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverMarkdownLocked(context.Background(), Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}, owner); err != nil {
+		_ = owner.Release()
+		t.Fatalf("RecoverMarkdownLocked: %v", err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, _, loadErr := store.LoadPublished()
+	closeErr := store.Close()
+	if loadErr != nil || closeErr != nil || published != manifest.GenerationID {
+		t.Fatalf("published pointer changed without an authorized rollback: generation=%q load=%v close=%v", published, loadErr, closeErr)
+	}
+	state, err := publicationstate.OpenReadOnly(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, acceptedErr := state.Accepted()
+	if closeErr := state.Close(); acceptedErr == nil || closeErr != nil {
+		t.Fatalf("mixed pointer/rolled-back publication became readable: accepted=%v close=%v", acceptedErr, closeErr)
 	}
 }
 
@@ -606,6 +737,32 @@ func TestMarkdownIntentRejectsIncompleteBaseRollbackPayload(t *testing.T) {
 	intent.BaseHistoryPreimage = ""
 	if err := publicationstate.ValidateIntent(intent, intent.ProjectID); err == nil {
 		t.Fatal("accepted an intent that cannot restore its prior Base pair")
+	}
+}
+
+func TestMarkdownIntentAuthenticatesObservedPointerPreimage(t *testing.T) {
+	intent := markdownIntentForTest("project-markdown-pointer-wire", "a")
+	intent.RequiresPointer = true
+	intent.RevisionID = MarkdownRevisionID(intent)
+	if err := publicationstate.ValidateIntent(intent, intent.ProjectID); err == nil {
+		t.Fatal("four-file intent accepted an unknown pointer preimage")
+	}
+	observedAbsent := ""
+	intent.PointerPreimage = &observedAbsent
+	intent.RevisionID = MarkdownRevisionID(intent)
+	if err := publicationstate.ValidateIntent(intent, intent.ProjectID); err != nil {
+		t.Fatalf("four-file intent rejected an observed absent pointer: %v", err)
+	}
+	observedSameGeneration := intent.GenerationID
+	intent.PointerPreimage = &observedSameGeneration
+	if err := publicationstate.ValidateIntent(intent, intent.ProjectID); err == nil {
+		t.Fatal("pointer preimage changed without invalidating the revision digest")
+	}
+	intent = markdownIntentForTest("project-markdown-pointer-wire", "b")
+	intent.PointerPreimage = &observedAbsent
+	intent.RevisionID = MarkdownRevisionID(intent)
+	if err := publicationstate.ValidateIntent(intent, intent.ProjectID); err == nil {
+		t.Fatal("three-file intent accepted an inapplicable pointer preimage")
 	}
 }
 

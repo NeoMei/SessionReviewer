@@ -70,7 +70,10 @@ func RunMarkdown(ctx context.Context, options Options) (_ syncengine.Report, ret
 		return buildMarkdownPlan(pin, options, &report)
 	}
 	if options.DryRun {
-		_, _, err := build()
+		plan, _, err := build()
+		if err == nil {
+			report.Operations = markdownOperations(plan)
+		}
 		return report, err
 	}
 	if options.PublishMarkdown == nil {
@@ -110,6 +113,30 @@ func RunMarkdown(ctx context.Context, options Options) (_ syncengine.Report, ret
 		return report, err
 	}
 	return report, pin.verify(options)
+}
+
+func markdownOperations(plan MarkdownSyncPlan) []syncengine.Operation {
+	operations := make([]syncengine.Operation, 0, len(plan.Plan.Files)*2)
+	for _, file := range plan.Plan.Files {
+		relative := strings.TrimPrefix(file.Relative, "docs/session-review/")
+		entityID := "machine-ledger"
+		switch file.Relative {
+		case reviewv2.ReviewRelativePath:
+			entityID = "project-overview"
+		case reviewv2.HistoryRelativePath:
+			entityID = "project-history"
+		}
+		after := bareHash(file.Desired)
+		operations = append(operations, syncengine.Operation{
+			EntityID: entityID, Kind: syncengine.OperationUpdateProject, Target: syncengine.SideProject,
+			RelativePath: relative, BeforeHash: bareHash(file.Expected), AfterHash: after,
+		})
+		operations = append(operations, syncengine.Operation{
+			EntityID: entityID, Kind: syncengine.OperationUpdateVault, Target: syncengine.SideVault,
+			RelativePath: relative, BeforeHash: bareHash(plan.VaultExpected[file.Relative]), AfterHash: after,
+		})
+	}
+	return operations
 }
 
 func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Report) (MarkdownSyncPlan, syncengine.BaseRecord, error) {
