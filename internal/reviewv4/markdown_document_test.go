@@ -93,6 +93,50 @@ func TestMarkdownDocumentReplaceFieldsPreservesShellAndStructure(t *testing.T) {
 	}
 }
 
+func replacementPreflightDocument(t *testing.T) (MarkdownDocument, []byte) {
+	t.Helper()
+	raw := validMarkdownDocument("<!-- session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\n0123456789\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\n<!-- session-reviewer:v4-field entity=\"project-overview\" name=\"stage\" -->\nx\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"stage\" -->\n")
+	document, err := ParseMarkdownDocument("项目回顾.md", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return document, raw
+}
+
+func TestMarkdownDocumentReplacementSizePreflightIsOrderIndependent(t *testing.T) {
+	document, raw := replacementPreflightDocument(t)
+	goal := FieldKey{Entity: "project-overview", Name: "goal"}
+	stage := FieldKey{Entity: "project-overview", Name: "stage"}
+
+	shrinkingFinal := map[FieldKey]string{
+		stage: "12345",
+		goal:  "",
+	}
+	result, err := document.replaceFields(shrinkingFinal, len(raw)-5)
+	if err != nil {
+		t.Fatalf("aggregate-valid shrink/grow replacement rejected: %v", err)
+	}
+	if got, want := len(result), len(raw)-6; got != want {
+		t.Fatalf("result length=%d want=%d", got, want)
+	}
+	if fields, err := ParseMarkdownDocument("项目回顾.md", result); err != nil || fields.Fields()[stage] != "12345" || fields.Fields()[goal] != "" {
+		t.Fatalf("replacement fields were not preserved: err=%v fields=%v", err, fields.Fields())
+	}
+}
+
+func TestMarkdownDocumentReplacementSizePreflightRejectsAggregateOverflow(t *testing.T) {
+	document, raw := replacementPreflightDocument(t)
+	goal := FieldKey{Entity: "project-overview", Name: "goal"}
+	stage := FieldKey{Entity: "project-overview", Name: "stage"}
+	overflowingFinal := map[FieldKey]string{
+		goal:  strings.Repeat("g", 20),
+		stage: strings.Repeat("s", 20),
+	}
+	if _, err := document.replaceFields(overflowingFinal, len(raw)+1); MarkdownCodeOf(err) != MarkdownFormatInvalid {
+		t.Fatalf("aggregate-over-limit replacement err=%v", err)
+	}
+}
+
 func TestMarkdownDocumentRejectsGeneratedReplacement(t *testing.T) {
 	raw := validMarkdownDocument("<!-- session-reviewer:v4-generated entity=\"project-overview\" name=\"problem-tree\" -->\nold\n<!-- /session-reviewer:v4-generated entity=\"project-overview\" name=\"problem-tree\" -->\n")
 	document, err := ParseMarkdownDocument("项目回顾.md", raw)

@@ -62,6 +62,10 @@ func (d MarkdownDocument) Fields() map[FieldKey]string {
 }
 
 func (d MarkdownDocument) ReplaceFields(replacements map[FieldKey]string) ([]byte, error) {
+	return d.replaceFields(replacements, maxMarkdownDocumentBytes)
+}
+
+func (d MarkdownDocument) replaceFields(replacements map[FieldKey]string, maximumBytes int) ([]byte, error) {
 	byKey := make(map[FieldKey]MarkdownBlock, len(d.blocks))
 	for _, block := range d.blocks {
 		byKey[block.Key] = block
@@ -78,8 +82,23 @@ func (d MarkdownDocument) ReplaceFields(replacements map[FieldKey]string) ([]byt
 			return nil, markdownError(MarkdownFormatInvalid, "", key)
 		}
 	}
+	removedBytes, replacementBytes := 0, 0
+	for key, value := range replacements {
+		block := byKey[key]
+		oldLength := block.ValueEnd - block.ValueStart
+		removedBytes += oldLength
+		if replacementBytes > maximumBytes-len(value) {
+			return nil, markdownError(MarkdownFormatInvalid, "", key)
+		}
+		replacementBytes += len(value)
+	}
+	prospectiveBytes := len(d.raw) - removedBytes
+	if prospectiveBytes > maximumBytes-replacementBytes {
+		return nil, markdownError(MarkdownFormatInvalid, "", FieldKey{})
+	}
+	prospectiveBytes += replacementBytes
 	var out bytes.Buffer
-	out.Grow(len(d.raw))
+	out.Grow(prospectiveBytes)
 	cursor := 0
 	for _, block := range d.blocks {
 		value, changed := replacements[block.Key]
@@ -92,7 +111,7 @@ func (d MarkdownDocument) ReplaceFields(replacements map[FieldKey]string) ([]byt
 	}
 	out.Write(d.raw[cursor:])
 	candidate := out.Bytes()
-	if len(candidate) > maxMarkdownDocumentBytes {
+	if len(candidate) != prospectiveBytes {
 		return nil, markdownError(MarkdownFormatInvalid, "", FieldKey{})
 	}
 	reparsed, err := ScanMarkdownBlocks(candidate)
