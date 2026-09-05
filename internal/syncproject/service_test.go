@@ -194,6 +194,7 @@ func TestMigrationSessionIndexPreservesUnknownTimestamps(t *testing.T) {
 type migrationServiceFixture struct {
 	projectID string
 	project   string
+	vault     string
 	data      string
 }
 
@@ -315,7 +316,7 @@ func newMigrationServiceFixture(t *testing.T) migrationServiceFixture {
 	}}}); err != nil {
 		t.Fatal(err)
 	}
-	return migrationServiceFixture{projectID: "project-migration", project: projectRoot, data: dataRoot}
+	return migrationServiceFixture{projectID: "project-migration", project: projectRoot, vault: vaultRoot, data: dataRoot}
 }
 
 // Removing configured-mapping authentication, passing the global data root to

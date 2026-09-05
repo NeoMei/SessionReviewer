@@ -94,6 +94,7 @@ type Store struct {
 	memory             *pathguard.Directory
 	projectID          string
 	closed             bool
+	readOnly           bool
 	objectCheckpoint   func() error
 	manifestCheckpoint func() error
 }
@@ -101,6 +102,16 @@ type Store struct {
 // Open creates and pins the private project layout below an existing absolute
 // SessionReviewer data root. Project IDs are data identities, never paths.
 func Open(dataRoot, projectID string) (*Store, error) {
+	return openStore(dataRoot, projectID, true)
+}
+
+// OpenReadOnly pins and validates an existing private store without creating,
+// protecting, locking, or recovering any state.
+func OpenReadOnly(dataRoot, projectID string) (*Store, error) {
+	return openStore(dataRoot, projectID, false)
+}
+
+func openStore(dataRoot, projectID string, create bool) (*Store, error) {
 	if !filepath.IsAbs(dataRoot) || filepath.Clean(dataRoot) != dataRoot {
 		return nil, errors.New("SessionReviewer data root must be an absolute clean path")
 	}
@@ -117,8 +128,12 @@ func Open(dataRoot, projectID string) (*Store, error) {
 			_ = data.Close()
 		}
 	}()
-	if err := protectPinnedDirectory(data, privateDirectoryMode); err != nil {
-		return nil, fmt.Errorf("protect SessionReviewer data root: %w", err)
+	if create {
+		if err := protectPinnedDirectory(data, privateDirectoryMode); err != nil {
+			return nil, fmt.Errorf("protect SessionReviewer data root: %w", err)
+		}
+	} else if runtime.GOOS != "windows" && data.Info().Mode().Perm() != privateDirectoryMode {
+		return nil, errors.New("SessionReviewer data root is not private")
 	}
 
 	projectBase := filepath.ToSlash(filepath.Join("projects", projectID, "memory-v1"))
@@ -132,8 +147,15 @@ func Open(dataRoot, projectID string) (*Store, error) {
 		directories = append(directories, projectBase+"/"+child)
 	}
 	for _, relative := range directories {
-		if err := data.EnsureDirectory(relative, privateDirectoryMode); err != nil {
-			return nil, fmt.Errorf("create private store directory %q: %w", relative, err)
+		if create {
+			if err := data.EnsureDirectory(relative, privateDirectoryMode); err != nil {
+				return nil, fmt.Errorf("create private store directory %q: %w", relative, err)
+			}
+			continue
+		}
+		info, err := data.Root.Lstat(relative)
+		if err != nil || info == nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != privateDirectoryMode) {
+			return nil, fmt.Errorf("existing private store directory %q is missing or unsafe", relative)
 		}
 	}
 
@@ -152,9 +174,21 @@ func Open(dataRoot, projectID string) (*Store, error) {
 		return nil, errors.New("project memory root escaped SessionReviewer data root")
 	}
 
-	store := &Store{data: data, memory: memoryDirectory, projectID: projectID}
-	if err := store.withStoreLock(store.reconcilePreparedAdvanceUnlocked); err != nil {
-		return nil, fmt.Errorf("recover prepared generation: %w", err)
+	store := &Store{data: data, memory: memoryDirectory, projectID: projectID, readOnly: !create}
+	if create {
+		if err := store.withStoreLock(store.reconcilePreparedAdvanceUnlocked); err != nil {
+			return nil, fmt.Errorf("recover prepared generation: %w", err)
+		}
+	} else {
+		if body, found, err := memoryDirectory.ReadRegular(preparedAdvanceJournalLeaf, maxManifestBytes); err != nil {
+			return nil, fmt.Errorf("inspect prepared advance journal: %w", err)
+		} else if found {
+			if err := requirePrivateRegular(memoryDirectory.Root, preparedAdvanceJournalLeaf); err != nil {
+				return nil, err
+			}
+			_ = body
+			return nil, errors.New("private store has an unresolved prepared advance")
+		}
 	}
 	closeData = false
 	closeMemory = false
@@ -600,7 +634,7 @@ func (s *Store) CommitPublished(generationID string, proof memory.PublicationPro
 func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
 	var genID string
 	var manifest memory.GenerationManifest
-	err := s.withStoreLock(func() error {
+	load := func() error {
 		root, err := s.reopenMemory()
 		if err != nil {
 			return err
@@ -623,7 +657,19 @@ func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
 		}
 		manifest, err = s.loadGeneration(genID)
 		return err
-	})
+	}
+	var err error
+	if s != nil && s.readOnly {
+		s.mu.RLock()
+		if openErr := s.requireOpenLocked(); openErr != nil {
+			err = openErr
+		} else {
+			err = load()
+		}
+		s.mu.RUnlock()
+	} else {
+		err = s.withStoreLock(load)
+	}
 	return genID, manifest, err
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strconv"
 )
 
@@ -13,6 +14,25 @@ const (
 )
 
 func RenderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair) (MarkdownPair, error) {
+	return renderMarkdown(p, ledger, previous, false)
+}
+
+// RenderMarkdownDraft renders a pending human draft only after proving the
+// supplied presentation is exactly the result of parsing that draft against
+// the accepted ledger. It intentionally does not weaken RenderMarkdown's
+// accepted-byte hash requirement.
+func RenderMarkdownDraft(p Presentation, ledger MachineLedger, draft MarkdownPair) (MarkdownPair, error) {
+	parsed, err := ParseMarkdownDraft(draft, ledger)
+	if err != nil {
+		return MarkdownPair{}, err
+	}
+	if !reflect.DeepEqual(parsed.Presentation, p) {
+		return MarkdownPair{}, &MarkdownError{Code: MarkdownBaselineMissing}
+	}
+	return renderMarkdown(p, ledger, &draft, true)
+}
+
+func renderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair, validatedDraft bool) (MarkdownPair, error) {
 	if err := ValidatePresentation(p); err != nil {
 		return MarkdownPair{}, &MarkdownError{Code: MarkdownFormatInvalid, Cause: err}
 	}
@@ -37,11 +57,11 @@ func RenderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair
 	if err != nil {
 		return MarkdownPair{}, err
 	}
-	mergedReview, err := mergeMarkdownDocument(markdownReviewRelative, previous.Review, oldCanonical.Review, desired.Review, ledger.ReviewSHA256, base, p)
+	mergedReview, err := mergeMarkdownDocument(markdownReviewRelative, previous.Review, oldCanonical.Review, desired.Review, ledger.ReviewSHA256, base, p, validatedDraft)
 	if err != nil {
 		return MarkdownPair{}, err
 	}
-	mergedHistory, err := mergeMarkdownDocument(markdownHistoryRelative, previous.History, oldCanonical.History, desired.History, ledger.HistorySHA256, base, p)
+	mergedHistory, err := mergeMarkdownDocument(markdownHistoryRelative, previous.History, oldCanonical.History, desired.History, ledger.HistorySHA256, base, p, validatedDraft)
 	if err != nil {
 		return MarkdownPair{}, err
 	}
@@ -345,7 +365,7 @@ func markdownAnchorID(id string) string {
 	return "x" + hex.EncodeToString([]byte(id))
 }
 
-func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []byte, acceptedHash string, base, next Presentation) ([]byte, error) {
+func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []byte, acceptedHash string, base, next Presentation, validatedDraft bool) ([]byte, error) {
 	oldDocument, err := ParseMarkdownDocument(relative, previous)
 	if err != nil {
 		return nil, err
@@ -391,7 +411,7 @@ func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []by
 			return nil, &MarkdownError{Code: MarkdownGeneratedRegionModified, Relative: relative, Entity: block.Key.Entity, Field: block.Key.Name}
 		}
 	}
-	if sha256Hex(previous) != acceptedHash {
+	if !validatedDraft && sha256Hex(previous) != acceptedHash {
 		return nil, &MarkdownError{Code: MarkdownBaselineMissing, Relative: relative}
 	}
 	replacements := make(map[FieldKey]string, len(newExpected.blocks))

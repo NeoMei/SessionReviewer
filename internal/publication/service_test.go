@@ -46,6 +46,10 @@ func observationKeyDigest(t *testing.T, key memory.ObservationKey) string {
 }
 
 func setupPublishEnv(t *testing.T, projectID string) (string, string, string, config.ProjectMapping, memory.GenerationManifest, presentation.RenderPlan) {
+	return setupPublishEnvWithIndex(t, projectID, false)
+}
+
+func setupPublishEnvWithIndex(t *testing.T, projectID string, withSessionIndex bool) (string, string, string, config.ProjectMapping, memory.GenerationManifest, presentation.RenderPlan) {
 	t.Helper()
 	dataRoot := t.TempDir()
 	projectRoot := t.TempDir()
@@ -233,6 +237,30 @@ func setupPublishEnv(t *testing.T, projectID string) (string, string, string, co
 		ProbeStateDigest:  probe.Digest,
 		ProbeCheck:        memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: testEndedAt, StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}},
 		ProjectViewDigest: project.Digest,
+	}
+	if withSessionIndex {
+		one := uint64(1)
+		manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{
+			Provider: session.Provider, SessionID: session.SessionID, RecordCount: &one,
+			Seen: 1, Indexed: 1,
+		}}
+		generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+		if err != nil {
+			t.Fatalf("parse generation timestamp: %v", err)
+		}
+		index, err := sessionindex.Build(sessionindex.BuildInput{
+			ProjectView: project, Manifest: manifest,
+			SessionViews: map[sessionindex.SessionKey]*memory.SessionView{{Provider: session.Provider, SessionID: session.SessionID}: &session},
+			GeneratedAt:  generatedAt,
+		})
+		if err != nil {
+			t.Fatalf("build session index: %v", err)
+		}
+		digest, err := store.PutSessionIndex(index)
+		if err != nil {
+			t.Fatalf("store session index: %v", err)
+		}
+		manifest.SessionIndexDigest = digest
 	}
 	if err := memory.ValidateGenerationManifest(manifest); err != nil {
 		t.Fatalf("fixture manifest is invalid: %v", err)

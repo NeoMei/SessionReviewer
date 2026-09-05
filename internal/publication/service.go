@@ -31,12 +31,15 @@ import (
 
 // Options configures a full publication run across Project, Vault, and Store.
 type Options struct {
-	ProjectID          string
-	PreparedGeneration string
-	Plan               presentation.RenderPlan
-	Mapping            config.ProjectMapping
-	DataRoot           string
-	Now                func() time.Time
+	ProjectID             string
+	PreparedGeneration    string
+	Plan                  presentation.RenderPlan
+	Mapping               config.ProjectMapping
+	DataRoot              string
+	Now                   func() time.Time
+	markdownIndex         []byte
+	markdownIndexDigest   string
+	markdownVaultExpected map[string][]byte
 
 	checkpoint             func(publishCheckpoint, string, string) error
 	publicationLockTimeout time.Duration
@@ -46,8 +49,15 @@ type publishCheckpoint string
 
 const (
 	checkpointAfterDestination    publishCheckpoint = "after_destination"
+	checkpointBeforeVaultSync     publishCheckpoint = "before_vault_sync"
+	checkpointAfterVaultSync      publishCheckpoint = "after_vault_sync"
+	checkpointBeforeIndexGuard    publishCheckpoint = "before_index_guard"
+	checkpointAfterIndexGuard     publishCheckpoint = "after_index_guard"
+	checkpointAfterPublicValidate publishCheckpoint = "after_public_validation"
 	checkpointBeforePointerCommit publishCheckpoint = "before_pointer_commit"
 	checkpointAfterPointerCommit  publishCheckpoint = "after_pointer_commit"
+	checkpointBeforeReceiptCommit publishCheckpoint = "before_receipt_commit"
+	checkpointAfterReceiptCommit  publishCheckpoint = "after_receipt_commit"
 )
 
 // VerifiedFile captures one verified file on disk after publication.
@@ -148,6 +158,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if now == nil {
 		now = time.Now
 	}
+	opts.Now = now
 
 	j, err := OpenJournal(opts.DataRoot, opts.ProjectID)
 	if err != nil {
@@ -184,12 +195,21 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("authenticate publication projection: %w", err)
 	}
+	if projectionVersion == 4 && opts.markdownIndex == nil {
+		if index, markdown := markdownProjectionIndex(opts.Plan); markdown {
+			opts.markdownIndex = index
+			opts.markdownIndexDigest = manifest.SessionIndexDigest
+		}
+	}
 	if err := repairRetainedRollbackEvidence(j, opts, projectDir, vaultDir, now); err != nil {
 		return Result{}, fmt.Errorf("repair legacy rolled-back merge-base state: %w", err)
 	}
 
 	rollback := func(ctx context.Context, intent Intent) error {
 		return rollbackIntent(ctx, intent, j, projectDir, vaultDir, func() error {
+			if intent.Version == 2 && intent.Kind == KindMarkdown {
+				return repairMarkdownBaseAfterRollback(intent, j, opts)
+			}
 			return repairRolledBackBases(intent, j, opts, projectDir, vaultDir, now)
 		})
 	}
@@ -204,11 +224,29 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	recoveryHandler := RecoveryHandlerFunc(func(ctx context.Context, intent Intent, j *Journal) error {
 		recovered = true
 		publishedID, _, publishedErr := store.LoadPublished()
+		if intent.Version == 2 && intent.Kind == KindMarkdown {
+			if intent.Stage == StageBaseCommitted {
+				accepted, err := markdownReceiptCommitted(j, intent)
+				if err != nil {
+					return err
+				}
+				if !accepted {
+					return rollback(ctx, intent)
+				}
+			}
+			if intent.Stage == StageBaseCommitted || (intent.RequiresPointer && intent.Stage == StageVerified && publishedErr == nil && publishedID == intent.GenerationID) {
+				if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
+					return err
+				}
+				return completeMarkdownAcceptance(intent, j, opts, projectDir, vaultDir)
+			}
+			return rollback(ctx, intent)
+		}
 		if publishedErr == nil {
 			if publishedID != intent.GenerationID {
 				return fmt.Errorf("published generation %q does not match active publication intent %q", publishedID, intent.GenerationID)
 			}
-			if intent.Stage != StageVerified {
+			if intent.Stage != StageVerified && !(intent.Version == 2 && intent.Kind == KindMarkdown && intent.Stage == StageBaseCommitted) {
 				return errors.New("published generation has a publication journal that was not verified")
 			}
 			if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
@@ -227,7 +265,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 
 	// Check if already published
 	pubID, _, err := store.LoadPublished()
-	if err == nil && pubID == opts.PreparedGeneration {
+	if opts.markdownIndex == nil && err == nil && pubID == opts.PreparedGeneration {
 		projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
 		if err == nil {
 			return Result{GenerationID: pubID, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
@@ -277,6 +315,11 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return Result{}, fmt.Errorf("inspect vault file %q: %w", vaultRel, err)
 		}
+		if expected, ok := opts.markdownVaultExpected[file.Relative]; ok {
+			if !vaultFound || !bytes.Equal(vaultBody, expected) {
+				return Result{}, fmt.Errorf("%w: Vault Markdown preimage changed", ErrPublicationConflict)
+			}
+		}
 		vSHA := ""
 		if vaultFound {
 			vSHA = sha256Hex(vaultBody)
@@ -310,6 +353,53 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		CreatedAt:         now().UTC(),
 		Destinations:      destinations,
 	}
+	if opts.markdownIndex != nil {
+		intent.Version, intent.Kind = 2, KindMarkdown
+		intent.RequiresPointer = len(opts.Plan.Files) == 4
+		if err := runPublishCheckpoint(opts, checkpointBeforeIndexGuard, "initial", ""); err != nil {
+			return Result{}, err
+		}
+		intent.IndexGuard, err = markdownIndexGuard(opts, projectDir, vaultDir, intent.RequiresPointer)
+		if err != nil {
+			return Result{}, err
+		}
+		if err := runPublishCheckpoint(opts, checkpointAfterIndexGuard, "initial", ""); err != nil {
+			return Result{}, err
+		}
+		baseStore, closeBase, err := markdownBaseStore(opts)
+		if err != nil {
+			return Result{}, err
+		}
+		base, found, loadErr := baseStore.Load(syncengine.MarkdownBaseEntityID)
+		closeErr := closeBase()
+		if loadErr != nil || closeErr != nil {
+			return Result{}, errors.Join(loadErr, closeErr)
+		}
+		if found {
+			intent.BasePreimageDigest = base.ContentHash
+			baseReview, baseHistory, err := syncengine.MarkdownBaseDocuments(base)
+			if err != nil {
+				return Result{}, err
+			}
+			intent.BaseReviewPreimage, intent.BaseHistoryPreimage = sha256Hex(baseReview), sha256Hex(baseHistory)
+			if err := j.PutPreimage(intent.BaseReviewPreimage, baseReview); err != nil {
+				return Result{}, err
+			}
+			if err := j.PutPreimage(intent.BaseHistoryPreimage, baseHistory); err != nil {
+				return Result{}, err
+			}
+		}
+		reviewDesired, historyDesired, err := markdownDesiredPair(opts.Plan)
+		if err != nil {
+			return Result{}, err
+		}
+		desiredBase, err := syncengine.NewMarkdownBaseRecord(reviewDesired, historyDesired, now().UTC())
+		if err != nil {
+			return Result{}, err
+		}
+		intent.BaseDesiredDigest = desiredBase.ContentHash
+		intent.RevisionID = MarkdownRevisionID(intent)
+	}
 	if err := j.Create(intent); err != nil {
 		return Result{}, fmt.Errorf("create journal intent: %w", err)
 	}
@@ -341,6 +431,11 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 			return Result{}, err
 		}
 	} else {
+		if intent.Version == 2 && intent.Kind == KindMarkdown {
+			if err := runPublishCheckpoint(opts, checkpointBeforeVaultSync, "", ""); err != nil {
+				return Result{}, rollbackFailure(ctx, intent, err)
+			}
+		}
 		for _, file := range opts.Plan.Files {
 			vaultRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, file.Relative)
 			if err := verifyDestinationPreimage(intent.Destinations, vaultDir, "vault", vaultRelative); err != nil {
@@ -359,6 +454,11 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 				return Result{}, rollbackFailure(ctx, intent, err)
 			}
 		}
+		if intent.Version == 2 && intent.Kind == KindMarkdown {
+			if err := runPublishCheckpoint(opts, checkpointAfterVaultSync, "", ""); err != nil {
+				return Result{}, rollbackFailure(ctx, intent, err)
+			}
+		}
 	}
 	if err := j.Advance(StageProjectWritten, StageVaultSynced); err != nil {
 		return Result{}, rollbackFailure(ctx, intent, err)
@@ -368,6 +468,11 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
 	if err != nil {
 		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("verify published files: %w", err))
+	}
+	if intent.Version == 2 && intent.Kind == KindMarkdown {
+		if err := runPublishCheckpoint(opts, checkpointAfterPublicValidate, "", ""); err != nil {
+			return Result{}, rollbackFailure(ctx, intent, err)
+		}
 	}
 
 	if err := j.Advance(StageVaultSynced, StageVerified); err != nil {
@@ -388,6 +493,9 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 			sessionIndexSHA = f.SHA256
 		}
 	}
+	if opts.markdownIndex != nil {
+		sessionIndexSHA = sha256Hex(opts.markdownIndex)
+	}
 
 	proof := PublicationProof{
 		ProjectID:         opts.ProjectID,
@@ -406,11 +514,26 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if err := runPublishCheckpoint(opts, checkpointBeforePointerCommit, "", ""); err != nil {
 		return Result{}, rollbackFailure(ctx, intent, err)
 	}
-	if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
-		return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
+	if intent.Version != 2 || intent.RequiresPointer {
+		if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
+			return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
+		}
 	}
 	if err := runPublishCheckpoint(opts, checkpointAfterPointerCommit, "", ""); err != nil {
 		return Result{}, err
+	}
+	if intent.Version == 2 && intent.Kind == KindMarkdown {
+		if err := completeMarkdownAcceptance(intent, j, opts, projectDir, vaultDir); err != nil {
+			accepted, receiptErr := markdownReceiptCommitted(j, intent)
+			if receiptErr != nil {
+				return Result{}, errors.Join(err, receiptErr)
+			}
+			if accepted {
+				return Result{}, err
+			}
+			return Result{}, rollbackFailure(ctx, intent, err)
+		}
+		return Result{GenerationID: opts.PreparedGeneration, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
 	}
 	if err := j.Advance(StageVerified, StageCommitted); err != nil {
 		return Result{}, err
@@ -559,6 +682,13 @@ func planProjectionVersion(plan presentation.RenderPlan) (int, error) {
 
 func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, manifest memory.GenerationManifest) (int, error) {
 	version, err := planProjectionVersion(opts.Plan)
+	if opts.markdownIndex != nil {
+		version = 4
+		err = nil
+		if len(opts.Plan.Files) != 3 {
+			return 0, errors.New("Markdown publication plan must contain exactly three files")
+		}
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -582,7 +712,11 @@ func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, ma
 		generationID = accepted.State.Machine.GenerationID
 		projectViewDigest = "sha256:" + accepted.State.Machine.ProjectViewDigest
 	} else {
-		accepted, err := reviewv4.LoadProjection(files[reviewv2.ReviewRelativePath], files[reviewv2.HistoryRelativePath], files[reviewv2.MachineLedgerRelativePath], files[sessionIndexRelativePath])
+		index := files[sessionIndexRelativePath]
+		if opts.markdownIndex != nil {
+			index = opts.markdownIndex
+		}
+		accepted, err := reviewv4.LoadProjection(files[reviewv2.ReviewRelativePath], files[reviewv2.HistoryRelativePath], files[reviewv2.MachineLedgerRelativePath], index)
 		if err != nil {
 			return 0, fmt.Errorf("load v4 projection: %w", err)
 		}
@@ -674,6 +808,12 @@ func verifyPublishedFiles(plan presentation.RenderPlan, mapping config.ProjectMa
 }
 
 func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, vaultDir *pathguard.Directory, afterRestore func() error) error {
+	if intent.Version == 2 && intent.Kind == KindMarkdown && afterRestore != nil {
+		if err := afterRestore(); err != nil {
+			return err
+		}
+		afterRestore = nil
+	}
 	for _, dest := range intent.Destinations {
 		var dir *pathguard.Directory
 		if dest.Side == "project" {
@@ -753,6 +893,9 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 			return err
 		}
 	}
+	if current.Version == 2 && current.Kind == KindMarkdown {
+		return j.CommitMarkdownRolledBack()
+	}
 	return j.Advance(StageRollbackRequired, StageCommitted)
 }
 
@@ -762,6 +905,9 @@ func rollbackIntent(ctx context.Context, intent Intent, j *Journal, projectDir, 
 // Vault bytes must both equal the immutable journal preimage, while the current
 // Base must equal that same journal intent's desired bytes.
 func repairRolledBackBases(intent Intent, j *Journal, opts Options, projectDir, vaultDir *pathguard.Directory, now func() time.Time) error {
+	if intent.Version == 2 && intent.Kind == KindMarkdown {
+		return nil
+	}
 	// Four-file v4 publication never uses the legacy sync merge-base store.
 	// Its generic Intent preimages are the complete recovery authority.
 	for _, destination := range intent.Destinations {

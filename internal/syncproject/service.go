@@ -13,6 +13,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
@@ -35,14 +36,17 @@ type Options struct {
 	// copy since the last successful sync; interactive sync keeps failing
 	// closed so an out-of-band vault edit still requires an explicit repair.
 	RepairMachineLedger bool
+	PublishMarkdown     MarkdownPublisher
+	RecoverMarkdown     MarkdownRecoverer
 	// AllowV3Publication is reserved for the existing publication service,
 	// which must finish the byte-compatible v3 three-file transaction. Ordinary
 	// sync callers must use the explicit v3-to-v4 migration flow.
 	AllowV3Publication     bool
 	TrustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 
-	pinCheckpoint func(pinCheckpointStage) error
-	beforeEngine  func() error
+	pinCheckpoint       func(pinCheckpointStage) error
+	beforeEngine        func() error
+	acquireMarkdownLock func(string, string, time.Duration) (*publicationlock.Owner, error)
 }
 
 // Run authenticates one configured Project mapping, constructs the existing

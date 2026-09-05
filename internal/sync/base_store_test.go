@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -94,6 +95,48 @@ func TestBaseStoreRejectsInvalidSelfCertification(t *testing.T) {
 				t.Fatalf("record accepted: %+v", record)
 			}
 		})
+	}
+}
+
+func TestBaseStoreV2AtomicallyCarriesLargeAuthenticatedMarkdownPair(t *testing.T) {
+	data := t.TempDir()
+	root, err := os.OpenRoot(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	store := BaseStore{Root: root}
+	review := append([]byte("---\ndocument_format: review-markdown-v1\n---\n"), bytes.Repeat([]byte("x"), (4<<20)+1)...)
+	history := []byte("---\ndocument_format: review-markdown-v1\n---\nhistory\n")
+	record, err := NewMarkdownBaseRecord(review, history, fixedTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit("", record); err != nil {
+		t.Fatalf("commit v2 pair: %v", err)
+	}
+	got, found, err := store.Load(MarkdownBaseEntityID)
+	if err != nil || !found || !reflect.DeepEqual(got, record) {
+		t.Fatalf("got=%+v found=%v err=%v", got, found, err)
+	}
+
+	legacy := validBaseRecord("legacy-large", "legacy.md", string(review))
+	if err := store.Commit("", legacy); err == nil {
+		t.Fatal("legacy v1 record escaped the 4 MiB content ceiling using marker-like text")
+	}
+}
+
+func TestBaseStoreRemoveUsesCAS(t *testing.T) {
+	_, root, store, first := baseStoreWithRecord(t)
+	defer root.Close()
+	if err := store.Remove("stale", first.EntityID); !errors.Is(err, ErrStaleBase) {
+		t.Fatalf("stale remove err=%v", err)
+	}
+	if err := store.Remove(first.ContentHash, first.EntityID); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.Load(first.EntityID); err != nil || found {
+		t.Fatalf("removed base found=%v err=%v", found, err)
 	}
 }
 

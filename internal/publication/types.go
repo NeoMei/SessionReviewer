@@ -4,41 +4,45 @@ import (
 	"context"
 	"errors"
 	"github.com/neomei/SessionReviewer/internal/memory"
-	"time"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 )
 
 // Stage indicates the current durable state in a publication lifecycle.
-type Stage string
+type Stage = publicationstate.Stage
 
 const (
-	StagePrepared         Stage = "prepared"
-	StageProjectWritten   Stage = "project_written"
-	StageVaultSynced      Stage = "vault_synced"
-	StageVerified         Stage = "verified"
-	StageCommitted        Stage = "committed"
-	StageRollbackRequired Stage = "rollback_required"
+	StagePrepared         = publicationstate.StagePrepared
+	StageProjectWritten   = publicationstate.StageProjectWritten
+	StageVaultSynced      = publicationstate.StageVaultSynced
+	StageVerified         = publicationstate.StageVerified
+	StageBaseCommitted    = publicationstate.StageBaseCommitted
+	StageCommitted        = publicationstate.StageCommitted
+	StageRollbackRequired = publicationstate.StageRollbackRequired
+)
+
+type Kind = publicationstate.Kind
+
+const (
+	KindGeneration = publicationstate.KindGeneration
+	KindMarkdown   = publicationstate.KindMarkdown
+)
+
+type Outcome = publicationstate.Outcome
+
+const (
+	OutcomeAccepted   = publicationstate.OutcomeAccepted
+	OutcomeRolledBack = publicationstate.OutcomeRolledBack
 )
 
 // Destination captures one projected file's preimage and expected desired state.
-type Destination struct {
-	Side           string `json:"side"`
-	Relative       string `json:"relative"`
-	PreimageSHA256 string `json:"preimage_sha256,omitempty"`
-	DesiredSHA256  string `json:"desired_sha256"`
-	PreimageExists bool   `json:"preimage_exists"`
-}
+type Destination = publicationstate.Destination
+type IndexGuard = publicationstate.IndexGuard
+type AcceptedMarkdownReceipt = publicationstate.AcceptedReceipt
 
 // Intent captures the full durable intent of a cross-root publication.
-type Intent struct {
-	Version           int           `json:"version"`
-	ProjectID         string        `json:"project_id"`
-	GenerationID      string        `json:"generation_id"`
-	ManifestDigest    string        `json:"manifest_digest"`
-	ProjectViewDigest string        `json:"project_view_digest"`
-	Stage             Stage         `json:"stage"`
-	CreatedAt         time.Time     `json:"created_at"`
-	Destinations      []Destination `json:"destinations"`
-}
+type Intent = publicationstate.Intent
+
+func MarkdownRevisionID(intent Intent) string { return publicationstate.MarkdownRevisionID(intent) }
 
 // PublicationProof aliases memory.PublicationProof.
 type PublicationProof = memory.PublicationProof

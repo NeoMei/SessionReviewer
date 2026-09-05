@@ -26,6 +26,42 @@ import (
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
+func TestOpenReadOnlyDoesNotCreateOrRecoverPrivateState(t *testing.T) {
+	empty := t.TempDir()
+	if store, err := OpenReadOnly(empty, "project-read-only"); err == nil || store != nil {
+		if store != nil {
+			_ = store.Close()
+		}
+		t.Fatal("read-only open created a missing project store")
+	}
+	entries, err := os.ReadDir(empty)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("read-only open mutated empty data root: entries=%v err=%v", entries, err)
+	}
+
+	data := t.TempDir()
+	store, err := Open(data, "project-read-only")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(data, "projects", "project-read-only", "memory-v1", preparedAdvanceJournalLeaf)
+	if err := os.WriteFile(journal, []byte("unresolved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if opened, err := OpenReadOnly(data, "project-read-only"); err == nil || opened != nil {
+		if opened != nil {
+			_ = opened.Close()
+		}
+		t.Fatal("read-only open recovered unresolved prepared advance")
+	}
+	if body, err := os.ReadFile(journal); err != nil || string(body) != "unresolved" {
+		t.Fatalf("prepared advance was mutated: %q err=%v", body, err)
+	}
+}
+
 func TestPrepareGenerationRejectsSessionIndexWithMissingDependency(t *testing.T) {
 	dataRoot := t.TempDir()
 	store, err := Open(dataRoot, testProjectID)

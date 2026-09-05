@@ -26,11 +26,15 @@ import (
 var ErrStaleBase = errors.New("stale merge base")
 
 const (
-	baseDirectoryName = "merge-bases"
-	baseLockName      = ".base-store.lock"
-	maxBaseBytes      = 8 << 20
-	maxBaseContent    = 4 << 20
+	baseDirectoryName        = "merge-bases"
+	baseLockName             = ".base-store.lock"
+	maxBaseBytes             = 8 << 20
+	maxBaseContent           = 4 << 20
+	maxMarkdownBaseBytes     = 192 << 20
+	maxMarkdownDocumentBytes = 64 << 20
 )
+
+const MarkdownBaseEntityID = "v4-markdown-documents"
 
 var (
 	stableBaseID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
@@ -40,14 +44,50 @@ var (
 )
 
 type BaseRecord struct {
-	Version      int       `json:"version"`
-	EntityID     string    `json:"entity_id"`
-	RelativePath string    `json:"relative_path"`
-	ContentHash  string    `json:"content_hash"`
-	ProjectHash  string    `json:"project_hash"`
-	VaultHash    string    `json:"vault_hash"`
-	Content      []byte    `json:"content"`
-	SyncedAt     time.Time `json:"synced_at"`
+	Version      int            `json:"version"`
+	EntityID     string         `json:"entity_id"`
+	RelativePath string         `json:"relative_path"`
+	ContentHash  string         `json:"content_hash"`
+	ProjectHash  string         `json:"project_hash"`
+	VaultHash    string         `json:"vault_hash"`
+	Content      []byte         `json:"content"`
+	SyncedAt     time.Time      `json:"synced_at"`
+	Format       string         `json:"format,omitempty"`
+	Documents    []BaseDocument `json:"documents,omitempty"`
+}
+
+type BaseDocument struct {
+	RelativePath string `json:"relative_path"`
+	ContentHash  string `json:"content_hash"`
+	Content      []byte `json:"content"`
+}
+
+func NewMarkdownBaseRecord(review, history []byte, syncedAt time.Time) (BaseRecord, error) {
+	documents := []BaseDocument{
+		{RelativePath: "项目回顾.md", Content: bytes.Clone(review)},
+		{RelativePath: "项目历史.md", Content: bytes.Clone(history)},
+	}
+	for index := range documents {
+		digest := sha256.Sum256(documents[index].Content)
+		documents[index].ContentHash = hex.EncodeToString(digest[:])
+	}
+	digest := markdownBaseDigest(documents)
+	record := BaseRecord{
+		Version: 2, EntityID: MarkdownBaseEntityID, RelativePath: "项目回顾.md",
+		ContentHash: digest, ProjectHash: digest, VaultHash: digest,
+		SyncedAt: syncedAt, Format: "review-markdown-v1", Documents: documents,
+	}
+	if err := validateBaseRecord(record, record.EntityID); err != nil {
+		return BaseRecord{}, err
+	}
+	return record, nil
+}
+
+func MarkdownBaseDocuments(record BaseRecord) (review, history []byte, err error) {
+	if err := validateBaseRecord(record, MarkdownBaseEntityID); err != nil {
+		return nil, nil, err
+	}
+	return bytes.Clone(record.Documents[0].Content), bytes.Clone(record.Documents[1].Content), nil
 }
 
 type BaseStore struct {
@@ -159,6 +199,45 @@ func (s BaseStore) Commit(expectedContentHash string, next BaseRecord) (retErr e
 	return s.commitWithFinalVerifyHook(expectedContentHash, next, nil)
 }
 
+func (s BaseStore) Remove(expectedContentHash, entityID string) (retErr error) {
+	if !stableBaseID.MatchString(entityID) || expectedContentHash == "" {
+		return ErrStaleBase
+	}
+	bases, found, err := s.openBaseDirectory(false)
+	if err != nil || !found {
+		return errors.Join(ErrStaleBase, err)
+	}
+	defer func() { retErr = errors.Join(retErr, bases.Close()) }()
+	lock, err := acquireBaseStoreLock(bases)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
+	record, found, err := loadBasePair(bases, entityID)
+	if err != nil || !found || record.ContentHash != expectedContentHash {
+		return errors.Join(ErrStaleBase, err)
+	}
+	name := baseRecordName(entityID)
+	info, found, err := regularBaseEntry(bases, name)
+	if err != nil || !found {
+		return errors.Join(ErrStaleBase, err)
+	}
+	file, err := bases.Open(name)
+	if err != nil {
+		return err
+	}
+	body, readErr := readBoundedBaseSnapshot(file)
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || info.Size() != int64(len(body)) {
+		return errors.Join(ErrStaleBase, readErr, closeErr)
+	}
+	digest := sha256.Sum256(body)
+	if err := atomicfile.RemoveRootFileIfHashMatches(bases, name, hex.EncodeToString(digest[:])); err != nil {
+		return err
+	}
+	return verifyBaseDirectoryIdentity(s.Root, bases)
+}
+
 func (s BaseStore) commitWithFinalVerifyHook(expectedContentHash string, next BaseRecord, beforeFinalVerify func() error) (retErr error) {
 	if err := validateBaseRecord(next, next.EntityID); err != nil {
 		return err
@@ -207,7 +286,7 @@ func (s BaseStore) commitWithFinalVerifyHook(expectedContentHash string, next Ba
 		return errors.New("cannot encode merge-base state")
 	}
 	encoded = append(encoded, '\n')
-	if len(encoded) > maxBaseBytes {
+	if err := validateBaseRecordWire(next, len(encoded)); err != nil {
 		return errors.New("merge-base state exceeds size limit")
 	}
 	if err := atomicfile.WriteRoot(bases, primaryName, encoded, 0o600); err != nil {
@@ -463,7 +542,7 @@ func readBaseRecord(root *os.Root, name, entityID string, before os.FileInfo) (B
 }
 
 func readBaseRecordWithHook(root *os.Root, name, entityID string, before os.FileInfo, afterRead func() error) (BaseRecord, error) {
-	if before.Size() > maxBaseBytes {
+	if before.Size() > maxMarkdownBaseBytes {
 		return BaseRecord{}, errors.New("merge-base state exceeds size limit")
 	}
 	file, err := root.Open(name)
@@ -510,6 +589,9 @@ func readBaseRecordWithHook(root *os.Root, name, entityID string, before os.File
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return BaseRecord{}, errors.New("merge-base state is corrupt")
 	}
+	if err := validateBaseRecordWire(record, len(encoded)); err != nil {
+		return BaseRecord{}, err
+	}
 	if err := validateBaseRecord(record, entityID); err != nil {
 		return BaseRecord{}, err
 	}
@@ -517,8 +599,8 @@ func readBaseRecordWithHook(root *os.Root, name, entityID string, before os.File
 }
 
 func readBoundedBaseSnapshot(file *os.File) ([]byte, error) {
-	encoded, err := io.ReadAll(io.LimitReader(file, maxBaseBytes+1))
-	if err != nil || len(encoded) > maxBaseBytes || !utf8.Valid(encoded) {
+	encoded, err := io.ReadAll(io.LimitReader(file, maxMarkdownBaseBytes+1))
+	if err != nil || len(encoded) > maxMarkdownBaseBytes || !utf8.Valid(encoded) {
 		return nil, errors.New("merge-base state is corrupt")
 	}
 	return encoded, nil
@@ -566,7 +648,7 @@ func verifyBaseDirectoryIdentityWithHook(parent, bases *os.Root, beforeFinalVeri
 }
 
 func validateBaseRecord(record BaseRecord, expectedEntityID string) error {
-	if record.Version != 1 {
+	if record.Version != 1 && record.Version != 2 {
 		return errors.New("invalid merge-base record version")
 	}
 	if !stableBaseID.MatchString(record.EntityID) || (expectedEntityID != "" && record.EntityID != expectedEntityID) {
@@ -578,11 +660,29 @@ func validateBaseRecord(record BaseRecord, expectedEntityID string) error {
 	if _, err := platform.PathKey("darwin", platform.CaseSensitive, record.RelativePath); err != nil {
 		return errors.New("invalid merge-base relative path")
 	}
-	if len(record.Content) > maxBaseContent || !utf8.Valid(record.Content) || bytes.IndexByte(record.Content, 0) >= 0 {
-		return errors.New("invalid merge-base content")
+	wantHash := ""
+	if record.Version == 1 {
+		if record.Format != "" || record.Documents != nil || len(record.Content) > maxBaseContent || !utf8.Valid(record.Content) || bytes.IndexByte(record.Content, 0) >= 0 {
+			return errors.New("invalid merge-base content")
+		}
+		digest := sha256.Sum256(record.Content)
+		wantHash = hex.EncodeToString(digest[:])
+	} else {
+		if record.EntityID != MarkdownBaseEntityID || record.RelativePath != "项目回顾.md" || record.Format != "review-markdown-v1" || len(record.Content) != 0 || len(record.Documents) != 2 {
+			return errors.New("invalid Markdown merge-base record")
+		}
+		wantPaths := []string{"项目回顾.md", "项目历史.md"}
+		for index, document := range record.Documents {
+			if document.RelativePath != wantPaths[index] || len(document.Content) > maxMarkdownDocumentBytes || !utf8.Valid(document.Content) || bytes.IndexByte(document.Content, 0) >= 0 {
+				return errors.New("invalid Markdown merge-base document")
+			}
+			digest := sha256.Sum256(document.Content)
+			if document.ContentHash != hex.EncodeToString(digest[:]) {
+				return errors.New("Markdown merge-base document hash mismatch")
+			}
+		}
+		wantHash = markdownBaseDigest(record.Documents)
 	}
-	digest := sha256.Sum256(record.Content)
-	wantHash := hex.EncodeToString(digest[:])
 	if !lowerSHA256.MatchString(record.ContentHash) || record.ContentHash != wantHash {
 		return errors.New("merge-base content hash mismatch")
 	}
@@ -596,6 +696,28 @@ func validateBaseRecord(record BaseRecord, expectedEntityID string) error {
 		return errors.New("merge-base synchronization time is required")
 	}
 	return nil
+}
+
+func validateBaseRecordWire(record BaseRecord, size int) error {
+	limit := maxBaseBytes
+	if record.Version == 2 {
+		limit = maxMarkdownBaseBytes
+	}
+	if size < 0 || size > limit {
+		return errors.New("merge-base state exceeds size limit")
+	}
+	return nil
+}
+
+func markdownBaseDigest(documents []BaseDocument) string {
+	hash := sha256.New()
+	for _, document := range documents {
+		hash.Write([]byte(document.RelativePath))
+		hash.Write([]byte{0})
+		hash.Write([]byte(document.ContentHash))
+		hash.Write([]byte{0})
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func privateStateMode(info os.FileInfo, want fs.FileMode) bool {

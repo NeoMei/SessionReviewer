@@ -20,6 +20,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 )
 
 const (
@@ -27,7 +28,7 @@ const (
 	journalFileMode      fs.FileMode = 0o600
 	maxIntentBytes                   = 4 << 20
 	maxPreimageBytes                 = 64 << 20
-	intentFileLeaf                   = "intent-v1.json"
+	intentFileLeaf                   = publicationstate.IntentLeaf
 	journalLockTimeout               = 5 * time.Second
 )
 
@@ -219,6 +220,72 @@ func (j *Journal) Advance(expected, next Stage) error {
 	return atomicfile.WriteRootFileChecked(j.dir.Root, intentFileLeaf, body, journalFileMode, nil)
 }
 
+// CommitMarkdownAccepted atomically replaces the accepted-revision receipt,
+// which is the human-revision commit point, then marks the operational intent
+// terminal. Recovery may finish the second step after a crash.
+func (j *Journal) CommitMarkdownAccepted() error {
+	return j.commitMarkdownAccepted(nil)
+}
+
+func (j *Journal) commitMarkdownAccepted(afterReceipt func() error) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("journal is closed")
+	}
+	intent, err := j.loadIntentUnlocked()
+	if err != nil {
+		return err
+	}
+	if intent.Stage != StageBaseCommitted || intent.Outcome != "" {
+		return ErrStageMismatch
+	}
+	if _, err := publicationstate.WriteAccepted(j.dir.Root, intent); err != nil {
+		return err
+	}
+	if afterReceipt != nil {
+		if err := afterReceipt(); err != nil {
+			return err
+		}
+	}
+	intent.Stage, intent.Outcome = StageCommitted, OutcomeAccepted
+	return j.writeIntentUnlocked(intent)
+}
+
+func (j *Journal) CommitMarkdownRolledBack() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return errors.New("journal is closed")
+	}
+	intent, err := j.loadIntentUnlocked()
+	if err != nil {
+		return err
+	}
+	if intent.Version != 2 || intent.Kind != KindMarkdown || intent.Stage != StageRollbackRequired || intent.Outcome != "" {
+		return ErrStageMismatch
+	}
+	intent.Stage, intent.Outcome = StageCommitted, OutcomeRolledBack
+	return j.writeIntentUnlocked(intent)
+}
+
+func (j *Journal) LoadAcceptedMarkdown() (AcceptedMarkdownReceipt, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.closed {
+		return AcceptedMarkdownReceipt{}, errors.New("journal is closed")
+	}
+	return publicationstate.ReadAccepted(j.dir.Root, j.projectID)
+}
+
+func (j *Journal) writeIntentUnlocked(intent Intent) error {
+	body, err := encodeCanonicalJSON(intent)
+	if err != nil {
+		return err
+	}
+	return atomicfile.WriteRootFileChecked(j.dir.Root, intentFileLeaf, body, journalFileMode, nil)
+}
+
 // PutPreimage stores an immutable preimage payload keyed by its sha256 hex string.
 func (j *Journal) PutPreimage(hash string, data []byte) error {
 	j.mu.Lock()
@@ -315,6 +382,8 @@ func validTransition(from, to Stage) bool {
 	case StageVaultSynced:
 		return to == StageVerified || to == StageRollbackRequired
 	case StageVerified:
+		return to == StageCommitted || to == StageBaseCommitted || to == StageRollbackRequired
+	case StageBaseCommitted:
 		return to == StageCommitted || to == StageRollbackRequired
 	case StageRollbackRequired:
 		return to == StageCommitted // After rollback is completed
@@ -324,48 +393,7 @@ func validTransition(from, to Stage) bool {
 }
 
 func validateIntent(intent Intent, expectedProjectID string) error {
-	if intent.Version != 1 {
-		return fmt.Errorf("unsupported journal intent version %d", intent.Version)
-	}
-	if intent.ProjectID == "" || intent.ProjectID != expectedProjectID {
-		return fmt.Errorf("journal intent project ID %q does not match %q", intent.ProjectID, expectedProjectID)
-	}
-	if !journalIDPattern.MatchString(intent.GenerationID) {
-		return errors.New("invalid generation ID in journal intent")
-	}
-	if !manifestDigestPat.MatchString(intent.ManifestDigest) {
-		return errors.New("invalid manifest digest in journal intent")
-	}
-	if !manifestDigestPat.MatchString(intent.ProjectViewDigest) {
-		return errors.New("invalid project view digest in journal intent")
-	}
-	if intent.CreatedAt.IsZero() {
-		return errors.New("journal intent created_at cannot be zero")
-	}
-	if len(intent.Destinations) == 0 {
-		return errors.New("journal intent destinations cannot be empty")
-	}
-	for i, dest := range intent.Destinations {
-		if dest.Side != "project" && dest.Side != "vault" {
-			return fmt.Errorf("destination side %q is invalid", dest.Side)
-		}
-		if dest.Relative == "" || filepath.IsAbs(dest.Relative) || strings.Contains(dest.Relative, "..") {
-			return fmt.Errorf("destination relative path %q is invalid", dest.Relative)
-		}
-		if !sha256HexPattern.MatchString(strings.ToLower(dest.DesiredSHA256)) {
-			return fmt.Errorf("destination desired SHA256 %q is invalid", dest.DesiredSHA256)
-		}
-		if dest.PreimageExists && !sha256HexPattern.MatchString(strings.ToLower(dest.PreimageSHA256)) {
-			return fmt.Errorf("destination preimage SHA256 %q is invalid", dest.PreimageSHA256)
-		}
-		if i > 0 {
-			prev := intent.Destinations[i-1]
-			if prev.Side > dest.Side || (prev.Side == dest.Side && prev.Relative >= dest.Relative) {
-				return errors.New("journal intent destinations must be sorted strictly by side and relative path without duplicates")
-			}
-		}
-	}
-	return nil
+	return publicationstate.ValidateIntent(intent, expectedProjectID)
 }
 
 func encodeCanonicalJSON(v any) ([]byte, error) {

@@ -114,6 +114,36 @@ func TestMarkdownRenderPreservesAcceptedCRLFBytesWhenValuesAreUnchanged(t *testi
 	}
 }
 
+func TestMarkdownDraftRenderRequiresValidatedPendingDraft(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	draftPair := MarkdownPair{
+		Review:  mustRead(t, "../../testdata/contracts/v4/markdown/review.md"),
+		History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md"),
+	}
+	draftPair.Review = bytes.Replace(draftPair.Review, []byte("项目目标夹具"), []byte("已经人工编辑"), 1)
+	draft, err := ParseMarkdownDraft(draftPair, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RenderMarkdown(draft.Presentation, ledger, &draftPair); MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("strict accepted renderer trusted pending bytes: %v", err)
+	}
+
+	got, err := RenderMarkdownDraft(draft.Presentation, ledger, draftPair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got.Review, []byte("已经人工编辑")) || !bytes.Contains(got.Review, []byte("revision: 2")) {
+		t.Fatalf("validated draft edit/revision not rendered:\n%s", got.Review)
+	}
+
+	tampered := draft.Presentation
+	tampered.CurrentState.Goal = "不是该草稿的结果"
+	if _, err := RenderMarkdownDraft(tampered, ledger, draftPair); err == nil {
+		t.Fatal("renderer accepted a presentation not derived from the validated draft")
+	}
+}
+
 func TestMarkdownRenderUsesCollisionFreeAnchorsForValidIDs(t *testing.T) {
 	ledger := projectedLedger(t)
 	p := ledger.DocumentProjection.PresentationBase
