@@ -29,7 +29,9 @@ import (
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/scan"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
@@ -67,6 +69,8 @@ type currentProjectFiles struct {
 	historyFound bool
 	ledgerBody   []byte
 	ledgerFound  bool
+	indexBody    []byte
+	indexFound   bool
 	expected     map[string][]byte
 }
 
@@ -199,6 +203,14 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if err := json.Unmarshal(pvBytes, &pv); err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("decode project view: %w", err)
 	}
+	indexBody, err := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+	if err != nil {
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load session index object: %w", err)
+	}
+	indexDocument, err := sessionindex.Parse(indexBody)
+	if err != nil {
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("parse session index object: %w", err)
+	}
 	projectAccounting, sessionReports, err := loadProjectionAccounting(catalog, pv)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load projection accounting: %w", err)
@@ -210,6 +222,32 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	currentFiles, err := loadCurrentProjectFiles(projectDir)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+	}
+	if len(currentFiles.expected) == 0 {
+		if publishedID != "" {
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, errors.New("published projection files are missing; refusing to initialize a new project")
+		}
+		if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+		}
+		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now})
+		if err != nil {
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
+		}
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scanResult.State, GenerationID: pubResult.GenerationID, SourceSessions: scanResult.SourceSessions, IndexedSessions: scanResult.IndexedSessions, IssueSessions: scanResult.IssueSessions, Publication: pubResult, ReviewRunTokens: 0, ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...)}, nil
+	}
+	if currentFiles.reviewFound && currentFiles.historyFound && currentFiles.ledgerFound && currentFiles.indexFound {
+		ledger, ledgerErr := reviewv4.DecodeLedger(currentFiles.ledgerBody)
+		if ledgerErr == nil && ledger.DocumentProjection != nil {
+			if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
+				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+			}
+			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, Existing: true})
+			if err != nil {
+				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
+			}
+			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scanResult.State, GenerationID: pubResult.GenerationID, SourceSessions: scanResult.SourceSessions, IndexedSessions: scanResult.IndexedSessions, IssueSessions: scanResult.IssueSessions, Publication: pubResult, ReviewRunTokens: 0, ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...)}, nil
+		}
 	}
 	reviewBody, reviewFound := currentFiles.reviewBody, currentFiles.reviewFound
 	historyBody, historyFound := currentFiles.historyBody, currentFiles.historyFound
@@ -638,16 +676,17 @@ func loadCurrentProjectFiles(projectDir *pathguard.Directory) (currentProjectFil
 	if projectDir == nil {
 		return currentProjectFiles{}, errors.New("project directory is required")
 	}
-	result := currentProjectFiles{expected: make(map[string][]byte, 3)}
+	result := currentProjectFiles{expected: make(map[string][]byte, 4)}
 	files := []struct {
 		relative string
 		maximum  int64
 		body     *[]byte
 		found    *bool
 	}{
-		{reviewv2.ReviewRelativePath, reviewv2.MaxDocumentBytes, &result.reviewBody, &result.reviewFound},
-		{reviewv2.HistoryRelativePath, reviewv2.MaxDocumentBytes, &result.historyBody, &result.historyFound},
-		{reviewv2.MachineLedgerRelativePath, reviewv2.MaxMachineLedgerBytes, &result.ledgerBody, &result.ledgerFound},
+		{reviewv2.ReviewRelativePath, 64 << 20, &result.reviewBody, &result.reviewFound},
+		{reviewv2.HistoryRelativePath, 64 << 20, &result.historyBody, &result.historyFound},
+		{reviewv2.MachineLedgerRelativePath, 64 << 20, &result.ledgerBody, &result.ledgerFound},
+		{presentation.SessionIndexRelativePath, 64 << 20, &result.indexBody, &result.indexFound},
 	}
 	for _, file := range files {
 		body, found, err := projectDir.ReadRegularOptional(file.relative, file.maximum)

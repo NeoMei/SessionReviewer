@@ -2,6 +2,7 @@ package reviewv4
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -141,6 +142,84 @@ func TestMarkdownDraftRenderRequiresValidatedPendingDraft(t *testing.T) {
 	tampered.CurrentState.Goal = "不是该草稿的结果"
 	if _, err := RenderMarkdownDraft(tampered, ledger, draftPair); err == nil {
 		t.Fatal("renderer accepted a presentation not derived from the validated draft")
+	}
+}
+
+func TestMarkdownUpdateRendersNewFactsFromAuthenticatedPendingHumanDraft(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	pending := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	pending.Review = bytes.Replace(pending.Review, []byte("项目目标夹具"), []byte("人工保留目标"), 1)
+	draft, err := ParseMarkdownDraft(pending, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := clonePresentation(draft.Presentation)
+	next.GenerationID = "generation-2"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
+	for i := range next.Timeline {
+		next.Timeline[i].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdownUpdate(next, ledger, pending)
+	if err != nil {
+		var markdown *MarkdownError
+		if errors.As(err, &markdown) {
+			t.Fatalf("update: code=%s relative=%s entity=%s field=%s cause=%v", markdown.Code, markdown.Relative, markdown.Entity, markdown.Field, markdown.Cause)
+		}
+		t.Fatal(err)
+	}
+	if !bytes.Contains(got.Review, []byte("人工保留目标")) || !bytes.Contains(got.Review, []byte("这段自定义文本")) || !bytes.Contains(got.Review, []byte("generation_id: generation-2")) || !bytes.Contains(got.Review, []byte("revision: 2")) {
+		t.Fatalf("pending human bytes or next identity lost:\n%s", got.Review)
+	}
+
+	tampered := clonePresentation(next)
+	tampered.Decisions[0].Provenance = "migrated"
+	if _, err := RenderMarkdownUpdate(tampered, ledger, pending); MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("existing provenance loss was accepted: %v", err)
+	}
+}
+
+func TestMarkdownUpdateAllowsHumanConclusionToRefreshGeneratedEvidence(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := clonePresentation(ledger.DocumentProjection.PresentationBase)
+	missing := "not_captured"
+	base.Timeline[0].ClosedLoop.Conclusion = ClosedLoopConclusion{Kind: ConclusionMissing, Text: "", MissingReason: &missing, SourceTurnRefs: []SourceTurnRef{}}
+	ledger.DocumentProjection.PresentationBase = base
+	ledger.AcceptedRevision = base.Revision
+	ledger = bindMarkdownPair(t, ledger, MarkdownPair{})
+	oldPair, err := RenderMarkdown(base, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger = bindMarkdownPair(t, ledger, oldPair)
+
+	history, err := ParseMarkdownDocument(markdownHistoryRelative, oldPair.History)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingHistory, err := history.ReplaceFields(map[FieldKey]string{{Entity: "milestone:" + base.Timeline[0].ID, Name: "conclusion"}: "人工确认结论"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := MarkdownPair{Review: oldPair.Review, History: pendingHistory}
+	draft, err := ParseMarkdownDraft(pending, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.Presentation.Timeline[0].ClosedLoop.Conclusion.Kind != ConclusionHumanConfirmed || !reflect.DeepEqual(draft.Presentation.Timeline[0].ClosedLoop.Verification, base.Timeline[0].ClosedLoop.Verification) {
+		t.Fatalf("conclusion edit changed the wrong closed-loop facts: %+v", draft.Presentation.Timeline[0].ClosedLoop)
+	}
+	next := clonePresentation(draft.Presentation)
+	next.GenerationID = "generation-2"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
+	for i := range next.Timeline {
+		next.Timeline[i].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdownUpdate(next, ledger, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(oldPair.History, []byte("结论来源：missing")) || !bytes.Contains(got.History, []byte("结论来源：human_confirmed")) || !bytes.Contains(got.History, []byte("验证状态：missing")) {
+		t.Fatalf("legal generated evidence refresh was rejected or stale:\n%s", got.History)
 	}
 }
 

@@ -80,6 +80,71 @@ func TestMarkdownEditPublishesThreeFilesAndNoOpDoesNotRepublish(t *testing.T) {
 	}
 }
 
+func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-scan-cas")
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
+	files := make([]presentation.FilePlan, 0, len(paths))
+	vaultExpected := make(map[string][]byte, len(paths))
+	var index []byte
+	for _, relative := range paths {
+		projectBody := readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(relative)))
+		vaultBody := readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, relative))))
+		files = append(files, presentation.FilePlan{Relative: relative, Expected: projectBody, ExpectedExists: true, Desired: projectBody, Mode: 0o600})
+		vaultExpected[relative] = vaultBody
+		if relative == sessionIndexRelativePath {
+			index = projectBody
+		}
+	}
+	receipt := loadAcceptedReceiptForTest(t, env)
+	base := loadMarkdownBaseForTest(t, env)
+	scan := syncproject.MarkdownSyncPlan{
+		Plan:  presentation.RenderPlan{ProjectID: env.projectID, GenerationID: env.manifest.GenerationID, ProjectViewDigest: env.manifest.ProjectViewDigest, Files: files},
+		Index: index, ExpectedGenerationID: env.manifest.GenerationID, ExpectedIndexDigest: env.manifest.SessionIndexDigest,
+		VaultExpected: vaultExpected, ExpectedReceiptRevision: receipt.RevisionID, ExpectedBaseDigest: base.ContentHash,
+	}
+
+	wrongReceipt := scan
+	wrongReceipt.ExpectedReceiptRevision = "sha256:" + strings.Repeat("f", 64)
+	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), wrongReceipt); err == nil || !strings.Contains(err.Error(), "receipt changed") {
+		t.Fatalf("same-generation no-op ignored receipt preimage: %v", err)
+	}
+	wrongBase := scan
+	wrongBase.ExpectedBaseDigest = strings.Repeat("f", 64)
+	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), wrongBase); err == nil || !strings.Contains(err.Error(), "receipt changed") {
+		t.Fatalf("same-generation no-op ignored Base preimage: %v", err)
+	}
+	vaultReview := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
+	if err := os.WriteFile(vaultReview, append(readTestFile(t, vaultReview), []byte("\nlate vault edit\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), scan); !errors.Is(err, ErrPublicationConflict) {
+		t.Fatalf("late Vault edit was not rejected by scan CAS: %v", err)
+	}
+}
+
+func TestInitialMarkdownScanRejectsAcceptedHistoryEvenWhenPublicFilesAreGone(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-scan-history")
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
+	files := make([]presentation.FilePlan, 0, len(paths))
+	vaultExpected := make(map[string][]byte, len(paths))
+	for _, relative := range paths {
+		body := readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(relative)))
+		files = append(files, presentation.FilePlan{Relative: relative, Desired: body, Mode: 0o600})
+		vaultExpected[relative] = nil
+		if err := os.Remove(filepath.Join(env.projectRoot, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, relative)))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := files[3].Desired
+	scan := syncproject.MarkdownSyncPlan{Plan: presentation.RenderPlan{ProjectID: env.projectID, GenerationID: env.manifest.GenerationID, ProjectViewDigest: env.manifest.ProjectViewDigest, Files: files}, Index: index, ExpectedGenerationID: env.manifest.GenerationID, ExpectedIndexDigest: env.manifest.SessionIndexDigest, VaultExpected: vaultExpected}
+	if _, err := PublishMarkdownScan(context.Background(), env.publishOptions(), scan); err == nil || !strings.Contains(err.Error(), "accepted publication history") {
+		t.Fatalf("missing public files reset an accepted project: %v", err)
+	}
+}
+
 func TestMarkdownRecoveryBeforeReceiptRollsBackBaseAndPreservesPriorAcceptance(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-before-receipt")
 	prior := loadAcceptedReceiptForTest(t, env)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -31,7 +32,69 @@ func PublishMarkdownEditLocked(ctx context.Context, opts Options, edit syncproje
 	opts.markdownIndex = bytes.Clone(edit.Index)
 	opts.markdownIndexDigest = edit.ExpectedIndexDigest
 	opts.markdownVaultExpected = edit.VaultExpected
+	opts.markdownReceiptRevision = edit.ExpectedReceiptRevision
+	opts.markdownBaseDigest = edit.ExpectedBaseDigest
 	return PublishLocked(ctx, opts, owner)
+}
+
+// PublishMarkdownScanLocked publishes a four-file scan result while retaining
+// the authenticated old Project/Vault, receipt, and Base preimages.
+func PublishMarkdownScanLocked(ctx context.Context, opts Options, scan syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) (Result, error) {
+	if len(scan.Plan.Files) != 4 {
+		return Result{}, errors.New("Markdown scan publication requires four files")
+	}
+	if (scan.ExpectedReceiptRevision == "") != (scan.ExpectedBaseDigest == "") {
+		return Result{}, errors.New("Markdown scan receipt and Base preimages must be supplied together")
+	}
+	if scan.ExpectedReceiptRevision == "" {
+		for _, file := range scan.Plan.Files {
+			if file.ExpectedExists {
+				return Result{}, errors.New("existing Markdown scan requires authenticated receipt and Base preimages")
+			}
+			expected, ok := scan.VaultExpected[file.Relative]
+			if !ok || expected != nil {
+				return Result{}, errors.New("initial Markdown scan requires explicit absent Vault preimages")
+			}
+		}
+		if err := owner.Use(opts.DataRoot, opts.ProjectID, func() error {
+			journal, err := OpenJournal(opts.DataRoot, opts.ProjectID)
+			if err != nil {
+				return err
+			}
+			defer journal.Close()
+			if _, err := journal.LoadAcceptedMarkdown(); !errors.Is(err, os.ErrNotExist) {
+				if err == nil {
+					return errors.New("initial Markdown scan found accepted publication history")
+				}
+				return err
+			}
+			store, closeStore, err := markdownBaseStore(opts)
+			if err != nil {
+				return err
+			}
+			defer closeStore()
+			_, found, err := store.Load(syncengine.MarkdownBaseEntityID)
+			if err != nil || found {
+				return errors.Join(errors.New("initial Markdown scan found merge Base history"), err)
+			}
+			return nil
+		}); err != nil {
+			return Result{}, err
+		}
+	}
+	return PublishMarkdownEditLocked(ctx, opts, scan, owner)
+}
+
+// PublishMarkdownScan acquires publication ownership for an initial four-file
+// Markdown scan. Nil VaultExpected entries mean the corresponding file must
+// not exist on the Vault side.
+func PublishMarkdownScan(ctx context.Context, opts Options, scan syncproject.MarkdownSyncPlan) (_ Result, retErr error) {
+	owner, err := publicationlock.Acquire(opts.DataRoot, opts.ProjectID, 10*time.Second)
+	if err != nil {
+		return Result{}, err
+	}
+	defer func() { retErr = errors.Join(retErr, owner.Release()) }()
+	return PublishMarkdownScanLocked(ctx, opts, scan, owner)
 }
 
 // RecoverMarkdownLocked resolves an unfinished human-edit intent before

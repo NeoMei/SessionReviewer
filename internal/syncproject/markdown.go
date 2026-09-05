@@ -32,11 +32,14 @@ const (
 )
 
 type MarkdownSyncPlan struct {
-	Plan                 presentation.RenderPlan
-	Index                []byte
-	ExpectedGenerationID string
-	ExpectedIndexDigest  string
-	VaultExpected        map[string][]byte
+	Plan                    presentation.RenderPlan
+	Pending                 reviewv4.MarkdownPair
+	Index                   []byte
+	ExpectedGenerationID    string
+	ExpectedIndexDigest     string
+	VaultExpected           map[string][]byte
+	ExpectedReceiptRevision string
+	ExpectedBaseDigest      string
 }
 
 type MarkdownPublisher func(context.Context, MarkdownSyncPlan, *publicationlock.Owner) error
@@ -317,7 +320,7 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 	if bytes.Equal(projectReview, desiredPair.Review) && bytes.Equal(vaultReview, desiredPair.Review) && bytes.Equal(projectHistory, desiredPair.History) && bytes.Equal(vaultHistory, desiredPair.History) && bytes.Equal(ledgerBody, desiredLedger) {
 		plan.Files = nil
 	}
-	return MarkdownSyncPlan{Plan: plan, Index: bytes.Clone(indexBody), ExpectedGenerationID: publishedID, ExpectedIndexDigest: manifest.SessionIndexDigest, VaultExpected: map[string][]byte{
+	return MarkdownSyncPlan{Plan: plan, Pending: reviewv4.MarkdownPair{Review: bytes.Clone(draftPair.Review), History: bytes.Clone(draftPair.History)}, Index: bytes.Clone(indexBody), ExpectedGenerationID: publishedID, ExpectedIndexDigest: manifest.SessionIndexDigest, ExpectedReceiptRevision: receipt.RevisionID, ExpectedBaseDigest: baseRecord.ContentHash, VaultExpected: map[string][]byte{
 		reviewv2.ReviewRelativePath: bytes.Clone(vaultReview), reviewv2.HistoryRelativePath: bytes.Clone(vaultHistory), reviewv2.MachineLedgerRelativePath: bytes.Clone(vaultLedger),
 	}}, baseRecord, nil
 }

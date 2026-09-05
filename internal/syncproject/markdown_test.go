@@ -35,6 +35,41 @@ func TestMarkdownBindingRejectsLoosePublicIndex(t *testing.T) {
 	}
 }
 
+func TestReadMarkdownForScanKeepsOldAcceptanceSeparateFromVaultOnlyDraft(t *testing.T) {
+	fixture, accepted := newMarkdownLockFixture(t)
+	vaultReview := filepath.Join(fixture.vault, "Projects", "Migration", "Session Review", "项目回顾.md")
+	before, err := os.ReadFile(vaultReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := reviewv4.ParseMarkdownDocument("项目回顾.md", before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := document.ReplaceFields(map[reviewv4.FieldKey]string{{Entity: "project-overview", Name: "goal"}: "Vault-only goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vaultReview, after, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Release()
+	read, err := ReadMarkdownForScan(context.Background(), Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerPeriodic}, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if read.OldAccepted.Review.CurrentState.Goal != accepted.Review.CurrentState.Goal || read.Pending.Presentation.CurrentState.Goal != "Vault-only goal" {
+		t.Fatalf("old acceptance and pending draft were conflated: old=%q pending=%q", read.OldAccepted.Review.CurrentState.Goal, read.Pending.Presentation.CurrentState.Goal)
+	}
+	if bytes.Equal(read.ProjectExpected[reviewv2.ReviewRelativePath], read.VaultExpected[reviewv2.ReviewRelativePath]) || read.ExpectedReceiptRevision == "" || read.ExpectedBaseDigest == "" {
+		t.Fatal("scan read lost exact divergent preimages or private receipt/Base identity")
+	}
+}
+
 func TestMarkdownDryRunReportsPendingWritesAndNoOp(t *testing.T) {
 	fixture, accepted := newMarkdownLockFixture(t)
 	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))

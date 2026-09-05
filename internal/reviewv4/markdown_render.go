@@ -32,6 +32,38 @@ func RenderMarkdownDraft(p Presentation, ledger MachineLedger, draft MarkdownPai
 	return renderMarkdown(p, ledger, &draft, true)
 }
 
+// RenderMarkdownUpdate proves pending human Markdown against the old accepted
+// ledger before allowing a caller-mapped scan identity to update generated
+// regions. The caller remains solely responsible for mapping and revision.
+func RenderMarkdownUpdate(next Presentation, oldLedger MachineLedger, pending MarkdownPair) (MarkdownPair, error) {
+	draft, err := ParseMarkdownDraft(pending, oldLedger)
+	if err != nil {
+		return MarkdownPair{}, err
+	}
+	wantRevision := draft.Presentation.Revision
+	base := oldLedger.DocumentProjection.PresentationBase
+	if draft.Presentation.Revision == base.Revision && (next.GenerationID != base.GenerationID || next.ProjectViewDigest != base.ProjectViewDigest) {
+		wantRevision++
+	}
+	if next.Revision != wantRevision || !samePresentationAcrossScanIdentity(next, draft.Presentation) {
+		return MarkdownPair{}, &MarkdownError{Code: MarkdownBaselineMissing}
+	}
+	return renderMarkdown(next, oldLedger, &pending, true)
+}
+
+func samePresentationAcrossScanIdentity(next, prior Presentation) bool {
+	if next.ProjectID != prior.ProjectID {
+		return false
+	}
+	next = clonePresentation(next)
+	next.GenerationID, next.ProjectViewDigest = prior.GenerationID, prior.ProjectViewDigest
+	next.Revision = prior.Revision
+	for i := range next.Timeline {
+		next.Timeline[i].GenerationID = prior.GenerationID
+	}
+	return reflect.DeepEqual(next, prior)
+}
+
 func renderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair, validatedDraft bool) (MarkdownPair, error) {
 	if err := ValidatePresentation(p); err != nil {
 		return MarkdownPair{}, &MarkdownError{Code: MarkdownFormatInvalid, Cause: err}

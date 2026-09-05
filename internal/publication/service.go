@@ -31,15 +31,17 @@ import (
 
 // Options configures a full publication run across Project, Vault, and Store.
 type Options struct {
-	ProjectID             string
-	PreparedGeneration    string
-	Plan                  presentation.RenderPlan
-	Mapping               config.ProjectMapping
-	DataRoot              string
-	Now                   func() time.Time
-	markdownIndex         []byte
-	markdownIndexDigest   string
-	markdownVaultExpected map[string][]byte
+	ProjectID               string
+	PreparedGeneration      string
+	Plan                    presentation.RenderPlan
+	Mapping                 config.ProjectMapping
+	DataRoot                string
+	Now                     func() time.Time
+	markdownIndex           []byte
+	markdownIndexDigest     string
+	markdownVaultExpected   map[string][]byte
+	markdownReceiptRevision string
+	markdownBaseDigest      string
 
 	checkpoint             func(publishCheckpoint, string, string) error
 	publicationLockTimeout time.Duration
@@ -204,6 +206,21 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if err := repairRetainedRollbackEvidence(j, opts, projectDir, vaultDir, now); err != nil {
 		return Result{}, fmt.Errorf("repair legacy rolled-back merge-base state: %w", err)
 	}
+	if opts.markdownReceiptRevision != "" || opts.markdownBaseDigest != "" {
+		receipt, err := j.LoadAcceptedMarkdown()
+		if err != nil || receipt.RevisionID != opts.markdownReceiptRevision || receipt.BaseDigest != opts.markdownBaseDigest {
+			return Result{}, errors.Join(errors.New("accepted Markdown receipt changed before scan publication"), err)
+		}
+		baseStore, closeBase, err := markdownBaseStore(opts)
+		if err != nil {
+			return Result{}, err
+		}
+		base, found, loadErr := baseStore.Load(syncengine.MarkdownBaseEntityID)
+		closeErr := closeBase()
+		if loadErr != nil || closeErr != nil || !found || base.ContentHash != opts.markdownBaseDigest {
+			return Result{}, errors.Join(errors.New("accepted Markdown Base changed before scan publication"), loadErr, closeErr)
+		}
+	}
 
 	rollback := func(ctx context.Context, intent Intent) error {
 		return rollbackIntent(ctx, intent, j, projectDir, vaultDir, func() error {
@@ -265,7 +282,10 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 
 	// Check if already published
 	pubID, _, err := store.LoadPublished()
-	if opts.markdownIndex == nil && err == nil && pubID == opts.PreparedGeneration {
+	legacyNoOp := opts.markdownIndex == nil
+	authenticatedScanNoOp := opts.markdownIndex != nil && len(opts.Plan.Files) == 4 && opts.markdownReceiptRevision != "" && opts.markdownBaseDigest != ""
+	verifiedRecovery := recovered && opts.markdownIndex != nil && len(opts.Plan.Files) == 4
+	if (legacyNoOp || authenticatedScanNoOp || verifiedRecovery) && err == nil && pubID == opts.PreparedGeneration {
 		projFiles, vaultFiles, err := verifyPublishedFiles(opts.Plan, opts.Mapping, projectDir, vaultDir)
 		if err == nil {
 			return Result{GenerationID: pubID, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
@@ -316,7 +336,11 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 			return Result{}, fmt.Errorf("inspect vault file %q: %w", vaultRel, err)
 		}
 		if expected, ok := opts.markdownVaultExpected[file.Relative]; ok {
-			if !vaultFound || !bytes.Equal(vaultBody, expected) {
+			if expected == nil {
+				if vaultFound {
+					return Result{}, fmt.Errorf("%w: Vault Markdown preimage changed", ErrPublicationConflict)
+				}
+			} else if !vaultFound || !bytes.Equal(vaultBody, expected) {
 				return Result{}, fmt.Errorf("%w: Vault Markdown preimage changed", ErrPublicationConflict)
 			}
 		}
@@ -695,8 +719,11 @@ func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, ma
 	if opts.markdownIndex != nil {
 		version = 4
 		err = nil
-		if len(opts.Plan.Files) != 3 {
-			return 0, errors.New("Markdown publication plan must contain exactly three files")
+		if len(opts.Plan.Files) != 3 && len(opts.Plan.Files) != 4 {
+			return 0, errors.New("Markdown publication plan must contain exactly three edit files or four scan files")
+		}
+		if len(opts.Plan.Files) == 4 && !bytes.Equal(filesFromPlan(opts.Plan)[sessionIndexRelativePath], opts.markdownIndex) {
+			return 0, errors.New("Markdown scan plan index differs from its authenticated index")
 		}
 	}
 	if err != nil {
@@ -738,6 +765,14 @@ func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, ma
 		return 0, errors.New("projection identity does not match prepared manifest")
 	}
 	return version, nil
+}
+
+func filesFromPlan(plan presentation.RenderPlan) map[string][]byte {
+	files := make(map[string][]byte, len(plan.Files))
+	for _, file := range plan.Files {
+		files[file.Relative] = file.Desired
+	}
+	return files
 }
 
 func syncReportReadyToApply(report syncengine.Report) bool {
