@@ -54,6 +54,8 @@
 
 ## Task 1 (M1)：冻结扩展、版本组合与字段目录
 
+状态：实现 `259e574`、补测 `3160649`，独立审查与修复复审通过。最终定向 Go/TS 验证通过；完整 Go 套件在最后夹具空格/哈希调整前通过，最终精确 HEAD 全套验收留给 M9。共享字段子集语义小项由 M2 接续。
+
 **Files:**
 - Modify: `internal/reviewv4/types.go`、`codec.go`、`validate.go`。
 - Create: `internal/reviewv4/document_projection.go`、`document_projection_test.go`、`markdown_fields.go`、`markdown_fields_test.go`、`markdown_errors.go`。
@@ -78,7 +80,7 @@ func MarkdownCodeOf(error) string
 type MarkdownError struct { Code, Relative, Entity, Field string; Cause error }
 ```
 
-- [ ] **1. RED：锁住旧字节与新扩展身份。** 在 reviewv4 包内使用已有 `minimumPresentation()`；旧 ledger 从冻结 JSON 读取。新增用例：同一 ledger 有无扩展、内外 revision/patch 不同、扩展自摘要篡改、0.4.0/0.4.1 拼接、扩展 null、未知键；断言错误代码和旧 canonical hash 不变。
+- [x] **1. RED：锁住旧字节与新扩展身份。** 在 reviewv4 包内使用已有 `minimumPresentation()`；旧 ledger 从冻结 JSON 读取。新增用例：同一 ledger 有无扩展、内外 revision/patch 不同、扩展自摘要篡改、0.4.0/0.4.1 拼接、扩展 null、未知键；断言错误代码和旧 canonical hash 不变。
 
 ```go
 func TestMarkdownFieldCatalogHasOneOwner(t *testing.T) {
@@ -94,8 +96,8 @@ func TestMarkdownFieldCatalogHasOneOwner(t *testing.T) {
 }
 ```
 
-- [ ] **2. 跑 RED。** `go test ./internal/reviewv4 -run 'DocumentProjection|MarkdownFieldCatalog' -count=1`。预期新接口缺失或扩展被旧严格解码拒绝；不是接受无关编译错误为 RED。
-- [ ] **3. 实现封闭扩展与目录。** 目录逐项复制 spec §6 的 24 字段和 §5.3 的四类生成区域；注册表返回副本。canonical 自摘要 DTO 使用可省略扩展，旧字段顺序/编码不变。JSON Schema 引用现有 Presentation schema；Go/TS 都检查内外项目、generation、digest、revision、patches/baselines 深度相同；旧 floor 只适用于无扩展组合，不能全局提高或放宽版本解析。
+- [x] **2. 跑 RED。** `go test ./internal/reviewv4 -run 'DocumentProjection|MarkdownFieldCatalog' -count=1`。预期新接口缺失或扩展被旧严格解码拒绝；不是接受无关编译错误为 RED。
+- [x] **3. 实现封闭扩展与目录。** 目录逐项复制 spec §6 的 24 字段和 §5.3 的四类生成区域；注册表返回副本。canonical 自摘要 DTO 使用可省略扩展，旧字段顺序/编码不变。JSON Schema 引用现有 Presentation schema；Go/TS 都检查内外项目、generation、digest、revision、patches/baselines 深度相同；旧 floor 只适用于无扩展组合，不能全局提高或放宽版本解析。
 
 ```go
 // Canonical body adds exactly this optional field; absence must not emit null.
@@ -107,8 +109,8 @@ if l.DocumentProjection != nil &&
 }
 ```
 
-- [ ] **4. 固定共享夹具。** `cases.json` 每项包含 `name`、输入文件相对路径、`expected_code`（成功为空）、期望 field values；包括变更扩展却重算公共自摘要的样本，后续 M5 必须仍拒绝未经私有认证的机器更改。Go/TS 测试直接读仓库这一份；不手工维护两份 Markdown 黄金文件。对照目录完整检查 24 字段，不仅检查数量。
-- [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 ./internal/strictjson -count=1`；在 `obsidian-plugin` 运行 `npm test -- tests/contracts-v4.test.ts`。记录旧 fixtures 的前后哈希。仅 stage 本任务文件，提交 `feat: define v4 markdown projection contract`。
+- [x] **4. 固定共享夹具。** `cases.json` 每项包含 `name`、输入文件相对路径、`expected_code`（成功为空）、期望 field values；包括变更扩展却重算公共自摘要的样本，后续 M5 必须仍拒绝未经私有认证的机器更改。Go/TS 测试直接读仓库这一份；不手工维护两份 Markdown 黄金文件。对照目录完整检查 24 字段，不仅检查数量。
+- [x] **5. GREEN 与提交。** `go test ./internal/reviewv4 ./internal/strictjson -count=1`；在 `obsidian-plugin` 运行 `npm test -- tests/contracts-v4.test.ts`。记录旧 fixtures 的前后哈希。仅 stage 本任务文件，提交 `feat: define v4 markdown projection contract`。
 
 ## Task 2 (M2)：实现有界标记词法与无损文档壳
 
