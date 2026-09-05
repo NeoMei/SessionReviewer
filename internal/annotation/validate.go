@@ -12,6 +12,8 @@ import (
 var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+const maxWireInteger = 1<<53 - 1
+
 func validID(value string) bool                { return len(value) <= 256 && idRE.MatchString(value) }
 func validText(value string, maximum int) bool { return len(value) <= maximum }
 
@@ -46,7 +48,7 @@ func Validate(store StoreRecord) error {
 	}
 	annotations := make(map[string]struct{}, len(store.Annotations))
 	for index, annotation := range store.Annotations {
-		if annotation.SchemaVersion != 1 || annotation.ProjectID != store.ProjectID || !validID(annotation.ID) || !validID(annotation.GenerationID) || !validID(annotation.AnalysisProfile) || !validID(annotation.AgentRunID) || !validText(annotation.Text, 4096) || annotation.Revision < 1 || !validText(annotation.CreatedAt, 128) || len(annotation.Dependencies) > 256 {
+		if annotation.SchemaVersion != 1 || annotation.ProjectID != store.ProjectID || !validID(annotation.ID) || !validID(annotation.GenerationID) || !validID(annotation.AnalysisProfile) || !validID(annotation.AgentRunID) || !validText(annotation.Text, 4096) || annotation.Revision < 1 || annotation.Revision > maxWireInteger || !validText(annotation.CreatedAt, 128) || len(annotation.Dependencies) > 256 {
 			return fmt.Errorf("invalid annotation %d", index)
 		}
 		if _, exists := annotations[annotation.ID]; exists {

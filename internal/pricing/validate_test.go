@@ -26,6 +26,19 @@ func TestValidateSnapshotRejectsIncompleteMarkedComplete(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotRejectsQuantityAboveJavaScriptSafeMaximum(t *testing.T) {
+	snapshot := completeSnapshot()
+	zero, four := 0.0, 4.0
+	snapshot.Rates.CachedInput = &zero
+	snapshot.LineCostsUSD.CachedInput = &zero
+	snapshot.KnownSubtotalUSD = four
+	snapshot.TotalCostUSD = &four
+	snapshot.BillableQuantities.CachedInput = 1 << 53
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("accepted billable quantity above the JavaScript safe maximum")
+	}
+}
+
 func TestValidateSnapshotCompletenessAndFreePrice(t *testing.T) {
 	zero := 0.0
 	ones := func() *float64 { v := 1.0; return &v }

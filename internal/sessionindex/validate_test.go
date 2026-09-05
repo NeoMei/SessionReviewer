@@ -28,6 +28,32 @@ func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsPersistedIntegersAboveJavaScriptSafeMaximum(t *testing.T) {
+	unsafe := uint64(1 << 53)
+	tests := []struct {
+		name   string
+		mutate func(*Entry)
+	}{
+		{name: "duration", mutate: func(entry *Entry) { entry.DurationMS = &unsafe }},
+		{name: "warning count", mutate: func(entry *Entry) { entry.WarningCount = unsafe }},
+		{name: "record count", mutate: func(entry *Entry) { entry.RecordCount = &unsafe }},
+		{name: "coverage", mutate: func(entry *Entry) {
+			entry.Coverage = Coverage{Seen: unsafe, Indexed: unsafe}
+			entry.IndexedEventCount = unsafe
+		}},
+		{name: "fact count", mutate: func(entry *Entry) { entry.FactCounts.FileChange = unsafe }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			document := oneSessionDocument()
+			tc.mutate(&document.Sessions[0])
+			if err := Validate(document); err == nil {
+				t.Fatal("accepted integer above the JavaScript safe maximum")
+			}
+		})
+	}
+}
+
 func TestValidateIdentityUsesProviderAndSessionIDPair(t *testing.T) {
 	d := minimumDocument()
 	d.Sessions = []Entry{{Provider: "claude", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: strptr("now"), EndedAt: strptr("now")}, {Provider: "codex", SessionID: "same", ProcessingState: ProcessingComplete, SourceAvailability: "available", StartedAt: strptr("now"), EndedAt: strptr("now")}}

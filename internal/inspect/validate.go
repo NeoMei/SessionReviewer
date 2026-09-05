@@ -13,6 +13,8 @@ import (
 var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+const maxWireInteger uint64 = 1<<53 - 1
+
 var eventKinds = map[string]bool{
 	"message": true, "tool_call": true, "tool_result": true, "cwd_change": true,
 	"usage": true, "skip": true, "file_change": true, "command": true,
@@ -23,12 +25,15 @@ func validID(value string) bool { return len(value) <= 256 && idRE.MatchString(v
 func validCoverage(coverage Coverage) bool {
 	total := uint64(0)
 	for _, value := range []uint64{coverage.Indexed, coverage.Collapsed, coverage.Unprojected, coverage.Undecodable, coverage.Truncated} {
+		if value > maxWireInteger {
+			return false
+		}
 		if ^uint64(0)-total < value {
 			return false
 		}
 		total += value
 	}
-	return total == coverage.Seen
+	return coverage.Seen <= maxWireInteger && total == coverage.Seen
 }
 
 func validateIdentity(schemaVersion int, reader, project, provider, session, generation, digest string) error {
@@ -39,7 +44,7 @@ func validateIdentity(schemaVersion int, reader, project, provider, session, gen
 }
 
 func validateEntry(entry Entry) error {
-	if len(entry.OccurredAt) > 128 || entry.Sequence == 0 || !validID(entry.RevisionID) || len(entry.Text) > 512 || len(entry.SourceRevisionIDs) > 64 {
+	if len(entry.OccurredAt) > 128 || entry.Sequence == 0 || entry.Sequence > maxWireInteger || !validID(entry.RevisionID) || len(entry.Text) > 512 || len(entry.SourceRevisionIDs) > 64 {
 		return errors.New("invalid summary entry")
 	}
 	seen := map[string]bool{}
@@ -53,7 +58,7 @@ func validateEntry(entry Entry) error {
 }
 
 func validateBlock(block Block) error {
-	if block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
+	if block.Total > maxWireInteger || block.Shown > maxWireInteger || block.Omitted > maxWireInteger || block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
 		return errors.New("summary block does not reconcile")
 	}
 	for _, entry := range block.Items {
@@ -68,7 +73,7 @@ func validateBlock(block Block) error {
 }
 
 func validateErrorBlock(block ErrorBlock) error {
-	if block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
+	if block.Total > maxWireInteger || block.Shown > maxWireInteger || block.Omitted > maxWireInteger || block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
 		return errors.New("summary error block does not reconcile")
 	}
 	entries := make([]Entry, len(block.Items))
@@ -129,7 +134,7 @@ func ValidateEventPage(page SessionEventPage) error {
 	if err := validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest); err != nil {
 		return err
 	}
-	if page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || uint64(len(page.Items)) != page.RangeEnd-page.RangeStart || len(page.Items) > 100 {
+	if page.Total > maxWireInteger || page.RangeStart > maxWireInteger || page.RangeEnd > maxWireInteger || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || uint64(len(page.Items)) != page.RangeEnd-page.RangeStart || len(page.Items) > 100 {
 		return errors.New("event page range does not reconcile")
 	}
 	for _, cursor := range []*string{page.PreviousCursor, page.NextCursor, page.FirstCursor, page.LastCursor} {
@@ -147,7 +152,7 @@ func ValidateEventPage(page SessionEventPage) error {
 		return errors.New("event page total does not match indexed coverage")
 	}
 	for index, item := range page.Items {
-		if !eventKinds[item.Kind] || len(item.Excerpt) > 512 || !validID(item.RevisionID) || item.Sequence == 0 || len(item.OccurredAt) > 128 {
+		if !eventKinds[item.Kind] || len(item.Excerpt) > 512 || !validID(item.RevisionID) || item.Sequence == 0 || item.Sequence > maxWireInteger || len(item.OccurredAt) > 128 {
 			return fmt.Errorf("invalid event item %d", index)
 		}
 	}

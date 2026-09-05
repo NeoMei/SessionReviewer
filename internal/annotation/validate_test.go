@@ -24,6 +24,14 @@ func TestValidateStoreRecordRequiresProjectIdentity(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsRevisionAboveJavaScriptSafeMaximum(t *testing.T) {
+	entityID, field := "e", "f"
+	store := StoreRecord{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: "p", Annotations: []Annotation{{ID: "a", ProjectID: "p", AnnotationKind: "decision_candidate", EntityID: &entityID, Field: &field, Status: "pending", Text: "candidate", GenerationID: "g", SchemaVersion: 1, AnalysisProfile: "profile", AgentRunID: "run", Dependencies: []Dependency{}, Revision: 1 << 53, CreatedAt: "now"}}, ExtractionRuns: []Run{{RunID: "run", ProjectID: "p", Status: "completed", ExtractorVersion: "v1", PromptSchemaVersion: "v1", DependencyDigests: []string{}, CreatedAt: "now", UpdatedAt: "now"}}}
+	if err := Validate(store); err == nil {
+		t.Fatal("accepted revision above the JavaScript safe maximum")
+	}
+}
+
 func TestParseRejectsFrozenInvalidFixture(t *testing.T) {
 	b, err := os.ReadFile("../../testdata/contracts/v4/agent-annotation-v1.invalid.json")
 	if err != nil {

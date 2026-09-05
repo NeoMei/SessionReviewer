@@ -6,6 +6,10 @@ export type ProcessingState = "complete" | "partial" | "error" | "unprocessed";
 export type SourceAvailability = "available" | "unavailable";
 export type DecisionStatus = "active" | "superseded" | "archived" | "legacy_unmapped";
 export type CandidateStatus = "pending" | "confirmed" | "ignored" | "not_decision" | "stale";
+export type ProblemWorkflowStateV4 = "not_started" | "in_progress" | "paused" | "resolved";
+export type ProblemAnswerStateV4 = "no_answer" | "answered_unverified" | "execution_verified";
+export type ProblemProvenanceV4 = "human_created" | "migrated" | "candidate_confirmed";
+export type ConversationVerificationStateV1 = "unknown" | "passed" | "failed" | "partial";
 export type PriceStatus =
   | "pending"
   | "current"
@@ -80,12 +84,12 @@ export interface ProblemNodeV4 {
   question: string;
   primary_parent_id: string | null;
   related_node_ids: string[];
-  workflow_state: string;
-  answer_state: string;
+  workflow_state: ProblemWorkflowStateV4;
+  answer_state: ProblemAnswerStateV4;
   completion_criterion: string;
   current_conclusion: string;
   source_turn_refs: SourceTurnRefV4[];
-  provenance: string;
+  provenance: ProblemProvenanceV4;
   first_proposed_at: string;
   sibling_order: number;
   confirmed_at: string | null;
@@ -554,7 +558,7 @@ export interface ConversationChainV1 {
       revision_id: string;
       source_ref: ConversationSourceRefV1;
       kind: string;
-      verification_state: string;
+      verification_state: ConversationVerificationStateV1;
       excerpt: string;
     }>;
     answer_state: "no_answer" | "answered" | "partial";

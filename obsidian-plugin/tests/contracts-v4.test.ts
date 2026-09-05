@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
   assertProblemGraph,
   assertSnapshotBindings,
@@ -20,7 +20,7 @@ import {
   WireRejectionError,
   type WireRejectionCode
 } from "../src/data/contracts-v4";
-import type { ViewKind } from "../src/contracts/review-v4";
+import type { ConversationChainV1, ProblemNodeV4, ViewKind } from "../src/contracts/review-v4";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginFixture = (name: string): Promise<string> =>
@@ -47,6 +47,15 @@ const contracts: ReadonlyArray<Readonly<{
   { name: "conversation-chain-v1", parser: parseConversationChainV1, invalidCode: "wire_contract_invalid" },
   { name: "problem-map-candidate-v1", parser: parseProblemMapCandidateV1, invalidCode: "wire_contract_invalid" }
 ];
+
+describe("public contract types preserve closed wire enums", () => {
+  it("does not widen problem states and result verification states to string", () => {
+    expectTypeOf<ProblemNodeV4["workflow_state"]>().toEqualTypeOf<"not_started" | "in_progress" | "paused" | "resolved">();
+    expectTypeOf<ProblemNodeV4["answer_state"]>().toEqualTypeOf<"no_answer" | "answered_unverified" | "execution_verified">();
+    expectTypeOf<ProblemNodeV4["provenance"]>().toEqualTypeOf<"human_created" | "migrated" | "candidate_confirmed">();
+    expectTypeOf<ConversationChainV1["turn_units"][number]["results"][number]["verification_state"]>().toEqualTypeOf<"unknown" | "passed" | "failed" | "partial">();
+  });
+});
 
 function captureRejection(action: () => unknown): WireRejectionError {
   try {

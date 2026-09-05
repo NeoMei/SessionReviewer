@@ -77,6 +77,51 @@ func TestValidatePresentationRejectsDecisionCycleAndBrokenGraph(t *testing.T) {
 	}
 }
 
+func TestV4ReviewAndLedgerRejectIntegersAboveJavaScriptSafeMaximum(t *testing.T) {
+	unsafe := 1 << 53
+	presentationCases := []struct {
+		name   string
+		mutate func(*Presentation)
+	}{
+		{name: "presentation revision", mutate: func(value *Presentation) { value.Revision = unsafe }},
+		{name: "decision revision", mutate: func(value *Presentation) {
+			value.Decisions = []Decision{minimumDecision("decision-1", []string{})}
+			value.Decisions[0].Revision = unsafe
+		}},
+	}
+	for _, tc := range presentationCases {
+		t.Run(tc.name, func(t *testing.T) {
+			value := minimumPresentation()
+			tc.mutate(&value)
+			if err := ValidatePresentation(value); err == nil {
+				t.Fatal("accepted integer above the JavaScript safe maximum")
+			}
+		})
+	}
+
+	ledgerCases := []struct {
+		name   string
+		mutate func(*MachineLedger)
+	}{
+		{name: "accepted revision", mutate: func(value *MachineLedger) { value.AcceptedRevision = unsafe }},
+		{name: "total duration", mutate: func(value *MachineLedger) { value.Accounting.TotalDurationMS = uint64(unsafe) }},
+		{name: "total tokens", mutate: func(value *MachineLedger) { value.Accounting.TotalTokens = uint64(unsafe) }},
+		{name: "model tokens", mutate: func(value *MachineLedger) {
+			value.Accounting.TotalTokens = uint64(unsafe)
+			value.Accounting.Models = []Model{{Model: "model-1", TotalTokens: uint64(unsafe)}}
+		}},
+	}
+	for _, tc := range ledgerCases {
+		t.Run(tc.name, func(t *testing.T) {
+			value := frozenLedger(t)
+			tc.mutate(&value)
+			if err := ValidateLedger(value); err == nil {
+				t.Fatal("accepted integer above the JavaScript safe maximum")
+			}
+		})
+	}
+}
+
 func TestDecodePresentationAcceptsOnlyLosslessLegacyDecisionStatusShape(t *testing.T) {
 	presentation := minimumPresentation()
 	body, err := json.Marshal(presentation)

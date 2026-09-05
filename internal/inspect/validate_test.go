@@ -30,6 +30,44 @@ func TestValidateRejectsCoverageAdditionOverflow(t *testing.T) {
 	}
 }
 
+func TestInspectionContractsRejectIntegersAboveJavaScriptSafeMaximum(t *testing.T) {
+	unsafe := uint64(1 << 53)
+
+	t.Run("summary coverage", func(t *testing.T) {
+		summary := minimumSummary()
+		summary.Coverage = Coverage{Seen: unsafe, Indexed: unsafe}
+		if err := ValidateSummary(summary); err == nil {
+			t.Fatal("accepted unsafe summary coverage")
+		}
+	})
+	t.Run("summary sequence", func(t *testing.T) {
+		summary := minimumSummary()
+		summary.PhaseBoundaries = Block{
+			Total: 1, Shown: 1, Coverage: Coverage{Seen: 1, Indexed: 1},
+			Items: []Entry{{OccurredAt: "2026-09-04T00:00:00Z", Sequence: unsafe, RevisionID: "revision-1", SourceRevisionIDs: []string{}}},
+		}
+		if err := ValidateSummary(summary); err == nil {
+			t.Fatal("accepted unsafe summary sequence")
+		}
+	})
+	t.Run("event page range and coverage", func(t *testing.T) {
+		page := minimumEventPage()
+		page.Total, page.RangeStart, page.RangeEnd = unsafe, unsafe, unsafe
+		page.Coverage = Coverage{Seen: unsafe, Indexed: unsafe}
+		if err := ValidateEventPage(page); err == nil {
+			t.Fatal("accepted unsafe event-page range and coverage")
+		}
+	})
+	t.Run("event sequence", func(t *testing.T) {
+		page := minimumEventPage()
+		page.Total, page.RangeEnd, page.Coverage = 1, 1, Coverage{Seen: 1, Indexed: 1}
+		page.Items = []EventItem{{Kind: "message", RevisionID: "revision-1", Sequence: unsafe}}
+		if err := ValidateEventPage(page); err == nil {
+			t.Fatal("accepted unsafe event sequence")
+		}
+	})
+}
+
 func TestParsersRejectFrozenInvalidFixtures(t *testing.T) {
 	for _, tc := range []struct {
 		name     string

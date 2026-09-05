@@ -16,10 +16,11 @@ var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 const (
-	maxID        = 256
-	maxText      = 4096
-	maxTimestamp = 128
-	maxURL       = 2048
+	maxID                 = 256
+	maxText               = 4096
+	maxTimestamp          = 128
+	maxURL                = 2048
+	maxWireInteger uint64 = 1<<53 - 1
 )
 
 func validID(value string) bool { return len(value) <= maxID && idRE.MatchString(value) }
@@ -105,6 +106,9 @@ func ValidateSnapshot(snapshot Snapshot) error {
 	names := []string{"input", "cached_input", "cache_write_input", "output", "reasoning_output"}
 	subtotal := 0.0
 	for i := range rates {
+		if quantities[i] > maxWireInteger {
+			return fmt.Errorf("billable quantity %s exceeds wire integer limit", names[i])
+		}
 		if quantities[i] > 0 && (rates[i] == nil || costs[i] == nil) && !missing[names[i]] {
 			return fmt.Errorf("unknown billed dimension %s is not reported", names[i])
 		}

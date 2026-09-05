@@ -30,7 +30,7 @@
         "schema_version": { "const": 1 }, "analysis_profile": { "$ref": "#/$defs/id" },
         "agent_run_id": { "$ref": "#/$defs/id" },
         "dependencies": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/dependency" } },
-        "revision": { "type": "integer", "minimum": 1 }, "created_at": { "$ref": "#/$defs/timestamp" },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "created_at": { "$ref": "#/$defs/timestamp" },
         "confirmed_entity_id": { "oneOf": [{ "$ref": "#/$defs/id" }, { "type": "null" }] },
         "target_milestone_id": { "$ref": "#/$defs/id" }, "prompt_schema_version": { "$ref": "#/$defs/id" }
       },

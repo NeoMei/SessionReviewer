@@ -16,6 +16,8 @@ import (
 var idRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
 var digestRE = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
+const maxWireInteger uint64 = 1<<53 - 1
+
 var stateReasons = map[string]bool{
 	"not_discovered": true, "duplicate_candidate": true, "freeze_terminal": true,
 	"malformed_source_records": true, "unsupported_source_records": true,
@@ -27,7 +29,35 @@ var stateReasons = map[string]bool{
 func validID(value string) bool                     { return len(value) <= 256 && idRE.MatchString(value) }
 func validOptional(value *string, maximum int) bool { return value == nil || len(*value) <= maximum }
 func validDigest(value *string) bool                { return value == nil || digestRE.MatchString(*value) }
+func validOptionalInteger(value *uint64) bool       { return value == nil || *value <= maxWireInteger }
+func validCoverage(coverage Coverage) bool {
+	for _, value := range []uint64{coverage.Seen, coverage.Indexed, coverage.Collapsed, coverage.Unprojected, coverage.Undecodable, coverage.Truncated} {
+		if value > maxWireInteger {
+			return false
+		}
+	}
+	return true
+}
+func validIndexCoverage(coverage IndexCoverage) bool {
+	for _, value := range []uint64{coverage.Total, coverage.Complete, coverage.Partial, coverage.Error, coverage.Unprocessed, coverage.SourceAvailable, coverage.SourceUnavailable, coverage.StartedAtKnown, coverage.EndedAtKnown, coverage.UsageKnown} {
+		if value > maxWireInteger {
+			return false
+		}
+	}
+	return true
+}
+func validFactCounts(counts FactCounts) bool {
+	for _, value := range []uint64{counts.FileChange, counts.Command, counts.Verification, counts.Error, counts.Artifact} {
+		if value > maxWireInteger {
+			return false
+		}
+	}
+	return true
+}
 func reconcileCoverage(coverage Coverage) bool {
+	if !validCoverage(coverage) {
+		return false
+	}
 	total, ok := checkedSum(coverage.Indexed, coverage.Collapsed, coverage.Unprojected, coverage.Undecodable, coverage.Truncated)
 	return ok && total == coverage.Seen
 }
@@ -52,6 +82,9 @@ func Validate(document Document) error {
 	}
 	if len(document.Sessions) > 65536 {
 		return errors.New("too many sessions")
+	}
+	if !validIndexCoverage(document.Coverage) {
+		return errors.New("session index coverage exceeds wire integer limit")
 	}
 	calculated := IndexCoverage{Total: uint64(len(document.Sessions))}
 	keys := map[SessionKey]bool{}
@@ -83,6 +116,9 @@ func Validate(document Document) error {
 		}
 		if !validTimestamp(entry.StartedAt) || !validTimestamp(entry.EndedAt) || !validOptional(entry.SourceTerminalState, 64) {
 			return fmt.Errorf("invalid session timestamps at %d", index)
+		}
+		if !validOptionalInteger(entry.DurationMS) || entry.WarningCount > maxWireInteger || !validOptionalInteger(entry.RecordCount) || entry.IndexedEventCount > maxWireInteger || !validFactCounts(entry.FactCounts) {
+			return fmt.Errorf("session %s has an integer above the wire limit", entry.SessionID)
 		}
 		if entry.StartedAt != nil {
 			calculated.StartedAtKnown++

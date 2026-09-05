@@ -113,6 +113,50 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	}
 }
 
+func TestV4SchemasBoundEveryPersistedIntegerToJavaScriptSafeMaximum(t *testing.T) {
+	names := []string{"review-presentation-v4", "machine-ledger-v4", "session-index-v1", "session-summary-v1", "session-event-page-v1", "agent-annotation-v1", "pricing-snapshot-v1", "pricing-supplement-v1", "conversation-chain-v1", "problem-map-candidate-v1"}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			schema := readContractJSON(t, filepath.Join("..", "..", "schemas", name+".schema.json"))
+			if err := validateIntegerSchemaMaximum(schema, "$"); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func validateIntegerSchemaMaximum(value any, path string) error {
+	object, ok := value.(map[string]any)
+	if ok {
+		integerType := object["type"] == "integer"
+		if types, typesOK := object["type"].([]any); typesOK {
+			for _, candidate := range types {
+				integerType = integerType || candidate == "integer"
+			}
+		}
+		if integerType {
+			maximum, exists := object["maximum"].(json.Number)
+			if !exists || numberFloat(maximum) > 9007199254740991 {
+				return fmt.Errorf("%s: persisted integer is not bounded to the JavaScript safe maximum", path)
+			}
+		}
+		for key, child := range object {
+			if err := validateIntegerSchemaMaximum(child, path+"."+key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if array, ok := value.([]any); ok {
+		for index, child := range array {
+			if err := validateIntegerSchemaMaximum(child, fmt.Sprintf("%s[%d]", path, index)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func TestV4SchemasAllowHonestUnknownSessionTimesAndLosslessLegacyDecisionStatus(t *testing.T) {
 	indexSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-index-v1.schema.json"))
 	index := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-index-v1.unknown.valid.json"))

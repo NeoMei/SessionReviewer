@@ -37,7 +37,7 @@ func optionalTexts(values *[]string, maximumItems, maximumText int) bool {
 }
 
 func ValidatePresentation(p Presentation) error {
-	if p.SchemaVersion != 4 || p.MinimumReaderVersion != "0.4.0" || p.MinimumWriterVersion != "0.4.0" || !validID(p.ProjectID) || !validID(p.GenerationID) || !digestRE.MatchString(p.ProjectViewDigest) || p.Revision < 0 {
+	if p.SchemaVersion != 4 || p.MinimumReaderVersion != "0.4.0" || p.MinimumWriterVersion != "0.4.0" || !validID(p.ProjectID) || !validID(p.GenerationID) || !digestRE.MatchString(p.ProjectViewDigest) || p.Revision < 0 || int64(p.Revision) > maxWireInteger {
 		return errors.New("invalid review presentation metadata")
 	}
 	for _, value := range []string{p.CurrentState.Goal, p.CurrentState.Stage, p.CurrentState.Status, p.CurrentState.NextAction, p.CurrentState.LastVerification} {
@@ -67,7 +67,7 @@ func ValidatePresentation(p Presentation) error {
 	}
 	decisions := map[string]Decision{}
 	for i, decision := range p.Decisions {
-		if !validID(decision.ID) || len(decision.OccurredAt) > 128 || !text(decision.Title, 16384) || !text(decision.Rationale, 16384) || !text(decision.Impact, 16384) || !optionalText(decision.LegacyStatusText, 16384) || !text(decision.ReevaluateWhen, 16384) || decision.Revision < 1 || len(decision.Supersedes) > 256 || len(decision.MilestoneIDs) > 256 || len(decision.SessionRefs) > 256 {
+		if !validID(decision.ID) || len(decision.OccurredAt) > 128 || !text(decision.Title, 16384) || !text(decision.Rationale, 16384) || !text(decision.Impact, 16384) || !optionalText(decision.LegacyStatusText, 16384) || !text(decision.ReevaluateWhen, 16384) || decision.Revision < 1 || int64(decision.Revision) > maxWireInteger || len(decision.Supersedes) > 256 || len(decision.MilestoneIDs) > 256 || len(decision.SessionRefs) > 256 {
 			return fmt.Errorf("invalid decision %d", i)
 		}
 		if _, exists := decisions[decision.ID]; exists {
@@ -495,14 +495,14 @@ func decisionCycle(decisions map[string]Decision) bool {
 }
 
 func ValidateLedger(l MachineLedger) error {
-	if l.SchemaVersion != 4 || l.MinimumReaderVersion != "0.4.0" || l.MinimumWriterVersion != "0.4.0" || !validID(l.ProjectID) || !validID(l.GenerationID) || !digestRE.MatchString(l.ProjectViewDigest) || l.AcceptedRevision < 0 || !shaRE.MatchString(l.ReviewSHA256) || !shaRE.MatchString(l.HistorySHA256) {
+	if l.SchemaVersion != 4 || l.MinimumReaderVersion != "0.4.0" || l.MinimumWriterVersion != "0.4.0" || !validID(l.ProjectID) || !validID(l.GenerationID) || !digestRE.MatchString(l.ProjectViewDigest) || l.AcceptedRevision < 0 || int64(l.AcceptedRevision) > maxWireInteger || !shaRE.MatchString(l.ReviewSHA256) || !shaRE.MatchString(l.HistorySHA256) {
 		return errors.New("invalid machine ledger metadata")
 	}
 	if len(l.Sessions) > 65536 || len(l.HumanPatches) > 65536 || len(l.OrphanPatches) > 65536 || len(l.GeneratedBaselines) > 65536 || len(l.PricingSnapshots) > 65536 || len(l.CurrentPricingSnapshotIDs) > 65536 || len(l.Accounting.Models) > 256 {
 		return errors.New("machine ledger exceeds array limit")
 	}
-	if !money(l.Accounting.TotalCostUSD) {
-		return errors.New("invalid aggregate cost")
+	if l.Accounting.TotalDurationMS > uint64(maxWireInteger) || l.Accounting.TotalTokens > uint64(maxWireInteger) || !money(l.Accounting.TotalCostUSD) {
+		return errors.New("invalid aggregate accounting")
 	}
 	pricingByID := map[string]pricing.Snapshot{}
 	for _, snapshot := range l.PricingSnapshots {
@@ -522,7 +522,7 @@ func ValidateLedger(l MachineLedger) error {
 	modelCostsComplete := true
 	modelCost := 0.0
 	for _, model := range l.Accounting.Models {
-		if !text(model.Model, 16384) || !money(model.TotalCostUSD) || modelNames[model.Model] {
+		if !text(model.Model, 16384) || model.TotalTokens > uint64(maxWireInteger) || !money(model.TotalCostUSD) || modelNames[model.Model] {
 			return errors.New("invalid or duplicate accounting model")
 		}
 		modelNames[model.Model] = true
