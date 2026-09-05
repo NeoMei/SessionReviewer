@@ -14,13 +14,17 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/publication"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
-var syncProject = syncproject.Run
+var syncProject = defaultSyncProject
+var detectSyncFormat = syncproject.DetectFormat
+var syncMarkdownProject = syncproject.RunMarkdown
 var syncMigrationProject = defaultSyncMigrationProject
 
 const syncHelp = `Synchronize editable Session Review Markdown with the configured Obsidian vault.
@@ -112,7 +116,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return writeDiagnostic(stderr, "sync", err)
 		}
-		report, err := syncProject(context.Background(), syncproject.Options{
+		options := syncproject.Options{
 			ProjectID: *projectID,
 			CWD:       *cwd,
 			DataDir:   absoluteData,
@@ -120,7 +124,8 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 			Now:       time.Now,
 			Trigger:   syncengine.TriggerCLI,
 			DryRun:    *dryRun,
-		})
+		}
+		report, err := syncProject(context.Background(), options)
 		if err != nil {
 			if shouldWriteFailedSyncReport(report) {
 				writeSyncReport(stdout, report)
@@ -187,6 +192,37 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+func defaultSyncProject(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
+	format, err := detectSyncFormat(ctx, options)
+	if err != nil {
+		return syncengine.Report{}, err
+	}
+	switch format {
+	case syncproject.ProjectionMarkdown:
+		return defaultSyncMarkdownProject(ctx, options)
+	case syncproject.ProjectionJSONV4:
+		return syncengine.Report{}, syncproject.ErrMigrationRequired
+	default:
+		return syncproject.Run(ctx, options)
+	}
+}
+
+func defaultSyncMarkdownProject(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
+	_, mapping, _, err := resolveSyncMapping(options.CWD, options.ProjectID, options.DataDir)
+	if err != nil {
+		return syncengine.Report{}, err
+	}
+	publicationOptions := publication.Options{ProjectID: mapping.ID, Mapping: mapping, DataRoot: options.DataDir, Now: options.Now}
+	options.RecoverMarkdown = func(ctx context.Context, owner *publicationlock.Owner) error {
+		return publication.RecoverMarkdownLocked(ctx, publicationOptions, owner)
+	}
+	options.PublishMarkdown = func(ctx context.Context, plan syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) error {
+		_, err := publication.PublishMarkdownEditLocked(ctx, publicationOptions, plan, owner)
+		return err
+	}
+	return syncMarkdownProject(ctx, options)
+}
+
 func explicitMigrationArgs(args []string) bool {
 	hasDryRun, hasJSON := false, false
 	for _, arg := range args {
@@ -215,6 +251,29 @@ func runSyncMigration(args []string, stdout, stderr io.Writer) int {
 	if request.Mode == "confirm-migration" {
 		mode = syncproject.MigrationConfirm
 	}
+	options := syncproject.Options{
+		ProjectID: request.ProjectID, DataDir: dataDir, GOOS: runtime.GOOS,
+		Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: mode == syncproject.MigrationDryRun,
+	}
+	format, err := detectSyncFormat(context.Background(), options)
+	if err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
+	if format == syncproject.ProjectionMarkdown {
+		if mode != syncproject.MigrationDryRun {
+			return writeSyncMigrationError(stderr, errors.New("authenticated Markdown does not require migration confirmation"))
+		}
+		report, err := defaultSyncMarkdownProject(context.Background(), options)
+		if err != nil {
+			return writeSyncMigrationError(stderr, err)
+		}
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(report); err != nil {
+			return writeSyncMigrationError(stderr, err)
+		}
+		return 0
+	}
 	result, err := syncMigrationProject(context.Background(), syncproject.MigrationOptions{
 		Options: syncproject.Options{
 			ProjectID: request.ProjectID, DataDir: dataDir, GOOS: runtime.GOOS,
@@ -234,7 +293,16 @@ func runSyncMigration(args []string, stdout, stderr io.Writer) int {
 }
 
 func defaultSyncMigrationProject(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+	options.Recover = func(ctx context.Context, mapping config.ProjectMapping, dataRoot string, owner *publicationlock.Owner) error {
+		return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: mapping.ID, Mapping: mapping, DataRoot: dataRoot, Now: options.Now}, owner)
+	}
 	options.Publish = func(ctx context.Context, plan syncproject.MigrationPublication) error {
+		if plan.Preview.TargetFormat == migrationv4.FormatMarkdownV1 {
+			_, err := publication.PublishMarkdownMigrationLocked(ctx, publication.Options{
+				ProjectID: plan.ProjectID, Mapping: plan.Mapping, DataRoot: plan.DataRoot, Now: options.Now,
+			}, plan)
+			return err
+		}
 		_, err := publication.PublishLocked(ctx, publication.Options{
 			ProjectID: plan.ProjectID, PreparedGeneration: plan.PreparedGeneration,
 			Plan: plan.Plan, Mapping: plan.Mapping, DataRoot: plan.DataRoot,

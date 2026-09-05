@@ -62,7 +62,17 @@ func MigrationPreviewDigest(preview MigrationPreview) string {
 }
 
 func validatePreview(preview MigrationPreview) error {
-	if preview.SchemaVersion != 1 || preview.SourceVersion != 3 || preview.TargetVersion != 4 || preview.ProjectID == "" || preview.GenerationID == "" || !preview.RequiresSessionIndex {
+	if len(preview.BlockingReasons) != 0 {
+		return errors.New("blocked migration preview is not publishable")
+	}
+	if preview.TargetFormat != "" && (preview.SourceFormat == "" || preview.TargetFormat != FormatMarkdownV1) {
+		return errors.New("invalid migration format route")
+	}
+	validVersionRoute := preview.SourceVersion == 3 && preview.TargetVersion == 4
+	if preview.TargetFormat != "" {
+		validVersionRoute = (preview.SourceVersion == 2 || preview.SourceVersion == 3 || preview.SourceVersion == 4) && preview.TargetVersion == 4
+	}
+	if preview.SchemaVersion != 1 || !validVersionRoute || preview.ProjectID == "" || preview.GenerationID == "" || !preview.RequiresSessionIndex {
 		return errors.New("invalid migration preview metadata")
 	}
 	for _, value := range []string{
@@ -73,6 +83,9 @@ func validatePreview(preview MigrationPreview) error {
 			return errors.New("migration preview contains an invalid artifact hash")
 		}
 	}
+	if preview.TargetFormat != "" && !previewDigestPattern.MatchString(preview.SourceHashes.SessionIndex) {
+		return errors.New("migration preview contains an invalid source index hash")
+	}
 	for _, value := range []string{
 		preview.TargetPreimageHashes.Review, preview.TargetPreimageHashes.History,
 		preview.TargetPreimageHashes.Ledger, preview.TargetPreimageHashes.SessionIndex,
@@ -81,9 +94,37 @@ func validatePreview(preview MigrationPreview) error {
 			return errors.New("migration preview contains an invalid target preimage hash")
 		}
 	}
+	if preview.TargetFormat != "" && preview.VaultPreimageHashes == nil {
+		return errors.New("Markdown migration preview has no Vault preimages")
+	}
+	if preview.VaultPreimageHashes != nil {
+		for _, value := range []string{preview.VaultPreimageHashes.Review, preview.VaultPreimageHashes.History, preview.VaultPreimageHashes.Ledger, preview.VaultPreimageHashes.SessionIndex} {
+			if value != AbsentPreimageSHA256 && !previewDigestPattern.MatchString(value) {
+				return errors.New("migration preview contains an invalid Vault preimage hash")
+			}
+		}
+	}
 	for _, value := range preview.SessionViewDependencyDigests {
 		if !previewDigestPattern.MatchString(value) {
 			return errors.New("migration preview contains an invalid SessionView dependency digest")
+		}
+	}
+	if MigrationPreviewDigest(preview) != preview.PreviewDigest {
+		return errors.New("migration preview digest mismatch")
+	}
+	return nil
+}
+
+func validateBlockedPreview(preview MigrationPreview) error {
+	if preview.SchemaVersion != 1 || preview.ProjectID == "" || preview.SourceFormat == "" || preview.TargetFormat != FormatMarkdownV1 || len(preview.BlockingReasons) == 0 || preview.VaultPreimageHashes == nil {
+		return errors.New("invalid blocked migration preview metadata")
+	}
+	if preview.TargetHashes != (ArtifactHashes{}) {
+		return errors.New("blocked migration preview contains target hashes")
+	}
+	for _, value := range []string{preview.SourceHashes.Review, preview.SourceHashes.History, preview.SourceHashes.Ledger, preview.SourceHashes.SessionIndex} {
+		if value != AbsentPreimageSHA256 && !previewDigestPattern.MatchString(value) {
+			return errors.New("blocked migration preview contains an invalid source hash")
 		}
 	}
 	if MigrationPreviewDigest(preview) != preview.PreviewDigest {
@@ -106,6 +147,25 @@ func normalizePreview(preview *MigrationPreview) {
 	}
 	preview.DefaultedFields = defaults
 	preview.SessionViewDependencyDigests = sortedUnique(preview.SessionViewDependencyDigests)
+	preview.BlockingReasons = sortedUniqueOmitNil(preview.BlockingReasons)
+	if preview.PreservedCustomHashes != nil {
+		preview.PreservedCustomHashes = cloneStringMap(preview.PreservedCustomHashes)
+	}
+}
+
+func sortedUniqueOmitNil(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return sortedUnique(values)
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	result := make(map[string]string, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
 }
 
 func sortedUnique(values []string) []string {

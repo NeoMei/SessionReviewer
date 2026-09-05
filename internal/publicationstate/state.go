@@ -71,39 +71,50 @@ type IndexGuard struct {
 	GenerationID  string `json:"generation_id"`
 }
 
-type Intent struct {
-	Version             int           `json:"version"`
-	Kind                Kind          `json:"kind,omitempty"`
-	ProjectID           string        `json:"project_id"`
-	GenerationID        string        `json:"generation_id"`
-	ManifestDigest      string        `json:"manifest_digest"`
-	ProjectViewDigest   string        `json:"project_view_digest"`
-	RevisionID          string        `json:"revision_id,omitempty"`
-	Stage               Stage         `json:"stage"`
-	Outcome             Outcome       `json:"outcome,omitempty"`
-	CreatedAt           time.Time     `json:"created_at"`
-	Destinations        []Destination `json:"destinations"`
-	IndexGuard          *IndexGuard   `json:"index_guard,omitempty"`
-	BasePreimageDigest  string        `json:"base_preimage_digest,omitempty"`
-	BaseReviewPreimage  string        `json:"base_review_preimage_sha256,omitempty"`
-	BaseHistoryPreimage string        `json:"base_history_preimage_sha256,omitempty"`
-	BaseDesiredDigest   string        `json:"base_desired_digest,omitempty"`
-	RequiresPointer     bool          `json:"requires_pointer,omitempty"`
-	PointerPreimage     *string       `json:"pointer_preimage_generation_id,omitempty"`
-}
-
-type AcceptedReceipt struct {
-	Version           int           `json:"version"`
-	ProjectID         string        `json:"project_id"`
+type MigrationSourceProof struct {
 	GenerationID      string        `json:"generation_id"`
 	ManifestDigest    string        `json:"manifest_digest"`
 	ProjectViewDigest string        `json:"project_view_digest"`
-	RevisionID        string        `json:"revision_id"`
+	IndexDigest       string        `json:"index_digest"`
+	JournalDigest     string        `json:"journal_digest"`
 	Destinations      []Destination `json:"destinations"`
-	IndexGuard        *IndexGuard   `json:"index_guard,omitempty"`
-	BaseDigest        string        `json:"base_digest"`
-	RequiresPointer   bool          `json:"requires_pointer,omitempty"`
-	PointerPreimage   *string       `json:"pointer_preimage_generation_id,omitempty"`
+}
+
+type Intent struct {
+	Version             int                   `json:"version"`
+	Kind                Kind                  `json:"kind,omitempty"`
+	ProjectID           string                `json:"project_id"`
+	GenerationID        string                `json:"generation_id"`
+	ManifestDigest      string                `json:"manifest_digest"`
+	ProjectViewDigest   string                `json:"project_view_digest"`
+	RevisionID          string                `json:"revision_id,omitempty"`
+	Stage               Stage                 `json:"stage"`
+	Outcome             Outcome               `json:"outcome,omitempty"`
+	CreatedAt           time.Time             `json:"created_at"`
+	Destinations        []Destination         `json:"destinations"`
+	IndexGuard          *IndexGuard           `json:"index_guard,omitempty"`
+	BasePreimageDigest  string                `json:"base_preimage_digest,omitempty"`
+	BaseReviewPreimage  string                `json:"base_review_preimage_sha256,omitempty"`
+	BaseHistoryPreimage string                `json:"base_history_preimage_sha256,omitempty"`
+	BaseDesiredDigest   string                `json:"base_desired_digest,omitempty"`
+	RequiresPointer     bool                  `json:"requires_pointer,omitempty"`
+	PointerPreimage     *string               `json:"pointer_preimage_generation_id,omitempty"`
+	MigrationSource     *MigrationSourceProof `json:"migration_source,omitempty"`
+}
+
+type AcceptedReceipt struct {
+	Version           int                   `json:"version"`
+	ProjectID         string                `json:"project_id"`
+	GenerationID      string                `json:"generation_id"`
+	ManifestDigest    string                `json:"manifest_digest"`
+	ProjectViewDigest string                `json:"project_view_digest"`
+	RevisionID        string                `json:"revision_id"`
+	Destinations      []Destination         `json:"destinations"`
+	IndexGuard        *IndexGuard           `json:"index_guard,omitempty"`
+	BaseDigest        string                `json:"base_digest"`
+	RequiresPointer   bool                  `json:"requires_pointer,omitempty"`
+	PointerPreimage   *string               `json:"pointer_preimage_generation_id,omitempty"`
+	MigrationSource   *MigrationSourceProof `json:"migration_source,omitempty"`
 }
 
 var (
@@ -119,7 +130,8 @@ func MarkdownRevisionID(intent Intent) string {
 		IndexGuard                                                 *IndexGuard
 		BaseDesiredDigest                                          string
 		RequiresPointer                                            bool
-		PointerPreimage                                            *string `json:"PointerPreimage,omitempty"`
+		PointerPreimage                                            *string               `json:"PointerPreimage,omitempty"`
+		MigrationSource                                            *MigrationSourceProof `json:"MigrationSource,omitempty"`
 	}
 	body, err := canonical(revision{
 		ProjectID: intent.ProjectID, GenerationID: intent.GenerationID,
@@ -127,6 +139,7 @@ func MarkdownRevisionID(intent Intent) string {
 		Destinations: intent.Destinations, IndexGuard: intent.IndexGuard,
 		BaseDesiredDigest: intent.BaseDesiredDigest, RequiresPointer: intent.RequiresPointer,
 		PointerPreimage: cloneString(intent.PointerPreimage),
+		MigrationSource: cloneMigrationSource(intent.MigrationSource),
 	})
 	if err != nil {
 		return ""
@@ -148,6 +161,7 @@ func ReceiptFromIntent(intent Intent) (AcceptedReceipt, error) {
 		RevisionID: intent.RevisionID, Destinations: cloneDestinations(intent.Destinations),
 		IndexGuard: cloneGuard(intent.IndexGuard), BaseDigest: intent.BaseDesiredDigest, RequiresPointer: intent.RequiresPointer,
 		PointerPreimage: cloneString(intent.PointerPreimage),
+		MigrationSource: cloneMigrationSource(intent.MigrationSource),
 	}, nil
 }
 
@@ -278,7 +292,7 @@ func ValidateIntent(intent Intent, projectID string) error {
 		return errors.New("invalid publication intent identity")
 	}
 	if intent.Version == 1 {
-		if intent.Kind != "" || intent.RevisionID != "" || intent.Outcome != "" || intent.IndexGuard != nil || intent.BasePreimageDigest != "" || intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "" || intent.BaseDesiredDigest != "" || intent.RequiresPointer || intent.PointerPreimage != nil {
+		if intent.Kind != "" || intent.RevisionID != "" || intent.Outcome != "" || intent.IndexGuard != nil || intent.BasePreimageDigest != "" || intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "" || intent.BaseDesiredDigest != "" || intent.RequiresPointer || intent.PointerPreimage != nil || intent.MigrationSource != nil {
 			return errors.New("legacy journal contains v2 fields")
 		}
 		if intent.Stage != StagePrepared && intent.Stage != StageProjectWritten && intent.Stage != StageVaultSynced && intent.Stage != StageVerified && intent.Stage != StageCommitted && intent.Stage != StageRollbackRequired {
@@ -295,6 +309,9 @@ func ValidateIntent(intent Intent, projectID string) error {
 		}
 	} else if intent.PointerPreimage != nil {
 		return errors.New("unexpected Markdown pointer preimage")
+	}
+	if err := validateMigrationSourceProof(intent.MigrationSource, intent.RequiresPointer, intent.GenerationID, intent.ManifestDigest, intent.ProjectViewDigest, intent.IndexGuard.Digest); err != nil {
+		return err
 	}
 	if (intent.BasePreimageDigest == "" && (intent.BaseReviewPreimage != "" || intent.BaseHistoryPreimage != "")) ||
 		(intent.BasePreimageDigest != "" && (!bareHashPattern.MatchString(intent.BaseReviewPreimage) || !bareHashPattern.MatchString(intent.BaseHistoryPreimage))) {
@@ -332,11 +349,36 @@ func ValidateReceipt(receipt AcceptedReceipt, projectID string) error {
 	} else if receipt.PointerPreimage != nil {
 		return errors.New("unexpected accepted Markdown pointer preimage")
 	}
-	probe := Intent{ProjectID: receipt.ProjectID, GenerationID: receipt.GenerationID, ManifestDigest: receipt.ManifestDigest, ProjectViewDigest: receipt.ProjectViewDigest, Destinations: receipt.Destinations, IndexGuard: receipt.IndexGuard, BaseDesiredDigest: receipt.BaseDigest, RequiresPointer: receipt.RequiresPointer, PointerPreimage: cloneString(receipt.PointerPreimage)}
+	if err := validateMigrationSourceProof(receipt.MigrationSource, receipt.RequiresPointer, receipt.GenerationID, receipt.ManifestDigest, receipt.ProjectViewDigest, receipt.IndexGuard.Digest); err != nil {
+		return err
+	}
+	probe := Intent{ProjectID: receipt.ProjectID, GenerationID: receipt.GenerationID, ManifestDigest: receipt.ManifestDigest, ProjectViewDigest: receipt.ProjectViewDigest, Destinations: receipt.Destinations, IndexGuard: receipt.IndexGuard, BaseDesiredDigest: receipt.BaseDigest, RequiresPointer: receipt.RequiresPointer, PointerPreimage: cloneString(receipt.PointerPreimage), MigrationSource: cloneMigrationSource(receipt.MigrationSource)}
 	if MarkdownRevisionID(probe) != receipt.RevisionID {
 		return errors.New("accepted Markdown receipt digest mismatch")
 	}
 	return nil
+}
+
+func validateMigrationSourceProof(proof *MigrationSourceProof, requiresPointer bool, generationID, manifestDigest, projectViewDigest, indexDigest string) error {
+	if proof == nil {
+		return nil
+	}
+	if !requiresPointer || !idPattern.MatchString(proof.GenerationID) || !digestPattern.MatchString(proof.ManifestDigest) || !digestPattern.MatchString(proof.ProjectViewDigest) || !digestPattern.MatchString(proof.IndexDigest) || !digestPattern.MatchString(proof.JournalDigest) || len(proof.Destinations) == 0 || validateDestinations(proof.Destinations) != nil {
+		return errors.New("invalid Markdown migration source proof")
+	}
+	if proof.GenerationID == generationID && (proof.ManifestDigest != manifestDigest || proof.ProjectViewDigest != projectViewDigest || proof.IndexDigest != indexDigest) {
+		return errors.New("invalid Markdown migration source proof")
+	}
+	return nil
+}
+
+func cloneMigrationSource(source *MigrationSourceProof) *MigrationSourceProof {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.Destinations = cloneDestinations(source.Destinations)
+	return &clone
 }
 
 func validateGuard(guard *IndexGuard, generation string) error {

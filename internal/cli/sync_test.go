@@ -3,8 +3,10 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,13 +16,367 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/publication"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
+
+// Removing format detection or the Markdown publisher/recoverer injection
+// would route an authenticated Markdown project into the legacy v2 engine.
+func TestSyncCLISelectsMarkdownServiceWithRealFormatFiles(t *testing.T) {
+	originalDetect, originalMarkdown := detectSyncFormat, syncMarkdownProject
+	t.Cleanup(func() { detectSyncFormat, syncMarkdownProject = originalDetect, originalMarkdown })
+	fixture := newCLIFormatFixture(t, "project-p", "v4/markdown")
+	called := 0
+	syncMarkdownProject = func(_ context.Context, options syncproject.Options) (syncengine.Report, error) {
+		called++
+		if options.PublishMarkdown == nil || options.RecoverMarkdown == nil {
+			t.Fatal("CLI omitted real Markdown publication callbacks")
+		}
+		return syncengine.Report{ProjectID: fixture.projectID, DryRun: true}, nil
+	}
+	var stdout, stderr bytes.Buffer
+	report, err := defaultSyncProject(t.Context(), syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: true})
+	code := 0
+	if err != nil {
+		code = 1
+	}
+	if code != 0 || called != 1 || stderr.Len() != 0 {
+		t.Fatalf("code=%d markdown_calls=%d report=%+v stdout=%q stderr=%q", code, called, report, stdout.String(), stderr.String())
+	}
+}
+
+// Each supported on-disk generation must reach its own service boundary. In
+// particular, a present v2/v3 ledger is not malformed v4, and old JSON v4 is
+// not an editable Markdown projection merely because both use .md paths.
+func TestSyncCLIClassifiesEachRealProjectionFormat(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		fixture func(*testing.T) cliSyncFixture
+		want    syncproject.ProjectionFormat
+	}{
+		{name: "legacy", fixture: newCLILegacySyncFixture, want: syncproject.ProjectionLegacy},
+		{name: "v2", fixture: newCLISyncFixture, want: syncproject.ProjectionV2},
+		{name: "v3", fixture: newCLIV3FormatFixture, want: syncproject.ProjectionV3},
+		{name: "old v4 JSON", fixture: newCLIOldV4Fixture, want: syncproject.ProjectionJSONV4},
+		{name: "Markdown", fixture: newCLIAuthenticatedMarkdownFixture, want: syncproject.ProjectionMarkdown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := test.fixture(t)
+			format, err := syncproject.DetectFormat(t.Context(), syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data, GOOS: runtime.GOOS, Trigger: syncengine.TriggerCLI})
+			if err != nil || format != test.want {
+				t.Fatalf("format=%q want=%q err=%v", format, test.want, err)
+			}
+		})
+	}
+}
+
+// This is the actual CLI-to-service-to-publication path. Replacing it with a
+// route fake would miss draft detection, receipt/Base authentication, and the
+// Project/Vault transaction.
+func TestSyncCLIExecutesAuthenticatedMarkdownPublication(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	vaultReviewPath := filepath.Join(fixture.vault, "Projects", "Markdown", "Session Review", "项目回顾.md")
+	beforeIndex, err := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "session-index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review = bytes.Replace(review, []byte("authenticated Markdown migration"), []byte("human CLI edit"), 1)
+	if err := os.WriteFile(reviewPath, review, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	format, err := syncproject.DetectFormat(t.Context(), syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data})
+	if err != nil || format != syncproject.ProjectionMarkdown {
+		t.Fatalf("edited Markdown format=%q err=%v", format, err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	projectReview, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultReview, err := os.ReadFile(vaultReviewPath)
+	if err != nil || !bytes.Equal(projectReview, vaultReview) || !bytes.Contains(projectReview, []byte("human CLI edit")) {
+		t.Fatalf("Project/Vault Markdown publication mismatch: err=%v", err)
+	}
+	afterIndex, err := os.ReadFile(filepath.Join(fixture.project, "docs", "session-review", ".session-reviewer", "session-index.json"))
+	if err != nil || !bytes.Equal(beforeIndex, afterIndex) {
+		t.Fatalf("human CLI edit changed index: err=%v", err)
+	}
+}
+
+// --dry-run --json is a presentation choice, not permission to send an
+// already-authenticated Markdown project through the legacy migration builder.
+func TestSyncCLIJSONDryRunRoutesAuthenticatedMarkdownToReadOnlySync(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	before := snapshotCLITree(t, filepath.Dir(fixture.data))
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--dry-run", "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var report syncengine.Report
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil || !report.DryRun || report.ProjectID != fixture.projectID {
+		t.Fatalf("report=%+v err=%v raw=%q", report, err, stdout.String())
+	}
+	if after := snapshotCLITree(t, filepath.Dir(fixture.data)); after != before {
+		t.Fatal("Markdown JSON dry-run mutated fixture trees")
+	}
+}
+
+func TestSyncCLIMarkdownLegacyWriteModesFailClosed(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	for _, args := range [][]string{
+		{"sync", "resolve", "--conflict", "missing-conflict", "--action", "accept_project", "--project-id", fixture.projectID, "--data-dir", fixture.data},
+		{"sync", "repair-machine-ledger", "--project-id", fixture.projectID, "--data-dir", fixture.data},
+	} {
+		before := snapshotCLITree(t, filepath.Dir(fixture.data))
+		var stdout, stderr bytes.Buffer
+		if code := Run(args, &stdout, &stderr); code == 0 || snapshotCLITree(t, filepath.Dir(fixture.data)) != before {
+			t.Fatalf("legacy mode did not fail closed: args=%v code=%d stdout=%q stderr=%q", args, code, stdout.String(), stderr.String())
+		}
+	}
+}
+
+// This executes the public command contract all the way through the dedicated
+// legacy-to-Markdown publisher. A mocked migration service would not prove the
+// Project/Vault atom, accepted receipt, merge Base, or post-migration routing.
+func TestSyncCLIOldV4DryRunThenConfirmPublishesAuthenticatedMarkdown(t *testing.T) {
+	fixture := newCLIOldV4Fixture(t)
+	fixtureRoot := filepath.Dir(fixture.data)
+	before := snapshotCLITree(t, fixtureRoot)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--dry-run", "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("dry-run code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var dryRun syncproject.MigrationResult
+	if err := json.Unmarshal(stdout.Bytes(), &dryRun); err != nil || dryRun.Applied || dryRun.Preview.SourceFormat != migrationv4.FormatJSONV4 || dryRun.Preview.TargetFormat != migrationv4.FormatMarkdownV1 || dryRun.Preview.PreviewDigest == "" {
+		t.Fatalf("dry-run=%+v err=%v raw=%q", dryRun, err, stdout.String())
+	}
+	if after := snapshotCLITree(t, fixtureRoot); after != before {
+		t.Fatal("old-v4 migration dry-run mutated fixture trees")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"sync", "--confirm-migration", "--expected-preview-digest", dryRun.Preview.PreviewDigest, "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("confirm code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	var confirmed syncproject.MigrationResult
+	if err := json.Unmarshal(stdout.Bytes(), &confirmed); err != nil || !confirmed.Applied || confirmed.Preview.PreviewDigest != dryRun.Preview.PreviewDigest {
+		t.Fatalf("confirmed=%+v err=%v raw=%q", confirmed, err, stdout.String())
+	}
+	format, err := syncproject.DetectFormat(t.Context(), syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data})
+	if err != nil || format != syncproject.ProjectionMarkdown {
+		t.Fatalf("confirmed format=%q err=%v", format, err)
+	}
+
+	readAccepted := func(root, prefix string) reviewv4.Accepted {
+		t.Helper()
+		read := func(relative string) []byte {
+			path := filepath.Join(root, filepath.FromSlash(filepath.Join(prefix, strings.TrimPrefix(relative, "docs/session-review/"))))
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			return body
+		}
+		accepted, loadErr := reviewv4.LoadProjection(read(migrationv4.ReviewRelativePath), read(migrationv4.HistoryRelativePath), read(migrationv4.LedgerRelativePath), read(migrationv4.SessionIndexRelativePath))
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		return accepted
+	}
+	projectAccepted := readAccepted(fixture.project, "docs/session-review")
+	vaultAccepted := readAccepted(fixture.vault, "Projects/Markdown/Session Review")
+	if projectAccepted.Ledger.DocumentProjection == nil || vaultAccepted.Ledger.DocumentProjection == nil || projectAccepted.Ledger.AcceptedRevision != vaultAccepted.Ledger.AcceptedRevision {
+		t.Fatalf("confirmed projections are not the same accepted Markdown revision")
+	}
+	state, err := publicationstate.OpenReadOnly(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, receiptErr := state.Accepted()
+	if closeErr := state.Close(); receiptErr != nil || closeErr != nil {
+		t.Fatalf("accepted receipt err=%v close=%v", receiptErr, closeErr)
+	}
+	projectData, err := os.OpenRoot(filepath.Join(fixture.data, "projects", fixture.projectID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, found, baseErr := (syncengine.BaseStore{Root: projectData}).Load(syncengine.MarkdownBaseEntityID)
+	if closeErr := projectData.Close(); baseErr != nil || closeErr != nil || !found || receipt.BaseDigest != base.ContentHash {
+		t.Fatalf("accepted Base found=%t receipt=%q base=%q err=%v close=%v", found, receipt.BaseDigest, base.ContentHash, baseErr, closeErr)
+	}
+
+	beforeNoop := snapshotCLITree(t, fixtureRoot)
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 || snapshotCLITree(t, fixtureRoot) != beforeNoop {
+		t.Fatalf("post-migration no-op code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
+
+// A crash after the first Project destination can leave a mixed public set.
+// CLI restart must authenticate the active Markdown intent and reach recovery
+// before trying to classify the four current bytes as one accepted format.
+func TestSyncCLIRestartRecoversInterruptedMarkdownEditBeforeFormatDetection(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	reviewPath := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	review, err := os.ReadFile(reviewPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review = bytes.Replace(review, []byte("authenticated Markdown migration"), []byte("recoverable CLI edit"), 1)
+	if err := os.WriteFile(reviewPath, review, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var plan syncproject.MarkdownSyncPlan
+	options := syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI,
+		RecoverMarkdown: func(context.Context, *publicationlock.Owner) error { return nil },
+		PublishMarkdown: func(_ context.Context, next syncproject.MarkdownSyncPlan, _ *publicationlock.Owner) error {
+			plan = next
+			return nil
+		},
+	}
+	if _, err := syncproject.RunMarkdown(t.Context(), options); err != nil || len(plan.Plan.Files) == 0 {
+		t.Fatalf("capture edit plan files=%d err=%v", len(plan.Plan.Files), err)
+	}
+	mapping := config.ProjectMapping{ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault, VaultReviewPath: "Projects/Markdown/Session Review", VaultCaseMode: platform.CaseSensitive}
+	vaultLedgerPath := filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(mapping.VaultReviewPath, strings.TrimPrefix(reviewv2.MachineLedgerRelativePath, "docs/session-review/"))))
+	vaultLedgerBefore, err := os.ReadFile(vaultLedgerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desiredLedger []byte
+	for _, file := range plan.Plan.Files {
+		if file.Relative == reviewv2.MachineLedgerRelativePath {
+			desiredLedger = bytes.Clone(file.Desired)
+		}
+	}
+	if len(desiredLedger) == 0 {
+		t.Fatal("captured edit plan has no ledger destination")
+	}
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("simulated CLI process crash")
+	func() {
+		defer func() {
+			if recovered := recover(); !errors.Is(recovered.(error), failure) {
+				t.Fatalf("publication panic=%v", recovered)
+			}
+		}()
+		_, _ = publication.PublishMarkdownEditLocked(t.Context(), publication.Options{
+			ProjectID: fixture.projectID, Mapping: mapping, DataRoot: fixture.data, Now: time.Now,
+			AfterDestination: func(side, relative string) error {
+				if side == "project" && relative == reviewv2.MachineLedgerRelativePath {
+					panic(failure)
+				}
+				return nil
+			},
+		}, plan, owner)
+	}()
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := publicationstate.OpenReadOnly(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, intentErr := state.Intent()
+	if closeErr := state.Close(); intentErr != nil || closeErr != nil || intent.Stage == publicationstate.StageCommitted {
+		t.Fatalf("active intent stage=%q intentErr=%v closeErr=%v", intent.Stage, intentErr, closeErr)
+	}
+	projectLedger, err := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
+	if err != nil || !bytes.Equal(projectLedger, desiredLedger) {
+		t.Fatalf("Project ledger did not reach next bytes: err=%v", err)
+	}
+	vaultLedger, err := os.ReadFile(vaultLedgerPath)
+	if err != nil || !bytes.Equal(vaultLedger, vaultLedgerBefore) {
+		t.Fatalf("Vault ledger changed before crash recovery: err=%v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("restart code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	projectReview, err := os.ReadFile(reviewPath)
+	if err != nil || !bytes.Contains(projectReview, []byte("recoverable CLI edit")) {
+		t.Fatalf("recovered edit missing err=%v", err)
+	}
+	loadProjection := func(root, prefix string) reviewv4.Accepted {
+		t.Helper()
+		read := func(relative string) []byte {
+			path := filepath.Join(root, filepath.FromSlash(filepath.Join(prefix, strings.TrimPrefix(relative, "docs/session-review/"))))
+			body, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			return body
+		}
+		accepted, loadErr := reviewv4.LoadProjection(
+			read(reviewv2.ReviewRelativePath), read(reviewv2.HistoryRelativePath),
+			read(reviewv2.MachineLedgerRelativePath), read("docs/session-review/.session-reviewer/session-index.json"),
+		)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		return accepted
+	}
+	projectAccepted := loadProjection(fixture.project, "docs/session-review")
+	vaultAccepted := loadProjection(fixture.vault, mapping.VaultReviewPath)
+	if projectAccepted.Review.GenerationID != vaultAccepted.Review.GenerationID || projectAccepted.Ledger.AcceptedRevision != vaultAccepted.Ledger.AcceptedRevision || projectAccepted.Ledger.SyncHashes != vaultAccepted.Ledger.SyncHashes {
+		t.Fatalf("recovered projections differ: project=%q vault=%q", projectAccepted.Review.GenerationID, vaultAccepted.Review.GenerationID)
+	}
+	state, err = publicationstate.OpenReadOnly(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt, receiptErr := state.Accepted()
+	if closeErr := state.Close(); receiptErr != nil || closeErr != nil {
+		t.Fatalf("accepted receipt err=%v close=%v", receiptErr, closeErr)
+	}
+	projectData, err := os.OpenRoot(filepath.Join(fixture.data, "projects", fixture.projectID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, found, baseErr := (syncengine.BaseStore{Root: projectData}).Load(syncengine.MarkdownBaseEntityID)
+	if closeErr := projectData.Close(); baseErr != nil || closeErr != nil || !found || receipt.BaseDigest != base.ContentHash {
+		t.Fatalf("accepted Base found=%t receipt=%q base=%q err=%v close=%v", found, receipt.BaseDigest, base.ContentHash, baseErr, closeErr)
+	}
+	beforeNoop := snapshotCLITree(t, filepath.Dir(fixture.data))
+	stdout.Reset()
+	stderr.Reset()
+	code = Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr)
+	if code != 0 || stderr.Len() != 0 || snapshotCLITree(t, filepath.Dir(fixture.data)) != beforeNoop {
+		t.Fatalf("authenticated no-op code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
 
 // Reconstructing the engine in the command, resolving the platform data root
 // inside the service, or moving report formatting out of the CLI breaks this
@@ -65,7 +421,13 @@ func TestSyncProjectServiceCLIDelegationPreservesFormatting(t *testing.T) {
 func TestRunSyncMigrationModesUseInjectableServiceAndJSON(t *testing.T) {
 	originalMigration := syncMigrationProject
 	originalSync := syncProject
-	t.Cleanup(func() { syncMigrationProject, syncProject = originalMigration, originalSync })
+	originalDetect := detectSyncFormat
+	t.Cleanup(func() {
+		syncMigrationProject, syncProject, detectSyncFormat = originalMigration, originalSync, originalDetect
+	})
+	detectSyncFormat = func(context.Context, syncproject.Options) (syncproject.ProjectionFormat, error) {
+		return syncproject.ProjectionV3, nil
+	}
 	syncProject = func(context.Context, syncproject.Options) (syncengine.Report, error) {
 		t.Fatal("explicit migration mode reached ordinary sync")
 		return syncengine.Report{}, nil
@@ -103,7 +465,11 @@ func TestRunSyncMigrationModesUseInjectableServiceAndJSON(t *testing.T) {
 
 func TestRunSyncMigrationStaleIsOneStableJSONObject(t *testing.T) {
 	original := syncMigrationProject
-	t.Cleanup(func() { syncMigrationProject = original })
+	originalDetect := detectSyncFormat
+	t.Cleanup(func() { syncMigrationProject, detectSyncFormat = original, originalDetect })
+	detectSyncFormat = func(context.Context, syncproject.Options) (syncproject.ProjectionFormat, error) {
+		return syncproject.ProjectionV3, nil
+	}
 	syncMigrationProject = func(context.Context, syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
 		return syncproject.MigrationResult{}, syncproject.ErrMigrationPreviewStale
 	}
@@ -507,6 +873,246 @@ func TestRunSyncReturnsFailureForUnassociatedMalformedDocument(t *testing.T) {
 }
 
 type cliSyncFixture struct{ project, vault, data, projectID string }
+
+func newCLIFormatFixture(t *testing.T, projectID, fixtureRelative string) cliSyncFixture {
+	t.Helper()
+	root := t.TempDir()
+	fixture := cliSyncFixture{project: filepath.Join(root, "project"), vault: filepath.Join(root, "vault"), data: filepath.Join(root, "data"), projectID: projectID}
+	reviewRoot := filepath.Join(fixture.project, "docs", "session-review")
+	if err := os.MkdirAll(reviewRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fixture.vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{
+		filepath.Join(fixture.data, "projects", projectID, "merge-bases"),
+		filepath.Join(fixture.data, "projects", projectID, "queue"),
+		filepath.Join(fixture.data, "projects", projectID, "transactions"),
+		filepath.Join(fixture.data, "projects", projectID, "locks"),
+	} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for source, target := range map[string]string{
+		"review.md": "项目回顾.md", "history.md": "项目历史.md",
+		"ledger.json": filepath.Join(".session-reviewer", "ledger.json"),
+		"index.json":  filepath.Join(".session-reviewer", "session-index.json"),
+	} {
+		body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", fixtureRelative, source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(reviewRoot, target)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: projectID, Root: fixture.project, VaultRoot: fixture.vault,
+		VaultReviewPath: "Projects/Format/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func newCLIAuthenticatedMarkdownFixture(t *testing.T) cliSyncFixture {
+	return newCLIV4PublicationFixture(t, true)
+}
+
+func newCLIV3FormatFixture(t *testing.T) cliSyncFixture {
+	t.Helper()
+	root := t.TempDir()
+	fixture := cliSyncFixture{project: filepath.Join(root, "project"), vault: filepath.Join(root, "vault"), data: filepath.Join(root, "data"), projectID: "project-v3-format"}
+	for _, directory := range []string{fixture.project, fixture.vault, filepath.Join(fixture.data, "projects", fixture.projectID)} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault,
+		VaultReviewPath: "Projects/V3/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	generationID := "generation-v3-format"
+	reviewModel := reviewv2.Review{
+		ProjectID: fixture.projectID, GenerationID: generationID, MinimumWriterVersion: reviewv2.MinimumWriterVersion,
+		Revision: 1, Name: "V3", Goal: "classify v3", Stage: "implementation", Status: "active", NextAction: "migrate", LastVerification: "2026-09-05",
+		Risks: []reviewv2.Risk{}, Decisions: []reviewv2.Decision{},
+	}
+	review, err := reviewv2.RenderReviewV3(reviewModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := reviewv2.RenderHistoryV3(fixture.projectID, 1, generationID, []reviewv2.Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine, err := reviewv2.RenderMachineLedgerV3(reviewv2.MachineLedgerV3{
+		SchemaVersion: 3, MinimumWriterVersion: reviewv2.MinimumWriterVersion,
+		ProjectID: fixture.projectID, GenerationID: generationID, ProjectViewDigest: strings.Repeat("d", 64), AcceptedRevision: 1,
+		ReviewSHA256: testBareSHA(review), HistorySHA256: testBareSHA(history), Sessions: []ledger.SessionReport{},
+		HumanPatches: []reviewv2.HumanPatchWire{}, OrphanPatches: []reviewv2.HumanPatchWire{}, GeneratedBaselines: []reviewv2.GeneratedBaselineWire{},
+		LegacyCompatibility: reviewv2.LegacyCompatibility{Timeline: []ledger.TimelineEvent{}, Decisions: []ledger.Decision{}, OpenLoops: []ledger.OpenLoop{}, CurrentRisks: []reviewv2.CurrentRiskProvenance{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for relative, body := range map[string][]byte{reviewv2.ReviewRelativePath: review, reviewv2.HistoryRelativePath: history, reviewv2.MachineLedgerRelativePath: machine} {
+		path := filepath.Join(fixture.project, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return fixture
+}
+
+func newCLIOldV4Fixture(t *testing.T) cliSyncFixture {
+	return newCLIV4PublicationFixture(t, false)
+}
+
+func newCLIV4PublicationFixture(t *testing.T, publishMarkdown bool) cliSyncFixture {
+	t.Helper()
+	root := t.TempDir()
+	fixture := cliSyncFixture{project: filepath.Join(root, "project"), vault: filepath.Join(root, "vault"), data: filepath.Join(root, "data"), projectID: "project-markdown-cli"}
+	if err := os.MkdirAll(fixture.project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(fixture.vault, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mapping := config.ProjectMapping{ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault, VaultReviewPath: "Projects/Markdown/Session Review", VaultCaseMode: platform.CaseSensitive}
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
+	}
+	store, err := memorystore.Open(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	probe := memory.ProjectProbeState{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID, CanonicalRoot: "/private/project", Branch: "main",
+		Head: strings.Repeat("a", 40), DirtyPathCount: 0, RemoteIdentityHashes: []string{}, VersionFiles: []memory.ProbeFile{},
+		RequiredProjectionFiles: []memory.ProbeFile{}, ProbeVersion: "v1", Diagnostics: []memory.Diagnostic{},
+	}
+	probe.Digest, err = memory.ProjectProbeStateDigest(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProbeState(probe); err != nil {
+		t.Fatal(err)
+	}
+	projectView := memory.ProjectView{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID, Generation: 1,
+		StartedAt: "2026-09-05T00:00:00Z", EndedAt: "2026-09-05T00:00:00Z", SourceSessions: 0,
+		TerminalCounts: memory.TerminalCounts{}, SessionViewDependencies: []memory.SessionViewDependency{}, ObservationRevisionIDs: []string{},
+		ProbeStateDigest: probe.Digest, LiveState: memory.StateSnapshot{Branch: probe.Branch, Head: probe.Head}, WitnessedState: []memory.DerivedRecord{}, DerivedRecords: []memory.DerivedRecord{},
+		AggregationCoverage: memory.ProjectAggregationCoverage{}, AssociatedUsage: []memory.AssociatedUsage{}, DependencyDigest: "sha256:" + strings.Repeat("2", 64), ReducerVersion: "v1",
+	}
+	projectView.Digest, err = memory.ProjectViewDigest(projectView)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(projectView); err != nil {
+		t.Fatal(err)
+	}
+	manifest := memory.GenerationManifest{
+		SchemaVersion: memory.MemorySchemaVersion, GenerationID: "generation-markdown-cli", ProjectID: fixture.projectID, CreatedAt: projectView.EndedAt,
+		SourceRecordDigests: []string{}, SessionViews: []memory.SessionViewDependency{}, SessionLineages: []memory.SessionLineageDependency{},
+		ProbeStateDigest: projectView.ProbeStateDigest, ProbeCheck: memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: projectView.EndedAt, StateDigest: projectView.ProbeStateDigest, Available: true, Diagnostics: []memory.Diagnostic{}},
+		ProjectViewDigest: projectView.Digest,
+	}
+	generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: projectView, Manifest: manifest, SessionViews: map[sessionindex.SessionKey]*memory.SessionView{}, GeneratedAt: generatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexDigest, err := store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SessionIndexDigest = indexDigest
+	prepared, err := store.PrepareGeneration(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectOutput, err := presentation.Project(presentation.ProjectInput{ProjectView: projectView, GenerationID: manifest.GenerationID, Revision: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPlan, err := presentation.Render(presentation.ProjectInput{ProjectView: projectView, GenerationID: manifest.GenerationID, Revision: 1}, projectOutput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRelative := make(map[string]presentation.FilePlan, len(legacyPlan.Files))
+	for _, file := range legacyPlan.Files {
+		byRelative[file.Relative] = file
+	}
+	indexBody, err := sessionindex.Render(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldV4, err := migrationv4.BuildPreview(migrationv4.Input{
+		Review: byRelative[reviewv2.ReviewRelativePath].Desired, History: byRelative[reviewv2.HistoryRelativePath].Desired,
+		Ledger: byRelative[reviewv2.MachineLedgerRelativePath].Desired, SessionIndex: indexBody,
+		GenerationID: manifest.GenerationID, TargetPreimages: map[string]migrationv4.Preimage{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAccepted, err := reviewv4.LoadProjection(oldV4.Review, oldV4.History, oldV4.Ledger, oldV4.SessionIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAccepted.Review.CurrentState.Goal = "authenticated Markdown migration"
+	oldV4.Review, err = strictjson.Encode(oldAccepted.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAccepted.Ledger.ReviewSHA256 = testBareSHA(oldV4.Review)
+	oldAccepted.Ledger.SyncHashes.ReviewSHA256 = oldAccepted.Ledger.ReviewSHA256
+	oldV4.Ledger, err = reviewv4.RenderLedger(oldAccepted.Ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := oldV4
+	if publishMarkdown {
+		target, err = migrationv4.BuildMarkdownPreview(migrationv4.MarkdownMigrationInput{Source: migrationv4.Input{
+			Review: oldV4.Review, History: oldV4.History, Ledger: oldV4.Ledger, SourceSessionIndex: indexBody, SessionIndex: indexBody,
+			TargetPreimages: map[string]migrationv4.Preimage{}, TargetVaultPreimages: map[string]migrationv4.Preimage{},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	plan := presentation.RenderPlan{ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, ProjectViewDigest: manifest.ProjectViewDigest, Files: []presentation.FilePlan{
+		{Relative: reviewv2.ReviewRelativePath, Desired: target.Review, Mode: 0o600},
+		{Relative: reviewv2.HistoryRelativePath, Desired: target.History, Mode: 0o600},
+		{Relative: reviewv2.MachineLedgerRelativePath, Desired: target.Ledger, Mode: 0o600},
+		{Relative: "docs/session-review/.session-reviewer/session-index.json", Desired: target.SessionIndex, Mode: 0o600},
+	}}
+	if _, err := publication.Publish(t.Context(), publication.Options{ProjectID: fixture.projectID, PreparedGeneration: prepared.GenerationID, Plan: plan, Mapping: mapping, DataRoot: fixture.data, Now: time.Now}); err != nil {
+		t.Fatal(err)
+	}
+	return fixture
+}
+
+func testBareSHA(body []byte) string {
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum)
+}
 
 func newCLISyncFixture(t *testing.T) cliSyncFixture {
 	t.Helper()

@@ -29,7 +29,8 @@ import (
 
 func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T) {
 	fixture := newMigrationServiceFixture(t)
-	preview := migrationv4.MigrationPreview{PreviewDigest: "sha256:" + strings.Repeat("1", 64)}
+	hash := "sha256:" + strings.Repeat("1", 64)
+	preview := migrationv4.MigrationPreview{PreviewDigest: hash, TargetHashes: migrationv4.ArtifactHashes{Review: hash, History: hash, Ledger: hash, SessionIndex: hash}}
 	buildCalls := 0
 	publishCalls := 0
 	options := MigrationOptions{
@@ -38,11 +39,20 @@ func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T
 		build: func(pin *MappingPin) (migrationv4.Result, error) {
 			buildCalls++
 			contender, err := publicationlock.Acquire(pin.data.Path, pin.mapping.ID, 0)
-			if contender != nil {
-				_ = contender.Release()
-			}
-			if !errors.Is(err, project.ErrProjectLocked) {
-				t.Fatalf("preview recomputation ran without publication lock: %v", err)
+			if buildCalls == 1 {
+				if err != nil {
+					t.Fatalf("dry-run unexpectedly held publication lock: %v", err)
+				}
+				if err := contender.Release(); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if contender != nil {
+					_ = contender.Release()
+				}
+				if !errors.Is(err, project.ErrProjectLocked) {
+					t.Fatalf("confirmation recomputation ran without publication lock: %v", err)
+				}
 			}
 			return migrationv4.Result{Preview: preview}, nil
 		},
@@ -87,11 +97,12 @@ func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T
 func TestSyncProjectMigrationConfirmationRejectsRecomputedStaleDigest(t *testing.T) {
 	fixture := newMigrationServiceFixture(t)
 	want := "sha256:" + strings.Repeat("1", 64)
+	complete := migrationv4.ArtifactHashes{Review: want, History: want, Ledger: want, SessionIndex: want}
 	options := MigrationOptions{
 		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
 		Mode:    MigrationConfirm, ExpectedPreviewDigest: want,
 		build: func(*MappingPin) (migrationv4.Result, error) {
-			return migrationv4.Result{Preview: migrationv4.MigrationPreview{PreviewDigest: "sha256:" + strings.Repeat("2", 64)}}, nil
+			return migrationv4.Result{Preview: migrationv4.MigrationPreview{PreviewDigest: "sha256:" + strings.Repeat("2", 64), TargetHashes: complete}}, nil
 		},
 		Publish: func(context.Context, MigrationPublication) error {
 			t.Fatal("stale preview reached publisher")
@@ -100,6 +111,66 @@ func TestSyncProjectMigrationConfirmationRejectsRecomputedStaleDigest(t *testing
 	}
 	if _, err := RunMigration(t.Context(), options); !errors.Is(err, ErrMigrationPreviewStale) {
 		t.Fatalf("RunMigration error = %v", err)
+	}
+}
+
+// Checking only the digest would let an informative blocked preview reach the
+// publisher. Confirmation must reject the state before invoking any writer.
+func TestMarkdownMigrationConfirmationRejectsBlockedPreviewEvenWithExactDigest(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	digest := "sha256:" + strings.Repeat("1", 64)
+	preview := migrationv4.MigrationPreview{
+		SchemaVersion: 1, SourceVersion: 3, TargetVersion: 4,
+		ProjectID: fixture.projectID, GenerationID: "generation-1", RequiresSessionIndex: true,
+		SourceFormat: migrationv4.FormatMarkdownV3, TargetFormat: migrationv4.FormatMarkdownV1,
+		BlockingReasons: []string{"verified_conversation_chain_required"}, PreviewDigest: digest,
+	}
+	_, err := RunMigration(t.Context(), MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationConfirm, ExpectedPreviewDigest: digest,
+		build: func(*MappingPin) (migrationv4.Result, error) {
+			return migrationv4.Result{Preview: preview}, nil
+		},
+		Publish: func(context.Context, MigrationPublication) error {
+			t.Fatal("blocked preview reached publisher")
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "blocked") {
+		t.Fatalf("blocked confirmation error = %v", err)
+	}
+}
+
+func TestMarkdownMigrationConfirmationRejectsEachMissingTargetHash(t *testing.T) {
+	for _, missing := range []string{"review", "history", "ledger", "session-index"} {
+		t.Run(missing, func(t *testing.T) {
+			fixture := newMigrationServiceFixture(t)
+			hash := "sha256:" + strings.Repeat("1", 64)
+			target := migrationv4.ArtifactHashes{Review: hash, History: hash, Ledger: hash, SessionIndex: hash}
+			switch missing {
+			case "review":
+				target.Review = ""
+			case "history":
+				target.History = ""
+			case "ledger":
+				target.Ledger = ""
+			case "session-index":
+				target.SessionIndex = ""
+			}
+			preview := migrationv4.MigrationPreview{PreviewDigest: hash, TargetHashes: target}
+			_, err := RunMigration(t.Context(), MigrationOptions{
+				Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+				Mode:    MigrationConfirm, ExpectedPreviewDigest: hash,
+				build: func(*MappingPin) (migrationv4.Result, error) { return migrationv4.Result{Preview: preview}, nil },
+				Publish: func(context.Context, MigrationPublication) error {
+					t.Fatal("incomplete target reached publisher")
+					return nil
+				},
+			})
+			if err == nil || !strings.Contains(err.Error(), "blocked") {
+				t.Fatalf("missing %s target hash error=%v", missing, err)
+			}
+		})
 	}
 }
 
@@ -127,7 +198,7 @@ func TestSyncProjectPlainV3RequiresExplicitMigration(t *testing.T) {
 	}
 }
 
-func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
+func TestSyncProjectBlocksLegacyPreparedGenerationWithoutVerifiedChains(t *testing.T) {
 	fixture := newMigrationServiceFixture(t)
 	manifest := seedMigrationPreparedGeneration(t, fixture)
 	before := snapshotMigrationPublicFiles(t, fixture)
@@ -138,7 +209,7 @@ func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if dry.Applied || dry.Preview.ProjectID != fixture.projectID || dry.Preview.GenerationID != manifest.GenerationID || dry.Preview.TargetPreimageHashes.SessionIndex != migrationv4.AbsentPreimageSHA256 {
+	if dry.Applied || dry.Preview.ProjectID != fixture.projectID || dry.Preview.GenerationID != manifest.GenerationID || dry.Preview.TargetPreimageHashes.SessionIndex != migrationv4.AbsentPreimageSHA256 || len(dry.Preview.BlockingReasons) == 0 {
 		t.Fatalf("dry migration = %+v", dry)
 	}
 	if after := snapshotMigrationPublicFiles(t, fixture); !reflect.DeepEqual(before, after) {
@@ -146,7 +217,7 @@ func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
 	}
 
 	published := 0
-	confirmed, err := RunMigration(t.Context(), MigrationOptions{
+	_, err = RunMigration(t.Context(), MigrationOptions{
 		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
 		Mode:    MigrationConfirm, ExpectedPreviewDigest: dry.Preview.PreviewDigest,
 		Publish: func(_ context.Context, publication MigrationPublication) error {
@@ -166,9 +237,68 @@ func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
 			return nil
 		},
 	})
-	if err != nil || !confirmed.Applied || published != 1 || confirmed.Preview.PreviewDigest != dry.Preview.PreviewDigest {
-		t.Fatalf("confirmed=%+v published=%d err=%v", confirmed, published, err)
+	if err == nil || !strings.Contains(err.Error(), "blocked") || published != 0 {
+		t.Fatalf("published=%d err=%v", published, err)
 	}
+}
+
+// A Markdown migration preview is a read-only observation: lock files,
+// journals, immutable objects, and public files must all remain byte-identical.
+func TestMarkdownMigrationDryRunDoesNotCreateLocksOrMutateAnyTree(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	seedMigrationPreparedGeneration(t, fixture)
+	if err := os.Remove(filepath.Join(fixture.data, "projects", fixture.projectID, "locks", "sync.lock")); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotMigrationTrees(t, fixture)
+	result, err := RunMigration(t.Context(), MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationDryRun,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Preview.BlockingReasons) == 0 {
+		t.Fatalf("legacy dry-run was not explicitly blocked: %+v", result.Preview)
+	}
+	if after := snapshotMigrationTrees(t, fixture); !reflect.DeepEqual(before, after) {
+		t.Fatalf("dry-run mutated Project/Vault/private trees:\n before=%v\n after=%v", before, after)
+	}
+}
+
+func snapshotMigrationTrees(t *testing.T, fixture migrationServiceFixture) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	for label, root := range map[string]string{"project": fixture.project, "vault": fixture.vault, "data": fixture.data} {
+		err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+			key := label + "/" + filepath.ToSlash(relative)
+			if entry.IsDir() {
+				result[key] = "dir:" + info.Mode().String()
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			result[key] = fmt.Sprintf("file:%s:%x", info.Mode().String(), sha256.Sum256(body))
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
 }
 
 func TestMigrationSessionIndexPreservesUnknownTimestamps(t *testing.T) {

@@ -22,6 +22,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -45,6 +46,7 @@ type Options struct {
 	markdownVaultExpected   map[string][]byte
 	markdownReceiptRevision string
 	markdownBaseDigest      string
+	migrationSource         *publicationstate.MigrationSourceProof
 
 	checkpoint             func(publishCheckpoint, string, string) error
 	publicationLockTimeout time.Duration
@@ -435,6 +437,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 			return Result{}, err
 		}
 		intent.BaseDesiredDigest = desiredBase.ContentHash
+		intent.MigrationSource = opts.migrationSource
 		intent.RevisionID = MarkdownRevisionID(intent)
 	}
 	if err := j.Create(intent); err != nil {

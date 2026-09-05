@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -95,6 +97,156 @@ func PublishMarkdownScan(ctx context.Context, opts Options, scan syncproject.Mar
 	}
 	defer func() { retErr = errors.Join(retErr, owner.Release()) }()
 	return PublishMarkdownScanLocked(ctx, opts, scan, owner)
+}
+
+// PublishMarkdownMigrationLocked adapts an authenticated accepted legacy
+// generation into the existing four-file Markdown transaction. Source proof
+// is verified before the prepared pointer can advance.
+func PublishMarkdownMigrationLocked(ctx context.Context, opts Options, migration syncproject.MigrationPublication) (Result, error) {
+	if migration.PublicationLock == nil || migration.Preview.SourceJournalDigest == "" || migration.Preview.SourceGenerationID == "" || migration.Preview.SourceManifestDigest == "" || migration.Preview.TargetManifestDigest == "" {
+		return Result{}, errors.New("Markdown migration requires authenticated source proof")
+	}
+	state, err := publicationstate.OpenReadOnly(migration.DataRoot, migration.ProjectID)
+	if err != nil {
+		return Result{}, err
+	}
+	currentIntent, intentErr := state.Intent()
+	closeErr := state.Close()
+	if intentErr != nil || closeErr != nil {
+		return Result{}, errors.Join(intentErr, closeErr)
+	}
+	proof, err := migrationSourceProof(currentIntent, migration)
+	if err != nil {
+		return Result{}, err
+	}
+	store, err := memorystore.Open(migration.DataRoot, migration.ProjectID)
+	if err != nil {
+		return Result{}, err
+	}
+	defer store.Close()
+	publishedID, sourceManifest, err := store.LoadPublished()
+	if err != nil {
+		return Result{}, err
+	}
+	sourceDigest, err := memory.Digest(sourceManifest)
+	if err != nil || publishedID != proof.GenerationID || sourceDigest != proof.ManifestDigest || sourceManifest.ProjectViewDigest != proof.ProjectViewDigest || (sourceManifest.SessionIndexDigest != "" && proof.IndexDigest != sourceManifest.SessionIndexDigest) {
+		return Result{}, errors.Join(fmt.Errorf("Markdown migration source no longer matches published generation: published=%q proof_generation=%q manifest=%q proof_manifest=%q project=%q proof_project=%q public_index_hash=%q private_index_digest=%q", publishedID, proof.GenerationID, sourceDigest, proof.ManifestDigest, sourceManifest.ProjectViewDigest, proof.ProjectViewDigest, migration.Preview.SourceHashes.SessionIndex, sourceManifest.SessionIndexDigest), err)
+	}
+	targetManifest := sourceManifest
+	targetDigest := sourceDigest
+	if migration.SuccessorManifest != nil {
+		targetManifest = *migration.SuccessorManifest
+		targetDigest, err = memory.Digest(targetManifest)
+		if err != nil {
+			return Result{}, err
+		}
+	}
+	if targetManifest.GenerationID != migration.PreparedGeneration || targetDigest != migration.Preview.TargetManifestDigest || targetManifest.SessionIndexDigest == "" {
+		return Result{}, errors.New("Markdown migration target manifest mismatch")
+	}
+	var targetIndex []byte
+	for _, file := range migration.Plan.Files {
+		if file.Relative == sessionIndexRelativePath {
+			targetIndex = bytes.Clone(file.Desired)
+		}
+	}
+	parsedTargetIndex, err := sessionindex.Parse(targetIndex)
+	if err != nil || parsedTargetIndex.Digest != targetManifest.SessionIndexDigest || parsedTargetIndex.GenerationID != targetManifest.GenerationID {
+		return Result{}, errors.Join(errors.New("Markdown migration target index proof mismatch"), err)
+	}
+	if migration.SuccessorManifest != nil {
+		storedIndexDigest, err := store.PutSessionIndex(parsedTargetIndex)
+		if err != nil || storedIndexDigest != targetManifest.SessionIndexDigest {
+			return Result{}, errors.Join(errors.New("store Markdown migration target index"), err)
+		}
+	}
+	prepared, _, err := store.LoadPrepared()
+	if err != nil {
+		return Result{}, err
+	}
+	targetPrepared := memorystore.Prepared{GenerationID: targetManifest.GenerationID, ManifestDigest: targetDigest, ProjectViewDigest: targetManifest.ProjectViewDigest}
+	if prepared != targetPrepared {
+		if migration.SuccessorManifest == nil {
+			return Result{}, errors.New("Markdown migration source generation is not prepared")
+		}
+		sourcePrepared := memorystore.Prepared{GenerationID: sourceManifest.GenerationID, ManifestDigest: sourceDigest, ProjectViewDigest: sourceManifest.ProjectViewDigest}
+		if prepared != sourcePrepared {
+			return Result{}, errors.New("Markdown migration found unrelated prepared generation")
+		}
+		if _, err := store.AdvancePrepared(sourcePrepared, targetManifest); err != nil {
+			return Result{}, err
+		}
+	}
+	opts.ProjectID, opts.PreparedGeneration, opts.Plan, opts.Mapping, opts.DataRoot = migration.ProjectID, migration.PreparedGeneration, migration.Plan, migration.Mapping, migration.DataRoot
+	opts.markdownIndex, opts.markdownIndexDigest = targetIndex, targetManifest.SessionIndexDigest
+	opts.markdownVaultExpected = migration.VaultExpected
+	opts.migrationSource = &proof
+	return PublishLocked(ctx, opts, migration.PublicationLock)
+}
+
+func migrationSourceProof(intent Intent, migration syncproject.MigrationPublication) (publicationstate.MigrationSourceProof, error) {
+	if intent.Version == 2 && intent.Stage == StageCommitted && intent.Outcome == OutcomeRolledBack && intent.MigrationSource != nil {
+		proof := *intent.MigrationSource
+		if proof.JournalDigest != migration.Preview.SourceJournalDigest || proof.GenerationID != migration.Preview.SourceGenerationID || proof.ManifestDigest != migration.Preview.SourceManifestDigest || !migrationProofMatchesPreimages(proof, migration) {
+			return publicationstate.MigrationSourceProof{}, errors.New("rolled-back Markdown migration source proof changed")
+		}
+		return proof, nil
+	}
+	digest, err := memory.Digest(intent)
+	if err != nil || intent.Version != 1 || intent.Stage != StageCommitted || digest != migration.Preview.SourceJournalDigest || intent.GenerationID != migration.Preview.SourceGenerationID || intent.ManifestDigest != migration.Preview.SourceManifestDigest {
+		return publicationstate.MigrationSourceProof{}, errors.Join(errors.New("legacy source publication journal changed"), err)
+	}
+	proof := publicationstate.MigrationSourceProof{GenerationID: intent.GenerationID, ManifestDigest: intent.ManifestDigest, ProjectViewDigest: intent.ProjectViewDigest, JournalDigest: digest, Destinations: append([]Destination(nil), intent.Destinations...)}
+	if store, openErr := memorystore.OpenReadOnly(migration.DataRoot, migration.ProjectID); openErr == nil {
+		_, sourceManifest, loadErr := store.LoadPublished()
+		closeErr := store.Close()
+		if loadErr != nil || closeErr != nil {
+			return publicationstate.MigrationSourceProof{}, errors.Join(loadErr, closeErr)
+		}
+		proof.IndexDigest = sourceManifest.SessionIndexDigest
+		if proof.IndexDigest == "" {
+			for _, file := range migration.Plan.Files {
+				if file.Relative != sessionIndexRelativePath || !file.ExpectedExists {
+					continue
+				}
+				index, parseErr := sessionindex.Parse(file.Expected)
+				if parseErr != nil {
+					return publicationstate.MigrationSourceProof{}, parseErr
+				}
+				proof.IndexDigest = index.Digest
+			}
+		}
+	} else {
+		return publicationstate.MigrationSourceProof{}, openErr
+	}
+	if !migrationProofMatchesPreimages(proof, migration) {
+		return publicationstate.MigrationSourceProof{}, errors.New("legacy source journal does not match exact migration preimages")
+	}
+	return proof, nil
+}
+
+func migrationProofMatchesPreimages(proof publicationstate.MigrationSourceProof, migration syncproject.MigrationPublication) bool {
+	want := make(map[string]string, len(migration.Plan.Files)*2)
+	for _, file := range migration.Plan.Files {
+		if !file.ExpectedExists {
+			return false
+		}
+		want["project\x00"+file.Relative] = sha256Hex(file.Expected)
+		vault, ok := migration.VaultExpected[file.Relative]
+		if !ok || vault == nil {
+			return false
+		}
+		want["vault\x00"+vaultRelativePath(migration.Mapping.VaultReviewPath, file.Relative)] = sha256Hex(vault)
+	}
+	if len(want) != len(proof.Destinations) {
+		return false
+	}
+	for _, destination := range proof.Destinations {
+		if want[destination.Side+"\x00"+destination.Relative] != destination.DesiredSHA256 {
+			return false
+		}
+	}
+	return true
 }
 
 // RecoverMarkdownLocked resolves an unfinished human-edit intent before

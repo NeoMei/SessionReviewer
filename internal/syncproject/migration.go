@@ -1,12 +1,17 @@
 package syncproject
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/config"
@@ -16,6 +21,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
@@ -39,17 +45,21 @@ type MigrationPublication struct {
 	DataRoot           string
 	Preview            migrationv4.MigrationPreview
 	PublicationLock    *publicationlock.Owner
+	SuccessorManifest  *memory.GenerationManifest
+	VaultExpected      map[string][]byte
 
 	syncDataRoot *os.Root
 }
 
 type MigrationPublisher func(context.Context, MigrationPublication) error
+type MigrationRecoverer func(context.Context, config.ProjectMapping, string, *publicationlock.Owner) error
 
 type MigrationOptions struct {
 	Options
 	Mode                  MigrationMode
 	ExpectedPreviewDigest string
 	Publish               MigrationPublisher
+	Recover               MigrationRecoverer
 
 	build func(*MappingPin) (migrationv4.Result, error)
 }
@@ -77,30 +87,51 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 		return MigrationResult{}, err
 	}
 	defer func() { retErr = errors.Join(retErr, pin.Close()) }()
+	build := options.build
+	if build == nil {
+		build = buildMigrationFromPin
+	}
+	if options.Mode == MigrationDryRun {
+		if err := pin.verify(options.Options); err != nil {
+			return MigrationResult{}, err
+		}
+		plan, err := build(pin)
+		if err != nil {
+			return MigrationResult{}, fmt.Errorf("build v4 migration preview: %w", err)
+		}
+		if err := pin.verify(options.Options); err != nil {
+			return MigrationResult{}, err
+		}
+		return MigrationResult{Preview: plan.Preview}, nil
+	}
 	publicationOwner, err := publicationlock.Acquire(pin.data.Path, pin.mapping.ID, 10*time.Second)
 	if err != nil {
 		return MigrationResult{}, errors.New("public projection is locked or unsafe")
 	}
 	defer func() { retErr = errors.Join(retErr, publicationOwner.Release()) }()
+	if err := pin.syncData.EnsureDirectory("locks", 0o700); err != nil {
+		return MigrationResult{}, fmt.Errorf("initialize migration sync lock directory: %w", err)
+	}
 	lock, err := project.AcquireProjectLock(pin.syncData.Root, "locks/sync.lock", 10*time.Second)
 	if err != nil {
-		return MigrationResult{}, errors.New("sync project is locked or unsafe")
+		return MigrationResult{}, fmt.Errorf("sync project is locked or unsafe: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
+	if options.Recover != nil {
+		if err := options.Recover(ctx, pin.mapping, pin.data.Path, publicationOwner); err != nil {
+			return MigrationResult{}, err
+		}
+	}
 	if err := pin.verify(options.Options); err != nil {
 		return MigrationResult{}, err
-	}
-	build := options.build
-	if build == nil {
-		build = buildMigrationFromPin
 	}
 	plan, err := build(pin)
 	if err != nil {
 		return MigrationResult{}, fmt.Errorf("build v4 migration preview: %w", err)
 	}
 	result := MigrationResult{Preview: plan.Preview}
-	if options.Mode == MigrationDryRun {
-		return result, nil
+	if len(plan.Preview.BlockingReasons) != 0 || !completeMigrationTargetHashes(plan.Preview.TargetHashes) {
+		return MigrationResult{}, errors.New("blocked migration preview cannot be confirmed")
 	}
 	if plan.Preview.PreviewDigest != options.ExpectedPreviewDigest {
 		return MigrationResult{}, ErrMigrationPreviewStale
@@ -119,8 +150,10 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 			Files:             migrationFilePlan(plan),
 		},
 		Mapping: pin.mapping, DataRoot: pin.data.Path, Preview: plan.Preview,
-		PublicationLock: publicationOwner,
-		syncDataRoot:    pin.syncData.Root,
+		PublicationLock:   publicationOwner,
+		SuccessorManifest: plan.SuccessorManifest,
+		VaultExpected:     migrationVaultExpected(plan.TargetVaultPreimages),
+		syncDataRoot:      pin.syncData.Root,
 	}
 	if err := options.Publish(ctx, publication); err != nil {
 		return MigrationResult{}, err
@@ -130,6 +163,22 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 	}
 	result.Applied = true
 	return result, nil
+}
+
+func completeMigrationTargetHashes(hashes migrationv4.ArtifactHashes) bool {
+	return hashes.Review != "" && hashes.History != "" && hashes.Ledger != "" && hashes.SessionIndex != ""
+}
+
+func migrationVaultExpected(preimages map[string]migrationv4.Preimage) map[string][]byte {
+	result := make(map[string][]byte, len(preimages))
+	for relative, preimage := range preimages {
+		if preimage.Exists {
+			result[relative] = append([]byte(nil), preimage.Bytes...)
+		} else {
+			result[relative] = nil
+		}
+	}
+	return result
 }
 
 func migrationFilePlan(result migrationv4.Result) []presentation.FilePlan {
@@ -149,6 +198,7 @@ func migrationFilePlan(result migrationv4.Result) []presentation.FilePlan {
 
 func buildMigrationFromPin(pin *MappingPin) (migrationv4.Result, error) {
 	preimages := make(map[string]migrationv4.Preimage, 4)
+	vaultPreimages := make(map[string]migrationv4.Preimage, 4)
 	read := func(relative string, required bool) ([]byte, error) {
 		body, found, err := pin.project.ReadRegularOptional(relative, 64<<20)
 		if err != nil {
@@ -172,30 +222,233 @@ func buildMigrationFromPin(pin *MappingPin) (migrationv4.Result, error) {
 	if err != nil {
 		return migrationv4.Result{}, err
 	}
-	if _, err := read(migrationv4.SessionIndexRelativePath, false); err != nil {
+	indexSource, err := read(migrationv4.SessionIndexRelativePath, false)
+	if err != nil {
 		return migrationv4.Result{}, err
-	} else if preimages[migrationv4.SessionIndexRelativePath].Exists {
-		return migrationv4.Result{}, errors.New("partial v4 projection cannot be migrated")
 	}
 
-	store, err := memorystore.Open(pin.data.Path, pin.mapping.ID)
+	store, err := memorystore.OpenReadOnly(pin.data.Path, pin.mapping.ID)
 	if err != nil {
 		return migrationv4.Result{}, err
 	}
 	defer store.Close()
-	_, manifest, err := store.LoadPrepared()
-	if err != nil {
-		return migrationv4.Result{}, err
+	var prepared memorystore.Prepared
+	var manifest memory.GenerationManifest
+	var successor *migrationv4.BindingSuccessor
+	var sourceManifestDigest string
+	var sourceIndexDigest string
+	var sourceJournalDigest string
+	var sourceIntent publicationstate.Intent
+	var intentErr error
+	if len(indexSource) != 0 {
+		publishedID, publishedManifest, loadErr := store.LoadPublished()
+		if loadErr != nil || publishedID != publishedManifest.GenerationID {
+			return migrationv4.Result{}, errors.Join(errors.New("old v4 migration source is not an accepted published generation"), loadErr)
+		}
+		manifest = publishedManifest
+		manifestDigest, digestErr := memory.Digest(manifest)
+		if digestErr != nil {
+			return migrationv4.Result{}, digestErr
+		}
+		sourceManifestDigest = manifestDigest
+		state, stateErr := publicationstate.OpenReadOnly(pin.data.Path, pin.mapping.ID)
+		if stateErr != nil {
+			return migrationv4.Result{}, stateErr
+		}
+		sourceIntent, intentErr = state.Intent()
+		closeErr := state.Close()
+		if intentErr != nil || closeErr != nil {
+			return migrationv4.Result{}, errors.Join(intentErr, closeErr)
+		}
+		sourceJournalDigest, err = memory.Digest(sourceIntent)
+		if err != nil {
+			return migrationv4.Result{}, err
+		}
+		if sourceIntent.Version == 2 && sourceIntent.Stage == publicationstate.StageCommitted && sourceIntent.Outcome == publicationstate.OutcomeRolledBack && sourceIntent.MigrationSource != nil {
+			sourceJournalDigest = sourceIntent.MigrationSource.JournalDigest
+		}
+		projectViewBody, loadErr := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+		if loadErr != nil {
+			return migrationv4.Result{}, loadErr
+		}
+		var projectView memory.ProjectView
+		if err := json.Unmarshal(projectViewBody, &projectView); err != nil {
+			return migrationv4.Result{}, err
+		}
+		parsedSourceIndex, parseErr := sessionindex.Parse(indexSource)
+		if parseErr != nil {
+			return migrationv4.Result{}, parseErr
+		}
+		if parsedSourceIndex.ProjectID != manifest.ProjectID || parsedSourceIndex.GenerationID != manifest.GenerationID || parsedSourceIndex.ProjectViewDigest != manifest.ProjectViewDigest {
+			return migrationv4.Result{}, errors.New("public source index identity does not match published generation")
+		}
+		sourceIndexDigest = parsedSourceIndex.Digest
+		if manifest.SessionIndexDigest != "" {
+			privateIndexBody, loadErr := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+			if loadErr != nil || !bytes.Equal(privateIndexBody, indexSource) {
+				return migrationv4.Result{}, errors.Join(errors.New("public source index does not match authenticated private object"), loadErr)
+			}
+		} else {
+			views, loadErr := migrationSessionViews(store, manifest)
+			if loadErr != nil {
+				return migrationv4.Result{}, loadErr
+			}
+			built, buildErr := migrationv4.BuildBindingSuccessor(migrationv4.BindingSuccessorInput{
+				SourceManifest: manifest, SourceManifestDigest: manifestDigest,
+				ProjectView: projectView, SessionViews: views, SourceIndex: &parsedSourceIndex,
+			})
+			if buildErr != nil {
+				return migrationv4.Result{}, buildErr
+			}
+			successor = &built
+		}
+	} else {
+		prepared, manifest, err = store.LoadPrepared()
+		if err != nil {
+			return migrationv4.Result{}, err
+		}
 	}
-	index, err := migrationSessionIndex(store, manifest)
-	if err != nil {
-		return migrationv4.Result{}, err
+	index := indexSource
+	if successor != nil {
+		index, err = sessionindex.Render(successor.Index)
+		if err != nil {
+			return migrationv4.Result{}, err
+		}
 	}
-	return migrationv4.BuildPreview(migrationv4.Input{
+	if len(index) == 0 {
+		index, err = migrationSessionIndex(store, manifest)
+		if err != nil {
+			return migrationv4.Result{}, err
+		}
+	}
+	for _, relative := range []string{migrationv4.ReviewRelativePath, migrationv4.HistoryRelativePath, migrationv4.LedgerRelativePath, migrationv4.SessionIndexRelativePath} {
+		vaultRelative := filepath.ToSlash(filepath.Join(pin.mapping.VaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))
+		body, found, readErr := pin.vault.ReadRegularOptional(vaultRelative, 64<<20)
+		if readErr != nil {
+			return migrationv4.Result{}, readErr
+		}
+		vaultPreimages[relative] = migrationv4.Preimage{Exists: found, Bytes: append([]byte(nil), body...)}
+	}
+	if len(indexSource) != 0 {
+		if err := validateMigrationSourceIntent(sourceIntent, pin.mapping, manifest, sourceManifestDigest, sourceIndexDigest, preimages, vaultPreimages); err != nil {
+			return migrationv4.Result{}, err
+		}
+	}
+	result, err := migrationv4.BuildMarkdownPreview(migrationv4.MarkdownMigrationInput{Source: migrationv4.Input{
 		Review: review, History: history, Ledger: ledger, SessionIndex: index,
-		GenerationID: manifest.GenerationID, SessionViewDependencyDigests: manifestSessionDigests(manifest),
-		TargetPreimages: preimages,
-	})
+		SourceSessionIndex: indexSource,
+		GenerationID: func() string {
+			if successor != nil {
+				return successor.Manifest.GenerationID
+			}
+			return manifest.GenerationID
+		}(), SessionViewDependencyDigests: manifestSessionDigests(manifest),
+		SourceManifestDigest: sourceManifestDigest,
+		TargetManifestDigest: func() string {
+			if successor != nil {
+				return successor.TargetManifestDigest
+			}
+			return sourceManifestDigest
+		}(), SourceJournalDigest: sourceJournalDigest,
+		TargetPreimages: preimages, TargetVaultPreimages: vaultPreimages,
+	}})
+	if err != nil {
+		return migrationv4.Result{}, err
+	}
+	if successor != nil {
+		result.SuccessorManifest = &successor.Manifest
+	}
+	for relative, before := range preimages {
+		after, found, readErr := pin.project.ReadRegularOptional(relative, 64<<20)
+		if readErr != nil || found != before.Exists || !bytes.Equal(after, before.Bytes) {
+			return migrationv4.Result{}, errors.Join(ErrMigrationPreviewStale, readErr)
+		}
+	}
+	for relative, before := range vaultPreimages {
+		vaultRelative := filepath.ToSlash(filepath.Join(pin.mapping.VaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))
+		after, found, readErr := pin.vault.ReadRegularOptional(vaultRelative, 64<<20)
+		if readErr != nil || found != before.Exists || !bytes.Equal(after, before.Bytes) {
+			return migrationv4.Result{}, errors.Join(ErrMigrationPreviewStale, readErr)
+		}
+	}
+	if len(indexSource) == 0 {
+		afterPrepared, afterManifest, loadErr := store.LoadPrepared()
+		if loadErr != nil || afterPrepared != prepared || !reflect.DeepEqual(afterManifest, manifest) {
+			return migrationv4.Result{}, errors.Join(ErrMigrationPreviewStale, loadErr)
+		}
+	} else {
+		afterID, afterManifest, loadErr := store.LoadPublished()
+		if loadErr != nil || afterID != manifest.GenerationID || !reflect.DeepEqual(afterManifest, manifest) {
+			return migrationv4.Result{}, errors.Join(ErrMigrationPreviewStale, loadErr)
+		}
+	}
+	return result, nil
+}
+
+func validateMigrationSourceIntent(intent publicationstate.Intent, mapping config.ProjectMapping, manifest memory.GenerationManifest, manifestDigest, sourceIndexDigest string, project, vault map[string]migrationv4.Preimage) error {
+	var destinations []publicationstate.Destination
+	if intent.Version == 1 && intent.Stage == publicationstate.StageCommitted && intent.ProjectID == mapping.ID && intent.GenerationID == manifest.GenerationID && intent.ManifestDigest == manifestDigest && intent.ProjectViewDigest == manifest.ProjectViewDigest {
+		destinations = intent.Destinations
+	} else if intent.Version == 2 && intent.Stage == publicationstate.StageCommitted && intent.Outcome == publicationstate.OutcomeRolledBack && intent.ProjectID == mapping.ID && intent.MigrationSource != nil {
+		proof := intent.MigrationSource
+		if proof.GenerationID != manifest.GenerationID || proof.ManifestDigest != manifestDigest || proof.ProjectViewDigest != manifest.ProjectViewDigest || proof.IndexDigest != sourceIndexDigest {
+			return errors.New("rolled-back migration source proof no longer matches published source")
+		}
+		destinations = proof.Destinations
+	} else {
+		return errors.New("old v4 source has no matching committed publication journal")
+	}
+	want := make(map[string]string, 8)
+	for relative, before := range project {
+		if !before.Exists {
+			return errors.New("old v4 source publication is incomplete")
+		}
+		want["project\x00"+relative] = bareMigrationHash(before.Bytes)
+		vaultRelative := filepath.ToSlash(filepath.Join(mapping.VaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))
+		vaultBefore := vault[relative]
+		if !vaultBefore.Exists {
+			return errors.New("old v4 Vault source publication is incomplete")
+		}
+		want["vault\x00"+vaultRelative] = bareMigrationHash(vaultBefore.Bytes)
+	}
+	if len(destinations) != len(want) {
+		return errors.New("old v4 source journal destination set is incomplete")
+	}
+	for _, destination := range destinations {
+		if want[destination.Side+"\x00"+destination.Relative] != destination.DesiredSHA256 {
+			return errors.New("old v4 source journal does not authenticate exact public bytes")
+		}
+	}
+	return nil
+}
+
+func bareMigrationHash(body []byte) string {
+	digest := sha256.Sum256(body)
+	return fmt.Sprintf("%x", digest)
+}
+
+func migrationSessionViews(store *memorystore.Store, manifest memory.GenerationManifest) (map[sessionindex.SessionKey]*memory.SessionView, error) {
+	views := make(map[sessionindex.SessionKey]*memory.SessionView, len(manifest.SessionViews))
+	for _, dependency := range manifest.SessionViews {
+		body, err := store.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
+		if err != nil {
+			return nil, err
+		}
+		var view memory.SessionView
+		if err := json.Unmarshal(body, &view); err != nil {
+			return nil, err
+		}
+		key := sessionindex.SessionKey{Provider: dependency.Provider, SessionID: dependency.SessionID}
+		if view.Provider != key.Provider || view.SessionID != key.SessionID || view.ProjectID != manifest.ProjectID || view.Digest != dependency.Digest {
+			return nil, errors.New("authenticated SessionView identity mismatch")
+		}
+		if _, duplicate := views[key]; duplicate {
+			return nil, errors.New("duplicate authenticated SessionView identity")
+		}
+		copy := view
+		views[key] = &copy
+	}
+	return views, nil
 }
 
 func migrationSessionIndex(store *memorystore.Store, manifest memory.GenerationManifest) ([]byte, error) {
