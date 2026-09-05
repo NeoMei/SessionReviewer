@@ -24,6 +24,7 @@ type markdownCorpusCase struct {
 	Index                  string            `json:"index" required:"true"`
 	ExpectedCode           string            `json:"expected_code" required:"true"`
 	ExpectedPrivateBinding *string           `json:"expected_private_binding,omitempty"`
+	ExpectedDocumentCode   *string           `json:"expected_document_code,omitempty"`
 	ExpectedMarkdownCode   *string           `json:"expected_markdown_code,omitempty"`
 	ExpectedFields         map[string]string `json:"expected_fields" required:"true"`
 }
@@ -147,6 +148,14 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 	}
 	foundRevisionMismatch := false
 	for _, testCase := range corpus.Cases {
+		if testCase.ExpectedDocumentCode != nil {
+			if *testCase.ExpectedDocumentCode == "" {
+				t.Fatalf("%s has an empty raw-document diagnostic", testCase.Name)
+			}
+			if _, ok := markdownCodes[*testCase.ExpectedDocumentCode]; !ok {
+				t.Fatalf("%s has an unknown raw-document diagnostic %q", testCase.Name, *testCase.ExpectedDocumentCode)
+			}
+		}
 		if testCase.ExpectedMarkdownCode != nil {
 			if *testCase.ExpectedMarkdownCode == "" {
 				t.Fatalf("%s has an empty parser-specific diagnostic", testCase.Name)

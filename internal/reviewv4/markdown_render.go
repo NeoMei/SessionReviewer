@@ -134,7 +134,7 @@ func renderFreshMarkdownBounded(p Presentation, limit int) (MarkdownPair, error)
 	writeMarkdownFrontmatter(history, "history-"+p.ProjectID, "project-history", p)
 	history.WriteString("# 项目历史\n\n## 里程碑\n")
 	if len(p.Timeline) == 0 {
-		history.WriteString("\n暂无里程碑。\n")
+		history.WriteString("\n已接受的里程碑（如有）列于下方。\n")
 	}
 	for _, item := range p.Timeline {
 		if history.Err() != nil {
@@ -162,7 +162,7 @@ func renderFreshMarkdownBounded(p Presentation, limit int) (MarkdownPair, error)
 func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 	review.WriteString("\n## 决策\n")
 	if len(p.Decisions) == 0 {
-		review.WriteString("\n暂无决策。\n")
+		review.WriteString("\n已接受的决策（如有）列于下方。\n")
 	}
 	for _, item := range p.Decisions {
 		if review.Err() != nil {
@@ -176,7 +176,7 @@ func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 	}
 	review.WriteString("\n## 风险\n")
 	if len(p.Risks) == 0 {
-		review.WriteString("\n暂无风险。\n")
+		review.WriteString("\n已识别的风险（如有）列于下方。\n")
 	}
 	for _, item := range p.Risks {
 		if review.Err() != nil {
@@ -189,7 +189,7 @@ func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 	}
 	review.WriteString("\n## 未决问题\n")
 	if len(p.OpenLoops) == 0 {
-		review.WriteString("\n暂无未决问题。\n")
+		review.WriteString("\n未决问题（如有）列于下方。\n")
 	}
 	for _, item := range p.OpenLoops {
 		if review.Err() != nil {
@@ -204,7 +204,7 @@ func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 	}
 	review.WriteString("\n## 正式问题\n")
 	if len(p.ProblemNodes) == 0 {
-		review.WriteString("\n暂无正式问题。\n")
+		review.WriteString("\n正式问题（如有）列于下方。\n")
 	}
 	for _, item := range p.ProblemNodes {
 		if review.Err() != nil {

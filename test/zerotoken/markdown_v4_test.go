@@ -204,12 +204,23 @@ func runMarkdownV4EndToEnd(t *testing.T, persistentRoot string) {
 			t.Fatalf("%s custom Markdown shell was not preserved", label)
 		}
 	}
+	for _, stale := range []struct {
+		body []byte
+		text string
+	}{{projectReviewBody, "暂无决策。"}, {projectReviewBody, "暂无正式问题。"}, {projectHistoryBody, "暂无里程碑。"}} {
+		if bytes.Contains(stale.body, []byte(stale.text)) {
+			t.Fatalf("accepted entity projection retained contradictory shell text %q", stale.text)
+		}
+	}
 	assertGateBProjectVaultBytesMatch(t, paths)
 
 	// Same inputs, then a later clock, must not rewrite any accepted byte or
 	// mtime. These calls also exercise the recorder on the actual M9 path.
-	runScan("same-input reopen")
 	beforeAudit := readGateBFileSnapshots(t, paths)
+	runScan("same-input reopen")
+	if afterSameInput := readGateBFileSnapshots(t, paths); !reflect.DeepEqual(afterSameInput, beforeAudit) {
+		t.Fatal("same-input reopen changed accepted projection bytes or mtimes")
+	}
 	scanNow = scanNow.Add(time.Minute)
 	runScan("later-clock reopen")
 	if afterAudit := readGateBFileSnapshots(t, paths); !reflect.DeepEqual(afterAudit, beforeAudit) {

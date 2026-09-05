@@ -14,6 +14,7 @@ interface CorpusCase {
   history: string;
   ledger: string;
   expected_code: string;
+  expected_document_code?: string;
   expected_markdown_code?: string;
   expected_fields: Record<string, string>;
 }
@@ -21,6 +22,20 @@ interface CorpusCase {
 const cases = (JSON.parse(read("cases.json")) as { cases: CorpusCase[] }).cases;
 
 describe("v4 human Markdown codec", () => {
+  it("keeps raw-document diagnostics distinct from ledger-backed draft diagnostics", () => {
+    const draftOnly = cases.filter((entry) => entry.expected_markdown_code && !entry.expected_document_code);
+    expect(draftOnly.map((entry) => entry.name)).toEqual([
+      "draft-duplicate-baseline",
+      "draft-invalid-baseline-hash",
+      "draft-baseline-generation-mismatch",
+      "draft-baseline-kind-mismatch",
+      "draft-baseline-value-missing",
+      "draft-baseline-values-present",
+      "draft-duplicate-human-patch",
+      "draft-orphan-patch-collision"
+    ]);
+  });
+
   it.each(cases)("matches the shared corpus for $name", (entry) => {
     let ledger;
     try {

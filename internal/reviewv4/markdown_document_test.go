@@ -297,8 +297,8 @@ func TestMarkdownDocumentSharedCorpusParserOutcomes(t *testing.T) {
 				gotCode = MarkdownCodeOf(historyErr)
 			}
 			wantCode := ""
-			if testCase.ExpectedMarkdownCode != nil {
-				wantCode = *testCase.ExpectedMarkdownCode
+			if testCase.ExpectedDocumentCode != nil {
+				wantCode = *testCase.ExpectedDocumentCode
 			}
 			if gotCode != wantCode {
 				t.Fatalf("Markdown rejection=%q want=%q reviewErr=%v historyErr=%v", gotCode, wantCode, reviewErr, historyErr)

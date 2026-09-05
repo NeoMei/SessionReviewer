@@ -389,6 +389,70 @@ func TestMarkdownRenderAddsNewGenerationEntitiesWhilePreservingPreviousShell(t *
 	}
 }
 
+func TestMarkdownRenderEmptySectionGuidanceStaysTruthfulAfterEntityAppend(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	full := clonePresentation(ledger.DocumentProjection.PresentationBase)
+	empty := clonePresentation(full)
+	empty.Decisions = []Decision{}
+	empty.Risks = []Risk{}
+	empty.OpenLoops = []OpenLoop{}
+	empty.ProblemMapRevision = 0
+	empty.ProblemRootIDs = []string{}
+	empty.ProblemNodes = []ProblemNode{}
+	empty.Timeline = []Timeline{}
+	ledger.DocumentProjection.PresentationBase = empty
+	ledger = bindMarkdownPair(t, ledger, MarkdownPair{})
+
+	fresh, err := RenderMarkdown(empty, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stale := range []string{"暂无里程碑。", "暂无决策。", "暂无风险。", "暂无未决问题。", "暂无正式问题。"} {
+		if bytes.Contains(fresh.Review, []byte(stale)) || bytes.Contains(fresh.History, []byte(stale)) {
+			t.Fatalf("fresh empty shell contains stale-only claim %q", stale)
+		}
+	}
+	for _, durable := range []string{
+		"已接受的里程碑（如有）列于下方。", "已接受的决策（如有）列于下方。", "已识别的风险（如有）列于下方。",
+		"未决问题（如有）列于下方。", "正式问题（如有）列于下方。",
+	} {
+		if !bytes.Contains(fresh.Review, []byte(durable)) && !bytes.Contains(fresh.History, []byte(durable)) {
+			t.Fatalf("fresh empty shell omitted durable guidance %q", durable)
+		}
+	}
+
+	const reviewCustom = "\n## 用户自定义保留\n\n暂无决策。\n暂无正式问题。\n"
+	const historyCustom = "\n## 用户历史保留\n\n暂无里程碑。\n"
+	previous := MarkdownPair{
+		Review:  append(append([]byte{}, fresh.Review...), []byte(reviewCustom)...),
+		History: append(append([]byte{}, fresh.History...), []byte(historyCustom)...),
+	}
+	ledger = bindMarkdownPair(t, ledger, previous)
+	next := clonePresentation(empty)
+	next.Revision++
+	next.Decisions = append(next.Decisions, full.Decisions[0])
+	next.ProblemMapRevision = full.ProblemMapRevision
+	next.ProblemRootIDs = append([]string{}, full.ProblemRootIDs...)
+	next.ProblemNodes = append([]ProblemNode{}, full.ProblemNodes...)
+	next.Timeline = append(next.Timeline, full.Timeline[0])
+
+	updated, err := RenderMarkdown(next, ledger, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(updated.Review, []byte(reviewCustom)) || !bytes.Contains(updated.History, []byte(historyCustom)) {
+		t.Fatal("incremental entity append erased unrelated custom shell bytes")
+	}
+	for _, preserved := range []struct {
+		body []byte
+		text string
+	}{{updated.Review, "暂无决策。"}, {updated.Review, "暂无正式问题。"}, {updated.History, "暂无里程碑。"}} {
+		if count := bytes.Count(preserved.body, []byte(preserved.text)); count != 1 {
+			t.Fatalf("literal user shell %q count=%d want 1", preserved.text, count)
+		}
+	}
+}
+
 func TestMarkdownRenderRejectsRemovingAcceptedEntity(t *testing.T) {
 	ledger := sharedMarkdownLedger(t)
 	base := ledger.DocumentProjection.PresentationBase
