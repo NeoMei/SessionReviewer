@@ -25,7 +25,9 @@ The regression verifies:
 - a `human_confirmed` conclusion without changing machine verification, source
   references, or the formal problem graph;
 - private manifest binding to the public Project view and Session index;
-- byte-identical and mtime-identical same-input and later-clock reopen;
+- byte-identical and mtime-identical later-clock reopen. At this source commit,
+  the snapshot was taken after the same-input reopen, so it did not yet prove an
+  immediate before/after comparison for that first reopen;
 - `ReviewRunTokens == 0` and only the existing allowlisted Git probes through an
   injected deny-by-default recorder.
 
@@ -176,3 +178,70 @@ contract. A reviewed ownership marker or neutral initial wording is required.
 
 The correct handoff remains `DONE_WITH_CONCERNS`; the original Task 3 must not be
 promoted to “implementation and local regression complete.”
+
+## Fix round 1 evidence
+
+Fix commit: `689fe3c` (`fix: keep markdown section guidance truthful`). The
+committed verification artifact itself was introduced in `a797414` and remains in
+this fix range.
+
+The review's four Important findings were addressed as follows:
+
+- The shared corpus now has a distinct optional `expected_document_code` for
+  syntax-only parsing while retaining `expected_markdown_code` for ledger-backed
+  draft/projection validation. The four syntax failures declare both fields; the
+  eight baseline/patch-state cases remain draft-only expectations and still run
+  through `ParseMarkdownDraft` in Go and `parseMarkdownV4` in TypeScript.
+- Fresh empty documents now use neutral durable section guidance, such as
+  `已接受的里程碑（如有）列于下方。`. No generated region, catalog entry, or
+  heuristic deletion was added. A unit regression proves incremental typed entity
+  append keeps the wording truthful and preserves unrelated custom bytes,
+  including literal user-authored copies of the old placeholder strings.
+- The M9 end-to-end regression asserts that the Project review/history contain no
+  contradictory old placeholder beside the seeded decision, problem, and 16
+  milestones.
+- The idempotence regression now snapshots all eight Project/Vault files and
+  mtimes before the same-input reopen, compares immediately afterward, advances
+  `Now`, and compares again.
+
+TDD RED before the renderer edit:
+
+```text
+go test ./internal/reviewv4 -run 'MarkdownDocumentSharedCorpusParserOutcomes|MarkdownRenderEmptySectionGuidance' -count=1
+```
+
+Exit `1`: the semantic split initially exposed the four syntax cases missing
+`expected_document_code`; after those fixture fields were added, the focused run
+failed only because fresh output still contained `暂无里程碑。`.
+
+Focused GREEN on the amended tree:
+
+```text
+go test ./internal/reviewv4 -run 'MarkdownDocumentSharedCorpusParserOutcomes|MarkdownRenderEmptySectionGuidance' -count=1
+```
+
+Exit `0`: `ok github.com/neomei/SessionReviewer/internal/reviewv4 0.412s`.
+
+Covering checks before the fix commit:
+
+- `go test ./internal/reviewv4 -count=1`: exit `0`, `0.378s`.
+- `go test ./test/zerotoken -run '^TestMarkdownV4EndToEnd$' -count=1`:
+  exit `0`, `24.692s`.
+- `go test ./test/zerotoken -run 'MarkdownV4|GateB' -count=1`: exit `0`,
+  `55.076s`.
+- `obsidian-plugin: npm test -- --run tests/markdown-v4.test.ts`: exit `0`,
+  1 file / 44 tests, `480ms`.
+- `git diff --check`: exit `0` before commit.
+
+The original `native-fixture-4357dc1` remains historical evidence and retains its
+unmarked old shell; this fix does not and must not rewrite it heuristically. A
+fresh post-fix fixture is required to demonstrate that newly created documents
+remain noncontradictory through the real scan/sync evolution. Pre-release data
+already rendered with the old unmarked placeholder cannot be distinguished from
+identical user prose, so automatic removal is intentionally unsupported pending
+an explicit migration/ownership decision.
+
+The long stable-HEAD full Go/race/vet/tidy/Gate A/npm sequence is intentionally
+deferred until the scoped re-review confirms this fix. Candidate-plugin approval
+and plugin/no-CLI UI acceptance also remain pending; no plugin acceptance is
+claimed here.
