@@ -227,23 +227,24 @@ type SyncHashes struct {
 	SessionIndexDigest string `json:"session_index_digest" required:"true"`
 }
 type MachineLedger struct {
-	SchemaVersion             int                `json:"schema_version" required:"true"`
-	MinimumReaderVersion      string             `json:"minimum_reader_version" required:"true"`
-	MinimumWriterVersion      string             `json:"minimum_writer_version" required:"true"`
-	ProjectID                 string             `json:"project_id" required:"true"`
-	GenerationID              string             `json:"generation_id" required:"true"`
-	ProjectViewDigest         string             `json:"project_view_digest" required:"true"`
-	AcceptedRevision          int                `json:"accepted_revision" required:"true"`
-	ReviewSHA256              string             `json:"review_sha256" required:"true"`
-	HistorySHA256             string             `json:"history_sha256" required:"true"`
-	Accounting                Accounting         `json:"accounting" required:"true"`
-	Sessions                  []LedgerSession    `json:"sessions" required:"true"`
-	HumanPatches              []Patch            `json:"human_patches" required:"true"`
-	OrphanPatches             []Patch            `json:"orphan_patches" required:"true"`
-	GeneratedBaselines        []Baseline         `json:"generated_baselines" required:"true"`
-	PricingSnapshots          []pricing.Snapshot `json:"pricing_snapshots" required:"true"`
-	CurrentPricingSnapshotIDs []string           `json:"current_pricing_snapshot_ids" required:"true"`
-	SyncHashes                SyncHashes         `json:"sync_hashes" required:"true"`
+	SchemaVersion             int                 `json:"schema_version" required:"true"`
+	MinimumReaderVersion      string              `json:"minimum_reader_version" required:"true"`
+	MinimumWriterVersion      string              `json:"minimum_writer_version" required:"true"`
+	ProjectID                 string              `json:"project_id" required:"true"`
+	GenerationID              string              `json:"generation_id" required:"true"`
+	ProjectViewDigest         string              `json:"project_view_digest" required:"true"`
+	AcceptedRevision          int                 `json:"accepted_revision" required:"true"`
+	ReviewSHA256              string              `json:"review_sha256" required:"true"`
+	HistorySHA256             string              `json:"history_sha256" required:"true"`
+	Accounting                Accounting          `json:"accounting" required:"true"`
+	Sessions                  []LedgerSession     `json:"sessions" required:"true"`
+	HumanPatches              []Patch             `json:"human_patches" required:"true"`
+	OrphanPatches             []Patch             `json:"orphan_patches" required:"true"`
+	GeneratedBaselines        []Baseline          `json:"generated_baselines" required:"true"`
+	PricingSnapshots          []pricing.Snapshot  `json:"pricing_snapshots" required:"true"`
+	CurrentPricingSnapshotIDs []string            `json:"current_pricing_snapshot_ids" required:"true"`
+	DocumentProjection        *DocumentProjection `json:"document_projection,omitempty"`
+	SyncHashes                SyncHashes          `json:"sync_hashes" required:"true"`
 }
 type Accepted struct {
 	Review       Presentation

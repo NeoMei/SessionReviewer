@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "format": "review-markdown-v1",
+  "fields": [
+    { "entity_kind": "project-overview", "name": "goal", "document": "review" },
+    { "entity_kind": "project-overview", "name": "stage", "document": "review" },
+    { "entity_kind": "project-overview", "name": "status", "document": "review" },
+    { "entity_kind": "project-overview", "name": "next_action", "document": "review" },
+    { "entity_kind": "project-overview", "name": "last_verification", "document": "review" },
+    { "entity_kind": "decision", "name": "title", "document": "review" },
+    { "entity_kind": "decision", "name": "rationale", "document": "review" },
+    { "entity_kind": "decision", "name": "impact", "document": "review" },
+    { "entity_kind": "decision", "name": "reevaluate_when", "document": "review" },
+    { "entity_kind": "risk", "name": "title", "document": "review" },
+    { "entity_kind": "risk", "name": "detail", "document": "review" },
+    { "entity_kind": "risk", "name": "status", "document": "review" },
+    { "entity_kind": "open-loop", "name": "title", "document": "review" },
+    { "entity_kind": "open-loop", "name": "question", "document": "review" },
+    { "entity_kind": "open-loop", "name": "next_experiment", "document": "review" },
+    { "entity_kind": "open-loop", "name": "completion_criterion", "document": "review" },
+    { "entity_kind": "open-loop", "name": "status", "document": "review" },
+    { "entity_kind": "problem", "name": "question", "document": "review" },
+    { "entity_kind": "problem", "name": "completion_criterion", "document": "review" },
+    { "entity_kind": "problem", "name": "current_conclusion", "document": "review" },
+    { "entity_kind": "milestone", "name": "title", "document": "history" },
+    { "entity_kind": "milestone", "name": "summary", "document": "history" },
+    { "entity_kind": "milestone", "name": "conclusion", "document": "history" },
+    { "entity_kind": "milestone", "name": "impact_and_follow_up", "document": "history" }
+  ],
+  "generated_regions": [
+    { "entity_kind": "project-overview", "name": "problem-tree", "document": "review" },
+    { "entity_kind": "project-overview", "name": "pinned-decisions", "document": "review" },
+    { "entity_kind": "project-overview", "name": "recent-milestones", "document": "review" },
+    { "entity_kind": "milestone", "name": "evidence", "document": "history" }
+  ]
+}

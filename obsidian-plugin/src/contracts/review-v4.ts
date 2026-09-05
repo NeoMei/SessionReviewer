@@ -267,10 +267,16 @@ export interface SyncHashesV4 {
   session_index_digest: string;
 }
 
+export interface DocumentProjectionV1 {
+  schema_version: 1;
+  format: "review-markdown-v1";
+  presentation_base: ReviewPresentationV4;
+}
+
 export interface MachineLedgerV4 {
   schema_version: 4;
-  minimum_reader_version: "0.4.0";
-  minimum_writer_version: "0.4.0";
+  minimum_reader_version: "0.4.0" | "0.4.1";
+  minimum_writer_version: "0.4.0" | "0.4.1";
   project_id: string;
   generation_id: string;
   project_view_digest: string;
@@ -284,6 +290,7 @@ export interface MachineLedgerV4 {
   generated_baselines: GeneratedBaselineV4[];
   pricing_snapshots: PricingSnapshotV1[];
   current_pricing_snapshot_ids: string[];
+  document_projection?: DocumentProjectionV1;
   sync_hashes: SyncHashesV4;
 }
 

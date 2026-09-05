@@ -1,0 +1,30 @@
+{
+  "schema_version": 4,
+  "minimum_reader_version": "0.4.1",
+  "minimum_writer_version": "0.4.1",
+  "project_id": "project-p",
+  "generation_id": "generation-1",
+  "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "accepted_revision": 1,
+  "review_sha256": "18aa24f1fffd1a7aa978b139d86f3c18cfc8cb3cd38e6f7a409fc33cb99a9dd3",
+  "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
+  "accounting": {
+    "total_duration_ms": 0,
+    "total_tokens": 0,
+    "total_cost_usd": null,
+    "models": []
+  },
+  "sessions": [],
+  "human_patches": [],
+  "orphan_patches": [],
+  "generated_baselines": [],
+  "pricing_snapshots": [],
+  "current_pricing_snapshot_ids": [],
+  "document_projection": null,
+  "sync_hashes": {
+    "review_sha256": "18aa24f1fffd1a7aa978b139d86f3c18cfc8cb3cd38e6f7a409fc33cb99a9dd3",
+    "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
+    "ledger_sha256": "913ed91d59ef92fa0d683a7c5e4879b6ad87524c91b763b5126912a4facb087d",
+    "session_index_digest": "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565"
+  }
+}

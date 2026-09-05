@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -495,8 +496,11 @@ func decisionCycle(decisions map[string]Decision) bool {
 }
 
 func ValidateLedger(l MachineLedger) error {
-	if l.SchemaVersion != 4 || l.MinimumReaderVersion != "0.4.0" || l.MinimumWriterVersion != "0.4.0" || !validID(l.ProjectID) || !validID(l.GenerationID) || !digestRE.MatchString(l.ProjectViewDigest) || l.AcceptedRevision < 0 || int64(l.AcceptedRevision) > maxWireInteger || !shaRE.MatchString(l.ReviewSHA256) || !shaRE.MatchString(l.HistorySHA256) {
+	if l.SchemaVersion != 4 || !validLedgerCapability(l) || !validID(l.ProjectID) || !validID(l.GenerationID) || !digestRE.MatchString(l.ProjectViewDigest) || l.AcceptedRevision < 0 || int64(l.AcceptedRevision) > maxWireInteger || !shaRE.MatchString(l.ReviewSHA256) || !shaRE.MatchString(l.HistorySHA256) {
 		return errors.New("invalid machine ledger metadata")
+	}
+	if err := validateDocumentProjection(l); err != nil {
+		return err
 	}
 	if len(l.Sessions) > 65536 || len(l.HumanPatches) > 65536 || len(l.OrphanPatches) > 65536 || len(l.GeneratedBaselines) > 65536 || len(l.PricingSnapshots) > 65536 || len(l.CurrentPricingSnapshotIDs) > 65536 || len(l.Accounting.Models) > 256 {
 		return errors.New("machine ledger exceeds array limit")
@@ -606,6 +610,34 @@ func ValidateLedger(l MachineLedger) error {
 	}
 	if l.SyncHashes.ReviewSHA256 != l.ReviewSHA256 || l.SyncHashes.HistorySHA256 != l.HistorySHA256 {
 		return errors.New("top-level and synchronization hashes disagree")
+	}
+	return nil
+}
+
+func validLedgerCapability(l MachineLedger) bool {
+	if l.DocumentProjection == nil {
+		return l.MinimumReaderVersion == "0.4.0" && l.MinimumWriterVersion == "0.4.0"
+	}
+	return l.MinimumReaderVersion == "0.4.1" && l.MinimumWriterVersion == "0.4.1"
+}
+
+func validateDocumentProjection(l MachineLedger) error {
+	projection := l.DocumentProjection
+	if projection == nil {
+		return nil
+	}
+	if projection.SchemaVersion != 1 || projection.Format != "review-markdown-v1" {
+		return errors.New("invalid markdown document projection identity")
+	}
+	base := projection.PresentationBase
+	if err := ValidatePresentation(base); err != nil {
+		return fmt.Errorf("invalid markdown presentation base: %w", err)
+	}
+	if base.ProjectID != l.ProjectID || base.GenerationID != l.GenerationID || base.ProjectViewDigest != l.ProjectViewDigest || base.Revision != l.AcceptedRevision {
+		return errors.New("markdown presentation base identity, generation, digest, or revision mismatch")
+	}
+	if !reflect.DeepEqual(base.HumanPatches, l.HumanPatches) || !reflect.DeepEqual(base.OrphanPatches, l.OrphanPatches) || !reflect.DeepEqual(base.GeneratedBaselines, l.GeneratedBaselines) {
+		return errors.New("markdown presentation base patches or baselines mismatch")
 	}
 	return nil
 }

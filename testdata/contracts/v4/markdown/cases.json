@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "format": "review-markdown-v1",
+  "cases": [
+    {
+      "name": "valid-shared-corpus",
+      "review": "review.md",
+      "history": "history.md",
+      "ledger": "ledger.json",
+      "index": "index.json",
+      "expected_code": "",
+      "expected_fields": {
+        "project-overview/goal": "项目目标夹具",
+        "project-overview/stage": "  实施阶段",
+        "project-overview/status": "active",
+        "project-overview/next_action": "运行聚焦测试。\n\n```sh\ngo test ./internal/reviewv4\n```",
+        "project-overview/last_verification": "",
+        "decision:decision:alpha/title": "选择 [Markdown] 作为人工编辑面。",
+        "decision:decision:alpha/rationale": "正文应可直接阅读，\n同时保持机器账本封闭。",
+        "decision:decision:alpha/impact": "编辑不再依赖 JSON。",
+        "decision:decision:alpha/reevaluate_when": "当无损往返无法保证时。",
+        "risk:risk:alpha/title": "无损性回归",
+        "risk:risk:alpha/detail": "未修改区域若被 pretty-print 会产生噪声。",
+        "risk:risk:alpha/status": "open",
+        "open-loop:loop:alpha/title": "CRLF 保留",
+        "open-loop:loop:alpha/question": "混合换行文档如何保持未改字节？",
+        "open-loop:loop:alpha/next_experiment": "构造 CRLF/LF 交错夹具。",
+        "open-loop:loop:alpha/completion_criterion": "未改区域哈希一致。",
+        "open-loop:loop:alpha/status": "open",
+        "problem:problem:alpha/question": "如何确保同一字段只有一个权威位置？",
+        "problem:problem:alpha/completion_criterion": "24 个字段归属均唯一。",
+        "problem:problem:alpha/current_conclusion": "使用封闭字段目录。",
+        "milestone:milestone:alpha/title": "冻结 Markdown 合同",
+        "milestone:milestone:alpha/summary": "目录、版本组合与基线绑定已定义。",
+        "milestone:milestone:alpha/conclusion": "人工字段可编辑，结构仍需显式操作。",
+        "milestone:milestone:alpha/impact_and_follow_up": "下一步：\n- 实现 lexer\n- 验证往返\n"
+      }
+    },
+    { "name": "reordered-nested-keys", "review": "review.md", "history": "history.md", "ledger": "ledger-reordered.json", "index": "index.json", "expected_code": "", "expected_fields": {} },
+    { "name": "tampered-self-digest", "review": "review.md", "history": "history.md", "ledger": "ledger-tampered-self-digest.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
+    { "name": "wrong-version-splice", "review": "review.md", "history": "history.md", "ledger": "ledger-wrong-version.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
+    { "name": "null-projection", "review": "review.md", "history": "history.md", "ledger": "ledger-null-projection.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
+    { "name": "unknown-projection-key", "review": "review.md", "history": "history.md", "ledger": "ledger-unknown-key.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
+    { "name": "patch-baseline-mismatch", "review": "review.md", "history": "history.md", "ledger": "ledger-patch-mismatch.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
+    { "name": "publicly-rehashed-machine-change", "review": "review-rehashed-public.md", "history": "history.md", "ledger": "ledger-rehashed-public.json", "index": "index.json", "expected_code": "", "expected_private_binding": "reject", "expected_fields": { "project-overview/goal": "公开自摘要已重签，私有认证仍应拒绝" } }
+  ]
+}

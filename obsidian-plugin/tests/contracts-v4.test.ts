@@ -27,6 +27,8 @@ const pluginFixture = (name: string): Promise<string> =>
   readFile(resolve(here, "fixtures/v4", name), "utf8");
 const sharedFixture = (name: string): Promise<Buffer> =>
   readFile(resolve(here, "../../testdata/contracts/v4", name));
+const markdownFixture = (name: string): Promise<Buffer> =>
+  readFile(resolve(here, "../../testdata/contracts/v4/markdown", name));
 
 type JsonObject = Record<string, unknown>;
 type Parser = (source: string) => unknown;
@@ -131,6 +133,109 @@ describe("frozen v4 contract fixture parity", () => {
   it("exposes CandidateListV1 as the agent-annotation-v1 typed view", async () => {
     const source = await pluginFixture("agent-annotation-v1.valid.json");
     expect(parseCandidateListV1(source)).toEqual(parseAgentAnnotationV1(source));
+  });
+});
+
+describe("review-markdown-v1 ledger extension", () => {
+  async function projectedLedger(): Promise<JsonObject> {
+    const ledger = await fixtureObject("machine-ledger-v4.valid.json");
+    const presentation = await fixtureObject("review-presentation-v4.valid.json");
+    presentation.revision = ledger.accepted_revision;
+    ledger.minimum_reader_version = "0.4.1";
+    ledger.minimum_writer_version = "0.4.1";
+    ledger.document_projection = {
+      schema_version: 1,
+      format: "review-markdown-v1",
+      presentation_base: presentation
+    };
+    return ledger;
+  }
+
+  it("accepts only the 0.4.1 outer and 0.4.0 inner version combination", async () => {
+    const ledger = await projectedLedger();
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
+
+    for (const mutate of [
+      (value: JsonObject) => { value.minimum_reader_version = "0.4.0"; },
+      (value: JsonObject) => { value.minimum_writer_version = "0.4.0"; },
+      (value: JsonObject) => { ((value.document_projection as JsonObject).presentation_base as JsonObject).minimum_reader_version = "0.4.1"; },
+      (value: JsonObject) => { ((value.document_projection as JsonObject).presentation_base as JsonObject).minimum_writer_version = "0.4.1"; }
+    ]) {
+      const changed = clone(ledger);
+      mutate(changed);
+      expect(() => parseMachineLedgerV4(JSON.stringify(changed))).toThrow(/version|capability|metadata/i);
+    }
+  });
+
+  it("rejects projection identity, revision, patches, and baseline mismatches", async () => {
+    const original = await projectedLedger();
+    const mutations: Array<(ledger: JsonObject) => void> = [
+      (ledger) => { (ledger.document_projection as JsonObject).schema_version = 2; },
+      (ledger) => { (ledger.document_projection as JsonObject).format = "other"; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).project_id = "other"; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).generation_id = "other"; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).project_view_digest = `sha256:${"9".repeat(64)}`; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).revision = 1; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).human_patches = [{ entity_id: "decision:d", field: "title", operation: "set", value: "x", base_generated_hash: "1".repeat(64) }]; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).orphan_patches = [{ entity_id: "decision:d", field: "title", operation: "set", value: "x", base_generated_hash: "1".repeat(64) }]; },
+      (ledger) => { ((ledger.document_projection as JsonObject).presentation_base as JsonObject).generated_baselines = [{ generation_id: "generation-1", entity_id: "decision:d", field: "title", kind: "text", value: "x", generated_hash: "1".repeat(64) }]; }
+    ];
+    for (const mutate of mutations) {
+      const ledger = clone(original);
+      mutate(ledger);
+      expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/projection|identity|revision|patch|baseline|format|schema/i);
+    }
+  });
+
+  it("consumes the shared catalog and corpus with pinned ledger outcomes", async () => {
+    const catalog = JSON.parse(await readFile(resolve(here, "../../schemas/review-markdown-v1.fields.json"), "utf8")) as JsonObject;
+    expect(Object.keys(catalog).sort()).toEqual(["fields", "format", "generated_regions", "schema_version"]);
+    expect(catalog.schema_version).toBe(1);
+    expect(catalog.format).toBe("review-markdown-v1");
+    const fields = catalog.fields as JsonObject[];
+    expect(fields).toHaveLength(24);
+    expect(fields.map((field) => `${field.entity_kind}/${field.name}/${field.document}`)).toEqual([
+      "project-overview/goal/review", "project-overview/stage/review", "project-overview/status/review",
+      "project-overview/next_action/review", "project-overview/last_verification/review",
+      "decision/title/review", "decision/rationale/review", "decision/impact/review", "decision/reevaluate_when/review",
+      "risk/title/review", "risk/detail/review", "risk/status/review",
+      "open-loop/title/review", "open-loop/question/review", "open-loop/next_experiment/review",
+      "open-loop/completion_criterion/review", "open-loop/status/review",
+      "problem/question/review", "problem/completion_criterion/review", "problem/current_conclusion/review",
+      "milestone/title/history", "milestone/summary/history", "milestone/conclusion/history", "milestone/impact_and_follow_up/history"
+    ]);
+    expect((catalog.generated_regions as JsonObject[]).map((region) => `${region.entity_kind}/${region.name}/${region.document}`)).toEqual([
+      "project-overview/problem-tree/review", "project-overview/pinned-decisions/review",
+      "project-overview/recent-milestones/review", "milestone/evidence/history"
+    ]);
+
+    const corpus = JSON.parse((await markdownFixture("cases.json")).toString("utf8")) as JsonObject;
+    expect(Object.keys(corpus).sort()).toEqual(["cases", "format", "schema_version"]);
+    expect(corpus.schema_version).toBe(1);
+    expect(corpus.format).toBe("review-markdown-v1");
+    const cases = corpus.cases as JsonObject[];
+    expect(cases).toHaveLength(8);
+    expect(Object.keys(cases[0].expected_fields as JsonObject)).toHaveLength(24);
+    for (const testCase of cases) {
+      const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_fields"];
+      expect(Object.keys(testCase).every((key) => allowed.includes(key))).toBe(true);
+      expect(await markdownFixture(testCase.review as string)).not.toHaveLength(0);
+      expect(await markdownFixture(testCase.history as string)).not.toHaveLength(0);
+      const index = (await markdownFixture(testCase.index as string)).toString("utf8");
+      expect(() => parseSessionIndexV1(index)).not.toThrow();
+      const ledger = (await markdownFixture(testCase.ledger as string)).toString("utf8");
+      if (testCase.expected_code === "") {
+        expect(() => parseMachineLedgerV4(ledger), testCase.name as string).not.toThrow();
+      } else {
+        expect(codeOf(captureRejection(() => parseMachineLedgerV4(ledger))), testCase.name as string).toBe(testCase.expected_code);
+      }
+    }
+    const resigned = cases.find((testCase) => testCase.name === "publicly-rehashed-machine-change");
+    expect(resigned?.expected_private_binding).toBe("reject");
+    const baseLedger = parseMachineLedgerV4((await markdownFixture("ledger.json")).toString("utf8"));
+    expect(baseLedger.sync_hashes.ledger_sha256).toBe("913ed91d59ef92fa0d683a7c5e4879b6ad87524c91b763b5126912a4facb087d");
+    const resignedLedger = parseMachineLedgerV4((await markdownFixture("ledger-rehashed-public.json")).toString("utf8"));
+    expect(resignedLedger.sync_hashes.ledger_sha256).toBe("1ff8f204b5dffbffe4a55e9b6557a4e4a9d25cecf581c86a64c2ccb3b5769a84");
   });
 });
 

@@ -121,25 +121,37 @@ func CanonicalLedgerSHA256(ledger MachineLedger) string {
 		SessionIndexDigest string `json:"session_index_digest"`
 	}
 	type bodyWithoutSelf struct {
-		SchemaVersion             int             `json:"schema_version"`
-		MinimumReaderVersion      string          `json:"minimum_reader_version"`
-		MinimumWriterVersion      string          `json:"minimum_writer_version"`
-		ProjectID                 string          `json:"project_id"`
-		GenerationID              string          `json:"generation_id"`
-		ProjectViewDigest         string          `json:"project_view_digest"`
-		AcceptedRevision          int             `json:"accepted_revision"`
-		ReviewSHA256              string          `json:"review_sha256"`
-		HistorySHA256             string          `json:"history_sha256"`
-		Accounting                Accounting      `json:"accounting"`
-		Sessions                  []LedgerSession `json:"sessions"`
-		HumanPatches              []Patch         `json:"human_patches"`
-		OrphanPatches             []Patch         `json:"orphan_patches"`
-		GeneratedBaselines        []Baseline      `json:"generated_baselines"`
-		PricingSnapshots          any             `json:"pricing_snapshots"`
-		CurrentPricingSnapshotIDs []string        `json:"current_pricing_snapshot_ids"`
-		SyncHashes                syncWithoutSelf `json:"sync_hashes"`
+		SchemaVersion             int                 `json:"schema_version"`
+		MinimumReaderVersion      string              `json:"minimum_reader_version"`
+		MinimumWriterVersion      string              `json:"minimum_writer_version"`
+		ProjectID                 string              `json:"project_id"`
+		GenerationID              string              `json:"generation_id"`
+		ProjectViewDigest         string              `json:"project_view_digest"`
+		AcceptedRevision          int                 `json:"accepted_revision"`
+		ReviewSHA256              string              `json:"review_sha256"`
+		HistorySHA256             string              `json:"history_sha256"`
+		Accounting                Accounting          `json:"accounting"`
+		Sessions                  []LedgerSession     `json:"sessions"`
+		HumanPatches              []Patch             `json:"human_patches"`
+		OrphanPatches             []Patch             `json:"orphan_patches"`
+		GeneratedBaselines        []Baseline          `json:"generated_baselines"`
+		PricingSnapshots          any                 `json:"pricing_snapshots"`
+		CurrentPricingSnapshotIDs []string            `json:"current_pricing_snapshot_ids"`
+		DocumentProjection        *DocumentProjection `json:"document_projection,omitempty"`
+		SyncHashes                syncWithoutSelf     `json:"sync_hashes"`
 	}
-	view := bodyWithoutSelf{ledger.SchemaVersion, ledger.MinimumReaderVersion, ledger.MinimumWriterVersion, ledger.ProjectID, ledger.GenerationID, ledger.ProjectViewDigest, ledger.AcceptedRevision, ledger.ReviewSHA256, ledger.HistorySHA256, ledger.Accounting, ledger.Sessions, ledger.HumanPatches, ledger.OrphanPatches, ledger.GeneratedBaselines, ledger.PricingSnapshots, ledger.CurrentPricingSnapshotIDs, syncWithoutSelf{ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256, ledger.SyncHashes.SessionIndexDigest}}
+	view := bodyWithoutSelf{
+		SchemaVersion: ledger.SchemaVersion, MinimumReaderVersion: ledger.MinimumReaderVersion,
+		MinimumWriterVersion: ledger.MinimumWriterVersion, ProjectID: ledger.ProjectID,
+		GenerationID: ledger.GenerationID, ProjectViewDigest: ledger.ProjectViewDigest,
+		AcceptedRevision: ledger.AcceptedRevision, ReviewSHA256: ledger.ReviewSHA256,
+		HistorySHA256: ledger.HistorySHA256, Accounting: ledger.Accounting, Sessions: ledger.Sessions,
+		HumanPatches: ledger.HumanPatches, OrphanPatches: ledger.OrphanPatches,
+		GeneratedBaselines: ledger.GeneratedBaselines, PricingSnapshots: ledger.PricingSnapshots,
+		CurrentPricingSnapshotIDs: ledger.CurrentPricingSnapshotIDs,
+		DocumentProjection:        ledger.DocumentProjection,
+		SyncHashes:                syncWithoutSelf{ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256, ledger.SyncHashes.SessionIndexDigest},
+	}
 	body, err := strictjson.Encode(view)
 	if err != nil {
 		return ""

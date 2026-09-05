@@ -13,6 +13,7 @@ import type {
   ConversationSourceRefV1,
   CoverageV1,
   DecisionV4,
+  DocumentProjectionV1,
   GeneratedBaselineV4,
   HumanPatchV4,
   LedgerAccountingModelV4,
@@ -202,19 +203,20 @@ export function parseMachineLedgerV4(source: string): MachineLedgerV4 {
 
 function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
   const row = documentObject(source, "machine ledger");
-  exact(row, "$", [
+  const ledgerKeys = [
     "schema_version", "minimum_reader_version", "minimum_writer_version", "project_id", "generation_id",
     "project_view_digest", "accepted_revision", "review_sha256", "history_sha256", "accounting", "sessions",
     "human_patches", "orphan_patches", "generated_baselines", "pricing_snapshots",
-    "current_pricing_snapshot_ids", "sync_hashes"
-  ]);
+    "current_pricing_snapshot_ids", "document_projection", "sync_hashes"
+  ] as const;
+  exact(row, "$", ledgerKeys, ledgerKeys.filter((key) => key !== "document_projection"));
   constant(row.schema_version, 4, "$.schema_version");
-  version(row.minimum_reader_version, "$.minimum_reader_version");
-  version(row.minimum_writer_version, "$.minimum_writer_version");
+  const readerVersion = oneOf(row.minimum_reader_version, "$.minimum_reader_version", ["0.4.0", "0.4.1"]);
+  const writerVersion = oneOf(row.minimum_writer_version, "$.minimum_writer_version", ["0.4.0", "0.4.1"]);
   const projectID = id(row.project_id, "$.project_id");
-  id(row.generation_id, "$.generation_id");
-  digest(row.project_view_digest, "$.project_view_digest");
-  integer(row.accepted_revision, "$.accepted_revision");
+  const generationID = id(row.generation_id, "$.generation_id");
+  const projectDigest = digest(row.project_view_digest, "$.project_view_digest");
+  const acceptedRevision = integer(row.accepted_revision, "$.accepted_revision");
   const reviewHash = sha256(row.review_sha256, "$.review_sha256");
   const historyHash = sha256(row.history_sha256, "$.history_sha256");
 
@@ -228,6 +230,22 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
   parsePatchArray(row.human_patches, "$.human_patches");
   parsePatchArray(row.orphan_patches, "$.orphan_patches");
   parseBaselineArray(row.generated_baselines, "$.generated_baselines");
+
+  if (row.document_projection === undefined) {
+    if (readerVersion !== "0.4.0" || writerVersion !== "0.4.0") {
+      throw new Error("legacy machine ledger requires capability 0.4.0");
+    }
+  } else {
+    if (readerVersion !== "0.4.1" || writerVersion !== "0.4.1") {
+      throw new Error("markdown projection requires capability 0.4.1");
+    }
+    parseDocumentProjection(row.document_projection, {
+      projectID, generationID, projectDigest, acceptedRevision,
+      humanPatches: row.human_patches as HumanPatchV4[],
+      orphanPatches: row.orphan_patches as HumanPatchV4[],
+      generatedBaselines: row.generated_baselines as GeneratedBaselineV4[]
+    });
+  }
 
   const pricingRows = boundedArray(row.pricing_snapshots, "$.pricing_snapshots", 65536);
   const pricingByID = new Map<string, PricingSnapshotV1>();
@@ -304,6 +322,32 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
     throw new Error("machine ledger self digest mismatch");
   }
   return ledger;
+}
+
+function parseDocumentProjection(value: unknown, outer: {
+  projectID: string;
+  generationID: string;
+  projectDigest: string;
+  acceptedRevision: number;
+  humanPatches: HumanPatchV4[];
+  orphanPatches: HumanPatchV4[];
+  generatedBaselines: GeneratedBaselineV4[];
+}): DocumentProjectionV1 {
+  const row = object(value, "$.document_projection");
+  exact(row, "$.document_projection", ["schema_version", "format", "presentation_base"]);
+  constant(row.schema_version, 1, "$.document_projection.schema_version");
+  constant(row.format, "review-markdown-v1", "$.document_projection.format");
+  const base = parseReviewPresentationDocument(goJSON(row.presentation_base));
+  if (base.project_id !== outer.projectID || base.generation_id !== outer.generationID ||
+    base.project_view_digest !== outer.projectDigest || base.revision !== outer.acceptedRevision) {
+    throw new Error("markdown presentation base identity, generation, digest, or revision mismatch");
+  }
+  if (goJSON(base.human_patches.map(orderedPatch)) !== goJSON(outer.humanPatches.map(orderedPatch)) ||
+    goJSON(base.orphan_patches.map(orderedPatch)) !== goJSON(outer.orphanPatches.map(orderedPatch)) ||
+    goJSON(base.generated_baselines.map(orderedBaseline)) !== goJSON(outer.generatedBaselines.map(orderedBaseline))) {
+    throw new Error("markdown presentation base patches or baselines mismatch");
+  }
+  return row as unknown as DocumentProjectionV1;
 }
 
 export function parseSessionIndexV1(source: string): SessionIndexV1 {
@@ -1671,6 +1715,13 @@ function canonicalLedgerSHA256(ledger: MachineLedgerV4): string {
     generated_baselines: ledger.generated_baselines.map(orderedBaseline),
     pricing_snapshots: ledger.pricing_snapshots.map(orderedPricingSnapshot),
     current_pricing_snapshot_ids: ledger.current_pricing_snapshot_ids,
+    ...(ledger.document_projection === undefined ? {} : {
+      document_projection: {
+        schema_version: ledger.document_projection.schema_version,
+        format: ledger.document_projection.format,
+        presentation_base: orderedPresentation(ledger.document_projection.presentation_base)
+      }
+    }),
     sync_hashes: {
       review_sha256: ledger.sync_hashes.review_sha256,
       history_sha256: ledger.sync_hashes.history_sha256,
@@ -1678,6 +1729,121 @@ function canonicalLedgerSHA256(ledger: MachineLedgerV4): string {
     }
   };
   return sha256Text(goJSON(body));
+}
+
+function orderedPresentation(value: ReviewPresentationV4): JsonObject {
+  return {
+    schema_version: value.schema_version,
+    minimum_reader_version: value.minimum_reader_version,
+    minimum_writer_version: value.minimum_writer_version,
+    project_id: value.project_id,
+    generation_id: value.generation_id,
+    project_view_digest: value.project_view_digest,
+    revision: value.revision,
+    current_state: {
+      goal: value.current_state.goal,
+      stage: value.current_state.stage,
+      status: value.current_state.status,
+      next_action: value.current_state.next_action,
+      last_verification: value.current_state.last_verification
+    },
+    timeline: value.timeline.map((item) => ({
+      id: item.id,
+      generation_id: item.generation_id,
+      occurred_at: item.occurred_at,
+      kind: item.kind,
+      title: item.title,
+      summary: item.summary,
+      decision_ids: item.decision_ids,
+      closed_loop: orderedClosedLoop(item.closed_loop)
+    })),
+    decisions: value.decisions.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      occurred_at: item.occurred_at,
+      title: item.title,
+      rationale: item.rationale,
+      impact: item.impact,
+      status: item.status,
+      legacy_status_text: item.legacy_status_text,
+      reevaluate_when: item.reevaluate_when,
+      supersedes: item.supersedes,
+      milestone_ids: item.milestone_ids,
+      session_refs: item.session_refs.map((ref) => ({ provider: ref.provider, session_id: ref.session_id })),
+      provenance: item.provenance,
+      pinned: item.pinned,
+      revision: item.revision
+    })),
+    risks: value.risks.map((item) => ({ id: item.id, title: item.title, status: item.status, detail: item.detail })),
+    open_loops: value.open_loops.map((item) => ({
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      question: item.question,
+      next_experiment: item.next_experiment,
+      completion_criterion: item.completion_criterion
+    })),
+    problem_map_revision: value.problem_map_revision,
+    problem_root_ids: value.problem_root_ids,
+    problem_nodes: value.problem_nodes.map((item) => ({
+      id: item.id,
+      question: item.question,
+      primary_parent_id: item.primary_parent_id,
+      related_node_ids: item.related_node_ids,
+      workflow_state: item.workflow_state,
+      answer_state: item.answer_state,
+      completion_criterion: item.completion_criterion,
+      current_conclusion: item.current_conclusion,
+      source_turn_refs: item.source_turn_refs.map(orderedSourceTurnRef),
+      provenance: item.provenance,
+      first_proposed_at: item.first_proposed_at,
+      sibling_order: item.sibling_order,
+      confirmed_at: item.confirmed_at,
+      revision: item.revision
+    })),
+    chain_dependencies: value.chain_dependencies.map((item) => ({
+      provider: item.provider,
+      session_id: item.session_id,
+      session_view_digest: item.session_view_digest,
+      dependency_digest: item.dependency_digest,
+      turn_unit_ids: item.turn_unit_ids
+    })),
+    human_patches: value.human_patches.map(orderedPatch),
+    orphan_patches: value.orphan_patches.map(orderedPatch),
+    generated_baselines: value.generated_baselines.map(orderedBaseline)
+  };
+}
+
+function orderedClosedLoop(value: ClosedLoopV4): JsonObject {
+  const segment = (item: ClosedLoopV4["execution"]): JsonObject => ({
+    state: item.state,
+    text: item.text,
+    missing_reason: item.missing_reason,
+    source_turn_refs: item.source_turn_refs.map(orderedSourceTurnRef)
+  });
+  return {
+    trigger_question: segment(value.trigger_question),
+    conclusion: {
+      kind: value.conclusion.kind,
+      text: value.conclusion.text,
+      missing_reason: value.conclusion.missing_reason,
+      source_turn_refs: value.conclusion.source_turn_refs.map(orderedSourceTurnRef)
+    },
+    execution: segment(value.execution),
+    verification: segment(value.verification),
+    impact_and_follow_up: segment(value.impact_and_follow_up),
+    source_turn_refs: value.source_turn_refs.map(orderedSourceTurnRef),
+    coverage: {
+      source_turns: value.coverage.source_turns,
+      captured_turns: value.coverage.captured_turns,
+      truncated_turns: value.coverage.truncated_turns,
+      source_unavailable_turns: value.coverage.source_unavailable_turns
+    }
+  };
+}
+
+function orderedSourceTurnRef(value: SourceTurnRefV4): JsonObject {
+  return { provider: value.provider, session_id: value.session_id, turn_unit_id: value.turn_unit_id };
 }
 
 function canonicalConversationChainDigest(chain: ConversationChainV1): string {
