@@ -14,6 +14,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -58,6 +59,83 @@ func TestSyncProjectServiceCLIDelegationPreservesFormatting(t *testing.T) {
 	writeSyncReport(&expected, wantReport)
 	if stdout.String() != expected.String() {
 		t.Fatalf("stdout=%q want=%q", stdout.String(), expected.String())
+	}
+}
+
+func TestRunSyncMigrationModesUseInjectableServiceAndJSON(t *testing.T) {
+	originalMigration := syncMigrationProject
+	originalSync := syncProject
+	t.Cleanup(func() { syncMigrationProject, syncProject = originalMigration, originalSync })
+	syncProject = func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		t.Fatal("explicit migration mode reached ordinary sync")
+		return syncengine.Report{}, nil
+	}
+	dataRoot := t.TempDir()
+	digest := "sha256:" + strings.Repeat("a", 64)
+	calls := 0
+	syncMigrationProject = func(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+		calls++
+		if ctx == nil || options.ProjectID != "project-p" || options.DataDir != dataRoot || options.GOOS != runtime.GOOS || options.Now == nil || options.Trigger != syncengine.TriggerCLI {
+			t.Fatalf("migration options = %+v", options.Options)
+		}
+		if calls == 1 && (options.Mode != syncproject.MigrationDryRun || options.ExpectedPreviewDigest != "") {
+			t.Fatalf("dry-run options = %+v", options)
+		}
+		if calls == 2 && (options.Mode != syncproject.MigrationConfirm || options.ExpectedPreviewDigest != digest) {
+			t.Fatalf("confirm options = %+v", options)
+		}
+		return syncproject.MigrationResult{Preview: migrationv4.MigrationPreview{SchemaVersion: 1, PreviewDigest: digest}, Applied: calls == 2}, nil
+	}
+	for _, args := range [][]string{
+		{"sync", "--dry-run", "--project-id", "project-p", "--data-dir", dataRoot, "--json"},
+		{"sync", "--confirm-migration", "--expected-preview-digest", digest, "--project-id", "project-p", "--data-dir", dataRoot, "--json"},
+	} {
+		var out, errOut bytes.Buffer
+		if code := Run(args, &out, &errOut); code != 0 || errOut.Len() != 0 {
+			t.Fatalf("args=%v code=%d stdout=%q stderr=%q", args, code, out.String(), errOut.String())
+		}
+		var result syncproject.MigrationResult
+		if err := json.Unmarshal(out.Bytes(), &result); err != nil || result.Preview.PreviewDigest != digest {
+			t.Fatalf("args=%v result=%+v err=%v", args, result, err)
+		}
+	}
+}
+
+func TestRunSyncMigrationStaleIsOneStableJSONObject(t *testing.T) {
+	original := syncMigrationProject
+	t.Cleanup(func() { syncMigrationProject = original })
+	syncMigrationProject = func(context.Context, syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+		return syncproject.MigrationResult{}, syncproject.ErrMigrationPreviewStale
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "--confirm-migration", "--expected-preview-digest", digest, "--data-dir", t.TempDir(), "--json"}, &out, &errOut)
+	if code != 1 || out.Len() != 0 {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+	var diagnostic map[string]string
+	if err := json.Unmarshal(errOut.Bytes(), &diagnostic); err != nil || diagnostic["code"] != ContractCodeMigrationPreviewStale {
+		t.Fatalf("diagnostic=%v err=%v raw=%q", diagnostic, err, errOut.String())
+	}
+}
+
+func TestRunSyncPlainV3ReturnsMigrationRequiredWithoutDispatchingMigration(t *testing.T) {
+	originalSync := syncProject
+	originalMigration := syncMigrationProject
+	t.Cleanup(func() { syncProject, syncMigrationProject = originalSync, originalMigration })
+	calls := 0
+	syncProject = func(context.Context, syncproject.Options) (syncengine.Report, error) {
+		calls++
+		return syncengine.Report{}, syncproject.ErrMigrationRequired
+	}
+	syncMigrationProject = func(context.Context, syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+		t.Fatal("plain sync implicitly dispatched migration")
+		return syncproject.MigrationResult{}, nil
+	}
+	var out, errOut bytes.Buffer
+	code := Run([]string{"sync", "--data-dir", t.TempDir()}, &out, &errOut)
+	if code != 1 || calls != 1 || out.Len() != 0 || !strings.Contains(errOut.String(), "migration_required") {
+		t.Fatalf("code=%d calls=%d stdout=%q stderr=%q", code, calls, out.String(), errOut.String())
 	}
 }
 

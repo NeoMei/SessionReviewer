@@ -13,6 +13,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
 
@@ -33,7 +34,11 @@ type Options struct {
 	// whose accepted apply is the legitimate writer that advanced the project
 	// copy since the last successful sync; interactive sync keeps failing
 	// closed so an out-of-band vault edit still requires an explicit repair.
-	RepairMachineLedger    bool
+	RepairMachineLedger bool
+	// AllowV3Publication is reserved for the existing publication service,
+	// which must finish the byte-compatible v3 three-file transaction. Ordinary
+	// sync callers must use the explicit v3-to-v4 migration flow.
+	AllowV3Publication     bool
 	TrustAppliedTransition func(relative string, preimageExists bool, preimageHash, targetHash string) (bool, error)
 
 	pinCheckpoint func(pinCheckpointStage) error
@@ -67,6 +72,13 @@ func Run(ctx context.Context, options Options) (syncengine.Report, error) {
 	}
 	if err := pin.verify(options); err != nil {
 		return syncengine.Report{}, err
+	}
+	version, err := reviewv2.DetectVersionExpected(pin.project.Path, pin.project.Info())
+	if err != nil {
+		return syncengine.Report{}, err
+	}
+	if version == reviewv2.VersionV3 && !options.AllowV3Publication {
+		return syncengine.Report{}, ErrMigrationRequired
 	}
 	if options.beforeEngine != nil {
 		if err := options.beforeEngine(); err != nil {

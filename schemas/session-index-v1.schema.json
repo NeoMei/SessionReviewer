@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionreviewer.local/schemas/session-index-v1.schema.json",
+  "title": "SessionReviewer complete session index v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "minimum_reader_version", "digest", "project_id", "generation_id", "project_view_digest", "generated_at", "sort_version", "coverage", "sessions"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "minimum_reader_version": { "const": "0.4.0" },
+    "digest": { "$ref": "#/$defs/digest" },
+    "project_id": { "$ref": "#/$defs/id" },
+    "generation_id": { "$ref": "#/$defs/id" },
+    "project_view_digest": { "$ref": "#/$defs/digest" },
+    "generated_at": { "$ref": "#/$defs/timestamp" },
+    "sort_version": { "const": "started-at-desc-null-last-provider-session-v1" },
+    "coverage": { "$ref": "#/$defs/index_coverage" },
+    "sessions": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/session" } }
+  },
+  "$defs": {
+    "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
+    "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "nonnegative": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "id_array": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/id" } },
+    "index_coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total", "complete", "partial", "error", "unprocessed", "source_available", "source_unavailable", "started_at_known", "ended_at_known", "usage_known"],
+      "properties": {
+        "total": { "$ref": "#/$defs/nonnegative" }, "complete": { "$ref": "#/$defs/nonnegative" },
+        "partial": { "$ref": "#/$defs/nonnegative" }, "error": { "$ref": "#/$defs/nonnegative" },
+        "unprocessed": { "$ref": "#/$defs/nonnegative" }, "source_available": { "$ref": "#/$defs/nonnegative" },
+        "source_unavailable": { "$ref": "#/$defs/nonnegative" }, "started_at_known": { "$ref": "#/$defs/nonnegative" },
+        "ended_at_known": { "$ref": "#/$defs/nonnegative" }, "usage_known": { "$ref": "#/$defs/nonnegative" }
+      }
+    },
+    "session": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "session_id", "processing_state", "state_reason_codes", "source_availability", "source_terminal_state", "started_at", "ended_at", "duration_ms", "warning_count", "record_count", "indexed_event_count", "coverage", "fact_counts", "session_view_digest", "usage_record_digest", "summary_digest", "last_seen_generation_id", "last_successful_generation_id"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
+        "processing_state": { "enum": ["complete", "partial", "error", "unprocessed"] },
+        "state_reason_codes": { "type": "array", "maxItems": 64, "items": { "enum": ["not_discovered", "duplicate_candidate", "freeze_terminal", "malformed_source_records", "unsupported_source_records", "source_missing", "source_unreadable", "source_ambiguous", "source_unsupported", "source_unavailable", "partial_observations", "unprojected_facts", "undecodable_facts", "scan_cancelled"] } },
+        "source_availability": { "enum": ["available", "unavailable"] },
+        "source_terminal_state": { "type": ["string", "null"], "maxLength": 64 },
+        "started_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] }, "ended_at": { "anyOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }] },
+        "duration_ms": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 }, "warning_count": { "$ref": "#/$defs/nonnegative" },
+        "record_count": { "type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991 }, "indexed_event_count": { "$ref": "#/$defs/nonnegative" },
+        "coverage": { "$ref": "#/$defs/session_coverage" }, "fact_counts": { "$ref": "#/$defs/fact_counts" },
+        "session_view_digest": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "usage_record_digest": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "summary_digest": { "type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$" },
+        "last_seen_generation_id": { "type": ["string", "null"], "maxLength": 256 },
+        "last_successful_generation_id": { "type": ["string", "null"], "maxLength": 256 }
+      }
+    },
+    "session_coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["seen", "indexed", "collapsed", "unprojected", "undecodable", "truncated"],
+      "properties": { "seen": { "$ref": "#/$defs/nonnegative" }, "indexed": { "$ref": "#/$defs/nonnegative" }, "collapsed": { "$ref": "#/$defs/nonnegative" }, "unprojected": { "$ref": "#/$defs/nonnegative" }, "undecodable": { "$ref": "#/$defs/nonnegative" }, "truncated": { "$ref": "#/$defs/nonnegative" } }
+    },
+    "fact_counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file_change", "command", "verification", "error", "artifact"],
+      "properties": { "file_change": { "$ref": "#/$defs/nonnegative" }, "command": { "$ref": "#/$defs/nonnegative" }, "verification": { "$ref": "#/$defs/nonnegative" }, "error": { "$ref": "#/$defs/nonnegative" }, "artifact": { "$ref": "#/$defs/nonnegative" } }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "minimum_reader_version": "0.4.0",
+  "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "project_id": "project-p",
+  "generation_id": "generation-1",
+  "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "generated_at": "2026-09-04T00:00:00Z",
+  "sort_version": "started-at-desc-null-last-provider-session-v1",
+  "coverage": { "total": 1, "complete": 1, "partial": 0, "error": 0, "unprocessed": 0, "source_available": 1, "source_unavailable": 0, "started_at_known": 1, "ended_at_known": 1, "usage_known": 0 },
+  "sessions": [{
+    "provider": "claude",
+    "session_id": "session-1",
+    "processing_state": "complete",
+    "state_reason_codes": [],
+    "source_availability": "available",
+    "source_terminal_state": null,
+    "started_at": "2026-09-04T00:00:00Z",
+    "ended_at": "2026-09-04T00:01:00Z",
+    "duration_ms": 60000,
+    "warning_count": 0,
+    "record_count": 1,
+    "indexed_event_count": 1,
+    "coverage": { "seen": 1, "indexed": 1, "collapsed": 0, "unprojected": 0, "undecodable": 0, "truncated": 0 },
+    "fact_counts": { "file_change": 0, "command": 0, "verification": 0, "error": 0, "artifact": 0 },
+    "session_view_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "usage_record_digest": null,
+    "summary_digest": null,
+    "last_seen_generation_id": "generation-1",
+    "last_successful_generation_id": "generation-1"
+  }]
+}

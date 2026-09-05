@@ -2,20 +2,321 @@ package syncproject
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/ledger"
+	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
+
+func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	preview := migrationv4.MigrationPreview{PreviewDigest: "sha256:" + strings.Repeat("1", 64)}
+	buildCalls := 0
+	publishCalls := 0
+	options := MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationDryRun,
+		build: func(pin *MappingPin) (migrationv4.Result, error) {
+			buildCalls++
+			contender, err := publicationlock.Acquire(pin.data.Path, pin.mapping.ID, 0)
+			if contender != nil {
+				_ = contender.Release()
+			}
+			if !errors.Is(err, project.ErrProjectLocked) {
+				t.Fatalf("preview recomputation ran without publication lock: %v", err)
+			}
+			return migrationv4.Result{Preview: preview}, nil
+		},
+		Publish: func(_ context.Context, publication MigrationPublication) error {
+			publishCalls++
+			if publication.Preview.PreviewDigest != preview.PreviewDigest {
+				t.Fatalf("publication preview = %+v", publication.Preview)
+			}
+			if publication.PublicationLock == nil {
+				t.Fatal("publisher did not receive publication lock ownership")
+			}
+			contender, publicationErr := publicationlock.Acquire(publication.DataRoot, publication.ProjectID, 0)
+			if contender != nil {
+				_ = contender.Release()
+			}
+			if !errors.Is(publicationErr, project.ErrProjectLocked) {
+				t.Fatalf("publisher ran without publication lock: %v", publicationErr)
+			}
+			lock, err := project.AcquireProjectLock(publication.syncDataRoot, "locks/sync.lock", 0)
+			if lock != nil {
+				_ = lock.Release()
+			}
+			if !errors.Is(err, project.ErrProjectLocked) {
+				t.Fatalf("publisher ran without project lock: %v", err)
+			}
+			return nil
+		},
+	}
+	dry, err := RunMigration(t.Context(), options)
+	if err != nil || dry.Applied || dry.Preview.PreviewDigest != preview.PreviewDigest || buildCalls != 1 || publishCalls != 0 {
+		t.Fatalf("dry=%+v build=%d publish=%d err=%v", dry, buildCalls, publishCalls, err)
+	}
+
+	options.Mode = MigrationConfirm
+	options.ExpectedPreviewDigest = preview.PreviewDigest
+	confirmed, err := RunMigration(t.Context(), options)
+	if err != nil || !confirmed.Applied || buildCalls != 2 || publishCalls != 1 {
+		t.Fatalf("confirmed=%+v build=%d publish=%d err=%v", confirmed, buildCalls, publishCalls, err)
+	}
+}
+
+func TestSyncProjectMigrationConfirmationRejectsRecomputedStaleDigest(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	want := "sha256:" + strings.Repeat("1", 64)
+	options := MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationConfirm, ExpectedPreviewDigest: want,
+		build: func(*MappingPin) (migrationv4.Result, error) {
+			return migrationv4.Result{Preview: migrationv4.MigrationPreview{PreviewDigest: "sha256:" + strings.Repeat("2", 64)}}, nil
+		},
+		Publish: func(context.Context, MigrationPublication) error {
+			t.Fatal("stale preview reached publisher")
+			return nil
+		},
+	}
+	if _, err := RunMigration(t.Context(), options); !errors.Is(err, ErrMigrationPreviewStale) {
+		t.Fatalf("RunMigration error = %v", err)
+	}
+}
+
+func TestSyncProjectPlainV3RequiresExplicitMigration(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	for relative, body := range map[string][]byte{
+		reviewv2.ReviewRelativePath:        []byte("---\nid: project-overview\nentity_type: project_review\nproject_id: project-migration\nschema_version: 3\nrevision: 1\n---\n# v3\n"),
+		reviewv2.HistoryRelativePath:       []byte("---\nid: project-history\nentity_type: project_history\nproject_id: project-migration\nschema_version: 3\nrevision: 1\n---\n# history\n"),
+		reviewv2.MachineLedgerRelativePath: []byte("{}\n"),
+	} {
+		path := filepath.Join(fixture.project, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := Run(t.Context(), Options{
+		ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data,
+		GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI,
+	})
+	if !errors.Is(err, ErrMigrationRequired) {
+		t.Fatalf("plain v3 sync error = %v", err)
+	}
+}
+
+func TestSyncProjectBuildsBoundMigrationFromPreparedGeneration(t *testing.T) {
+	fixture := newMigrationServiceFixture(t)
+	manifest := seedMigrationPreparedGeneration(t, fixture)
+	before := snapshotMigrationPublicFiles(t, fixture)
+	dry, err := RunMigration(t.Context(), MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationDryRun,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dry.Applied || dry.Preview.ProjectID != fixture.projectID || dry.Preview.GenerationID != manifest.GenerationID || dry.Preview.TargetPreimageHashes.SessionIndex != migrationv4.AbsentPreimageSHA256 {
+		t.Fatalf("dry migration = %+v", dry)
+	}
+	if after := snapshotMigrationPublicFiles(t, fixture); !reflect.DeepEqual(before, after) {
+		t.Fatalf("dry-run wrote public files: before=%v after=%v", before, after)
+	}
+
+	published := 0
+	confirmed, err := RunMigration(t.Context(), MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationConfirm, ExpectedPreviewDigest: dry.Preview.PreviewDigest,
+		Publish: func(_ context.Context, publication MigrationPublication) error {
+			published++
+			if len(publication.Plan.Files) != 4 {
+				t.Fatalf("publication files = %d", len(publication.Plan.Files))
+			}
+			for _, file := range publication.Plan.Files {
+				if file.Relative == migrationv4.SessionIndexRelativePath {
+					if file.ExpectedExists {
+						t.Fatal("new session index unexpectedly had a preimage")
+					}
+				} else if !file.ExpectedExists || len(file.Expected) == 0 {
+					t.Fatalf("source preimage missing for %s", file.Relative)
+				}
+			}
+			return nil
+		},
+	})
+	if err != nil || !confirmed.Applied || published != 1 || confirmed.Preview.PreviewDigest != dry.Preview.PreviewDigest {
+		t.Fatalf("confirmed=%+v published=%d err=%v", confirmed, published, err)
+	}
+}
+
+func TestMigrationSessionIndexPreservesUnknownTimestamps(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	entry, err := migrationIndexEntry(memory.SessionView{
+		Provider: "codex", SessionID: "unknown-times", TerminalState: memory.Indexed,
+		SourceAvailability: memory.SourceAvailable, UsageRecordDigest: digest,
+		ObservationSummaries: []memory.ObservationSummary{}, ActiveRevisionIDs: []string{}, Diagnostics: []memory.Diagnostic{},
+	}, memory.SessionViewDependency{Digest: digest}, "generation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.StartedAt != nil || entry.EndedAt != nil || entry.DurationMS != nil {
+		t.Fatalf("migration fabricated unknown timestamps: %+v", entry)
+	}
+	coverage := sessionindex.IndexCoverage{Total: 1}
+	addIndexCoverage(&coverage, entry)
+	if coverage.StartedAtKnown != 0 || coverage.EndedAtKnown != 0 {
+		t.Fatalf("migration counted unknown timestamps as known: %+v", coverage)
+	}
+}
+
+type migrationServiceFixture struct {
+	projectID string
+	project   string
+	data      string
+}
+
+func seedMigrationPreparedGeneration(t *testing.T, fixture migrationServiceFixture) memory.GenerationManifest {
+	t.Helper()
+	store, err := memorystore.Open(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	created := "2026-09-04T08:00:00Z"
+	probe := memory.ProjectProbeState{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID,
+		CanonicalRoot: fixture.project, Branch: "main", Head: strings.Repeat("a", 40),
+		RemoteIdentityHashes: []string{}, VersionFiles: []memory.ProbeFile{}, RequiredProjectionFiles: []memory.ProbeFile{},
+		ProbeVersion: "v1", Diagnostics: []memory.Diagnostic{},
+	}
+	probe.Digest, err = memory.ProjectProbeStateDigest(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProbeState(probe); err != nil {
+		t.Fatal(err)
+	}
+	view := memory.ProjectView{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID, Generation: 1,
+		StartedAt: created, EndedAt: created, SourceSessions: 0, TerminalCounts: memory.TerminalCounts{},
+		SessionViewDependencies: []memory.SessionViewDependency{}, ObservationRevisionIDs: []string{}, ProbeStateDigest: probe.Digest,
+		LiveState: memory.StateSnapshot{Branch: "main", Head: probe.Head}, WitnessedState: []memory.DerivedRecord{}, DerivedRecords: []memory.DerivedRecord{},
+		AggregationCoverage: memory.ProjectAggregationCoverage{}, AssociatedUsage: []memory.AssociatedUsage{},
+		DependencyDigest: "sha256:" + strings.Repeat("b", 64), ReducerVersion: "v1",
+	}
+	view.Digest, err = memory.ProjectViewDigest(view)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(view); err != nil {
+		t.Fatal(err)
+	}
+	manifest := memory.GenerationManifest{
+		SchemaVersion: memory.MemorySchemaVersion, GenerationID: "generation-migration", ProjectID: fixture.projectID, CreatedAt: created,
+		SourceRecordDigests: []string{}, SessionViews: []memory.SessionViewDependency{}, SessionLineages: []memory.SessionLineageDependency{},
+		ProbeStateDigest:  probe.Digest,
+		ProbeCheck:        memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: created, StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}},
+		ProjectViewDigest: view.Digest,
+	}
+	if _, err := store.PrepareGeneration(manifest); err != nil {
+		t.Fatal(err)
+	}
+	reviewModel := reviewv2.Review{
+		ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, MinimumWriterVersion: reviewv2.MinimumWriterVersion,
+		Revision: 1, Name: "Migration", Goal: "Preserve", Stage: "implementation", Status: "active", NextAction: "confirm", LastVerification: "2026-09-04",
+		Risks: []reviewv2.Risk{}, Decisions: []reviewv2.Decision{{ID: "decision-1", OccurredAt: "2026-09-04", Title: "Keep", Rationale: "because", Impact: "scope", Status: "active"}},
+	}
+	reviewBody, err := reviewv2.RenderReviewV3(reviewModel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyBody, err := reviewv2.RenderHistoryV3(fixture.projectID, 1, manifest.GenerationID, []reviewv2.Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledgerBody, err := reviewv2.RenderMachineLedgerV3(reviewv2.MachineLedgerV3{
+		SchemaVersion: 3, MinimumWriterVersion: reviewv2.MinimumWriterVersion,
+		ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, ProjectViewDigest: strings.TrimPrefix(view.Digest, "sha256:"),
+		AcceptedRevision: 1, ReviewSHA256: fmt.Sprintf("%x", sha256.Sum256(reviewBody)), HistorySHA256: fmt.Sprintf("%x", sha256.Sum256(historyBody)),
+		Sessions: []ledger.SessionReport{}, HumanPatches: []reviewv2.HumanPatchWire{}, OrphanPatches: []reviewv2.HumanPatchWire{}, GeneratedBaselines: []reviewv2.GeneratedBaselineWire{},
+		LegacyCompatibility: reviewv2.LegacyCompatibility{Timeline: []ledger.TimelineEvent{}, Decisions: []ledger.Decision{}, OpenLoops: []ledger.OpenLoop{}, CurrentRisks: []reviewv2.CurrentRiskProvenance{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for relative, body := range map[string][]byte{reviewv2.ReviewRelativePath: reviewBody, reviewv2.HistoryRelativePath: historyBody, reviewv2.MachineLedgerRelativePath: ledgerBody} {
+		path := filepath.Join(fixture.project, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return manifest
+}
+
+func snapshotMigrationPublicFiles(t *testing.T, fixture migrationServiceFixture) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	for _, relative := range []string{migrationv4.ReviewRelativePath, migrationv4.HistoryRelativePath, migrationv4.LedgerRelativePath, migrationv4.SessionIndexRelativePath} {
+		path := filepath.Join(fixture.project, filepath.FromSlash(relative))
+		body, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		result[relative] = body
+	}
+	return result
+}
+
+func newMigrationServiceFixture(t *testing.T) migrationServiceFixture {
+	t.Helper()
+	root := t.TempDir()
+	projectRoot := filepath.Join(root, "project")
+	vaultRoot := filepath.Join(root, "vault")
+	dataRoot := filepath.Join(root, "data")
+	for _, directory := range []string{projectRoot, vaultRoot, filepath.Join(dataRoot, "projects", "project-migration", "locks")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "projects", "project-migration", "locks", "sync.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: "project-migration", Root: projectRoot, VaultRoot: vaultRoot,
+		VaultReviewPath: "Projects/Migration/Session Review", VaultCaseMode: platform.CaseSensitive,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	return migrationServiceFixture{projectID: "project-migration", project: projectRoot, data: dataRoot}
+}
 
 // Removing configured-mapping authentication, passing the global data root to
 // the engine, or reconciling with a different trigger makes this test fail.

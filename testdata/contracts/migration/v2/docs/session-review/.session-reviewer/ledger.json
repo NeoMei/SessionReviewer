@@ -1,0 +1,36 @@
+{
+  "schema_version": 2,
+  "project_id": "project-compatibility",
+  "accepted_revision": 2,
+  "review_sha256": "c8b4497d1b296d09be02935016d21a4d137c4e18f7258f746c6abeba2dbf77a7",
+  "history_sha256": "57fb4f5ce9b7a73dbaf3bf4297284c6dd24c8a54e433b2d092e3da9a6de707dc",
+  "accounting": {
+    "total_duration_ms": 0,
+    "total_tokens": 0,
+    "total_cost_usd": 0,
+    "models": []
+  },
+  "sessions": [],
+  "evidence": [],
+  "legacy_compatibility": {
+    "current_state": {
+      "project_id": "project-compatibility",
+      "revision": 2,
+      "goal": "preserve compatibility",
+      "last_verified": "fixture",
+      "branch": "migration",
+      "uncommitted_changes": [],
+      "blockers": [],
+      "open_risks": [],
+      "next_action": "migrate",
+      "first_inspection": "fixture",
+      "last_updated": "2026-09-04T00:00:00Z",
+      "source_sessions": [],
+      "evidence": []
+    },
+    "timeline": [],
+    "decisions": [],
+    "open_loops": [],
+    "current_risks": []
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "case": "mixed",
+  "review_version": 3,
+  "history_version": 3,
+  "ledger_version": 4,
+  "index_version": 1,
+  "expected": "reject"
+}

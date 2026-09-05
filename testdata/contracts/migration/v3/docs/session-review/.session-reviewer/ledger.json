@@ -1,0 +1,41 @@
+{
+  "schema_version": 3,
+  "minimum_writer_version": "0.3.0",
+  "project_id": "project-compatibility",
+  "generation_id": "generation-compatibility",
+  "project_view_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+  "accepted_revision": 3,
+  "review_sha256": "fe3f1ca35bb85bddf1533925ee5c796926f6cbe191c9aecf140b492d03463597",
+  "history_sha256": "bf48faeb4b0de73721ccc46a615aecdb3ef3fa1c497b5340f1b2ee323eaacbdd",
+  "accounting": {
+    "total_duration_ms": 0,
+    "total_tokens": 0,
+    "total_cost_usd": 0,
+    "models": []
+  },
+  "sessions": [],
+  "human_patches": [],
+  "orphan_patches": [],
+  "generated_baselines": [],
+  "legacy_compatibility": {
+    "current_state": {
+      "project_id": "",
+      "revision": 0,
+      "goal": "",
+      "last_verified": "",
+      "branch": "",
+      "uncommitted_changes": [],
+      "blockers": [],
+      "open_risks": [],
+      "next_action": "",
+      "first_inspection": "",
+      "last_updated": "",
+      "source_sessions": [],
+      "evidence": []
+    },
+    "timeline": [],
+    "decisions": [],
+    "open_loops": [],
+    "current_risks": []
+  }
+}

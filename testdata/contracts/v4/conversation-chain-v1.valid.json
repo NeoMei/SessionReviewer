@@ -1,0 +1,32 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "digest": "sha256:6b047065af598dc399c64ef25f7fad0979665cfbe1976877225fc3e85bbf04a0",
+  "project_id": "project-p", "provider": "claude", "session_id": "same-native-id",
+  "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "dependency_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "segmentation_rule_version": "visible-turn-v1",
+  "coverage": { "source_messages": 2, "captured_messages": 2, "turn_units": 1, "unanswered_units": 0, "truncated_messages": 0 },
+  "turn_units": [{
+    "turn_unit_id": "turn-1", "ordinal": 1, "started_at": "2026-09-04T00:00:00Z", "ended_at": "2026-09-04T00:00:02Z",
+    "user_message": {
+      "role": "user", "revision_id": "revision-user-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 1, "source_hash": "3333333333333333333333333333333333333333333333333333333333333333" },
+      "occurred_at": "2026-09-04T00:00:00Z", "visible_excerpt": "How should this problem be handled?", "truncated": false
+    },
+    "assistant_messages": [{
+      "role": "assistant", "revision_id": "revision-assistant-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 2, "source_hash": "4444444444444444444444444444444444444444444444444444444444444444" },
+      "occurred_at": "2026-09-04T00:00:01Z", "visible_excerpt": "Use a deterministic contract.", "truncated": false
+    }],
+    "actions": [{
+      "revision_id": "revision-action-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 3, "source_hash": "5555555555555555555555555555555555555555555555555555555555555555" },
+      "kind": "tool_call", "tool_name": "go-test", "excerpt": "Run focused tests"
+    }],
+    "results": [{
+      "revision_id": "revision-result-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 4, "source_hash": "6666666666666666666666666666666666666666666666666666666666666666" },
+      "kind": "test", "verification_state": "passed", "excerpt": "PASS"
+    }],
+    "answer_state": "answered"
+  }]
+}

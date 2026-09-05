@@ -1321,3 +1321,50 @@ func TestCommitPublishedRequiresProofAndSwitchesAtomically(t *testing.T) {
 		t.Fatalf("published manifest mismatch: ID=%s manifest=%+v", pubID, pubManifest)
 	}
 }
+
+func TestCommitPublishedV4RequiresSessionIndexProof(t *testing.T) {
+	_, store, fixture := preparedStore(t)
+	defer store.Close()
+	prepared, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: testProjectID, GenerationID: fixture.manifest.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64), JournalVerified: true,
+	}
+	if err := store.CommitPublished(fixture.manifest.GenerationID, proof); !errors.Is(err, ErrPublicationProofInvalid) {
+		t.Fatalf("v4 proof without session index = %v", err)
+	}
+	proof.SessionIndexSHA256 = strings.Repeat("4", 64)
+	if err := store.CommitPublished(fixture.manifest.GenerationID, proof); err != nil {
+		t.Fatalf("v4 proof with session index rejected: %v", err)
+	}
+}
+
+func TestCommitPublishedRejectsAmbiguousPublicationProofVersions(t *testing.T) {
+	_, store, fixture := preparedStore(t)
+	defer store.Close()
+	prepared, _, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := memory.PublicationProof{
+		ProjectID: testProjectID, GenerationID: fixture.manifest.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64), JournalVerified: true,
+	}
+	for _, proof := range []memory.PublicationProof{
+		func() memory.PublicationProof { value := base; value.Version = 3; return value }(),
+		func() memory.PublicationProof {
+			value := base
+			value.SessionIndexSHA256 = strings.Repeat("4", 64)
+			return value
+		}(),
+	} {
+		if err := store.CommitPublished(fixture.manifest.GenerationID, proof); !errors.Is(err, ErrPublicationProofInvalid) {
+			t.Fatalf("ambiguous proof %+v error=%v", proof, err)
+		}
+	}
+}

@@ -1,0 +1,6 @@
+{
+  "case": "v2",
+  "source_version": 2,
+  "expected_reader": "reviewv2",
+  "expected_route": "migrationv3"
+}
