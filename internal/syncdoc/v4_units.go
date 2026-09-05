@@ -3,6 +3,7 @@ package syncdoc
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -108,8 +109,9 @@ func (state *v4DocumentState) buildShell(source []byte, blocks []reviewv4.Markdo
 		if block.Start < previous || block.Start < 0 || block.End <= block.Start || block.End > len(source) {
 			return nil, invalidDocument("invalid v4 Markdown block span")
 		}
-		physical := []byte(fmt.Sprintf("<!-- sr-v4-%x-block:%d -->\n", nonce, len(state.blocks)))
-		semantic := []byte(fmt.Sprintf("<!-- sr-v4-block:%d -->\n", len(state.blocks)))
+		identity := v4PlaceholderIdentity(block)
+		physical := []byte(fmt.Sprintf("<!-- sr-v4-%x-block:%s -->\n", nonce, identity))
+		semantic := []byte(fmt.Sprintf("<!-- sr-v4-block:%s -->\n", identity))
 		unitKey := UnitKey{Kind: UnitSection, Name: v4UnitPrefix + block.Key.Entity + "/" + block.Key.Name}
 		state.blocks = append(state.blocks, v4BlockState{
 			block: block, unitKey: unitKey, physicalPlaceholder: physical, semanticPlaceholder: semantic, original: bytes.Clone(source[block.Start:block.End]),
@@ -121,6 +123,14 @@ func (state *v4DocumentState) buildShell(source []byte, blocks []reviewv4.Markdo
 	}
 	out.Write(source[previous:])
 	return out.Bytes(), nil
+}
+
+func v4PlaceholderIdentity(block reviewv4.MarkdownBlock) string {
+	kind := "field"
+	if block.Generated {
+		kind = "generated"
+	}
+	return kind + ":" + hex.EncodeToString([]byte(block.Key.Entity)) + ":" + hex.EncodeToString([]byte(block.Key.Name))
 }
 
 func (state *v4DocumentState) semanticShellUnit(unit Unit) Unit {

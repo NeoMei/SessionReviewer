@@ -119,6 +119,134 @@ func TestV4ShellCustomFrontmatterCanBeAddedAndRemovedWithoutRewritingMachineBind
 	}
 }
 
+func TestV4ShellCustomFrontmatterUsesCRLFForChangedAndAddedUnits(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	crlf := bytes.ReplaceAll(raw, []byte("\n"), []byte("\r\n"))
+	crlf = bytes.Replace(crlf, []byte("这段自定义文本和 [链接](https://example.test/custom) 必须原样保留。\r\n"), []byte("这段自定义文本和 [链接](https://example.test/custom) 必须原样保留。\n"), 1)
+	document, err := ParseV4("项目回顾.md", crlf, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	units := document.SemanticUnits()
+	owner := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+	unit := units[owner]
+	unit.Value = []byte("修改\n")
+	units[owner] = unit
+	units[UnitKey{Kind: UnitFrontmatter, Name: "custom_team"}] = Unit{Present: true, Value: []byte("codec\n")}
+
+	edited, err := document.WithSemanticUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := edited.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytes.Replace(crlf, []byte("custom_owner: 保留\r\n"), []byte("custom_owner: 修改\r\n"), 1)
+	want = bytes.Replace(want, []byte("---\r\n# 项目回顾"), []byte("custom_team: codec\r\n---\r\n# 项目回顾"), 1)
+	if !bytes.Equal(rendered, want) {
+		t.Fatalf("CRLF frontmatter edit changed physical bytes\ngot:  %q\nwant: %q", rendered[:bytes.Index(rendered, []byte("# 项目回顾"))], want[:bytes.Index(want, []byte("# 项目回顾"))])
+	}
+	if !bytes.Contains(rendered, []byte("必须原样保留。\n")) {
+		t.Fatal("unrelated mixed-LF body byte was normalized")
+	}
+}
+
+func TestV4StablePlaceholdersPreserveFormalIdentityAcrossPhysicalReordering(t *testing.T) {
+	original, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	parsed, err := reviewv4.ParseMarkdownDocument("项目回顾.md", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocks := parsed.Blocks()
+	goal := findV4TestBlock(t, blocks, reviewv4.FieldKey{Entity: "project-overview", Name: "goal"})
+	stage := findV4TestBlock(t, blocks, reviewv4.FieldKey{Entity: "project-overview", Name: "stage"})
+	problemTree := findV4TestBlock(t, blocks, reviewv4.FieldKey{Entity: "project-overview", Name: "problem-tree"})
+
+	for _, test := range []struct {
+		name        string
+		first, last reviewv4.MarkdownBlock
+	}{
+		{name: "two human fields", first: goal, last: stage},
+		{name: "human and generated", first: goal, last: problemTree},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reorderedRaw := swapV4TestBlocks(raw, test.first, test.last)
+			reordered, err := ParseV4("项目回顾.md", reorderedRaw, ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			applied, err := original.WithSemanticUnits(reordered.SemanticUnits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := applied.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, reorderedRaw) {
+				t.Fatal("independent physical reordering was hidden by ordinal placeholders")
+			}
+			validated, err := reviewv4.ParseMarkdownDocumentAgainstLedger("项目回顾.md", got, ledger)
+			if err != nil {
+				t.Fatalf("reconstructed identities no longer validate: %v", err)
+			}
+			for _, block := range validated.Blocks() {
+				if block.Key == test.last.Key && block.Generated != test.last.Generated {
+					t.Fatalf("block %v changed generated identity", block.Key)
+				}
+			}
+		})
+	}
+}
+
+func TestV4StablePlaceholdersRejectUnknownAndDuplicateInjection(t *testing.T) {
+	document, _, _ := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	known := "<!-- sr-v4-block:" + v4PlaceholderIdentity(reviewv4.MarkdownBlock{Key: reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}}) + " -->\n"
+	unknown := "<!-- sr-v4-block:field:756e6b6e6f776e:756e6b6e6f776e -->\n"
+	for _, test := range []struct {
+		name, token string
+	}{
+		{name: "duplicate known identity", token: known},
+		{name: "unknown identity", token: unknown},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			units := document.SemanticUnits()
+			key := UnitKey{Kind: UnitPreamble}
+			unit := units[key]
+			unit.Value = append(unit.Value, []byte(test.token)...)
+			units[key] = unit
+			if _, err := document.WithSemanticUnits(units); err == nil {
+				t.Fatal("injected internal placeholder was accepted")
+			}
+		})
+	}
+}
+
+func findV4TestBlock(t *testing.T, blocks []reviewv4.MarkdownBlock, key reviewv4.FieldKey) reviewv4.MarkdownBlock {
+	t.Helper()
+	for _, block := range blocks {
+		if block.Key == key {
+			return block
+		}
+	}
+	t.Fatalf("fixture block %v not found", key)
+	return reviewv4.MarkdownBlock{}
+}
+
+func swapV4TestBlocks(raw []byte, first, last reviewv4.MarkdownBlock) []byte {
+	if first.Start > last.Start {
+		first, last = last, first
+	}
+	result := make([]byte, 0, len(raw))
+	result = append(result, raw[:first.Start]...)
+	result = append(result, raw[last.Start:last.End]...)
+	result = append(result, raw[first.End:last.Start]...)
+	result = append(result, raw[first.Start:first.End]...)
+	result = append(result, raw[last.End:]...)
+	return result
+}
+
 func TestV4UnitsCannotAddOrDeleteFormalFields(t *testing.T) {
 	document, _, _ := v4FixtureDocument(t, "项目回顾.md", "review.md")
 	units := document.SemanticUnits()

@@ -43,6 +43,7 @@ func (d Document) rewriteV4Shell(nextShell Document, units UnitSet) ([]byte, err
 
 func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error) {
 	raw := d.v4.shell.raw
+	newline := v4FrontmatterNewline(raw[:d.v4.bodyStart])
 	parts := make([][]byte, 0, len(d.v4.frontmatter)+2)
 	parts = append(parts, raw[:d.v4.frontStart])
 	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
@@ -62,7 +63,7 @@ func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, encoded)
+		parts = append(parts, applyV4NewlineStyle(encoded, newline))
 	}
 	for _, name := range sortedFrontmatterNames(units, seen) {
 		key := UnitKey{Kind: UnitFrontmatter, Name: name}
@@ -70,10 +71,25 @@ func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, encoded)
+		parts = append(parts, applyV4NewlineStyle(encoded, newline))
 	}
 	parts = append(parts, raw[d.v4.frontEnd:d.v4.bodyStart])
 	return joinV4Bounded(parts, limit)
+}
+
+func v4FrontmatterNewline(source []byte) []byte {
+	end := bytes.IndexByte(source, '\n')
+	if end > 0 && source[end-1] == '\r' {
+		return []byte("\r\n")
+	}
+	return []byte("\n")
+}
+
+func applyV4NewlineStyle(source, newline []byte) []byte {
+	if bytes.Equal(newline, []byte("\n")) {
+		return source
+	}
+	return bytes.ReplaceAll(source, []byte("\n"), newline)
 }
 
 func encodeV4FrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {

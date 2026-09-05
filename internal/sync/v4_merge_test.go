@@ -98,6 +98,103 @@ func TestV4MergeNormalizesOnlyValueLineEndings(t *testing.T) {
 	}
 }
 
+func TestV4MergeKeepsReorderedShellBoundToStableFieldIdentity(t *testing.T) {
+	ledgerBody, err := os.ReadFile("../../testdata/contracts/v4/markdown/ledger.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := reviewv4.DecodeLedger(ledgerBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("../../testdata/contracts/v4/markdown/review.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := syncdoc.ParseV4("项目回顾.md", raw, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := reviewv4.ParseMarkdownDocument("项目回顾.md", raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalKey := reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}
+	stageKey := reviewv4.FieldKey{Entity: "project-overview", Name: "stage"}
+	goal := findV4MergeBlock(t, parsed.Blocks(), goalKey)
+	stage := findV4MergeBlock(t, parsed.Blocks(), stageKey)
+	reorderedRaw := swapV4MergeBlocks(raw, goal, stage)
+
+	projectRaw, err := parsed.ReplaceFields(map[reviewv4.FieldKey]string{goalKey: "project goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := syncdoc.ParseV4("项目回顾.md", projectRaw, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reorderedDocument, err := reviewv4.ParseMarkdownDocument("项目回顾.md", reorderedRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultRaw, err := reorderedDocument.ReplaceFields(map[reviewv4.FieldKey]string{stageKey: "vault stage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vault, err := syncdoc.ParseV4("项目回顾.md", vaultRaw, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	merged := MergeV4Units(V4MergeInput{Base: base.SemanticUnits(), Project: project.SemanticUnits(), Vault: vault.SemanticUnits(), HasBase: true})
+	if len(merged.Conflicts) != 0 {
+		t.Fatalf("independent field/shell changes conflicted: %v", merged.Conflicts)
+	}
+	accepted, err := base.WithSemanticUnits(merged.Units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := accepted.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDocument, err := reviewv4.ParseMarkdownDocument("项目回顾.md", reorderedRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := wantDocument.ReplaceFields(map[reviewv4.FieldKey]string{goalKey: "project goal", stageKey: "vault stage"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("merged reordered shell swapped or lost stable field identity")
+	}
+}
+
+func findV4MergeBlock(t *testing.T, blocks []reviewv4.MarkdownBlock, key reviewv4.FieldKey) reviewv4.MarkdownBlock {
+	t.Helper()
+	for _, block := range blocks {
+		if block.Key == key {
+			return block
+		}
+	}
+	t.Fatalf("fixture block %v not found", key)
+	return reviewv4.MarkdownBlock{}
+}
+
+func swapV4MergeBlocks(raw []byte, first, last reviewv4.MarkdownBlock) []byte {
+	if first.Start > last.Start {
+		first, last = last, first
+	}
+	result := make([]byte, 0, len(raw))
+	result = append(result, raw[:first.Start]...)
+	result = append(result, raw[last.Start:last.End]...)
+	result = append(result, raw[first.End:last.Start]...)
+	result = append(result, raw[first.Start:first.End]...)
+	result = append(result, raw[last.End:]...)
+	return result
+}
+
 func TestV4CandidateSensitiveTrustsOnlyAuthenticatedMarkerBoundaries(t *testing.T) {
 	ledgerBody, err := os.ReadFile("../../testdata/contracts/v4/markdown/ledger.json")
 	if err != nil {
