@@ -124,6 +124,7 @@ type DecodeReport struct {
 	TerminalState         memory.TerminalState
 	MalformedLines        int
 	UnsupportedRecords    int
+	UndecodableRecords    int
 	EmittedRevisions      int
 	RecordCount           *uint64
 	Diagnostics           []memory.Diagnostic

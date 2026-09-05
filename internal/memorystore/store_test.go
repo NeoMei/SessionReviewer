@@ -144,6 +144,13 @@ func TestPrepareGenerationRejectsForgedRetainedFactsDigest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	previous := index
+	previous.GenerationID = "generation-index-forged-previous"
+	previous.GeneratedAt = "2026-08-30T10:00:00Z"
+	previousDigest, err := store.PutSessionIndex(previous)
+	if err != nil {
+		t.Fatal(err)
+	}
 	emptyProject := fixture.project
 	emptyProject.SourceSessions = 0
 	emptyProject.TerminalCounts = memory.TerminalCounts{}
@@ -167,7 +174,7 @@ func TestPrepareGenerationRejectsForgedRetainedFactsDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.manifest.RetainedSessionViews = []memory.SessionViewDependency{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID, Digest: fixture.session.Digest}}
-	fixture.manifest.PreviousSessionIndexDigest = buildDigestForTest("previous")
+	fixture.manifest.PreviousSessionIndexDigest = previousDigest
 	fixture.manifest.RetainedSessionFactsDigest = buildDigestForTest("forged")
 	fixture.manifest.SessionIndexDigest = digest
 	if _, err := store.PrepareGeneration(fixture.manifest); err == nil || !strings.Contains(err.Error(), "retained Session facts binding mismatch") {

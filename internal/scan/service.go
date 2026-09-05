@@ -110,6 +110,7 @@ type terminalSource struct {
 	recordCount         *uint64
 	malformedRecords    int
 	unsupportedRecords  int
+	undecodableRecords  int
 	unprojectedRecords  int
 }
 
@@ -366,20 +367,31 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		for _, dependency := range manifest.SessionViews {
 			current[sourceKey(dependency.Provider, dependency.SessionID)] = struct{}{}
 		}
-		retainedEntries := make([]sessionindex.Entry, 0)
+		inheritedEntries := make([]sessionindex.Entry, 0)
 		for _, entry := range previous.acceptedIndex.Sessions {
-			if _, found := current[sourceKey(entry.Provider, entry.SessionID)]; !found {
-				entry.SourceAvailability = "unavailable"
-				retainedEntries = append(retainedEntries, entry)
+			key := sessionindex.SessionKey{Provider: entry.Provider, SessionID: entry.SessionID}
+			view, found := viewsByKey[key]
+			if found && view.SourceAvailability == memory.SourceAvailable {
+				continue
 			}
+			entry.SourceAvailability = "unavailable"
+			if found {
+				terminal := string(view.TerminalState)
+				viewDigest, usageDigest := view.Digest, view.UsageRecordDigest
+				entry.SourceTerminalState = &terminal
+				entry.SessionViewDigest = &viewDigest
+				entry.UsageRecordDigest = &usageDigest
+				entry.LastSeenGenerationID = nil
+			}
+			inheritedEntries = append(inheritedEntries, entry)
 		}
 		for _, dependency := range acceptedDependencies {
 			if _, found := current[sourceKey(dependency.Provider, dependency.SessionID)]; !found {
 				manifest.RetainedSessionViews = append(manifest.RetainedSessionViews, dependency)
 			}
 		}
-		if len(retainedEntries) > 0 {
-			manifest.RetainedSessionFactsDigest, err = memory.Digest(retainedEntries)
+		if len(inheritedEntries) > 0 {
+			manifest.RetainedSessionFactsDigest, err = memory.Digest(inheritedEntries)
 			if err != nil {
 				return result, err
 			}
@@ -845,6 +857,7 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			shared:      len(record.ProjectIDs) > 1,
 			recordCount: item.report.RecordCount, malformedRecords: item.report.MalformedLines,
 			unsupportedRecords: item.report.UnsupportedRecords, unprojectedRecords: len(item.report.Quarantined),
+			undecodableRecords: item.report.UndecodableRecords,
 		})
 	}
 	for _, issue := range issues {
@@ -958,7 +971,7 @@ func measurementForTerminal(terminal terminalSource, view memory.SessionView) me
 	}
 	indexed := uint64(len(view.ObservationSummaries))
 	unprojected := uint64(terminal.unprojectedRecords)
-	undecodable := uint64(terminal.malformedRecords + terminal.unsupportedRecords)
+	undecodable := uint64(terminal.malformedRecords + terminal.unsupportedRecords + terminal.undecodableRecords)
 	measurement.Indexed, measurement.Unprojected, measurement.Undecodable = indexed, unprojected, undecodable
 	measurement.Seen = indexed + unprojected + undecodable
 	return measurement

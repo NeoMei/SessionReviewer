@@ -25,9 +25,11 @@ import (
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
 	"github.com/neomei/SessionReviewer/internal/projectprobe"
 	"github.com/neomei/SessionReviewer/internal/projectview"
+	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
+	codexsource "github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
 
@@ -1528,6 +1530,156 @@ func TestRunBuildsFromLastPublishedIndexAndPreservesUnavailableHistory(t *testin
 			t.Fatalf("retention cleanup removed previous Session index: %v", err)
 		}
 	})
+}
+
+func TestRunPublishedSourceBecomingUnavailablePreservesFactsAndPrepares(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, firstManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: scanTestProject, GenerationID: first.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64),
+		SessionIndexSHA256: strings.TrimPrefix(firstManifest.SessionIndexDigest, "sha256:"), JournalVerified: true,
+	}
+	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
+		t.Fatal(err)
+	}
+	harness.adapter.sources = map[string]*fakeSourceSpec{}
+	harness.adapter.issues = []source.Issue{{
+		Provider: "codex", SessionID: "session-1", Code: "missing_segment", TerminalState: memory.Missing,
+	}}
+	second, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatalf("prepare unavailable successor: %v", err)
+	}
+	_, secondManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := harness.store.LoadObject(memorystore.ObjectSessionIndex, secondManifest.SessionIndexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := sessionindex.Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Sessions) != 1 {
+		t.Fatalf("sessions=%d", len(document.Sessions))
+	}
+	entry := document.Sessions[0]
+	if entry.ProcessingState != sessionindex.ProcessingComplete || entry.SourceAvailability != "unavailable" || entry.FactCounts.FileChange != 1 || entry.IndexedEventCount != 1 || entry.LastSuccessfulGenerationID == nil || *entry.LastSuccessfulGenerationID != first.GenerationID {
+		t.Fatalf("unavailable accepted facts=%+v", entry)
+	}
+	if secondManifest.PreviousSessionIndexDigest != firstManifest.SessionIndexDigest || secondManifest.RetainedSessionFactsDigest == "" {
+		t.Fatalf("unavailable inheritance is unauthenticated: %+v", secondManifest)
+	}
+	if _, err := harness.store.ReportRetention(time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("retention rejected current-unavailable successor: %v", err)
+	}
+	harness.options.Now = func() time.Time { return time.Date(2026, 8, 31, 12, 2, 0, 0, time.UTC) }
+	third, err := Run(context.Background(), harness.options)
+	if err != nil || third.GenerationID != second.GenerationID {
+		t.Fatalf("later-clock unavailable replay drifted: second=%+v third=%+v err=%v", second, third, err)
+	}
+	_, thirdManifest, err := harness.store.LoadPrepared()
+	if err != nil || thirdManifest.SessionIndexDigest != secondManifest.SessionIndexDigest || thirdManifest.PreviousSessionIndexDigest != secondManifest.PreviousSessionIndexDigest {
+		t.Fatalf("later-clock unavailable bindings drifted: second=%+v third=%+v err=%v", secondManifest, thirdManifest, err)
+	}
+}
+
+func TestRunUnpublishedSourceBecomingUnavailableDoesNotClaimInheritedFacts(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	if _, err := Run(context.Background(), harness.options); err != nil {
+		t.Fatal(err)
+	}
+	harness.adapter.sources = map[string]*fakeSourceSpec{}
+	harness.adapter.issues = []source.Issue{{
+		Provider: "codex", SessionID: "session-1", Code: "missing_segment", TerminalState: memory.Missing,
+	}}
+	if _, err := Run(context.Background(), harness.options); err != nil {
+		t.Fatalf("prepare first unavailable index without accepted predecessor: %v", err)
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.PreviousSessionIndexDigest != "" || manifest.RetainedSessionFactsDigest != "" {
+		t.Fatalf("unpublished facts were classified as inherited: %+v", manifest)
+	}
+}
+
+func TestRunRealCodexMalformedPayloadReportsExactPartialCoverage(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.options.Now = func() time.Time { return time.Date(2026, 8, 31, 14, 1, 0, 0, time.UTC) }
+	const sessionID = "session-malformed-payloads"
+	records := []map[string]any{
+		{"timestamp": "2026-08-31T14:00:00Z", "type": "session_meta", "payload": map[string]any{"id": sessionID, "cwd": harness.options.Binding.CanonicalRoot}},
+		{"timestamp": "2026-08-31T14:00:01Z", "type": "turn_context", "payload": "not-an-object"},
+		{"timestamp": "2026-08-31T14:00:02Z", "type": "response_item", "payload": map[string]any{"type": "custom_tool_call", "call_id": "call-malformed", "name": "exec_command", "input": "{"}},
+		{"timestamp": "2026-08-31T14:00:03Z", "type": "response_item", "payload": map[string]any{"type": "reasoning", "summary": []any{"PRIVATE-HIDDEN"}}},
+		{"timestamp": "2026-08-31T14:00:04Z", "type": "response_item", "payload": map[string]any{"type": "message", "id": "system-hidden", "role": "system", "content": []any{map[string]any{"type": "input_text", "text": "PRIVATE-SYSTEM"}}}},
+	}
+	var body strings.Builder
+	for _, record := range records {
+		encoded, err := json.Marshal(record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body.Write(encoded)
+		body.WriteByte('\n')
+	}
+	if err := os.WriteFile(filepath.Join(harness.options.SessionsRoot, sessionID+".jsonl"), []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	redactor := redact.Default()
+	adapter, err := codexsource.New(codexsource.AdapterOptions{
+		SessionsRoot: harness.options.SessionsRoot, Bindings: []projectidentity.Binding{harness.options.Binding},
+		Catalog: harness.catalog, Redactor: &redactor, AdapterVersion: "v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	harness.options.Adapter = adapter
+	result, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, manifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.SessionIndexMeasurements) != 1 {
+		t.Fatalf("measurements=%+v", manifest.SessionIndexMeasurements)
+	}
+	measurement := manifest.SessionIndexMeasurements[0]
+	if measurement.RecordCount == nil || *measurement.RecordCount != 5 || measurement.Seen != 3 || measurement.Indexed != 1 || measurement.Undecodable != 2 || measurement.Collapsed != 0 || measurement.Unprojected != 0 || measurement.Truncated != 0 {
+		t.Fatalf("measurement=%+v", measurement)
+	}
+	indexBody, err := harness.store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := sessionindex.Parse(indexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Sessions) != 1 {
+		t.Fatalf("sessions=%+v result=%+v", document.Sessions, result)
+	}
+	entry := document.Sessions[0]
+	if entry.ProcessingState != sessionindex.ProcessingPartial || entry.WarningCount == 0 || entry.Coverage.Seen != 3 || entry.Coverage.Indexed != 1 || entry.Coverage.Undecodable != 2 || entry.IndexedEventCount != 1 || entry.FactCounts.Artifact != 1 || entry.FactCounts.Command != 0 {
+		t.Fatalf("indexed malformed source=%+v", entry)
+	}
 }
 
 func TestRunSessionViewUsageDigestResolvesExactCatalogUsage(t *testing.T) {

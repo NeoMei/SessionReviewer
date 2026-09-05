@@ -169,7 +169,7 @@ func buildEntry(view memory.SessionView, measurement memory.SessionIndexMeasurem
 	state := ProcessingComplete
 	switch view.TerminalState {
 	case memory.Indexed:
-		if len(reasons) != 0 || coverage.Collapsed != 0 || coverage.Unprojected != 0 || coverage.Undecodable != 0 || coverage.Truncated != 0 {
+		if len(view.Diagnostics) != 0 || coverage.Collapsed != 0 || coverage.Unprojected != 0 || coverage.Undecodable != 0 || coverage.Truncated != 0 {
 			state = ProcessingPartial
 		}
 	case memory.Unsupported, memory.Missing, memory.Unreadable, memory.Ambiguous:

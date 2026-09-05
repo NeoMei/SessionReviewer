@@ -152,6 +152,26 @@ func TestBuildUnavailableCurrentViewPreservesAcceptedFactsAndState(t *testing.T)
 	}
 }
 
+func TestBuildIndexedViewWithNonPublicDiagnosticIsPartial(t *testing.T) {
+	view := buildView("codex", "diagnostic", memory.Indexed, memory.SourceAvailable, true)
+	view.Diagnostics = []memory.Diagnostic{{Code: "malformed_payload"}}
+	dependency := memory.SessionViewDependency{Provider: "codex", SessionID: "diagnostic", Digest: view.Digest}
+	measurement := memory.SessionIndexMeasurement{Provider: "codex", SessionID: "diagnostic", RecordCount: uint64ptr(1), Seen: 1, Indexed: 1}
+	got, err := Build(BuildInput{
+		ProjectView:  buildProjectView([]memory.SessionViewDependency{dependency}),
+		Manifest:     buildManifest([]memory.SessionViewDependency{dependency}, []memory.SessionIndexMeasurement{measurement}),
+		SessionViews: map[SessionKey]*memory.SessionView{{Provider: "codex", SessionID: "diagnostic"}: &view},
+		GeneratedAt:  buildTime,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := requireBuildEntry(t, got, SessionKey{Provider: "codex", SessionID: "diagnostic"})
+	if entry.ProcessingState != ProcessingPartial || entry.WarningCount != 1 || len(entry.StateReasonCodes) != 0 {
+		t.Fatalf("indexed diagnostic entry=%+v", entry)
+	}
+}
+
 func buildView(provider, sessionID string, terminal memory.TerminalState, availability memory.SourceAvailability, knownTime bool) memory.SessionView {
 	view := memory.SessionView{
 		ProjectID: "project-p", Provider: provider, SessionID: sessionID,

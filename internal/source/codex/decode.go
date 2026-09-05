@@ -256,6 +256,7 @@ func (d *recordDecoder) add(record session.Record) error {
 		return err
 	}
 	if !validRecordMetadata(record) {
+		d.report.UndecodableRecords++
 		d.diagnostic("malformed_observation")
 		return nil
 	}
@@ -647,6 +648,7 @@ type observedFact struct {
 func (d *recordDecoder) observe(record session.Record, fact observedFact) error {
 	validated, err := d.buildObservation(record, fact, "quarantine")
 	if err != nil {
+		d.report.UndecodableRecords++
 		d.diagnostic("malformed_observation")
 		return nil
 	}
@@ -667,6 +669,7 @@ func (d *recordDecoder) observe(record session.Record, fact observedFact) error 
 	validated.Key.ProjectID = projectID
 	validated.RevisionID = memory.ObservationRevisionID(validated)
 	if err := memory.ValidateObservationRevision(validated); err != nil {
+		d.report.UndecodableRecords++
 		d.diagnostic("malformed_observation")
 		return nil
 	}
@@ -1158,6 +1161,7 @@ func (d *recordDecoder) unsupported() {
 }
 
 func (d *recordDecoder) malformedPayload() {
+	d.report.UndecodableRecords++
 	d.diagnostic("malformed_payload")
 }
 

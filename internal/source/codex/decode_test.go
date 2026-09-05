@@ -123,6 +123,40 @@ func TestDecodeParsesGitAndVerificationFactsWithoutCopyingMessagesOutputsOrUsage
 	}
 }
 
+func TestDecodeCountsMalformedPayloadsWithoutCountingHiddenRecords(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	const sessionID = "session-malformed-payloads"
+	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": sessionID, "cwd": fixture.projectA}) +
+		encodedRecord(t, "2026-08-31T14:00:01Z", "turn_context", "not-an-object") +
+		encodedRecord(t, "2026-08-31T14:00:02Z", "response_item", map[string]any{"type": "custom_tool_call", "call_id": "call-malformed", "name": "exec_command", "input": "{"}) +
+		encodedRecord(t, "2026-08-31T14:00:03Z", "response_item", map[string]any{"type": "reasoning", "summary": []any{"PRIVATE-HIDDEN"}}) +
+		encodedRecord(t, "2026-08-31T14:00:04Z", "response_item", map[string]any{"type": "message", "id": "system-hidden", "role": "system", "content": []any{map[string]any{"type": "input_text", "text": "PRIVATE-SYSTEM"}}})
+	if err := os.WriteFile(filepath.Join(fixture.sessions, sessionID+".jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations, report := decodeBoundary(t, adapter, boundary)
+	if len(observations) != 1 || observations[0].Operation != "session_started" {
+		t.Fatalf("projected observations=%+v", observations)
+	}
+	if report.RecordCount == nil || *report.RecordCount != 5 || report.UndecodableRecords != 2 || report.MalformedLines != 0 || report.UnsupportedRecords != 0 {
+		t.Fatalf("decode accounting=%+v", report)
+	}
+	malformedDiagnostics := 0
+	for _, diagnostic := range report.Diagnostics {
+		if diagnostic.Code == "malformed_payload" {
+			malformedDiagnostics++
+		}
+	}
+	if malformedDiagnostics != 2 {
+		t.Fatalf("malformed diagnostics=%d all=%+v", malformedDiagnostics, report.Diagnostics)
+	}
+}
+
 func TestGitStatusGrammarRejectsProseAsAStatusEntry(t *testing.T) {
 	if fields, valid := parseGitOutput("status", "exit code: 0\n## main...origin/main\nthis prose only sounds dirty"); valid {
 		t.Fatalf("prose accepted as typed Git status: %+v", fields)

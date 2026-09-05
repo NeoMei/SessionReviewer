@@ -1215,6 +1215,18 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		if index.ProjectID != value.ProjectID || index.GenerationID != value.GenerationID || index.ProjectViewDigest != value.ProjectViewDigest || index.Digest != value.SessionIndexDigest {
 			return errors.New("Session index identity does not match generation")
 		}
+		var previousIndex *sessionindex.Document
+		previousEntries := make(map[string]struct{})
+		if value.PreviousSessionIndexDigest != "" {
+			previous, loadErr := objects.sessionIndex(ctx, value.PreviousSessionIndexDigest)
+			if loadErr != nil {
+				return errors.Join(errors.New("previous Session index authentication failed"), loadErr)
+			}
+			previousIndex = &previous
+			for _, entry := range previous.Sessions {
+				previousEntries[entry.Provider+"\x00"+entry.SessionID] = struct{}{}
+			}
+		}
 		authenticated := make(map[string]string, len(value.SessionViews)+len(value.RetainedSessionViews))
 		for _, dependency := range append(append([]memory.SessionViewDependency(nil), value.SessionViews...), value.RetainedSessionViews...) {
 			view, err := objects.sessionView(ctx, dependency)
@@ -1224,7 +1236,7 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 			authenticated[dependency.Provider+"\x00"+dependency.SessionID] = dependency.Digest
 		}
 		seen := make(map[string]struct{}, len(index.Sessions))
-		retainedFacts := make([]sessionindex.Entry, 0, len(value.RetainedSessionViews))
+		inheritedFacts := make([]sessionindex.Entry, 0, len(value.RetainedSessionViews))
 		currentKeys := make(map[string]struct{}, len(value.SessionViews))
 		for _, dependency := range value.SessionViews {
 			currentKeys[dependency.Provider+"\x00"+dependency.SessionID] = struct{}{}
@@ -1235,30 +1247,27 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 				return errors.New("Session index references unauthenticated SessionView")
 			}
 			seen[key] = struct{}{}
-			if _, current := currentKeys[key]; !current {
-				retainedFacts = append(retainedFacts, entry)
+			currentView, current := currentViews[sessionindex.SessionKey{Provider: entry.Provider, SessionID: entry.SessionID}]
+			_, existedPreviously := previousEntries[key]
+			if !current || currentView.SourceAvailability != memory.SourceAvailable && existedPreviously {
+				if current {
+					entry.LastSeenGenerationID = nil
+				}
+				inheritedFacts = append(inheritedFacts, entry)
 			}
 		}
 		if len(seen) != len(authenticated) {
 			return errors.New("Session index dependency coverage is incomplete")
 		}
-		if len(retainedFacts) == 0 {
+		if len(inheritedFacts) == 0 {
 			if value.RetainedSessionFactsDigest != "" || value.PreviousSessionIndexDigest != "" {
 				return errors.New("generation retains unexpected Session index facts")
 			}
 		} else {
-			digest, err := memory.Digest(retainedFacts)
+			digest, err := memory.Digest(inheritedFacts)
 			if err != nil || digest != value.RetainedSessionFactsDigest || value.PreviousSessionIndexDigest == "" {
 				return errors.Join(errors.New("retained Session facts binding mismatch"), err)
 			}
-		}
-		var previousIndex *sessionindex.Document
-		if value.PreviousSessionIndexDigest != "" {
-			previous, loadErr := objects.sessionIndex(ctx, value.PreviousSessionIndexDigest)
-			if loadErr != nil {
-				return errors.Join(errors.New("previous Session index authentication failed"), loadErr)
-			}
-			previousIndex = &previous
 		}
 		generatedAt, parseErr := time.Parse(time.RFC3339Nano, value.CreatedAt)
 		if parseErr != nil {

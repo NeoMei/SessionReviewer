@@ -83,3 +83,56 @@ Status: DONE. Implementation is complete; the controller's independent review re
 ## Concerns
 
 - The single full-suite run is not a pristine all-green invocation because it exposed the stale Gate B expectation. The exact failing assertion was repaired and its focused regression passed; the full suite was intentionally not repeated per controller instruction.
+
+## Review fix round 1 (BASE `3084303`)
+
+Status: DONE. Both Important findings in `task-2-review.md` are fixed; the deferred Minor strict-JSON error-string coupling is unchanged.
+
+### Changes
+
+- A current SessionView that is unavailable inherits accepted factual counts and processing state only when the accepted predecessor contains the same identity. The manifest now binds that inherited entry to the authenticated previous index and to a generation-free retained-facts digest. Store reconciliation loads the accepted predecessor, applies the identical prior-exists-and-unavailable classification, rebuilds the index, and retains the predecessor graph.
+- A bootstrap/unpublished unavailable identity does not claim inherited facts or require a previous index. This prevents the fix from rejecting a current unavailable Session that has no accepted predecessor.
+- Codex decoding now reports an exact producer-side `UndecodableRecords` count for syntactically valid records whose payload or projected observation cannot be decoded. Scan measurement adds that count directly; it is not reconstructed from bounded diagnostics, raw record count, emitted revisions, or supersession data.
+- Indexed SessionViews with any diagnostic are `partial` even when the diagnostic code is intentionally omitted from the public reason-code allowlist. The public wire schema is unchanged.
+- The retained-facts tamper fixture now supplies a real stored previous index, so it reaches and tests the intended retained-fingerprint rejection rather than passing through an earlier missing-object error.
+
+### TDD evidence
+
+RED:
+
+- `go test ./internal/scan -run '^TestRunPublishedSourceBecomingUnavailablePreservesFactsAndPrepares$' -count=1`
+  - Failed with `prepare unavailable successor: Session index measurement or retained facts mismatch`.
+- `go test ./internal/sessionindex -run '^TestBuildIndexedViewWithNonPublicDiagnosticIsPartial$' -count=1`
+  - Failed because the indexed entry had `warning_count=1` but `processing_state=complete` and no public reason code.
+- `go test ./internal/source/codex -run '^TestDecodeCountsMalformedPayloadsWithoutCountingHiddenRecords$' -count=1`
+  - Failed to compile because `source.DecodeReport` did not yet expose the exact `UndecodableRecords` producer counter.
+- `go test ./internal/scan -run '^TestRunUnpublishedSourceBecomingUnavailableDoesNotClaimInheritedFacts$' -count=1`
+  - Failed with `retained Session facts binding mismatch`, proving store classification had been broadened beyond the builder's prior-exists rule.
+
+GREEN:
+
+- `go test ./internal/source/codex -run '^(TestDecodeCountsMalformedPayloadsWithoutCountingHiddenRecords|TestDecodeDiagnosticsStayBoundedWhileUnsupportedCountRemainsExact)$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/internal/source/codex 0.521s`.
+- `go test ./internal/sessionindex -run '^(TestBuildIndexedViewWithNonPublicDiagnosticIsPartial|TestBuildUnavailableCurrentViewPreservesAcceptedFactsAndState|TestBuildRetainsAbsentPriorSessionAsUnavailable)$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/internal/sessionindex 0.194s`.
+- `go test ./internal/scan -run '^(TestRunPublishedSourceBecomingUnavailablePreservesFactsAndPrepares|TestRunUnpublishedSourceBecomingUnavailableDoesNotClaimInheritedFacts|TestRunRealCodexMalformedPayloadReportsExactPartialCoverage|TestRunBuildsFromLastPublishedIndexAndPreservesUnavailableHistory)$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/internal/scan 2.483s`.
+- `go test ./internal/memorystore -run '^(TestPrepareGenerationRejectsSessionIndexMeasurementMismatch|TestPrepareGenerationRejectsSessionIndexWithOmittedMeasurements|TestPrepareGenerationRejectsForgedRetainedFactsDigest|TestPrepareGenerationRejectsSessionIndexWithMissingDependency)$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/internal/memorystore 1.943s`.
+
+The real Codex scan fixture contains five syntactically valid records: one projected `session_started` fact, one malformed `turn_context`, one malformed tool payload, one hidden reasoning record, and one system message. The resulting private measurement is exactly `record_count=5`, `seen=3`, `indexed=1`, `undecodable=2`, with the other gap counters zero; the public entry is partial with warnings and only the artifact fact. Hidden/system records remain outside both the index and `seen`.
+
+### Fix-round verification
+
+- `go test ./test/zerotoken -run '^TestGateAZeroTokenCore$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/test/zerotoken 33.691s`.
+- `go test ./test/zerotoken -run '^TestGateBEndToEndPublicationAndIdempotence$' -count=1`
+  - PASS: `ok github.com/neomei/SessionReviewer/test/zerotoken 4.222s`.
+- `go vet ./...`
+  - PASS, no output.
+- `go mod tidy -diff`
+  - PASS, no output or module-file delta.
+- `git diff --check`
+  - PASS, no output.
+
+Per fix-round instruction, the repository-wide test suite was not rerun; Gate A/B and all amended behavior paths were verified directly.
