@@ -388,7 +388,7 @@ paths := []string{
 
 ## Task 7 (M7)：显式升级与旧私有 index 认证衔接
 
-状态：从 `a7a62da` 开始实施，尚未完成验证或审查。
+状态：实现 `b411e51`，修复 `e6166d5`、`139aede`、`6edc664`，独立审查及三轮限范围复审通过。实际 CLI 预览/确认/恢复、旧 v4 同世代与缺索引绑定迁移、历史重复字段裁决、六类私有证据变化拒绝已有测试。相关五包及最后受影响两包回归通过；v2/v3 缺已认证分类/因果链的生产迁移仍明确阻止，不宣称真实旧项目已完成迁移。
 
 **Files:** Create `internal/migrationv4/markdown.go`、`markdown_test.go`；Modify `internal/migrationv4/types.go`、`plan.go`、`internal/syncproject/migration.go`、`internal/cli/sync.go`；各自相邻测试。既有 `internal/migrationv4/migrate.go` 和 `internal/memorystore/store.go` 是复用接口，仅发现具体缺陷时修改；已有 JSON BuildPreview 和 durable AdvancePrepared/图校验不要求为新格式增加无效改动或旁路。
 
@@ -440,6 +440,8 @@ if len(result.Preview.BlockingReasons) != 0 {
 - [ ] **6. GREEN 与提交。** `go test ./internal/migrationv4 ./internal/memorystore ./internal/syncproject ./internal/publication ./internal/cli -count=1`。提交 `feat: migrate legacy projections to authenticated markdown`。保留缺分类能力的明确状态，不把迁移适配测试成功当作实际旧项目完成迁移。
 
 ## Task 8 (M8)：Go/TypeScript 格式一致与插件草稿/降级状态
+
+状态：从 `6edc664` 开始实施，尚未完成验证或审查。
 
 **Files:** Create `obsidian-plugin/src/data/markdown-v4.ts`、`repository-v4.ts`、`obsidian-plugin/tests/markdown-v4.test.ts`、`repository-v4.test.ts`；Modify `obsidian-plugin/src/data/repository.ts`、`editor.ts`、`vault-port.ts`、`obsidian-plugin/src/view/presentation.ts`、`obsidian-plugin/src/main.ts`（仅路由/状态）、`obsidian-plugin/package.json`、`package-lock.json`；Create `internal/reviewv4/markdown_corpus_test.go`。
 
