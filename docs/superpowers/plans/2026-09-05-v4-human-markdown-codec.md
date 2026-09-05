@@ -390,7 +390,7 @@ paths := []string{
 
 状态：从 `a7a62da` 开始实施，尚未完成验证或审查。
 
-**Files:** Create `internal/migrationv4/markdown.go`、`markdown_test.go`；Modify `internal/migrationv4/types.go`、`plan.go`、`migrate.go`、`internal/syncproject/migration.go`、`internal/cli/sync.go`、`internal/memorystore/store.go`；各自相邻测试。
+**Files:** Create `internal/migrationv4/markdown.go`、`markdown_test.go`；Modify `internal/migrationv4/types.go`、`plan.go`、`internal/syncproject/migration.go`、`internal/cli/sync.go`；各自相邻测试。既有 `internal/migrationv4/migrate.go` 和 `internal/memorystore/store.go` 是复用接口，仅发现具体缺陷时修改；已有 JSON BuildPreview 和 durable AdvancePrepared/图校验不要求为新格式增加无效改动或旁路。
 
 **Interfaces:** consumes M3 render、M5 publisher/认证、既有 `MigrationPreview`/`Input`/`Result`；produces：
 
