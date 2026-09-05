@@ -338,7 +338,7 @@ if manifest.SessionIndexDigest == "" ||
 
 ## Task 6 (M6)：接入普通扫描的四文件渲染
 
-状态：从 `aac65b1` 开始实施，尚未完成验证或审查。
+状态：实现 `a9bd8e4`、修复 `a7a62da`，独立审查及五项重要修复复审通过。相关六包回归与 Gate B 通过，覆盖 154→155 累积 Session、人工回顾/历史结论→扫描→同步→重开、精确预像、部分初始发布恢复、已认证费用保留及旧格式边界。取消传播小项留最终整分支审查；CLI 迁移/插件/完整仓库和真实 Vault 验收仍待 M7–M9。
 
 **Files:** Create `internal/presentation/render_v4.go`、`render_v4_test.go`、`internal/contextupdate/v4.go`、`v4_test.go`；Modify `internal/contextupdate/service.go`；仅必要时修改 `internal/publication/service.go` 与 `internal/cli/scan_test.go`。
 
@@ -387,6 +387,8 @@ paths := []string{
 - [ ] **6. GREEN 与提交。** `go test ./internal/presentation ./internal/contextupdate ./internal/publication ./internal/sessionindex -count=1`；`go test ./test/zerotoken -run '^TestGateB' -count=1`。提交 `feat: publish editable markdown on the v4 scan path`。
 
 ## Task 7 (M7)：显式升级与旧私有 index 认证衔接
+
+状态：从 `a7a62da` 开始实施，尚未完成验证或审查。
 
 **Files:** Create `internal/migrationv4/markdown.go`、`markdown_test.go`；Modify `internal/migrationv4/types.go`、`plan.go`、`migrate.go`、`internal/syncproject/migration.go`、`internal/cli/sync.go`、`internal/memorystore/store.go`；各自相邻测试。
 
