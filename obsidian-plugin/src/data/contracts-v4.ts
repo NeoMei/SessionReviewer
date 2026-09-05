@@ -2082,11 +2082,15 @@ function assertExactSafeIntegerLexeme(source: string, path: ReadonlyArray<string
   if (!match) reject("wire_shape_invalid", `${jsonPath(path)} must be an exact safe integer`);
   const negative = match[1] === "-";
   const fraction = match[3] ?? "";
-  const exponent = Number(match[4] ?? "0");
+  const exponentSource = match[4] ?? "0";
+  const exponent = Number(exponentSource);
   let digits = `${match[2]}${fraction}`.replace(/^0+/, "");
   if (digits === "") return;
   if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 1024) {
-    reject("wire_shape_invalid", `${jsonPath(path)} must be an exact safe integer`);
+    if (exponentSource.startsWith("-")) {
+      reject("wire_shape_invalid", `${jsonPath(path)} must be an exact integer`);
+    }
+    return;
   }
   const scale = fraction.length - exponent;
   if (scale > 0) {
@@ -2097,14 +2101,14 @@ function assertExactSafeIntegerLexeme(source: string, path: ReadonlyArray<string
   } else if (scale < 0) {
     const zeros = -scale;
     if (digits.length + zeros > 16) {
-      reject("wire_shape_invalid", `${jsonPath(path)} must be a safe integer`);
+      return;
     }
     digits += "0".repeat(zeros);
   }
+  if (digits.length > 16) return;
   const exact = BigInt(`${negative ? "-" : ""}${digits}`);
-  if (exact > BigInt(MAX_SAFE) || exact < BigInt(-MAX_SAFE) || Number(source) !== Number(exact)) {
-    reject("wire_shape_invalid", `${jsonPath(path)} must be a safe integer`);
-  }
+  if (exact > BigInt(MAX_SAFE) || exact < BigInt(-MAX_SAFE)) return;
+  if (Number(source) !== Number(exact)) reject("wire_shape_invalid", `${jsonPath(path)} must be an exact integer`);
 }
 
 function jsonPath(path: ReadonlyArray<string | number>): string {
