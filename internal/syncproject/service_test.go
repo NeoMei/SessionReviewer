@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,10 +24,230 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
 )
+
+func TestMarkdownMigrationPreviewRejectsPrivateEvidenceMutationDuringBuild(t *testing.T) {
+	for _, target := range []string{"source journal", "prepared pointer", "published pointer", "ProjectView", "SessionView", "private index"} {
+		t.Run(target, func(t *testing.T) {
+			fixture, manifest := newOldV4EvidenceFixture(t)
+			memoryRoot := filepath.Join(fixture.data, "projects", fixture.projectID, "memory-v1")
+			paths := map[string]string{
+				"source journal":    filepath.Join(fixture.data, "publication-journal", fixture.projectID, publicationstate.IntentLeaf),
+				"prepared pointer":  filepath.Join(memoryRoot, "manifest.json"),
+				"published pointer": filepath.Join(memoryRoot, "published_generation"),
+				"ProjectView":       filepath.Join(memoryRoot, "project-views", strings.TrimPrefix(manifest.ProjectViewDigest, "sha256:")+".json"),
+				"SessionView":       filepath.Join(memoryRoot, "sessions", strings.TrimPrefix(manifest.SessionViews[0].Digest, "sha256:")+".json"),
+				"private index":     filepath.Join(memoryRoot, "session-indexes", strings.TrimPrefix(manifest.SessionIndexDigest, "sha256:")+".json"),
+			}
+			_, err := RunMigration(t.Context(), MigrationOptions{
+				Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+				Mode:    MigrationDryRun,
+				afterMigrationBuild: func() error {
+					path := paths[target]
+					body, readErr := os.ReadFile(path)
+					if readErr != nil {
+						return readErr
+					}
+					switch target {
+					case "source journal":
+						var intent publicationstate.Intent
+						if err := json.Unmarshal(body, &intent); err != nil {
+							return err
+						}
+						intent.CreatedAt = intent.CreatedAt.Add(time.Second)
+						var out bytes.Buffer
+						encoder := json.NewEncoder(&out)
+						encoder.SetEscapeHTML(false)
+						encoder.SetIndent("", "  ")
+						if err := encoder.Encode(intent); err != nil {
+							return err
+						}
+						body = out.Bytes()
+					case "published pointer":
+						body = []byte("generation-markdown-lock\n")
+					default:
+						body = append(body, '\n')
+					}
+					return os.WriteFile(path, body, 0o600)
+				},
+			})
+			if !errors.Is(err, ErrMigrationPreviewStale) {
+				t.Fatalf("%s mutation error=%v, want migration preview stale", target, err)
+			}
+		})
+	}
+}
+
+func newOldV4EvidenceFixture(t *testing.T) (migrationServiceFixture, memory.GenerationManifest) {
+	t.Helper()
+	fixture, accepted := newMarkdownLockFixture(t)
+	store, err := memorystore.Open(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, manifest, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectBody, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projectView memory.ProjectView
+	if err := json.Unmarshal(projectBody, &projectView); err != nil {
+		t.Fatal(err)
+	}
+	session := memory.SessionView{
+		SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-evidence", SourceIdentity: "source-evidence",
+		SourceRecordDigest: "sha256:" + strings.Repeat("3", 64), UsageRecordDigest: "sha256:" + strings.Repeat("4", 64),
+		StartedAt: manifest.CreatedAt, EndedAt: manifest.CreatedAt,
+		TerminalState: memory.Missing, SourceAvailability: memory.SourceUnavailable,
+		ActiveRevisionIDs: []string{}, ObservationSummaries: []memory.ObservationSummary{}, ObservationChunkDigests: []string{}, DerivedRecords: []memory.DerivedRecord{}, Diagnostics: []memory.Diagnostic{},
+		DependencyDigest: "sha256:" + strings.Repeat("5", 64), MaterializerVersion: "v1",
+	}
+	session.Digest, err = memory.SessionViewDigest(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionView(session); err != nil {
+		t.Fatal(err)
+	}
+	lineage := memory.SessionLineage{SchemaVersion: memory.MemorySchemaVersion, ProjectID: fixture.projectID, Provider: session.Provider, SessionID: session.SessionID, SourceIdentity: session.SourceIdentity, ActiveRevisions: map[string]string{}, SupersededRevisions: map[string]string{}, WithdrawnRevisions: map[string]string{}}
+	lineage.Digest, err = memory.SessionLineageDigest(lineage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionLineage(lineage); err != nil {
+		t.Fatal(err)
+	}
+	dependency := memory.SessionViewDependency{Provider: session.Provider, SessionID: session.SessionID, Digest: session.Digest}
+	projectView.Generation++
+	projectView.SourceSessions = 1
+	projectView.TerminalCounts = memory.TerminalCounts{Missing: 1}
+	projectView.SessionViewDependencies = []memory.SessionViewDependency{dependency}
+	projectView.DependencyDigest = "sha256:" + strings.Repeat("6", 64)
+	projectView.Digest, err = memory.ProjectViewDigest(projectView)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(projectView); err != nil {
+		t.Fatal(err)
+	}
+	manifest.GenerationID = "generation-private-evidence"
+	manifest.SourceRecordDigests = []string{session.SourceRecordDigest}
+	manifest.SessionViews = []memory.SessionViewDependency{dependency}
+	manifest.SessionLineages = []memory.SessionLineageDependency{{Provider: session.Provider, SessionID: session.SessionID, Digest: lineage.Digest}}
+	manifest.ProjectViewDigest = projectView.Digest
+	manifest.SessionIndexDigest = ""
+	manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{Provider: session.Provider, SessionID: session.SessionID}}
+	generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexDocument, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: projectView, Manifest: manifest, SessionViews: map[sessionindex.SessionKey]*memory.SessionView{{Provider: session.Provider, SessionID: session.SessionID}: &session}, GeneratedAt: generatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SessionIndexDigest, err = store.PutSessionIndex(indexDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvancePrepared(prepared, manifest); err != nil {
+		t.Fatal(err)
+	}
+	index, err := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.Review.GenerationID, accepted.Review.ProjectViewDigest = manifest.GenerationID, manifest.ProjectViewDigest
+	for index := range accepted.Review.Timeline {
+		accepted.Review.Timeline[index].GenerationID = manifest.GenerationID
+	}
+	for index := range accepted.Review.GeneratedBaselines {
+		accepted.Review.GeneratedBaselines[index].GenerationID = manifest.GenerationID
+	}
+	accepted.Ledger.GenerationID, accepted.Ledger.ProjectViewDigest = manifest.GenerationID, manifest.ProjectViewDigest
+	accepted.Ledger.SyncHashes.SessionIndexDigest = manifest.SessionIndexDigest
+	manifestDigest, err := memory.Digest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.Review.MinimumReaderVersion, accepted.Review.MinimumWriterVersion = "0.4.0", "0.4.0"
+	review, err := strictjson.Encode(accepted.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := reviewv2.RenderHistoryV3(fixture.projectID, accepted.Review.Revision, manifest.GenerationID, []reviewv2.Event{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := accepted.Ledger
+	ledger.MinimumReaderVersion, ledger.MinimumWriterVersion = "0.4.0", "0.4.0"
+	ledger.DocumentProjection = nil
+	ledger.ReviewSHA256, ledger.HistorySHA256 = fmt.Sprintf("%x", sha256.Sum256(review)), fmt.Sprintf("%x", sha256.Sum256(history))
+	ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256 = ledger.ReviewSHA256, ledger.HistorySHA256
+	ledgerBody, err := reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string][]byte{migrationv4.ReviewRelativePath: review, migrationv4.HistoryRelativePath: history, migrationv4.LedgerRelativePath: ledgerBody, migrationv4.SessionIndexRelativePath: index}
+	destinations := make([]publicationstate.Destination, 0, 8)
+	for _, side := range []string{"project", "vault"} {
+		for _, relative := range []string{migrationv4.HistoryRelativePath, migrationv4.LedgerRelativePath, migrationv4.ReviewRelativePath, migrationv4.SessionIndexRelativePath} {
+			path := filepath.Join(fixture.project, filepath.FromSlash(relative))
+			journalRelative := relative
+			if side == "vault" {
+				journalRelative = filepath.ToSlash(filepath.Join("Projects/Migration/Session Review", strings.TrimPrefix(relative, "docs/session-review/")))
+				path = filepath.Join(fixture.vault, filepath.FromSlash(journalRelative))
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, files[relative], 0o600); err != nil {
+				t.Fatal(err)
+			}
+			destinations = append(destinations, publicationstate.Destination{Side: side, Relative: journalRelative, DesiredSHA256: fmt.Sprintf("%x", sha256.Sum256(files[relative]))})
+		}
+	}
+	sort.Slice(destinations, func(i, j int) bool {
+		if destinations[i].Side != destinations[j].Side {
+			return destinations[i].Side < destinations[j].Side
+		}
+		return destinations[i].Relative < destinations[j].Relative
+	})
+	intent := publicationstate.Intent{Version: 1, ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, ManifestDigest: manifestDigest, ProjectViewDigest: manifest.ProjectViewDigest, Stage: publicationstate.StageCommitted, CreatedAt: time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC), Destinations: destinations}
+	if err := publicationstate.ValidateIntent(intent, fixture.projectID); err != nil {
+		t.Fatal(err)
+	}
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(intent); err != nil {
+		t.Fatal(err)
+	}
+	journalDir := filepath.Join(fixture.data, "publication-journal", fixture.projectID)
+	if err := os.MkdirAll(journalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(journalDir, publicationstate.IntentLeaf), encoded.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(filepath.Join(journalDir, publicationstate.AcceptedReceiptLeaf))
+	if err := store.CommitPublished(manifest.GenerationID, memory.PublicationProof{Version: 4, ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, ManifestDigest: manifestDigest, ProjectViewDigest: manifest.ProjectViewDigest, ReviewSHA256: fmt.Sprintf("%x", sha256.Sum256(review)), HistorySHA256: fmt.Sprintf("%x", sha256.Sum256(history)), LedgerSHA256: fmt.Sprintf("%x", sha256.Sum256(ledgerBody)), SessionIndexSHA256: fmt.Sprintf("%x", sha256.Sum256(index)), JournalVerified: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return fixture, manifest
+}
 
 func TestSyncProjectMigrationConfirmationRecomputesUnderProjectLock(t *testing.T) {
 	fixture := newMigrationServiceFixture(t)

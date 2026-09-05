@@ -26,6 +26,7 @@ var syncProject = defaultSyncProject
 var detectSyncFormat = syncproject.DetectFormat
 var syncMarkdownProject = syncproject.RunMarkdown
 var syncMigrationProject = defaultSyncMigrationProject
+var recoverSyncBeforeFormat = defaultRecoverSyncBeforeFormat
 
 const syncHelp = `Synchronize editable Session Review Markdown with the configured Obsidian vault.
 
@@ -193,6 +194,9 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 }
 
 func defaultSyncProject(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
+	if _, err := recoverSyncBeforeFormat(ctx, options); err != nil {
+		return syncengine.Report{}, err
+	}
 	format, err := detectSyncFormat(ctx, options)
 	if err != nil {
 		return syncengine.Report{}, err
@@ -255,6 +259,9 @@ func runSyncMigration(args []string, stdout, stderr io.Writer) int {
 		ProjectID: request.ProjectID, DataDir: dataDir, GOOS: runtime.GOOS,
 		Now: time.Now, Trigger: syncengine.TriggerCLI, DryRun: mode == syncproject.MigrationDryRun,
 	}
+	if _, err := recoverSyncBeforeFormat(context.Background(), options); err != nil {
+		return writeSyncMigrationError(stderr, err)
+	}
 	format, err := detectSyncFormat(context.Background(), options)
 	if err != nil {
 		return writeSyncMigrationError(stderr, err)
@@ -292,6 +299,12 @@ func runSyncMigration(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+func defaultRecoverSyncBeforeFormat(ctx context.Context, options syncproject.Options) (bool, error) {
+	return syncproject.RecoverMarkdownBeforeFormat(ctx, options, func(ctx context.Context, mapping config.ProjectMapping, dataRoot string, owner *publicationlock.Owner) error {
+		return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: mapping.ID, Mapping: mapping, DataRoot: dataRoot, Now: options.Now}, owner)
+	})
+}
+
 func defaultSyncMigrationProject(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
 	options.Recover = func(ctx context.Context, mapping config.ProjectMapping, dataRoot string, owner *publicationlock.Owner) error {
 		return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: mapping.ID, Mapping: mapping, DataRoot: dataRoot, Now: options.Now}, owner)
@@ -324,6 +337,8 @@ func writeSyncMigrationError(output io.Writer, err error) int {
 		code, message = ContractCodeMigrationPreviewStale, "migration preview changed"
 	case errors.Is(err, syncproject.ErrMigrationRequired):
 		code, message = "migration_required", "explicit v3 to v4 migration is required"
+	case errors.Is(err, syncproject.ErrMarkdownRecoveryRequired):
+		code, message = "migration_recovery_required", "interrupted Markdown publication requires writable recovery"
 	}
 	_ = json.NewEncoder(output).Encode(map[string]string{"code": code, "message": message})
 	return 1

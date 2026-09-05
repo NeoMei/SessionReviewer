@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
@@ -144,6 +146,7 @@ func classifyMarkdownMigrationSource(input Input) (string, reviewv4.Accepted, er
 func buildBlockedLegacyMarkdownPreview(input Input, format string, reconstructed *reviewv4.Presentation) (Result, error) {
 	var projectID, generationID string
 	var sourceVersion int
+	var acceptedV3 *reviewv2.AcceptedV3
 	switch format {
 	case FormatMarkdownV3:
 		accepted, err := reviewv2.LoadV3Bytes(input.Review, input.History, input.Ledger)
@@ -151,6 +154,7 @@ func buildBlockedLegacyMarkdownPreview(input Input, format string, reconstructed
 			return Result{}, err
 		}
 		projectID, generationID, sourceVersion = accepted.State.Machine.ProjectID, accepted.State.Machine.GenerationID, 3
+		acceptedV3 = &accepted
 	case FormatMarkdownV2:
 		review, err := reviewv2.ParseReview(input.Review)
 		if err != nil {
@@ -158,8 +162,10 @@ func buildBlockedLegacyMarkdownPreview(input Input, format string, reconstructed
 		}
 		projectID, sourceVersion = review.Model.ProjectID, 2
 	}
-	if reconstructed != nil && (reconstructed.ProjectID != projectID || (generationID != "" && reconstructed.GenerationID != generationID)) {
-		return Result{}, errors.New("reconstructed presentation identity does not match authenticated legacy source")
+	if reconstructed != nil {
+		if err := validateLegacyReconstruction(*reconstructed, projectID, generationID, input.SessionViewDependencyDigests, acceptedV3); err != nil {
+			return Result{}, err
+		}
 	}
 	preview := MigrationPreview{
 		SchemaVersion: 1, SourceVersion: sourceVersion, TargetVersion: 4,
@@ -182,7 +188,10 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 	if len(index) == 0 {
 		index = input.SourceSessionIndex
 	}
-	presentation := source.Review
+	presentation, err := adjudicateOldV4History(source.Review, input.History)
+	if err != nil {
+		return Result{}, err
+	}
 	sourceGenerationID := presentation.GenerationID
 	if input.GenerationID != "" && input.GenerationID != presentation.GenerationID {
 		presentation.GenerationID = input.GenerationID
@@ -246,6 +255,114 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func validateLegacyReconstruction(candidate reviewv4.Presentation, projectID, generationID string, authenticatedSessionViews []string, source *reviewv2.AcceptedV3) error {
+	if err := reviewv4.ValidatePresentation(candidate); err != nil {
+		return fmt.Errorf("reconstructed presentation is invalid: %w", err)
+	}
+	if candidate.ProjectID != projectID || (generationID != "" && candidate.GenerationID != generationID) {
+		return errors.New("reconstructed presentation identity does not match authenticated legacy source")
+	}
+	if source == nil {
+		return errors.New("legacy source has no authenticated ProjectView or chain dependency proof")
+	}
+	if candidate.ProjectViewDigest != "sha256:"+source.State.Machine.ProjectViewDigest {
+		return errors.New("reconstructed ProjectView digest does not match authenticated legacy source")
+	}
+	expected := sortedUnique(authenticatedSessionViews)
+	actual := make([]string, 0, len(candidate.ChainDependencies))
+	for _, dependency := range candidate.ChainDependencies {
+		actual = append(actual, dependency.SessionViewDigest)
+	}
+	actual = sortedUnique(actual)
+	if !reflect.DeepEqual(actual, expected) {
+		return errors.New("reconstructed SessionView dependencies do not match authenticated legacy source")
+	}
+	if len(candidate.ChainDependencies) != 0 {
+		return errors.New("reconstructed chain dependencies have no authenticated ConversationChain proof")
+	}
+	return nil
+}
+
+func adjudicateOldV4History(presentation reviewv4.Presentation, source []byte) (reviewv4.Presentation, error) {
+	history, err := reviewv2.ParseHistory(source)
+	if err != nil {
+		if bytes.Contains(source, []byte("session-reviewer:event")) {
+			return reviewv4.Presentation{}, fmt.Errorf("markdown_migration_conflict: recognizable legacy history is malformed: %w", err)
+		}
+		return presentation, nil
+	}
+	if history.ProjectID != presentation.ProjectID || (history.GenerationID != "" && history.GenerationID != presentation.GenerationID) {
+		return reviewv4.Presentation{}, errors.New("markdown_migration_conflict: legacy history identity differs from authenticated review")
+	}
+	byID := make(map[string]reviewv2.Event, len(history.Events))
+	for _, event := range history.Events {
+		byID[event.ID] = event
+	}
+	if len(byID) != len(presentation.Timeline) {
+		return reviewv4.Presentation{}, errors.New("markdown_migration_conflict: legacy history event set differs from authenticated review")
+	}
+	for index := range presentation.Timeline {
+		current := &presentation.Timeline[index]
+		old, found := byID[current.ID]
+		if !found || old.OccurredAt != current.OccurredAt || old.Kind != current.Kind || !equalLegacyIDs(old.DecisionIDs, current.DecisionIDs) {
+			return reviewv4.Presentation{}, fmt.Errorf("markdown_migration_conflict: legacy history structure differs for %q", current.ID)
+		}
+		current.Title, err = adjudicateOldV4Scalar(presentation, current.ID, "title", current.Title, old.Title)
+		if err != nil {
+			return reviewv4.Presentation{}, err
+		}
+		current.Summary, err = adjudicateOldV4Scalar(presentation, current.ID, "summary", current.Summary, old.Summary)
+		if err != nil {
+			return reviewv4.Presentation{}, err
+		}
+	}
+	return presentation, nil
+}
+
+func equalLegacyIDs(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func adjudicateOldV4Scalar(presentation reviewv4.Presentation, entityID, field, reviewValue, historyValue string) (string, error) {
+	if normalizeLegacyScalar(reviewValue) == normalizeLegacyScalar(historyValue) {
+		return reviewValue, nil
+	}
+	var baseline *reviewv4.Baseline
+	for index := range presentation.GeneratedBaselines {
+		candidate := &presentation.GeneratedBaselines[index]
+		if candidate.EntityID == entityID && candidate.Field == field {
+			baseline = candidate
+			break
+		}
+	}
+	if baseline != nil && baseline.Kind == "scalar" && baseline.Value != nil && baseline.Values == nil && baseline.GeneratedHash == baselinehash.SHA256(entityID, field, "scalar", *baseline.Value, nil) {
+		for _, patch := range presentation.HumanPatches {
+			if patch.EntityID != entityID || patch.Field != field || patch.Operation != "set" || patch.Value == nil || patch.Values != nil || patch.BaseGeneratedHash != baseline.GeneratedHash {
+				continue
+			}
+			if reviewValue == *patch.Value && historyValue == *baseline.Value {
+				return reviewValue, nil
+			}
+			if historyValue == *patch.Value && reviewValue == *baseline.Value {
+				return historyValue, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("markdown_migration_conflict: duplicate legacy field differs without authenticated single-side edit for %s/%s", entityID, field)
+}
+
+func normalizeLegacyScalar(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
 }
 
 func appendHistoricalPreservation(rendered, source []byte) []byte {

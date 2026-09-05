@@ -8,9 +8,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 // Returning a publishable result for unauthenticated prose would let a caller
@@ -22,6 +25,146 @@ func TestMarkdownMigrationRejectsUnauthenticatedSource(t *testing.T) {
 	if err == nil {
 		t.Fatal("invented migration baseline")
 	}
+}
+
+func TestOldV4HistoryDuplicateFieldsRequireAuthenticatedAdjudication(t *testing.T) {
+	tests := []struct {
+		name, reviewTitle, historyTitle, baseline, patch, want string
+		wantConflict                                           bool
+	}{
+		{name: "equal normalized once", reviewTitle: "same", historyTitle: "same", want: "same"},
+		{name: "review side proved human", reviewTitle: "human", historyTitle: "generated", baseline: "generated", patch: "human", want: "human"},
+		{name: "history side proved human", reviewTitle: "generated", historyTitle: "human", baseline: "generated", patch: "human", want: "human"},
+		{name: "different without proof", reviewTitle: "json", historyTitle: "markdown", wantConflict: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			review, history, ledger, index := oldV4TimelineSource(t, test.reviewTitle, test.historyTitle, test.baseline, test.patch)
+			result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+				Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+				TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+			}})
+			if test.wantConflict {
+				if err == nil || !strings.Contains(err.Error(), "markdown_migration_conflict") {
+					t.Fatalf("unproved duplicate accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := result.Accepted.Review.Timeline[0].Title; got != test.want {
+				t.Fatalf("title = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOldV4HistoryStructureMismatchConflicts(t *testing.T) {
+	review, history, ledger, index := oldV4TimelineSource(t, "same", "same", "", "")
+	history = bytes.Replace(history, []byte("### 事件类别\nmilestone"), []byte("### 事件类别\nrelease"), 1)
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+	_, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index, TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{}}})
+	if err == nil || !strings.Contains(err.Error(), "markdown_migration_conflict") {
+		t.Fatalf("history structure mismatch accepted: %v", err)
+	}
+}
+
+func TestLegacyReconstructionRejectsUnverifiedAuthenticatedFields(t *testing.T) {
+	review, history, ledger, index := migrationFixture(t)
+	accepted, err := reviewv2.LoadV3Bytes(review, history, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := reviewv4.Presentation{
+		SchemaVersion: 4, MinimumReaderVersion: "0.4.0", MinimumWriterVersion: "0.4.0",
+		ProjectID: accepted.State.Machine.ProjectID, GenerationID: accepted.State.Machine.GenerationID,
+		ProjectViewDigest: "sha256:" + accepted.State.Machine.ProjectViewDigest,
+		CurrentState:      reviewv4.CurrentState{}, Timeline: []reviewv4.Timeline{}, Decisions: []reviewv4.Decision{}, Risks: []reviewv4.Risk{}, OpenLoops: []reviewv4.OpenLoop{},
+		ProblemRootIDs: []string{}, ProblemNodes: []reviewv4.ProblemNode{}, ChainDependencies: []reviewv4.ChainDependency{}, HumanPatches: []reviewv4.Patch{}, OrphanPatches: []reviewv4.Patch{}, GeneratedBaselines: []reviewv4.Baseline{},
+	}
+	cases := []struct {
+		name   string
+		mutate func(*reviewv4.Presentation)
+	}{
+		{"project view mismatch", func(p *reviewv4.Presentation) { p.ProjectViewDigest = "sha256:" + strings.Repeat("f", 64) }},
+		{"chain dependency is caller asserted", func(p *reviewv4.Presentation) {
+			p.ChainDependencies = []reviewv4.ChainDependency{{Provider: "codex", SessionID: "session-proof", SessionViewDigest: "sha256:" + strings.Repeat("a", 64), DependencyDigest: "sha256:" + strings.Repeat("b", 64), TurnUnitIDs: []string{}}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := base
+			tc.mutate(&candidate)
+			_, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{Review: review, History: history, Ledger: ledger, SessionIndex: index, TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{}}, Reconstructed: &candidate})
+			if err == nil {
+				t.Fatal("unverified reconstruction accepted")
+			}
+		})
+	}
+}
+
+func oldV4TimelineSource(t *testing.T, reviewTitle, historyTitle, baseline, patch string) ([]byte, []byte, []byte, []byte) {
+	t.Helper()
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	history := compatibilityArtifact(t, "v4", HistoryRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	accepted, err := reviewv4.LoadProjection(review, history, ledger, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := reviewv4.Timeline{ID: "milestone-auth", GenerationID: accepted.Review.GenerationID, OccurredAt: "2026-09-05T00:00:00Z", Kind: "milestone", Title: reviewTitle, Summary: "summary", DecisionIDs: []string{}, ClosedLoop: reviewv4.NeutralClosedLoop()}
+	accepted.Review.Timeline = []reviewv4.Timeline{event}
+	if patch != "" {
+		hash := baselinehash.SHA256(event.ID, "title", "scalar", baseline, nil)
+		baseValue, patchValue := baseline, patch
+		accepted.Review.GeneratedBaselines = []reviewv4.Baseline{{GenerationID: accepted.Review.GenerationID, EntityID: event.ID, Field: "title", Kind: "scalar", Value: &baseValue, GeneratedHash: hash}}
+		accepted.Review.HumanPatches = []reviewv4.Patch{{EntityID: event.ID, Field: "title", Operation: "set", Value: &patchValue, BaseGeneratedHash: hash}}
+	}
+	review, err = strictjson.Encode(accepted.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err = reviewv2.RenderHistory(accepted.Review.ProjectID, accepted.Review.Revision, []reviewv2.Event{{
+		ID: event.ID, OccurredAt: event.OccurredAt, Kind: event.Kind, Title: historyTitle,
+		Meaning: "legacy meaning", Summary: event.Summary, Why: "legacy why", Next: "legacy next",
+		Changes: []string{"legacy change"}, Results: []string{"legacy result"}, DecisionIDs: []string{},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.Ledger.HumanPatches = accepted.Review.HumanPatches
+	accepted.Ledger.GeneratedBaselines = accepted.Review.GeneratedBaselines
+	ledger = rehashOldV4Ledger(t, review, history, mustRenderLedger(t, accepted.Ledger))
+	if _, err := reviewv4.LoadProjection(review, history, ledger, index); err != nil {
+		t.Fatal(err)
+	}
+	return review, history, ledger, index
+}
+
+func mustRenderLedger(t *testing.T, ledger reviewv4.MachineLedger) []byte {
+	t.Helper()
+	body, err := reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func rehashOldV4Ledger(t *testing.T, review, history, ledger []byte) []byte {
+	t.Helper()
+	value, err := reviewv4.DecodeLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.ReviewSHA256, value.HistorySHA256 = bareDigest(review), bareDigest(history)
+	value.SyncHashes.ReviewSHA256, value.SyncHashes.HistorySHA256 = value.ReviewSHA256, value.HistorySHA256
+	body, err := reviewv4.RenderLedger(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
 
 // Removing the explicit legacy evidence gate would turn the old converter's

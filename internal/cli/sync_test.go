@@ -240,6 +240,105 @@ func TestSyncCLIOldV4DryRunThenConfirmPublishesAuthenticatedMarkdown(t *testing.
 	}
 }
 
+// Removing the pre-format recovery probe would strand a migration that crashed
+// after only the first JSON-to-Markdown destination: the mixed public set is
+// intentionally not classifiable as either accepted format.
+func TestSyncCLIEarlyMigrationCrashRequiresReadOnlyDryRunAndRecoversBeforeFormatDetection(t *testing.T) {
+	fixture := newCLIOldV4Fixture(t)
+	args := []string{"sync", "--dry-run", "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}
+	var stdout, stderr bytes.Buffer
+	if code := Run(args, &stdout, &stderr); code != 0 {
+		t.Fatalf("initial dry-run code=%d stderr=%q", code, stderr.String())
+	}
+	var preview syncproject.MigrationResult
+	if err := json.Unmarshal(stdout.Bytes(), &preview); err != nil || preview.Preview.PreviewDigest == "" {
+		t.Fatalf("preview=%+v err=%v", preview, err)
+	}
+
+	originalMigration := syncMigrationProject
+	t.Cleanup(func() { syncMigrationProject = originalMigration })
+	failure := errors.New("simulated early CLI migration crash")
+	mapping := config.ProjectMapping{ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault, VaultReviewPath: "Projects/Markdown/Session Review", VaultCaseMode: platform.CaseSensitive}
+	syncMigrationProject = func(ctx context.Context, options syncproject.MigrationOptions) (syncproject.MigrationResult, error) {
+		options.Recover = func(ctx context.Context, mapping config.ProjectMapping, dataRoot string, owner *publicationlock.Owner) error {
+			return publication.RecoverMarkdownLocked(ctx, publication.Options{ProjectID: mapping.ID, Mapping: mapping, DataRoot: dataRoot, Now: options.Now}, owner)
+		}
+		options.Publish = func(ctx context.Context, plan syncproject.MigrationPublication) error {
+			_, err := publication.PublishMarkdownMigrationLocked(ctx, publication.Options{
+				ProjectID: plan.ProjectID, Mapping: plan.Mapping, DataRoot: plan.DataRoot, Now: options.Now,
+				AfterDestination: func(side, relative string) error {
+					if side == "project" && relative == reviewv2.ReviewRelativePath {
+						panic(failure)
+					}
+					return nil
+				},
+			}, plan)
+			return err
+		}
+		return syncproject.RunMigration(ctx, options)
+	}
+	confirmArgs := []string{"sync", "--confirm-migration", "--expected-preview-digest", preview.Preview.PreviewDigest, "--json", "--project-id", fixture.projectID, "--data-dir", fixture.data}
+	func() {
+		defer func() {
+			if recovered := recover(); !errors.Is(recovered.(error), failure) {
+				t.Fatalf("migration panic=%v", recovered)
+			}
+		}()
+		_ = Run(confirmArgs, &stdout, &stderr)
+	}()
+	syncMigrationProject = originalMigration
+	state, err := publicationstate.OpenReadOnly(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, intentErr := state.Intent()
+	if closeErr := state.Close(); intentErr != nil || closeErr != nil || intent.Stage == publicationstate.StageCommitted {
+		t.Fatalf("active intent=%+v intentErr=%v closeErr=%v", intent, intentErr, closeErr)
+	}
+	projectReview, err := os.ReadFile(filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath)))
+	if err != nil || !bytes.HasPrefix(projectReview, []byte("---\n")) {
+		t.Fatalf("first Project destination was not Markdown: err=%v", err)
+	}
+	vaultReview, err := os.ReadFile(filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(mapping.VaultReviewPath, strings.TrimPrefix(reviewv2.ReviewRelativePath, "docs/session-review/")))))
+	if err != nil || !bytes.HasPrefix(vaultReview, []byte("{")) {
+		t.Fatalf("Vault changed before crash recovery: err=%v", err)
+	}
+
+	beforeDryRun := snapshotCLITree(t, filepath.Dir(fixture.data))
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run(args, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "migration_recovery_required") {
+		t.Fatalf("interrupted dry-run code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if after := snapshotCLITree(t, filepath.Dir(fixture.data)); after != beforeDryRun {
+		t.Fatal("interrupted dry-run performed recovery or another write")
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"sync", "--project-id", fixture.projectID, "--data-dir", fixture.data}, &stdout, &stderr); code == 0 || !strings.Contains(stderr.String(), "migration_required") {
+		t.Fatalf("ordinary recovery route code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	state, err = publicationstate.OpenReadOnly(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, intentErr = state.Intent()
+	if closeErr := state.Close(); intentErr != nil || closeErr != nil || intent.Stage != publicationstate.StageCommitted || intent.Outcome != publicationstate.OutcomeRolledBack {
+		t.Fatalf("recovered intent=%+v intentErr=%v closeErr=%v", intent, intentErr, closeErr)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run(confirmArgs, &stdout, &stderr); code != 0 || stderr.Len() != 0 {
+		t.Fatalf("retry confirm code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	format, err := syncproject.DetectFormat(t.Context(), syncproject.Options{ProjectID: fixture.projectID, DataDir: fixture.data})
+	if err != nil || format != syncproject.ProjectionMarkdown {
+		t.Fatalf("recovered format=%q err=%v", format, err)
+	}
+}
+
 // A crash after the first Project destination can leave a mixed public set.
 // CLI restart must authenticate the active Markdown intent and reach recovery
 // before trying to classify the four current bytes as one accepted format.
@@ -422,9 +521,11 @@ func TestRunSyncMigrationModesUseInjectableServiceAndJSON(t *testing.T) {
 	originalMigration := syncMigrationProject
 	originalSync := syncProject
 	originalDetect := detectSyncFormat
+	originalRecover := recoverSyncBeforeFormat
 	t.Cleanup(func() {
-		syncMigrationProject, syncProject, detectSyncFormat = originalMigration, originalSync, originalDetect
+		syncMigrationProject, syncProject, detectSyncFormat, recoverSyncBeforeFormat = originalMigration, originalSync, originalDetect, originalRecover
 	})
+	recoverSyncBeforeFormat = func(context.Context, syncproject.Options) (bool, error) { return false, nil }
 	detectSyncFormat = func(context.Context, syncproject.Options) (syncproject.ProjectionFormat, error) {
 		return syncproject.ProjectionV3, nil
 	}
@@ -466,7 +567,11 @@ func TestRunSyncMigrationModesUseInjectableServiceAndJSON(t *testing.T) {
 func TestRunSyncMigrationStaleIsOneStableJSONObject(t *testing.T) {
 	original := syncMigrationProject
 	originalDetect := detectSyncFormat
-	t.Cleanup(func() { syncMigrationProject, detectSyncFormat = original, originalDetect })
+	originalRecover := recoverSyncBeforeFormat
+	t.Cleanup(func() {
+		syncMigrationProject, detectSyncFormat, recoverSyncBeforeFormat = original, originalDetect, originalRecover
+	})
+	recoverSyncBeforeFormat = func(context.Context, syncproject.Options) (bool, error) { return false, nil }
 	detectSyncFormat = func(context.Context, syncproject.Options) (syncproject.ProjectionFormat, error) {
 		return syncproject.ProjectionV3, nil
 	}
