@@ -89,6 +89,25 @@ func TestOldV4OpaqueHistoryMayContainFencedEventMarkerLiteral(t *testing.T) {
 	}
 }
 
+func TestOldV4OpaqueHistoryMayContainNestedRawHTMLMarkerLiteral(t *testing.T) {
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	history := []byte("<div class=\"historical-example\">\n<!-- session-reviewer:event id=\"example-only\" -->\n<!-- /session-reviewer:event -->\n</div>\n")
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err != nil {
+		t.Fatalf("opaque nested raw HTML marker literal rejected: %v", err)
+	}
+	if !bytes.Contains(result.History, history) {
+		t.Fatal("opaque nested raw HTML history was not preserved byte-for-byte")
+	}
+}
+
 func TestOldV4MalformedRealHistoryEventMarkerStillConflicts(t *testing.T) {
 	review, history, ledger, index := oldV4TimelineSource(t, "same", "same", "", "")
 	history = bytes.Replace(history, []byte("<!-- /session-reviewer:event -->"), nil, 1)

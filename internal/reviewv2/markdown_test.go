@@ -544,6 +544,13 @@ func TestTopLevelHistoryEventMarkerUsesGoldmarkContext(t *testing.T) {
 		{name: "quoted HTML", source: "> <!-- session-reviewer:event id=\"quoted\" -->\n"},
 		{name: "indented code", source: "    <!-- session-reviewer:event id=\"indented\" -->\n"},
 		{name: "unrelated longer comment name", source: "<!-- session-reviewer:eventual documentation -->\n"},
+		{name: "nested raw HTML", source: "<div>\n<!-- session-reviewer:event id=\"nested\" -->\n</div>\n"},
+		{
+			name: "top-level marker after raw HTML sibling",
+			source: "<div>\n<!-- session-reviewer:event id=\"nested\" -->\n</div>\n\n" +
+				"<!-- session-reviewer:event id=\"event-real\" -->\n",
+			want: true,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
