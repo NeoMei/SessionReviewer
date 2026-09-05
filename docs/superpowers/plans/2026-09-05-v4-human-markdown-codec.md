@@ -90,12 +90,12 @@ func TestMarkdownFieldCatalogHasOneOwner(t *testing.T) {
         }
         seen[key] = true
     }
-    if len(seen) != 25 { t.Fatalf("fields=%d, want 25", len(seen)) }
+    if len(seen) != 24 { t.Fatalf("fields=%d, want 24", len(seen)) }
 }
 ```
 
 - [ ] **2. 跑 RED。** `go test ./internal/reviewv4 -run 'DocumentProjection|MarkdownFieldCatalog' -count=1`。预期新接口缺失或扩展被旧严格解码拒绝；不是接受无关编译错误为 RED。
-- [ ] **3. 实现封闭扩展与目录。** 目录逐项复制 spec §6 的 25 字段和 §5.3 的四类生成区域；注册表返回副本。canonical 自摘要 DTO 使用可省略扩展，旧字段顺序/编码不变。JSON Schema 引用现有 Presentation schema；Go/TS 都检查内外项目、generation、digest、revision、patches/baselines 深度相同；旧 floor 只适用于无扩展组合，不能全局提高或放宽版本解析。
+- [ ] **3. 实现封闭扩展与目录。** 目录逐项复制 spec §6 的 24 字段和 §5.3 的四类生成区域；注册表返回副本。canonical 自摘要 DTO 使用可省略扩展，旧字段顺序/编码不变。JSON Schema 引用现有 Presentation schema；Go/TS 都检查内外项目、generation、digest、revision、patches/baselines 深度相同；旧 floor 只适用于无扩展组合，不能全局提高或放宽版本解析。
 
 ```go
 // Canonical body adds exactly this optional field; absence must not emit null.
@@ -107,7 +107,7 @@ if l.DocumentProjection != nil &&
 }
 ```
 
-- [ ] **4. 固定共享夹具。** `cases.json` 每项包含 `name`、输入文件相对路径、`expected_code`（成功为空）、期望 field values；包括变更扩展却重算公共自摘要的样本，后续 M5 必须仍拒绝未经私有认证的机器更改。Go/TS 测试直接读仓库这一份；不手工维护两份 Markdown 黄金文件。对照目录完整检查 25 字段，不仅检查数量。
+- [ ] **4. 固定共享夹具。** `cases.json` 每项包含 `name`、输入文件相对路径、`expected_code`（成功为空）、期望 field values；包括变更扩展却重算公共自摘要的样本，后续 M5 必须仍拒绝未经私有认证的机器更改。Go/TS 测试直接读仓库这一份；不手工维护两份 Markdown 黄金文件。对照目录完整检查 24 字段，不仅检查数量。
 - [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 ./internal/strictjson -count=1`；在 `obsidian-plugin` 运行 `npm test -- tests/contracts-v4.test.ts`。记录旧 fixtures 的前后哈希。仅 stage 本任务文件，提交 `feat: define v4 markdown projection contract`。
 
 ## Task 2 (M2)：实现有界标记词法与无损文档壳
@@ -219,7 +219,7 @@ if edit.Key.Name == "conclusion" && edit.After != edit.Before {
 ```
 
 - [ ] **4. 渲染完整正文。** 回顾放 current/decision/risk/open_loop/problem；历史放全部 timeline。回顾近期/置顶/树区域只链接，生成区从旧认证基线检验后才更新。新文档固定 H1/H2 与 stable ID 锚点；标题字段只出现一次，不能把标题值再复制成第二个可编辑标题。完整闭环显示触发、结论、执行、验证、影响/后续及 coverage；零条也显示真实空态。使用 M2 跨度修改保留旧自定义内容，不走 v3 codec。
-- [ ] **5. 验证公共接受态与草稿分离。** `LoadProjection` 新分支先 DecodeLedger，再 parse 两个 Markdown、比对完整字段集合与哈希、index 和内外基线。`ParseMarkdownDraft` 只校验格式及允许差异，不宣称私有认证；调用服务必须先认证基线。对每个 25 字段做 roundtrip；原文改名后链接 ID 不变；只有纯换行风格变化不提升来源；修改 generated/name/revision/id 均拒绝。
+- [ ] **5. 验证公共接受态与草稿分离。** `LoadProjection` 新分支先 DecodeLedger，再 parse 两个 Markdown、比对完整字段集合与哈希、index 和内外基线。`ParseMarkdownDraft` 只校验格式及允许差异，不宣称私有认证；调用服务必须先认证基线。对每个 24 字段做 roundtrip；原文改名后链接 ID 不变；只有纯换行风格变化不提升来源；修改 generated/name/revision/id 均拒绝。
 - [ ] **5a. 修订与 patch 测试。** 每批实际人工变更只推进一次 Presentation revision；只对有既存 revision 字段且实际变化的 decision/problem 推进实体修订，不给 timeline/risk 临时发明字段。使用现有 Patch/GeneratedBaseline 哈希规则记录原值和人工覆盖，active/orphan 与嵌入基线保持相同；零变更不新增 patch、不推进 revision。先以不含修订变化的内容比较确定是否发生变更，再统一设置新修订和哈希，避免自增触发自增。
 - [ ] **6. GREEN 与提交。** `go test ./internal/reviewv4 -count=1`。保留旧 JSON 测试、增加混合格式拒绝测试。提交 `feat: render and read editable v4 review documents`。
 
@@ -536,7 +536,7 @@ git diff --check
 |---|---|
 | §1–4 权威分工、单正文、ledger 基线 | M1、M3、M5 |
 | §5 marker/frontmatter/跨度/只读区 | M1–M3、M8 |
-| §6 25 字段及闭环来源规则 | M1、M3、M8 |
+| §6 24 字段及闭环来源规则 | M1、M3、M8 |
 | §7 草稿/共同 Base/孤儿/修订幂等 | M3–M6、M9 |
 | §8 四文件/三文件事务和恢复 | M5、M6、M9 |
 | §9 四种格式显式升级、私有绑定 | M1、M7、M9 |
