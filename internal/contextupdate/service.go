@@ -31,6 +31,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/scan"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
+	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
@@ -47,15 +48,16 @@ type Options struct {
 
 // Result contains the outcome of a context update scan and publication.
 type Result struct {
-	SchemaVersion   int                `json:"schema_version"`
-	ProjectID       string             `json:"project_id"`
-	State           scan.State         `json:"state"`
-	GenerationID    string             `json:"generation_id,omitempty"`
-	SourceSessions  int                `json:"source_sessions"`
-	IndexedSessions int                `json:"indexed_sessions"`
-	IssueSessions   int                `json:"issue_sessions"`
-	Publication     publication.Result `json:"publication,omitempty"`
-	ReviewRunTokens int                `json:"review_run_tokens"`
+	SchemaVersion       int                         `json:"schema_version"`
+	ProjectID           string                      `json:"project_id"`
+	State               scan.State                  `json:"state"`
+	GenerationID        string                      `json:"generation_id,omitempty"`
+	SourceSessions      int                         `json:"source_sessions"`
+	IndexedSessions     int                         `json:"indexed_sessions"`
+	IssueSessions       int                         `json:"issue_sessions"`
+	Publication         publication.Result          `json:"publication,omitempty"`
+	ReviewRunTokens     int                         `json:"review_run_tokens"`
+	ProviderDiagnostics []source.ProviderDiagnostic `json:"provider_diagnostics,omitempty"`
 }
 
 type currentProjectFiles struct {
@@ -154,7 +156,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Binding:      binding,
 		SessionsRoot: sessionsRoot,
 		DataRoot:     opts.DataRoot,
-		Adapter:      adapter,
+		Adapters:     []source.NamedAdapter{{Provider: "codex", Adapter: adapter, Required: true}},
 		Catalog:      catalog,
 		Workers:      4,
 		Store:        store,
@@ -172,7 +174,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 
 	scanResult, err := scan.Run(ctx, scanOpts)
 	if err != nil {
-		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
+		return Result{
+			SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed,
+			ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...),
+		}, err
 	}
 
 	if err := notifyPhase(opts.PhaseObserver, "reducing"); err != nil {
@@ -246,6 +251,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 					GenerationID: publishedID, SourceSessions: scanResult.SourceSessions,
 					IndexedSessions: scanResult.IndexedSessions, IssueSessions: scanResult.IssueSessions,
 					Publication: unchangedPublication, ReviewRunTokens: 0,
+					ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...),
 				}, nil
 			}
 		}
@@ -317,15 +323,16 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	return Result{
-		SchemaVersion:   1,
-		ProjectID:       opts.ProjectID,
-		State:           scanResult.State,
-		GenerationID:    pubResult.GenerationID,
-		SourceSessions:  scanResult.SourceSessions,
-		IndexedSessions: scanResult.IndexedSessions,
-		IssueSessions:   scanResult.IssueSessions,
-		Publication:     pubResult,
-		ReviewRunTokens: 0,
+		SchemaVersion:       1,
+		ProjectID:           opts.ProjectID,
+		State:               scanResult.State,
+		GenerationID:        pubResult.GenerationID,
+		SourceSessions:      scanResult.SourceSessions,
+		IndexedSessions:     scanResult.IndexedSessions,
+		IssueSessions:       scanResult.IssueSessions,
+		Publication:         pubResult,
+		ReviewRunTokens:     0,
+		ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...),
 	}, nil
 }
 

@@ -300,6 +300,58 @@ func newScanHarness(t *testing.T) scanHarness {
 	return scanHarness{options: options, adapter: adapter, catalog: catalog, store: store}
 }
 
+func TestRunAcceptsNamedAdapterAndPreservesSingularCompatibility(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	harness.options.Adapters = []source.NamedAdapter{{Provider: "codex", Adapter: harness.adapter, Required: true}}
+	harness.options.Adapter = nil
+
+	result, err := Run(context.Background(), harness.options)
+	if err != nil || !result.Prepared || result.IndexedSessions != 1 {
+		t.Fatalf("named adapter scan result=%+v err=%v", result, err)
+	}
+	if candidates, boundaries := harness.adapter.leaseCounts(); candidates != 0 || boundaries != 0 {
+		t.Fatalf("named adapter leaked leases: candidates=%d boundaries=%d", candidates, boundaries)
+	}
+
+	legacy := newScanHarness(t)
+	legacy.addSource(1, memory.Indexed, scanTestProject)
+	if result, err := Run(context.Background(), legacy.options); err != nil || !result.Prepared {
+		t.Fatalf("singular compatibility result=%+v err=%v", result, err)
+	}
+}
+
+func TestRunRejectsConflictingSingularAndPluralAdapters(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.options.Adapters = []source.NamedAdapter{{Provider: "codex", Adapter: harness.adapter, Required: true}}
+	if _, err := Run(context.Background(), harness.options); err == nil || !strings.Contains(err.Error(), "singular and plural") {
+		t.Fatalf("conflicting adapter configuration was accepted: %v", err)
+	}
+}
+
+func TestRunKeepsProviderDiagnosticWhenOptionalAdapterIsUnavailable(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	optional := &fakeAdapter{
+		sources: make(map[string]*fakeSourceSpec), discoverErr: source.ErrProviderUnavailable,
+		decodeErrors: make(map[string]error), candidateLeases: make(map[string]string), boundaryLeases: make(map[string]string),
+	}
+	harness.options.Adapters = []source.NamedAdapter{
+		{Provider: "codex", Adapter: harness.adapter, Required: true},
+		{Provider: "claude", Adapter: optional},
+	}
+	harness.options.Adapter = nil
+
+	result, err := Run(context.Background(), harness.options)
+	if err != nil || !result.Prepared {
+		t.Fatalf("scan result=%+v err=%v", result, err)
+	}
+	want := []source.ProviderDiagnostic{{Provider: "claude", Code: "provider_unavailable"}}
+	if !reflect.DeepEqual(result.ProviderDiagnostics, want) {
+		t.Fatalf("provider diagnostics=%+v", result.ProviderDiagnostics)
+	}
+}
+
 func (h scanHarness) addSource(index int, state memory.TerminalState, projects ...string) *fakeSourceSpec {
 	sessionID := "session-" + strconv.Itoa(index)
 	sourceIdentity := "source-" + strconv.Itoa(index)

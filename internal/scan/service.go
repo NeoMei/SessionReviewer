@@ -65,6 +65,7 @@ type Options struct {
 	SessionsRoot     string
 	DataRoot         string
 	Adapter          source.Adapter
+	Adapters         []source.NamedAdapter
 	Catalog          *sourcecatalog.Catalog
 	Store            MemoryStore
 	Workers          int
@@ -138,8 +139,10 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	if err != nil {
 		return result, err
 	}
-	discovery, err := options.Adapter.Discover(ctx)
-	defer abandonCandidates(options.Adapter, discovery.Candidates)
+	adapter, discovery, providerDiagnostics, err := discoverSources(ctx, options)
+	options.Adapter = adapter
+	result.ProviderDiagnostics = providerDiagnostics
+	defer abandonCandidates(adapter, discovery.Candidates)
 	if err != nil {
 		return result, fmt.Errorf("discover source sessions: %w", err)
 	}
@@ -466,13 +469,32 @@ func validateOptions(options Options) error {
 			return fmt.Errorf("scan %s must be an absolute clean path", name)
 		}
 	}
-	if options.Adapter == nil || options.Catalog == nil || options.Store == nil || options.Materialize == nil || options.Probe == nil || options.Reduce == nil || options.Now == nil {
+	if options.Adapter != nil && len(options.Adapters) > 0 {
+		return errors.New("scan singular and plural source adapters conflict")
+	}
+	if options.Adapter == nil && len(options.Adapters) == 0 {
+		return errors.New("scan dependencies are incomplete")
+	}
+	if options.Catalog == nil || options.Store == nil || options.Materialize == nil || options.Probe == nil || options.Reduce == nil || options.Now == nil {
 		return errors.New("scan dependencies are incomplete")
 	}
 	if options.Workers < 1 {
 		return errors.New("scan worker count must be positive")
 	}
 	return nil
+}
+
+func discoverSources(ctx context.Context, options Options) (source.Adapter, source.Discovery, []source.ProviderDiagnostic, error) {
+	if options.Adapter != nil {
+		discovery, err := options.Adapter.Discover(ctx)
+		return options.Adapter, discovery, nil, err
+	}
+	manager, err := source.NewManager(options.Adapters)
+	if err != nil {
+		return nil, source.Discovery{}, nil, err
+	}
+	discovery, diagnostics, err := manager.DiscoverAll(ctx)
+	return manager, discovery, diagnostics, err
 }
 
 func acquireScanLock(ctx context.Context, dataRoot, projectID string) (*project.ProjectLock, error) {
