@@ -169,6 +169,8 @@ out.Write(d.raw[cursor:])
 
 ## Task 3 (M3)：渲染两份正文、识别草稿与受信字段应用
 
+状态：实现 `1c6e9fc`、修复 `72819c1`，独立审查及六项修复复审通过。实现提交通过完整 Go；修复提交通过定向 Go、TS 合同 67 项，旧 JSON 夹具未变。私有认证、同步接入与最终 HEAD 全套验收仍待后续任务。
+
 **Files:** Create `internal/reviewv4/markdown_render.go`、`markdown_draft.go`、`markdown_render_test.go`、`markdown_draft_test.go`；Modify `internal/reviewv4/codec.go`；扩充共享 cases。
 
 **Interfaces:** consumes M1/M2；produces：
