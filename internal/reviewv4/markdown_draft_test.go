@@ -55,6 +55,23 @@ func TestMarkdownDraftAdvancesRevisionForCustomOnlyChange(t *testing.T) {
 	}
 }
 
+func TestMarkdownDraftRejectsShellOnlyChangeAtMaximumRevision(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := clonePresentation(ledger.DocumentProjection.PresentationBase)
+	base.Revision = int(maxWireInteger)
+	ledger.AcceptedRevision = base.Revision
+	ledger.DocumentProjection.PresentationBase = base
+	pair, err := RenderMarkdown(base, bindMarkdownPair(t, ledger, MarkdownPair{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger = bindMarkdownPair(t, ledger, pair)
+	pair.Review = append(pair.Review, []byte("\n人工自定义附注。\n")...)
+	if _, err := ParseMarkdownDraft(pair, ledger); MarkdownCodeOf(err) != MarkdownFormatInvalid {
+		t.Fatalf("maximum-revision shell-only edit err=%v", err)
+	}
+}
+
 func TestMarkdownDraftRejectsGeneratedRegionModification(t *testing.T) {
 	ledger := sharedMarkdownLedger(t)
 	pair, err := RenderMarkdown(ledger.DocumentProjection.PresentationBase, ledger, nil)

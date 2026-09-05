@@ -77,8 +77,12 @@ func ParseMarkdownDraft(pair MarkdownPair, ledger MachineLedger) (MarkdownDraft,
 		relative         string
 	}{{review, expectedReview, markdownReviewRelative}, {history, expectedHistory, markdownHistoryRelative}} {
 		actual, expected := documents.actual, documents.expected
+		expectedIndex, indexErr := newMarkdownDocumentIndex(documents.relative, expected)
+		if indexErr != nil {
+			return MarkdownDraft{}, indexErr
+		}
 		for _, block := range actual.blocks {
-			expectedBlock, _ := markdownBlockByKey(expected, block.Key)
+			expectedBlock := expectedIndex.blocks[block.Key]
 			after := markdownBlockValue(actual, block)
 			before := markdownBlockValue(expected, expectedBlock)
 			if block.Generated {
@@ -98,8 +102,14 @@ func ParseMarkdownDraft(pair MarkdownPair, ledger MachineLedger) (MarkdownDraft,
 	}
 	if sha256Hex(pair.Review) != ledger.ReviewSHA256 || sha256Hex(pair.History) != ledger.HistorySHA256 {
 		if len(edits) == 0 {
+			if int64(next.Revision) >= maxWireInteger {
+				return MarkdownDraft{}, &MarkdownError{Code: MarkdownFormatInvalid}
+			}
 			next.Revision++
 		}
+	}
+	if err := ValidatePresentation(next); err != nil {
+		return MarkdownDraft{}, &MarkdownError{Code: MarkdownFormatInvalid, Cause: err}
 	}
 	return MarkdownDraft{
 		Documents: MarkdownPair{Review: bytes.Clone(pair.Review), History: bytes.Clone(pair.History)},
@@ -120,39 +130,57 @@ func validateMarkdownLedger(ledger MachineLedger) error {
 	return nil
 }
 
-func validateMarkdownStructure(actual, expected MarkdownDocument) error {
-	if len(actual.blocks) != len(expected.blocks) {
-		actualKeys := make(map[FieldKey]bool, len(actual.blocks))
-		for _, block := range actual.blocks {
-			actualKeys[block.Key] = true
+type markdownDocumentIndex struct {
+	blocks  map[FieldKey]MarkdownBlock
+	anchors map[string]int
+}
+
+func newMarkdownDocumentIndex(relative string, document MarkdownDocument) (markdownDocumentIndex, error) {
+	index := markdownDocumentIndex{
+		blocks:  make(map[FieldKey]MarkdownBlock, len(document.blocks)),
+		anchors: make(map[string]int),
+	}
+	for _, block := range document.blocks {
+		if _, exists := index.blocks[block.Key]; exists {
+			return markdownDocumentIndex{}, &MarkdownError{Code: MarkdownFieldDuplicate, Relative: relative, Entity: block.Key.Entity, Field: block.Key.Name}
 		}
+		index.blocks[block.Key] = block
+	}
+	for start := 0; start < len(document.raw); {
+		end, next := markdownPhysicalLine(document.raw, start)
+		line := document.raw[start:end]
+		if bytes.HasPrefix(line, []byte(`<a id="`)) && bytes.HasSuffix(line, []byte(`"></a>`)) {
+			index.anchors[string(line)]++
+		}
+		start = next
+	}
+	return index, nil
+}
+
+func validateMarkdownStructure(actual, expected MarkdownDocument) error {
+	actualIndex, err := newMarkdownDocumentIndex("", actual)
+	if err != nil {
+		return err
+	}
+	expectedIndex, err := newMarkdownDocumentIndex("", expected)
+	if err != nil {
+		return err
+	}
+	if len(actual.blocks) != len(expected.blocks) {
 		for _, block := range expected.blocks {
-			if !actualKeys[block.Key] {
+			if _, exists := actualIndex.blocks[block.Key]; !exists {
 				return &MarkdownError{Code: MarkdownFieldMissing, Entity: block.Key.Entity, Field: block.Key.Name}
 			}
 		}
 		return &MarkdownError{Code: MarkdownStructureEditRequiresCommand}
 	}
-	expectedKinds := make(map[FieldKey]bool, len(expected.blocks))
-	for _, block := range expected.blocks {
-		expectedKinds[block.Key] = block.Generated
-	}
 	for _, block := range actual.blocks {
-		generated, exists := expectedKinds[block.Key]
-		if !exists || block.Generated != generated {
+		expectedBlock, exists := expectedIndex.blocks[block.Key]
+		if !exists || block.Generated != expectedBlock.Generated {
 			return &MarkdownError{Code: MarkdownStructureEditRequiresCommand, Entity: block.Key.Entity, Field: block.Key.Name}
 		}
 	}
 	return nil
-}
-
-func markdownBlockByKey(document MarkdownDocument, key FieldKey) (MarkdownBlock, bool) {
-	for _, block := range document.blocks {
-		if block.Key == key {
-			return block, true
-		}
-	}
-	return MarkdownBlock{}, false
 }
 
 func markdownBlockValue(document MarkdownDocument, block MarkdownBlock) string {

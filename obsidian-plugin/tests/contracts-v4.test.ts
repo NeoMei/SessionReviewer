@@ -251,12 +251,12 @@ describe("review-markdown-v1 ledger extension", () => {
     const revisionMismatch = cases.find((testCase) => testCase.name === "outer-inner-revision-mismatch");
     expect(revisionMismatch?.expected_code).toBe("wire_contract_invalid");
     const baseLedger = parseMachineLedgerV4((await markdownFixture("ledger.json")).toString("utf8"));
-    expect(baseLedger.sync_hashes.ledger_sha256).toBe("1f45d3c3d500f46ae656efc03acd7d174e157c6cfc1ecf3f41f021ebcad9dea7");
+    expect(baseLedger.sync_hashes.ledger_sha256).toBe("7f88cfc54caf84e0e58224916815530ed6ed18f156e57f1c9ea7102bd67888c5");
     const resignedLedger = parseMachineLedgerV4((await markdownFixture("ledger-rehashed-public.json")).toString("utf8"));
-    expect(resignedLedger.sync_hashes.ledger_sha256).toBe("7364479204d7c01a69227947e08085d86b4aa6a8193597b1ad2139707d91a1a8");
+    expect(resignedLedger.sync_hashes.ledger_sha256).toBe("d3ea7b0eba5e77fccd2b2766b260b43d165b71bf8d720243c612d8263a112bee");
     const containerLedger = parseMachineLedgerV4((await markdownFixture("ledger-container-markers.json")).toString("utf8"));
-    expect(containerLedger.review_sha256).toBe("eb1e7268fa3eed513478aa9c39c540d35f50f849b99613da6972ad62fe9ff529");
-    expect(containerLedger.sync_hashes.ledger_sha256).toBe("8737d6c698fbb91cffa1886c81053361604b0b3843bc41a9d050db586e9d36a7");
+    expect(containerLedger.review_sha256).toBe("8048725cb9d978d428dc913008a55f9202e3736369a119782bfb205fc0496713");
+    expect(containerLedger.sync_hashes.ledger_sha256).toBe("1982bd93997dd7429dc05fa9d7d96af74f2013d53ba6015893f9db8fa2922c23");
   });
 });
 

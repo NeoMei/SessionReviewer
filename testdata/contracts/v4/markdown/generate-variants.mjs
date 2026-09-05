@@ -34,6 +34,14 @@ const canonicalLedgerHash = (ledger) => {
   return createHash("sha256").update(JSON.stringify(body)).digest("hex");
 };
 
+const review = await readFile(new URL("review.md", directory), "utf8");
+const history = await readFile(new URL("history.md", directory), "utf8");
+base.review_sha256 = createHash("sha256").update(review).digest("hex");
+base.history_sha256 = createHash("sha256").update(history).digest("hex");
+base.sync_hashes.review_sha256 = base.review_sha256;
+base.sync_hashes.history_sha256 = base.history_sha256;
+base.sync_hashes.ledger_sha256 = canonicalLedgerHash(base);
+
 const reorder = (value) => {
   if (Array.isArray(value)) return value.map(reorder);
   if (value === null || typeof value !== "object") return value;
@@ -50,8 +58,6 @@ await write("ledger-tampered-self-digest.json", tampered);
 
 const publiclyResigned = copy();
 const resignedGoal = "公开自摘要已重签，私有认证仍应拒绝";
-const review = await readFile(new URL("review.md", directory), "utf8");
-
 const containerText = [
   "- <!-- session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->",
   "> <!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->"

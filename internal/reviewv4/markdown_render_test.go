@@ -2,6 +2,7 @@ package reviewv4
 
 import (
 	"bytes"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -67,6 +68,135 @@ func TestMarkdownRenderAndDraftRoundTripFullCatalog(t *testing.T) {
 	}
 }
 
+func TestMarkdownRenderShowsStaticLabelsWithoutDuplicatingEditableValues(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	pair, err := RenderMarkdown(ledger.DocumentProjection.PresentationBase, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, label := range []string{
+		"### 目标", "### 阶段", "### 状态", "### 下一步", "### 上次验证",
+		"### 标题", "### 理由", "### 影响", "### 重新评估条件", "### 详情",
+		"### 问题", "### 下一个实验", "### 完成标准", "### 当前结论", "### 摘要", "### 结论", "### 影响与后续",
+	} {
+		if !bytes.Contains(pair.Review, []byte(label)) && !bytes.Contains(pair.History, []byte(label)) {
+			t.Fatalf("rendered Markdown omitted visible label %q", label)
+		}
+	}
+	for _, value := range []string{
+		ledger.DocumentProjection.PresentationBase.Decisions[0].Title,
+		ledger.DocumentProjection.PresentationBase.Risks[0].Title,
+		ledger.DocumentProjection.PresentationBase.Timeline[0].Title,
+	} {
+		if count := bytes.Count(pair.Review, []byte(value)) + bytes.Count(pair.History, []byte(value)); count != 1 {
+			t.Fatalf("editable title %q appears %d times, want once", value, count)
+		}
+	}
+}
+
+func TestMarkdownRenderPreservesAcceptedCRLFBytesWhenValuesAreUnchanged(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := ledger.DocumentProjection.PresentationBase
+	pair, err := RenderMarkdown(base, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.Review = bytes.ReplaceAll(pair.Review, []byte("\n"), []byte("\r\n"))
+	pair.History = bytes.ReplaceAll(pair.History, []byte("\n"), []byte("\r\n"))
+	ledger = bindMarkdownPair(t, ledger, pair)
+
+	got, err := RenderMarkdown(base, ledger, &pair)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, pair) {
+		t.Fatal("unchanged accepted CRLF document bytes were rewritten")
+	}
+}
+
+func TestMarkdownRenderUsesCollisionFreeAnchorsForValidIDs(t *testing.T) {
+	ledger := projectedLedger(t)
+	p := ledger.DocumentProjection.PresentationBase
+	p.Revision = 1
+	ledger.AcceptedRevision = 1
+	p.Decisions = []Decision{
+		minimumDecision("a:b", []string{}),
+		minimumDecision("ab", []string{}),
+	}
+	p.Decisions[0].Title, p.Decisions[0].Pinned = "colon", true
+	p.Decisions[1].Title, p.Decisions[1].Pinned = "plain", true
+	ledger.DocumentProjection.PresentationBase = p
+	seed, err := RenderMarkdown(p, bindMarkdownPair(t, ledger, MarkdownPair{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger = bindMarkdownPair(t, ledger, seed)
+	for _, target := range []string{"decision-x613a62", "decision-x6162"} {
+		if bytes.Count(seed.Review, []byte(`<a id="`+target+`"></a>`)) != 1 || bytes.Count(seed.Review, []byte(`(#`+target+`)`)) != 1 {
+			t.Fatalf("anchor/link target %q is not unique and identical:\n%s", target, seed.Review)
+		}
+	}
+	if bytes.Contains(seed.Review, []byte("%")) || bytes.Contains(seed.Review, []byte("decision-a:b")) {
+		t.Fatalf("anchors are not injective:\n%s", seed.Review)
+	}
+	if _, err := ParseMarkdownDraft(seed, ledger); err != nil {
+		t.Fatalf("canonical collision case did not round trip: %v", err)
+	}
+}
+
+func TestMarkdownDraftLargeDocumentUsesIndexedBlockAndAnchorMatching(t *testing.T) {
+	ledger := projectedLedger(t)
+	p := ledger.DocumentProjection.PresentationBase
+	p.Revision = 1
+	ledger.AcceptedRevision = 1
+	p.Risks = make([]Risk, 5000)
+	for index := range p.Risks {
+		p.Risks[index] = Risk{ID: fmt.Sprintf("risk:%04d", index), Title: "title", Status: "open", Detail: "detail"}
+	}
+	ledger.DocumentProjection.PresentationBase = p
+	pair, err := RenderMarkdown(p, bindMarkdownPair(t, ledger, MarkdownPair{}), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger = bindMarkdownPair(t, ledger, pair)
+	if _, err := ParseMarkdownDraft(pair, ledger); err != nil {
+		t.Fatal(err)
+	}
+	review, err := ParseMarkdownDocument(markdownReviewRelative, pair.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := newMarkdownDocumentIndex(markdownReviewRelative, review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(index.blocks) != len(review.blocks) || len(index.anchors) != len(p.Risks) {
+		t.Fatalf("index coverage blocks=%d/%d anchors=%d/%d", len(index.blocks), len(review.blocks), len(index.anchors), len(p.Risks))
+	}
+	for _, key := range []FieldKey{{Entity: "risk:risk:0000", Name: "title"}, {Entity: "risk:risk:4999", Name: "status"}} {
+		if _, ok := index.blocks[key]; !ok {
+			t.Fatalf("index omitted boundary key %+v", key)
+		}
+	}
+}
+
+func bindMarkdownPair(t *testing.T, ledger MachineLedger, pair MarkdownPair) MachineLedger {
+	t.Helper()
+	ledger.ReviewSHA256 = sha256Hex(pair.Review)
+	ledger.HistorySHA256 = sha256Hex(pair.History)
+	ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
+	ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+	body, err := RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := DecodeLedger(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bound
+}
+
 func TestMarkdownRenderRejectsRevisionZero(t *testing.T) {
 	ledger := projectedLedger(t)
 	ledger.AcceptedRevision = 0
@@ -91,7 +221,7 @@ func TestMarkdownRenderPreservesPreviousCustomBytesAndStableIDLinks(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(pair.Review, []byte("这段自定义文本")) || !bytes.Contains(pair.Review, []byte("#decision-decisionalpha")) {
+	if !bytes.Contains(pair.Review, []byte("这段自定义文本")) || !bytes.Contains(pair.Review, []byte("#decision-x6465636973696f6e3a616c706861")) {
 		t.Fatalf("custom bytes or stable ID link lost:\n%s", pair.Review)
 	}
 	if strings.Count(string(pair.Review), "改名后的决策") != 1 {
@@ -142,10 +272,10 @@ func TestMarkdownRenderAddsNewGenerationEntitiesWhilePreservingPreviousShell(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(pair.Review, []byte(`risk:risk:new`)) || !bytes.Contains(pair.Review, []byte(`<a id="risk-risknew"></a>`)) || !bytes.Contains(pair.Review, []byte("这段自定义文本")) {
+	if !bytes.Contains(pair.Review, []byte(`risk:risk:new`)) || !bytes.Contains(pair.Review, []byte(`<a id="risk-x7269736b3a6e6577"></a>`)) || !bytes.Contains(pair.Review, []byte("这段自定义文本")) {
 		t.Fatalf("new entity or previous shell missing:\n%s", pair.Review)
 	}
-	if !bytes.Contains(pair.History, []byte(`milestone:milestone:new`)) || !bytes.Contains(pair.History, []byte(`<a id="milestone-milestonenew"></a>`)) || !bytes.Contains(pair.History, []byte("历史自定义附注保留。")) {
+	if !bytes.Contains(pair.History, []byte(`milestone:milestone:new`)) || !bytes.Contains(pair.History, []byte(`<a id="milestone-x6d696c6573746f6e653a6e6577"></a>`)) || !bytes.Contains(pair.History, []byte("历史自定义附注保留。")) {
 		t.Fatalf("new milestone or previous history shell missing:\n%s", pair.History)
 	}
 }
@@ -166,7 +296,7 @@ func TestMarkdownRenderRejectsModifiedStableAnchor(t *testing.T) {
 	ledger := sharedMarkdownLedger(t)
 	base := ledger.DocumentProjection.PresentationBase
 	previous := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
-	previous.Review = bytes.Replace(previous.Review, []byte(`<a id="decision-decisionalpha"></a>`), []byte(`<a id="decision-forged"></a>`), 1)
+	previous.Review = bytes.Replace(previous.Review, []byte(`<a id="decision-x6465636973696f6e3a616c706861"></a>`), []byte(`<a id="decision-forged"></a>`), 1)
 	if _, err := RenderMarkdown(base, ledger, &previous); MarkdownCodeOf(err) != MarkdownStructureEditRequiresCommand {
 		t.Fatalf("modified anchor err=%v", err)
 	}

@@ -2,9 +2,9 @@ package reviewv4
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"strconv"
-	"strings"
 )
 
 const (
@@ -49,213 +49,300 @@ func RenderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair
 }
 
 func renderFreshMarkdown(p Presentation) (MarkdownPair, error) {
-	var review, history bytes.Buffer
-	writeMarkdownFrontmatter(&review, "review-"+p.ProjectID, "project-review", p)
-	review.WriteString("# 项目回顾\n\n## 当前状态\n\n")
-	writeMarkdownField(&review, FieldKey{Entity: "project-overview", Name: "goal"}, p.CurrentState.Goal)
-	writeMarkdownField(&review, FieldKey{Entity: "project-overview", Name: "stage"}, p.CurrentState.Stage)
-	writeMarkdownField(&review, FieldKey{Entity: "project-overview", Name: "status"}, p.CurrentState.Status)
-	writeMarkdownField(&review, FieldKey{Entity: "project-overview", Name: "next_action"}, p.CurrentState.NextAction)
-	writeMarkdownField(&review, FieldKey{Entity: "project-overview", Name: "last_verification"}, p.CurrentState.LastVerification)
-	review.WriteString("\n## 问题概览\n")
-	writeMarkdownGenerated(&review, FieldKey{Entity: "project-overview", Name: "problem-tree"}, renderProblemTree(p))
-	review.WriteString("\n## 置顶决策\n")
-	writeMarkdownGenerated(&review, FieldKey{Entity: "project-overview", Name: "pinned-decisions"}, renderPinnedDecisions(p))
-	review.WriteString("\n## 近期里程碑\n")
-	writeMarkdownGenerated(&review, FieldKey{Entity: "project-overview", Name: "recent-milestones"}, renderRecentMilestones(p))
-	renderReviewEntities(&review, p)
+	return renderFreshMarkdownBounded(p, maxMarkdownDocumentBytes)
+}
 
-	writeMarkdownFrontmatter(&history, "history-"+p.ProjectID, "project-history", p)
+func renderFreshMarkdownBounded(p Presentation, limit int) (MarkdownPair, error) {
+	review := newMarkdownBoundedWriter(limit)
+	history := newMarkdownBoundedWriter(limit)
+	writeMarkdownFrontmatter(review, "review-"+p.ProjectID, "project-review", p)
+	review.WriteString("# 项目回顾\n\n## 当前状态\n\n")
+	writeMarkdownLabeledField(review, "目标", FieldKey{Entity: "project-overview", Name: "goal"}, p.CurrentState.Goal)
+	writeMarkdownLabeledField(review, "阶段", FieldKey{Entity: "project-overview", Name: "stage"}, p.CurrentState.Stage)
+	writeMarkdownLabeledField(review, "状态", FieldKey{Entity: "project-overview", Name: "status"}, p.CurrentState.Status)
+	writeMarkdownLabeledField(review, "下一步", FieldKey{Entity: "project-overview", Name: "next_action"}, p.CurrentState.NextAction)
+	writeMarkdownLabeledField(review, "上次验证", FieldKey{Entity: "project-overview", Name: "last_verification"}, p.CurrentState.LastVerification)
+	review.WriteString("\n## 问题概览\n")
+	writeMarkdownGeneratedStart(review, FieldKey{Entity: "project-overview", Name: "problem-tree"})
+	renderProblemTree(review, p)
+	writeMarkdownGeneratedEnd(review, FieldKey{Entity: "project-overview", Name: "problem-tree"})
+	review.WriteString("\n## 置顶决策\n")
+	writeMarkdownGeneratedStart(review, FieldKey{Entity: "project-overview", Name: "pinned-decisions"})
+	renderPinnedDecisions(review, p)
+	writeMarkdownGeneratedEnd(review, FieldKey{Entity: "project-overview", Name: "pinned-decisions"})
+	review.WriteString("\n## 近期里程碑\n")
+	writeMarkdownGeneratedStart(review, FieldKey{Entity: "project-overview", Name: "recent-milestones"})
+	renderRecentMilestones(review, p)
+	writeMarkdownGeneratedEnd(review, FieldKey{Entity: "project-overview", Name: "recent-milestones"})
+	renderReviewEntities(review, p)
+	if review.Err() != nil {
+		return MarkdownPair{}, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+
+	writeMarkdownFrontmatter(history, "history-"+p.ProjectID, "project-history", p)
 	history.WriteString("# 项目历史\n\n## 里程碑\n")
 	if len(p.Timeline) == 0 {
 		history.WriteString("\n暂无里程碑。\n")
 	}
 	for _, item := range p.Timeline {
-		fmt.Fprintf(&history, "\n<a id=\"milestone-%s\"></a>\n\n", markdownAnchorID(item.ID))
-		writeMarkdownField(&history, FieldKey{Entity: "milestone:" + item.ID, Name: "title"}, item.Title)
-		history.WriteString("\n### 摘要\n")
-		writeMarkdownField(&history, FieldKey{Entity: "milestone:" + item.ID, Name: "summary"}, item.Summary)
-		history.WriteString("\n### 结论\n")
-		writeMarkdownField(&history, FieldKey{Entity: "milestone:" + item.ID, Name: "conclusion"}, item.ClosedLoop.Conclusion.Text)
-		history.WriteString("\n### 影响与后续\n")
-		writeMarkdownField(&history, FieldKey{Entity: "milestone:" + item.ID, Name: "impact_and_follow_up"}, item.ClosedLoop.ImpactAndFollowUp.Text)
+		if history.Err() != nil {
+			break
+		}
+		fmt.Fprintf(history, "\n<a id=\"milestone-%s\"></a>\n\n", markdownAnchorID(item.ID))
+		writeMarkdownLabeledField(history, "标题", FieldKey{Entity: "milestone:" + item.ID, Name: "title"}, item.Title)
+		writeMarkdownLabeledField(history, "摘要", FieldKey{Entity: "milestone:" + item.ID, Name: "summary"}, item.Summary)
+		writeMarkdownLabeledField(history, "结论", FieldKey{Entity: "milestone:" + item.ID, Name: "conclusion"}, item.ClosedLoop.Conclusion.Text)
+		writeMarkdownLabeledField(history, "影响与后续", FieldKey{Entity: "milestone:" + item.ID, Name: "impact_and_follow_up"}, item.ClosedLoop.ImpactAndFollowUp.Text)
 		history.WriteString("\n### 触发、执行、验证与 Coverage\n")
-		writeMarkdownGenerated(&history, FieldKey{Entity: "milestone:" + item.ID, Name: "evidence"}, renderMilestoneEvidence(item))
+		key := FieldKey{Entity: "milestone:" + item.ID, Name: "evidence"}
+		writeMarkdownGeneratedStart(history, key)
+		renderMilestoneEvidence(history, item)
+		writeMarkdownGeneratedEnd(history, key)
 	}
-	if review.Len() > maxMarkdownDocumentBytes || history.Len() > maxMarkdownDocumentBytes {
+	reviewBody, reviewErr := review.take()
+	historyBody, historyErr := history.take()
+	if reviewErr != nil || historyErr != nil {
 		return MarkdownPair{}, &MarkdownError{Code: MarkdownFormatInvalid}
 	}
-	return MarkdownPair{Review: bytes.Clone(review.Bytes()), History: bytes.Clone(history.Bytes())}, nil
+	return MarkdownPair{Review: reviewBody, History: historyBody}, nil
 }
 
-func renderReviewEntities(review *bytes.Buffer, p Presentation) {
+func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 	review.WriteString("\n## 决策\n")
 	if len(p.Decisions) == 0 {
 		review.WriteString("\n暂无决策。\n")
 	}
 	for _, item := range p.Decisions {
+		if review.Err() != nil {
+			return
+		}
 		fmt.Fprintf(review, "\n<a id=\"decision-%s\"></a>\n\n", markdownAnchorID(item.ID))
-		writeMarkdownField(review, FieldKey{Entity: "decision:" + item.ID, Name: "title"}, item.Title)
-		writeMarkdownField(review, FieldKey{Entity: "decision:" + item.ID, Name: "rationale"}, item.Rationale)
-		writeMarkdownField(review, FieldKey{Entity: "decision:" + item.ID, Name: "impact"}, item.Impact)
-		writeMarkdownField(review, FieldKey{Entity: "decision:" + item.ID, Name: "reevaluate_when"}, item.ReevaluateWhen)
+		writeMarkdownLabeledField(review, "标题", FieldKey{Entity: "decision:" + item.ID, Name: "title"}, item.Title)
+		writeMarkdownLabeledField(review, "理由", FieldKey{Entity: "decision:" + item.ID, Name: "rationale"}, item.Rationale)
+		writeMarkdownLabeledField(review, "影响", FieldKey{Entity: "decision:" + item.ID, Name: "impact"}, item.Impact)
+		writeMarkdownLabeledField(review, "重新评估条件", FieldKey{Entity: "decision:" + item.ID, Name: "reevaluate_when"}, item.ReevaluateWhen)
 	}
 	review.WriteString("\n## 风险\n")
 	if len(p.Risks) == 0 {
 		review.WriteString("\n暂无风险。\n")
 	}
 	for _, item := range p.Risks {
+		if review.Err() != nil {
+			return
+		}
 		fmt.Fprintf(review, "\n<a id=\"risk-%s\"></a>\n\n", markdownAnchorID(item.ID))
-		writeMarkdownField(review, FieldKey{Entity: "risk:" + item.ID, Name: "title"}, item.Title)
-		writeMarkdownField(review, FieldKey{Entity: "risk:" + item.ID, Name: "detail"}, item.Detail)
-		writeMarkdownField(review, FieldKey{Entity: "risk:" + item.ID, Name: "status"}, item.Status)
+		writeMarkdownLabeledField(review, "标题", FieldKey{Entity: "risk:" + item.ID, Name: "title"}, item.Title)
+		writeMarkdownLabeledField(review, "详情", FieldKey{Entity: "risk:" + item.ID, Name: "detail"}, item.Detail)
+		writeMarkdownLabeledField(review, "状态", FieldKey{Entity: "risk:" + item.ID, Name: "status"}, item.Status)
 	}
 	review.WriteString("\n## 未决问题\n")
 	if len(p.OpenLoops) == 0 {
 		review.WriteString("\n暂无未决问题。\n")
 	}
 	for _, item := range p.OpenLoops {
+		if review.Err() != nil {
+			return
+		}
 		fmt.Fprintf(review, "\n<a id=\"open-loop-%s\"></a>\n\n", markdownAnchorID(item.ID))
-		writeMarkdownField(review, FieldKey{Entity: "open-loop:" + item.ID, Name: "title"}, item.Title)
-		writeMarkdownField(review, FieldKey{Entity: "open-loop:" + item.ID, Name: "question"}, item.Question)
-		writeMarkdownField(review, FieldKey{Entity: "open-loop:" + item.ID, Name: "next_experiment"}, item.NextExperiment)
-		writeMarkdownField(review, FieldKey{Entity: "open-loop:" + item.ID, Name: "completion_criterion"}, item.CompletionCriterion)
-		writeMarkdownField(review, FieldKey{Entity: "open-loop:" + item.ID, Name: "status"}, item.Status)
+		writeMarkdownLabeledField(review, "标题", FieldKey{Entity: "open-loop:" + item.ID, Name: "title"}, item.Title)
+		writeMarkdownLabeledField(review, "问题", FieldKey{Entity: "open-loop:" + item.ID, Name: "question"}, item.Question)
+		writeMarkdownLabeledField(review, "下一个实验", FieldKey{Entity: "open-loop:" + item.ID, Name: "next_experiment"}, item.NextExperiment)
+		writeMarkdownLabeledField(review, "完成标准", FieldKey{Entity: "open-loop:" + item.ID, Name: "completion_criterion"}, item.CompletionCriterion)
+		writeMarkdownLabeledField(review, "状态", FieldKey{Entity: "open-loop:" + item.ID, Name: "status"}, item.Status)
 	}
 	review.WriteString("\n## 正式问题\n")
 	if len(p.ProblemNodes) == 0 {
 		review.WriteString("\n暂无正式问题。\n")
 	}
 	for _, item := range p.ProblemNodes {
+		if review.Err() != nil {
+			return
+		}
 		fmt.Fprintf(review, "\n<a id=\"problem-%s\"></a>\n\n", markdownAnchorID(item.ID))
-		writeMarkdownField(review, FieldKey{Entity: "problem:" + item.ID, Name: "question"}, item.Question)
-		writeMarkdownField(review, FieldKey{Entity: "problem:" + item.ID, Name: "completion_criterion"}, item.CompletionCriterion)
-		writeMarkdownField(review, FieldKey{Entity: "problem:" + item.ID, Name: "current_conclusion"}, item.CurrentConclusion)
+		writeMarkdownLabeledField(review, "问题", FieldKey{Entity: "problem:" + item.ID, Name: "question"}, item.Question)
+		writeMarkdownLabeledField(review, "完成标准", FieldKey{Entity: "problem:" + item.ID, Name: "completion_criterion"}, item.CompletionCriterion)
+		writeMarkdownLabeledField(review, "当前结论", FieldKey{Entity: "problem:" + item.ID, Name: "current_conclusion"}, item.CurrentConclusion)
 	}
 }
 
-func writeMarkdownFrontmatter(out *bytes.Buffer, id, entityType string, p Presentation) {
+func writeMarkdownFrontmatter(out *markdownBoundedWriter, id, entityType string, p Presentation) {
 	out.WriteString("---\n")
 	fmt.Fprintf(out, "id: %s\nentity_type: %s\nproject_id: %s\nschema_version: 4\ndocument_format: review-markdown-v1\nrevision: %d\ngeneration_id: %s\nminimum_reader_version: 0.4.1\nminimum_writer_version: 0.4.1\n---\n", id, entityType, p.ProjectID, p.Revision, p.GenerationID)
 }
 
-func writeMarkdownField(out *bytes.Buffer, key FieldKey, value string) {
+func writeMarkdownLabeledField(out *markdownBoundedWriter, label string, key FieldKey, value string) {
+	out.WriteString("### " + label + "\n")
+	writeMarkdownField(out, key, value)
+}
+func writeMarkdownField(out *markdownBoundedWriter, key FieldKey, value string) {
 	writeMarkdownBlock(out, "field", key, value)
 }
-func writeMarkdownGenerated(out *bytes.Buffer, key FieldKey, value string) {
-	writeMarkdownBlock(out, "generated", key, value)
+func writeMarkdownGeneratedStart(out *markdownBoundedWriter, key FieldKey) {
+	fmt.Fprintf(out, "<!-- session-reviewer:v4-generated entity=\"%s\" name=\"%s\" -->\n", key.Entity, key.Name)
 }
-func writeMarkdownBlock(out *bytes.Buffer, kind string, key FieldKey, value string) {
+func writeMarkdownGeneratedEnd(out *markdownBoundedWriter, key FieldKey) {
+	out.WriteByte('\n')
+	fmt.Fprintf(out, "<!-- /session-reviewer:v4-generated entity=\"%s\" name=\"%s\" -->\n", key.Entity, key.Name)
+}
+func writeMarkdownBlock(out *markdownBoundedWriter, kind string, key FieldKey, value string) {
 	fmt.Fprintf(out, "<!-- session-reviewer:v4-%s entity=\"%s\" name=\"%s\" -->\n", kind, key.Entity, key.Name)
 	out.WriteString(value)
 	out.WriteByte('\n')
 	fmt.Fprintf(out, "<!-- /session-reviewer:v4-%s entity=\"%s\" name=\"%s\" -->\n", kind, key.Entity, key.Name)
 }
 
-func renderProblemTree(p Presentation) string {
+func renderProblemTree(out *markdownBoundedWriter, p Presentation) {
 	if len(p.ProblemNodes) == 0 {
-		return "- 暂无正式问题"
+		out.WriteString("- 暂无正式问题")
+		return
 	}
-	byParent := make(map[string][]ProblemNode, len(p.ProblemNodes))
-	for _, item := range p.ProblemNodes {
+	byParent := make(map[string][]int, len(p.ProblemNodes))
+	for index, item := range p.ProblemNodes {
 		parent := ""
 		if item.PrimaryParentID != nil {
 			parent = *item.PrimaryParentID
 		}
-		byParent[parent] = append(byParent[parent], item)
+		byParent[parent] = append(byParent[parent], index)
 	}
-	var out strings.Builder
-	var visit func(string, int)
-	visit = func(parent string, depth int) {
-		for _, item := range byParent[parent] {
-			out.WriteString(strings.Repeat("  ", depth))
-			fmt.Fprintf(&out, "- [正式问题](#problem-%s)\n", markdownAnchorID(item.ID))
-			visit(item.ID, depth+1)
+	type pendingNode struct{ index, depth int }
+	stack := make([]pendingNode, 0, len(p.ProblemNodes))
+	for index := len(byParent[""]) - 1; index >= 0; index-- {
+		stack = append(stack, pendingNode{index: byParent[""][index]})
+	}
+	first := true
+	for len(stack) > 0 && out.Err() == nil {
+		pending := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		item := p.ProblemNodes[pending.index]
+		if !first {
+			out.WriteByte('\n')
+		}
+		first = false
+		if err := out.WriteRepeat("  ", pending.depth); err != nil {
+			return
+		}
+		fmt.Fprintf(out, "- [正式问题](#problem-%s)", markdownAnchorID(item.ID))
+		children := byParent[item.ID]
+		for index := len(children) - 1; index >= 0; index-- {
+			stack = append(stack, pendingNode{index: children[index], depth: pending.depth + 1})
 		}
 	}
-	visit("", 0)
-	return strings.TrimSuffix(out.String(), "\n")
 }
 
-func renderPinnedDecisions(p Presentation) string {
-	var out strings.Builder
+func renderPinnedDecisions(out *markdownBoundedWriter, p Presentation) {
+	first := true
 	for _, item := range p.Decisions {
+		if out.Err() != nil {
+			return
+		}
 		if item.Pinned {
-			fmt.Fprintf(&out, "- [决策](#decision-%s)\n", markdownAnchorID(item.ID))
+			if !first {
+				out.WriteByte('\n')
+			}
+			first = false
+			fmt.Fprintf(out, "- [决策](#decision-%s)", markdownAnchorID(item.ID))
 		}
 	}
-	if out.Len() == 0 {
-		return "- 暂无置顶决策"
+	if first {
+		out.WriteString("- 暂无置顶决策")
 	}
-	return strings.TrimSuffix(out.String(), "\n")
 }
 
-func renderRecentMilestones(p Presentation) string {
+func renderRecentMilestones(out *markdownBoundedWriter, p Presentation) {
 	count := len(p.Timeline)
 	displayed := count
 	if displayed > 5 {
 		displayed = 5
 	}
-	var out strings.Builder
-	fmt.Fprintf(&out, "共 %d 条，显示 %d 条；[查看完整历史](项目历史.md)。", count, displayed)
+	fmt.Fprintf(out, "共 %d 条，显示 %d 条；[查看完整历史](项目历史.md)。", count, displayed)
 	for index := count - displayed; index < count; index++ {
 		if index >= 0 {
-			fmt.Fprintf(&out, "\n- [里程碑](项目历史.md#milestone-%s)", markdownAnchorID(p.Timeline[index].ID))
+			fmt.Fprintf(out, "\n- [里程碑](项目历史.md#milestone-%s)", markdownAnchorID(p.Timeline[index].ID))
 		}
 	}
-	return out.String()
 }
 
-func renderMilestoneEvidence(item Timeline) string {
-	var out strings.Builder
-	fmt.Fprintf(&out, "- 发生时间：%s\n- 类型：%s\n", item.OccurredAt, item.Kind)
-	writeSegmentEvidence(&out, "触发", item.ClosedLoop.TriggerQuestion)
-	fmt.Fprintf(&out, "- 结论来源：%s\n", item.ClosedLoop.Conclusion.Kind)
-	writeSourceRefs(&out, "结论引用", item.ClosedLoop.Conclusion.SourceTurnRefs)
-	writeSegmentEvidence(&out, "执行", item.ClosedLoop.Execution)
-	writeSegmentEvidence(&out, "验证", item.ClosedLoop.Verification)
-	fmt.Fprintf(&out, "- 影响/后续状态：%s\n", item.ClosedLoop.ImpactAndFollowUp.State)
-	writeSourceRefs(&out, "影响/后续引用", item.ClosedLoop.ImpactAndFollowUp.SourceTurnRefs)
+func renderMilestoneEvidence(out *markdownBoundedWriter, item Timeline) {
+	first := true
+	writeEvidenceLine(out, &first, "- 发生时间：", item.OccurredAt)
+	writeEvidenceLine(out, &first, "- 类型：", item.Kind)
+	writeSegmentEvidence(out, &first, "触发", item.ClosedLoop.TriggerQuestion)
+	writeEvidenceLine(out, &first, "- 结论来源：", string(item.ClosedLoop.Conclusion.Kind))
+	writeSourceRefs(out, &first, "结论引用", item.ClosedLoop.Conclusion.SourceTurnRefs)
+	writeSegmentEvidence(out, &first, "执行", item.ClosedLoop.Execution)
+	writeSegmentEvidence(out, &first, "验证", item.ClosedLoop.Verification)
+	writeEvidenceLine(out, &first, "- 影响/后续状态：", item.ClosedLoop.ImpactAndFollowUp.State)
+	writeSourceRefs(out, &first, "影响/后续引用", item.ClosedLoop.ImpactAndFollowUp.SourceTurnRefs)
 	coverage := item.ClosedLoop.Coverage
-	fmt.Fprintf(&out, "- Coverage：source=%d, captured=%d, truncated=%d, unavailable=%d\n", coverage.SourceTurns, coverage.CapturedTurns, coverage.TruncatedTurns, coverage.SourceUnavailableTurns)
-	writeSourceRefs(&out, "全部引用", item.ClosedLoop.SourceTurnRefs)
+	writeEvidencePrefix(out, &first)
+	fmt.Fprintf(out, "- Coverage：source=%d, captured=%d, truncated=%d, unavailable=%d", coverage.SourceTurns, coverage.CapturedTurns, coverage.TruncatedTurns, coverage.SourceUnavailableTurns)
+	writeSourceRefs(out, &first, "全部引用", item.ClosedLoop.SourceTurnRefs)
+	writeEvidencePrefix(out, &first)
 	if len(item.DecisionIDs) == 0 {
-		out.WriteString("- 关联决策：无\n")
+		out.WriteString("- 关联决策：无")
 	} else {
-		out.WriteString("- 关联决策：" + strings.Join(item.DecisionIDs, ", ") + "\n")
+		out.WriteString("- 关联决策：")
+		for index, id := range item.DecisionIDs {
+			if index > 0 {
+				out.WriteString(", ")
+			}
+			out.WriteString(id)
+		}
 	}
-	return strings.TrimSuffix(out.String(), "\n")
 }
 
-func writeSegmentEvidence(out *strings.Builder, label string, segment ClosedLoopSegment) {
-	fmt.Fprintf(out, "- %s状态：%s\n", label, segment.State)
+func writeSegmentEvidence(out *markdownBoundedWriter, first *bool, label string, segment ClosedLoopSegment) {
+	writeEvidenceLine(out, first, "- "+label+"状态：", segment.State)
 	if segment.Text != "" {
-		fmt.Fprintf(out, "  - 文本：%s\n", strings.ReplaceAll(segment.Text, "\n", "\n    "))
+		writeEvidencePrefix(out, first)
+		out.WriteString("  - 文本：")
+		writeMarkdownIndented(out, segment.Text)
 	}
 	if segment.MissingReason != nil {
-		fmt.Fprintf(out, "  - 缺失原因：%s\n", *segment.MissingReason)
+		writeEvidenceLine(out, first, "  - 缺失原因：", *segment.MissingReason)
 	}
-	writeSourceRefs(out, label+"引用", segment.SourceTurnRefs)
+	writeSourceRefs(out, first, label+"引用", segment.SourceTurnRefs)
 }
 
-func writeSourceRefs(out *strings.Builder, label string, refs []SourceTurnRef) {
+func writeSourceRefs(out *markdownBoundedWriter, first *bool, label string, refs []SourceTurnRef) {
 	if len(refs) == 0 {
-		fmt.Fprintf(out, "- %s：无\n", label)
+		writeEvidenceLine(out, first, "- "+label+"：", "无")
 		return
 	}
 	for _, ref := range refs {
-		fmt.Fprintf(out, "- %s：%s/%s#%s\n", label, ref.Provider, ref.SessionID, ref.TurnUnitID)
+		writeEvidencePrefix(out, first)
+		fmt.Fprintf(out, "- %s：%s/%s#%s", label, ref.Provider, ref.SessionID, ref.TurnUnitID)
 	}
 }
 
-func markdownAnchorID(id string) string {
-	var out strings.Builder
-	for _, character := range id {
-		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.' {
-			out.WriteRune(character)
-		}
+func writeEvidenceLine(out *markdownBoundedWriter, first *bool, prefix, value string) {
+	writeEvidencePrefix(out, first)
+	out.WriteString(prefix)
+	out.WriteString(value)
+}
+
+func writeEvidencePrefix(out *markdownBoundedWriter, first *bool) {
+	if !*first {
+		out.WriteByte('\n')
 	}
-	return out.String()
+	*first = false
+}
+
+func writeMarkdownIndented(out *markdownBoundedWriter, value string) {
+	start := 0
+	for index := 0; index < len(value); index++ {
+		if value[index] != '\n' {
+			continue
+		}
+		out.WriteString(value[start:index])
+		out.WriteString("\n    ")
+		start = index + 1
+	}
+	out.WriteString(value[start:])
+}
+
+func markdownAnchorID(id string) string {
+	return "x" + hex.EncodeToString([]byte(id))
 }
 
 func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []byte, acceptedHash string, base, next Presentation) ([]byte, error) {
@@ -280,6 +367,14 @@ func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []by
 	if err := validateMarkdownAnchors(relative, oldDocument.raw, oldExpected.raw); err != nil {
 		return nil, err
 	}
+	oldIndex, err := newMarkdownDocumentIndex(relative, oldDocument)
+	if err != nil {
+		return nil, err
+	}
+	oldExpectedIndex, err := newMarkdownDocumentIndex(relative, oldExpected)
+	if err != nil {
+		return nil, err
+	}
 	newKeys := make(map[FieldKey]bool, len(newExpected.blocks))
 	for _, block := range newExpected.blocks {
 		newKeys[block.Key] = true
@@ -291,7 +386,7 @@ func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []by
 		if !block.Generated {
 			continue
 		}
-		oldBlock, _ := markdownBlockByKey(oldExpected, block.Key)
+		oldBlock := oldExpectedIndex.blocks[block.Key]
 		if !markdownSemanticEqual(markdownBlockValue(oldDocument, block), markdownBlockValue(oldExpected, oldBlock)) {
 			return nil, &MarkdownError{Code: MarkdownGeneratedRegionModified, Relative: relative, Entity: block.Key.Entity, Field: block.Key.Name}
 		}
@@ -301,7 +396,14 @@ func mergeMarkdownDocument(relative string, previous, oldCanonical, desired []by
 	}
 	replacements := make(map[FieldKey]string, len(newExpected.blocks))
 	for _, block := range newExpected.blocks {
-		replacements[block.Key] = markdownBlockValue(newExpected, block)
+		desiredValue := markdownBlockValue(newExpected, block)
+		oldBlock, oldExists := oldIndex.blocks[block.Key]
+		oldExpectedBlock, expectedExists := oldExpectedIndex.blocks[block.Key]
+		if oldExists && expectedExists && markdownSemanticEqual(desiredValue, markdownBlockValue(oldExpected, oldExpectedBlock)) {
+			replacements[block.Key] = markdownBlockValue(oldDocument, oldBlock)
+			continue
+		}
+		replacements[block.Key] = desiredValue
 	}
 	merged, err := replaceMarkdownBlocks(oldDocument, replacements)
 	if err != nil {
@@ -325,7 +427,14 @@ func appendNewMarkdownEntities(relative string, merged, desired []byte, oldDocum
 	}
 	seen := make(map[string]bool)
 	seenKind := make(map[string]bool)
-	additions := make([]byte, 0)
+	separatorBytes := 0
+	if len(merged) > 0 && merged[len(merged)-1] != '\n' {
+		separatorBytes = 1
+	}
+	if len(merged) > maxMarkdownDocumentBytes-separatorBytes {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid, Relative: relative}
+	}
+	additions := newMarkdownBoundedWriter(maxMarkdownDocumentBytes - len(merged) - separatorBytes)
 	for index, block := range newExpected.blocks {
 		entity := block.Key.Entity
 		if entity == "project-overview" || oldEntities[entity] || seen[entity] {
@@ -347,30 +456,30 @@ func appendNewMarkdownEntities(relative string, merged, desired []byte, oldDocum
 			heading = markdownNewEntityHeading(kind)
 			seenKind[kind] = true
 		}
-		additionBytes := len(heading) + end - start
-		if additionBytes > maxMarkdownDocumentBytes || len(merged)+len(additions) > maxMarkdownDocumentBytes-additionBytes {
+		additions.WriteString(heading)
+		additions.Write(desired[start:end])
+		if additions.Err() != nil {
 			return nil, &MarkdownError{Code: MarkdownFormatInvalid, Relative: relative, Entity: entity}
 		}
-		additions = append(additions, heading...)
-		additions = append(additions, desired[start:end]...)
 	}
-	if len(additions) == 0 {
+	additionBytes, err := additions.take()
+	if err != nil {
+		return nil, err
+	}
+	if len(additionBytes) == 0 {
 		return merged, nil
 	}
-	separatorBytes := 0
-	if len(merged) > 0 && merged[len(merged)-1] != '\n' {
-		separatorBytes = 1
+	result := newMarkdownBoundedWriter(maxMarkdownDocumentBytes)
+	result.Write(merged)
+	if separatorBytes != 0 {
+		result.WriteByte('\n')
 	}
-	if len(merged) > maxMarkdownDocumentBytes-len(additions)-separatorBytes {
+	result.Write(additionBytes)
+	body, err := result.take()
+	if err != nil {
 		return nil, &MarkdownError{Code: MarkdownFormatInvalid, Relative: relative}
 	}
-	result := make([]byte, 0, len(merged)+len(additions)+separatorBytes)
-	result = append(result, merged...)
-	if separatorBytes != 0 {
-		result = append(result, '\n')
-	}
-	result = append(result, additions...)
-	return result, nil
+	return body, nil
 }
 
 func markdownNewEntityHeading(kind string) string {
@@ -397,10 +506,17 @@ func newEntityAnchorStart(document MarkdownDocument, block MarkdownBlock) int {
 		if previousEnd > 0 && document.raw[previousEnd-1] == '\r' {
 			previousEnd--
 		}
-		previousStart := bytes.LastIndexByte(document.raw[:previousEnd], '\n') + 1
+		previousStart := previousEnd
+		for previousStart > 0 && document.raw[previousStart-1] != '\n' {
+			previousStart--
+		}
 		line := document.raw[previousStart:previousEnd]
 		if bytes.HasPrefix(line, []byte(`<a id="`)) && bytes.HasSuffix(line, []byte(`"></a>`)) {
 			return previousStart
+		}
+		if bytes.HasPrefix(line, []byte("### ")) {
+			lineStart = previousStart
+			continue
 		}
 		if len(bytes.TrimSpace(line)) != 0 {
 			return -1
@@ -411,7 +527,28 @@ func newEntityAnchorStart(document MarkdownDocument, block MarkdownBlock) int {
 }
 
 func replaceMarkdownBlocks(document MarkdownDocument, replacements map[FieldKey]string) ([]byte, error) {
-	var out bytes.Buffer
+	return replaceMarkdownBlocksBounded(document, replacements, maxMarkdownDocumentBytes)
+}
+
+func replaceMarkdownBlocksBounded(document MarkdownDocument, replacements map[FieldKey]string, limit int) ([]byte, error) {
+	removedBytes, replacementBytes := 0, 0
+	for _, block := range document.blocks {
+		value, exists := replacements[block.Key]
+		if !exists {
+			return nil, &MarkdownError{Code: MarkdownFieldMissing, Entity: block.Key.Entity, Field: block.Key.Name}
+		}
+		removedBytes += block.ValueEnd - block.ValueStart
+		if len(value) > limit-replacementBytes {
+			return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+		}
+		replacementBytes += len(value)
+	}
+	prospective := len(document.raw) - removedBytes
+	if prospective > limit-replacementBytes {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	prospective += replacementBytes
+	out := newMarkdownBoundedWriter(limit)
 	cursor := 0
 	for _, block := range document.blocks {
 		value, exists := replacements[block.Key]
@@ -423,20 +560,24 @@ func replaceMarkdownBlocks(document MarkdownDocument, replacements map[FieldKey]
 		cursor = block.ValueEnd
 	}
 	out.Write(document.raw[cursor:])
-	if out.Len() > maxMarkdownDocumentBytes {
-		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
-	}
-	return out.Bytes(), nil
+	return out.take()
 }
 
 func validateMarkdownAnchors(relative string, actual, expected []byte) error {
-	for start := 0; start < len(expected); {
-		end, next := markdownPhysicalLine(expected, start)
-		line := expected[start:end]
-		if bytes.HasPrefix(line, []byte(`<a id="`)) && bytes.HasSuffix(line, []byte(`"></a>`)) && bytes.Count(actual, line) != 1 {
+	actualDocument := MarkdownDocument{raw: actual}
+	expectedDocument := MarkdownDocument{raw: expected}
+	actualIndex, err := newMarkdownDocumentIndex(relative, actualDocument)
+	if err != nil {
+		return err
+	}
+	expectedIndex, err := newMarkdownDocumentIndex(relative, expectedDocument)
+	if err != nil {
+		return err
+	}
+	for anchor, count := range expectedIndex.anchors {
+		if count != 1 || actualIndex.anchors[anchor] != 1 {
 			return &MarkdownError{Code: MarkdownStructureEditRequiresCommand, Relative: relative}
 		}
-		start = next
 	}
 	return nil
 }
@@ -447,7 +588,7 @@ func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, 
 		"generation_id": next.GenerationID,
 	}
 	found := map[string]bool{}
-	var out bytes.Buffer
+	out := newMarkdownBoundedWriter(maxMarkdownDocumentBytes)
 	cursor := 0
 	for start := 0; start < len(raw); {
 		end, nextLine := markdownPhysicalLine(raw, start)
@@ -476,5 +617,9 @@ func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, 
 		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
 	}
 	out.Write(raw[cursor:])
-	return out.Bytes(), nil
+	body, err := out.take()
+	if err != nil {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	return body, nil
 }
