@@ -39,6 +39,7 @@
     { "name": "reordered-nested-keys", "review": "review.md", "history": "history.md", "ledger": "ledger-reordered.json", "index": "index.json", "expected_code": "", "expected_fields": {} },
     { "name": "tampered-self-digest", "review": "review.md", "history": "history.md", "ledger": "ledger-tampered-self-digest.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
     { "name": "wrong-version-splice", "review": "review.md", "history": "history.md", "ledger": "ledger-wrong-version.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
+    { "name": "outer-inner-revision-mismatch", "review": "review.md", "history": "history.md", "ledger": "ledger-revision-mismatch.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
     { "name": "null-projection", "review": "review.md", "history": "history.md", "ledger": "ledger-null-projection.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
     { "name": "unknown-projection-key", "review": "review.md", "history": "history.md", "ledger": "ledger-unknown-key.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
     { "name": "patch-baseline-mismatch", "review": "review.md", "history": "history.md", "ledger": "ledger-patch-mismatch.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },

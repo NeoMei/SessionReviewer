@@ -37,6 +37,10 @@ const wrongVersion = copy();
 wrongVersion.minimum_reader_version = "0.4.0";
 await write("ledger-wrong-version.json", wrongVersion);
 
+const revisionMismatch = copy();
+revisionMismatch.document_projection.presentation_base.revision += 1;
+await write("ledger-revision-mismatch.json", revisionMismatch);
+
 const nullProjection = copy();
 nullProjection.document_projection = null;
 await write("ledger-null-projection.json", nullProjection);

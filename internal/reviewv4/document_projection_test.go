@@ -141,10 +141,17 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 	if err := strictjson.Decode(mustRead(t, "../../testdata/contracts/v4/markdown/cases.json"), &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 8 {
+	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 9 {
 		t.Fatalf("invalid corpus identity: %+v", corpus)
 	}
+	foundRevisionMismatch := false
 	for _, testCase := range corpus.Cases {
+		if testCase.Name == "outer-inner-revision-mismatch" {
+			foundRevisionMismatch = true
+			if testCase.ExpectedCode != "wire_contract_invalid" {
+				t.Fatalf("revision mismatch code = %q", testCase.ExpectedCode)
+			}
+		}
 		t.Run(testCase.Name, func(t *testing.T) {
 			body := mustRead(t, "../../testdata/contracts/v4/markdown/"+testCase.Ledger)
 			ledger, err := DecodeLedger(body)
@@ -167,6 +174,9 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 				t.Fatal("successful corpus case has stale index binding")
 			}
 		})
+	}
+	if !foundRevisionMismatch {
+		t.Fatal("shared corpus is missing outer-inner-revision-mismatch")
 	}
 }
 

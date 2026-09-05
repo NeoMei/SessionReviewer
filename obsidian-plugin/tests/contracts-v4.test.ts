@@ -214,7 +214,7 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(corpus.schema_version).toBe(1);
     expect(corpus.format).toBe("review-markdown-v1");
     const cases = corpus.cases as JsonObject[];
-    expect(cases).toHaveLength(8);
+    expect(cases).toHaveLength(9);
     expect(Object.keys(cases[0].expected_fields as JsonObject)).toHaveLength(24);
     for (const testCase of cases) {
       const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_fields"];
@@ -232,6 +232,8 @@ describe("review-markdown-v1 ledger extension", () => {
     }
     const resigned = cases.find((testCase) => testCase.name === "publicly-rehashed-machine-change");
     expect(resigned?.expected_private_binding).toBe("reject");
+    const revisionMismatch = cases.find((testCase) => testCase.name === "outer-inner-revision-mismatch");
+    expect(revisionMismatch?.expected_code).toBe("wire_contract_invalid");
     const baseLedger = parseMachineLedgerV4((await markdownFixture("ledger.json")).toString("utf8"));
     expect(baseLedger.sync_hashes.ledger_sha256).toBe("913ed91d59ef92fa0d683a7c5e4879b6ad87524c91b763b5126912a4facb087d");
     const resignedLedger = parseMachineLedgerV4((await markdownFixture("ledger-rehashed-public.json")).toString("utf8"));
