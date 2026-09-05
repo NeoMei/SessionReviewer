@@ -195,7 +195,7 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(catalog.format).toBe("review-markdown-v1");
     const fields = catalog.fields as JsonObject[];
     expect(fields).toHaveLength(24);
-    expect(fields.map((field) => `${field.entity_kind}/${field.name}/${field.document}`)).toEqual([
+    expect(fields.map((field) => [field.entity_kind, field.name, field.document].map(String).join("/"))).toEqual([
       "project-overview/goal/review", "project-overview/stage/review", "project-overview/status/review",
       "project-overview/next_action/review", "project-overview/last_verification/review",
       "decision/title/review", "decision/rationale/review", "decision/impact/review", "decision/reevaluate_when/review",
@@ -205,7 +205,7 @@ describe("review-markdown-v1 ledger extension", () => {
       "problem/question/review", "problem/completion_criterion/review", "problem/current_conclusion/review",
       "milestone/title/history", "milestone/summary/history", "milestone/conclusion/history", "milestone/impact_and_follow_up/history"
     ]);
-    expect((catalog.generated_regions as JsonObject[]).map((region) => `${region.entity_kind}/${region.name}/${region.document}`)).toEqual([
+    expect((catalog.generated_regions as JsonObject[]).map((region) => [region.entity_kind, region.name, region.document].map(String).join("/"))).toEqual([
       "project-overview/problem-tree/review", "project-overview/pinned-decisions/review",
       "project-overview/recent-milestones/review", "milestone/evidence/history"
     ]);

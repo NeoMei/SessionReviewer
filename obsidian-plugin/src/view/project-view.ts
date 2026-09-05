@@ -3,17 +3,19 @@ import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
 import type { CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
-import type { Diagnostic, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
+import type { Diagnostic, MarkdownSnapshotReady, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
 import { ConflictModal, type ConflictAction } from "./conflict-modal";
 import { ConfirmModal } from "./confirm-modal";
 import { element } from "./dom";
 import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
 import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
+import { renderMarkdownV4View } from "./presentation";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
   private lastReady?: SnapshotReady;
+  private lastMarkdownReady?: MarkdownSnapshotReady;
   private selected?: ProjectDescriptor;
   private projects: ProjectDescriptor[] = [];
   private currentState: ViewState;
@@ -77,8 +79,10 @@ export class ProjectEvolutionView extends ItemView {
 
   private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean } = {}): Promise<void> {
     if (!this.selected) return;
-    const snapshot = await this.repository!.load(this.selected, this.lastReady);
+    const previous = this.selected.format === "markdown-v4" ? this.lastMarkdownReady : this.lastReady;
+    const snapshot = await this.repository!.load(this.selected, previous);
     if (snapshot.kind === "ready") this.lastReady = snapshot;
+    if (snapshot.kind === "markdown-v4" && snapshot.state.kind === "public_valid") this.lastMarkdownReady = { ...snapshot, state: snapshot.state };
     await this.refreshCliStatus();
     if (options.scanStatus !== false) await this.refreshScanStatus();
     this.renderSnapshot(snapshot, projects);
@@ -87,6 +91,17 @@ export class ProjectEvolutionView extends ItemView {
 
   private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
     this.contentEl.replaceChildren();
+    if (snapshot.kind === "markdown-v4" || snapshot.kind === "markdown-v4-stale") {
+      const browser = renderMarkdownV4View(
+        snapshot,
+        (path) => { void this.app.workspace.openLinkText(path, "", false); },
+        { cliUnavailable: this.cliDiagnostic?.code === "cli_unavailable" }
+      );
+      if (projects.length > 1) browser.prepend(this.projectPicker(projects));
+      if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
+      this.contentEl.append(browser);
+      return;
+    }
     if (snapshot.kind === "empty" || snapshot.kind === "migration_required") {
       const diagnostic = snapshot.diagnostic;
       this.contentEl.append(element("div", { className: "session-reviewer-browser" }, [
@@ -287,6 +302,7 @@ export class ProjectEvolutionView extends ItemView {
       this.disposeWatch?.();
       this.selected = next;
       this.lastReady = undefined;
+      this.lastMarkdownReady = undefined;
       void this.refresh(projects).then(() => { this.disposeWatch = this.repository!.watch(next, () => { void this.refresh(projects); }); });
     });
     wrapper.append(select);

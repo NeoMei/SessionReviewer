@@ -2,6 +2,9 @@ import type { BrowserModel, MachineLedger } from "../contracts/review-v3";
 import { sha256Text } from "./hash";
 import { parseLedger } from "./ledger";
 import { parseHistory, parseReview } from "./markdown";
+import { parseReviewPresentationV4 } from "./contracts-v4";
+import { readMarkdownIdentityV4 } from "./markdown-v4";
+import { loadMarkdownSnapshot, type MarkdownSnapshot } from "./repository-v4";
 import type { VaultPort } from "./vault-port";
 import type { ConflictCandidate } from "../view/conflict-modal";
 
@@ -9,6 +12,7 @@ export interface ProjectDescriptor {
   projectId: string;
   root: string;
   name: string;
+  format?: "markdown-v4" | "legacy-v4-json";
 }
 
 export interface Diagnostic {
@@ -31,11 +35,22 @@ export interface SnapshotReady {
   loadedAt: number;
 }
 
+export interface MarkdownSnapshotReady {
+  kind: "markdown-v4";
+  descriptor: ProjectDescriptor;
+  state: Extract<MarkdownSnapshot, { kind: "public_valid" }>;
+  loadedAt: number;
+}
+
+export type LastValidSnapshot = SnapshotReady | MarkdownSnapshotReady;
+
 export type Snapshot =
   | SnapshotReady
   | { kind: "pending_edit"; model: BrowserModel; machine: MachineLedger; diagnostic: Diagnostic }
   | { kind: "migration_required"; descriptor: ProjectDescriptor; diagnostic: Diagnostic }
   | { kind: "stale"; lastValid: SnapshotReady; diagnostic: Diagnostic }
+  | { kind: "markdown-v4"; descriptor: ProjectDescriptor; state: MarkdownSnapshot; loadedAt: number }
+  | { kind: "markdown-v4-stale"; lastValid: MarkdownSnapshotReady; state: Extract<MarkdownSnapshot, { kind: "invalid" | "unverified" }>; diagnostic: Diagnostic }
   | { kind: "empty"; diagnostic?: Diagnostic };
 
 interface PendingWrite {
@@ -58,7 +73,28 @@ export class ProjectRepository {
       const historyPath = `${root}/项目历史.md`;
       if (!markdownPaths.has(historyPath)) continue;
       try {
-        const review = parseReview(await this.vault.read(file.path));
+        const identity = readMarkdownIdentityV4(await this.vault.read(file.path));
+        if (identity.document !== "review") continue;
+        descriptors.push({ projectId: identity.projectId, root, name: identity.projectId, format: "markdown-v4" });
+        continue;
+      } catch {
+        // Continue to legacy formats only when the source is not a known v4 Markdown document.
+      }
+      const source = await this.vault.read(file.path);
+      if (/^---\r?\n[\s\S]*?^schema_version:\s*4\s*$[\s\S]*?^document_format:\s*review-markdown-v1\s*$/m.test(source)) {
+        const projectId = /^project_id:\s*([^\s]+)\s*$/m.exec(source)?.[1];
+        if (projectId && validProjectId(projectId)) descriptors.push({ projectId, root, name: projectId, format: "markdown-v4" });
+        continue;
+      }
+      try {
+        const legacy = parseReviewPresentationV4(source);
+        descriptors.push({ projectId: legacy.project_id, root, name: legacy.project_id, format: "legacy-v4-json" });
+        continue;
+      } catch {
+        // Try v3 below.
+      }
+      try {
+        const review = parseReview(source);
         if (!validProjectId(review.projectId)) continue;
         descriptors.push({ projectId: review.projectId, root, name: review.name });
       } catch {
@@ -68,7 +104,11 @@ export class ProjectRepository {
     return descriptors.sort((left, right) => left.name.localeCompare(right.name, "zh-CN") || left.projectId.localeCompare(right.projectId));
   }
 
-  async load(project: ProjectDescriptor, previous?: SnapshotReady): Promise<Snapshot> {
+  async load(project: ProjectDescriptor, previous?: LastValidSnapshot): Promise<Snapshot> {
+    if (project.format === "legacy-v4-json") {
+      return { kind: "migration_required", descriptor: project, diagnostic: { code: "migration_required", message: "此项目是旧 v4 JSON，需要先运行显式迁移预览。" } };
+    }
+    if (project.format === "markdown-v4") return this.loadV4(project, previous);
     const reviewPath = `${project.root}/项目回顾.md`;
     const historyPath = `${project.root}/项目历史.md`;
     const ledgerPath = `${project.root}/.session-reviewer/ledger.json`;
@@ -78,13 +118,13 @@ export class ProjectRepository {
       reviewText = await this.vault.read(reviewPath);
       parseReview(reviewText);
     } catch (error) {
-      return invalid(previous, "review_parse_failed", `项目回顾无法解析：${message(error)}`);
+      return invalid(previous?.kind === "ready" ? previous : undefined, "review_parse_failed", `项目回顾无法解析：${message(error)}`);
     }
     try {
       historyText = await this.vault.read(historyPath);
       parseHistory(historyText);
     } catch (error) {
-      return invalid(previous, "history_parse_failed", `项目历史无法解析：${message(error)}`);
+      return invalid(previous?.kind === "ready" ? previous : undefined, "history_parse_failed", `项目历史无法解析：${message(error)}`);
     }
     const review = parseReview(reviewText);
     const history = parseHistory(historyText);
@@ -92,15 +132,15 @@ export class ProjectRepository {
     try {
       machine = parseLedger(await this.vault.read(ledgerPath));
     } catch (error) {
-      return invalid(previous, "machine_ledger_modified", `机器账本无法验证：${message(error)}`);
+      return invalid(previous?.kind === "ready" ? previous : undefined, "machine_ledger_modified", `机器账本无法验证：${message(error)}`);
     }
     if (review.projectId !== project.projectId || history.projectId !== project.projectId || machine.projectId !== project.projectId) {
-      return invalid(previous, "stale_snapshot", "三份文件的 project_id 不一致。");
+      return invalid(previous?.kind === "ready" ? previous : undefined, "stale_snapshot", "三份文件的 project_id 不一致。");
     }
-    if (review.revision !== history.revision) return invalid(previous, "stale_snapshot", "项目回顾与项目历史的 revision 不一致。");
+    if (review.revision !== history.revision) return invalid(previous?.kind === "ready" ? previous : undefined, "stale_snapshot", "项目回顾与项目历史的 revision 不一致。");
     const decisions = new Set(review.decisions.map((decision) => decision.id));
     for (const event of history.events) {
-      for (const id of event.decisionIds) if (!decisions.has(id)) return invalid(previous, "stale_snapshot", `历史节点 ${event.id} 引用了缺失的决策 ${id}。`);
+      for (const id of event.decisionIds) if (!decisions.has(id)) return invalid(previous?.kind === "ready" ? previous : undefined, "stale_snapshot", `历史节点 ${event.id} 引用了缺失的决策 ${id}。`);
     }
     const reviewSha256 = sha256Text(reviewText);
     const historySha256 = sha256Text(historyText);
@@ -119,11 +159,32 @@ export class ProjectRepository {
     return { kind: "ready", model, machine, loadedAt: Date.now() };
   }
 
+  private async loadV4(project: ProjectDescriptor, previous?: LastValidSnapshot): Promise<Snapshot> {
+    const paths = {
+      review: `${project.root}/项目回顾.md`, history: `${project.root}/项目历史.md`,
+      ledger: `${project.root}/.session-reviewer/ledger.json`, index: `${project.root}/.session-reviewer/session-index.json`
+    };
+    let state: MarkdownSnapshot;
+    try {
+      state = loadMarkdownSnapshot({
+        review: await this.vault.read(paths.review), history: await this.vault.read(paths.history),
+        ledger: await this.vault.read(paths.ledger), index: await this.vault.read(paths.index)
+      });
+    } catch {
+      state = { kind: "unverified", reason: "baseline_missing" };
+    }
+    if ((state.kind === "invalid" || state.kind === "unverified") && previous?.kind === "markdown-v4" && previous.descriptor.projectId === project.projectId && previous.descriptor.root === project.root) {
+      return { kind: "markdown-v4-stale", lastValid: previous, state, diagnostic: { code: "stale_snapshot", message: "当前四文件快照无法验证，正在显示此项目上一次公开校验快照（已过期、只读）。" } };
+    }
+    return { kind: "markdown-v4", descriptor: project, state, loadedAt: Date.now() };
+  }
+
   watch(project: ProjectDescriptor, refresh: () => void): () => void {
     const targets = new Set([
       `${project.root}/项目回顾.md`,
       `${project.root}/项目历史.md`,
-      `${project.root}/.session-reviewer/ledger.json`
+      `${project.root}/.session-reviewer/ledger.json`,
+      `${project.root}/.session-reviewer/session-index.json`
     ]);
     let timer: number | undefined;
     let closed = false;

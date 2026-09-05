@@ -11,11 +11,12 @@ const fixture = (name: string): Promise<string> =>
   readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/review-v3", name), "utf8");
 
 class EditVault implements VaultPort {
+  processCalls = 0;
   constructor(public body: string) {}
   getMarkdownFiles(): VaultFile[] { return []; }
   getFrontmatter(): Record<string, unknown> | undefined { return undefined; }
   async read(): Promise<string> { return this.body; }
-  async process(_path: string, transform: (current: string) => string): Promise<void> { this.body = transform(this.body); }
+  async process(_path: string, transform: (current: string) => string): Promise<void> { this.processCalls += 1; this.body = transform(this.body); }
   onChange(): () => void { return () => undefined; }
 }
 
@@ -44,5 +45,16 @@ describe("review editor", () => {
     await editor.apply({ path: "项目历史.md", expectedSha256: sha256Text(vault.body), document: "history", unitId: "timeline-trust-chain", field: "event.next", value: "Windows 编辑通过" });
     expect(parseHistory(vault.body).events[0]?.next).toBe("Windows 编辑通过");
     expect(vault.body).not.toContain("\r");
+  });
+
+  it("rejects v4 Markdown before entering the v3 Vault process path", async () => {
+    const body = await readFile(resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/contracts/v4/markdown/review.md"), "utf8");
+    const vault = new EditVault(body);
+    const editor = new ReviewEditor(vault);
+
+    await expect(editor.apply({ path: "项目回顾.md", expectedSha256: sha256Text(body), document: "review", unitId: "project", field: "goal", value: "不应写入" })).rejects.toThrow(/v4|unsupported/i);
+
+    expect(vault.processCalls).toBe(0);
+    expect(vault.body).toBe(body);
   });
 });

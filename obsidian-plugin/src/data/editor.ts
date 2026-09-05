@@ -28,6 +28,14 @@ export class ReviewEditor {
 
   async apply(request: EditRequest): Promise<{ sha256: string }> {
     validateRequest(request);
+    const before = await this.vault.read(request.path);
+    try {
+      if (request.document === "review") parseReview(before);
+      else parseHistory(before);
+    } catch (error) {
+      rejectUnsupportedFormat(before);
+      throw error;
+    }
     let resultHash = "";
     await this.vault.process(request.path, (current) => {
       if (sha256Text(current) !== request.expectedSha256) throw new Error("stale edit: file changed; reload before editing");
@@ -38,6 +46,14 @@ export class ReviewEditor {
       return next;
     });
     return { sha256: resultHash };
+  }
+}
+
+function rejectUnsupportedFormat(source: string): void {
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(source)?.[1];
+  if (!frontmatter) return;
+  if (/^schema_version:\s*4\s*$/m.test(frontmatter) && /^document_format:\s*review-markdown-v1\s*$/m.test(frontmatter)) {
+    throw new Error("v4 Markdown is unsupported by the v3 editor; edit the native Markdown body instead");
   }
 }
 
