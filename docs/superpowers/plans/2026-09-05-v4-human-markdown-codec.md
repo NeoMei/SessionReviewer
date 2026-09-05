@@ -114,6 +114,8 @@ if l.DocumentProjection != nil &&
 
 ## Task 2 (M2)：实现有界标记词法与无损文档壳
 
+状态：实现 `6b1a3d3`、有界替换修复 `d5e1066`，独立审查和修复复审通过。实现提交通过完整 Go、TS 合同 67 项和 486,336 次模糊测试；修复提交通过定向回归。当前范围不包含正式接受态、同步和插件回读，完整 HEAD 验收仍留给 M9。
+
 **Files:** Create `internal/reviewv4/markdown_lex.go`、`markdown_document.go`、`markdown_lex_test.go`、`markdown_document_test.go`；扩充 M1 的共享 cases。
 
 **Interfaces:** consumes M1 FieldKey/目录/错误；produces：
@@ -132,7 +134,7 @@ func (d MarkdownDocument) Fields() map[FieldKey]string
 func (d MarkdownDocument) ReplaceFields(map[FieldKey]string) ([]byte, error)
 ```
 
-- [ ] **1. RED：保留尾换行与代码中的标记。** 下例为可直接放入同包测试的最小用例；再表驱动加入 tilde/backtick fence、缩进代码、列表/引用内文字、空值、重复/嵌套/截断标记、裸 CR、无效 UTF-8、超过 64 MiB、YAML 重复键/alias/merge/深度溢出。
+- [x] **1. RED：保留尾换行与代码中的标记。** 下例为可直接放入同包测试的最小用例；再表驱动加入 tilde/backtick fence、缩进代码、列表/引用内文字、空值、重复/嵌套/截断标记、裸 CR、无效 UTF-8、超过 64 MiB、YAML 重复键/alias/merge/深度溢出。
 
 ```go
 func TestMarkdownLexKeepsValueBytes(t *testing.T) {
@@ -146,8 +148,8 @@ func TestMarkdownLexKeepsValueBytes(t *testing.T) {
 }
 ```
 
-- [ ] **2. 跑 RED。** `go test ./internal/reviewv4 -run 'MarkdownLex|MarkdownDocument' -count=1`。
-- [ ] **3. 实现单次跨度扫描。** 行状态跟踪 fence 字符/长度、缩进与容器；只有独占顶层行的精确保留语法才识别。匹配两端 entity/name，一块值只剥离两端各一个 LF 或 CRLF，保留其他字节。记录跨度后一次顺序写出替换，不为每字段反复扫全文件。规范化比较不修改原始 Bytes。
+- [x] **2. 跑 RED。** `go test ./internal/reviewv4 -run 'MarkdownLex|MarkdownDocument' -count=1`。
+- [x] **3. 实现单次跨度扫描。** 行状态跟踪 fence 字符/长度、缩进与容器；只有独占顶层行的精确保留语法才识别。匹配两端 entity/name，一块值只剥离两端各一个 LF 或 CRLF，保留其他字节。记录跨度后一次顺序写出替换，不为每字段反复扫全文件。规范化比较不修改原始 Bytes。
 
 ```go
 var out bytes.Buffer
@@ -162,8 +164,8 @@ for _, span := range d.blocks {
 out.Write(d.raw[cursor:])
 ```
 
-- [ ] **4. 收紧文档壳。** 复用现有 yaml.v3 的 Node 检查方式，不使用宽松 map 解码；只为新格式采用 64 MiB，旧 `syncdoc.MaxDocumentBytes=4 MiB` 不全局放宽。沿用 frontmatter 1 MiB、10,000 节点/100 深度上限。frontmatter 必备键、safe ID、保留前缀和版本校验按 spec；Bytes/Fields 都返回独立副本，防止调用者修改认证输入。
-- [ ] **5. GREEN 与提交。** `go test ./internal/reviewv4 -run Markdown -count=1`；新增 `FuzzMarkdownBlocks` 用同一 corpus 检查无 panic、跨度单调、不越界，执行 `go test ./internal/reviewv4 -run '^$' -fuzz '^FuzzMarkdownBlocks$' -fuzztime=10s`。提交 `feat: parse v4 markdown without losing human bytes`。
+- [x] **4. 收紧文档壳。** 复用现有 yaml.v3 的 Node 检查方式，不使用宽松 map 解码；只为新格式采用 64 MiB，旧 `syncdoc.MaxDocumentBytes=4 MiB` 不全局放宽。沿用 frontmatter 1 MiB、10,000 节点/100 深度上限。frontmatter 必备键、safe ID、保留前缀和版本校验按 spec；Bytes/Fields 都返回独立副本，防止调用者修改认证输入。
+- [x] **5. GREEN 与提交。** `go test ./internal/reviewv4 -run Markdown -count=1`；新增 `FuzzMarkdownBlocks` 用同一 corpus 检查无 panic、跨度单调、不越界，执行 `go test ./internal/reviewv4 -run '^$' -fuzz '^FuzzMarkdownBlocks$' -fuzztime=10s`。提交 `feat: parse v4 markdown without losing human bytes`。
 
 ## Task 3 (M3)：渲染两份正文、识别草稿与受信字段应用
 
