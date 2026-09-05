@@ -1,0 +1,166 @@
+{
+  "schema_version": 4,
+  "minimum_reader_version": "0.4.1",
+  "minimum_writer_version": "0.4.1",
+  "project_id": "project-p",
+  "generation_id": "generation-1",
+  "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "accepted_revision": 1,
+  "review_sha256": "0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c",
+  "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
+  "accounting": {
+    "total_duration_ms": 0,
+    "total_tokens": 0,
+    "total_cost_usd": null,
+    "models": []
+  },
+  "sessions": [],
+  "human_patches": [],
+  "orphan_patches": [],
+  "generated_baselines": [],
+  "pricing_snapshots": [],
+  "current_pricing_snapshot_ids": [],
+  "document_projection": {
+    "schema_version": 1,
+    "format": "review-markdown-v1",
+    "presentation_base": {
+      "schema_version": 4,
+      "minimum_reader_version": "0.4.0",
+      "minimum_writer_version": "0.4.0",
+      "project_id": "project-p",
+      "generation_id": "generation-1",
+      "project_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "revision": 1,
+      "current_state": {
+        "goal": "项目目标夹具",
+        "stage": "  实施阶段",
+        "status": "active",
+        "next_action": "运行聚焦测试。\n\n```sh\ngo test ./internal/reviewv4\n```",
+        "last_verification": ""
+      },
+      "timeline": [
+        {
+          "id": "milestone:alpha",
+          "generation_id": "generation-1",
+          "occurred_at": "2026-09-05T00:00:00Z",
+          "kind": "milestone",
+          "title": "冻结 Markdown 合同",
+          "summary": "目录、版本组合与基线绑定已定义。",
+          "decision_ids": [
+            "decision:alpha"
+          ],
+          "closed_loop": {
+            "trigger_question": {
+              "state": "missing",
+              "text": "",
+              "missing_reason": "not_captured",
+              "source_turn_refs": []
+            },
+            "conclusion": {
+              "kind": "human_confirmed",
+              "text": "人工字段可编辑，结构仍需显式操作。",
+              "missing_reason": null,
+              "source_turn_refs": []
+            },
+            "execution": {
+              "state": "missing",
+              "text": "",
+              "missing_reason": "no_execution_evidence",
+              "source_turn_refs": []
+            },
+            "verification": {
+              "state": "missing",
+              "text": "",
+              "missing_reason": "not_verified",
+              "source_turn_refs": []
+            },
+            "impact_and_follow_up": {
+              "state": "present",
+              "text": "下一步：\n- 实现 lexer\n- 验证往返\n",
+              "missing_reason": null,
+              "source_turn_refs": []
+            },
+            "source_turn_refs": [],
+            "coverage": {
+              "source_turns": 0,
+              "captured_turns": 0,
+              "truncated_turns": 0,
+              "source_unavailable_turns": 0
+            }
+          }
+        }
+      ],
+      "decisions": [
+        {
+          "id": "decision:alpha",
+          "kind": "decision",
+          "occurred_at": "2026-09-05T00:00:00Z",
+          "title": "选择 [Markdown] 作为人工编辑面。",
+          "rationale": "正文应可直接阅读，\n同时保持机器账本封闭。",
+          "impact": "编辑不再依赖 JSON。",
+          "status": "active",
+          "legacy_status_text": null,
+          "reevaluate_when": "当无损往返无法保证时。",
+          "supersedes": [],
+          "milestone_ids": [
+            "milestone:alpha"
+          ],
+          "session_refs": [],
+          "provenance": "human_created",
+          "pinned": true,
+          "revision": 1
+        }
+      ],
+      "risks": [
+        {
+          "id": "risk:alpha",
+          "title": "无损性回归",
+          "status": "open",
+          "detail": "未修改区域若被 pretty-print 会产生噪声。"
+        }
+      ],
+      "open_loops": [
+        {
+          "id": "loop:alpha",
+          "title": "CRLF 保留",
+          "status": "open",
+          "question": "混合换行文档如何保持未改字节？",
+          "next_experiment": "构造 CRLF/LF 交错夹具。",
+          "completion_criterion": "未改区域哈希一致。"
+        }
+      ],
+      "problem_map_revision": 1,
+      "problem_root_ids": [
+        "problem:alpha"
+      ],
+      "problem_nodes": [
+        {
+          "id": "problem:alpha",
+          "question": "如何确保同一字段只有一个权威位置？",
+          "primary_parent_id": null,
+          "related_node_ids": [],
+          "workflow_state": "in_progress",
+          "answer_state": "answered_unverified",
+          "completion_criterion": "24 个字段归属均唯一。",
+          "current_conclusion": "使用封闭字段目录。",
+          "source_turn_refs": [],
+          "provenance": "human_created",
+          "first_proposed_at": "2026-09-05T00:00:00Z",
+          "sibling_order": 0,
+          "confirmed_at": "2026-09-05T00:00:00Z",
+          "revision": 1
+        }
+      ],
+      "chain_dependencies": [],
+      "human_patches": [],
+      "orphan_patches": [],
+      "generated_baselines": []
+    }
+  },
+  "sync_hashes": {
+    "review_sha256": "0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c",
+    "history_sha256": "080b3852e4ceebdc083ceb73b1d55d5cd541c476e0091db35a4e812cf9f61aaa",
+    "ledger_sha256": "377cd1d9939da273b7ebbdeb90f2d95a1ed7a0a8420bd64fa7626fe0b5888a6c",
+    "session_index_digest": "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565"
+  }
+}

@@ -43,6 +43,9 @@
     { "name": "null-projection", "review": "review.md", "history": "history.md", "ledger": "ledger-null-projection.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
     { "name": "unknown-projection-key", "review": "review.md", "history": "history.md", "ledger": "ledger-unknown-key.json", "index": "index.json", "expected_code": "wire_shape_invalid", "expected_fields": {} },
     { "name": "patch-baseline-mismatch", "review": "review.md", "history": "history.md", "ledger": "ledger-patch-mismatch.json", "index": "index.json", "expected_code": "wire_contract_invalid", "expected_fields": {} },
-    { "name": "publicly-rehashed-machine-change", "review": "review-rehashed-public.md", "history": "history.md", "ledger": "ledger-rehashed-public.json", "index": "index.json", "expected_code": "", "expected_private_binding": "reject", "expected_fields": { "project-overview/goal": "公开自摘要已重签，私有认证仍应拒绝" } }
+    { "name": "publicly-rehashed-machine-change", "review": "review-rehashed-public.md", "history": "history.md", "ledger": "ledger-rehashed-public.json", "index": "index.json", "expected_code": "", "expected_private_binding": "reject", "expected_fields": { "project-overview/goal": "公开自摘要已重签，私有认证仍应拒绝" } },
+    { "name": "draft-duplicate-field", "review": "review-duplicate-field.md", "history": "history.md", "ledger": "ledger.json", "index": "index.json", "expected_code": "", "expected_markdown_code": "markdown_field_duplicate", "expected_fields": {} },
+    { "name": "draft-truncated-field", "review": "review-truncated-field.md", "history": "history.md", "ledger": "ledger.json", "index": "index.json", "expected_code": "", "expected_markdown_code": "markdown_format_invalid", "expected_fields": {} },
+    { "name": "valid-container-marker-text", "review": "review-container-markers.md", "history": "history.md", "ledger": "ledger-container-markers.json", "index": "index.json", "expected_code": "", "expected_fields": { "project-overview/goal": "项目目标夹具", "milestone:milestone:alpha/title": "冻结 Markdown 合同" } }
   ]
 }

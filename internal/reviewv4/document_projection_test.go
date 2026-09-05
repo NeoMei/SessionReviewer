@@ -24,6 +24,7 @@ type markdownCorpusCase struct {
 	Index                  string            `json:"index" required:"true"`
 	ExpectedCode           string            `json:"expected_code" required:"true"`
 	ExpectedPrivateBinding *string           `json:"expected_private_binding,omitempty"`
+	ExpectedMarkdownCode   *string           `json:"expected_markdown_code,omitempty"`
 	ExpectedFields         map[string]string `json:"expected_fields" required:"true"`
 }
 
@@ -141,11 +142,19 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 	if err := strictjson.Decode(mustRead(t, "../../testdata/contracts/v4/markdown/cases.json"), &corpus); err != nil {
 		t.Fatal(err)
 	}
-	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 9 {
+	if corpus.SchemaVersion != 1 || corpus.Format != "review-markdown-v1" || len(corpus.Cases) != 12 {
 		t.Fatalf("invalid corpus identity: %+v", corpus)
 	}
 	foundRevisionMismatch := false
 	for _, testCase := range corpus.Cases {
+		if testCase.ExpectedMarkdownCode != nil {
+			if *testCase.ExpectedMarkdownCode == "" {
+				t.Fatalf("%s has an empty parser-specific diagnostic", testCase.Name)
+			}
+			if _, ok := markdownCodes[*testCase.ExpectedMarkdownCode]; !ok {
+				t.Fatalf("%s has an unknown parser-specific diagnostic %q", testCase.Name, *testCase.ExpectedMarkdownCode)
+			}
+		}
 		if testCase.Name == "outer-inner-revision-mismatch" {
 			foundRevisionMismatch = true
 			if testCase.ExpectedCode != "wire_contract_invalid" {
@@ -163,7 +172,7 @@ func TestDocumentProjectionSharedCorpusLedgerOutcomes(t *testing.T) {
 			}
 			review := mustRead(t, "../../testdata/contracts/v4/markdown/"+testCase.Review)
 			history := mustRead(t, "../../testdata/contracts/v4/markdown/"+testCase.History)
-			if sha256Hex(review) != ledger.ReviewSHA256 || sha256Hex(history) != ledger.HistorySHA256 {
+			if testCase.ExpectedMarkdownCode == nil && (sha256Hex(review) != ledger.ReviewSHA256 || sha256Hex(history) != ledger.HistorySHA256) {
 				t.Fatal("successful corpus case has stale review or history hash")
 			}
 			index, indexErr := sessionindex.Parse(mustRead(t, "../../testdata/contracts/v4/markdown/"+testCase.Index))

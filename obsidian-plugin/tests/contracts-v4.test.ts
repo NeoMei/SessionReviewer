@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, expectTypeOf, it } from "vitest";
@@ -214,18 +215,33 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(corpus.schema_version).toBe(1);
     expect(corpus.format).toBe("review-markdown-v1");
     const cases = corpus.cases as JsonObject[];
-    expect(cases).toHaveLength(9);
+    expect(cases).toHaveLength(12);
     expect(Object.keys(cases[0].expected_fields as JsonObject)).toHaveLength(24);
     for (const testCase of cases) {
-      const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_fields"];
+      const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_markdown_code", "expected_fields"];
       expect(Object.keys(testCase).every((key) => allowed.includes(key))).toBe(true);
-      expect(await markdownFixture(testCase.review as string)).not.toHaveLength(0);
-      expect(await markdownFixture(testCase.history as string)).not.toHaveLength(0);
+      if ("expected_markdown_code" in testCase) {
+        expect(typeof testCase.expected_markdown_code).toBe("string");
+        expect((testCase.expected_markdown_code as string).length).toBeGreaterThan(0);
+        expect([
+          "markdown_format_invalid", "markdown_field_duplicate", "markdown_field_missing",
+          "markdown_structure_edit_requires_command", "markdown_generated_region_modified",
+          "markdown_baseline_missing", "markdown_field_conflict", "markdown_migration_conflict"
+        ]).toContain(testCase.expected_markdown_code);
+      }
+      const reviewBytes = await markdownFixture(testCase.review as string);
+      const historyBytes = await markdownFixture(testCase.history as string);
+      expect(reviewBytes).not.toHaveLength(0);
+      expect(historyBytes).not.toHaveLength(0);
       const index = (await markdownFixture(testCase.index as string)).toString("utf8");
       expect(() => parseSessionIndexV1(index)).not.toThrow();
       const ledger = (await markdownFixture(testCase.ledger as string)).toString("utf8");
       if (testCase.expected_code === "") {
-        expect(() => parseMachineLedgerV4(ledger), testCase.name as string).not.toThrow();
+        const parsedLedger = parseMachineLedgerV4(ledger);
+        if (!("expected_markdown_code" in testCase)) {
+          expect(createHash("sha256").update(reviewBytes).digest("hex"), testCase.name as string).toBe(parsedLedger.review_sha256);
+          expect(createHash("sha256").update(historyBytes).digest("hex"), testCase.name as string).toBe(parsedLedger.history_sha256);
+        }
       } else {
         expect(codeOf(captureRejection(() => parseMachineLedgerV4(ledger))), testCase.name as string).toBe(testCase.expected_code);
       }
@@ -238,6 +254,9 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(baseLedger.sync_hashes.ledger_sha256).toBe("913ed91d59ef92fa0d683a7c5e4879b6ad87524c91b763b5126912a4facb087d");
     const resignedLedger = parseMachineLedgerV4((await markdownFixture("ledger-rehashed-public.json")).toString("utf8"));
     expect(resignedLedger.sync_hashes.ledger_sha256).toBe("1ff8f204b5dffbffe4a55e9b6557a4e4a9d25cecf581c86a64c2ccb3b5769a84");
+    const containerLedger = parseMachineLedgerV4((await markdownFixture("ledger-container-markers.json")).toString("utf8"));
+    expect(containerLedger.review_sha256).toBe("0ca020feae93b66c232d57f175c191c8e49974c04ce85482a61e97fd06b1ce9c");
+    expect(containerLedger.sync_hashes.ledger_sha256).toBe("377cd1d9939da273b7ebbdeb90f2d95a1ed7a0a8420bd64fa7626fe0b5888a6c");
   });
 });
 
