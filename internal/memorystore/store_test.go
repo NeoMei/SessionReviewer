@@ -3,6 +3,8 @@ package memorystore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,10 +19,166 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
+
+func TestPrepareGenerationRejectsSessionIndexWithMissingDependency(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-index-missing")
+	index := sessionindex.Document{
+		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: testProjectID,
+		GenerationID: fixture.manifest.GenerationID, ProjectViewDigest: fixture.manifest.ProjectViewDigest,
+		GeneratedAt: fixture.manifest.CreatedAt, SortVersion: sessionindex.SortVersion,
+		Coverage: sessionindex.IndexCoverage{}, Sessions: []sessionindex.Entry{},
+	}
+	digest, err := store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.SessionIndexDigest = digest
+	if _, err := store.PrepareGeneration(fixture.manifest); err == nil || !strings.Contains(err.Error(), "coverage is incomplete") {
+		t.Fatalf("missing dependency accepted: %v", err)
+	}
+}
+
+func TestPrepareGenerationRejectsSessionIndexMeasurementMismatch(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-index-measurement")
+	fixture.manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{
+		Provider: fixture.session.Provider, SessionID: fixture.session.SessionID,
+		RecordCount: uint64PointerForTest(1), Seen: 1, Indexed: 1,
+	}}
+	entry := sessionindex.Entry{
+		Provider: fixture.session.Provider, SessionID: fixture.session.SessionID,
+		ProcessingState: sessionindex.ProcessingComplete, StateReasonCodes: []string{}, SourceAvailability: "available",
+		StartedAt: &fixture.session.StartedAt, EndedAt: &fixture.session.EndedAt,
+		RecordCount: uint64PointerForTest(2), Coverage: sessionindex.Coverage{Seen: 2, Indexed: 2}, IndexedEventCount: 2,
+		SessionViewDigest: &fixture.session.Digest, UsageRecordDigest: &fixture.session.UsageRecordDigest,
+		LastSeenGenerationID: &fixture.manifest.GenerationID, LastSuccessfulGenerationID: &fixture.manifest.GenerationID,
+	}
+	index := sessionindex.Document{
+		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: testProjectID,
+		GenerationID: fixture.manifest.GenerationID, ProjectViewDigest: fixture.manifest.ProjectViewDigest,
+		GeneratedAt: fixture.manifest.CreatedAt, SortVersion: sessionindex.SortVersion,
+		Coverage: sessionindex.IndexCoverage{Total: 1, Complete: 1, SourceAvailable: 1, StartedAtKnown: 1, EndedAtKnown: 1, UsageKnown: 1},
+		Sessions: []sessionindex.Entry{entry},
+	}
+	digest, err := store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.SessionIndexDigest = digest
+	if _, err := store.PrepareGeneration(fixture.manifest); err == nil || !strings.Contains(err.Error(), "measurement") {
+		t.Fatalf("forged Session index measurement accepted: %v", err)
+	}
+}
+
+func TestPrepareGenerationRejectsSessionIndexWithOmittedMeasurements(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-index-omitted-measurement")
+	generatedAt, err := time.Parse(time.RFC3339Nano, fixture.manifest.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Build(sessionindex.BuildInput{
+		ProjectView: fixture.project, Manifest: fixture.manifest,
+		SessionViews: map[sessionindex.SessionKey]*memory.SessionView{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID}: &fixture.session},
+		GeneratedAt:  generatedAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.SessionIndexDigest = digest
+	if _, err := store.PrepareGeneration(fixture.manifest); err == nil || !strings.Contains(err.Error(), "measurement") {
+		t.Fatalf("omitted Session index measurements accepted: %v", err)
+	}
+}
+
+func uint64PointerForTest(value uint64) *uint64 { return &value }
+
+func TestPrepareGenerationRejectsForgedRetainedFactsDigest(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-index-forged")
+	entry := sessionindex.Entry{
+		Provider: fixture.session.Provider, SessionID: fixture.session.SessionID,
+		ProcessingState: sessionindex.ProcessingComplete, StateReasonCodes: []string{}, SourceAvailability: "available",
+		StartedAt: &fixture.session.StartedAt, EndedAt: &fixture.session.EndedAt,
+		Coverage: sessionindex.Coverage{Seen: 1, Indexed: 1}, IndexedEventCount: 1,
+		SessionViewDigest: &fixture.session.Digest, UsageRecordDigest: &fixture.session.UsageRecordDigest,
+	}
+	index := sessionindex.Document{
+		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: testProjectID,
+		GenerationID: fixture.manifest.GenerationID, ProjectViewDigest: fixture.manifest.ProjectViewDigest,
+		GeneratedAt: fixture.manifest.CreatedAt, SortVersion: sessionindex.SortVersion,
+		Coverage: sessionindex.IndexCoverage{Total: 1, Complete: 1, SourceAvailable: 1, StartedAtKnown: 1, EndedAtKnown: 1, UsageKnown: 1}, Sessions: []sessionindex.Entry{entry},
+	}
+	digest, err := store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyProject := fixture.project
+	emptyProject.SourceSessions = 0
+	emptyProject.TerminalCounts = memory.TerminalCounts{}
+	emptyProject.SessionViewDependencies = []memory.SessionViewDependency{}
+	emptyProject.AggregationCoverage.ObservationSummariesSeen = 0
+	emptyProject.AggregationCoverage.EventReferences = memory.AggregationChannelCoverage{}
+	emptyProject.Digest, err = memory.ProjectViewDigest(emptyProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutProjectView(emptyProject); err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.SessionViews = nil
+	fixture.manifest.SessionLineages = nil
+	fixture.manifest.SourceRecordDigests = nil
+	fixture.manifest.ProjectViewDigest = emptyProject.Digest
+	index.ProjectViewDigest = emptyProject.Digest
+	digest, err = store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.RetainedSessionViews = []memory.SessionViewDependency{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID, Digest: fixture.session.Digest}}
+	fixture.manifest.PreviousSessionIndexDigest = buildDigestForTest("previous")
+	fixture.manifest.RetainedSessionFactsDigest = buildDigestForTest("forged")
+	fixture.manifest.SessionIndexDigest = digest
+	if _, err := store.PrepareGeneration(fixture.manifest); err == nil || !strings.Contains(err.Error(), "retained Session facts binding mismatch") {
+		t.Fatalf("forged retained facts accepted: %v", err)
+	}
+}
+
+func buildDigestForTest(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
 
 func TestReconcileGenerationGraphContextCancelsDuringLoadedGraphWork(t *testing.T) {
 	dataRoot := t.TempDir()

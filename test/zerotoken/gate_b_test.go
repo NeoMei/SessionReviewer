@@ -174,8 +174,8 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 		t.Fatalf("post-human-edit idempotence run: %v", err)
 	}
 
-	// A later ProbeCheck is retained as a fresh private audit generation, but
-	// must not advance or rewrite an unchanged public Project/Vault projection.
+	// A later wall clock with byte-identical source/project facts reuses the
+	// immutable generation and must not rewrite the public Project/Vault projection.
 	beforePrepared, _, err := store.LoadPrepared()
 	if err != nil {
 		t.Fatal(err)
@@ -218,7 +218,7 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterPrepared.GenerationID == beforePrepared.GenerationID || afterPublished != beforePublished || auditOnly.GenerationID != beforePublished {
+	if afterPrepared.GenerationID != beforePrepared.GenerationID || afterPublished != beforePublished || auditOnly.GenerationID != beforePublished {
 		t.Fatalf("audit-only generation leaked into public projection: before prepared=%s published=%s; after prepared=%s published=%s result=%s",
 			beforePrepared.GenerationID, beforePublished, afterPrepared.GenerationID, afterPublished, auditOnly.GenerationID)
 	}

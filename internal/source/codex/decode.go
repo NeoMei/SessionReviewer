@@ -140,6 +140,8 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		return decoder.report, err
 	}
 	decoder.report.MalformedLines = summary.MalformedLines
+	recordCount := uint64(summary.Records + summary.MalformedLines)
+	decoder.report.RecordCount = &recordCount
 	for range summary.MalformedLines {
 		decoder.diagnostic("malformed_jsonl")
 	}

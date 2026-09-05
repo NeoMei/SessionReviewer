@@ -125,6 +125,7 @@ type DecodeReport struct {
 	MalformedLines        int
 	UnsupportedRecords    int
 	EmittedRevisions      int
+	RecordCount           *uint64
 	Diagnostics           []memory.Diagnostic
 	Quarantined           []QuarantinedRevision
 	Supersessions         []RevisionSupersession

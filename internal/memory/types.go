@@ -239,6 +239,21 @@ type SessionLineageDependency struct {
 	Digest    string `json:"digest"`
 }
 
+// SessionIndexMeasurement carries exact source-accounting counters into the
+// generation identity. It is separate from diagnostics because diagnostics
+// are intentionally deduplicated and bounded.
+type SessionIndexMeasurement struct {
+	Provider    string  `json:"provider"`
+	SessionID   string  `json:"session_id"`
+	RecordCount *uint64 `json:"record_count"`
+	Seen        uint64  `json:"seen"`
+	Indexed     uint64  `json:"indexed"`
+	Collapsed   uint64  `json:"collapsed"`
+	Unprojected uint64  `json:"unprojected"`
+	Undecodable uint64  `json:"undecodable"`
+	Truncated   uint64  `json:"truncated"`
+}
+
 // SessionLineage is an immutable, per-source lineage head. ActiveRevisions is
 // the current bounded source selection; the inactive maps describe only the
 // transition from PreviousLineageDigest, never cumulative project history.
@@ -335,6 +350,14 @@ type GenerationManifest struct {
 	ProbeStateDigest    string                     `json:"probe_state_digest"`
 	ProbeCheck          ProbeCheck                 `json:"probe_check"`
 	ProjectViewDigest   string                     `json:"project_view_digest"`
+	// The optional index extension preserves byte compatibility with legacy v1
+	// manifests. SessionIndexDigest is excluded only from generation identity to
+	// break the generation/index self-reference; every other field participates.
+	RetainedSessionViews       []SessionViewDependency   `json:"retained_session_views,omitempty"`
+	SessionIndexMeasurements   []SessionIndexMeasurement `json:"session_index_measurements,omitempty"`
+	PreviousSessionIndexDigest string                    `json:"previous_session_index_digest,omitempty"`
+	RetainedSessionFactsDigest string                    `json:"retained_session_facts_digest,omitempty"`
+	SessionIndexDigest         string                    `json:"session_index_digest,omitempty"`
 	// Deprecated Gate A draft fields are retained in the Go API so callers
 	// still compile, but v1 validation rejects non-empty project-wide lineage.
 	ObservationChunkDigests []string          `json:"observation_chunk_digests,omitempty"`
@@ -899,6 +922,36 @@ func ValidateGenerationManifestContext(ctx context.Context, value GenerationMani
 	if err := validateSessionDependencies(value.SessionViews, len(value.SessionViews), checkpoints...); err != nil {
 		return err
 	}
+	if len(value.SessionViews)+len(value.RetainedSessionViews) > 65536 {
+		return errors.New("generation cumulative Session dependency limit exceeded")
+	}
+	if err := validateSessionDependencies(value.RetainedSessionViews, len(value.RetainedSessionViews), checkpoints...); err != nil {
+		return err
+	}
+	current := make(map[string]struct{}, len(value.SessionViews))
+	for _, dependency := range value.SessionViews {
+		current[dependency.Provider+"\x00"+dependency.SessionID] = struct{}{}
+	}
+	for _, dependency := range value.RetainedSessionViews {
+		if _, duplicate := current[dependency.Provider+"\x00"+dependency.SessionID]; duplicate {
+			return errors.New("retained SessionView duplicates current dependency")
+		}
+	}
+	if err := validateSessionIndexMeasurements(value.SessionIndexMeasurements, value.SessionViews, checkpoints...); err != nil {
+		return err
+	}
+	if value.SessionIndexDigest != "" && !validDigest(value.SessionIndexDigest) {
+		return errors.New("invalid Session index digest")
+	}
+	if value.PreviousSessionIndexDigest != "" && !validDigest(value.PreviousSessionIndexDigest) {
+		return errors.New("invalid previous Session index digest")
+	}
+	if value.RetainedSessionFactsDigest != "" && !validDigest(value.RetainedSessionFactsDigest) {
+		return errors.New("invalid retained Session facts digest")
+	}
+	if len(value.RetainedSessionViews) != 0 && value.PreviousSessionIndexDigest == "" {
+		return errors.New("retained SessionViews require previous Session index digest")
+	}
 	if err := validateLineageDependencies(value.SessionLineages, value.SessionViews, checkpoints...); err != nil {
 		return err
 	}
@@ -913,6 +966,47 @@ func ValidateGenerationManifestContext(ctx context.Context, value GenerationMani
 	}
 	if value.ProbeCheck.StateDigest != value.ProbeStateDigest {
 		return errors.New("probe check does not reference generation probe state")
+	}
+	return nil
+}
+
+func validateSessionIndexMeasurements(values []SessionIndexMeasurement, sessions []SessionViewDependency, checkpoints ...func() error) error {
+	if len(values) == 0 {
+		return nil // legacy manifest
+	}
+	if len(values) != len(sessions) {
+		return errors.New("Session index measurement count does not match SessionViews")
+	}
+	expected := make(map[string]struct{}, len(sessions))
+	for _, session := range sessions {
+		expected[session.Provider+"\x00"+session.SessionID] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if err := digestCheckpoint(checkpoints); err != nil {
+			return err
+		}
+		key := value.Provider + "\x00" + value.SessionID
+		if _, exists := expected[key]; !exists {
+			return errors.New("Session index measurement identity does not match SessionView")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("duplicate Session index measurement identity")
+		}
+		seen[key] = struct{}{}
+		counts := []uint64{value.Seen, value.Indexed, value.Collapsed, value.Unprojected, value.Undecodable, value.Truncated}
+		for _, count := range counts {
+			if count > uint64(maxSafeInteger) {
+				return errors.New("Session index measurement exceeds safe integer limit")
+			}
+		}
+		if value.RecordCount != nil && *value.RecordCount > uint64(maxSafeInteger) {
+			return errors.New("Session index record count exceeds safe integer limit")
+		}
+		total := value.Indexed + value.Collapsed + value.Unprojected + value.Undecodable + value.Truncated
+		if total < value.Indexed || total != value.Seen {
+			return errors.New("Session index measurement coverage does not reconcile")
+		}
 	}
 	return nil
 }

@@ -24,6 +24,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/project"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
 const (
@@ -68,6 +69,7 @@ const (
 	ObjectSessionLineage   ObjectKind = "session-lineages"
 	ObjectProbeState       ObjectKind = "project-probes"
 	ObjectProjectView      ObjectKind = "project-views"
+	ObjectSessionIndex     ObjectKind = "session-indexes"
 )
 
 // Prepared is the durable pointer to one fully verified private generation.
@@ -126,7 +128,7 @@ func Open(dataRoot, projectID string) (*Store, error) {
 		filepath.ToSlash(filepath.Join("projects", projectID)),
 		projectBase,
 	}
-	for _, child := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
+	for _, child := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "generations", "diagnostics", "staging", "locks"} {
 		directories = append(directories, projectBase+"/"+child)
 	}
 	for _, relative := range directories {
@@ -228,6 +230,24 @@ func (s *Store) PutProjectView(value memory.ProjectView) (string, error) {
 		return "", errors.New("ProjectView belongs to a different project")
 	}
 	return s.putJSON(ObjectProjectView, value.Digest, value)
+}
+
+func (s *Store) PutSessionIndex(value sessionindex.Document) (string, error) {
+	body, err := sessionindex.Render(value)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := sessionindex.Parse(body)
+	if err != nil {
+		return "", err
+	}
+	if parsed.ProjectID != s.projectID {
+		return "", errors.New("Session index belongs to a different project")
+	}
+	if err := s.putImmutable(ObjectSessionIndex, parsed.Digest, body); err != nil {
+		return "", err
+	}
+	return parsed.Digest, nil
 }
 
 func (s *Store) putJSON(kind ObjectKind, digest string, value any) (string, error) {
@@ -720,6 +740,7 @@ type decodedStoredObject struct {
 	lineage      memory.SessionLineage
 	probe        memory.ProjectProbeState
 	project      memory.ProjectView
+	index        sessionindex.Document
 }
 
 func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) (decodedStoredObject, error) {
@@ -812,6 +833,12 @@ func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, dig
 			return decodedStoredObject{}, errors.Join(errors.New("invalid stored ProjectView"), validationErr)
 		}
 		return decodedStoredObject{project: value}, nil
+	case ObjectSessionIndex:
+		value, err := sessionindex.Parse(body)
+		if err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored Session index"), err)
+		}
+		return decodedStoredObject{index: value}, nil
 	default:
 		return decodedStoredObject{}, errors.New("unknown immutable object kind")
 	}
@@ -929,6 +956,7 @@ type generationGraphObjects interface {
 	sessionLineage(context.Context, memory.SessionLineageDependency) (memory.SessionLineage, error)
 	probeState(context.Context, string) (memory.ProjectProbeState, error)
 	projectView(context.Context, string) (memory.ProjectView, error)
+	sessionIndex(context.Context, string) (sessionindex.Document, error)
 }
 
 type storedGenerationGraphObjects struct{ store *Store }
@@ -999,6 +1027,14 @@ func (objects storedGenerationGraphObjects) projectView(ctx context.Context, dig
 	return view, nil
 }
 
+func (objects storedGenerationGraphObjects) sessionIndex(ctx context.Context, digest string) (sessionindex.Document, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectSessionIndex, digest)
+	if err != nil {
+		return sessionindex.Document{}, fmt.Errorf("verify Session index %s: %w", digest, err)
+	}
+	return sessionindex.Parse(body)
+}
+
 func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.GenerationManifest, objects generationGraphObjects) error {
 	if err := context.Cause(ctx); err != nil {
 		return err
@@ -1026,6 +1062,7 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		evidenceRemaining[revisionID] = struct{}{}
 	}
 	lineageBySession := make(map[string]memory.SessionLineageDependency, len(value.SessionLineages))
+	currentViews := make(map[sessionindex.SessionKey]*memory.SessionView, len(value.SessionViews))
 	for _, dependency := range value.SessionLineages {
 		if err := context.Cause(ctx); err != nil {
 			return err
@@ -1044,6 +1081,8 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		if err != nil {
 			return err
 		}
+		viewCopy := view
+		currentViews[sessionindex.SessionKey{Provider: view.Provider, SessionID: view.SessionID}] = &viewCopy
 		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
 			return errors.New("SessionView source record does not resolve uniquely through manifest")
 		}
@@ -1164,6 +1203,74 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 	}
 	if projectView.ProbeStateDigest != value.ProbeStateDigest || probe.Digest != value.ProbeStateDigest {
 		return errors.New("ProjectView probe dependency does not match manifest")
+	}
+	if value.SessionIndexDigest != "" {
+		if len(value.SessionIndexMeasurements) != len(value.SessionViews) {
+			return errors.New("Session index measurement coverage is incomplete")
+		}
+		index, err := objects.sessionIndex(ctx, value.SessionIndexDigest)
+		if err != nil {
+			return err
+		}
+		if index.ProjectID != value.ProjectID || index.GenerationID != value.GenerationID || index.ProjectViewDigest != value.ProjectViewDigest || index.Digest != value.SessionIndexDigest {
+			return errors.New("Session index identity does not match generation")
+		}
+		authenticated := make(map[string]string, len(value.SessionViews)+len(value.RetainedSessionViews))
+		for _, dependency := range append(append([]memory.SessionViewDependency(nil), value.SessionViews...), value.RetainedSessionViews...) {
+			view, err := objects.sessionView(ctx, dependency)
+			if err != nil || view.ProjectID != value.ProjectID {
+				return errors.Join(errors.New("retained SessionView authentication failed"), err)
+			}
+			authenticated[dependency.Provider+"\x00"+dependency.SessionID] = dependency.Digest
+		}
+		seen := make(map[string]struct{}, len(index.Sessions))
+		retainedFacts := make([]sessionindex.Entry, 0, len(value.RetainedSessionViews))
+		currentKeys := make(map[string]struct{}, len(value.SessionViews))
+		for _, dependency := range value.SessionViews {
+			currentKeys[dependency.Provider+"\x00"+dependency.SessionID] = struct{}{}
+		}
+		for _, entry := range index.Sessions {
+			key := entry.Provider + "\x00" + entry.SessionID
+			if entry.SessionViewDigest == nil || authenticated[key] != *entry.SessionViewDigest {
+				return errors.New("Session index references unauthenticated SessionView")
+			}
+			seen[key] = struct{}{}
+			if _, current := currentKeys[key]; !current {
+				retainedFacts = append(retainedFacts, entry)
+			}
+		}
+		if len(seen) != len(authenticated) {
+			return errors.New("Session index dependency coverage is incomplete")
+		}
+		if len(retainedFacts) == 0 {
+			if value.RetainedSessionFactsDigest != "" || value.PreviousSessionIndexDigest != "" {
+				return errors.New("generation retains unexpected Session index facts")
+			}
+		} else {
+			digest, err := memory.Digest(retainedFacts)
+			if err != nil || digest != value.RetainedSessionFactsDigest || value.PreviousSessionIndexDigest == "" {
+				return errors.Join(errors.New("retained Session facts binding mismatch"), err)
+			}
+		}
+		var previousIndex *sessionindex.Document
+		if value.PreviousSessionIndexDigest != "" {
+			previous, loadErr := objects.sessionIndex(ctx, value.PreviousSessionIndexDigest)
+			if loadErr != nil {
+				return errors.Join(errors.New("previous Session index authentication failed"), loadErr)
+			}
+			previousIndex = &previous
+		}
+		generatedAt, parseErr := time.Parse(time.RFC3339Nano, value.CreatedAt)
+		if parseErr != nil {
+			return errors.Join(errors.New("Session index generation time is invalid"), parseErr)
+		}
+		expectedIndex, buildErr := sessionindex.Build(sessionindex.BuildInput{
+			ProjectView: projectView, Manifest: value, SessionViews: currentViews,
+			Previous: previousIndex, GeneratedAt: generatedAt,
+		})
+		if buildErr != nil || expectedIndex.Digest != index.Digest {
+			return errors.Join(errors.New("Session index measurement or retained facts mismatch"), buildErr)
+		}
 	}
 	return nil
 }
@@ -1329,6 +1436,11 @@ func validateObjectBytes(kind ObjectKind, digest string, body []byte, projectID 
 		}
 		if err := memory.ValidateProjectView(value); err != nil || value.Digest != digest || value.ProjectID != projectID {
 			return errors.Join(errors.New("invalid stored ProjectView"), err)
+		}
+	case ObjectSessionIndex:
+		value, err := sessionindex.Parse(body)
+		if err != nil || value.Digest != digest || value.ProjectID != projectID {
+			return errors.Join(errors.New("invalid stored Session index"), err)
 		}
 	default:
 		return errors.New("unknown immutable object kind")
@@ -1757,6 +1869,8 @@ func objectLocation(kind ObjectKind, digest string) (string, string, error) {
 		return "project-probes", ".json", nil
 	case ObjectProjectView:
 		return "project-views", ".json", nil
+	case ObjectSessionIndex:
+		return "session-indexes", ".json", nil
 	default:
 		return "", "", errors.New("unknown immutable object kind")
 	}

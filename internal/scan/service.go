@@ -27,6 +27,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
 	"github.com/neomei/SessionReviewer/internal/projectprobe"
 	"github.com/neomei/SessionReviewer/internal/projectview"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
@@ -53,7 +54,9 @@ type MemoryStore interface {
 	PutSessionLineage(memory.SessionLineage) (string, error)
 	PutProbeState(memory.ProjectProbeState) (string, error)
 	PutProjectView(memory.ProjectView) (string, error)
+	PutSessionIndex(sessionindex.Document) (string, error)
 	LoadPrepared() (memorystore.Prepared, memory.GenerationManifest, error)
+	LoadPublished() (string, memory.GenerationManifest, error)
 	LoadObject(memorystore.ObjectKind, string) ([]byte, error)
 	PrepareGeneration(memory.GenerationManifest) (memorystore.Prepared, error)
 	AdvancePrepared(memorystore.Prepared, memory.GenerationManifest) (memorystore.Prepared, error)
@@ -76,6 +79,7 @@ type Options struct {
 	Reduce           ReduceFunc
 	ProgressObserver func(Progress) error
 	spoolObserver    func(observationSpoolStats)
+	buildIndex       func(sessionindex.BuildInput) (sessionindex.Document, error)
 }
 
 type frozenTask struct {
@@ -102,15 +106,22 @@ type terminalSource struct {
 	lineage             memory.SessionLineage
 	issue               bool
 	shared              bool
+	measurement         memory.SessionIndexMeasurement
+	recordCount         *uint64
+	malformedRecords    int
+	unsupportedRecords  int
+	unprojectedRecords  int
 }
 
 type baseline struct {
-	present  bool
-	prepared memorystore.Prepared
-	manifest memory.GenerationManifest
-	sessions map[string]memory.SessionView
-	project  *memory.ProjectView
-	lineages map[string]memory.SessionLineageDependency
+	present          bool
+	prepared         memorystore.Prepared
+	manifest         memory.GenerationManifest
+	sessions         map[string]memory.SessionView
+	project          *memory.ProjectView
+	lineages         map[string]memory.SessionLineageDependency
+	acceptedManifest *memory.GenerationManifest
+	acceptedIndex    *sessionindex.Document
 }
 
 // Run prepares one complete private generation. Every adapter error is fatal;
@@ -285,6 +296,7 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 			return result, errors.New("SessionView and SessionLineage active revisions disagree")
 		}
 		terminal.lineage = lineage
+		terminal.measurement = measurementForTerminal(*terminal, view)
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
@@ -339,12 +351,63 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		ProbeStateDigest: probeState.Digest, ProbeCheck: probeCheck,
 		ProjectViewDigest: projectView.Digest,
 	}
+	manifest.SessionIndexMeasurements = make([]memory.SessionIndexMeasurement, 0, len(terminals))
+	for _, terminal := range terminals {
+		manifest.SessionIndexMeasurements = append(manifest.SessionIndexMeasurements, terminal.measurement)
+	}
+	viewsByKey := make(map[sessionindex.SessionKey]*memory.SessionView, len(views))
+	for index := range views {
+		view := &views[index]
+		viewsByKey[sessionindex.SessionKey{Provider: view.Provider, SessionID: view.SessionID}] = view
+	}
+	if previous.acceptedIndex != nil && previous.acceptedManifest != nil {
+		acceptedDependencies := append(append([]memory.SessionViewDependency(nil), previous.acceptedManifest.SessionViews...), previous.acceptedManifest.RetainedSessionViews...)
+		current := make(map[string]struct{}, len(manifest.SessionViews))
+		for _, dependency := range manifest.SessionViews {
+			current[sourceKey(dependency.Provider, dependency.SessionID)] = struct{}{}
+		}
+		retainedEntries := make([]sessionindex.Entry, 0)
+		for _, entry := range previous.acceptedIndex.Sessions {
+			if _, found := current[sourceKey(entry.Provider, entry.SessionID)]; !found {
+				entry.SourceAvailability = "unavailable"
+				retainedEntries = append(retainedEntries, entry)
+			}
+		}
+		for _, dependency := range acceptedDependencies {
+			if _, found := current[sourceKey(dependency.Provider, dependency.SessionID)]; !found {
+				manifest.RetainedSessionViews = append(manifest.RetainedSessionViews, dependency)
+			}
+		}
+		if len(retainedEntries) > 0 {
+			manifest.RetainedSessionFactsDigest, err = memory.Digest(retainedEntries)
+			if err != nil {
+				return result, err
+			}
+			manifest.PreviousSessionIndexDigest = previous.acceptedManifest.SessionIndexDigest
+			if previous.acceptedManifest.RetainedSessionFactsDigest == manifest.RetainedSessionFactsDigest && previous.acceptedManifest.PreviousSessionIndexDigest != "" {
+				manifest.PreviousSessionIndexDigest = previous.acceptedManifest.PreviousSessionIndexDigest
+			}
+		}
+	}
+	stabilizeManifestClock(&manifest, previous)
 	manifest.GenerationID, err = generationID(manifest)
 	if err != nil {
 		return result, err
 	}
 	if err := memory.ValidateGenerationManifest(manifest); err != nil {
 		return result, fmt.Errorf("validate complete generation: %w", err)
+	}
+	buildIndex := options.buildIndex
+	if buildIndex == nil {
+		buildIndex = sessionindex.Build
+	}
+	indexDocument, err := buildIndex(sessionindex.BuildInput{ProjectView: projectView, Manifest: manifest, SessionViews: viewsByKey, Previous: previous.acceptedIndex, GeneratedAt: parseManifestTime(manifest.CreatedAt)})
+	if err != nil {
+		return result, err
+	}
+	manifest.SessionIndexDigest = indexDocument.Digest
+	if err := memory.ValidateGenerationManifest(manifest); err != nil {
+		return result, fmt.Errorf("validate indexed generation: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -418,6 +481,9 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	}
 	if _, err := options.Store.PutProjectView(projectView); err != nil {
 		return result, fmt.Errorf("persist ProjectView: %w", err)
+	}
+	if digest, err := options.Store.PutSessionIndex(indexDocument); err != nil || digest != manifest.SessionIndexDigest {
+		return result, errors.Join(errors.New("persist Session index"), err)
 	}
 	if err := ctx.Err(); err != nil {
 		return result, err
@@ -777,6 +843,8 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			diagnostics: diagnostics,
 			issue:       state != memory.Indexed || item.report.MalformedLines > 0 || item.report.UnsupportedRecords > 0 || len(item.report.Quarantined) > 0 || len(item.report.Diagnostics) > 0,
 			shared:      len(record.ProjectIDs) > 1,
+			recordCount: item.report.RecordCount, malformedRecords: item.report.MalformedLines,
+			unsupportedRecords: item.report.UnsupportedRecords, unprojectedRecords: len(item.report.Quarantined),
 		})
 	}
 	for _, issue := range issues {
@@ -860,7 +928,68 @@ func loadBaseline(store MemoryStore) (baseline, error) {
 		return baseline{}, err
 	}
 	result.project = &projectView
+	_, acceptedManifest, publishedErr := store.LoadPublished()
+	if publishedErr == nil {
+		result.acceptedManifest = &acceptedManifest
+		if acceptedManifest.SessionIndexDigest != "" {
+			body, err := store.LoadObject(memorystore.ObjectSessionIndex, acceptedManifest.SessionIndexDigest)
+			if err != nil {
+				return baseline{}, fmt.Errorf("load accepted Session index: %w", err)
+			}
+			index, err := sessionindex.Parse(body)
+			if err != nil {
+				return baseline{}, fmt.Errorf("parse accepted Session index: %w", err)
+			}
+			result.acceptedIndex = &index
+		}
+	} else if !errors.Is(publishedErr, memorystore.ErrNoPublishedGeneration) {
+		return baseline{}, fmt.Errorf("load published Session index baseline: %w", publishedErr)
+	}
 	return result, nil
+}
+
+func measurementForTerminal(terminal terminalSource, view memory.SessionView) memory.SessionIndexMeasurement {
+	measurement := memory.SessionIndexMeasurement{Provider: view.Provider, SessionID: view.SessionID}
+	measurement.RecordCount = cloneUint64Pointer(terminal.recordCount)
+	if terminal.spool == nil {
+		measurement.Seen = uint64(len(view.ObservationSummaries))
+		measurement.Indexed = measurement.Seen
+		return measurement
+	}
+	indexed := uint64(len(view.ObservationSummaries))
+	unprojected := uint64(terminal.unprojectedRecords)
+	undecodable := uint64(terminal.malformedRecords + terminal.unsupportedRecords)
+	measurement.Indexed, measurement.Unprojected, measurement.Undecodable = indexed, unprojected, undecodable
+	measurement.Seen = indexed + unprojected + undecodable
+	return measurement
+}
+
+func cloneUint64Pointer(value *uint64) *uint64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func stabilizeManifestClock(manifest *memory.GenerationManifest, previous baseline) {
+	if manifest == nil || !previous.present {
+		return
+	}
+	left, right := *manifest, previous.manifest
+	left.GenerationID, right.GenerationID = "same", "same"
+	left.CreatedAt, right.CreatedAt = "same", "same"
+	left.ProbeCheck.CheckedAt, right.ProbeCheck.CheckedAt = "same", "same"
+	left.SessionIndexDigest, right.SessionIndexDigest = "", ""
+	if equalJSON(left, right) {
+		manifest.CreatedAt = previous.manifest.CreatedAt
+		manifest.ProbeCheck.CheckedAt = previous.manifest.ProbeCheck.CheckedAt
+	}
+}
+
+func parseManifestTime(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
 }
 
 func replayObservationSpool(ctx context.Context, spool *observationSpool) ([]memory.ObservationRevision, error) {
@@ -1055,6 +1184,7 @@ func sameGenerationContent(first, second memory.GenerationManifest) bool {
 func generationID(value memory.GenerationManifest) (string, error) {
 	identity := value
 	identity.GenerationID = "scan"
+	identity.SessionIndexDigest = ""
 	digest, err := memory.Digest(identity)
 	if err != nil {
 		return "", fmt.Errorf("digest scan generation identity: %w", err)

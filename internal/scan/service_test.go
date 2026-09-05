@@ -25,6 +25,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
 	"github.com/neomei/SessionReviewer/internal/projectprobe"
 	"github.com/neomei/SessionReviewer/internal/projectview"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
@@ -1277,7 +1278,7 @@ func TestRunSingleSourceObservationBudgetStillFailsClosed(t *testing.T) {
 	}
 }
 
-func TestRunProbeCheckOnlyAdvancesGenerationWithoutSemanticObjectChurn(t *testing.T) {
+func TestRunLaterClockIdenticalScanReusesGenerationAndIndexBytes(t *testing.T) {
 	harness := newScanHarness(t)
 	harness.addSource(1, memory.Indexed, scanTestProject)
 	checkedAt := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
@@ -1299,8 +1300,8 @@ func TestRunProbeCheckOnlyAdvancesGenerationWithoutSemanticObjectChurn(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.GenerationID == first.GenerationID || secondManifest.ProbeCheck.CheckedAt == firstManifest.ProbeCheck.CheckedAt {
-		t.Fatalf("fresh ProbeCheck did not advance generation: first=%+v second=%+v", firstManifest.ProbeCheck, secondManifest.ProbeCheck)
+	if second.GenerationID != first.GenerationID || secondManifest.ProbeCheck.CheckedAt != firstManifest.ProbeCheck.CheckedAt || secondManifest.SessionIndexDigest != firstManifest.SessionIndexDigest {
+		t.Fatalf("later-clock identical scan changed immutable generation: first=%+v second=%+v", firstManifest, secondManifest)
 	}
 	if second.ProjectViewDigest != first.ProjectViewDigest || secondManifest.ProjectViewDigest != firstManifest.ProjectViewDigest ||
 		secondManifest.ProbeStateDigest != firstManifest.ProbeStateDigest ||
@@ -1314,6 +1315,73 @@ func TestRunProbeCheckOnlyAdvancesGenerationWithoutSemanticObjectChurn(t *testin
 	}
 }
 
+func TestGenerationIdentityIncludesPreviousIndexButExcludesCurrentIndexDigest(t *testing.T) {
+	first := memory.GenerationManifest{ProjectID: scanTestProject, PreviousSessionIndexDigest: "sha256:" + strings.Repeat("1", 64), SessionIndexDigest: "sha256:" + strings.Repeat("2", 64)}
+	second := first
+	second.PreviousSessionIndexDigest = "sha256:" + strings.Repeat("3", 64)
+	firstID, err := generationID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := generationID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID == secondID {
+		t.Fatal("previous accepted index was excluded from generation identity")
+	}
+	second = first
+	second.SessionIndexDigest = "sha256:" + strings.Repeat("4", 64)
+	secondID, err = generationID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID != secondID {
+		t.Fatal("current index self-reference changed generation identity")
+	}
+}
+
+func TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedBefore, manifestBefore, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: scanTestProject, GenerationID: first.GenerationID,
+		ManifestDigest: preparedBefore.ManifestDigest, ProjectViewDigest: preparedBefore.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64),
+		SessionIndexSHA256: strings.TrimPrefix(manifestBefore.SessionIndexDigest, "sha256:"), JournalVerified: true,
+	}
+	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
+		t.Fatal(err)
+	}
+	harness.addSource(2, memory.Indexed, scanTestProject)
+	harness.options.buildIndex = func(sessionindex.BuildInput) (sessionindex.Document, error) {
+		return sessionindex.Document{}, sessionindex.ErrCapacityExceeded
+	}
+	result, err := Run(context.Background(), harness.options)
+	if !errors.Is(err, sessionindex.ErrCapacityExceeded) || result.Prepared {
+		t.Fatalf("capacity result=%+v err=%v", result, err)
+	}
+	preparedAfter, afterManifest, err := harness.store.LoadPrepared()
+	if err != nil || preparedAfter != preparedBefore || afterManifest.GenerationID != manifestBefore.GenerationID {
+		t.Fatalf("capacity failure changed prepared pointer: before=%+v after=%+v err=%v", preparedBefore, preparedAfter, err)
+	}
+	publishedAfter, publishedManifest, err := harness.store.LoadPublished()
+	if err != nil || publishedAfter != first.GenerationID || publishedManifest.GenerationID != first.GenerationID {
+		t.Fatalf("capacity failure changed published pointer: generation=%q manifest=%+v err=%v", publishedAfter, publishedManifest, err)
+	}
+	if records, err := harness.catalog.ListCandidates(scanTestProject); err != nil || len(records) != 1 || records[0].SessionID != "session-1" {
+		t.Fatalf("capacity failure changed catalog: records=%+v err=%v", records, err)
+	}
+}
+
 type rejectAdvanceStore struct {
 	MemoryStore
 }
@@ -1322,7 +1390,7 @@ func (store rejectAdvanceStore) AdvancePrepared(memorystore.Prepared, memory.Gen
 	return memorystore.Prepared{}, memorystore.ErrPreparedGeneration
 }
 
-func TestRunProbeCheckOnlySuccessorFailsClosedOnStalePreparedCAS(t *testing.T) {
+func TestRunLaterClockIdenticalScanDoesNotAttemptPreparedAdvance(t *testing.T) {
 	harness := newScanHarness(t)
 	harness.addSource(1, memory.Indexed, scanTestProject)
 	checkedAt := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
@@ -1338,13 +1406,128 @@ func TestRunProbeCheckOnlySuccessorFailsClosedOnStalePreparedCAS(t *testing.T) {
 	checkedAt = checkedAt.Add(time.Minute)
 	harness.options.Store = rejectAdvanceStore{MemoryStore: harness.store}
 	second, err := Run(context.Background(), harness.options)
-	if !errors.Is(err, memorystore.ErrPreparedGeneration) || second.Prepared {
-		t.Fatalf("stale ProbeCheck successor result=%+v err=%v", second, err)
+	if err != nil || !second.Prepared || second.GenerationID != first.GenerationID {
+		t.Fatalf("idempotent scan result=%+v err=%v", second, err)
 	}
 	after, afterManifest, err := harness.store.LoadPrepared()
 	if err != nil || after != before || afterManifest.GenerationID != beforeManifest.GenerationID || !reflect.DeepEqual(afterManifest.ProbeCheck, beforeManifest.ProbeCheck) {
 		t.Fatalf("stale ProbeCheck CAS changed prepared generation: before=%+v after=%+v err=%v", before, after, err)
 	}
+}
+
+func TestRunBuildsFromLastPublishedIndexAndPreservesUnavailableHistory(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	harness.addSource(2, memory.Indexed, scanTestProject)
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, firstManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: scanTestProject, GenerationID: first.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64),
+		SessionIndexSHA256: strings.TrimPrefix(firstManifest.SessionIndexDigest, "sha256:"), JournalVerified: true,
+	}
+	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
+		t.Fatal(err)
+	}
+	delete(harness.adapter.sources, "session-1")
+	catalogLeaf := scanHex("codex\x00session-1") + ".json"
+	if err := os.Remove(filepath.Join(harness.options.DataRoot, "source-catalog", catalogLeaf)); err != nil {
+		t.Fatal(err)
+	}
+	second, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, secondManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := harness.store.LoadObject(memorystore.ObjectSessionIndex, secondManifest.SessionIndexDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := sessionindex.Parse(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Sessions) != 2 || len(secondManifest.RetainedSessionViews) != 1 {
+		t.Fatalf("cumulative unavailable index=%+v second=%+v", document, second)
+	}
+	var retained sessionindex.Entry
+	for _, entry := range document.Sessions {
+		if entry.SessionID == "session-1" {
+			retained = entry
+		}
+	}
+	if retained.ProcessingState != sessionindex.ProcessingComplete || retained.SourceAvailability != "unavailable" || retained.FactCounts.FileChange != 1 {
+		t.Fatalf("retained cumulative entry=%+v", retained)
+	}
+	secondPrepared, _, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondProof := proof
+	secondProof.GenerationID = second.GenerationID
+	secondProof.ManifestDigest = secondPrepared.ManifestDigest
+	secondProof.ProjectViewDigest = secondPrepared.ProjectViewDigest
+	secondProof.SessionIndexSHA256 = strings.TrimPrefix(secondManifest.SessionIndexDigest, "sha256:")
+	if err := harness.store.CommitPublished(second.GenerationID, secondProof); err != nil {
+		t.Fatal(err)
+	}
+	harness.options.Now = func() time.Time { return time.Date(2026, 8, 31, 11, 2, 0, 0, time.UTC) }
+	third, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, thirdManifest, err := harness.store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.GenerationID != second.GenerationID || thirdManifest.SessionIndexDigest != secondManifest.SessionIndexDigest || thirdManifest.PreviousSessionIndexDigest != secondManifest.PreviousSessionIndexDigest {
+		t.Fatalf("accepted retained baseline drifted: second=%+v third=%+v", secondManifest, thirdManifest)
+	}
+	t.Run("retention protects retained view and previous index", func(t *testing.T) {
+		retentionTime := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+		reportBefore, err := harness.store.ReportRetention(retentionTime)
+		if err != nil {
+			t.Fatalf("retention rejected authenticated cumulative graph: %v", err)
+		}
+		assertRetentionDependency := func(path, expected string) {
+			t.Helper()
+			hidden := filepath.Join(t.TempDir(), filepath.Base(path))
+			if err := os.Rename(path, hidden); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := harness.store.ReportRetention(retentionTime); err == nil || !strings.Contains(err.Error(), expected) || !strings.Contains(err.Error(), "file does not exist") {
+				t.Fatalf("retention missing-dependency result for %s: %v", filepath.Base(path), err)
+			}
+			if err := os.Rename(hidden, path); err != nil {
+				t.Fatal(err)
+			}
+		}
+		memoryRoot := filepath.Join(harness.options.DataRoot, "projects", scanTestProject, "memory-v1")
+		retainedDigest := strings.TrimPrefix(secondManifest.RetainedSessionViews[0].Digest, "sha256:")
+		assertRetentionDependency(filepath.Join(memoryRoot, "sessions", retainedDigest+".json"), "retained SessionView authentication failed")
+		previousDigest := strings.TrimPrefix(secondManifest.PreviousSessionIndexDigest, "sha256:")
+		assertRetentionDependency(filepath.Join(memoryRoot, "session-indexes", previousDigest+".json"), "Session index")
+		reportAfter, err := harness.store.CleanupUnreachable(retentionTime)
+		if err != nil || reportAfter.ReachableObjects != reportBefore.ReachableObjects || reportAfter.ReachableBytes != reportBefore.ReachableBytes {
+			t.Fatalf("retention cleanup changed reachable graph: before=%+v after=%+v err=%v", reportBefore, reportAfter, err)
+		}
+		if _, err := harness.store.LoadObject(memorystore.ObjectSessionView, secondManifest.RetainedSessionViews[0].Digest); err != nil {
+			t.Fatalf("retention cleanup removed retained SessionView: %v", err)
+		}
+		if _, err := harness.store.LoadObject(memorystore.ObjectSessionIndex, secondManifest.PreviousSessionIndexDigest); err != nil {
+			t.Fatalf("retention cleanup removed previous Session index: %v", err)
+		}
+	})
 }
 
 func TestRunSessionViewUsageDigestResolvesExactCatalogUsage(t *testing.T) {

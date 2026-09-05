@@ -18,6 +18,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
 const (
@@ -60,11 +61,12 @@ type retentionSnapshot struct {
 }
 
 type retentionAnchors struct {
-	root            retentionFile
-	preparedPointer *retentionFile
-	generationRoots map[string]retentionFile
-	externalPins    map[string]struct{}
-	namespaces      map[string]retentionFile
+	root             retentionFile
+	preparedPointer  *retentionFile
+	publishedPointer *retentionFile
+	generationRoots  map[string]retentionFile
+	externalPins     map[string]struct{}
+	namespaces       map[string]retentionFile
 }
 
 // retentionDeleteCheckpoint is a deterministic test seam at the final CAS
@@ -234,7 +236,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 	}
 	allowedDirectories := map[string]bool{
 		"observations": true, "sessions": true, "session-lineages": true, "project-probes": true,
-		"project-views": true, "generations": true, "diagnostics": true,
+		"project-views": true, "session-indexes": true, "generations": true, "diagnostics": true,
 		"staging": true, "locks": true, "cache": true,
 	}
 	rootFacts := make([]retentionFile, 0, len(rootEntries)+16)
@@ -242,6 +244,8 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 	rootDirectories := make(map[string]struct{}, len(allowedDirectories))
 	var preparedPointerBody []byte
 	preparedPointerFound := false
+	var publishedPointerBody []byte
+	publishedPointerFound := false
 	for _, entry := range rootEntries {
 		if err := retentionCheckpoint(ctx); err != nil {
 			return retentionSnapshot{}, err
@@ -275,6 +279,15 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 			rootFacts = append(rootFacts, file)
 			continue
 		}
+		if name == "published_generation" {
+			file, body, err := readRetentionFileWithBody(ctx, root, name, maxManifestBytes)
+			if err != nil {
+				return retentionSnapshot{}, err
+			}
+			publishedPointerBody, publishedPointerFound = body, true
+			rootFacts = append(rootFacts, file)
+			continue
+		}
 		if name != "manifest.json" {
 			return retentionSnapshot{}, fmt.Errorf("unknown memory root state %q", name)
 		}
@@ -286,7 +299,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		preparedPointerFound = true
 		rootFacts = append(rootFacts, file)
 	}
-	for _, required := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "generations", "diagnostics", "staging", "locks"} {
+	for _, required := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "generations", "diagnostics", "staging", "locks"} {
 		if _, found := rootDirectories[required]; !found {
 			return retentionSnapshot{}, fmt.Errorf("required memory namespace %q is missing", required)
 		}
@@ -383,6 +396,17 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 	if preparedErr == nil {
 		rootGenerations[prepared.GenerationID] = struct{}{}
 	}
+	publishedGenerationID := ""
+	if publishedPointerFound {
+		publishedGenerationID = strings.TrimSpace(string(publishedPointerBody))
+		if err := validateStoreID(publishedGenerationID); err != nil {
+			return retentionSnapshot{}, errors.New("published generation pointer is invalid")
+		}
+		if err := reconcileGeneration(publishedGenerationID); err != nil {
+			return retentionSnapshot{}, fmt.Errorf("reconcile published generation: %w", err)
+		}
+		rootGenerations[publishedGenerationID] = struct{}{}
+	}
 	for _, pin := range pins {
 		if err := retentionCheckpoint(ctx); err != nil {
 			return retentionSnapshot{}, err
@@ -426,7 +450,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 			reachablePaths[file.relative] = file
 			reachableDigests[file.digest] = struct{}{}
 		}
-		for _, dependency := range manifest.SessionViews {
+		for _, dependency := range append(append([]memory.SessionViewDependency(nil), manifest.SessionViews...), manifest.RetainedSessionViews...) {
 			view := objects.sessions[dependency.Digest]
 			for _, chunkDigest := range view.ObservationChunkDigests {
 				relative := filepath.ToSlash(filepath.Join("observations", digestLeafName(chunkDigest, ".jsonl")))
@@ -567,11 +591,17 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		if fact.relative == "manifest.json" {
 			copyFact := fact
 			anchors.preparedPointer = &copyFact
-			break
+		}
+		if fact.relative == "published_generation" {
+			copyFact := fact
+			anchors.publishedPointer = &copyFact
 		}
 	}
 	if preparedErr == nil {
 		anchors.generationRoots[prepared.GenerationID] = generationFiles[prepared.GenerationID]
+	}
+	if publishedGenerationID != "" {
+		anchors.generationRoots[publishedGenerationID] = generationFiles[publishedGenerationID]
 	}
 	for _, pin := range pins {
 		anchors.generationRoots[pin] = generationFiles[pin]
@@ -645,6 +675,21 @@ func (s *Store) revalidateRetentionAnchors(ctx context.Context, anchors *retenti
 			current, readErr := readRetentionFile(ctx, currentRoot, "manifest.json", maxManifestBytes)
 			if readErr != nil || !sameRetentionFact(current, *anchors.preparedPointer) {
 				factErr = errors.Join(errors.New("retention prepared pointer changed before cleanup"), readErr)
+			}
+		}
+	}
+	if factErr == nil {
+		info, pointerErr := currentRoot.Root.Lstat("published_generation")
+		switch {
+		case anchors.publishedPointer == nil && errors.Is(pointerErr, os.ErrNotExist):
+		case anchors.publishedPointer == nil:
+			factErr = errors.Join(errors.New("retention published pointer appeared before cleanup"), pointerErr)
+		case pointerErr != nil || info == nil:
+			factErr = errors.Join(errors.New("retention published pointer disappeared before cleanup"), pointerErr)
+		default:
+			current, readErr := readRetentionFile(ctx, currentRoot, "published_generation", maxManifestBytes)
+			if readErr != nil || !sameRetentionFact(current, *anchors.publishedPointer) {
+				factErr = errors.Join(errors.New("retention published pointer changed before cleanup"), readErr)
 			}
 		}
 	}
@@ -755,7 +800,7 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 	if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
 		return nil, err
 	}
-	references := make([]manifestObjectReference, 0, len(manifest.SessionViews)+len(manifest.SessionLineages)+2)
+	references := make([]manifestObjectReference, 0, len(manifest.SessionViews)+len(manifest.RetainedSessionViews)+len(manifest.SessionLineages)+3)
 	for index, dependency := range manifest.SessionViews {
 		if index%256 == 0 {
 			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
@@ -771,6 +816,20 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 			}
 		}
 		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("session-lineages", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
+	}
+	for index, dependency := range manifest.RetainedSessionViews {
+		if index%256 == 0 {
+			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
+				return nil, err
+			}
+		}
+		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("sessions", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
+	}
+	if manifest.SessionIndexDigest != "" {
+		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("session-indexes", digestLeafName(manifest.SessionIndexDigest, ".json"))), digest: manifest.SessionIndexDigest})
+	}
+	if manifest.PreviousSessionIndexDigest != "" && manifest.PreviousSessionIndexDigest != manifest.SessionIndexDigest {
+		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("session-indexes", digestLeafName(manifest.PreviousSessionIndexDigest, ".json"))), digest: manifest.PreviousSessionIndexDigest})
 	}
 	if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
 		return nil, err
@@ -793,6 +852,7 @@ type retentionObjectSnapshot struct {
 	lineages     map[string]memory.SessionLineage
 	probes       map[string]memory.ProjectProbeState
 	projects     map[string]memory.ProjectView
+	indexes      map[string]sessionindex.Document
 }
 
 func (objects *retentionObjectSnapshot) observationChunk(ctx context.Context, digest string) ([]memory.ObservationRevision, error) {
@@ -856,11 +916,22 @@ func (objects *retentionObjectSnapshot) projectView(ctx context.Context, digest 
 	return view, nil
 }
 
+func (objects *retentionObjectSnapshot) sessionIndex(ctx context.Context, digest string) (sessionindex.Document, error) {
+	if err := retentionContextCause(ctx); err != nil {
+		return sessionindex.Document{}, err
+	}
+	value, exists := objects.indexes[digest]
+	if !exists {
+		return sessionindex.Document{}, fmt.Errorf("verify Session index %s: %w", digest, os.ErrNotExist)
+	}
+	return value, nil
+}
+
 func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObjectSnapshot, error) {
 	objects := &retentionObjectSnapshot{
 		files: make(map[string]retentionFile), observations: make(map[string][]memory.ObservationRevision),
 		sessions: make(map[string]memory.SessionView), lineages: make(map[string]memory.SessionLineage), probes: make(map[string]memory.ProjectProbeState),
-		projects: make(map[string]memory.ProjectView),
+		projects: make(map[string]memory.ProjectView), indexes: make(map[string]sessionindex.Document),
 	}
 	collections := []struct {
 		kind   ObjectKind
@@ -872,6 +943,7 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 		{ObjectSessionLineage, "session-lineages", ".json"},
 		{ObjectProbeState, "project-probes", ".json"},
 		{ObjectProjectView, "project-views", ".json"},
+		{ObjectSessionIndex, "session-indexes", ".json"},
 	}
 	for _, collection := range collections {
 		if err := retentionCheckpoint(ctx); err != nil {
@@ -926,6 +998,8 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 				objects.probes[digest] = decoded.probe
 			case ObjectProjectView:
 				objects.projects[digest] = decoded.project
+			case ObjectSessionIndex:
+				objects.indexes[digest] = decoded.index
 			}
 		}
 		if err := directory.Close(); err != nil {
