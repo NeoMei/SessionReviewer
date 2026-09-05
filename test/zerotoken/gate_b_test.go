@@ -28,15 +28,36 @@ import (
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
-func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
-	dataRoot := t.TempDir()
-	projectRoot := t.TempDir()
-	vaultRoot := t.TempDir()
-	sessionsRoot := t.TempDir()
+type gateBFixture struct {
+	root, dataRoot, projectRoot, vaultRoot, sessionsRoot, projectID, gitExecutable string
+	mapping                                                                        config.ProjectMapping
+	base                                                                           time.Time
+	scanNow                                                                        time.Time
+}
+
+func newGateBFixture(t *testing.T, persistentRoot string) gateBFixture {
+	t.Helper()
+	root := persistentRoot
+	if root == "" {
+		root = t.TempDir()
+	} else {
+		if err := preparePersistentGateBRoot(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dataRoot := filepath.Join(root, "data")
+	projectRoot := filepath.Join(root, "Project")
+	vaultRoot := filepath.Join(root, "Vault")
+	sessionsRoot := filepath.Join(root, "sessions")
+	for _, directory := range []string{dataRoot, projectRoot, vaultRoot, sessionsRoot} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatalf("create Gate B fixture directory %s: %v", directory, err)
+		}
+	}
 	projectID := "project-gate-b-test"
 	_ = os.WriteFile(filepath.Join(projectRoot, "VERSION"), []byte("v1.0.0\n"), 0o600)
 	_ = os.WriteFile(filepath.Join(projectRoot, "project-fixture.md"), []byte("# fixture\n"), 0o600)
-	initializeGateRepository(t, projectRoot)
+	gitExecutable := initializeGateRepository(t, projectRoot)
 
 	mapping := config.ProjectMapping{
 		ID:              projectID,
@@ -67,12 +88,64 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 			t.Fatalf("write session %s: %v", sessionID, err)
 		}
 	}
+	return gateBFixture{root: root, dataRoot: dataRoot, projectRoot: projectRoot, vaultRoot: vaultRoot, sessionsRoot: sessionsRoot, projectID: projectID, gitExecutable: gitExecutable, mapping: mapping, base: base, scanNow: scanNow}
+}
+
+func preparePersistentGateBRoot(root string) error {
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return fmt.Errorf("persistent Gate B fixture root must be absolute and clean: %q", root)
+	}
+	for candidate := root; ; candidate = filepath.Dir(candidate) {
+		info, err := os.Lstat(candidate)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("persistent Gate B fixture path has a symlink ancestor: %s", candidate)
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("inspect persistent Gate B fixture ancestor %s: %w", candidate, err)
+		}
+		if filepath.Dir(candidate) == candidate {
+			break
+		}
+	}
+	info, err := os.Lstat(root)
+	switch {
+	case os.IsNotExist(err):
+		if err := os.Mkdir(root, 0o700); err != nil {
+			return fmt.Errorf("create persistent Gate B fixture root: %w", err)
+		}
+		return nil
+	case err != nil:
+		return fmt.Errorf("inspect persistent Gate B fixture root: %w", err)
+	case !info.IsDir() || info.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("persistent Gate B fixture root is not a real directory: %s", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fmt.Errorf("read persistent Gate B fixture root: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("persistent Gate B fixture root must be empty: %s", root)
+	}
+	return nil
+}
+
+func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
+	runGateBEndToEnd(t)
+}
+
+func runGateBEndToEnd(t *testing.T) {
+	t.Helper()
+	fixture := newGateBFixture(t, "")
+	dataRoot, projectRoot, vaultRoot, sessionsRoot, projectID := fixture.dataRoot, fixture.projectRoot, fixture.vaultRoot, fixture.sessionsRoot, fixture.projectID
+	mapping, base, scanNow := fixture.mapping, fixture.base, fixture.scanNow
+	processRecorder := newGateGitRecorder(t, fixture.gitExecutable, projectRoot)
 
 	phases := []string{}
 	cuOpts := contextupdate.Options{
 		ProjectID:    projectID,
 		SessionsRoot: sessionsRoot,
 		DataRoot:     dataRoot,
+		RunGit:       processRecorder.run,
 		Now:          func() time.Time { return scanNow },
 		PhaseObserver: func(phase string) error {
 			phases = append(phases, phase)
@@ -283,7 +356,19 @@ func TestGateBEndToEndPublicationAndIdempotence(t *testing.T) {
 }
 
 func seedGateBV4Timeline(t *testing.T, dataRoot, projectID string, mapping config.ProjectMapping, now time.Time) reviewv4.Timeline {
+	return seedGateBV4Acceptance(t, dataRoot, projectID, mapping, now, 1).milestone
+}
+
+type gateBV4Seed struct {
+	milestone reviewv4.Timeline
+	decision  reviewv4.Decision
+}
+
+func seedGateBV4Acceptance(t *testing.T, dataRoot, projectID string, mapping config.ProjectMapping, now time.Time, milestoneCount int) gateBV4Seed {
 	t.Helper()
+	if milestoneCount < 1 {
+		t.Fatal("Gate B fixture requires at least one accepted milestone")
+	}
 	owner, err := publicationlock.Acquire(dataRoot, projectID, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -299,6 +384,37 @@ func seedGateBV4Timeline(t *testing.T, dataRoot, projectID string, mapping confi
 	closed.Verification.MissingReason = nil
 	milestone := reviewv4.Timeline{ID: "gate-b-seeded", GenerationID: next.GenerationID, OccurredAt: "2026-09-05T00:00:00Z", Kind: "milestone", Title: "Seeded accepted history", Summary: "Trusted typed seed for the human-edit chain.", DecisionIDs: []string{}, ClosedLoop: closed}
 	next.Timeline = append(next.Timeline, milestone)
+	seed := gateBV4Seed{milestone: milestone}
+	for index := 2; index <= milestoneCount; index++ {
+		next.Timeline = append(next.Timeline, reviewv4.Timeline{
+			ID: fmt.Sprintf("gate-b-seeded-%02d", index), GenerationID: next.GenerationID,
+			OccurredAt: fmt.Sprintf("2026-09-05T00:%02d:00Z", index-1), Kind: "milestone",
+			Title: fmt.Sprintf("Seeded accepted history %02d", index), Summary: "Trusted typed acceptance fixture; no automatic promotion is claimed.",
+			DecisionIDs: []string{}, ClosedLoop: reviewv4.NeutralClosedLoop(),
+		})
+	}
+	if milestoneCount > 1 {
+		decision := reviewv4.Decision{
+			ID: "gate-b-decision", Kind: "decision", OccurredAt: "2026-09-05T00:00:00Z",
+			Title: "Seeded accepted decision", Rationale: "Typed fixture rationale", Impact: "Fixture-only impact",
+			Status: reviewv4.DecisionActive, ReevaluateWhen: "When fixture requirements change",
+			Supersedes: []string{}, MilestoneIDs: []string{milestone.ID}, SessionRefs: []reviewv4.SessionRef{},
+			Provenance: "human_created", Pinned: true, Revision: 1,
+		}
+		next.Decisions = append(next.Decisions, decision)
+		next.Timeline[len(next.Timeline)-milestoneCount].DecisionIDs = []string{decision.ID}
+		problem := reviewv4.ProblemNode{
+			ID: "gate-b-problem", Question: "Does the accepted problem graph survive a Markdown edit?",
+			RelatedNodeIDs: []string{}, WorkflowState: "not_started", AnswerState: "no_answer",
+			CompletionCriterion: "The graph is byte-for-byte equivalent after scan and sync.", CurrentConclusion: "",
+			SourceTurnRefs: []reviewv4.SourceTurnRef{}, Provenance: "human_created", FirstProposedAt: "2026-09-05T00:00:00Z",
+			SiblingOrder: 0, Revision: 1,
+		}
+		next.ProblemMapRevision = 1
+		next.ProblemNodes = append(next.ProblemNodes, problem)
+		next.ProblemRootIDs = append(next.ProblemRootIDs, problem.ID)
+		seed.decision = decision
+	}
 	next.Revision++
 	pair, err := reviewv4.RenderMarkdown(next, read.OldAccepted.Ledger, &read.AcceptedPair)
 	if err != nil {
@@ -323,7 +439,7 @@ func seedGateBV4Timeline(t *testing.T, dataRoot, projectID string, mapping confi
 	if _, err := publication.PublishMarkdownScan(context.Background(), publication.Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: func() time.Time { return now }}, plan); err != nil {
 		t.Fatalf("seed accepted typed history: %v", err)
 	}
-	return milestone
+	return seed
 }
 
 func gateBMilestone(t *testing.T, accepted reviewv4.Accepted, id string) reviewv4.Timeline {

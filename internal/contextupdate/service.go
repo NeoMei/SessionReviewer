@@ -41,10 +41,13 @@ import (
 
 // Options configures foreground or worker context updates.
 type Options struct {
-	ProjectID          string
-	SessionsRoot       string
-	DataRoot           string
-	Now                func() time.Time
+	ProjectID    string
+	SessionsRoot string
+	DataRoot     string
+	Now          func() time.Time
+	// RunGit is an optional observation seam for the existing allowlisted
+	// project probe. Nil preserves the authenticated production runner.
+	RunGit             func(context.Context, string, ...string) ([]byte, error)
 	PhaseObserver      func(phase string) error
 	ExtractionObserver func(scan.Progress) error
 	afterDestination   func(side, relative string) error
@@ -175,6 +178,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ProbeOptions: projectprobe.Options{
 			Binding:       binding,
 			GitExecutable: resolveGitExecutable(),
+			RunGit:        opts.RunGit,
 			Now:           now,
 		},
 		Reduce:           projectview.Reduce,
