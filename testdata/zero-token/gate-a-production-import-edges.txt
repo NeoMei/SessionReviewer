@@ -533,6 +533,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source	errors
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source	fmt
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source	github.com/neomei/SessionReviewer/internal/memory
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source	sort
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	bufio
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	bytes
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	context

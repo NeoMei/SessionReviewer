@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
 )
@@ -218,73 +219,17 @@ func appendVerifiedProvider(combined *Discovery, named NamedAdapter, discovered 
 }
 
 func sortDiscovery(discovery *Discovery) {
-	stableSortCandidates(discovery.Candidates, make([]Candidate, len(discovery.Candidates)))
-	stableSortIssues(discovery.Issues, make([]Issue, len(discovery.Issues)))
-}
-
-func candidateLess(left, right Candidate) bool {
-	return left.Provider < right.Provider || left.Provider == right.Provider && left.SessionID < right.SessionID
-}
-
-func issueLess(left, right Issue) bool {
-	if left.Provider != right.Provider {
-		return left.Provider < right.Provider
-	}
-	return left.SessionID < right.SessionID || left.SessionID == right.SessionID && left.Path < right.Path
-}
-
-func stableSortCandidates(values, scratch []Candidate) {
-	if len(values) < 2 {
-		return
-	}
-	middle := len(values) / 2
-	stableSortCandidates(values[:middle], scratch[:middle])
-	stableSortCandidates(values[middle:], scratch[middle:])
-	copy(scratch, values)
-	left, right := 0, middle
-	for index := range values {
-		switch {
-		case left >= middle:
-			values[index] = scratch[right]
-			right++
-		case right >= len(values):
-			values[index] = scratch[left]
-			left++
-		case candidateLess(scratch[right], scratch[left]):
-			values[index] = scratch[right]
-			right++
-		default:
-			values[index] = scratch[left]
-			left++
+	sort.SliceStable(discovery.Candidates, func(i, j int) bool {
+		left, right := discovery.Candidates[i], discovery.Candidates[j]
+		return left.Provider < right.Provider || left.Provider == right.Provider && left.SessionID < right.SessionID
+	})
+	sort.SliceStable(discovery.Issues, func(i, j int) bool {
+		left, right := discovery.Issues[i], discovery.Issues[j]
+		if left.Provider != right.Provider {
+			return left.Provider < right.Provider
 		}
-	}
-}
-
-func stableSortIssues(values, scratch []Issue) {
-	if len(values) < 2 {
-		return
-	}
-	middle := len(values) / 2
-	stableSortIssues(values[:middle], scratch[:middle])
-	stableSortIssues(values[middle:], scratch[middle:])
-	copy(scratch, values)
-	left, right := 0, middle
-	for index := range values {
-		switch {
-		case left >= middle:
-			values[index] = scratch[right]
-			right++
-		case right >= len(values):
-			values[index] = scratch[left]
-			left++
-		case issueLess(scratch[right], scratch[left]):
-			values[index] = scratch[right]
-			right++
-		default:
-			values[index] = scratch[left]
-			left++
-		}
-	}
+		return left.SessionID < right.SessionID || left.SessionID == right.SessionID && left.Path < right.Path
+	})
 }
 
 func abandonAdapterCandidates(adapter Adapter, candidates []Candidate) {

@@ -115,6 +115,40 @@ func TestDiscoverAllKeepsSameNativeSessionAcrossThreeProviders(t *testing.T) {
 	}
 }
 
+func TestDiscoverAllSortsSessionsAndIssuesStablyWithinProvider(t *testing.T) {
+	adapter := &managerFakeAdapter{discovery: Discovery{
+		Candidates: []Candidate{
+			{Provider: "codex", SessionID: "z", Handle: "z"},
+			{Provider: "codex", SessionID: "a", Handle: "a-first"},
+			{Provider: "codex", SessionID: "a", Handle: "a-second"},
+		},
+		Issues: []Issue{
+			{Provider: "codex", SessionID: "z", Path: "b", Code: "z"},
+			{Provider: "codex", SessionID: "a", Path: "same", Code: "first"},
+			{Provider: "codex", SessionID: "a", Path: "a", Code: "a"},
+			{Provider: "codex", SessionID: "a", Path: "same", Code: "second"},
+		},
+	}}
+	discovery, diagnostics, err := DiscoverAll(context.Background(), []NamedAdapter{{Provider: "codex", Adapter: adapter}})
+	if err != nil || len(diagnostics) != 0 {
+		t.Fatalf("diagnostics=%+v err=%v", diagnostics, err)
+	}
+	gotCandidates := make([]string, len(discovery.Candidates))
+	for index, candidate := range discovery.Candidates {
+		gotCandidates[index] = candidate.Handle
+	}
+	if want := []string{"a-first", "a-second", "z"}; !reflect.DeepEqual(gotCandidates, want) {
+		t.Fatalf("candidate order=%v want=%v", gotCandidates, want)
+	}
+	gotIssues := make([]string, len(discovery.Issues))
+	for index, issue := range discovery.Issues {
+		gotIssues[index] = issue.Code
+	}
+	if want := []string{"a", "first", "second", "z"}; !reflect.DeepEqual(gotIssues, want) {
+		t.Fatalf("issue order=%v want=%v", gotIssues, want)
+	}
+}
+
 func TestDiscoverAllConfiguredCorruptionFailsClosedAndReleasesLeases(t *testing.T) {
 	corrupt := errors.New("configured provider is corrupt")
 	candidate := Candidate{Provider: "codex", SessionID: "kept-only-on-success", Handle: "handle", Lease: "lease"}
