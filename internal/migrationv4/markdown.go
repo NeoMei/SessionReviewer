@@ -288,7 +288,7 @@ func validateLegacyReconstruction(candidate reviewv4.Presentation, projectID, ge
 func adjudicateOldV4History(presentation reviewv4.Presentation, source []byte) (reviewv4.Presentation, error) {
 	history, err := reviewv2.ParseHistory(source)
 	if err != nil {
-		if bytes.Contains(source, []byte("session-reviewer:event")) {
+		if reviewv2.HasTopLevelHistoryEventMarker(source) {
 			return reviewv4.Presentation{}, fmt.Errorf("markdown_migration_conflict: recognizable legacy history is malformed: %w", err)
 		}
 		return presentation, nil

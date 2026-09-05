@@ -97,6 +97,51 @@ func ValidatedMarkerDocument(source []byte, entityType string) ([]byte, []Marker
 	return bytes.Clone(normalized), result, nil
 }
 
+// HasTopLevelHistoryEventMarker reports whether Goldmark recognizes an event
+// marker-looking comment as a top-level HTML block. Literal marker text inside
+// prose, lists, block quotes, indented code, or fenced code is not authority.
+// This intentionally recognizes malformed event comments so callers can fail
+// closed when a document that intended the legacy envelope cannot be parsed.
+func HasTopLevelHistoryEventMarker(source []byte) bool {
+	source = normalizeMarkdownSource(bytes.Clone(source))
+	root := goldmark.DefaultParser().Parse(text.NewReader(source))
+	for node := root.FirstChild(); node != nil; node = node.NextSibling() {
+		block, ok := node.(*ast.HTMLBlock)
+		if !ok {
+			continue
+		}
+		body := block.Text(source)
+		for start := 0; start <= len(body); {
+			end, next := physicalLine(body, start)
+			line := bytes.TrimSpace(body[start:end])
+			if recognizableHistoryEventMarkerLine(line) {
+				return true
+			}
+			if next == len(body) {
+				break
+			}
+			start = next
+		}
+	}
+	return false
+}
+
+func recognizableHistoryEventMarkerLine(line []byte) bool {
+	for _, prefix := range [][]byte{[]byte("<!-- session-reviewer:event"), []byte("<!-- /session-reviewer:event")} {
+		if !bytes.HasPrefix(line, prefix) {
+			continue
+		}
+		if len(line) == len(prefix) {
+			return true
+		}
+		switch line[len(prefix)] {
+		case ' ', '\t', '-', '>':
+			return true
+		}
+	}
+	return false
+}
+
 func normalizedToOriginalOffsets(source []byte) []int {
 	normalizedLength := len(normalizeMarkdownSource(source))
 	offsets := make([]int, normalizedLength+1)

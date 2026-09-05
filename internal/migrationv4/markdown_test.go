@@ -70,6 +70,39 @@ func TestOldV4HistoryStructureMismatchConflicts(t *testing.T) {
 	}
 }
 
+func TestOldV4OpaqueHistoryMayContainFencedEventMarkerLiteral(t *testing.T) {
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	history := []byte("# Historical source archive\n\n```html\n<!-- session-reviewer:event id=\"example-only\" -->\n<!-- /session-reviewer:event -->\n```\n")
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err != nil {
+		t.Fatalf("opaque fenced marker literal rejected: %v", err)
+	}
+	if !bytes.Contains(result.History, history) {
+		t.Fatal("opaque history was not preserved byte-for-byte")
+	}
+}
+
+func TestOldV4MalformedRealHistoryEventMarkerStillConflicts(t *testing.T) {
+	review, history, ledger, index := oldV4TimelineSource(t, "same", "same", "", "")
+	history = bytes.Replace(history, []byte("<!-- /session-reviewer:event -->"), nil, 1)
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+
+	_, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "markdown_migration_conflict") {
+		t.Fatalf("malformed real legacy history accepted: %v", err)
+	}
+}
+
 func TestLegacyReconstructionRejectsUnverifiedAuthenticatedFields(t *testing.T) {
 	review, history, ledger, index := migrationFixture(t)
 	accepted, err := reviewv2.LoadV3Bytes(review, history, ledger)

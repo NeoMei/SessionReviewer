@@ -525,6 +525,35 @@ func TestMarkerScannerUsesGoldmarkFencedCodeSpansOnlyAfterFrontmatter(t *testing
 	}
 }
 
+func TestTopLevelHistoryEventMarkerUsesGoldmarkContext(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   bool
+	}{
+		{
+			name: "real marker survives later unclosed fence",
+			source: "<!-- session-reviewer:event id=\"event-real\" -->\n\n" +
+				"```text\n<!-- session-reviewer:event id=\"example-only\" -->\n",
+			want: true,
+		},
+		{name: "closed fenced literal", source: "```html\n<!-- session-reviewer:event id=\"example-only\" -->\n```\n"},
+		{name: "empty fence and prose", source: "```\n```\nThe literal session-reviewer:event is documentation.\n"},
+		{name: "inline HTML", source: "Prefix <!-- session-reviewer:event id=\"inline\" --> suffix\n"},
+		{name: "list nested HTML", source: "- <!-- session-reviewer:event id=\"listed\" -->\n"},
+		{name: "quoted HTML", source: "> <!-- session-reviewer:event id=\"quoted\" -->\n"},
+		{name: "indented code", source: "    <!-- session-reviewer:event id=\"indented\" -->\n"},
+		{name: "unrelated longer comment name", source: "<!-- session-reviewer:eventual documentation -->\n"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := HasTopLevelHistoryEventMarker([]byte(test.source)); got != test.want {
+				t.Fatalf("HasTopLevelHistoryEventMarker() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHistoryCanonicalOrderUsesParsedTimeThenStableIDWithoutMutatingCaller(t *testing.T) {
 	events := []Event{
 		historyTestEvent("event-early", "2026-08-23T01:00:00Z"),
