@@ -2,7 +2,91 @@
 
 Date: 2026-09-06
 
-## Current follow-up — flow repair reviewed; two final-review defects remain
+## Final local checkpoint — known in-scope debt closed
+
+Final tested source: `cf8a39a4a63c80488b008da087d3641b72ebfc08` on
+`codex/session-index-v1`. Implementation, independent review, all seven frozen
+local checks and isolated native/CLI acceptance are complete. Subsequent
+documentation-only commits do not change this tested source identity. This is
+closure of the known in-scope findings, not a guarantee of zero undiscovered
+defects or completion of the separate Session Index Tasks 4–7.
+
+Task 17 closed the flow-YAML parsing/comment/separator/deletion compositions.
+The final broad review found block-style comment loss and discovery failure on
+an unreadable candidate; the single combined corrective wave closed both.
+The final independent scoped review reports 0 Critical / 0 Important / 0 new
+Minor and no remaining scoped correction. Earlier three Minor debts were also
+explicitly triaged as addressed. Every intermediate failure below remains
+historical evidence, not an open finding at this checkpoint.
+
+### Final frozen verification
+
+All commands ran anew, serially, once each with exit 0; start/end HEAD matched,
+Git status stayed clean. Ordinary and race runs each reported 56 passing
+packages, including 37 valid cached results; those are not claimed as uncached.
+
+| Order | Exact command | Result |
+|---|---|---|
+| 1 | `go test ./...` | PASS, 6m21s; ordinary large-Session case included |
+| 2 | `go vet ./...` | PASS, no diagnostics |
+| 3 | `go mod tidy -diff` | PASS, no diff |
+| 4 | `go test ./test/zerotoken -run '^TestGateAZeroTokenCore$' -count=1` | PASS, package 33.254s |
+| 5 | `go test -race -timeout 30m ./... -skip '^TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB$'` | PASS, 12m49s; only named exclusion, no race report |
+| 6 | `git diff --check` | PASS |
+| 7 | `npm run check` in `obsidian-plugin` | PASS, lint + 256 tests / 19 files + typecheck/build |
+
+Covering regressions include 76 literal block-composition cases, eight scalar
+roundtrip cases, authenticated block and flow edits through actual publication,
+and 14 discovery/startup cases. The v4-private scalar encoder corrects only
+observed terminal-LF drift and verifies typed values after encoding; legacy
+encoder, dependencies, schema and validation protections are unchanged. The
+first combined plugin check's test-only TypeScript annotation failure remains
+recorded; corrected covering and final frozen checks both passed.
+
+### Final native and CLI acceptance
+
+New plugin bundle SHA256:
+`9df2a8157515459883f12b0cbc2c450f7daaac72b385be9775e052dad459f9dd`.
+It was installed only into the backed-up synthetic ColdStartVault copy, launched
+in a dedicated sandboxed Obsidian 1.13.7 process/profile. Browser skill absent;
+existing Playwright connected only to its local CDP endpoint. Desktop screenshots
+and actual rendered interactions were checked, not merely a build result.
+
+The unreadable copied review still returned EPERM and remained in the inventory,
+but clicking the project ribbon now rendered the unrelated valid project's goal
+and milestone16. Previously it remained on “正在发现项目…”. Final inventory order
+was valid-then-unreadable (baseline was the reverse); the original exception
+aborted discovery in either order. All CLI candidates were actually inaccessible,
+runtime absent, and only native review/history plus read-only refresh were
+available. Refresh and native history reading showed the human conclusion and
+independent verification, with no interaction pageerrors and all four public
+hashes unchanged. Expected sandboxed updater-network errors were not hidden.
+Only the owned experiment process was stopped. Final repository build reproduced
+the same native-tested bundle hash. No mobile or cross-platform acceptance claimed.
+
+Fresh CLI SHA256:
+`a82418197089aae46d376e53c8188e3bc581a8ba50dc5c1b3147cfdeab0830d2`.
+Explicit synthetic status -> scan -> sync -> status all exited0 with no stderr:
+154/154 Sessions, zero issues/tokens, same generation and revision9, all eight
+public file hashes and mtimes unchanged. This is an actual CLI execution against
+the bounded fixture, not a real-project rescan.
+
+Detailed local receipts are retained under this plan's ignored
+`.superpowers/sdd/2026-09-05-v4-human-markdown-codec/` directory:
+`task-17-final-rereview.md`, `task-17-postfix-check-report.md` and seven postfix
+logs, `task-17-final-fix-report.md`, and
+`task-17-cf8a39a-native-cli-receipt.md`. Native before/after screenshots and
+old-candidate logs are preserved rather than overwritten by source cleanup.
+
+### Delivery boundary
+
+Cross-platform CI and real legacy-project migration are excluded by the user's
+decision, not passed. No automatic real rescan, production Vault/config/installed
+plugin/CLI replacement, merge, push or release occurred. The local branch and
+worktree remain preserved. Original Session Index Task 3's amended implementation
+and local acceptance gate is closed; Tasks 4–7 are separate future feature work.
+
+## Historical checkpoint — 5d6c398 passed checks with two review defects
 
 Latest frozen candidate `5d6c39884a8e2395c5fc8fd5785c3c37ee1bb3bd` passed
 all seven prescribed local commands in order, without retries or source changes:
