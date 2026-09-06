@@ -630,6 +630,15 @@ func (s *Store) rejectPreparedAdvanceReadOnly() error {
 // the immutable generation manifest, project view digest, three projection file hashes,
 // and the journal verification proof.
 func (s *Store) CommitPublished(generationID string, proof memory.PublicationProof) error {
+	return s.CommitPublishedContext(context.Background(), generationID, proof)
+}
+
+// CommitPublishedContext observes cancellation under the store lock at the
+// actual pointer-write boundary. Once written, the journal owns recovery.
+func (s *Store) CommitPublishedContext(ctx context.Context, generationID string, proof memory.PublicationProof) error {
+	if ctx == nil {
+		return errors.New("publication context is required")
+	}
 	if err := validateStoreID(generationID); err != nil {
 		return fmt.Errorf("%w: invalid generation ID", ErrPublicationProofInvalid)
 	}
@@ -671,11 +680,14 @@ func (s *Store) CommitPublished(generationID string, proof memory.PublicationPro
 		defer root.Close()
 
 		publishedBody := []byte(generationID + "\n")
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		if err := atomicfile.WriteRootFile(root.Root, "published_generation", publishedBody, privateFileMode); err != nil {
 			return fmt.Errorf("commit published generation: %w", err)
 		}
 		return nil
-	})
+	}, ctx)
 }
 
 // LoadPublished returns the currently published generation ID and its manifest.
@@ -1041,6 +1053,51 @@ func (s *Store) openCollection(name string) (*pathguard.Directory, error) {
 
 func (s *Store) reconcileGenerationGraph(value memory.GenerationManifest) error {
 	return s.reconcileGenerationGraphContext(context.Background(), value)
+}
+
+// ValidateSessionIndexSuccessor checks a prospective index-bound manifest
+// using the exact prepared-generation graph validator. Only the not-yet-stored
+// index is supplied in memory; all other dependencies must authenticate in the
+// existing store. This does not write objects, pointers, or acceptance state.
+func (s *Store) ValidateSessionIndexSuccessor(ctx context.Context, value memory.GenerationManifest, index sessionindex.Document) error {
+	if ctx == nil {
+		return errors.New("graph validation context is required")
+	}
+	if err := memory.ValidateGenerationManifestContext(ctx, value); err != nil {
+		return err
+	}
+	if value.ProjectID != s.projectID || value.SessionIndexDigest == "" {
+		return errors.New("successor index project binding mismatch")
+	}
+	body, err := sessionindex.Render(index)
+	if err != nil {
+		return err
+	}
+	parsed, err := sessionindex.Parse(body)
+	if err != nil || parsed.Digest != value.SessionIndexDigest || index.Digest != parsed.Digest {
+		return errors.Join(errors.New("successor index digest mismatch"), err)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.requireOpenLocked(); err != nil {
+		return err
+	}
+	return reconcileGenerationGraphObjectsContext(ctx, value, successorIndexGraphObjects{storedGenerationGraphObjects{store: s}, parsed})
+}
+
+type successorIndexGraphObjects struct {
+	storedGenerationGraphObjects
+	index sessionindex.Document
+}
+
+func (objects successorIndexGraphObjects) sessionIndex(ctx context.Context, digest string) (sessionindex.Document, error) {
+	if err := context.Cause(ctx); err != nil {
+		return sessionindex.Document{}, err
+	}
+	if digest == objects.index.Digest {
+		return objects.index, nil
+	}
+	return objects.storedGenerationGraphObjects.sessionIndex(ctx, digest)
 }
 
 func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memory.GenerationManifest) error {

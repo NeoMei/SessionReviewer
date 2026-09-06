@@ -148,7 +148,7 @@ func RunMigration(ctx context.Context, options MigrationOptions) (_ MigrationRes
 	build := options.build
 	if build == nil {
 		build = func(pin *MappingPin) (migrationv4.Result, error) {
-			return buildMigrationFromPin(pin, options.afterMigrationBuild)
+			return buildMigrationFromPin(ctx, pin, options.afterMigrationBuild)
 		}
 	}
 	if options.Mode == MigrationDryRun {
@@ -256,7 +256,7 @@ func migrationFilePlan(result migrationv4.Result) []presentation.FilePlan {
 	return files
 }
 
-func buildMigrationFromPin(pin *MappingPin, afterBuild ...func() error) (migrationv4.Result, error) {
+func buildMigrationFromPin(ctx context.Context, pin *MappingPin, afterBuild ...func() error) (migrationv4.Result, error) {
 	preimages := make(map[string]migrationv4.Preimage, 4)
 	vaultPreimages := make(map[string]migrationv4.Preimage, 4)
 	read := func(relative string, required bool) ([]byte, error) {
@@ -364,6 +364,9 @@ func buildMigrationFromPin(pin *MappingPin, afterBuild ...func() error) (migrati
 			})
 			if buildErr != nil {
 				return migrationv4.Result{}, buildErr
+			}
+			if err := store.ValidateSessionIndexSuccessor(ctx, built.Manifest, built.Index); err != nil {
+				return migrationv4.Result{}, fmt.Errorf("validate migration successor graph: %w", err)
 			}
 			successor = &built
 		}

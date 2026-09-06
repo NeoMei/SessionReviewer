@@ -243,6 +243,15 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	rollback := func(ctx context.Context, intent Intent) error {
+		if intent.Version == 2 && intent.Kind == KindMarkdown && intent.RequiresPointer {
+			published, _, err := store.LoadPublished()
+			if err != nil && !errors.Is(err, memorystore.ErrNoPublishedGeneration) {
+				return err
+			}
+			if err == nil && markdownPointerCrossed(intent, published) {
+				return errors.New("durable Markdown pointer requires forward recovery")
+			}
+		}
 		return rollbackIntent(ctx, intent, j, projectDir, vaultDir, func() error {
 			if intent.Version == 2 && intent.Kind == KindMarkdown {
 				return repairMarkdownBaseAfterRollback(intent, j, opts)
@@ -273,7 +282,10 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 				if err != nil {
 					return err
 				}
-				if !accepted {
+				if !accepted && !(publishedErr == nil && markdownPointerCrossed(intent, publishedID)) {
+					if publishedErr != nil && !errors.Is(publishedErr, memorystore.ErrNoPublishedGeneration) {
+						return publishedErr
+					}
 					return rollback(ctx, intent)
 				}
 			}
@@ -582,7 +594,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, rollbackFailure(ctx, intent, err)
 	}
 	if intent.Version != 2 || intent.RequiresPointer {
-		if err := store.CommitPublished(opts.PreparedGeneration, proof); err != nil {
+		if err := store.CommitPublishedContext(ctx, opts.PreparedGeneration, proof); err != nil {
 			return Result{}, rollbackFailure(ctx, intent, fmt.Errorf("commit published generation: %w", err))
 		}
 	}
@@ -597,6 +609,15 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 			}
 			if accepted {
 				return Result{}, err
+			}
+			if intent.RequiresPointer {
+				published, _, pointerErr := store.LoadPublished()
+				if pointerErr != nil {
+					return Result{}, errors.Join(err, pointerErr)
+				}
+				if markdownPointerCrossed(intent, published) {
+					return Result{}, err
+				}
 			}
 			return Result{}, rollbackFailure(ctx, intent, err)
 		}

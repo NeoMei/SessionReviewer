@@ -238,12 +238,12 @@ func setupPublishEnvWithIndex(t *testing.T, projectID string, withSessionIndex b
 		ProbeCheck:        memory.ProbeCheck{SchemaVersion: memory.MemorySchemaVersion, CheckedAt: testEndedAt, StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}},
 		ProjectViewDigest: project.Digest,
 	}
-	one := uint64(1)
-	manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{
-		Provider: session.Provider, SessionID: session.SessionID, RecordCount: &one,
-		Seen: 1, Indexed: 1,
-	}}
 	if withSessionIndex {
+		one := uint64(1)
+		manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{
+			Provider: session.Provider, SessionID: session.SessionID, RecordCount: &one,
+			Seen: 1, Indexed: 1,
+		}}
 		generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
 		if err != nil {
 			t.Fatalf("parse generation timestamp: %v", err)

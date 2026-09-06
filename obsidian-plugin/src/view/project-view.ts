@@ -26,6 +26,9 @@ export class ProjectEvolutionView extends ItemView {
   private scanActionInFlight = false;
   private scanPollGeneration = 0;
   private scanPollTimer?: number;
+  private refreshEpoch = 0;
+  private closed = false;
+  private settlingTimer?: number;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -48,6 +51,7 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
+    this.closed = false;
     if (!this.repository) {
       this.contentEl.textContent = "正在加载项目…";
       return;
@@ -56,14 +60,20 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   async onClose(): Promise<void> {
+    this.closed = true;
+    this.refreshEpoch += 1;
+    this.stopSettlingRetry();
     this.stopScanPolling();
     this.disposeWatch?.();
+    this.disposeWatch = undefined;
     this.contentEl.replaceChildren();
   }
 
   private async openProjects(): Promise<void> {
+    const epoch = ++this.refreshEpoch;
     this.contentEl.replaceChildren(element("p", { className: "sr-loading", text: "正在发现项目…" }));
     const projects = await this.repository!.discover();
+    if (this.closed || epoch !== this.refreshEpoch) return;
     this.projects = projects;
     if (projects.length === 0) {
       this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
@@ -73,20 +83,56 @@ export class ProjectEvolutionView extends ItemView {
       return;
     }
     this.selected = projects.find((project) => project.projectId === this.initialState.projectId) ?? projects[0];
+    this.watchSelectedProject();
     await this.refresh(projects);
-    this.disposeWatch = this.repository!.watch(this.selected, () => { void this.refresh(projects); });
   }
 
-  private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean } = {}): Promise<void> {
-    if (!this.selected) return;
-    const previous = this.selected.format === "markdown-v4" ? this.lastMarkdownReady : this.lastReady;
-    const snapshot = await this.repository!.load(this.selected, previous);
+  private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean; settlingAttempt?: number } = {}): Promise<void> {
+    if (!this.selected || this.closed) return;
+    const selected = this.selected;
+    const epoch = ++this.refreshEpoch;
+    const current = () => !this.closed && epoch === this.refreshEpoch && selected === this.selected;
+    this.stopSettlingRetry();
+    this.stopScanPolling();
+    const previous = selected.format === "markdown-v4" ? this.lastMarkdownReady : this.lastReady;
+    const snapshot = await this.repository!.load(selected, previous);
+    if (!current()) return;
+    const cli = await this.readCliStatus(selected);
+    if (!current()) return;
+    const scanStatus = selected.format === "markdown-v4" ? undefined : options.scanStatus === false ? this.scanStatus : await this.readScanStatus(selected);
+    if (!current()) return;
+    // Publish one complete result set. Obsolete loads/status commands never
+    // change even the cached last-valid snapshot or shared diagnostics.
     if (snapshot.kind === "ready") this.lastReady = snapshot;
     if (snapshot.kind === "markdown-v4" && snapshot.state.kind === "public_valid") this.lastMarkdownReady = { ...snapshot, state: snapshot.state };
-    await this.refreshCliStatus();
-    if (options.scanStatus !== false) await this.refreshScanStatus();
+    this.cliDiagnostic = cli.diagnostic;
+    this.hiddenConflictIds = cli.hiddenConflictIds;
+    this.scanStatus = scanStatus;
     this.renderSnapshot(snapshot, projects);
     this.scheduleScanPolling();
+    const delays = [250, 750, 2000];
+    const attempt = options.settlingAttempt ?? 0;
+    const unsettled = cli.diagnostic?.code === "sync_status_failed" || snapshot.kind === "markdown-v4-stale" || (snapshot.kind === "markdown-v4" && (snapshot.state.kind === "invalid" || snapshot.state.kind === "unverified"));
+    if (selected.format === "markdown-v4" && unsettled && attempt < delays.length) {
+      this.settlingTimer = window.setTimeout(() => {
+        this.settlingTimer = undefined;
+        if (current()) void this.refresh(projects, { settlingAttempt: attempt + 1 });
+      }, delays[attempt]);
+    }
+  }
+
+  private stopSettlingRetry(): void {
+    if (this.settlingTimer !== undefined) window.clearTimeout(this.settlingTimer);
+    this.settlingTimer = undefined;
+  }
+
+  private watchSelectedProject(): void {
+    this.disposeWatch?.();
+    const selected = this.selected;
+    if (!selected || this.closed) return;
+    this.disposeWatch = this.repository!.watch(selected, () => {
+      if (!this.closed && this.selected === selected) void this.refresh(this.projects);
+    });
   }
 
   private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
@@ -100,6 +146,9 @@ export class ProjectEvolutionView extends ItemView {
       if (projects.length > 1) browser.prepend(this.projectPicker(projects));
       if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
       if (this.cliDiagnostic && this.cliDiagnostic.code !== "cli_unavailable") browser.prepend(renderStatusBanner(this.cliDiagnostic));
+      const refresh = element("button", { text: "刷新同步状态", attrs: { type: "button", "data-action": "refresh-v4-status" } });
+      refresh.addEventListener("click", () => { void this.refresh(this.projects); });
+      browser.append(refresh);
       this.contentEl.append(browser);
       return;
     }
@@ -134,31 +183,30 @@ export class ProjectEvolutionView extends ItemView {
     this.contentEl.append(browser);
   }
 
-  private async refreshCliStatus(): Promise<void> {
-    this.cliDiagnostic = undefined;
-    this.hiddenConflictIds = [];
-    if (!this.selected) return;
+  private async readCliStatus(selected: ProjectDescriptor): Promise<{ diagnostic?: Diagnostic; hiddenConflictIds: string[] }> {
+    let diagnostic: Diagnostic | undefined;
+    let hiddenConflictIds: string[] = [];
     if (!this.runner) {
-      this.cliDiagnostic = { code: "cli_unavailable", message: "" };
-      return;
+      return { diagnostic: { code: "cli_unavailable", message: "" }, hiddenConflictIds };
     }
     try {
-      const status = await this.runner.status(this.selected.projectId);
-      if (this.selected.format === "markdown-v4") {
+      const status = await this.runner.status(selected.projectId);
+      if (selected.format === "markdown-v4") {
         // This status observes private sync state but carries no acceptance
         // proof for the independently loaded public snapshot.
-        if (status.conflicted > 0 || status.open_conflicts.length > 0 || status.hidden_conflict_ids.length > 0) this.cliDiagnostic = { code: "content_conflict", message: "请在原生 Markdown 中比较并修改双方内容，然后重新查询同步状态。" };
-        else if (status.machine_state === "blocked" || status.blocked > 0 || status.malformed > 0) this.cliDiagnostic = { code: "sync_status_failed", message: "" };
-        else if (status.pending_operations.length > 0 || status.machine_state === "pending") this.cliDiagnostic = { code: "markdown_sync_pending", message: "" };
-        return;
+        if (status.conflicted > 0 || status.open_conflicts.length > 0 || status.hidden_conflict_ids.length > 0) diagnostic = { code: "content_conflict", message: "请在原生 Markdown 中比较并修改双方内容，然后重新查询同步状态。" };
+        else if (status.machine_state === "blocked" || status.blocked > 0 || status.malformed > 0) diagnostic = { code: "sync_status_failed", message: "" };
+        else if (status.pending_operations.length > 0 || status.machine_state === "pending") diagnostic = { code: "markdown_sync_pending", message: "" };
+        return { diagnostic, hiddenConflictIds };
       }
-      this.hiddenConflictIds = Array.isArray(status.hidden_conflict_ids) ? status.hidden_conflict_ids.filter((value): value is string => typeof value === "string") : [];
-      if (this.hiddenConflictIds.length) this.cliDiagnostic = { code: "content_conflict", message: `待处理冲突 ${this.hiddenConflictIds.length} 个。` };
-      else if (status.migration === "required") this.cliDiagnostic = { code: "migration_required", message: "" };
-      else if (status.machine_state === "blocked") this.cliDiagnostic = { code: "machine_ledger_modified", message: "" };
+      hiddenConflictIds = Array.isArray(status.hidden_conflict_ids) ? status.hidden_conflict_ids.filter((value): value is string => typeof value === "string") : [];
+      if (hiddenConflictIds.length) diagnostic = { code: "content_conflict", message: `待处理冲突 ${hiddenConflictIds.length} 个。` };
+      else if (status.migration === "required") diagnostic = { code: "migration_required", message: "" };
+      else if (status.machine_state === "blocked") diagnostic = { code: "machine_ledger_modified", message: "" };
     } catch (error) {
-      this.cliDiagnostic = { code: error instanceof SyncStatusError && error.code === "cli_unavailable" ? "cli_unavailable" : "sync_status_failed", message: "" };
+      diagnostic = { code: error instanceof SyncStatusError && error.code === "cli_unavailable" ? "cli_unavailable" : "sync_status_failed", message: "" };
     }
+    return { diagnostic, hiddenConflictIds };
   }
 
   private actionFor(diagnostic: Diagnostic): (() => void) | undefined {
@@ -187,11 +235,10 @@ export class ProjectEvolutionView extends ItemView {
     await this.refresh(this.projects);
   }
 
-  private async refreshScanStatus(): Promise<void> {
-    this.scanStatus = undefined;
-    if (!this.runner || !this.selected) return;
+  private async readScanStatus(selected: ProjectDescriptor): Promise<ScanStatus | undefined> {
+    if (!this.runner) return undefined;
     try {
-      this.scanStatus = await this.runner.getScanStatus(this.selected.projectId);
+      return await this.runner.getScanStatus(selected.projectId);
     } catch {
       // 状态读取失败时保持既有状态
     }
@@ -241,9 +288,11 @@ export class ProjectEvolutionView extends ItemView {
     this.scanPollTimer = undefined;
     if (generation !== this.scanPollGeneration) return;
     const previous = this.scanStatus;
-    await this.refreshScanStatus();
-    if (generation !== this.scanPollGeneration) return;
-    const current = this.scanStatus;
+    const selected = this.selected;
+    if (!selected || this.closed) return;
+    const current = await this.readScanStatus(selected);
+    if (generation !== this.scanPollGeneration || this.closed || selected !== this.selected) return;
+    this.scanStatus = current;
     if (!current) {
       void this.pollScanJob(generation, round + 1);
       return;
@@ -309,11 +358,11 @@ export class ProjectEvolutionView extends ItemView {
       if (!next) return;
       this.stopScanPolling();
       this.scanStatus = undefined;
-      this.disposeWatch?.();
       this.selected = next;
       this.lastReady = undefined;
       this.lastMarkdownReady = undefined;
-      void this.refresh(projects).then(() => { this.disposeWatch = this.repository!.watch(next, () => { void this.refresh(projects); }); });
+      this.watchSelectedProject();
+      void this.refresh(projects);
     });
     wrapper.append(select);
     return wrapper;

@@ -77,6 +77,18 @@ func BuildBindingSuccessor(input BindingSuccessorInput) (BindingSuccessor, error
 	targetGeneration := "migration-" + strings.TrimPrefix(digestBytes(body), "sha256:")[:32]
 	successor := input.SourceManifest
 	successor.GenerationID = targetGeneration
+	if len(successor.SessionIndexMeasurements) == 0 {
+		// The authenticated seed's legacy fallback counts available summaries,
+		// not raw source records. Retain that supported coverage with unknown
+		// RecordCount; never infer raw totals from the public document.
+		successor.SessionIndexMeasurements = make([]memory.SessionIndexMeasurement, 0, len(seed.Sessions))
+		for _, entry := range seed.Sessions {
+			successor.SessionIndexMeasurements = append(successor.SessionIndexMeasurements, memory.SessionIndexMeasurement{
+				Provider: entry.Provider, SessionID: entry.SessionID,
+				Seen: entry.Coverage.Seen, Indexed: entry.Coverage.Indexed,
+			})
+		}
+	}
 	targetIndex, err := sessionindex.Build(sessionindex.BuildInput{
 		ProjectView: input.ProjectView, Manifest: successor,
 		SessionViews: input.SessionViews, GeneratedAt: generatedAt,

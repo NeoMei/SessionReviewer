@@ -266,6 +266,51 @@ func TestPrepareGenerationRejectsSessionIndexWithOmittedMeasurements(t *testing.
 
 func uint64PointerForTest(value uint64) *uint64 { return &value }
 
+func TestValidateSessionIndexSuccessorUsesCompleteGraphWithoutWrites(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-candidate")
+	manifest := fixture.manifest
+	manifest.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID, Seen: 1, Indexed: 1}}
+	generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: fixture.project, Manifest: manifest, SessionViews: map[sessionindex.SessionKey]*memory.SessionView{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID}: &fixture.session}, GeneratedAt: generatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SessionIndexDigest = index.Digest
+	before := snapshotPrivateTree(t, store.memory.Path)
+	if err := store.ValidateSessionIndexSuccessor(t.Context(), manifest, index); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func(*memory.GenerationManifest){
+		func(value *memory.GenerationManifest) { value.SessionIndexMeasurements = nil },
+		func(value *memory.GenerationManifest) {
+			value.SessionIndexMeasurements = []memory.SessionIndexMeasurement{{Provider: fixture.session.Provider, SessionID: fixture.session.SessionID, Seen: 2, Indexed: 2}}
+		},
+		func(value *memory.GenerationManifest) {
+			value.SessionViews = append([]memory.SessionViewDependency(nil), value.SessionViews...)
+			value.SessionViews[0].Digest = "sha256:" + strings.Repeat("f", 64)
+		},
+		func(value *memory.GenerationManifest) { value.ProjectViewDigest = "sha256:" + strings.Repeat("f", 64) },
+	} {
+		invalid := manifest
+		mutate(&invalid)
+		if err := store.ValidateSessionIndexSuccessor(t.Context(), invalid, index); err == nil {
+			t.Fatal("candidate overlay bypassed graph authentication")
+		}
+	}
+	if after := snapshotPrivateTree(t, store.memory.Path); !reflect.DeepEqual(before, after) {
+		t.Fatal("candidate graph verification mutated the private store")
+	}
+}
+
 func TestPrepareGenerationRejectsForgedRetainedFactsDigest(t *testing.T) {
 	dataRoot := t.TempDir()
 	store, err := Open(dataRoot, testProjectID)

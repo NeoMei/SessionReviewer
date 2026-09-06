@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceLeaf } from "obsidian";
 import { ProjectRepository, type MarkdownSnapshotReady } from "../src/data/repository";
 import type { VaultFile, VaultPort } from "../src/data/vault-port";
@@ -33,6 +33,128 @@ function configuredVault(): { vault: V4Vault; root: string } {
   return { vault, root: projectRoot };
 }
 
+afterEach(() => { vi.useRealTimers(); });
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+describe("v4 live refresh lifecycle", () => {
+  it("discards an older failed status after a newer clean refresh", async () => {
+    vi.useFakeTimers();
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    let calls = 0;
+    let finishOld!: () => void;
+    const runner = new CliRunner("/bin/session-reviewer", (_file, args, _options, callback) => {
+      if (args[0] !== "sync") return callback(new Error("no scan"), "", "");
+      calls++;
+      if (calls === 2) { finishOld = () => callback(Object.assign(new Error("transient"), { code: 1 }), "", ""); return; }
+      callback(null, JSON.stringify(syncStatusFixture("project-p")), "");
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository, undefined, runner);
+    await view.onOpen();
+    vault.write(`${projectRoot}/项目回顾.md`, fixture("review.md"));
+    await vi.advanceTimersByTimeAsync(151);
+    vault.write(`${projectRoot}/项目历史.md`, fixture("history.md"));
+    await vi.advanceTimersByTimeAsync(151);
+    finishOld();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.contentEl.textContent).not.toContain("同步状态验证失败");
+    expect(view.contentEl.textContent).toContain("待私有验证");
+    await view.onClose();
+  });
+
+  it.each(["newer snapshot", "project switch", "close"])("discards a delayed old snapshot after %s", async (event) => {
+    vi.useFakeTimers();
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    if (event === "project switch") vi.spyOn(repository, "discover").mockResolvedValue([project, { ...project, projectId: "project-q", root: "Projects/Q", name: "Q" }]);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository);
+    await view.onOpen();
+    vault.files.set(`${projectRoot}/项目回顾.md`, fixture("review.md").replace("项目目标夹具", "old delayed goal"));
+    const oldSnapshot = await repository.load(project);
+    const old = deferred<typeof oldSnapshot>();
+    vi.spyOn(repository, "load").mockImplementationOnce(() => old.promise);
+    vault.write(`${projectRoot}/项目回顾.md`, fixture("review.md").replace("项目目标夹具", "newer goal"));
+    await vi.advanceTimersByTimeAsync(151);
+    if (event === "newer snapshot") {
+      vault.write(`${projectRoot}/项目历史.md`, fixture("history.md"));
+      await vi.advanceTimersByTimeAsync(151);
+    } else if (event === "project switch") {
+      const picker = view.contentEl.querySelector<HTMLSelectElement>("select")!;
+      picker.value = "project-q";
+      picker.dispatchEvent(new Event("change"));
+      await vi.advanceTimersByTimeAsync(0);
+    } else await view.onClose();
+    old.resolve(oldSnapshot);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.contentEl.textContent).not.toContain("old delayed goal");
+    if (event === "newer snapshot") expect(view.contentEl.textContent).toContain("newer goal");
+    if (event === "project switch") expect(view.contentEl.querySelector<HTMLSelectElement>("select")!.value).toBe("project-q");
+    if (event === "close") expect(view.contentEl.childElementCount).toBe(0);
+    await view.onClose();
+  });
+
+  it("settles a transient private refusal without another public event and keeps retry bounded", async () => {
+    vi.useFakeTimers();
+    const { vault } = configuredVault();
+    const commands: string[] = [];
+    let failing = true;
+    const runner = new CliRunner("/bin/session-reviewer", (_file, args, _options, callback) => {
+      commands.push(args.join(" "));
+      if (failing) callback(Object.assign(new Error("publication still settling"), { code: 1 }), "", "");
+      else callback(null, JSON.stringify(syncStatusFixture("project-p")), "");
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), new ProjectRepository(vault), undefined, runner);
+    await view.onOpen();
+    expect(view.contentEl.textContent).toContain("同步状态验证失败");
+    failing = false;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(view.contentEl.textContent).not.toContain("同步状态验证失败");
+    expect(view.contentEl.textContent).toContain("待私有验证");
+    const refresh = view.contentEl.querySelector<HTMLButtonElement>("[data-action='refresh-v4-status']");
+    expect(refresh).not.toBeNull();
+    failing = true;
+    refresh!.click();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(view.contentEl.textContent).toContain("同步状态验证失败");
+    const settledCalls = commands.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(commands).toHaveLength(settledCalls);
+    failing = false;
+    view.contentEl.querySelector<HTMLButtonElement>("[data-action='refresh-v4-status']")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(view.contentEl.textContent).not.toContain("同步状态验证失败");
+    expect(view.contentEl.textContent).toContain("待私有验证");
+    expect(commands).toEqual(commands.map(() => "sync status --json --project-id project-p"));
+    expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4']")).toBeNull();
+    expect(vault.process).not.toHaveBeenCalled();
+    await view.onClose();
+  });
+
+  it("cancels settling retries when the view closes", async () => {
+    vi.useFakeTimers();
+    const { vault } = configuredVault();
+    const commands: string[] = [];
+    const runner = new CliRunner("/bin/session-reviewer", (_file, args, _options, callback) => {
+      commands.push(args.join(" "));
+      callback(Object.assign(new Error("persistent failure"), { code: 1 }), "", "");
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), new ProjectRepository(vault), undefined, runner);
+    await view.onOpen();
+    expect(view.contentEl.textContent).toContain("同步状态验证失败");
+    await view.onClose();
+    const closedCalls = commands.length;
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(commands).toHaveLength(closedCalls);
+    expect(view.contentEl.childElementCount).toBe(0);
+  });
+});
+
 describe("v4 project repository", () => {
   it.each([
     { label: "clean", patch: {}, code: undefined, text: "待私有验证" },
@@ -57,7 +179,7 @@ describe("v4 project repository", () => {
     expect(view.contentEl.textContent).not.toContain("/private/secret");
     if (code !== "ENOENT") expect(view.contentEl.textContent).not.toContain("CLI 不可用");
     expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4']")).toBeNull();
-    expect(view.contentEl.querySelectorAll("button")).toHaveLength(2);
+    expect(view.contentEl.querySelectorAll("button:not([data-action='refresh-v4-status'])")).toHaveLength(2);
     const snapshot = await repository.load((await repository.discover())[0]);
     expect(snapshot.kind === "markdown-v4" && snapshot.state.kind).toBe("public_valid");
     expect(vault.process).not.toHaveBeenCalled();
@@ -253,7 +375,7 @@ describe("v4 project repository", () => {
     await view.onOpen();
 
     expect(view.contentEl.textContent).toContain("wire_shape_invalid");
-    expect(view.contentEl.querySelectorAll("button")).toHaveLength(2);
+    expect(view.contentEl.querySelectorAll("button:not([data-action='refresh-v4-status'])")).toHaveLength(2);
     view.contentEl.querySelector<HTMLButtonElement>("button")!.click();
     expect(openLinkText).toHaveBeenCalledWith("Projects/V4/项目回顾.md", "", false);
     expect(editor.apply).not.toHaveBeenCalled();

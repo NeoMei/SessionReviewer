@@ -18,11 +18,12 @@ const (
 )
 
 type MarkdownDocument struct {
-	raw                []byte
-	blocks             []MarkdownBlock
-	trustedAnchorIDs   map[string]struct{}
-	trustedAnchorSpans []markdownAnchorSpan
-	authenticated      bool
+	raw                  []byte
+	blocks               []MarkdownBlock
+	trustedAnchorIDs     map[string]struct{}
+	trustedAnchorSpans   []markdownAnchorSpan
+	trustedIdentitySpans []markdownIdentitySpan
+	authenticated        bool
 }
 
 func ParseMarkdownDocument(relative string, raw []byte) (MarkdownDocument, error) {
@@ -74,8 +75,12 @@ func (d MarkdownDocument) SensitiveScanSource() ([]byte, error) {
 		markerSpan byte = iota
 		generatedSpan
 		anchorSpan
+		identitySpan
 	)
 	blockSpans := make([]sensitiveSpan, 0, len(d.blocks)*3)
+	for _, span := range d.trustedIdentitySpans {
+		blockSpans = append(blockSpans, sensitiveSpan{start: span.start, end: span.end, kind: identitySpan})
+	}
 	for _, block := range d.blocks {
 		blockSpans = append(blockSpans, sensitiveSpan{start: block.Start, end: block.ValueStart, kind: markerSpan, key: block.Key})
 		if block.Generated && block.ValueStart < block.ValueEnd {
@@ -109,6 +114,8 @@ func (d MarkdownDocument) SensitiveScanSource() ([]byte, error) {
 			out.Write(maskTrustedMarkdownAnchorIDs(d.raw[span.start:span.end], d.trustedAnchorIDs))
 		case anchorSpan:
 			out.WriteString(`<a id="validated-marker"></a>`)
+		case identitySpan:
+			out.WriteString("validated-identity")
 		}
 		cursor = span.end
 	}
@@ -162,6 +169,10 @@ func ParseMarkdownDocumentAgainstLedger(relative string, raw []byte, ledger Mach
 	}
 	if err := validateMarkdownFrontmatterIdentity(relative, raw, base); err != nil {
 		return MarkdownDocument{}, err
+	}
+	document.trustedIdentitySpans, err = markdownIdentitySpans(raw)
+	if err != nil {
+		return MarkdownDocument{}, markdownError(MarkdownFormatInvalid, relative, FieldKey{})
 	}
 	expectedPair, err := renderFreshMarkdown(base)
 	if err != nil {
@@ -225,6 +236,96 @@ func ParseMarkdownDocumentAgainstLedger(relative string, raw []byte, ledger Mach
 		}
 	}
 	return document, nil
+}
+
+type markdownIdentitySpan struct{ start, end int }
+
+// Called only after fixed frontmatter identities match the authenticated Base.
+// YAML positions select scalar values; spelling never selects a user field or
+// comment, even when it contains the very same identity.
+func markdownIdentitySpans(raw []byte) ([]markdownIdentitySpan, error) {
+	mapping, err := markdownFrontmatter(raw)
+	if err != nil {
+		return nil, err
+	}
+	starts := []int{bytes.IndexByte(raw, '\n') + 1}
+	for cursor := starts[0]; cursor < len(raw); {
+		end, next := markdownPhysicalLine(raw, cursor)
+		if bytes.Equal(raw[cursor:end], []byte("---")) {
+			break
+		}
+		starts = append(starts, next)
+		cursor = next
+	}
+	var spans []markdownIdentitySpan
+	for i := 0; i < len(mapping.Content); i += 2 {
+		key, node := mapping.Content[i].Value, mapping.Content[i+1]
+		if key != "id" && key != "project_id" && key != "generation_id" {
+			continue
+		}
+		if node.Line < 1 || node.Line > len(starts) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		start := starts[node.Line-1]
+		for col := 1; col < node.Column && start < len(raw); col++ {
+			_, size := utf8.DecodeRune(raw[start:])
+			start += size
+		}
+		// Explicit tags and anchors are syntax, not the scalar VALUE.
+		for start < len(raw) && (raw[start] == '!' || raw[start] == '&') {
+			for start < len(raw) && raw[start] != ' ' && raw[start] != '\t' && raw[start] != '\n' && raw[start] != '\r' {
+				start++
+			}
+			for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+				start++
+			}
+		}
+		if start >= len(raw) {
+			return nil, io.ErrUnexpectedEOF
+		}
+		end := start
+		switch raw[start] {
+		case '\'', '"':
+			quote := raw[start]
+			end = start + 1
+			for end < len(raw) {
+				if quote == '"' && raw[end] == '\\' {
+					end += 2
+					continue
+				}
+				if raw[end] == quote {
+					if quote == '\'' && end+1 < len(raw) && raw[end+1] == quote {
+						end += 2
+						continue
+					}
+					break
+				}
+				end++
+			}
+			if end >= len(raw) {
+				return nil, io.ErrUnexpectedEOF
+			}
+			start++ // Leave quotes and all outside comments intact.
+		case '|', '>':
+			// A safe ID contains no whitespace: an authenticated block scalar
+			// can therefore have only one nonblank content line.
+			_, start = markdownPhysicalLine(raw, start)
+			for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+				start++
+			}
+			end = start + len(node.Value)
+			if end > len(raw) || string(raw[start:end]) != node.Value {
+				return nil, io.ErrUnexpectedEOF
+			}
+		default:
+			end = start + len(node.Value)
+			if end > len(raw) || string(raw[start:end]) != node.Value {
+				return nil, io.ErrUnexpectedEOF
+			}
+		}
+		spans = append(spans, markdownIdentitySpan{start, end})
+	}
+	return spans, nil
 }
 
 func parseMarkdownAnchorLineID(anchor string) (string, bool) {

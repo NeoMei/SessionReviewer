@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
@@ -123,6 +124,62 @@ func TestMarkdownDocumentSensitiveSourceKeepsKnownAnchorIDInHumanCode(t *testing
 	}
 	if bytes.Contains(source, []byte("项目历史.md#"+known+"\n")) {
 		t.Fatal("authenticated generated reference was not masked")
+	}
+}
+
+func TestMarkdownSensitiveSourceMasksOnlyAuthenticatedIdentityValues(t *testing.T) {
+	const identity = "migration-0123456789abcdef0123456789abcdef"
+	ledger := sharedMarkdownLedger(t)
+	ledger.GenerationID = identity
+	ledger.DocumentProjection.PresentationBase.GenerationID = identity
+	for i := range ledger.DocumentProjection.PresentationBase.Timeline {
+		ledger.DocumentProjection.PresentationBase.Timeline[i].GenerationID = identity
+	}
+	body, err := RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = DecodeLedger(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := RenderMarkdown(ledger.DocumentProjection.PresentationBase, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spelling := range []string{identity, "'" + identity + "'", "\"" + identity + "\"", "|-\n  " + identity, ">-\n  " + identity} {
+		for _, newline := range []string{"\n", "\r\n"} {
+			raw := bytes.Replace(pair.Review, []byte("generation_id: "+identity), []byte("\"generation_id\": "+spelling), 1)
+			raw = bytes.ReplaceAll(raw, []byte("\n"), []byte(newline))
+			document, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", raw, ledger)
+			if err != nil {
+				t.Fatalf("parse %q: %v", spelling, err)
+			}
+			source, err := document.SensitiveScanSource()
+			if err != nil || len(redact.Default().Text(string(source)).Findings) != 0 {
+				t.Fatalf("authenticated identity scanned: spelling=%q err=%v", spelling, err)
+			}
+		}
+	}
+	for name, add := range map[string]func([]byte) []byte{
+		"comment": func(raw []byte) []byte {
+			return bytes.Replace(raw, []byte("generation_id: "+identity), []byte("generation_id: "+identity+" # "+identity), 1)
+		},
+		"custom": func(raw []byte) []byte {
+			return bytes.Replace(raw, []byte("---\n"), []byte("---\ncustom: "+identity+"\n"), 1)
+		},
+		"human": func(raw []byte) []byte { return append(raw, []byte("\n"+identity+"\n")...) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			document, err := ParseMarkdownDocumentAgainstLedger("项目回顾.md", add(bytes.Clone(pair.Review)), ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := document.SensitiveScanSource()
+			if err != nil || !bytes.Contains(source, []byte(identity)) || len(redact.Default().Text(string(source)).Findings) == 0 {
+				t.Fatalf("human identity lookalike escaped scan: %v", err)
+			}
+		})
 	}
 }
 

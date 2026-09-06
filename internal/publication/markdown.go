@@ -292,17 +292,18 @@ func RecoverMarkdownLocked(ctx context.Context, opts Options, owner *publication
 			}
 			if accepted {
 				complete = true
-			} else {
-				return rollback()
 			}
 		}
-		if !complete && intent.RequiresPointer && intent.Stage == StageVerified {
+		if !complete && intent.RequiresPointer && (intent.Stage == StageVerified || intent.Stage == StageBaseCommitted) {
 			store, err := memorystore.Open(opts.DataRoot, opts.ProjectID)
 			if err != nil {
 				return err
 			}
 			defer store.Close()
 			published, _, err := store.LoadPublished()
+			if err != nil && !errors.Is(err, memorystore.ErrNoPublishedGeneration) {
+				return err
+			}
 			if err == nil && markdownPointerCrossed(intent, published) {
 				complete = true
 			}

@@ -188,6 +188,9 @@ func TestOldV4ExistingIndexMigrationKeepsAuthenticatedGenerationAndIndex(t *test
 func TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor(t *testing.T) {
 	projectID := "project-old-v4-unbound-index"
 	dataRoot, projectRoot, vaultRoot, mapping, sourceManifest, legacy := setupPublishEnvWithIndex(t, projectID, false)
+	if len(sourceManifest.SessionViews) == 0 || len(sourceManifest.SessionIndexMeasurements) != 0 {
+		t.Fatal("fixture must be genuinely legacy and nonempty")
+	}
 	store, err := memorystore.Open(dataRoot, projectID)
 	if err != nil {
 		t.Fatal(err)
@@ -251,12 +254,16 @@ func TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor(t *tes
 		t.Fatal(err)
 	}
 	options := syncproject.MigrationOptions{Options: syncproject.Options{ProjectID: projectID, CWD: projectRoot, DataDir: dataRoot, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI}, Mode: syncproject.MigrationDryRun}
+	beforePreview := snapshotMarkdownTree(t, dataRoot) + snapshotMarkdownTree(t, projectRoot) + snapshotMarkdownTree(t, vaultRoot)
 	dry, err := syncproject.RunMigration(t.Context(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if dry.Preview.GenerationID == sourceManifest.GenerationID || dry.Preview.SourceGenerationID != sourceManifest.GenerationID || dry.Preview.TargetManifestDigest == dry.Preview.SourceManifestDigest {
 		t.Fatalf("missing binding did not produce a successor: %+v", dry.Preview)
+	}
+	if after := snapshotMarkdownTree(t, dataRoot) + snapshotMarkdownTree(t, projectRoot) + snapshotMarkdownTree(t, vaultRoot); after != beforePreview {
+		t.Fatal("preview wrote state")
 	}
 	options.Mode, options.ExpectedPreviewDigest = syncproject.MigrationConfirm, dry.Preview.PreviewDigest
 	preBeginCrash := errors.New("simulated crash after prepared advance")
@@ -274,11 +281,13 @@ func TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor(t *tes
 	}
 	func() {
 		defer func() {
-			if recovered := recover(); !errors.Is(recovered.(error), preBeginCrash) {
+			if recovered, ok := recover().(error); !ok || !errors.Is(recovered, preBeginCrash) {
 				t.Fatalf("prepared advance panic=%v", recovered)
 			}
 		}()
-		_, _ = syncproject.RunMigration(t.Context(), options)
+		if _, err := syncproject.RunMigration(t.Context(), options); err != nil {
+			t.Fatalf("confirm failed before crash seam: %v", err)
+		}
 	}()
 	state, err := publicationstate.OpenReadOnly(dataRoot, projectID)
 	if err != nil {
@@ -304,6 +313,9 @@ func TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor(t *tes
 	if closeErr := store.Close(); loadErr != nil || closeErr != nil || publishedID != dry.Preview.GenerationID || publishedManifest.SessionIndexDigest == "" {
 		t.Fatalf("published=%q manifest=%+v load=%v close=%v", publishedID, publishedManifest, loadErr, closeErr)
 	}
+	if len(publishedManifest.SessionIndexMeasurements) != 1 || publishedManifest.SessionIndexMeasurements[0].RecordCount != nil || publishedManifest.SessionIndexMeasurements[0].Seen != 1 || publishedManifest.SessionIndexMeasurements[0].Indexed != 1 {
+		t.Fatalf("legacy coverage fabricated or missing: %+v", publishedManifest.SessionIndexMeasurements)
+	}
 	if sourceManifestAfter, err := os.ReadFile(sourceManifestPath); err != nil || string(sourceManifestAfter) != string(sourceManifestBefore) {
 		t.Fatalf("immutable source manifest changed: err=%v", err)
 	}
@@ -313,5 +325,26 @@ func TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor(t *tes
 	accepted, err := reviewv4.LoadProjection(readVault(reviewv2.ReviewRelativePath), readVault(reviewv2.HistoryRelativePath), readVault(reviewv2.MachineLedgerRelativePath), readVault(sessionIndexRelativePath))
 	if err != nil || accepted.Review.GenerationID != publishedID {
 		t.Fatalf("Vault successor generation=%q err=%v", accepted.Review.GenerationID, err)
+	}
+	if status, err := syncproject.StatusMarkdown(t.Context(), options.Options); err != nil || status.InSync != 1 {
+		t.Fatalf("migrated status=%+v err=%v", status, err)
+	}
+	syncOpts := options.Options
+	syncOpts.RecoverMarkdown = func(ctx context.Context, owner *publicationlock.Owner) error {
+		return RecoverMarkdownLocked(ctx, Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}, owner)
+	}
+	syncOpts.PublishMarkdown = func(ctx context.Context, edit syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) error {
+		_, err := PublishMarkdownEditLocked(ctx, Options{ProjectID: projectID, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}, edit, owner)
+		return err
+	}
+	reviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	if err := os.WriteFile(reviewPath, replaceMarkdownFieldForTest(t, readTestFile(t, reviewPath), "project-overview", "goal", accepted.Review.CurrentState.Goal, "after legacy migration"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncproject.RunMarkdown(t.Context(), syncOpts); err != nil {
+		t.Fatalf("subsequent migration sync: %v", err)
+	}
+	if status, err := syncproject.StatusMarkdown(t.Context(), options.Options); err != nil || status.InSync != 1 {
+		t.Fatalf("reopened status=%+v err=%v", status, err)
 	}
 }

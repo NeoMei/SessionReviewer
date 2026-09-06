@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -420,7 +421,7 @@ func TestMarkdownSameGenerationFourFileRecoveryRequiresExactReceipt(t *testing.T
 	}
 }
 
-func TestMarkdownNewGenerationBaseCommittedWithoutReceiptRemainsBlocked(t *testing.T) {
+func TestMarkdownNewGenerationBaseCommittedWithoutReceiptRecoversForward(t *testing.T) {
 	projectID := "project-new-generation-mixed"
 	dataRoot, _, _, mapping, manifest, legacy := setupPublishEnvWithIndex(t, projectID, true)
 	plan := validMarkdownPublicationPlanForTest(t, dataRoot, manifest, legacy)
@@ -468,10 +469,161 @@ func TestMarkdownNewGenerationBaseCommittedWithoutReceiptRemainsBlocked(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, acceptedErr := state.Accepted()
-	if closeErr := state.Close(); acceptedErr == nil || closeErr != nil {
-		t.Fatalf("mixed pointer/rolled-back publication became readable: accepted=%v close=%v", acceptedErr, closeErr)
+	receipt, acceptedErr := state.Accepted()
+	if closeErr := state.Close(); acceptedErr != nil || closeErr != nil || receipt.GenerationID != manifest.GenerationID {
+		t.Fatalf("durable pointer did not recover acceptance: receipt=%+v accepted=%v close=%v", receipt, acceptedErr, closeErr)
 	}
+}
+
+func TestMarkdownNewGenerationCancellationConvergesThroughNormalRecovery(t *testing.T) {
+	for _, point := range []publishCheckpoint{checkpointBeforePointerCommit, checkpointAfterPointerCommit, checkpointBeforeReceiptCommit, checkpointAfterReceiptCommit} {
+		for _, reopen := range []string{"sync", "publisher"} {
+			t.Run(string(point)+"/"+reopen, func(t *testing.T) {
+				env := setupMarkdownPublication(t, "project-generation-cancel")
+				scan := nextMarkdownGenerationForTest(t, env)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				opts := env.publishOptions()
+				opts.checkpoint = func(stage publishCheckpoint, _, _ string) error {
+					if stage == point {
+						cancel()
+					}
+					return nil
+				}
+				if _, err := PublishMarkdownScan(ctx, opts, scan); !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected cancellation, got %v", err)
+				}
+				wantGeneration := scan.ExpectedGenerationID
+				if point == checkpointBeforePointerCommit {
+					wantGeneration = env.manifest.GenerationID
+				}
+				store, err := memorystore.OpenReadOnly(env.dataRoot, env.projectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				published, _, err := store.LoadPublished()
+				if closeErr := store.Close(); err != nil || closeErr != nil || published != wantGeneration {
+					t.Fatalf("actual pointer boundary: got=%s want=%s err=%v close=%v", published, wantGeneration, err, closeErr)
+				}
+				j, err := OpenJournal(env.dataRoot, env.projectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				intent, err := j.Load()
+				if closeErr := j.Close(); err != nil || closeErr != nil {
+					t.Fatal(errors.Join(err, closeErr))
+				}
+				if (point == checkpointAfterPointerCommit || point == checkpointBeforeReceiptCommit) && intent.Stage == StageCommitted {
+					t.Fatal("post-pointer cancellation terminalized inconsistent rollback")
+				}
+				if reopen == "publisher" && point != checkpointBeforePointerCommit && point != checkpointAfterReceiptCommit {
+					reopenOpts := env.publishOptions()
+					reopenOpts.PreparedGeneration, reopenOpts.Plan = scan.ExpectedGenerationID, scan.Plan
+					if _, err := Publish(t.Context(), reopenOpts); err != nil {
+						t.Fatalf("publisher reopen: %v", err)
+					}
+				} else {
+					owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+					if err != nil {
+						t.Fatal(err)
+					}
+					err = RecoverMarkdownLocked(t.Context(), env.publishOptions(), owner)
+					if releaseErr := owner.Release(); err != nil || releaseErr != nil {
+						t.Fatal(errors.Join(err, releaseErr))
+					}
+				}
+				for _, file := range scan.Plan.Files {
+					want := file.Desired
+					if point == checkpointBeforePointerCommit {
+						want = file.Expected
+					}
+					for _, path := range []string{filepath.Join(env.projectRoot, filepath.FromSlash(file.Relative)), filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, file.Relative)))} {
+						if !bytes.Equal(readTestFile(t, path), want) {
+							t.Fatalf("recovery public bytes mismatch: %s", path)
+						}
+					}
+				}
+				receipt, base := loadAcceptedReceiptForTest(t, env), loadMarkdownBaseForTest(t, env)
+				if receipt.GenerationID != wantGeneration || receipt.BaseDigest != base.ContentHash || loadMarkdownProjectionForTest(t, env).Review.GenerationID != wantGeneration {
+					t.Fatal("receipt/Base/public generation diverged")
+				}
+				if status, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false)); err != nil || status.InSync != 1 {
+					t.Fatalf("normal status after recovery: %+v err=%v", status, err)
+				}
+			})
+		}
+	}
+}
+
+func nextMarkdownGenerationForTest(t *testing.T, env markdownPublicationTestEnv) syncproject.MarkdownSyncPlan {
+	t.Helper()
+	store, err := memorystore.Open(env.dataRoot, env.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	prepared, manifest, err := store.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.GenerationID = "generation-next"
+	manifest.SessionIndexDigest = ""
+	body, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view memory.ProjectView
+	if err := json.Unmarshal(body, &view); err != nil {
+		t.Fatal(err)
+	}
+	views := make(map[sessionindex.SessionKey]*memory.SessionView)
+	for _, dependency := range manifest.SessionViews {
+		body, err := store.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var session memory.SessionView
+		if err := json.Unmarshal(body, &session); err != nil {
+			t.Fatal(err)
+		}
+		views[sessionindex.SessionKey{Provider: dependency.Provider, SessionID: dependency.SessionID}] = &session
+	}
+	generatedAt, err := time.Parse(time.RFC3339Nano, manifest.CreatedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: view, Manifest: manifest, SessionViews: views, GeneratedAt: generatedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SessionIndexDigest, err = store.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AdvancePrepared(prepared, manifest); err != nil {
+		t.Fatal(err)
+	}
+	input := presentation.ProjectInput{ProjectView: view, GenerationID: manifest.GenerationID, Revision: 1}
+	output, err := presentation.Project(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := presentation.Render(input, output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := validMarkdownPublicationPlanForTest(t, env.dataRoot, manifest, legacy)
+	vaultExpected := make(map[string][]byte)
+	for i := range plan.Files {
+		file := &plan.Files[i]
+		file.Expected, file.ExpectedExists = readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(file.Relative))), true
+		vaultExpected[file.Relative] = readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, file.Relative))))
+	}
+	indexBody, err := sessionindex.Render(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return syncproject.MarkdownSyncPlan{Plan: plan, Index: indexBody, ExpectedGenerationID: manifest.GenerationID, ExpectedIndexDigest: index.Digest, VaultExpected: vaultExpected, ExpectedReceiptRevision: loadAcceptedReceiptForTest(t, env).RevisionID, ExpectedBaseDigest: loadMarkdownBaseForTest(t, env).ContentHash}
 }
 
 func TestMarkdownEditRejectsVaultPreimageAndIndexChanges(t *testing.T) {
