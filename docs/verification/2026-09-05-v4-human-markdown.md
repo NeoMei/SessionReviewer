@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-## Current follow-up — remaining debt cleanup in progress
+## Current follow-up — final review blocked, not debt-free
 
 The user explicitly removed cross-platform CI and real legacy-project migration
 from this batch's delivery gates, choosing separately initiated rescans for old
@@ -14,6 +14,15 @@ Approved follow-up Tasks 13–16 start from 5f70657: fix the three known Minor d
 indexed bulk field edits), verify cold-start no-runtime behavior, independently
 review and rerun the complete local gate. Earlier completed-batch results below
 remain bound to their original source; they are not this follow-up's evidence.
+
+Current source: `90e8e62fbed365a45295953d1b978c51cbfd31b4`. Original read-diagnostic,
+YAML-binding and bulk-index debts are fixed and task-reviewed; cold-start native
+and automated coverage is established. Final fix re-review nevertheless found
+two new Important flow-YAML regressions, independently reproduced below. The
+branch is not approved for integration and remaining technical debt is not cleared.
+The prescribed single final repair/re-review wave is exhausted; no second wave
+was silently started. A new bounded continuation is required for N1/N2, followed
+by complete frozen-source verification. Scope exclusions remain unchanged.
 
 ### Task 13 — read diagnostics closed
 
@@ -97,7 +106,7 @@ quoted/tagged YAML bindings and comments. No production project was scanned.
 Cold-start automated coverage and the new final frozen-source full gate remain
 pending. These measurements are not a whole-repository completion or release claim.
 
-### Task 16 — cold-start automated candidate, review pending
+### Task 16 — cold-start source and native evidence closed
 
 Tests-only commit5affeb3 adds real discoverRuntime all-candidate absence and
 second-call freshness checks, then exercises plugin onload→registered real
@@ -108,7 +117,8 @@ The initial focused run was GREEN (2files/6tests): no product defect was
 reproduced. First full check found a missing test-only type annotation; after
 that correction, full plugin lint/test/build passed19files/242tests.
 
-Independent review is pending. The rebuilt production plugin has SHA256
+Independent review approved the coverage; its cleanup Minor was fixed by5f1835e
+and scoped re-review closed it without new findings. The production plugin has SHA256
 2372870c681bda0d2b6ae87bfbff2d893afcc0172e05953bf1af9fd41cb84306,
 identical to the previously verified real no-runtime native fixture. There are
 no plugin source/dependency changes since b28f099, nor Go source/module changes
@@ -130,7 +140,8 @@ fixed bindings from the intermediate merge and fail its final parse. This refuse
 a legitimate edit before publication; it is not evidence of corrupted files
 being published. Binding-only YAML tests did not exercise this merge boundary.
 A bounded source-span correction with authenticated sync/status/reopen regression
-is in progress; no entire-mapping normalization or validator weakening is allowed.
+was implemented in90e8e62; its remaining re-review blockers are recorded below.
+No entire-mapping normalization or validator weakening was allowed.
 
 The preliminary full Go command at the same clean HEAD passed (approximately
 312.9s;59 package result lines,41 cached and3 no-test packages). The ordinary
@@ -138,6 +149,62 @@ large-Session test was not excluded; scan reported a cached package result.
 Commands2–7 were not launched after the review finding. Therefore the full
 ordered gate is incomplete, not passed. A fresh ordered sequence will follow
 the reviewed correction. No merge, push, release or production mutation occurred.
+
+### Final fix and scoped re-review — N1/N2 remain open
+
+Commit90e8e62 changes only the v4 frontmatter index/rewriter and adjacent
+syncdoc/publication tests. Actual RED reproduced the original invalid merged
+document in both direct source-unit merge and authenticated StatusMarkdown.
+Focused GREEN covered first/middle/last custom edits, nested values, multiline
+flow, CRLF/comments, add/remove, authenticated status→sync→reopen, no-op and
+invalid-edit no-write protection. A Chinese custom value precedes revision and
+generation in the integration fixture. Complete uncached affected
+syncdoc/syncproject/publication tests passed (0.734s/50.490s/112.631s).
+
+The single scoped re-review marked original I1 addressed but found two new
+Important blockers, not optional polish:
+
+| ID | Confirmed regression | Required next correction |
+|---|---|---|
+| N1 | The new flow scanner treats an internal quote in a plain scalar (`team's`) as a quoted token, and rejects a valid trailing comma (`custom_owner: keep,}`). Even no-op ParseV4/status can fail. | Use YAML-consistent token boundaries and handle the optional final separator without normalizing untouched bytes. Cover plain internal quotes, trailing commas and actual merge/no-op paths. |
+| N2 | Removing the last two consecutive custom entries emits overlapping byte edits and fails its overlap guard. | Derive delimiter ownership from surviving entries or coalesce adjacent removals; cover deleted suffixes and preserve all surviving bindings. |
+
+The controller independently ran an ignored, read-only Go probe against the
+checked-in synthetic Markdown/ledger fixture at90e8e62. It performed no fixture
+or accepted-state write. Exact final probe output:
+
+```text
+control: codec=<nil> sync=<nil>
+plain_apostrophe: codec=<nil> sync=invalid sync document: invalid v4 Markdown flow frontmatter entry boundary
+trailing_comma: codec=<nil> sync=invalid sync document: invalid v4 Markdown flow frontmatter entry boundary
+adjacent_delete_input: <nil>
+adjacent_delete_merge: invalid sync document: overlapping v4 Markdown flow frontmatter edits
+```
+
+An initial diagnostic attempt passed generic Units instead of SemanticUnits to
+the deletion API and correctly received `machine-reserved field changed`; it
+was corrected before the N2 result above. Neither rejection demonstrates corrupt
+publication: current guards refuse the work. The valid-input compatibility
+regressions remain real and were not downgraded or silently deferred.
+
+The latest clean90e8e62 `go test ./...` completed with exit0:59 package lines,
+42 cached,3 no-test packages,14 fresh timings; zerotoken325.962s. The ordinary
+large-Session test was not excluded (scan package result was cached). Commands
+2–7 of the ordered final gate were not started after the scoped findings, so
+vet/tidy/exactGateA/race/diff/plugin are not a completed final sequence on this
+candidate. Earlier plugin242/full-source receipts remain source-specific.
+
+The controller's final candidate CLI build has SHA256
+1bfa731ad4bf9c6908f19fe2e5846fab553f6feb1b4d4044188f6d5cb35f2caa.
+The existing synthetic154-session status→scan→sync→status repeat still passed,
+with zero issues/review tokens and all eight public bytes/mtimes unchanged.
+This block-style/no-op fixture does not exercise or refute N1/N2. Plugin bundle
+and cold-start fixture file hashes remain identical to the prior native receipt.
+
+No merge, push, release, installed CLI/plugin replacement or real-project scan
+was performed. The named worktree, diagnostics, review reports and experimental
+fixtures are preserved. A new bounded repair batch is needed; original Session
+Index Tasks4–7 remain separate unfinished feature work.
 
 ## Historical checkpoint — preceding local corrective batch complete
 
