@@ -152,6 +152,114 @@ func TestV4ShellCustomFrontmatterUsesCRLFForChangedAndAddedUnits(t *testing.T) {
 	}
 }
 
+func TestV4ShellFlowCustomFrontmatterChangesPreserveEntryBoundaries(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	tests := []struct {
+		name, before, after string
+	}{
+		{
+			name:   "first quoted entry",
+			before: `{"custom_owner": "保留", id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+			after:  `{"custom_owner": "修改", id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+		},
+		{
+			name:   "middle nested entry",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, custom_owner: {name: "保留", roles: [writer, reviewer], url: https://example.test/a#part}, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, custom_owner: {name: "修改", roles: [writer, reviewer], url: 'https://example.test/a#part'}, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+		},
+		{
+			name:   "last entry",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: '保留'}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: "generation-\x31", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: '修改'}`,
+		},
+		{
+			name:   "multiline CRLF with comments",
+			before: "{\r\n  id: review-project-p, # identity\r\n  entity_type: project-review,\r\n  project_id: project-p,\r\n  schema_version: 4,\r\n  custom_owner: \"保留\", # human owner\r\n  document_format: review-markdown-v1,\r\n  revision: !!int +1,\r\n  generation_id: \"generation-\\x31\",\r\n  minimum_reader_version: 0.4.1,\r\n  minimum_writer_version: 0.4.1\r\n}",
+			after:  "{\r\n  id: review-project-p, # identity\r\n  entity_type: project-review,\r\n  project_id: project-p,\r\n  schema_version: 4,\r\n  custom_owner: \"修改\", # human owner\r\n  document_format: review-markdown-v1,\r\n  revision: !!int +1,\r\n  generation_id: \"generation-\\x31\",\r\n  minimum_reader_version: 0.4.1,\r\n  minimum_writer_version: 0.4.1\r\n}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			projectRaw := replaceV4TestFrontmatter(t, raw, []byte(test.before))
+			vaultRaw := replaceV4TestFrontmatter(t, raw, []byte(test.after))
+			project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			vault, err := ParseV4("项目回顾.md", vaultRaw, ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			units := project.SemanticUnits()
+			key := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+			units[key] = vault.SemanticUnits()[key]
+			edited, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := edited.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, vaultRaw) {
+				t.Fatalf("flow custom edit changed bytes outside the selected entry\ngot:\n%s\nwant:\n%s", got, vaultRaw)
+			}
+			if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+				t.Fatalf("flow custom edit cannot be reparsed: %v", err)
+			}
+		})
+	}
+}
+
+func TestV4ShellFlowCustomFrontmatterCanBeAddedAndRemoved(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	flow := `{id: review-project-p, entity_type: project-review, custom_remove: old, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep}`
+	projectRaw := replaceV4TestFrontmatter(t, raw, []byte(flow))
+	project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	units := project.SemanticUnits()
+	delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_remove"})
+	units[UnitKey{Kind: UnitFrontmatter, Name: "custom_team"}] = Unit{Present: true, Value: []byte("codec\n")}
+	edited, err := project.WithSemanticUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := edited.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFlow := `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep, custom_team: codec}`
+	want := replaceV4TestFrontmatter(t, raw, []byte(wantFlow))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("flow add/remove changed unrelated entry bytes\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+		t.Fatalf("flow add/remove cannot be reparsed: %v", err)
+	}
+}
+
+func replaceV4TestFrontmatter(t *testing.T, raw, replacement []byte) []byte {
+	t.Helper()
+	frontmatter, _, err := splitFrontmatter(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := bytes.Index(raw, frontmatter)
+	if start < 0 {
+		t.Fatal("frontmatter source not found")
+	}
+	result := make([]byte, 0, len(raw)-len(frontmatter)+len(replacement)+1)
+	result = append(result, raw[:start]...)
+	result = append(result, replacement...)
+	if len(replacement) == 0 || replacement[len(replacement)-1] != '\n' {
+		result = append(result, '\n')
+	}
+	result = append(result, raw[start+len(frontmatter):]...)
+	return result
+}
+
 func TestV4StablePlaceholdersPreserveFormalIdentityAcrossPhysicalReordering(t *testing.T) {
 	original, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
 	parsed, err := reviewv4.ParseMarkdownDocument("项目回顾.md", raw)

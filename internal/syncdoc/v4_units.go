@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -24,7 +26,7 @@ type v4BlockState struct {
 }
 
 type v4FrontmatterSpan struct {
-	start, end int
+	start, end, delimiter int
 }
 
 type v4DocumentState struct {
@@ -36,6 +38,9 @@ type v4DocumentState struct {
 	shellMachine       UnitSet
 	semantic           UnitSet
 	frontmatter        map[UnitKey]v4FrontmatterSpan
+	frontmatterOrder   []UnitKey
+	frontmatterFlow    bool
+	frontmatterClose   int
 	physicalToSemantic map[string][]byte
 	physicalPrefix     []byte
 	frontStart         int
@@ -187,21 +192,145 @@ func (state *v4DocumentState) indexFrontmatter(source []byte) error {
 	keys, starts := make([]UnitKey, 0, len(state.shell.frontmatter.Content)/2), make([]int, 0, len(state.shell.frontmatter.Content)/2)
 	for index := 0; index+1 < len(state.shell.frontmatter.Content); index += 2 {
 		keyNode := state.shell.frontmatter.Content[index]
-		if keyNode.Line < 1 || keyNode.Line > len(lineStarts) {
+		start, ok := v4YAMLNodeOffset(frontmatter, lineStarts, keyNode)
+		if !ok {
 			return invalidDocument("invalid v4 Markdown frontmatter key position")
 		}
 		keys = append(keys, UnitKey{Kind: UnitFrontmatter, Name: keyNode.Value})
-		starts = append(starts, state.frontStart+lineStarts[keyNode.Line-1])
+		starts = append(starts, state.frontStart+start)
 	}
+	state.frontmatterOrder = append([]UnitKey(nil), keys...)
 	state.frontmatter = make(map[UnitKey]v4FrontmatterSpan, len(keys))
+	if state.shell.frontmatter.Style&yaml.FlowStyle != 0 {
+		return state.indexFlowFrontmatter(source, frontmatter, lineStarts, keys, starts)
+	}
 	for index, key := range keys {
 		end := state.frontEnd
 		if index+1 < len(starts) {
 			end = starts[index+1]
 		}
-		state.frontmatter[key] = v4FrontmatterSpan{start: starts[index], end: end}
+		state.frontmatter[key] = v4FrontmatterSpan{start: starts[index], end: end, delimiter: end}
 	}
 	return nil
+}
+
+func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, lineStarts []int, keys []UnitKey, starts []int) error {
+	open, ok := v4YAMLNodeOffset(frontmatter, lineStarts, state.shell.frontmatter)
+	if !ok || open >= len(frontmatter) || frontmatter[open] != '{' {
+		return invalidDocument("invalid v4 Markdown flow frontmatter position")
+	}
+	state.frontmatterFlow = true
+	frontmatterOpen := state.frontStart + open
+	for index, key := range keys {
+		valueNode := state.shell.frontmatter.Content[index*2+1]
+		valueStart, ok := v4YAMLNodeOffset(frontmatter, lineStarts, valueNode)
+		if !ok {
+			return invalidDocument("invalid v4 Markdown flow frontmatter value position")
+		}
+		delimiter, ok := v4FlowEntryDelimiter(frontmatter, valueStart)
+		if !ok || index+1 < len(keys) && frontmatter[delimiter] != ',' || index+1 == len(keys) && frontmatter[delimiter] != '}' {
+			return invalidDocument("invalid v4 Markdown flow frontmatter entry boundary")
+		}
+		end := delimiter
+		for end > valueStart && (frontmatter[end-1] == ' ' || frontmatter[end-1] == '\t' || frontmatter[end-1] == '\r' || frontmatter[end-1] == '\n') {
+			end--
+		}
+		absoluteDelimiter := state.frontStart + delimiter
+		state.frontmatter[key] = v4FrontmatterSpan{
+			start:     starts[index],
+			end:       state.frontStart + end,
+			delimiter: absoluteDelimiter,
+		}
+		if index+1 == len(keys) {
+			state.frontmatterClose = absoluteDelimiter
+		}
+	}
+	if state.frontmatterClose < frontmatterOpen || state.frontmatterClose >= state.frontEnd || source[state.frontmatterClose] != '}' {
+		return invalidDocument("invalid v4 Markdown flow frontmatter close")
+	}
+	return nil
+}
+
+func v4YAMLNodeOffset(source []byte, lineStarts []int, node *yaml.Node) (int, bool) {
+	if node == nil || node.Line < 1 || node.Line > len(lineStarts) || node.Column < 1 {
+		return 0, false
+	}
+	offset := lineStarts[node.Line-1]
+	for column := 1; column < node.Column; column++ {
+		if offset >= len(source) || source[offset] == '\r' || source[offset] == '\n' {
+			return 0, false
+		}
+		_, size := utf8.DecodeRune(source[offset:])
+		if size == 0 {
+			return 0, false
+		}
+		offset += size
+	}
+	return offset, offset < len(source)
+}
+
+func v4FlowEntryDelimiter(source []byte, start int) (int, bool) {
+	braceDepth, bracketDepth := 0, 0
+	inSingle, inDouble, inComment := false, false, false
+	for index := start; index < len(source); index++ {
+		value := source[index]
+		if inComment {
+			if value == '\n' {
+				inComment = false
+			}
+			continue
+		}
+		if inSingle {
+			if value == '\'' {
+				if index+1 < len(source) && source[index+1] == '\'' {
+					index++
+				} else {
+					inSingle = false
+				}
+			}
+			continue
+		}
+		if inDouble {
+			if value == '\\' {
+				index++
+			} else if value == '"' {
+				inDouble = false
+			}
+			continue
+		}
+		switch value {
+		case '#':
+			if index == start || source[index-1] == ' ' || source[index-1] == '\t' || source[index-1] == '\r' || source[index-1] == '\n' {
+				inComment = true
+			}
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '{':
+			braceDepth++
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth == 0 {
+				return 0, false
+			}
+			bracketDepth--
+		case '}':
+			if braceDepth == 0 && bracketDepth == 0 {
+				return index, true
+			}
+			if braceDepth == 0 {
+				return 0, false
+			}
+			braceDepth--
+		case ',':
+			if braceDepth == 0 && bracketDepth == 0 {
+				return index, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func v4MachineFrontmatter(name string) bool {
@@ -352,6 +481,9 @@ func cloneV4DocumentState(state *v4DocumentState) *v4DocumentState {
 	for key, span := range state.frontmatter {
 		copy.frontmatter[key] = span
 	}
+	copy.frontmatterOrder = append([]UnitKey(nil), state.frontmatterOrder...)
+	copy.frontmatterFlow = state.frontmatterFlow
+	copy.frontmatterClose = state.frontmatterClose
 	for token, replacement := range state.physicalToSemantic {
 		copy.physicalToSemantic[token] = bytes.Clone(replacement)
 	}

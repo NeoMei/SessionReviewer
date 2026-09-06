@@ -81,6 +81,121 @@ func TestMarkdownEditPublishesThreeFilesAndNoOpDoesNotRepublish(t *testing.T) {
 	}
 }
 
+func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.T) {
+	env := setupFlowMarkdownPublication(t, "project-markdown-flow-custom")
+	projectReviewPath := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	vaultReviewPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
+	projectIndexPath := filepath.Join(env.projectRoot, filepath.FromSlash(sessionIndexRelativePath))
+	vaultIndexPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, sessionIndexRelativePath)))
+	beforeProjectReview := readTestFile(t, projectReviewPath)
+	beforeIndex := map[string][]byte{
+		projectIndexPath: readTestFile(t, projectIndexPath),
+		vaultIndexPath:   readTestFile(t, vaultIndexPath),
+	}
+	beforeIndexModTime := make(map[string]time.Time, len(beforeIndex))
+	for path := range beforeIndex {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeIndexModTime[path] = info.ModTime()
+	}
+	vaultEdit := bytes.Replace(readTestFile(t, vaultReviewPath), []byte("custom_owner: '保留'"), []byte("custom_owner: '修改'"), 1)
+	if bytes.Equal(vaultEdit, readTestFile(t, vaultReviewPath)) {
+		t.Fatal("flow custom fixture was not edited")
+	}
+	if err := os.WriteFile(vaultReviewPath, vaultEdit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false))
+	if err != nil {
+		t.Fatalf("authenticated flow status: %v", err)
+	}
+	if len(status.Pending) != 6 || status.InSync != 0 || status.Conflicted != 0 || status.Malformed != 0 {
+		t.Fatalf("flow custom status = %+v", status)
+	}
+
+	publishes := 0
+	options := env.syncOptions(false)
+	options.RecoverMarkdown = func(ctx context.Context, owner *publicationlock.Owner) error {
+		return RecoverMarkdownLocked(ctx, env.publishOptions(), owner)
+	}
+	options.PublishMarkdown = func(ctx context.Context, edit syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) error {
+		publishes++
+		_, publishErr := PublishMarkdownEditLocked(ctx, env.publishOptions(), edit, owner)
+		return publishErr
+	}
+	if _, err := syncproject.RunMarkdown(context.Background(), options); err != nil {
+		t.Fatalf("authenticated flow sync: %v", err)
+	}
+	if publishes != 1 {
+		t.Fatalf("flow custom publisher calls = %d, want 1", publishes)
+	}
+	expectedReview := bytes.Replace(vaultEdit, []byte("revision: !!int +1,"), []byte("revision: !!int 2,"), 1)
+	for _, path := range []string{projectReviewPath, vaultReviewPath} {
+		if got := readTestFile(t, path); !bytes.Equal(got, expectedReview) {
+			t.Fatalf("flow custom publication changed unrelated bytes in %s\ngot:\n%s\nwant:\n%s", path, got, expectedReview)
+		}
+	}
+	if !bytes.Contains(readTestFile(t, projectReviewPath), []byte("[\u94fe\u63a5](https://example.test/custom)")) {
+		t.Fatal("flow custom publication changed unrelated Markdown link")
+	}
+	for path, before := range beforeIndex {
+		if got := readTestFile(t, path); !bytes.Equal(got, before) {
+			t.Fatalf("human flow edit changed index bytes: %s", path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(beforeIndexModTime[path]) {
+			t.Fatalf("human flow edit changed index mtime: %s", path)
+		}
+	}
+	accepted := loadMarkdownProjectionForTest(t, env)
+	if accepted.Review.GenerationID != env.manifest.GenerationID || accepted.Review.Revision != 2 {
+		t.Fatalf("flow edit changed generation or wrong revision: generation=%q revision=%d", accepted.Review.GenerationID, accepted.Review.Revision)
+	}
+	if status, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false)); err != nil || status.InSync != 1 {
+		t.Fatalf("flow status after sync: %+v err=%v", status, err)
+	}
+	if _, err := syncproject.RunMarkdown(context.Background(), options); err != nil {
+		t.Fatalf("flow no-op reopen: %v", err)
+	}
+	if publishes != 1 {
+		t.Fatalf("flow no-op republished: calls=%d", publishes)
+	}
+
+	beforeInvalidProject := readTestFile(t, projectReviewPath)
+	beforeInvalidReceipt := loadAcceptedReceiptForTest(t, env)
+	beforeInvalidBase := loadMarkdownBaseForTest(t, env)
+	invalidVault := bytes.Replace(readTestFile(t, vaultReviewPath), []byte("custom_owner: '修改'"), []byte("custom_owner: [invalid"), 1)
+	if bytes.Equal(invalidVault, readTestFile(t, vaultReviewPath)) {
+		t.Fatal("flow invalid fixture was not edited")
+	}
+	if err := os.WriteFile(vaultReviewPath, invalidVault, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false)); err == nil {
+		t.Fatal("invalid flow edit produced authenticated status")
+	}
+	if _, err := syncproject.RunMarkdown(context.Background(), options); err == nil {
+		t.Fatal("invalid flow edit was synchronized")
+	}
+	if publishes != 1 || !bytes.Equal(readTestFile(t, projectReviewPath), beforeInvalidProject) ||
+		!reflect.DeepEqual(loadAcceptedReceiptForTest(t, env), beforeInvalidReceipt) ||
+		!reflect.DeepEqual(loadMarkdownBaseForTest(t, env), beforeInvalidBase) {
+		t.Fatal("invalid flow edit changed accepted state")
+	}
+	if !bytes.Equal(readTestFile(t, vaultReviewPath), invalidVault) {
+		t.Fatal("invalid flow edit was overwritten")
+	}
+	if bytes.Equal(beforeProjectReview, readTestFile(t, projectReviewPath)) {
+		t.Fatal("valid flow custom edit did not reach Project")
+	}
+}
+
 func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-scan-cas")
 	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
@@ -1114,6 +1229,70 @@ func setupMarkdownPublication(t *testing.T, projectID string) markdownPublicatio
 		t.Fatalf("initial Markdown Publish: %v", err)
 	}
 	return markdownPublicationTestEnv{projectID: projectID, dataRoot: dataRoot, projectRoot: projectRoot, vaultRoot: vaultRoot, mapping: mapping, manifest: manifest, plan: plan}
+}
+
+func setupFlowMarkdownPublication(t *testing.T, projectID string) markdownPublicationTestEnv {
+	t.Helper()
+	dataRoot, projectRoot, vaultRoot, mapping, manifest, legacy := setupPublishEnvWithIndex(t, projectID, true)
+	plan := validMarkdownPublicationPlanForTest(t, dataRoot, manifest, legacy)
+	byRelative := make(map[string]*presentation.FilePlan, len(plan.Files))
+	for index := range plan.Files {
+		byRelative[plan.Files[index].Relative] = &plan.Files[index]
+	}
+	for _, document := range []struct {
+		relative, id, entity string
+	}{
+		{reviewv2.ReviewRelativePath, "review-" + projectID, "project-review"},
+		{reviewv2.HistoryRelativePath, "history-" + projectID, "project-history"},
+	} {
+		file := byRelative[document.relative]
+		if file == nil {
+			t.Fatalf("missing flow fixture file %s", document.relative)
+		}
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
+		file.Desired = replaceMarkdownFrontmatterForTest(t, file.Desired, []byte(flow))
+		if document.relative == reviewv2.ReviewRelativePath {
+			file.Desired = bytes.Replace(file.Desired, []byte("---\n# 项目回顾"), []byte("---\n自定义段落和 [链接](https://example.test/custom) 必须保留。\n\n```yaml\ncustom: code-block\n```\n\n# 项目回顾"), 1)
+		}
+	}
+	ledgerFile := byRelative[reviewv2.MachineLedgerRelativePath]
+	if ledgerFile == nil {
+		t.Fatal("missing flow fixture ledger")
+	}
+	ledger, err := reviewv4.DecodeLedger(ledgerFile.Desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.ReviewSHA256 = sha256Hex(byRelative[reviewv2.ReviewRelativePath].Desired)
+	ledger.HistorySHA256 = sha256Hex(byRelative[reviewv2.HistoryRelativePath].Desired)
+	ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
+	ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+	ledgerFile.Desired, err = reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Publish(context.Background(), Options{ProjectID: projectID, PreparedGeneration: manifest.GenerationID, Plan: plan, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}); err != nil {
+		t.Fatalf("initial flow Markdown Publish: %v", err)
+	}
+	return markdownPublicationTestEnv{projectID: projectID, dataRoot: dataRoot, projectRoot: projectRoot, vaultRoot: vaultRoot, mapping: mapping, manifest: manifest, plan: plan}
+}
+
+func replaceMarkdownFrontmatterForTest(t *testing.T, raw, replacement []byte) []byte {
+	t.Helper()
+	firstEnd := bytes.IndexByte(raw, '\n') + 1
+	if firstEnd == 0 {
+		t.Fatal("missing opening frontmatter line")
+	}
+	closingOffset := bytes.Index(raw[firstEnd:], []byte("---\n"))
+	if closingOffset < 0 {
+		t.Fatal("missing closing frontmatter line")
+	}
+	closingStart := firstEnd + closingOffset
+	result := make([]byte, 0, len(raw)-(closingStart-firstEnd)+len(replacement))
+	result = append(result, raw[:firstEnd]...)
+	result = append(result, replacement...)
+	result = append(result, raw[closingStart:]...)
+	return result
 }
 
 func validMarkdownPublicationPlanForTest(t *testing.T, dataRoot string, manifest memory.GenerationManifest, legacy presentation.RenderPlan) presentation.RenderPlan {

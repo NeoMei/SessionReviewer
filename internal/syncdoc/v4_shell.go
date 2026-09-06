@@ -42,6 +42,9 @@ func (d Document) rewriteV4Shell(nextShell Document, units UnitSet) ([]byte, err
 }
 
 func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error) {
+	if d.v4.frontmatterFlow {
+		return d.rewriteV4FlowFrontmatter(units, limit)
+	}
 	raw := d.v4.shell.raw
 	newline := v4FrontmatterNewline(raw[:d.v4.bodyStart])
 	parts := make([][]byte, 0, len(d.v4.frontmatter)+2)
@@ -75,6 +78,109 @@ func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error)
 	}
 	parts = append(parts, raw[d.v4.frontEnd:d.v4.bodyStart])
 	return joinV4Bounded(parts, limit)
+}
+
+type v4SourceEdit struct {
+	start, end int
+	value      []byte
+}
+
+func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, error) {
+	raw := d.v4.shell.raw
+	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
+	edits := make([]v4SourceEdit, 0, len(d.v4.frontmatter)+1)
+	for index, key := range d.v4.frontmatterOrder {
+		seen[key] = true
+		span := d.v4.frontmatter[key]
+		unit, present := units[key]
+		if !present || !unit.Present {
+			if index+1 < len(d.v4.frontmatterOrder) {
+				next := d.v4.frontmatter[d.v4.frontmatterOrder[index+1]]
+				edits = append(edits, v4SourceEdit{start: span.start, end: next.start})
+			} else if index > 0 {
+				previous := d.v4.frontmatter[d.v4.frontmatterOrder[index-1]]
+				edits = append(edits, v4SourceEdit{start: previous.delimiter, end: span.end})
+			} else {
+				return nil, invalidDocument("v4 Markdown flow frontmatter cannot be empty")
+			}
+			continue
+		}
+		if original, found := d.v4.shellAll[key]; found && unitsEqual(original, unit) {
+			continue
+		}
+		encoded, err := encodeV4FlowFrontmatterUnit(key, unit)
+		if err != nil {
+			return nil, err
+		}
+		edits = append(edits, v4SourceEdit{start: span.start, end: span.end, value: encoded})
+	}
+	additions := sortedFrontmatterNames(units, seen)
+	if len(additions) != 0 {
+		var addition bytes.Buffer
+		for _, name := range additions {
+			key := UnitKey{Kind: UnitFrontmatter, Name: name}
+			encoded, err := encodeV4FlowFrontmatterUnit(key, units[key])
+			if err != nil {
+				return nil, err
+			}
+			addition.WriteString(", ")
+			addition.Write(encoded)
+		}
+		edits = append(edits, v4SourceEdit{start: d.v4.frontmatterClose, end: d.v4.frontmatterClose, value: addition.Bytes()})
+	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
+	parts := make([][]byte, 0, len(edits)*2+1)
+	cursor := 0
+	for _, edit := range edits {
+		if edit.start < cursor || edit.end < edit.start || edit.end > len(raw) {
+			return nil, invalidDocument("overlapping v4 Markdown flow frontmatter edits")
+		}
+		parts = append(parts, raw[cursor:edit.start], edit.value)
+		cursor = edit.end
+	}
+	parts = append(parts, raw[cursor:d.v4.bodyStart])
+	return joinV4Bounded(parts, limit)
+}
+
+func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
+	encoded, err := encodeV4FrontmatterUnit(key, unit)
+	if err != nil {
+		return nil, err
+	}
+	mapping, err := decodeFrontmatter(encoded)
+	if err != nil || len(mapping.Content) != 2 {
+		return nil, invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
+	}
+	mapping.Style |= yaml.FlowStyle
+	var out bytes.Buffer
+	encoder := yaml.NewEncoder(&out)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(mapping); err != nil {
+		return nil, invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, invalidDocument("cannot finish v4 Markdown flow frontmatter unit")
+	}
+	source := out.Bytes()
+	flowMapping, err := decodeFrontmatter(source)
+	if err != nil || len(flowMapping.Content) != 2 {
+		return nil, invalidDocument("cannot decode encoded v4 Markdown flow frontmatter unit")
+	}
+	lineStarts := []int{0}
+	for index, value := range source {
+		if value == '\n' && index+1 < len(source) {
+			lineStarts = append(lineStarts, index+1)
+		}
+	}
+	start, ok := v4YAMLNodeOffset(source, lineStarts, flowMapping.Content[0])
+	if !ok {
+		return nil, invalidDocument("cannot locate encoded v4 Markdown flow frontmatter unit")
+	}
+	delimiter, ok := v4FlowEntryDelimiter(source, start)
+	if !ok {
+		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+	}
+	return bytes.Clone(bytes.TrimRight(source[start:delimiter], " \t\r\n")), nil
 }
 
 func v4FrontmatterNewline(source []byte) []byte {
