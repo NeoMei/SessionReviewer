@@ -278,6 +278,14 @@ func buildMarkdownPlanWithReadSet(pin *MappingPin, options Options, report *sync
 			vault:   map[string]string{markdownReviewRelative: bareHash(vaultReview), markdownHistoryRelative: bareHash(vaultHistory), markdownLedgerRelative: bareHash(vaultLedger), markdownIndexRelative: bareHash(vaultIndex)},
 		}
 	}
+	// Per-document structure checks do not apply the human-field/domain rules.
+	// Validate both actual pairs before a conflict can short-circuit the merged
+	// draft validation (for example, clearing a confirmed conclusion is invalid).
+	for _, pair := range []reviewv4.MarkdownPair{{Review: projectReview, History: projectHistory}, {Review: vaultReview, History: vaultHistory}} {
+		if _, err := reviewv4.ParseMarkdownDraft(pair, ledger); err != nil {
+			return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
+		}
+	}
 
 	mergeOne := func(relative string, base, projectBytes, vaultBytes []byte) ([]byte, error) {
 		baseDoc, err := syncdoc.ParseV4(relative, base, ledger)

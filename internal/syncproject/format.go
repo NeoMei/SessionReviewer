@@ -24,6 +24,17 @@ const (
 // DetectFormat validates enough of the complete four-file combination to keep
 // malformed or partial state from being guessed as authenticated Markdown.
 func DetectFormat(ctx context.Context, options Options) (_ ProjectionFormat, retErr error) {
+	return detectFormat(ctx, options, false)
+}
+
+// DetectStatusFormat preserves the legacy Engine's diagnostic reads even when
+// its ledger or human documents are malformed. It never classifies a partial
+// v4 projection as legacy merely because full format validation failed.
+func DetectStatusFormat(ctx context.Context, options Options) (_ ProjectionFormat, retErr error) {
+	return detectFormat(ctx, options, true)
+}
+
+func detectFormat(ctx context.Context, options Options, diagnosticStatus bool) (_ ProjectionFormat, retErr error) {
 	if ctx == nil {
 		return "", errors.New("sync context is required")
 	}
@@ -34,6 +45,15 @@ func DetectFormat(ctx context.Context, options Options) (_ ProjectionFormat, ret
 	defer func() { retErr = errors.Join(retErr, pin.Close()) }()
 	if err := pin.verify(options); err != nil {
 		return "", err
+	}
+	if diagnosticStatus {
+		format, known, err := legacyStatusFormat(pin)
+		if err != nil {
+			return "", err
+		}
+		if known {
+			return format, pin.verify(options)
+		}
 	}
 	read := func(relative string) ([]byte, error) {
 		body, found, err := pin.project.ReadRegularOptional(relative, 64<<20)
@@ -77,7 +97,7 @@ func DetectFormat(ctx context.Context, options Options) (_ ProjectionFormat, ret
 		}
 		reviewBody, reviewErr := read(reviewv2.ReviewRelativePath)
 		historyBody, historyErr := read(reviewv2.HistoryRelativePath)
-		if reviewErr == nil && historyErr == nil {
+		if !diagnosticStatus && reviewErr == nil && historyErr == nil {
 			if _, err := reviewv2.LoadV3Bytes(reviewBody, historyBody, ledgerBody); err == nil {
 				return ProjectionV3, nil
 			}
@@ -97,6 +117,9 @@ func DetectFormat(ctx context.Context, options Options) (_ ProjectionFormat, ret
 	version, err := reviewv2.DetectVersionExpected(pin.project.Path, pin.project.Info())
 	if err != nil {
 		return "", err
+	}
+	if diagnosticStatus {
+		return "", errors.New("status projection is not a known legacy or validated v4 format")
 	}
 	switch version {
 	case reviewv2.VersionLegacy:

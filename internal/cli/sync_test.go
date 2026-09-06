@@ -1085,7 +1085,7 @@ func newCLIOldV4Fixture(t *testing.T) cliSyncFixture {
 	return newCLIV4PublicationFixture(t, false)
 }
 
-func newCLIV4PublicationFixture(t *testing.T, publishMarkdown bool) cliSyncFixture {
+func newCLIV4PublicationFixture(t *testing.T, publishMarkdown bool, customize ...func(*reviewv4.Presentation)) cliSyncFixture {
 	t.Helper()
 	root := t.TempDir()
 	fixture := cliSyncFixture{project: filepath.Join(root, "project"), vault: filepath.Join(root, "vault"), data: filepath.Join(root, "data"), projectID: "project-markdown-cli"}
@@ -1182,6 +1182,21 @@ func newCLIV4PublicationFixture(t *testing.T, publishMarkdown bool) cliSyncFixtu
 		t.Fatal(err)
 	}
 	oldAccepted.Review.CurrentState.Goal = "authenticated Markdown migration"
+	for _, edit := range customize {
+		edit(&oldAccepted.Review)
+	}
+	if len(customize) != 0 {
+		events := make([]reviewv2.Event, 0, len(oldAccepted.Review.Timeline))
+		for _, milestone := range oldAccepted.Review.Timeline {
+			events = append(events, reviewv2.Event{ID: milestone.ID, GenerationID: milestone.GenerationID, OccurredAt: milestone.OccurredAt, Kind: milestone.Kind, Title: milestone.Title, Summary: milestone.Summary, Meaning: "milestone", Why: "status fixture", Next: "verify readonly status", DecisionIDs: milestone.DecisionIDs, Changes: []string{"confirmed conclusion"}, Results: []string{"fixture accepted"}})
+		}
+		oldV4.History, err = reviewv2.RenderHistoryV3(fixture.projectID, oldAccepted.Review.Revision, manifest.GenerationID, events)
+		if err != nil {
+			t.Fatal(err)
+		}
+		oldAccepted.Ledger.HistorySHA256 = testBareSHA(oldV4.History)
+		oldAccepted.Ledger.SyncHashes.HistorySHA256 = oldAccepted.Ledger.HistorySHA256
+	}
 	oldV4.Review, err = strictjson.Encode(oldAccepted.Review)
 	if err != nil {
 		t.Fatal(err)

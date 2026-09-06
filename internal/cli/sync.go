@@ -147,7 +147,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	if mode == "status" {
 		options := syncproject.Options{ProjectID: mapping.ID, CWD: *cwd, DataDir: filepath.Dir(filepath.Dir(projectData)), GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI}
 		// Status must classify without invoking the recovery-before-format write path.
-		format, err := syncproject.DetectFormat(context.Background(), options)
+		format, err := syncproject.DetectStatusFormat(context.Background(), options)
 		if err != nil {
 			return writeDiagnostic(stderr, "sync", err)
 		}
