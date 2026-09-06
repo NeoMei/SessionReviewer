@@ -97,6 +97,24 @@ quoted/tagged YAML bindings and comments. No production project was scanned.
 Cold-start automated coverage and the new final frozen-source full gate remain
 pending. These measurements are not a whole-repository completion or release claim.
 
+### Task 16 — cold-start automated candidate, review pending
+
+Tests-only commit5affeb3 adds real discoverRuntime all-candidate absence and
+second-call freshness checks, then exercises plugin onload→registered real
+ProjectEvolutionView with a public-valid v4 fixture. Both native document
+buttons work, the view remains pending-private/read-only with a clear runtime
+diagnostic, and no structure/acceptance/scan or Vault-write path is invoked.
+The initial focused run was GREEN (2files/6tests): no product defect was
+reproduced. First full check found a missing test-only type annotation; after
+that correction, full plugin lint/test/build passed19files/242tests.
+
+Independent review is pending. The rebuilt production plugin has SHA256
+2372870c681bda0d2b6ae87bfbff2d893afcc0172e05953bf1af9fd41cb84306,
+identical to the previously verified real no-runtime native fixture. There are
+no plugin source/dependency changes since b28f099, nor Go source/module changes
+since b347274. Thus native UI and synthetic CLI evidence have explicit code
+equivalence; the final full-suite run is still required.
+
 ## Historical checkpoint — preceding local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
