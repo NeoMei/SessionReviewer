@@ -64,7 +64,7 @@ a94ee8eb1b4a018bb73f38720abce2188490ce375609e27bf41d333cba67cd1d.
 An initial unsupported sync --json invocation exited2 before mutation; the
 successful sync used the documented plain command. No real project was scanned.
 
-## Current checkpoint — local corrective batch complete
+## Historical checkpoint — preceding local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
 on unchanged clean `da3d2df332d9b923b226fe6120e4a0249cd6cf00` (one docs-only
