@@ -2,7 +2,42 @@
 
 Date: 2026-09-06
 
-## Current follow-up — authorized N1/N2 repair in progress, not debt-free
+## Current follow-up — flow repair reviewed; two final-review defects remain
+
+Latest frozen candidate `5d6c39884a8e2395c5fc8fd5785c3c37ee1bb3bd` passed
+all seven prescribed local commands in order, without retries or source changes:
+ordinary full Go including large Session (6m10s, 38 cached packages), vet,
+tidy -diff, exact Gate A (31.860s), race with only the prescribed large-Session
+exclusion (11m08s, 35 cached packages, no race diagnostics), diff --check,
+and plugin check (242 tests / 19 files, lint/typecheck/build).
+
+Task 17's flow findings and four scoped fix rounds are closed. The final broad
+review nevertheless found two Important defects, so this is not a debt-free
+or integration-ready candidate:
+
+1. Block-style custom frontmatter edits drop untouched leading/inter-key
+   comments. Controller probes independently confirm both inputs parse and
+   merge/render succeeds while the comment disappears. No publication of those
+   probe results was attempted.
+2. An unreadable review candidate escapes discovery through an unguarded second
+   read and blocks unrelated valid projects. An actual isolated Obsidian 1.13.7
+   experiment reproduced this with one copied file denied by an exact sandbox
+   rule: both candidates remained in the inventory, adapter read returned EPERM,
+   and the project view stayed on “正在发现项目…”. No pageerror event was observed;
+   no unhandled-error event is claimed. Normal project files remained unchanged.
+
+The single combined final corrective wave is now authorized within this batch.
+Source writes were held until all seven commands completed and final HEAD/status
+were verified. Corrected source will require scoped review, a fresh complete
+gate and repeated native acceptance because the plugin bundle changes.
+
+The same `5d6c398` CLI (SHA256
+`ea76d886812bcd5276951292faf1fa65c316447968508ba480ff6bb1abb600f2`)
+passed explicit synthetic status -> scan -> sync -> status: 154/154 Sessions,
+zero issues/tokens, unchanged generation, all eight file hashes/mtimes stable.
+This no-op path does not exercise either new defect. Only the owned isolated
+Obsidian process was stopped after the failure reproduction. No production
+Vault/config/installed plugin change, real rescan, merge, push or release.
 
 The user explicitly removed cross-platform CI and real legacy-project migration
 from this batch's delivery gates, choosing separately initiated rescans for old
@@ -33,7 +68,7 @@ valid Go cache, demonstrating its missing coverage rather than refuting the
 defects. New regression-first repair, independent review and the complete local
 gate are in progress; no completion or integration is implied by this approval.
 
-Latest Task 17 checkpoint: source `c095253`, fourth task fix round in progress.
+Earlier Task 17 checkpoint: source `c095253`, fourth task fix round in progress.
 The second round (`fea199e`) corrected surviving-comment/deletion composition
 and no-space comments. Its two new findings (plain `#` text mistaken for a
 comment and a deleted value's comment retained) were corrected by `c095253`'s
