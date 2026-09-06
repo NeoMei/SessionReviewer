@@ -2,6 +2,19 @@
 
 Date: 2026-09-06
 
+## Current follow-up — remaining debt cleanup in progress
+
+The user explicitly removed cross-platform CI and real legacy-project migration
+from this batch's delivery gates, choosing separately initiated rescans for old
+projects. Those checks are excluded by decision, not marked passed. No rescan,
+deletion or overwrite of real human content is authorized by this change.
+
+Approved follow-up Tasks 13–16 start from 5f70657: fix the three known Minor debts
+(safe file-specific read diagnostics, YAML binding presentation preservation,
+indexed bulk field edits), verify cold-start no-runtime behavior, independently
+review and rerun the complete local gate. Earlier completed-batch results below
+remain bound to their original source; they are not this follow-up's evidence.
+
 ## Current checkpoint — local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
