@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Prerequisite: the original `2026-09-04-obsidian-context-gate-0-contracts.md` contracts are implemented; ordinary v4 publication additionally requires the approved Markdown supplement and implementation plan `2026-09-05-v4-human-markdown-codec.md`. The supplement is planned, not implemented.
+- Prerequisite: the original `2026-09-04-obsidian-context-gate-0-contracts.md` contracts are implemented; ordinary v4 publication additionally requires the Markdown supplement `2026-09-05-v4-human-markdown-codec.md`. Its implementation/local regression completed on 2026-09-06 at source6ad0c05; platform/real-data delivery gates and three Minor items remain explicitly open.
 - Begin from released 0.3.5 v3 (`ea5b1ba`) in the isolated implementation worktree and preserve the original dirty user changes. No destructive Git cleanup.
 - `session-index.json` is complete or not published. Limits are 65,536 entries and 64 MiB; overflow returns `session_index_capacity_exceeded` and retains the previous accepted generation.
 - Index order is `started_at desc nulls last, provider asc, session_id asc`. Identity is always `(project_id, provider, session_id)`.
@@ -140,7 +140,7 @@ doc.Coverage = calculateCoverage(doc.Sessions)
 
 ### Task 3: Publish and recover the four-file atomic set
 
-**Status:** pending. The user approved the full Markdown supplement on 2026-09-05; plan approval is not implementation evidence.
+**Status:** implementation and local regression complete (2026-09-06), not final product acceptance. Source6ad0c05 / frozen full-gate HEADda3d2df passed all seven ordered commands, independent reviews, and the authorized native experimental-Vault repeat. See `docs/verification/2026-09-05-v4-human-markdown.md`. Three Minor debts, native platform CI, applicable real old-data migration/classification prerequisites and cold-start no-runtime discovery remain open; no merge/push/release. The checklist below retains the original requirements; this status is the verified checkpoint.
 
 **Implementation owner:** `docs/superpowers/plans/2026-09-05-v4-human-markdown-codec.md`, tasks M1–M9. That plan contains exact file ownership, interfaces, RED/GREEN tests, migration prerequisites and failure-recovery gates. Its M6 produces `presentation.RenderV4(V4RenderInput) (RenderPlan, error)` using the current cumulative index and the existing transaction engine.
 

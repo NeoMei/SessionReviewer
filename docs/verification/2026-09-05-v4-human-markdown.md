@@ -2,6 +2,26 @@
 
 Date: 2026-09-06
 
+## Current checkpoint — local corrective batch complete
+
+Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
+on unchanged clean `da3d2df332d9b923b226fe6120e4a0249cd6cf00` (one docs-only
+commit after that source). All seven local gates passed. Task reviews and the
+single final scoped review closed all Important findings; three Minor remain.
+Final-source native experiment passed already-open-view edit/sync recovery,
+conflict/generated-region refusal, runtime-loss/manual-refresh recovery and
+154-Session zero-token scan with paired hashes and complete history.
+
+This completes this corrective batch's implementation and local verification,
+not final delivery or all technical-debt cleanup. Native platform CI, applicable
+real legacy-project migration, cold-start discovery with every runtime absent,
+and the three Minor items remain open. No merge, push, release or production
+plugin/Vault replacement occurred. The branch and experiment evidence are kept.
+Details and exact final receipts are at the end; earlier entries below are
+historical, including failed candidates, and are not the current verdict.
+
+## Historical M9 starting checkpoint
+
 Source commit: `4357dc15e582a85e289e1a8a7decc08092c38956`
 
 Status: `DONE_WITH_CONCERNS` (not deliverable)
@@ -490,3 +510,56 @@ confirmation, private graph reload and subsequent edit/sync/status. Prior Minor
 M1–M3 remain deferred. The single scoped final re-review, final full ordered
 sequence and native same-open-view acceptance are pending; this is not a final
 green gate or integration claim.
+
+### Final reviewed-source gate — all local checks passed
+
+The single scoped re-review of f841907..6ad0c05 found I1–I4 all addressed,
+with no new Critical/Important/Minor finding. Original three Minor items remain.
+The exact ordered sequence then completed on clean, unchanged da3d2df:
+
+| Command | Result |
+|---|---|
+| `go test ./...` | Exit0; includes ordinary large-Session test; publication274.995s, scan284.201s |
+| `go vet ./...` | Exit0 |
+| `go mod tidy -diff` | Exit0 |
+| `go test ./test/zerotoken -run '^TestGateAZeroTokenCore$' -count=1` | Exit0,32.520s; baseline not changed |
+| `go test -race -timeout 30m ./... -skip '^TestFoundationLargeSessionReachesBoundedPacketAfterStreamingPast20MiB$'` | Exit0; no race report; scan1009.167s, zerotoken573.792s |
+| `git diff --check` | Exit0 |
+| Plugin `npm run check` | Exit0;19 files/223 tests, lint, typecheck and build |
+
+Only the exact named test is excluded under race; its ordinary run is included
+above. Previous failed frozen runs remain recorded rather than rewritten.
+
+Final native Obsidian1.13.7 used only the authorized synthetic Vault and CLI
+source6ad0c05 (SHA256 `3d3c52b08669049ed1231f900a68c7f65291a8664216187366a828cb054218fa`),
+with plugin bundle SHA256
+`36a0c94b87736fcee84932e4f3f46780bb7a83ef4bf0fb1ed0ccddcb8d18b8f1`.
+The previous experiment files were backed up before replacement. The same open
+project view showed a native goal edit, then automatically cleared pending/error
+after explicit fixture-bound sync. No new-view workaround was used. It stayed
+public-valid/pending-private and read-only, never claiming private acceptance.
+
+Controlled dual-sided conflict displayed correctly and refused sync while
+preserving both drafts and accepted ledger. A generated evidence modification
+refused sync and remained visibly stale. Losing only the already-selected
+experiment runtime preserved native history access; restoring it and using
+`刷新同步状态` recovered the same view. All controlled edits and runtime paths
+were restored. This is runtime-loss recovery, not all-candidates-absent cold start.
+
+The final explicit scan returned154 source/154 indexed/0 issues/0 review tokens,
+same generation, and identical Project/Vault four-file hashes. Native history
+still showed the sixteenth accepted synthetic milestone. After close/reopen,
+reading mode showed the preserved human conclusion and separate source/evidence
+section. Final accepted experiment revision8 has goal `Native settled status goal`.
+Its matched pair hashes are review
+`057e3d7ac1279f310396512ce744cfa4af6fffc31e1ad72e68ae0eba63431483`,
+history `92f1ba1cce60a6f118154b33d47de96e3d531fd081d45ddac0d3cb37b43c02a9`,
+ledger `a72aa55b01c7855d5eaf3e135191f1e4e9e1e734ac1fbbdbae1e54ad1d6334d3`,
+index `a94ee8eb1b4a018bb73f38720abce2188490ce375609e27bf41d333cba67cd1d`.
+
+Original Session Index Task3 may now be recorded as implementation/local regression
+complete, with these explicit limits: M9 platform/real-data acceptance remains
+open; real legacy migration may need classification/chain prerequisites; native
+cold-start no-runtime discovery remains untested; Minor M1(read diagnostics),
+M2(YAML binding presentation), M3(bulk-edit scaling) remain. Subsequent Session
+Index Tasks4–7 are separate unfinished work. No integration or release occurred.
