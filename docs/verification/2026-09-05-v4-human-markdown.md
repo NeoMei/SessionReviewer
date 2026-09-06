@@ -15,7 +15,7 @@ indexed bulk field edits), verify cold-start no-runtime behavior, independently
 review and rerun the complete local gate. Earlier completed-batch results below
 remain bound to their original source; they are not this follow-up's evidence.
 
-Current source: `90e8e62fbed365a45295953d1b978c51cbfd31b4`. Original read-diagnostic,
+Previous blocked source: `90e8e62fbed365a45295953d1b978c51cbfd31b4`. Original read-diagnostic,
 YAML-binding and bulk-index debts are fixed and task-reviewed; cold-start native
 and automated coverage is established. Final fix re-review nevertheless found
 two new Important flow-YAML regressions, independently reproduced below. The
@@ -32,6 +32,33 @@ deletion still fails the overlap guard. The existing syncdoc suite passes using
 valid Go cache, demonstrating its missing coverage rather than refuting the
 defects. New regression-first repair, independent review and the complete local
 gate are in progress; no completion or integration is implied by this approval.
+
+Latest Task 17 checkpoint: source `9b0ab71`, second task fix round in progress.
+Original N1/N2 reproductions now pass after `418498a`/`13f38c8`; task review
+found quoted `,#` token ambiguity, fixed by validated quoted-node spans in
+`ff1e397`. Its disclosed nested-value separator-comment duplication and edited
+comment loss were treated as in-scope, regression-tested and corrected in
+`6dee24d`/`9b0ab71`, not deferred. Final affected-package run on that candidate:
+syncdoc 1.118s, syncproject 60.741s, publication 140.533s; 23 focused syncdoc
+variants and two authenticated publication tests also passed.
+
+Scoped re-review nevertheless found two new Important combinations: changing a
+surviving nested value while deleting the final following keys can lose its
+unchanged separator comment (or reject overlapping edits if the comment changes);
+legal `,#comment` without intervening whitespace can be misread as structural
+punctuation. The controller independently reproduced successful rendering with
+the comment absent, changed-comment overlap rejection, and core-codec acceptance
+followed by sync-parser rejection of the no-space comment. No actual publication
+of the comment-loss result or real-user data change was attempted. Both are
+assigned to Task 17 fix round 2; the final ordered seven-command gate has not
+started, and this branch is still not approved or debt-free.
+
+The same `9b0ab71` CLI was built and run only against the approved synthetic
+fixture (SHA256 `0d137ea2db5b9d725063bfbae6aad3c927c738ea2ab4f436bd16e84e5a21192d`).
+Status -> scan -> sync -> status all exited0 with no stderr, all154 Sessions were
+indexed, issues/tokens were0, and all eight public file hashes and mtimes stayed
+unchanged. That repeat-scan/no-op receipt does not refute the newly discovered
+editing combinations. No merge, push, release or production installation.
 
 ### Task 13 — read diagnostics closed
 
