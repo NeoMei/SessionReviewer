@@ -565,3 +565,41 @@ git diff --check
 本计划不把代码片段中的接口当现成实现。所有测试例子需使用真实当前合同值，新增夹具必须先经现有 validators 验证，禁止放宽验证器使测试变绿。M7 的外部分类能力、M9 的原生 CI/真实 Vault 是明确检查点；M8 的 YAML 依赖已指定现有锁定版本，实施时检查打包结果与许可。发现需要扩大合同或授权时报告具体差异。
 
 用户于 2026-09-05 授权开始执行，采用逐任务子代理实现与独立审查。从 M1 开始，每任务 RED→实现→GREEN→审查→提交；状态与证据保存在本计划专属 SDD ledger。此处记录启动，不代表任何任务实现/测试已通过。
+
+## 2026-09-06 用户确认的纠偏批次
+
+用户确认修复四项阻塞后完整回归；基线 `9bf9565`，不合并、不推送、不发布。M1–M8 不重做，M9 仍开放。本批依次执行 Task 10–12，随后重新执行 M9 稳定 HEAD 全套与实验 Vault 状态验收。此前三个 Minor 保留在最终审查中，不当作已解决。
+
+## Task 10：恢复值后的跨世代编辑与历史列表基线
+
+**Files:** Modify `internal/contextupdate/v4.go`、`internal/reviewv4/markdown_render.go` 及相邻测试；Test `test/zerotoken/gate_b_test.go`、`obsidian-plugin/tests/markdown-v4.test.ts`；仅必要时修改 `internal/migrationv4/markdown.go` 及相邻测试以保留历史 orphan 世代。
+
+**Interfaces:** consumes 已认证 Presentation/GeneratedBaselines/HumanPatches/OrphanPatches；produces 原 `MapV4Presentation` 和 authenticated render bridge 的正确跨世代行为，无新增 wire 合同。
+
+- [ ] RED：真实编辑→恢复生成值（patch 删除、baseline 保留）→新 Session 导致新 generation→再次编辑→sync→reopen，验证人工值、原始 baseline value/hash 和新的 live generation；Go/TS 同样接受最终草稿，不放宽 stale/hash 拒绝。
+- [ ] RED：合法旧 v4 list orphan 经认证迁移后普通扫描成功；原 values/hash/历史 generation 不变；重复、畸形 scalar/list shape、错误 hash 和 patch linkage 仍失败。先运行定向测试并保存实际失败输出。
+- [ ] 实现：按支持的 scalar/list 形状验证历史元数据；以固定 Markdown 白名单和真实实体存在性识别 live scalar 字段，而不是以是否有 active patch 判断。仅将认证当前 generation 的 eligible live baseline 绑定推进，保留原 value/hash；历史 orphan 不提升世代、不转成 scalar。渲染 bridge 使用同一资格规则，禁止任意 stale baseline 被洗成新绑定。
+- [ ] GREEN：`go test ./internal/reviewv4 ./internal/contextupdate ./internal/migrationv4 -count=1`；`go test ./test/zerotoken -run 'MarkdownV4|GateB' -count=1`；插件 `npm test -- tests/markdown-v4.test.ts`。记录 RED/GREEN、覆盖边界与自审，精确 stage 并提交；独立任务审查通过后进入 Task 11。
+
+## Task 11：迁移扫描完整解码后的目标正文
+
+**Files:** Modify `internal/migrationv4/markdown.go`、`markdown_test.go`；Test `internal/syncproject/migration_test.go` 或同包 Markdown 迁移测试；复用 `internal/syncdoc/v4_units.go` 现有敏感内容入口，不另造规则。
+
+**Interfaces:** consumes 已认证旧输入及渲染后的完整 Markdown pair；produces 通过相同 marker-aware 策略验证的可发布 preview，错误仍有界且不回显源内容。
+
+- [ ] RED：旧 JSON goal 通过 JSON Unicode escape 表达测试用的敏感字符串，源字节未直接出现 token、解码后正文出现；预览必须拒绝。覆盖原始历史、自定义保留段和含合法机器 ID 的安全成功例。
+- [ ] 实现：完成历史 preservation wrapping 后，对完整 prospective pair 使用认证 marker-aware 扫描，在返回 publishable Result 前拒绝敏感内容。原始输入不得修改，不通过扫描 raw JSON 代替检查目标正文。
+- [ ] GREEN：运行 `go test ./internal/migrationv4 ./internal/syncproject -count=1`，实际 coordinator 的 preview/confirm 路径不得发布拒绝对象、不得推进 Base/receipt/private pointers；报告具体覆盖测试与 RED/GREEN，精确提交并独立审查。
+
+## Task 12：接通 v4 只读 sync status 与插件解释
+
+**Files:** Modify `internal/cli/sync.go`、相邻测试；Create `internal/syncproject/markdown_status.go`、`markdown_status_test.go`（如必要）；Modify 现有同步只读公共 helper，仅提取真实共享语义；Modify `obsidian-plugin/src/main.ts` 或实际状态处理模块及相邻测试。
+
+**Interfaces:** consumes 既有 Markdown 认证/只读 dry-run 和既有 sync Status wire；produces typed readonly status。必须保持旧 v2/v3 status 行为；不得把 Report 冒充 Status，不新增私有接受证明 API。
+
+- [ ] 先跟踪 CLI status 路由、Status 必填字段和插件消费，记录明确映射；status 不调用创建式锁、恢复、repair、Prepare 或 publish，观察不稳定绑定/journal 时失败关闭。
+- [ ] RED：真实认证 v4 fixture 上 CLI `sync status --json --project-id` 成功输出既有类型；完整 Project/Vault/private 文件清单和字节在查询前后不变，缺 lock/目录时也不创建。覆盖 clean、pending edit、same-field conflict、坏 generated region、缺私有绑定、pending journal 和旧格式回归。
+- [ ] 实现最小 v4 只读路由；插件区分运行时不可用与命令/状态失败，不因 status 成功将 public_valid 升为 accepted 或启用结构操作；pending/stale 保持原合同。
+- [ ] GREEN：受影响 Go 包、插件 `npm run check`；记录 RED/GREEN，提交并独立审查。随后控制器在获准的独立实验 Vault 上更新候选 CLI/plugin，验证真实 status 和 UI 无误导警告、草稿提示、冲突/机器区拒绝与运行时消失降级；不触碰正式安装、正式 Vault 或生产映射。
+
+本批完成条件：三项任务审查、整分支复审、最终同一源 HEAD 的 M9 全套本地命令与限定原生 UI 验证。平台 CI 和真实旧项目迁移前置条件仍独立列明，不由本地通过推定。
