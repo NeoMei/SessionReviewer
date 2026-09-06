@@ -2,6 +2,7 @@ package syncdoc
 
 import (
 	"bytes"
+	"gopkg.in/yaml.v3"
 	"testing"
 )
 
@@ -82,5 +83,64 @@ func TestV4BlockCommentOwnershipComposition(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestV4BlockScalarSemanticUnitRoundTrip(t *testing.T) {
+	_, fixture, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	for _, tc := range []struct {
+		name, source, value string
+		nested              bool
+	}{
+		{"folded keep", ">+\n  changed\n\n", "changed\n\n", false},
+		{"tagged folded keep comment", "!!str >+ # scalar header\n  changed\n\n", "changed\n\n", false},
+		{"nested folded keep", "\n  label: >+ # nested header\n    changed\n\n", "changed\n\n", true},
+		{"nested folded keep extra", "\n  label: >+\n    changed\n\n\n", "changed\n\n\n", true},
+		{"folded clip", ">\n  changed\n", "changed\n", false},
+		{"literal keep", "|+\n  changed\n\n", "changed\n\n", false},
+		{"folded empty keep", ">+\n\n\n", "\n\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := bytes.Replace(fixture, []byte("custom_owner: 保留\n"), []byte("custom_owner: "+tc.source+"# next head\ncustom_keep: two\n"), 1)
+			doc, err := ParseV4("项目回顾.md", raw, ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			key := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+			unit := doc.SemanticUnits()[key]
+			node, err := decodeUnitValue(unit.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value := node
+			if tc.nested {
+				value = node.Content[1]
+			}
+			if value.Value != tc.value {
+				t.Fatalf("semantic unit scalar=%q want=%q", value.Value, tc.value)
+			}
+			if value.Style&yaml.FoldedStyle == 0 && tc.name != "literal keep" {
+				t.Fatal("folded style lost")
+			}
+			encoded, err := encodeV4FrontmatterUnit(key, unit)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mapping, err := decodeFrontmatter(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value = mapping.Content[1]
+			if tc.nested {
+				value = value.Content[1]
+			}
+			if value.Value != tc.value {
+				t.Fatalf("rendered scalar=%q want=%q", value.Value, tc.value)
+			}
+			unchanged, err := doc.Render()
+			if err != nil || !bytes.Equal(unchanged, raw) {
+				t.Fatalf("raw no-op changed: %v", err)
+			}
+		})
 	}
 }
