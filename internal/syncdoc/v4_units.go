@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -27,6 +28,10 @@ type v4BlockState struct {
 
 type v4FrontmatterSpan struct {
 	start, end, delimiter int
+}
+
+type v4YAMLSourceSpan struct {
+	start, end int
 }
 
 type v4DocumentState struct {
@@ -221,7 +226,11 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 	}
 	state.frontmatterFlow = true
 	frontmatterOpen := state.frontStart + open
-	close, ok := v4FlowMappingClose(frontmatter, open)
+	quoted, ok := v4YAMLQuotedScalarSpans(frontmatter, lineStarts, state.shell.frontmatter)
+	if !ok {
+		return invalidDocument("invalid v4 Markdown flow frontmatter scalar position")
+	}
+	close, ok := v4FlowMappingClose(frontmatter, open, quoted)
 	if !ok {
 		return invalidDocument("invalid v4 Markdown flow frontmatter close")
 	}
@@ -236,7 +245,7 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 		if index+1 < len(starts) {
 			entryLimit = starts[index+1] - state.frontStart
 		}
-		delimiter, ok := v4FlowEntryDelimiter(frontmatter, valueStart, entryLimit, index+1 == len(keys))
+		delimiter, ok := v4FlowEntryDelimiter(frontmatter, valueStart, entryLimit, index+1 == len(keys), quoted)
 		if !ok {
 			return invalidDocument("invalid v4 Markdown flow frontmatter entry boundary")
 		}
@@ -275,44 +284,142 @@ func v4YAMLNodeOffset(source []byte, lineStarts []int, node *yaml.Node) (int, bo
 	return offset, offset < len(source)
 }
 
-func v4FlowMappingClose(source []byte, open int) (int, bool) {
+func v4YAMLQuotedScalarSpans(source []byte, lineStarts []int, root *yaml.Node) ([]v4YAMLSourceSpan, bool) {
+	spans := make([]v4YAMLSourceSpan, 0)
+	var visit func(*yaml.Node) bool
+	visit = func(node *yaml.Node) bool {
+		if node == nil {
+			return false
+		}
+		if node.Kind == yaml.ScalarNode && node.Style&(yaml.SingleQuotedStyle|yaml.DoubleQuotedStyle) != 0 {
+			start, ok := v4YAMLNodeOffset(source, lineStarts, node)
+			if !ok {
+				return false
+			}
+			quote := byte('\'')
+			if node.Style&yaml.DoubleQuotedStyle != 0 {
+				quote = '"'
+			}
+			open := bytes.IndexByte(source[start:], quote)
+			if open < 0 {
+				return false
+			}
+			open += start
+			end, ok := v4YAMLQuotedScalarEnd(source, open, quote)
+			if !ok {
+				return false
+			}
+			spans = append(spans, v4YAMLSourceSpan{start: open, end: end})
+		}
+		for _, child := range node.Content {
+			if !visit(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if !visit(root) {
+		return nil, false
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
+	for index, span := range spans {
+		if span.start < 0 || span.end <= span.start || span.end > len(source) || index > 0 && span.start < spans[index-1].end {
+			return nil, false
+		}
+	}
+	return spans, true
+}
+
+func v4YAMLQuotedScalarEnd(source []byte, open int, quote byte) (int, bool) {
 	for index := open + 1; index < len(source); index++ {
-		if source[index] == '}' && v4FlowTrivia(source[index+1:]) {
-			return index, true
+		if quote == '"' && source[index] == '\\' {
+			index++
+			continue
+		}
+		if source[index] != quote {
+			continue
+		}
+		if quote == '\'' && index+1 < len(source) && source[index+1] == '\'' {
+			index++
+			continue
+		}
+		return index + 1, true
+	}
+	return 0, false
+}
+
+func v4FlowMappingClose(source []byte, open int, quoted []v4YAMLSourceSpan) (int, bool) {
+	if open < 0 || open >= len(source) || source[open] != '{' {
+		return 0, false
+	}
+	return v4FlowBoundary(source, open+1, len(source), '}', quoted)
+}
+
+func v4FlowBoundary(source []byte, start, limit int, boundary byte, quoted []v4YAMLSourceSpan) (int, bool) {
+	if start < 0 || start >= limit || limit > len(source) || boundary != ',' && boundary != '}' {
+		return 0, false
+	}
+	braceDepth, bracketDepth := 0, 0
+	quotedIndex := sort.Search(len(quoted), func(index int) bool { return quoted[index].end > start })
+	inComment := false
+	for index := start; index < limit; index++ {
+		for quotedIndex < len(quoted) && quoted[quotedIndex].end <= index {
+			quotedIndex++
+		}
+		if quotedIndex < len(quoted) && index >= quoted[quotedIndex].start && index < quoted[quotedIndex].end {
+			index = quoted[quotedIndex].end - 1
+			continue
+		}
+		if inComment {
+			if source[index] == '\n' {
+				inComment = false
+			}
+			continue
+		}
+		switch source[index] {
+		case '#':
+			if index == start || source[index-1] == ' ' || source[index-1] == '\t' || source[index-1] == '\r' || source[index-1] == '\n' {
+				inComment = true
+			}
+		case '{':
+			braceDepth++
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth == 0 {
+				return 0, false
+			}
+			bracketDepth--
+		case '}':
+			if braceDepth == 0 {
+				if boundary == '}' && bracketDepth == 0 {
+					return index, true
+				}
+				return 0, false
+			}
+			braceDepth--
+		case ',':
+			if boundary == ',' && braceDepth == 0 && bracketDepth == 0 {
+				return index, true
+			}
 		}
 	}
 	return 0, false
 }
 
-func v4FlowEntryDelimiter(source []byte, start, limit int, final bool) (int, bool) {
-	if start < 0 || start >= limit || limit > len(source) {
+func v4FlowEntryDelimiter(source []byte, start, limit int, final bool, quoted []v4YAMLSourceSpan) (int, bool) {
+	if start < 0 || start > limit || limit > len(source) {
 		return 0, false
 	}
-	for index := start; index < limit; index++ {
-		if source[index] == ',' && v4FlowTrivia(source[index+1:limit]) {
-			return index, true
+	if start < limit {
+		if delimiter, ok := v4FlowBoundary(source, start, limit, ',', quoted); ok {
+			return delimiter, true
 		}
 	}
 	if final && limit < len(source) && source[limit] == '}' {
 		return limit, true
 	}
 	return 0, false
-}
-
-func v4FlowTrivia(source []byte) bool {
-	for index := 0; index < len(source); {
-		switch source[index] {
-		case ' ', '\t', '\r', '\n':
-			index++
-		case '#':
-			for index < len(source) && source[index] != '\n' {
-				index++
-			}
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func v4MachineFrontmatter(name string) bool {

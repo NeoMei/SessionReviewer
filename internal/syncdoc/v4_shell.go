@@ -198,11 +198,15 @@ func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
 	if !ok {
 		return nil, invalidDocument("cannot locate encoded v4 Markdown flow frontmatter unit")
 	}
-	close, ok := v4FlowMappingClose(source, 0)
+	quoted, ok := v4YAMLQuotedScalarSpans(source, lineStarts, flowMapping)
 	if !ok {
 		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
-	delimiter, ok := v4FlowEntryDelimiter(source, start, close, true)
+	close, ok := v4FlowMappingClose(source, 0, quoted)
+	if !ok {
+		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+	}
+	delimiter, ok := v4FlowEntryDelimiter(source, start, close, true, quoted)
 	if !ok {
 		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}

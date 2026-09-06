@@ -196,7 +196,7 @@ func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.
 	}
 }
 
-func TestMarkdownVaultFlowGroupedDeletionWithPlainQuoteAndTrailingComma(t *testing.T) {
+func TestMarkdownVaultFlowGroupedDeletionWithQuotedPunctuationAndTrailingComma(t *testing.T) {
 	env := setupFlowMarkdownPublication(t, "project-markdown-flow-group-delete")
 	projectReviewPath := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
 	vaultReviewPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
