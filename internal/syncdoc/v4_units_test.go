@@ -240,6 +240,171 @@ func TestV4ShellFlowCustomFrontmatterCanBeAddedAndRemoved(t *testing.T) {
 	}
 }
 
+func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	tests := []struct {
+		name, before, after string
+	}{
+		{
+			name:   "apostrophe in plain scalar",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: team's}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: team's-updated}`,
+		},
+		{
+			name:   "double quote in nested plain scalar",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {name: team"blue, roles: [writer, reviewer]}}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {name: team"green, roles: [writer, reviewer]}}`,
+		},
+		{
+			name:   "same-line trailing comma",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep,}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: changed,}`,
+		},
+		{
+			name:   "trailing comma before CRLF comment and close",
+			before: "{\r\n  id: review-project-p,\r\n  entity_type: project-review,\r\n  project_id: project-p,\r\n  schema_version: 4,\r\n  document_format: review-markdown-v1,\r\n  revision: 1,\r\n  generation_id: generation-1,\r\n  minimum_reader_version: 0.4.1,\r\n  minimum_writer_version: 0.4.1,\r\n  custom_owner: keep, # trailing separator comment\r\n}",
+			after:  "{\r\n  id: review-project-p,\r\n  entity_type: project-review,\r\n  project_id: project-p,\r\n  schema_version: 4,\r\n  document_format: review-markdown-v1,\r\n  revision: 1,\r\n  generation_id: generation-1,\r\n  minimum_reader_version: 0.4.1,\r\n  minimum_writer_version: 0.4.1,\r\n  custom_owner: changed, # trailing separator comment\r\n}",
+		},
+		{
+			name:   "quoted nested tagged Unicode and comments",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {single: 'team''s', double: \"team\\\"blue\", tagged: !!str 中文, nested: [{label: keep}]}, # owner metadata\n custom_edit: before}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {single: 'team''s', double: \"team\\\"blue\", tagged: !!str 中文, nested: [{label: keep}]}, # owner metadata\n custom_edit: after}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			projectRaw := replaceV4TestFrontmatter(t, raw, []byte(test.before))
+			vaultRaw := replaceV4TestFrontmatter(t, raw, []byte(test.after))
+			project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+			if err != nil {
+				t.Fatalf("parse accepted Project flow YAML: %v", err)
+			}
+			noOp, err := project.WithSemanticUnits(project.SemanticUnits())
+			if err != nil {
+				t.Fatalf("no-op accepted Project flow YAML: %v", err)
+			}
+			noOpRaw, err := noOp.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(noOpRaw, projectRaw) {
+				t.Fatal("no-op changed accepted flow YAML bytes")
+			}
+			vault, err := ParseV4("项目回顾.md", vaultRaw, ledger)
+			if err != nil {
+				t.Fatalf("parse accepted Vault flow YAML: %v", err)
+			}
+			units := project.SemanticUnits()
+			changedKey := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+			if test.name == "quoted nested tagged Unicode and comments" {
+				changedKey.Name = "custom_edit"
+			}
+			units[changedKey] = vault.SemanticUnits()[changedKey]
+			merged, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatalf("merge accepted flow YAML: %v", err)
+			}
+			got, err := merged.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, vaultRaw) {
+				t.Fatalf("flow YAML merge changed bytes outside the selected entry\ngot:\n%s\nwant:\n%s", got, vaultRaw)
+			}
+			if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+				t.Fatalf("merged accepted flow YAML cannot be reopened: %v", err)
+			}
+		})
+	}
+}
+
+func TestV4ShellFlowGroupedCustomDeletionsProduceDisjointEdits(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	tests := []struct {
+		name, before, want string
+		remove             []string
+		change             map[string]string
+		add                map[string]string
+	}{
+		{
+			name: "final two", remove: []string{"custom_a", "custom_b"},
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_a: one, custom_b: two}`,
+			want:   `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+		},
+		{
+			name: "final three retaining trailing comma", remove: []string{"custom_a", "custom_b", "custom_c"},
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_a: one, custom_b: two, custom_c: three,}`,
+			want:   `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1,}`,
+		},
+		{
+			name: "adjacent middle", remove: []string{"custom_a", "custom_b"},
+			before: `{id: review-project-p, entity_type: project-review, custom_a: one, custom_b: two, # deleted group comment
+ project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes}`,
+			want: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes}`,
+		},
+		{
+			name: "adjacent prefix", remove: []string{"custom_a", "custom_b"},
+			before: `{custom_a: one, custom_b: two, id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+			want:   `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}`,
+		},
+		{
+			name: "deletion with addition and value change after trailing comma", remove: []string{"custom_a", "custom_b"},
+			change: map[string]string{"custom_owner": "changed\n"}, add: map[string]string{"custom_team": "codec\n"},
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep, custom_a: one, custom_b: two,}`,
+			want:   `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: changed, custom_team: codec}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			projectRaw := replaceV4TestFrontmatter(t, raw, []byte(test.before))
+			project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+			if err != nil {
+				t.Fatalf("parse accepted flow YAML: %v", err)
+			}
+			units := project.SemanticUnits()
+			for _, name := range test.remove {
+				delete(units, UnitKey{Kind: UnitFrontmatter, Name: name})
+			}
+			for name, value := range test.change {
+				key := UnitKey{Kind: UnitFrontmatter, Name: name}
+				unit := units[key]
+				unit.Value = []byte(value)
+				units[key] = unit
+			}
+			for name, value := range test.add {
+				units[UnitKey{Kind: UnitFrontmatter, Name: name}] = Unit{Present: true, Value: []byte(value)}
+			}
+			merged, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatalf("apply grouped flow YAML deletion: %v", err)
+			}
+			got, err := merged.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := replaceV4TestFrontmatter(t, raw, []byte(test.want))
+			if !bytes.Equal(got, want) {
+				t.Fatalf("grouped flow deletion changed surviving bytes\ngot:\n%s\nwant:\n%s", got, want)
+			}
+			reopened, err := ParseV4("项目回顾.md", got, ledger)
+			if err != nil {
+				t.Fatalf("grouped flow deletion cannot be reopened: %v", err)
+			}
+			stable, err := reopened.WithSemanticUnits(reopened.SemanticUnits())
+			if err != nil {
+				t.Fatalf("grouped flow deletion no-op: %v", err)
+			}
+			stableRaw, err := stable.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stableRaw, got) {
+				t.Fatal("grouped flow deletion was not stable on no-op")
+			}
+		})
+	}
+}
+
 func replaceV4TestFrontmatter(t *testing.T, raw, replacement []byte) []byte {
 	t.Helper()
 	frontmatter, _, err := splitFrontmatter(raw)

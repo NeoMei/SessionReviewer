@@ -196,6 +196,93 @@ func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.
 	}
 }
 
+func TestMarkdownVaultFlowGroupedDeletionWithPlainQuoteAndTrailingComma(t *testing.T) {
+	env := setupFlowMarkdownPublication(t, "project-markdown-flow-group-delete")
+	projectReviewPath := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	vaultReviewPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
+	projectIndexPath := filepath.Join(env.projectRoot, filepath.FromSlash(sessionIndexRelativePath))
+	vaultIndexPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, sessionIndexRelativePath)))
+	beforeIndex := map[string][]byte{
+		projectIndexPath: readTestFile(t, projectIndexPath),
+		vaultIndexPath:   readTestFile(t, vaultIndexPath),
+	}
+	beforeIndexModTime := make(map[string]time.Time, len(beforeIndex))
+	for path := range beforeIndex {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		beforeIndexModTime[path] = info.ModTime()
+	}
+	originalVault := readTestFile(t, vaultReviewPath)
+	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two,"), nil, 1)
+	if bytes.Equal(vaultEdit, originalVault) {
+		t.Fatal("flow grouped-deletion fixture was not edited")
+	}
+	if err := os.WriteFile(vaultReviewPath, vaultEdit, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false))
+	if err != nil {
+		t.Fatalf("authenticated grouped-deletion status: %v", err)
+	}
+	if len(status.Pending) != 6 || status.InSync != 0 || status.Conflicted != 0 || status.Malformed != 0 {
+		t.Fatalf("grouped-deletion status = %+v", status)
+	}
+
+	publishes := 0
+	options := env.syncOptions(false)
+	options.RecoverMarkdown = func(ctx context.Context, owner *publicationlock.Owner) error {
+		return RecoverMarkdownLocked(ctx, env.publishOptions(), owner)
+	}
+	options.PublishMarkdown = func(ctx context.Context, edit syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) error {
+		publishes++
+		_, publishErr := PublishMarkdownEditLocked(ctx, env.publishOptions(), edit, owner)
+		return publishErr
+	}
+	if _, err := syncproject.RunMarkdown(context.Background(), options); err != nil {
+		t.Fatalf("authenticated grouped-deletion sync: %v", err)
+	}
+	if publishes != 1 {
+		t.Fatalf("grouped-deletion publisher calls = %d, want 1", publishes)
+	}
+	expectedReview := bytes.Replace(vaultEdit, []byte("revision: !!int +1,"), []byte("revision: !!int 2,"), 1)
+	for _, path := range []string{projectReviewPath, vaultReviewPath} {
+		if got := readTestFile(t, path); !bytes.Equal(got, expectedReview) {
+			t.Fatalf("grouped-deletion publication changed unrelated bytes in %s\ngot:\n%s\nwant:\n%s", path, got, expectedReview)
+		}
+	}
+	if !bytes.Contains(expectedReview, []byte("custom_note: team's,")) {
+		t.Fatal("grouped-deletion publication lost plain-scalar apostrophe or trailing comma")
+	}
+	for path, before := range beforeIndex {
+		if got := readTestFile(t, path); !bytes.Equal(got, before) {
+			t.Fatalf("grouped flow deletion changed index bytes: %s", path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.ModTime().Equal(beforeIndexModTime[path]) {
+			t.Fatalf("grouped flow deletion changed index mtime: %s", path)
+		}
+	}
+	accepted := loadMarkdownProjectionForTest(t, env)
+	if accepted.Review.GenerationID != env.manifest.GenerationID || accepted.Review.Revision != 2 {
+		t.Fatalf("grouped flow deletion changed generation or wrong revision: generation=%q revision=%d", accepted.Review.GenerationID, accepted.Review.Revision)
+	}
+	if status, err := syncproject.StatusMarkdown(t.Context(), env.syncOptions(false)); err != nil || status.InSync != 1 {
+		t.Fatalf("grouped-deletion status after sync: %+v err=%v", status, err)
+	}
+	if _, err := syncproject.RunMarkdown(context.Background(), options); err != nil {
+		t.Fatalf("grouped-deletion no-op reopen: %v", err)
+	}
+	if publishes != 1 {
+		t.Fatalf("grouped-deletion no-op republished: calls=%d", publishes)
+	}
+}
+
 func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-scan-cas")
 	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
@@ -1249,7 +1336,7 @@ func setupFlowMarkdownPublication(t *testing.T, projectID string) markdownPublic
 		if file == nil {
 			t.Fatalf("missing flow fixture file %s", document.relative)
 		}
-		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: team's, custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
 		file.Desired = replaceMarkdownFrontmatterForTest(t, file.Desired, []byte(flow))
 		if document.relative == reviewv2.ReviewRelativePath {
 			file.Desired = bytes.Replace(file.Desired, []byte("---\n# 项目回顾"), []byte("---\n自定义段落和 [链接](https://example.test/custom) 必须保留。\n\n```yaml\ncustom: code-block\n```\n\n# 项目回顾"), 1)
