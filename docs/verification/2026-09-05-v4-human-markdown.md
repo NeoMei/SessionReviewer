@@ -441,3 +441,52 @@ The corrected batch now enters whole-branch review and the exact ordered local
 gate. Those results are pending. The three pre-existing Minor items, platform CI,
 real old-project migration prerequisites and cold-start all-candidates-absent
 runtime discovery remain separately open. This branch is not merged or published.
+
+### Frozen corrected batch `f841907` — whole-branch gate remains red
+
+The complete ordered local sequence ran without source changes at
+`f8419070e587bc6ef48254361155c5e70f3ceaf3` (source37c5e72): full Go exit1;
+vet0; tidy-diff0; Gate A0 (33.138s); full race exit1; diff-check0; plugin check0
+(19 files/217 tests, lint/typecheck/build). Ordinary Go included the large-Session
+test; race used only the exact pre-approved exclusion. Race ran to completion
+(scan887.241s) and emitted no race-detector finding, but is **not a passing suite**.
+Both failed `TestOldV4MissingIndexBindingBuildsAndPublishesAuthenticatedSuccessor`
+because authenticated migration-generation identity was scanned as sensitive
+human text. Prior focused results do not override this failure.
+
+Independent whole-branch review of c7fd0bb..f841907 identifies four Important
+items: that false positive; four-file cancellation advancing a pointer then
+terminalizing inconsistent rollback; genuine old manifests lacking measurements
+failing successor confirmation; and live plugin refresh retaining transient
+status failure. The three previously recorded Minor findings remain deferred.
+
+The final source37c5e72 native replay reproduced the last issue: native edit and
+explicit fixture sync succeeded, direct status was clean, but the already-open
+view retained a status-failure warning. A new view cleared it. This is a defect,
+not automatic-settling acceptance. All controlled conflict/machine edits and the
+experiment runtime path were restored; current accepted experiment revision7
+has the same Project/Vault goal and generation.
+
+One combined final fix wave is authorized for these four Important findings,
+followed by one scoped re-review and a new frozen-source full gate. Implementation
+has begun only after all seven preceding commands completed. No integration,
+release, platform or real-data acceptance is implied.
+
+### Combined final fix candidate `6ad0c05`
+
+All four Important corrections are committed in
+`6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Exact authenticated identity scalar
+values are excluded at the shared structural scanner boundary; human/custom
+lookalikes remain scanned. New-generation cancellation retains post-pointer
+journal authority for forward recovery. Genuine old manifests derive only
+supported coverage with unknown raw counts left absent, and candidate graph
+validation remains read-only. Plugin refresh discards obsolete complete results,
+limits settling retries and offers an explicit read-only status refresh.
+
+Actual RED/GREEN tests reproduced each defect. Final covering eight Go packages,
+affected vet, exact Gate A and plugin check passed; plugin has223 tests. The
+original real missing-index migration failure now passes through preview,
+confirmation, private graph reload and subsequent edit/sync/status. Prior Minor
+M1–M3 remain deferred. The single scoped final re-review, final full ordered
+sequence and native same-open-view acceptance are pending; this is not a final
+green gate or integration claim.
