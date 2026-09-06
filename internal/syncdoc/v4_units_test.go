@@ -290,6 +290,11 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue} still scalar\", alternate: 'team,#blue] still scalar'}, custom_keep: yes, # unrelated comment },#\n custom_last: keep}",
 			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green} still scalar\", alternate: 'team,#blue] still scalar'}, custom_keep: yes, # unrelated comment },#\n custom_last: keep}",
 		},
+		{
+			name:   "changed nested value with separator side comment",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner separator comment\n custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # owner separator comment\n custom_keep: yes}",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -331,8 +336,20 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			if !bytes.Equal(got, vaultRaw) {
 				t.Fatalf("flow YAML merge changed bytes outside the selected entry\ngot:\n%s\nwant:\n%s", got, vaultRaw)
 			}
-			if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+			reopened, err := ParseV4("项目回顾.md", got, ledger)
+			if err != nil {
 				t.Fatalf("merged accepted flow YAML cannot be reopened: %v", err)
+			}
+			stable, err := reopened.WithSemanticUnits(reopened.SemanticUnits())
+			if err != nil {
+				t.Fatalf("merged accepted flow YAML no-op: %v", err)
+			}
+			stableRaw, err := stable.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stableRaw, got) {
+				t.Fatal("merged accepted flow YAML changed on no-op")
 			}
 		})
 	}

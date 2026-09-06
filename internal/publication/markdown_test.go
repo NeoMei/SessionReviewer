@@ -100,7 +100,7 @@ func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.
 		}
 		beforeIndexModTime[path] = info.ModTime()
 	}
-	vaultEdit := bytes.Replace(readTestFile(t, vaultReviewPath), []byte("custom_owner: '保留'"), []byte("custom_owner: '修改'"), 1)
+	vaultEdit := bytes.Replace(readTestFile(t, vaultReviewPath), []byte(`custom_owner: {label: "team,#blue"}`), []byte(`custom_owner: {label: "team,#green"}`), 1)
 	if bytes.Equal(vaultEdit, readTestFile(t, vaultReviewPath)) {
 		t.Fatal("flow custom fixture was not edited")
 	}
@@ -170,7 +170,7 @@ func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.
 	beforeInvalidProject := readTestFile(t, projectReviewPath)
 	beforeInvalidReceipt := loadAcceptedReceiptForTest(t, env)
 	beforeInvalidBase := loadMarkdownBaseForTest(t, env)
-	invalidVault := bytes.Replace(readTestFile(t, vaultReviewPath), []byte("custom_owner: '修改'"), []byte("custom_owner: [invalid"), 1)
+	invalidVault := bytes.Replace(readTestFile(t, vaultReviewPath), []byte(`custom_owner: {label: "team,#green"}`), []byte("custom_owner: [invalid"), 1)
 	if bytes.Equal(invalidVault, readTestFile(t, vaultReviewPath)) {
 		t.Fatal("flow invalid fixture was not edited")
 	}
@@ -1336,7 +1336,7 @@ func setupFlowMarkdownPublication(t *testing.T, projectID string) markdownPublic
 		if file == nil {
 			t.Fatalf("missing flow fixture file %s", document.relative)
 		}
-		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: \"team,#blue\", custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: {label: \"team,#blue\"}, # owner separator comment\r\n schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: \"team,#blue\", custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
 		file.Desired = replaceMarkdownFrontmatterForTest(t, file.Desired, []byte(flow))
 		if document.relative == reviewv2.ReviewRelativePath {
 			file.Desired = bytes.Replace(file.Desired, []byte("---\n# 项目回顾"), []byte("---\n自定义段落和 [链接](https://example.test/custom) 必须保留。\n\n```yaml\ncustom: code-block\n```\n\n# 项目回顾"), 1)
