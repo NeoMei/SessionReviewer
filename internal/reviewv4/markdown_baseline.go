@@ -11,11 +11,12 @@ import (
 // name a real field in the fixed Markdown registry. Historical metadata,
 // including list baselines for removed entities, keeps its original binding.
 func CarryMarkdownGeneratedBaselines(presentation *Presentation, generationID string) error {
+	fields := newMarkdownPresentationIndex(presentation)
 	baselines := make(map[string]int, len(presentation.GeneratedBaselines))
 	live := make(map[string]bool, len(presentation.GeneratedBaselines))
 	for index := range presentation.GeneratedBaselines {
 		baseline := &presentation.GeneratedBaselines[index]
-		key, isLive, err := markdownStoredSemanticKey(*presentation, baseline.EntityID, baseline.Field)
+		key, isLive, err := fields.storedSemanticKey(baseline.EntityID, baseline.Field)
 		if err != nil {
 			return err
 		}
@@ -33,7 +34,7 @@ func CarryMarkdownGeneratedBaselines(presentation *Presentation, generationID st
 
 	patches := make(map[string]bool, len(presentation.HumanPatches)+len(presentation.OrphanPatches))
 	for _, patch := range presentation.HumanPatches {
-		key, isLive, err := markdownStoredSemanticKey(*presentation, patch.EntityID, patch.Field)
+		key, isLive, err := fields.storedSemanticKey(patch.EntityID, patch.Field)
 		if err != nil {
 			return err
 		}
@@ -44,7 +45,7 @@ func CarryMarkdownGeneratedBaselines(presentation *Presentation, generationID st
 		patches[key] = true
 	}
 	for _, patch := range presentation.OrphanPatches {
-		key, isLive, err := markdownStoredSemanticKey(*presentation, patch.EntityID, patch.Field)
+		key, isLive, err := fields.storedSemanticKey(patch.EntityID, patch.Field)
 		if err != nil {
 			return err
 		}
@@ -58,43 +59,6 @@ func CarryMarkdownGeneratedBaselines(presentation *Presentation, generationID st
 		presentation.GeneratedBaselines[baselines[key]].GenerationID = generationID
 	}
 	return nil
-}
-
-func markdownStoredSemanticKey(presentation Presentation, entityID, field string) (string, bool, error) {
-	rawKey := entityID + "\x00" + field
-	candidates := make(map[string]bool)
-	if _, exists := markdownPresentationField(presentation, FieldKey{Entity: entityID, Name: field}); exists {
-		candidates[rawKey] = true
-	}
-	// Old v4 presentation patches used the stable entity ID directly. The
-	// Markdown marker adds the entity kind, so migration must resolve that old
-	// identity through the same closed registry and require exactly one real
-	// field across both possible interpretations.
-	seenKinds := make(map[string]bool)
-	for _, spec := range markdownFieldSpecs {
-		if spec.Name != field || spec.EntityKind == "project-overview" || seenKinds[spec.EntityKind] {
-			continue
-		}
-		seenKinds[spec.EntityKind] = true
-		key := FieldKey{Entity: spec.EntityKind + ":" + entityID, Name: field}
-		if _, exists := markdownPresentationField(presentation, key); exists {
-			candidates[key.Entity+"\x00"+field] = true
-		}
-	}
-	if len(candidates) > 1 {
-		return "", false, errors.New("ambiguous legacy Markdown entity identity")
-	}
-	for key := range candidates {
-		return key, true, nil
-	}
-	return rawKey, false, nil
-}
-
-func markdownPatchSemanticKey(presentation Presentation, key FieldKey) (string, error) {
-	if _, exists := markdownPresentationField(presentation, key); !exists {
-		return "", errors.New("Markdown field does not exist")
-	}
-	return key.Entity + "\x00" + key.Name, nil
 }
 
 func validMarkdownBaselineShape(baseline Baseline) bool {

@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"github.com/neomei/SessionReviewer/internal/baselinehash"
 )
 
 type MarkdownPair struct {
@@ -257,6 +255,7 @@ func ApplyMarkdownEdits(base Presentation, edits []FieldEdit) (Presentation, err
 		return Presentation{}, err
 	}
 	next := clonePresentation(base)
+	fields := newMarkdownPresentationIndex(&next)
 	seen := make(map[FieldKey]bool, len(edits))
 	changed := make([]FieldEdit, 0, len(edits))
 	for _, edit := range edits {
@@ -264,7 +263,7 @@ func ApplyMarkdownEdits(base Presentation, edits []FieldEdit) (Presentation, err
 			return Presentation{}, &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
 		}
 		seen[edit.Key] = true
-		before, exists := markdownPresentationField(base, edit.Key)
+		before, exists := fields.field(edit.Key)
 		if !exists {
 			return Presentation{}, &MarkdownError{Code: MarkdownStructureEditRequiresCommand, Entity: edit.Key.Entity, Field: edit.Key.Name}
 		}
@@ -278,11 +277,15 @@ func ApplyMarkdownEdits(base Presentation, edits []FieldEdit) (Presentation, err
 	if len(changed) == 0 {
 		return next, nil
 	}
+	metadata, err := newMarkdownEditMetadataIndex(&next, fields)
+	if err != nil {
+		return Presentation{}, &MarkdownError{Code: MarkdownBaselineMissing, Entity: changed[0].Key.Entity, Field: changed[0].Key.Name, Cause: err}
+	}
 	changedDecisions := map[string]bool{}
 	changedProblems := map[string]bool{}
 	for _, edit := range changed {
 		kind, id, _ := splitMarkdownEntity(edit.Key.Entity)
-		if err := setMarkdownPresentationField(&next, edit.Key, edit.After); err != nil {
+		if err := fields.set(edit.Key, edit.After); err != nil {
 			return Presentation{}, err
 		}
 		if kind == "decision" {
@@ -291,7 +294,7 @@ func ApplyMarkdownEdits(base Presentation, edits []FieldEdit) (Presentation, err
 		if kind == "problem" {
 			changedProblems[id] = true
 		}
-		if err := recordMarkdownPatch(&next, edit); err != nil {
+		if err := metadata.record(edit); err != nil {
 			return Presentation{}, err
 		}
 	}
@@ -325,323 +328,11 @@ func ApplyMarkdownEdits(base Presentation, edits []FieldEdit) (Presentation, err
 }
 
 func markdownPresentationField(p Presentation, key FieldKey) (string, bool) {
-	kind, id, hasID := splitMarkdownEntity(key.Entity)
-	switch kind {
-	case "project-overview":
-		if hasID {
-			return "", false
-		}
-		switch key.Name {
-		case "goal":
-			return p.CurrentState.Goal, true
-		case "stage":
-			return p.CurrentState.Stage, true
-		case "status":
-			return p.CurrentState.Status, true
-		case "next_action":
-			return p.CurrentState.NextAction, true
-		case "last_verification":
-			return p.CurrentState.LastVerification, true
-		}
-	case "decision":
-		for _, item := range p.Decisions {
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				return item.Title, true
-			case "rationale":
-				return item.Rationale, true
-			case "impact":
-				return item.Impact, true
-			case "reevaluate_when":
-				return item.ReevaluateWhen, true
-			}
-		}
-	case "risk":
-		for _, item := range p.Risks {
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				return item.Title, true
-			case "detail":
-				return item.Detail, true
-			case "status":
-				return item.Status, true
-			}
-		}
-	case "open-loop":
-		for _, item := range p.OpenLoops {
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				return item.Title, true
-			case "question":
-				return item.Question, true
-			case "next_experiment":
-				return item.NextExperiment, true
-			case "completion_criterion":
-				return item.CompletionCriterion, true
-			case "status":
-				return item.Status, true
-			}
-		}
-	case "problem":
-		for _, item := range p.ProblemNodes {
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "question":
-				return item.Question, true
-			case "completion_criterion":
-				return item.CompletionCriterion, true
-			case "current_conclusion":
-				return item.CurrentConclusion, true
-			}
-		}
-	case "milestone":
-		for _, item := range p.Timeline {
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				return item.Title, true
-			case "summary":
-				return item.Summary, true
-			case "conclusion":
-				return item.ClosedLoop.Conclusion.Text, true
-			case "impact_and_follow_up":
-				return item.ClosedLoop.ImpactAndFollowUp.Text, true
-			}
-		}
-	}
-	return "", false
-}
-
-func setMarkdownPresentationField(p *Presentation, key FieldKey, value string) error {
-	kind, id, _ := splitMarkdownEntity(key.Entity)
-	switch kind {
-	case "project-overview":
-		switch key.Name {
-		case "goal":
-			p.CurrentState.Goal = value
-		case "stage":
-			p.CurrentState.Stage = value
-		case "status":
-			p.CurrentState.Status = value
-		case "next_action":
-			p.CurrentState.NextAction = value
-		case "last_verification":
-			p.CurrentState.LastVerification = value
-		default:
-			return markdownEditStructureError(key)
-		}
-		return nil
-	case "decision":
-		for index := range p.Decisions {
-			item := &p.Decisions[index]
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				item.Title = value
-			case "rationale":
-				item.Rationale = value
-			case "impact":
-				item.Impact = value
-			case "reevaluate_when":
-				item.ReevaluateWhen = value
-			default:
-				return markdownEditStructureError(key)
-			}
-			return nil
-		}
-	case "risk":
-		for index := range p.Risks {
-			item := &p.Risks[index]
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				item.Title = value
-			case "detail":
-				item.Detail = value
-			case "status":
-				item.Status = value
-			default:
-				return markdownEditStructureError(key)
-			}
-			return nil
-		}
-	case "open-loop":
-		for index := range p.OpenLoops {
-			item := &p.OpenLoops[index]
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				item.Title = value
-			case "question":
-				item.Question = value
-			case "next_experiment":
-				item.NextExperiment = value
-			case "completion_criterion":
-				item.CompletionCriterion = value
-			case "status":
-				item.Status = value
-			default:
-				return markdownEditStructureError(key)
-			}
-			return nil
-		}
-	case "problem":
-		for index := range p.ProblemNodes {
-			item := &p.ProblemNodes[index]
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "question":
-				item.Question = value
-			case "completion_criterion":
-				item.CompletionCriterion = value
-			case "current_conclusion":
-				item.CurrentConclusion = value
-			default:
-				return markdownEditStructureError(key)
-			}
-			return nil
-		}
-	case "milestone":
-		for index := range p.Timeline {
-			item := &p.Timeline[index]
-			if item.ID != id {
-				continue
-			}
-			switch key.Name {
-			case "title":
-				item.Title = value
-			case "summary":
-				item.Summary = value
-			case "conclusion":
-				if value == "" && item.ClosedLoop.Conclusion.Kind != ConclusionMissing {
-					return markdownEditStructureError(key)
-				}
-				if value != "" {
-					item.ClosedLoop.Conclusion.Text = value
-					item.ClosedLoop.Conclusion.Kind = ConclusionHumanConfirmed
-					item.ClosedLoop.Conclusion.MissingReason = nil
-				}
-			case "impact_and_follow_up":
-				segment := &item.ClosedLoop.ImpactAndFollowUp
-				if value == "" && segment.Text != "" {
-					return markdownEditStructureError(key)
-				}
-				if value != "" {
-					segment.Text = value
-					if segment.State == "missing" {
-						segment.State = "present"
-					}
-					segment.MissingReason = nil
-				}
-			default:
-				return markdownEditStructureError(key)
-			}
-			return nil
-		}
-	}
-	return markdownEditStructureError(key)
+	return newMarkdownPresentationIndex(&p).field(key)
 }
 
 func markdownEditStructureError(key FieldKey) error {
 	return &MarkdownError{Code: MarkdownStructureEditRequiresCommand, Entity: key.Entity, Field: key.Name}
-}
-
-func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
-	semanticKey, err := markdownPatchSemanticKey(*p, edit.Key)
-	if err != nil {
-		return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: err}
-	}
-	entityID := markdownPatchEntityID(edit.Key)
-	baselineIndex := -1
-	for index, baseline := range p.GeneratedBaselines {
-		key, _, resolveErr := markdownStoredSemanticKey(*p, baseline.EntityID, baseline.Field)
-		if resolveErr != nil {
-			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
-		}
-		if key == semanticKey {
-			if baselineIndex >= 0 {
-				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
-			}
-			baselineIndex = index
-		}
-	}
-	if baselineIndex < 0 {
-		before := edit.Before
-		p.GeneratedBaselines = append(p.GeneratedBaselines, Baseline{
-			GenerationID: p.GenerationID, EntityID: entityID, Field: edit.Key.Name,
-			Kind: "scalar", Value: &before,
-			GeneratedHash: baselinehash.SHA256(entityID, edit.Key.Name, "scalar", before, nil),
-		})
-		baselineIndex = len(p.GeneratedBaselines) - 1
-	}
-	baseline := p.GeneratedBaselines[baselineIndex]
-	if baseline.GenerationID != p.GenerationID || baseline.Kind != "scalar" || baseline.Value == nil || baseline.Values != nil ||
-		baseline.GeneratedHash != baselinehash.SHA256(baseline.EntityID, baseline.Field, baseline.Kind, *baseline.Value, nil) {
-		return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
-	}
-	patchIndex := -1
-	for index, patch := range p.HumanPatches {
-		key, _, resolveErr := markdownStoredSemanticKey(*p, patch.EntityID, patch.Field)
-		if resolveErr != nil {
-			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
-		}
-		if key == semanticKey {
-			if patch.EntityID != baseline.EntityID || patch.Field != baseline.Field {
-				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
-			}
-			if patchIndex >= 0 {
-				return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
-			}
-			patchIndex = index
-		}
-	}
-	for _, patch := range p.OrphanPatches {
-		key, _, resolveErr := markdownStoredSemanticKey(*p, patch.EntityID, patch.Field)
-		if resolveErr != nil {
-			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
-		}
-		if key == semanticKey {
-			if patch.EntityID != baseline.EntityID || patch.Field != baseline.Field {
-				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
-			}
-			return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
-		}
-	}
-	if edit.After == *baseline.Value {
-		if patchIndex >= 0 {
-			p.HumanPatches = slices.Delete(p.HumanPatches, patchIndex, patchIndex+1)
-		}
-		return nil
-	}
-	after := edit.After
-	patch := Patch{EntityID: baseline.EntityID, Field: baseline.Field, Operation: "set", Value: &after, BaseGeneratedHash: baseline.GeneratedHash}
-	if patchIndex >= 0 {
-		p.HumanPatches[patchIndex] = patch
-	} else {
-		p.HumanPatches = append(p.HumanPatches, patch)
-	}
-	return nil
 }
 
 func markdownPatchEntityID(key FieldKey) string {
