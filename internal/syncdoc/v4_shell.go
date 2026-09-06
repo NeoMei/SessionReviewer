@@ -59,7 +59,7 @@ func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error)
 		}
 		if original, found := d.v4.shellAll[key]; found && unitsEqual(original, unit) {
 			span := d.v4.frontmatter[key]
-			parts = append(parts, raw[span.start:span.end])
+			parts = append(parts, raw[span.start:span.valueEnd])
 			continue
 		}
 		encoded, err := encodeV4FrontmatterUnit(key, unit)
@@ -113,11 +113,11 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 				previous := d.v4.frontmatter[d.v4.frontmatterOrder[first-1]]
 				lastSpan := d.v4.frontmatter[d.v4.frontmatterOrder[last]]
 				start := previous.delimiter
-				end := lastSpan.end
-				if previous.lineComment != "" {
+				end := lastSpan.removalEnd
+				if previous.lineCommentAfterDelimiter {
 					start = span.start
 					preservedFinalSeparator = true
-					if lastSpan.delimiter < d.v4.frontmatterClose {
+					if lastSpan.delimiter < d.v4.frontmatterClose && end <= lastSpan.delimiter {
 						end = lastSpan.delimiter + 1
 					}
 				}
@@ -135,7 +135,7 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 		if err != nil {
 			return nil, err
 		}
-		edits = append(edits, v4SourceEdit{start: span.start, end: span.end, value: encoded})
+		edits = append(edits, v4SourceEdit{start: span.start, end: span.valueEnd, value: encoded})
 		if span.lineComment != "" && lineComment != span.lineComment {
 			edits = append(edits, v4SourceEdit{start: span.lineCommentStart, end: span.lineCommentEnd, value: []byte(lineComment)})
 		}
@@ -225,11 +225,11 @@ func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit, sourceOwnsLineComment b
 	if !ok {
 		return nil, "", invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
-	delimiter, ok := v4FlowEntryDelimiter(source, start, close, true, quoted)
+	entry, ok := v4FlowEntryBoundary(source, start, close, true, quoted)
 	if !ok {
 		return nil, "", invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
-	return bytes.Clone(bytes.TrimRight(source[start:delimiter], " \t\r\n")), lineComment, nil
+	return bytes.Clone(bytes.TrimRight(source[start:entry.boundary], " \t\r\n")), lineComment, nil
 }
 
 func v4FrontmatterNewline(source []byte) []byte {

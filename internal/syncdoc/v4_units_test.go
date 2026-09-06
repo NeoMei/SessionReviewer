@@ -440,12 +440,17 @@ func TestV4ShellFlowDeletionConsumesRemovedValueSideComment(t *testing.T) {
 		{
 			name:   "uncommented survivor with trailing comma",
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, custom_remove: [blue] # removed value comment\n ,}",
-			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes,}",
 		},
 		{
 			name:   "commented survivor without trailing comma",
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, # survivor comment\n custom_remove: {label: blue} # removed value comment\n }",
 			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, # survivor comment\n }",
+		},
+		{
+			name:   "uncommented survivor and removed suffix of two",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, custom_a: one # removed a\n , custom_b: two # removed b\n ,}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes,}",
 		},
 	}
 	for _, test := range tests {
@@ -456,6 +461,8 @@ func TestV4ShellFlowDeletionConsumesRemovedValueSideComment(t *testing.T) {
 			}
 			units := project.SemanticUnits()
 			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_remove"})
+			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_a"})
+			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_b"})
 			merged, err := project.WithSemanticUnits(units)
 			if err != nil {
 				t.Fatal(err)
