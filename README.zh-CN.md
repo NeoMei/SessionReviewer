@@ -13,12 +13,12 @@ SessionReviewer 默认使用零 Token 的整项目扫描：Go CLI 找出与当�
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [最新 GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包。当前源码候选版本为 `0.3.5`：
+无需 Go 工具链时，从 [最新 GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包。当前源码候选版本为 `0.4.1`：
 
-- Apple Silicon Mac：`session-reviewer_0.3.5_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.3.5_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.3.5_windows_amd64.zip`
-- Obsidian：`session-reviewer-obsidian-0.3.5.zip`
+- Apple Silicon Mac：`session-reviewer_0.4.1_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.4.1_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.4.1_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.4.1.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -148,12 +148,22 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-发布包中的 `session-reviewer-obsidian-0.3.5.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+发布包中的 `session-reviewer-obsidian-0.4.1.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
 
 目录中应当恰好有 `main.js`、`manifest.json` 和 `styles.css`。在 Obsidian 的“设置 → 第三方插件”中启用 SessionReviewer，然后从命令面板运行“SessionReviewer: 打开项目脉络”。
+
+#### 0.4.1 的 v4 Markdown 视图
+
+v4 项目视图为只读入口：通过按钮打开原生 `项目回顾.md` 和 `项目历史.md`，在文档中编辑允许的人类字段，再通过 CLI 执行扫描或同步。未安装 CLI 时仍可阅读，但不能完成私有接受状态验证或同步；公开文件有效不等于已经同步验收。完整已接受历史与累计 Session 索引独立保留，不受摘要展示条数限制。
+
+升级前请备份已有回顾/历史文件及本机接受状态；重新扫描必须明确发起，不代表允许删除或覆盖人工内容。本次不宣称真实旧项目迁移已验收，也不包含仍在规划的问题拆分/归位推荐和后续 Session 摘要功能。详见 [0.4.1 发布说明](docs/release/0.4.1.md)。
+
+#### 旧格式浏览器与兼容操作
+
+以下内联编辑器和更新按钮说明适用于支持这些操作的旧格式视图，不适用于 v4 Markdown 只读视图。
 
 页面默认只呈现项目目标、阶段、一个下一步、最近五个演进节点，以及选中节点的详情。“决策”可跳回相关演进节点；“用量”显示已验收账本中的时长、Token、成本、模型占比、单价来源与日期。需要旧细节时再展开全部历史并搜索。
 
@@ -179,7 +189,7 @@ session-reviewer scan --json
 
 该命令扫描与项目关联的全部 Codex Session，分别更新确定性 Session 记忆，再汇总为项目级视图、生成简洁的人类可读内容并同步到 Obsidian。它不调用 Agent，结果中的 `review_run_tokens` 固定为 `0`。人类已编辑字段和未知 Markdown 章节保持最高呈现优先级；机器生成的统计区由新扫描结果刷新。
 
-Obsidian 中的“更新项目脉络”执行同一流程，但使用可恢复的后台任务。对应的手工命令是：
+支持该操作的旧格式 Obsidian 视图中，“更新项目脉络”执行同一流程，但使用可恢复的后台任务。v4 Markdown 视图请使用 CLI；对应的后台任务命令是：
 
 ```bash
 session-reviewer scan start --json
@@ -192,7 +202,7 @@ session-reviewer scan status --json
 
 项目重拾时的推荐路径只有一条：
 
-1. 在项目目录运行 `session-reviewer scan --json`，或在 Obsidian 点击“更新项目脉络”。
+1. 在项目目录运行 `session-reviewer scan --json`；仅支持该操作的旧格式 Obsidian 视图也可点击“更新项目脉络”。
 2. 已安装 Obsidian 项目脉络浏览器时优先打开它；否则先读 `项目回顾.md`。
 3. 需要旧细节时再打开 `项目历史.md`；它按时间倒序保留事件流。
 4. 在 Project 或 Obsidian 编辑允许的人类字段，再运行 `session-reviewer sync`。
@@ -271,23 +281,23 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.3.5 dist
+./scripts/build-release.sh 0.4.1 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.3.5 -Dist dist
+.\scripts\build-release.ps1 -Version 0.4.1 -Dist dist
 ```
 
 Obsidian 插件包可独立构建：
 
 ```bash
-./scripts/build-obsidian-plugin.sh 0.3.5 dist
+./scripts/build-obsidian-plugin.sh 0.4.1 dist
 ```
 
 ```powershell
-.\scripts\build-obsidian-plugin.ps1 -Version 0.3.5 -Dist dist
+.\scripts\build-obsidian-plugin.ps1 -Version 0.4.1 -Dist dist
 ```
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。

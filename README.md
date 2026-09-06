@@ -26,6 +26,22 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
+### 0.4.1: native Markdown project context
+
+This release adds v4 human-editable Markdown, a cumulative Session index and
+complete accepted history alongside a concise project review. The v4 plugin
+view is read-only: use its native review/history buttons to read or edit allowed
+human fields, then use the CLI for scan/sync. Public-file validation is not private
+acceptance proof; without a CLI, native reading remains available but validation
+and synchronization do not. Legacy inline editors and update buttons described
+below apply only to their supported older formats, not to the v4 Markdown view.
+
+Back up existing review files and accepted local state before upgrading. A rescan
+must be explicitly initiated; it is not permission to delete or overwrite human
+content. This release does not claim real legacy-project migration acceptance or
+the still-planned problem-placement and further Session-summary features.
+See [0.4.1 release notes](https://github.com/NeoMei/SessionReviewer/blob/0.4.1/docs/release/0.4.1.md) for the delivered scope.
+
 Download `main.js`, `manifest.json`, and `styles.css` from the [latest GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest). Place the three files in:
 
 ```text
@@ -71,7 +87,7 @@ session-reviewer scan --json
 
 The command discovers all Codex sessions associated with the project, updates deterministic per-session memory, reduces it into a project-wide view, preserves accepted human edits and unknown Markdown sections, and synchronizes the concise projection to Obsidian. It never sends session content to an Agent and reports `review_run_tokens: 0`.
 
-The Obsidian action **更新项目脉络** starts the same work as a durable background job. The equivalent CLI controls are:
+In supported legacy views, the Obsidian action **更新项目脉络** starts the same work as a durable background job. For the v4 Markdown view, use the CLI; its equivalent background controls are:
 
 ```bash
 session-reviewer scan start --json
