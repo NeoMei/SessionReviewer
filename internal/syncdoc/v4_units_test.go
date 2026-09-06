@@ -270,6 +270,21 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {single: 'team''s', double: \"team\\\"blue\", tagged: !!str 中文, nested: [{label: keep}]}, # owner metadata\n custom_edit: before}",
 			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {single: 'team''s', double: \"team\\\"blue\", tagged: !!str 中文, nested: [{label: keep}]}, # owner metadata\n custom_edit: after}",
 		},
+		{
+			name:   "double quoted comma hash",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: "team,#blue", custom_keep: yes}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: "team,#green", custom_keep: yes}`,
+		},
+		{
+			name:   "single quoted comma hash",
+			before: `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: 'team,#blue', custom_keep: yes}`,
+			after:  `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: 'team,#green', custom_keep: yes}`,
+		},
+		{
+			name:   "nested quoted punctuation and comment",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue} still scalar\", alternate: 'team,#blue] still scalar'}, # actual comment },#\n custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green} still scalar\", alternate: 'team,#blue] still scalar'}, # actual comment },#\n custom_keep: yes}",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -402,6 +417,34 @@ func TestV4ShellFlowGroupedCustomDeletionsProduceDisjointEdits(t *testing.T) {
 				t.Fatal("grouped flow deletion was not stable on no-op")
 			}
 		})
+	}
+}
+
+func TestV4ShellFlowQuotedBraceHashKeepsMappingCloseWhenAdding(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	flow := `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: "team}#blue"}`
+	projectRaw := replaceV4TestFrontmatter(t, raw, []byte(flow))
+	project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+	if err != nil {
+		t.Fatalf("parse quoted brace/hash flow YAML: %v", err)
+	}
+	units := project.SemanticUnits()
+	units[UnitKey{Kind: UnitFrontmatter, Name: "custom_team"}] = Unit{Present: true, Value: []byte("codec\n")}
+	merged, err := project.WithSemanticUnits(units)
+	if err != nil {
+		t.Fatalf("add after quoted brace/hash flow YAML: %v", err)
+	}
+	got, err := merged.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFlow := `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: "team}#blue", custom_team: codec}`
+	want := replaceV4TestFrontmatter(t, raw, []byte(wantFlow))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("quoted brace/hash moved the mapping close\ngot:\n%s\nwant:\n%s", got, want)
+	}
+	if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+		t.Fatalf("quoted brace/hash addition cannot be reopened: %v", err)
 	}
 }
 

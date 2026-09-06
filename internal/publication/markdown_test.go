@@ -253,8 +253,8 @@ func TestMarkdownVaultFlowGroupedDeletionWithPlainQuoteAndTrailingComma(t *testi
 			t.Fatalf("grouped-deletion publication changed unrelated bytes in %s\ngot:\n%s\nwant:\n%s", path, got, expectedReview)
 		}
 	}
-	if !bytes.Contains(expectedReview, []byte("custom_note: team's,")) {
-		t.Fatal("grouped-deletion publication lost plain-scalar apostrophe or trailing comma")
+	if !bytes.Contains(expectedReview, []byte(`custom_note: "team,#blue",`)) {
+		t.Fatal("grouped-deletion publication lost quoted punctuation or trailing comma")
 	}
 	for path, before := range beforeIndex {
 		if got := readTestFile(t, path); !bytes.Equal(got, before) {
@@ -1336,7 +1336,7 @@ func setupFlowMarkdownPublication(t *testing.T, projectID string) markdownPublic
 		if file == nil {
 			t.Fatalf("missing flow fixture file %s", document.relative)
 		}
-		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: team's, custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: '保留', schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: \"team,#blue\", custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
 		file.Desired = replaceMarkdownFrontmatterForTest(t, file.Desired, []byte(flow))
 		if document.relative == reviewv2.ReviewRelativePath {
 			file.Desired = bytes.Replace(file.Desired, []byte("---\n# 项目回顾"), []byte("---\n自定义段落和 [链接](https://example.test/custom) 必须保留。\n\n```yaml\ncustom: code-block\n```\n\n# 项目回顾"), 1)
