@@ -1,6 +1,7 @@
 package contextupdate
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,9 +11,11 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/baselinehash"
+	"github.com/neomei/SessionReviewer/internal/migrationv4"
 	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestV4ScanMapsCanonicalIndexAndPreservesHumanStructures(t *testing.T) {
@@ -232,6 +235,67 @@ func TestV4ScanAcceptsValidHistoricalListOrphanWithoutPromotingIt(t *testing.T) 
 	if !reflect.DeepEqual(next.GeneratedBaselines, accepted.Review.GeneratedBaselines) || !reflect.DeepEqual(next.OrphanPatches, accepted.Review.OrphanPatches) ||
 		!reflect.DeepEqual(ledger.GeneratedBaselines, accepted.Review.GeneratedBaselines) || !reflect.DeepEqual(ledger.OrphanPatches, accepted.Review.OrphanPatches) {
 		t.Fatalf("historical list orphan was changed: presentation=%+v ledger=%+v", next, ledger)
+	}
+}
+
+func TestV4ScanMapsAuthenticatedMigrationWithHistoricalListOrphan(t *testing.T) {
+	read := func(relative string) []byte {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "migration", "v4", filepath.FromSlash(relative)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	reviewBody := read(migrationv4.ReviewRelativePath)
+	historyBody := read(migrationv4.HistoryRelativePath)
+	ledgerBody := read(migrationv4.LedgerRelativePath)
+	indexBody := read(migrationv4.SessionIndexRelativePath)
+	source, err := reviewv4.LoadProjection(reviewBody, historyBody, ledgerBody, indexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []string{"historical", "ordered"}
+	hash := baselinehash.SHA256("decision:removed", "tags", "list", "", values)
+	source.Review.GeneratedBaselines = []reviewv4.Baseline{{GenerationID: "historical-generation", EntityID: "decision:removed", Field: "tags", Kind: "list", Values: &values, GeneratedHash: hash}}
+	override := []string{"preserved", "human"}
+	source.Review.OrphanPatches = []reviewv4.Patch{{EntityID: "decision:removed", Field: "tags", Operation: "set", Values: &override, BaseGeneratedHash: hash}}
+	reviewBody, err = strictjson.Encode(source.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Ledger.GeneratedBaselines = append([]reviewv4.Baseline{}, source.Review.GeneratedBaselines...)
+	source.Ledger.OrphanPatches = append([]reviewv4.Patch{}, source.Review.OrphanPatches...)
+	reviewDigest := fmt.Sprintf("%x", sha256.Sum256(reviewBody))
+	source.Ledger.ReviewSHA256, source.Ledger.SyncHashes.ReviewSHA256 = reviewDigest, reviewDigest
+	ledgerBody, err = reviewv4.RenderLedger(source.Ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := migrationv4.BuildMarkdownPreview(migrationv4.MarkdownMigrationInput{Source: migrationv4.Input{
+		Review: reviewBody, History: historyBody, Ledger: ledgerBody, SourceSessionIndex: indexBody, SessionIndex: indexBody,
+		TargetPreimages: map[string]migrationv4.Preimage{}, TargetVaultPreimages: map[string]migrationv4.Preimage{},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextIndex := migrated.Accepted.SessionIndex
+	nextIndex.GenerationID = "generation-after-migration"
+	nextIndex.ProjectViewDigest = "sha256:" + strings.Repeat("7", 64)
+	nextIndexBody, err := sessionindex.Render(nextIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextIndex, err = sessionindex.Parse(nextIndexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, ledger, err := mapV4Scan(v4MapInput{Accepted: migrated.Accepted, Index: nextIndex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(next.GeneratedBaselines, source.Review.GeneratedBaselines) || !reflect.DeepEqual(next.OrphanPatches, source.Review.OrphanPatches) || !reflect.DeepEqual(ledger.GeneratedBaselines, source.Review.GeneratedBaselines) {
+		t.Fatalf("real scan mapper changed migrated historical list metadata: presentation=%+v ledger=%+v", next, ledger)
 	}
 }
 

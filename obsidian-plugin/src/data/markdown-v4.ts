@@ -64,7 +64,7 @@ export function parseMarkdownV4(pair: MarkdownPair, ledger: MachineLedgerV4): Ma
   const expectedFields = new Map(expected.filter((block) => !block.generated).map((block) => [`${block.entity}\0${block.name}`, block.value]));
   const presentation = structuredClone(base);
   const entities = presentationEntities(presentation);
-  const patches = patchState(presentation);
+  const patches = patchState(presentation, expected);
   const changedFields: { entity: string; name: string }[] = [];
   for (const field of fields) {
     const before = expectedFields.get(`${field.entity}\0${field.name}`);
@@ -257,6 +257,19 @@ interface PatchState {
   removedHuman: Set<number>;
 }
 
+function storedSemanticKey(liveFields: ReadonlySet<string>, entity: string, field: string): { key: string; live: boolean } {
+  const qualified = patchKey(entity, field);
+  const candidates = new Set<string>();
+  if (liveFields.has(qualified)) candidates.add(qualified);
+  for (const kind of ["decision", "risk", "open-loop", "problem", "milestone"]) {
+    const candidate = patchKey(`${kind}:${entity}`, field);
+    if (liveFields.has(candidate)) candidates.add(candidate);
+  }
+  if (candidates.size > 1) fail("markdown_baseline_missing");
+  const [matched] = candidates;
+  return matched === undefined ? { key: qualified, live: false } : { key: matched, live: true };
+}
+
 function presentationEntities(p: ReviewPresentationV4): PresentationEntities {
   return {
     decisions: new Map(p.decisions.map((item) => [item.id, item])), risks: new Map(p.risks.map((item) => [item.id, item])),
@@ -265,10 +278,11 @@ function presentationEntities(p: ReviewPresentationV4): PresentationEntities {
   };
 }
 
-function patchState(p: ReviewPresentationV4): PatchState {
+function patchState(p: ReviewPresentationV4, expected: readonly Block[]): PatchState {
+  const liveFields = new Set(expected.filter((block) => !block.generated).map((block) => patchKey(block.entity, block.name)));
   const baselines = new Map<string, { first: ReviewPresentationV4["generated_baselines"][number]; duplicate: boolean }>();
   for (const baseline of p.generated_baselines) {
-    const key = patchKey(baseline.entity_id, baseline.field);
+    const key = storedSemanticKey(liveFields, baseline.entity_id, baseline.field).key;
     const prior = baselines.get(key);
     if (prior) prior.duplicate = true;
     else baselines.set(key, { first: baseline, duplicate: false });
@@ -276,7 +290,7 @@ function patchState(p: ReviewPresentationV4): PatchState {
   const human = new Map<string, { index: number; duplicate: boolean }>();
   for (let index = 0; index < p.human_patches.length; index += 1) {
     const patch = p.human_patches[index];
-    const key = patchKey(patch.entity_id, patch.field);
+    const key = storedSemanticKey(liveFields, patch.entity_id, patch.field).key;
     const prior = human.get(key);
     if (prior) prior.duplicate = true;
     else human.set(key, { index, duplicate: false });
@@ -284,7 +298,7 @@ function patchState(p: ReviewPresentationV4): PatchState {
   return {
     baselines,
     human,
-    orphan: new Set(p.orphan_patches.map((patch) => patchKey(patch.entity_id, patch.field))),
+    orphan: new Set(p.orphan_patches.map((patch) => storedSemanticKey(liveFields, patch.entity_id, patch.field).key)),
     removedHuman: new Set()
   };
 }
@@ -331,7 +345,7 @@ function recordPatch(p: ReviewPresentationV4, state: PatchState, entity: string,
     if (patchIndex >= 0) state.removedHuman.add(patchIndex);
     return;
   }
-  const patch = { entity_id: entity, field, operation: "set" as const, value: after, base_generated_hash: baseline.generated_hash };
+  const patch = { entity_id: baseline.entity_id, field: baseline.field, operation: "set" as const, value: after, base_generated_hash: baseline.generated_hash };
   if (patchIndex >= 0) p.human_patches[patchIndex] = patch;
   else { state.human.set(key, { index: p.human_patches.length, duplicate: false }); p.human_patches.push(patch); }
 }

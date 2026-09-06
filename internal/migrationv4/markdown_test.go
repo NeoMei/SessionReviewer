@@ -371,16 +371,74 @@ func TestOldV4JSONMigrationPreservesHistoricalListOrphanGeneration(t *testing.T)
 	if !reflect.DeepEqual(result.Accepted.Review.GeneratedBaselines[1], accepted.Review.GeneratedBaselines[1]) || !reflect.DeepEqual(result.Accepted.Review.OrphanPatches, accepted.Review.OrphanPatches) {
 		t.Fatalf("migration promoted or converted the historical list orphan: got=%+v want=%+v", result.Accepted.Review, accepted.Review)
 	}
+}
 
-	// The migration target is itself accepted input for the next ordinary scan;
-	// re-run the shared carry classifier to prove the historical list orphan is
-	// not merely renderable but survives the next generation boundary unchanged.
-	scanned := result.Accepted.Review
-	if err := reviewv4.CarryMarkdownGeneratedBaselines(&scanned, "generation-after-migration-scan"); err != nil {
-		t.Fatalf("authenticated migrated list orphan blocked the next ordinary scan: %v", err)
+// A migration that keeps the authenticated old-v4 bare entity identity must
+// not let Markdown editing create a second kind-qualified baseline/patch.
+func TestOldV4NonProjectScalarMigrationCanEditRestoreAndReopen(t *testing.T) {
+	review, history, ledger, index := oldV4TimelineSource(t, "legacy human title", "legacy generated title", "legacy generated title", "legacy human title")
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if scanned.GeneratedBaselines[0].GenerationID != "generation-after-migration-scan" || !reflect.DeepEqual(scanned.GeneratedBaselines[1], accepted.Review.GeneratedBaselines[1]) || !reflect.DeepEqual(scanned.OrphanPatches, accepted.Review.OrphanPatches) {
-		t.Fatalf("post-migration scan changed historical list orphan or missed live carry: %+v", scanned)
+	key := reviewv4.FieldKey{Entity: "milestone:milestone-auth", Name: "title"}
+	baseline := result.Accepted.Review.GeneratedBaselines[0]
+	if baseline.EntityID != "milestone-auth" || baseline.Value == nil || *baseline.Value != "legacy generated title" {
+		t.Fatalf("migration did not retain the authenticated bare baseline: %+v", baseline)
+	}
+
+	edit := func(accepted reviewv4.Accepted, pair reviewv4.MarkdownPair, value string) (reviewv4.Accepted, reviewv4.MarkdownPair) {
+		t.Helper()
+		document, err := reviewv4.ParseMarkdownDocument(HistoryRelativePath, pair.History)
+		if err != nil {
+			t.Fatal(err)
+		}
+		history, err := document.ReplaceFields(map[reviewv4.FieldKey]string{key: value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pending := reviewv4.MarkdownPair{Review: pair.Review, History: history}
+		draft, err := reviewv4.ParseMarkdownDraft(pending, accepted.Ledger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendered, err := reviewv4.RenderMarkdownDraft(draft.Presentation, accepted.Ledger, pending)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextLedger := accepted.Ledger
+		nextLedger.AcceptedRevision = draft.Presentation.Revision
+		nextLedger.HumanPatches = append([]reviewv4.Patch{}, draft.Presentation.HumanPatches...)
+		nextLedger.OrphanPatches = append([]reviewv4.Patch{}, draft.Presentation.OrphanPatches...)
+		nextLedger.GeneratedBaselines = append([]reviewv4.Baseline{}, draft.Presentation.GeneratedBaselines...)
+		nextLedger.DocumentProjection.PresentationBase = draft.Presentation
+		nextLedger.ReviewSHA256, nextLedger.HistorySHA256 = bareDigest(rendered.Review), bareDigest(rendered.History)
+		nextLedger.SyncHashes.ReviewSHA256, nextLedger.SyncHashes.HistorySHA256 = nextLedger.ReviewSHA256, nextLedger.HistorySHA256
+		ledgerBody, err := reviewv4.RenderLedger(nextLedger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := reviewv4.LoadProjection(rendered.Review, rendered.History, ledgerBody, result.SessionIndex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reopened, rendered
+	}
+
+	accepted, pair := edit(result.Accepted, reviewv4.MarkdownPair{Review: result.Review, History: result.History}, "edited migrated title")
+	if len(accepted.Review.GeneratedBaselines) != 1 || len(accepted.Review.HumanPatches) != 1 || accepted.Review.GeneratedBaselines[0].EntityID != "milestone-auth" || accepted.Review.HumanPatches[0].EntityID != "milestone-auth" || accepted.Review.HumanPatches[0].Value == nil || *accepted.Review.HumanPatches[0].Value != "edited migrated title" {
+		t.Fatalf("edit created a qualified alias instead of updating the bare metadata: %+v", accepted.Review)
+	}
+	accepted, pair = edit(accepted, pair, "legacy generated title")
+	if len(accepted.Review.GeneratedBaselines) != 1 || len(accepted.Review.HumanPatches) != 0 || !reflect.DeepEqual(accepted.Review.GeneratedBaselines[0], baseline) {
+		t.Fatalf("restore did not remove only the bare patch and retain its baseline: %+v", accepted.Review)
+	}
+	accepted, _ = edit(accepted, pair, "edited after restore")
+	if len(accepted.Review.GeneratedBaselines) != 1 || len(accepted.Review.HumanPatches) != 1 || accepted.Review.HumanPatches[0].EntityID != "milestone-auth" || accepted.Review.HumanPatches[0].Value == nil || *accepted.Review.HumanPatches[0].Value != "edited after restore" || !reflect.DeepEqual(accepted.Review.GeneratedBaselines[0], baseline) {
+		t.Fatalf("reopened restored field did not reuse its authenticated bare identity: %+v", accepted.Review)
 	}
 }
 

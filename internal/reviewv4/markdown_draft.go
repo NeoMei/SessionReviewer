@@ -568,10 +568,18 @@ func markdownEditStructureError(key FieldKey) error {
 }
 
 func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
+	semanticKey, err := markdownPatchSemanticKey(*p, edit.Key)
+	if err != nil {
+		return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: err}
+	}
 	entityID := markdownPatchEntityID(edit.Key)
 	baselineIndex := -1
 	for index, baseline := range p.GeneratedBaselines {
-		if baseline.EntityID == entityID && baseline.Field == edit.Key.Name {
+		key, _, resolveErr := markdownStoredSemanticKey(*p, baseline.EntityID, baseline.Field)
+		if resolveErr != nil {
+			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
+		}
+		if key == semanticKey {
 			if baselineIndex >= 0 {
 				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
 			}
@@ -594,7 +602,11 @@ func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
 	}
 	patchIndex := -1
 	for index, patch := range p.HumanPatches {
-		if patch.EntityID == entityID && patch.Field == edit.Key.Name {
+		key, _, resolveErr := markdownStoredSemanticKey(*p, patch.EntityID, patch.Field)
+		if resolveErr != nil {
+			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
+		}
+		if key == semanticKey {
 			if patchIndex >= 0 {
 				return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
 			}
@@ -602,7 +614,11 @@ func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
 		}
 	}
 	for _, patch := range p.OrphanPatches {
-		if patch.EntityID == entityID && patch.Field == edit.Key.Name {
+		key, _, resolveErr := markdownStoredSemanticKey(*p, patch.EntityID, patch.Field)
+		if resolveErr != nil {
+			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
+		}
+		if key == semanticKey {
 			return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
 		}
 	}
@@ -613,7 +629,7 @@ func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
 		return nil
 	}
 	after := edit.After
-	patch := Patch{EntityID: entityID, Field: edit.Key.Name, Operation: "set", Value: &after, BaseGeneratedHash: baseline.GeneratedHash}
+	patch := Patch{EntityID: baseline.EntityID, Field: baseline.Field, Operation: "set", Value: &after, BaseGeneratedHash: baseline.GeneratedHash}
 	if patchIndex >= 0 {
 		p.HumanPatches[patchIndex] = patch
 	} else {

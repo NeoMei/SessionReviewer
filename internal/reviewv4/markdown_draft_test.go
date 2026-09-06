@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"reflect"
 	"testing"
+
+	"github.com/neomei/SessionReviewer/internal/baselinehash"
 )
 
 func TestMarkdownConclusionEditPreservesVerification(t *testing.T) {
@@ -116,6 +118,71 @@ func TestApplyMarkdownEditsAdvancesRevisionsOnceAndRecordsPatch(t *testing.T) {
 	unchanged, err := ApplyMarkdownEdits(next, []FieldEdit{{Key: FieldKey{Entity: "project-overview", Name: "goal"}, Before: "人工目标", After: "人工目标"}})
 	if err != nil || unchanged.Revision != next.Revision || len(unchanged.HumanPatches) != len(next.HumanPatches) {
 		t.Fatalf("no-op drifted revision or patches: err=%v", err)
+	}
+}
+
+func TestApplyMarkdownEditsRejectsAmbiguousLegacyBareEntityIdentity(t *testing.T) {
+	p := minimumPresentation()
+	p.Decisions = []Decision{{
+		ID: "shared", Kind: "decision", OccurredAt: "2026-09-05", Title: "human title", Status: DecisionActive,
+		Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []SessionRef{}, Provenance: "human_created", Revision: 1,
+	}}
+	p.Timeline = []Timeline{{ID: "shared", GenerationID: p.GenerationID, OccurredAt: "2026-09-05", Kind: "milestone", Title: "milestone title", DecisionIDs: []string{}, ClosedLoop: NeutralClosedLoop()}}
+	generated := "generated title"
+	hash := baselinehash.SHA256("shared", "title", "scalar", generated, nil)
+	p.GeneratedBaselines = []Baseline{{GenerationID: p.GenerationID, EntityID: "shared", Field: "title", Kind: "scalar", Value: &generated, GeneratedHash: hash}}
+	human := "human title"
+	p.HumanPatches = []Patch{{EntityID: "shared", Field: "title", Operation: "set", Value: &human, BaseGeneratedHash: hash}}
+
+	if err := CarryMarkdownGeneratedBaselines(&p, "generation-next"); err == nil {
+		t.Fatal("carry accepted an ambiguous bare entity identity")
+	}
+	_, err := ApplyMarkdownEdits(p, []FieldEdit{{Key: FieldKey{Entity: "decision:shared", Name: "title"}, Before: human, After: "edited"}})
+	if MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("ambiguous bare entity identity was accepted: %v", err)
+	}
+}
+
+func TestApplyMarkdownEditsRejectsBareAndQualifiedSemanticBaselineDuplicate(t *testing.T) {
+	p := minimumPresentation()
+	p.Decisions = []Decision{{
+		ID: "decision-1", Kind: "decision", OccurredAt: "2026-09-05", Title: "generated title", Status: DecisionActive,
+		Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []SessionRef{}, Provenance: "human_created", Revision: 1,
+	}}
+	value := p.Decisions[0].Title
+	bareHash := baselinehash.SHA256("decision-1", "title", "scalar", value, nil)
+	qualifiedHash := baselinehash.SHA256("decision:decision-1", "title", "scalar", value, nil)
+	p.GeneratedBaselines = []Baseline{
+		{GenerationID: p.GenerationID, EntityID: "decision-1", Field: "title", Kind: "scalar", Value: &value, GeneratedHash: bareHash},
+		{GenerationID: p.GenerationID, EntityID: "decision:decision-1", Field: "title", Kind: "scalar", Value: &value, GeneratedHash: qualifiedHash},
+	}
+
+	if err := CarryMarkdownGeneratedBaselines(&p, "generation-next"); err == nil {
+		t.Fatal("carry accepted a semantic bare/qualified duplicate")
+	}
+	_, err := ApplyMarkdownEdits(p, []FieldEdit{{Key: FieldKey{Entity: "decision:decision-1", Name: "title"}, Before: value, After: "edited"}})
+	if MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("semantic bare/qualified duplicate was accepted: %v", err)
+	}
+}
+
+func TestApplyMarkdownEditsRejectsStoredIdentityWithQualifiedAndLegacyInterpretations(t *testing.T) {
+	p := minimumPresentation()
+	p.Decisions = []Decision{{
+		ID: "risk:shared", Kind: "decision", OccurredAt: "2026-09-05", Title: "decision title", Status: DecisionActive,
+		Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []SessionRef{}, Provenance: "human_created", Revision: 1,
+	}}
+	p.Risks = []Risk{{ID: "shared", Title: "risk title", Detail: "risk detail", Status: "open"}}
+	generated := "generated title"
+	hash := baselinehash.SHA256("risk:shared", "title", "scalar", generated, nil)
+	p.GeneratedBaselines = []Baseline{{GenerationID: p.GenerationID, EntityID: "risk:shared", Field: "title", Kind: "scalar", Value: &generated, GeneratedHash: hash}}
+
+	if err := CarryMarkdownGeneratedBaselines(&p, "generation-next"); err == nil {
+		t.Fatal("carry accepted a stored identity with qualified and legacy interpretations")
+	}
+	_, err := ApplyMarkdownEdits(p, []FieldEdit{{Key: FieldKey{Entity: "decision:risk:shared", Name: "title"}, Before: "decision title", After: "edited"}})
+	if MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("stored identity ambiguity was accepted: %v", err)
 	}
 }
 

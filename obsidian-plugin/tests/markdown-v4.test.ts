@@ -204,6 +204,78 @@ describe("v4 human Markdown codec", () => {
     });
   });
 
+  it("updates and restores one uniquely resolved legacy bare non-project baseline", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const decision = ledger.document_projection!.presentation_base.decisions[0];
+    const generated = "legacy generated decision";
+    const generatedHash = "e339ea33de501b152e7c3058731988176b62df4d5c72f58bacd80e7e9799b19b";
+    decision.title = "legacy human decision";
+    const baseline = { generation_id: ledger.generation_id, entity_id: decision.id, field: "title", kind: "scalar" as const, value: generated, generated_hash: generatedHash };
+    const patch = { entity_id: decision.id, field: "title", operation: "set" as const, value: decision.title, base_generated_hash: generatedHash };
+    ledger.document_projection!.presentation_base.generated_baselines = [baseline];
+    ledger.document_projection!.presentation_base.human_patches = [patch];
+    ledger.generated_baselines = structuredClone(ledger.document_projection!.presentation_base.generated_baselines);
+    ledger.human_patches = structuredClone(ledger.document_projection!.presentation_base.human_patches);
+    const acceptedReview = read("review.md").replace("选择 [Markdown] 作为人工编辑面。", decision.title);
+
+    const edited = parseMarkdownV4({ review: acceptedReview.replace(decision.title, "edited migrated decision"), history: read("history.md") }, ledger);
+    expect(edited.presentation.generated_baselines).toEqual([baseline]);
+    expect(edited.presentation.human_patches).toEqual([{ ...patch, value: "edited migrated decision" }]);
+
+    const restored = parseMarkdownV4({ review: acceptedReview.replace(decision.title, generated), history: read("history.md") }, ledger);
+    expect(restored.presentation.generated_baselines).toEqual([baseline]);
+    expect(restored.presentation.human_patches).toEqual([]);
+  });
+
+  it("rejects simultaneous bare and qualified baselines for one semantic field", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const decision = ledger.document_projection!.presentation_base.decisions[0];
+    const value = decision.title;
+    const bare = { generation_id: ledger.generation_id, entity_id: decision.id, field: "title", kind: "scalar" as const, value, generated_hash: "a9816e82efb51cbf2bed59687f40939a9c4e5b54aff984778267a777737fc4b9" };
+    const qualified = { generation_id: ledger.generation_id, entity_id: `decision:${decision.id}`, field: "title", kind: "scalar" as const, value, generated_hash: "19ffa1597d3b097a53f7bfe8f73a42341ef3f6eee23e2cf2684ce7ae80fd2c63" };
+    ledger.document_projection!.presentation_base.generated_baselines = [bare, qualified];
+    ledger.generated_baselines = structuredClone(ledger.document_projection!.presentation_base.generated_baselines);
+
+    expect(() => parseMarkdownV4({ review: read("review.md").replace(value, "duplicate alias edit"), history: read("history.md") }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_baseline_missing" }));
+  });
+
+  it("rejects an ambiguous legacy bare identity shared by two entity kinds", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const decision = ledger.document_projection!.presentation_base.decisions[0];
+    const risk = ledger.document_projection!.presentation_base.risks[0];
+    risk.id = decision.id;
+    const value = decision.title;
+    const hash = "a9816e82efb51cbf2bed59687f40939a9c4e5b54aff984778267a777737fc4b9";
+    ledger.document_projection!.presentation_base.generated_baselines = [{ generation_id: ledger.generation_id, entity_id: decision.id, field: "title", kind: "scalar", value, generated_hash: hash }];
+    ledger.generated_baselines = structuredClone(ledger.document_projection!.presentation_base.generated_baselines);
+    const review = read("review.md")
+      .replaceAll("risk:risk:alpha", `risk:${decision.id}`)
+      .replaceAll("risk-x7269736b3a616c706861", "risk-x6465636973696f6e3a616c706861");
+
+    expect(() => parseMarkdownV4({ review: review.replace(value, "ambiguous edit"), history: read("history.md") }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_baseline_missing" }));
+  });
+
+  it("rejects a stored identity with qualified and legacy interpretations", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const decision = ledger.document_projection!.presentation_base.decisions[0];
+    const risk = ledger.document_projection!.presentation_base.risks[0];
+    const priorID = decision.id;
+    decision.id = `risk:${risk.id}`;
+    for (const milestone of ledger.document_projection!.presentation_base.timeline) {
+      milestone.decision_ids = milestone.decision_ids.map((id) => id === priorID ? decision.id : id);
+    }
+    const generated = "legacy generated title";
+    const hash = "6087acf518f8073d448499b374654689804396b7c3f2d64aa438879116a87c47";
+    ledger.document_projection!.presentation_base.generated_baselines = [{ generation_id: ledger.generation_id, entity_id: decision.id, field: "title", kind: "scalar", value: generated, generated_hash: hash }];
+    ledger.generated_baselines = structuredClone(ledger.document_projection!.presentation_base.generated_baselines);
+    const review = read("review.md")
+      .replaceAll("decision:decision:alpha", `decision:${decision.id}`)
+      .replaceAll("decision-x6465636973696f6e3a616c706861", "decision-x7269736b3a7269736b3a616c706861");
+    const history = read("history.md").replaceAll(priorID, decision.id);
+
+    expect(() => parseMarkdownV4({ review: review.replace(decision.title, "ambiguous edit"), history }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_baseline_missing" }));
+  });
+
   it("validates Go baseline hashes containing HTML and line-separator characters", () => {
     const ledger = parseMachineLedgerV4(read("ledger-special-baseline.json"));
     expect(ledger.generated_baselines[0].generated_hash).toBe("112173e9eb315eaffc9ce7b55ca9fc1a768be05486a426a2365c1354301476bd");

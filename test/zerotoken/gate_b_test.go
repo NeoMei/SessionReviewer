@@ -348,8 +348,18 @@ func runGateBEndToEnd(t *testing.T) {
 	if _, err := syncproject.RunMarkdown(context.Background(), syncOptions); err != nil || publishes != 1 {
 		t.Fatalf("second edit after restore and generation advance was not accepted: publishes=%d err=%v", publishes, err)
 	}
-	if reopened := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review")); reopened.Review.CurrentState.Status != "第二次人工状态" {
+	reopened := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review"))
+	if reopened.Review.CurrentState.Status != "第二次人工状态" {
 		t.Fatalf("second edit missing after reopen: %q", reopened.Review.CurrentState.Status)
+	}
+	finalBaseline := reviewv4.Baseline{}
+	for _, baseline := range reopened.Review.GeneratedBaselines {
+		if baseline.EntityID == "project-overview" && baseline.Field == "status" {
+			finalBaseline = baseline
+		}
+	}
+	if finalBaseline.GenerationID != result5.GenerationID || finalBaseline.Value == nil || *finalBaseline.Value != *statusBaseline.Value || finalBaseline.GeneratedHash != statusBaseline.GeneratedHash {
+		t.Fatalf("reopened second edit changed the original baseline binding: got=%+v original=%+v generation=%s", finalBaseline, statusBaseline, result5.GenerationID)
 	}
 	if _, err := contextupdate.Run(context.Background(), cuOpts); err != nil {
 		t.Fatalf("post-human-edit idempotence run: %v", err)
