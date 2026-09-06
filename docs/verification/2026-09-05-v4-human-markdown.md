@@ -341,3 +341,32 @@ view remained readonly with its CLI-unavailable explanation and could still open
 the native history. The exact wrapper was restored. This covers loss of a bound
 runtime after plugin load, not cold-start discovery with every CLI candidate
 absent. Production binaries were untouched.
+
+### Scoped final review result — still blocked
+
+The single scoped review of `64f2535..e281a89` is complete. It verifies that the
+legacy-layout opener, readonly prepared loader, cancellation boundary and npm
+corpus omission are addressed. It does **not** accept the full fix wave:
+
+- **I1 Important remains:** restoring a field to its generated value removes its
+  human patch but leaves a live baseline; the next generation does not carry that
+  unpatched baseline, so editing again fails.
+- **I5 Important remains:** raw old-JSON scanning does not inspect sensitive
+  plaintext materialized by JSON escape decoding into prospective Markdown.
+- **N1 Important is new:** the new scalar-only check rejects valid historical
+  list/orphan baselines supported by the existing codec and migration.
+- **M1–M3 remain Minor:** Vault read diagnostics, YAML binding presentation
+  preservation and bulk field-application complexity are still unresolved.
+
+The native v4 status-query integration is also still blocked. The correct state
+is **not ready for integration, M9 incomplete**. Covered tests passing cannot
+discharge these source-confirmed missing cases. The eventual corrected HEAD
+still needs its complete ordered local gate and the separately required native,
+platform and applicable migration checks.
+
+The controller retained all source/evidence commits and stopped after the
+agreed single combined fix/re-review wave. A new explicitly scoped corrective
+batch is needed; no residual was waived as completed, and no push, merge or
+release occurred. The reviewer also qualified one test-evidence claim: the
+prepared-journal test inserts a journal before the readonly load, not between
+its two checks, so mutation coverage of deleting the second check is not proven.
