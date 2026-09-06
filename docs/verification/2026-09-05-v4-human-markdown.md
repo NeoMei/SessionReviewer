@@ -40,6 +40,30 @@ This closes the previously unobserved all-candidates-unavailable startup case
 for that plugin candidate; final-source hash equivalence/repeat remains required.
 No installed CLI, production Vault or regular Obsidian profile was modified.
 
+### Task 14 — YAML binding presentation closed
+
+Commit dbeaa03 replaces only changed validated scalar value spans, retaining
+quoted keys, tags, comments, spacing, flow delimiters and existing line endings.
+No-op and unchanged scalar spellings remain byte-identical. Actual RED exposed
+quoted-key refusal, unwanted normalization and block-scalar corruption; final
+focused render/parse, sensitive-identity and malformed-YAML tests passed, followed
+by complete reviewv4 and syncdoc tests. Independent review: approved, no findings.
+
+The fixture-bound CLI was also exercised against the existing authorized
+Project/Vault experiment: only Project frontmatter presentation was edited to
+quoted keys/tagged values with trailing comments. Real sync exited0 and advanced
+revision8 to9 while retaining the exact presentation on both sides. All body
+bytes beyond frontmatter remained identical to the pre-test copies, all four
+Project/Vault files matched and status returned in_sync1. CLI SHA256:
+7929afc4f4cfe48d3c5407fb923c1f818039d3c46994984db9a88af223bce4ba.
+Accepted experiment review/history/ledger/index hashes respectively:
+cea9ab71245f534e19df765c57620678edcba710909e9d4ecac13670544dc1cc,
+cc0a816f111c6c9abbbef36ed8fd4df845ecaacfbf1455e72342415872a19f2d,
+72f45540e69e37682e360e74d3514c2d9df1f18b4ca9f2f7d7b34fa4eb022a21,
+a94ee8eb1b4a018bb73f38720abce2188490ce375609e27bf41d333cba67cd1d.
+An initial unsupported sync --json invocation exited2 before mutation; the
+successful sync used the documented plain command. No real project was scanned.
+
 ## Current checkpoint — local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
