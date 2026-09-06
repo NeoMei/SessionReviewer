@@ -278,19 +278,75 @@ func runGateBEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	foundHumanStatus := false
+	var statusBaseline reviewv4.Baseline
 	for _, patch := range machine.HumanPatches {
 		if patch.EntityID == "project-overview" && patch.Field == "status" && patch.Operation == "set" && patch.Value != nil && *patch.Value == "人工确认状态" {
 			foundHumanStatus = true
 		}
 	}
+	for _, baseline := range machine.GeneratedBaselines {
+		if baseline.EntityID == "project-overview" && baseline.Field == "status" {
+			statusBaseline = baseline
+		}
+	}
 	if !foundHumanStatus {
 		t.Fatalf("human status patch was not persisted: %+v", machine.HumanPatches)
 	}
-	// The same field remains editable after the scan advanced its generation.
+	if statusBaseline.Value == nil {
+		t.Fatalf("human status baseline was not persisted: %+v", machine.GeneratedBaselines)
+	}
+
+	// Restore the generated value, which removes the active patch but retains
+	// the authenticated baseline. A later real source session must carry that
+	// unpatched baseline before the field can be edited again.
+	editV4Field(t, projectReviewPath, reviewv2.ReviewRelativePath, reviewv4.FieldKey{Entity: "project-overview", Name: "status"}, *statusBaseline.Value)
+	publishes = 0
+	if _, err := syncproject.RunMarkdown(context.Background(), syncOptions); err != nil || publishes != 1 {
+		t.Fatalf("restoring generated status was not accepted: publishes=%d err=%v", publishes, err)
+	}
+	restored := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review"))
+	for _, patch := range restored.Review.HumanPatches {
+		if patch.EntityID == "project-overview" && patch.Field == "status" {
+			t.Fatalf("restored status retained an active patch: %+v", restored.Review.HumanPatches)
+		}
+	}
+	restoredBaseline := reviewv4.Baseline{}
+	for _, baseline := range restored.Review.GeneratedBaselines {
+		if baseline.EntityID == "project-overview" && baseline.Field == "status" {
+			restoredBaseline = baseline
+		}
+	}
+	if restoredBaseline.Value == nil || *restoredBaseline.Value != *statusBaseline.Value || restoredBaseline.GeneratedHash != statusBaseline.GeneratedHash {
+		t.Fatalf("restore changed or removed the original status baseline: got=%+v want=%+v", restoredBaseline, statusBaseline)
+	}
+
+	session3 := []string{
+		`{"timestamp":"` + base.Add(6*time.Minute).Format(time.RFC3339) + `","type":"session_meta","payload":{"id":"session-156","cwd":"` + filepath.ToSlash(projectRoot) + `","source":"codex"}}`,
+		`{"timestamp":"` + base.Add(6*time.Minute+time.Second).Format(time.RFC3339) + `","type":"turn_context","payload":{"cwd":"` + filepath.ToSlash(projectRoot) + `","model":"gpt-5"}}`,
+	}
+	if err := os.WriteFile(filepath.Join(sessionsRoot, "session-156.jsonl"), []byte(strings.Join(session3, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result5, err := contextupdate.Run(context.Background(), cuOpts)
+	if err != nil {
+		t.Fatalf("new generation after restoring generated status: %v", err)
+	}
+	if result5.GenerationID == result4.GenerationID {
+		t.Fatal("new source session after restore did not advance the scan generation")
+	}
+	carried := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review"))
+	for _, baseline := range carried.Review.GeneratedBaselines {
+		if baseline.EntityID == "project-overview" && baseline.Field == "status" {
+			if baseline.GenerationID != result5.GenerationID || baseline.Value == nil || *baseline.Value != *statusBaseline.Value || baseline.GeneratedHash != statusBaseline.GeneratedHash {
+				t.Fatalf("restored status baseline did not carry exactly: got=%+v original=%+v generation=%s", baseline, statusBaseline, result5.GenerationID)
+			}
+		}
+	}
+
 	editV4Field(t, projectReviewPath, reviewv2.ReviewRelativePath, reviewv4.FieldKey{Entity: "project-overview", Name: "status"}, "第二次人工状态")
 	publishes = 0
 	if _, err := syncproject.RunMarkdown(context.Background(), syncOptions); err != nil || publishes != 1 {
-		t.Fatalf("second edit after generation advance was not accepted: publishes=%d err=%v", publishes, err)
+		t.Fatalf("second edit after restore and generation advance was not accepted: publishes=%d err=%v", publishes, err)
 	}
 	if reopened := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review")); reopened.Review.CurrentState.Status != "第二次人工状态" {
 		t.Fatalf("second edit missing after reopen: %q", reopened.Review.CurrentState.Status)

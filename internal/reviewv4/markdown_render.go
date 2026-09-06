@@ -55,30 +55,16 @@ func samePresentationAcrossScanIdentity(next, prior Presentation) bool {
 	if next.ProjectID != prior.ProjectID {
 		return false
 	}
-	next = clonePresentation(next)
-	next.GenerationID, next.ProjectViewDigest = prior.GenerationID, prior.ProjectViewDigest
-	next.Revision = prior.Revision
-	for i := range next.Timeline {
-		next.Timeline[i].GenerationID = prior.GenerationID
+	expected := clonePresentation(prior)
+	if CarryMarkdownGeneratedBaselines(&expected, next.GenerationID) != nil {
+		return false
 	}
-	priorBaselines := make(map[string]Baseline, len(prior.GeneratedBaselines))
-	for _, baseline := range prior.GeneratedBaselines {
-		priorBaselines[baseline.EntityID+"\x00"+baseline.Field] = baseline
+	expected.GenerationID, expected.ProjectViewDigest = next.GenerationID, next.ProjectViewDigest
+	expected.Revision = next.Revision
+	for i := range expected.Timeline {
+		expected.Timeline[i].GenerationID = next.GenerationID
 	}
-	for _, patch := range next.HumanPatches {
-		key := patch.EntityID + "\x00" + patch.Field
-		old, found := priorBaselines[key]
-		if !found {
-			return false
-		}
-		for index := range next.GeneratedBaselines {
-			baseline := &next.GeneratedBaselines[index]
-			if baseline.EntityID == patch.EntityID && baseline.Field == patch.Field && baseline.GeneratedHash == old.GeneratedHash {
-				baseline.GenerationID = old.GenerationID
-			}
-		}
-	}
-	return reflect.DeepEqual(next, prior)
+	return reflect.DeepEqual(next, expected)
 }
 
 func renderMarkdown(p Presentation, ledger MachineLedger, previous *MarkdownPair, validatedDraft bool) (MarkdownPair, error) {

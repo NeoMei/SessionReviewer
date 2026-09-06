@@ -171,6 +171,39 @@ describe("v4 human Markdown codec", () => {
     expect(result.presentation.generated_baselines).toEqual(ledger.generated_baselines);
   });
 
+  it("accepts a second edit after a restored baseline is carried to a new authenticated generation", () => {
+    const ledger = parseMachineLedgerV4(read("ledger-existing-patch.json"));
+    const restored = parseMarkdownV4({ review: read("review.md"), history: read("history.md") }, ledger);
+    expect(restored.presentation.human_patches).toEqual([]);
+
+    const nextLedger = structuredClone(ledger);
+    nextLedger.generation_id = "generation-after-restore";
+    nextLedger.document_projection!.presentation_base = structuredClone(restored.presentation);
+    nextLedger.document_projection!.presentation_base.generation_id = "generation-after-restore";
+    for (const milestone of nextLedger.document_projection!.presentation_base.timeline) milestone.generation_id = "generation-after-restore";
+    nextLedger.document_projection!.presentation_base.generated_baselines[0].generation_id = "generation-after-restore";
+    nextLedger.generated_baselines = structuredClone(nextLedger.document_projection!.presentation_base.generated_baselines);
+    const nextReview = read("review-existing-patch-draft.md")
+      .replace("revision: 1", `revision: ${restored.presentation.revision}`)
+      .replaceAll("generation-1", "generation-after-restore");
+    const nextHistory = read("history.md")
+      .replace("revision: 1", `revision: ${restored.presentation.revision}`)
+      .replaceAll("generation-1", "generation-after-restore");
+
+    const editedAgain = parseMarkdownV4({ review: nextReview, history: nextHistory }, nextLedger);
+
+    expect(editedAgain.presentation.current_state.goal).toBe("再次人工编辑目标");
+    expect(editedAgain.presentation.human_patches[0]).toMatchObject({
+      value: "再次人工编辑目标",
+      base_generated_hash: restored.presentation.generated_baselines[0].generated_hash
+    });
+    expect(editedAgain.presentation.generated_baselines[0]).toMatchObject({
+      generation_id: "generation-after-restore",
+      value: "项目目标夹具",
+      generated_hash: restored.presentation.generated_baselines[0].generated_hash
+    });
+  });
+
   it("validates Go baseline hashes containing HTML and line-separator characters", () => {
     const ledger = parseMachineLedgerV4(read("ledger-special-baseline.json"));
     expect(ledger.generated_baselines[0].generated_hash).toBe("112173e9eb315eaffc9ce7b55ca9fc1a768be05486a426a2365c1354301476bd");

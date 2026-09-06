@@ -195,12 +195,12 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 	}
 	sourceGenerationID := presentation.GenerationID
 	if input.GenerationID != "" && input.GenerationID != presentation.GenerationID {
+		if err := reviewv4.CarryMarkdownGeneratedBaselines(&presentation, input.GenerationID); err != nil {
+			return Result{}, fmt.Errorf("classify old v4 Markdown baselines: %w", err)
+		}
 		presentation.GenerationID = input.GenerationID
 		for index := range presentation.Timeline {
 			presentation.Timeline[index].GenerationID = input.GenerationID
-		}
-		for index := range presentation.GeneratedBaselines {
-			presentation.GeneratedBaselines[index].GenerationID = input.GenerationID
 		}
 	}
 	ledger := source.Ledger

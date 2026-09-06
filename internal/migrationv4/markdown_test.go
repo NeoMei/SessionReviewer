@@ -315,6 +315,75 @@ func TestOldV4JSONMigrationPreservesTypedPresentationAndHistoryShell(t *testing.
 	}
 }
 
+func TestOldV4JSONMigrationPreservesHistoricalListOrphanGeneration(t *testing.T) {
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	history := compatibilityArtifact(t, "v4", HistoryRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	sourceIndex := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	accepted, err := reviewv4.LoadProjection(review, history, ledger, sourceIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := []string{"historical", "ordered"}
+	hash := baselinehash.SHA256("decision:removed", "tags", "list", "", values)
+	liveValue := "generated goal"
+	liveHash := baselinehash.SHA256("project-overview", "goal", "scalar", liveValue, nil)
+	accepted.Review.GeneratedBaselines = []reviewv4.Baseline{
+		{GenerationID: accepted.Review.GenerationID, EntityID: "project-overview", Field: "goal", Kind: "scalar", Value: &liveValue, GeneratedHash: liveHash},
+		{GenerationID: "historical-generation", EntityID: "decision:removed", Field: "tags", Kind: "list", Values: &values, GeneratedHash: hash},
+	}
+	liveOverride := accepted.Review.CurrentState.Goal
+	accepted.Review.HumanPatches = []reviewv4.Patch{{EntityID: "project-overview", Field: "goal", Operation: "set", Value: &liveOverride, BaseGeneratedHash: liveHash}}
+	override := []string{"preserved", "human"}
+	accepted.Review.OrphanPatches = []reviewv4.Patch{{EntityID: "decision:removed", Field: "tags", Operation: "set", Values: &override, BaseGeneratedHash: hash}}
+	review, err = strictjson.Encode(accepted.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted.Ledger.HumanPatches = append([]reviewv4.Patch(nil), accepted.Review.HumanPatches...)
+	accepted.Ledger.GeneratedBaselines = append([]reviewv4.Baseline(nil), accepted.Review.GeneratedBaselines...)
+	accepted.Ledger.OrphanPatches = append([]reviewv4.Patch(nil), accepted.Review.OrphanPatches...)
+	ledger = rehashOldV4Ledger(t, review, history, mustRenderLedger(t, accepted.Ledger))
+	if _, err := reviewv4.LoadProjection(review, history, ledger, sourceIndex); err != nil {
+		t.Fatalf("old v4 list orphan source is not authenticated: %v", err)
+	}
+	targetIndex, err := sessionindex.Parse(sourceIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetIndex.GenerationID = "migration-generation"
+	targetIndexBody, err := sessionindex.Render(targetIndex)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: sourceIndex,
+		SessionIndex: targetIndexBody, GenerationID: targetIndex.GenerationID,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Accepted.Review.GeneratedBaselines[0].GenerationID != targetIndex.GenerationID || result.Accepted.Review.GeneratedBaselines[0].GeneratedHash != liveHash || result.Accepted.Review.GeneratedBaselines[0].Value == nil || *result.Accepted.Review.GeneratedBaselines[0].Value != liveValue {
+		t.Fatalf("migration did not carry the authenticated live scalar baseline exactly: %+v", result.Accepted.Review.GeneratedBaselines[0])
+	}
+	if !reflect.DeepEqual(result.Accepted.Review.GeneratedBaselines[1], accepted.Review.GeneratedBaselines[1]) || !reflect.DeepEqual(result.Accepted.Review.OrphanPatches, accepted.Review.OrphanPatches) {
+		t.Fatalf("migration promoted or converted the historical list orphan: got=%+v want=%+v", result.Accepted.Review, accepted.Review)
+	}
+
+	// The migration target is itself accepted input for the next ordinary scan;
+	// re-run the shared carry classifier to prove the historical list orphan is
+	// not merely renderable but survives the next generation boundary unchanged.
+	scanned := result.Accepted.Review
+	if err := reviewv4.CarryMarkdownGeneratedBaselines(&scanned, "generation-after-migration-scan"); err != nil {
+		t.Fatalf("authenticated migrated list orphan blocked the next ordinary scan: %v", err)
+	}
+	if scanned.GeneratedBaselines[0].GenerationID != "generation-after-migration-scan" || !reflect.DeepEqual(scanned.GeneratedBaselines[1], accepted.Review.GeneratedBaselines[1]) || !reflect.DeepEqual(scanned.OrphanPatches, accepted.Review.OrphanPatches) {
+		t.Fatalf("post-migration scan changed historical list orphan or missed live carry: %+v", scanned)
+	}
+}
+
 func TestHistoricalPreservationUsesSafeFenceAndKeepsExactSourceBytes(t *testing.T) {
 	source := []byte("# 旧权威标题\n\n```go\nfmt.Println(\"old\")\n```\n````\n")
 	got := appendHistoricalPreservation([]byte("# 当前历史\n"), source)

@@ -154,6 +154,9 @@ func TestMarkdownUpdateRendersNewFactsFromAuthenticatedPendingHumanDraft(t *test
 		t.Fatal(err)
 	}
 	next := clonePresentation(draft.Presentation)
+	if err := CarryMarkdownGeneratedBaselines(&next, "generation-2"); err != nil {
+		t.Fatal(err)
+	}
 	next.GenerationID = "generation-2"
 	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
 	for i := range next.Timeline {
@@ -175,6 +178,44 @@ func TestMarkdownUpdateRendersNewFactsFromAuthenticatedPendingHumanDraft(t *test
 	tampered.Decisions[0].Provenance = "migrated"
 	if _, err := RenderMarkdownUpdate(tampered, ledger, pending); MarkdownCodeOf(err) != MarkdownBaselineMissing {
 		t.Fatalf("existing provenance loss was accepted: %v", err)
+	}
+}
+
+func TestMarkdownUpdateAcceptsCarriedBaselineAfterRestoreRemovedPatch(t *testing.T) {
+	ledger, err := DecodeLedger(mustRead(t, "../../testdata/contracts/v4/markdown/ledger-existing-patch.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := MarkdownPair{
+		Review:  mustRead(t, "../../testdata/contracts/v4/markdown/review.md"),
+		History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md"),
+	}
+	restored, err := ParseMarkdownDraft(pending, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Presentation.HumanPatches) != 0 || len(restored.Presentation.GeneratedBaselines) != 1 {
+		t.Fatalf("restore did not retain only the generated baseline: %+v", restored.Presentation)
+	}
+	next := clonePresentation(restored.Presentation)
+	next.GenerationID = "generation-after-restore"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("7", 64)
+	next.GeneratedBaselines[0].GenerationID = next.GenerationID
+	for index := range next.Timeline {
+		next.Timeline[index].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdownUpdate(next, ledger, pending)
+	if err != nil {
+		t.Fatalf("authenticated restored baseline carry was rejected: %v", err)
+	}
+	if !bytes.Contains(got.Review, []byte("generation_id: generation-after-restore")) || !bytes.Contains(got.Review, []byte("\n项目目标夹具\n")) {
+		t.Fatalf("restored field or next identity was lost:\n%s", got.Review)
+	}
+
+	stale := clonePresentation(next)
+	stale.GeneratedBaselines[0].GenerationID = "arbitrary-stale-generation"
+	if _, err := RenderMarkdownUpdate(stale, ledger, pending); MarkdownCodeOf(err) != MarkdownBaselineMissing {
+		t.Fatalf("arbitrary stale baseline was washed through the bridge: %v", err)
 	}
 }
 
@@ -209,6 +250,9 @@ func TestMarkdownUpdateAllowsHumanConclusionToRefreshGeneratedEvidence(t *testin
 		t.Fatalf("conclusion edit changed the wrong closed-loop facts: %+v", draft.Presentation.Timeline[0].ClosedLoop)
 	}
 	next := clonePresentation(draft.Presentation)
+	if err := CarryMarkdownGeneratedBaselines(&next, "generation-2"); err != nil {
+		t.Fatal(err)
+	}
 	next.GenerationID = "generation-2"
 	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
 	for i := range next.Timeline {

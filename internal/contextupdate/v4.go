@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
-	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/pricing"
@@ -101,28 +100,8 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 }
 
 func carryV4GeneratedBaselines(presentation *reviewv4.Presentation, generationID string) error {
-	baselines := make(map[string]int, len(presentation.GeneratedBaselines))
-	for index := range presentation.GeneratedBaselines {
-		baseline := &presentation.GeneratedBaselines[index]
-		key := baseline.EntityID + "\x00" + baseline.Field
-		if _, duplicate := baselines[key]; duplicate || baseline.Kind != "scalar" || baseline.Value == nil || baseline.Values != nil ||
-			baseline.GeneratedHash != baselinehash.SHA256(baseline.EntityID, baseline.Field, baseline.Kind, *baseline.Value, nil) {
-			return errors.New("v4 scan cannot carry malformed generated baseline")
-		}
-		baselines[key] = index
-	}
-	for _, patch := range presentation.HumanPatches {
-		index, found := baselines[patch.EntityID+"\x00"+patch.Field]
-		if !found || patch.BaseGeneratedHash != presentation.GeneratedBaselines[index].GeneratedHash || presentation.GeneratedBaselines[index].GenerationID != presentation.GenerationID {
-			return errors.New("v4 scan cannot carry unbound human patch")
-		}
-		presentation.GeneratedBaselines[index].GenerationID = generationID
-	}
-	for _, patch := range presentation.OrphanPatches {
-		index, found := baselines[patch.EntityID+"\x00"+patch.Field]
-		if !found || patch.BaseGeneratedHash != presentation.GeneratedBaselines[index].GeneratedHash {
-			return errors.New("v4 scan cannot carry unbound orphan patch")
-		}
+	if err := reviewv4.CarryMarkdownGeneratedBaselines(presentation, generationID); err != nil {
+		return errors.Join(errors.New("v4 scan cannot carry generated baselines"), err)
 	}
 	return nil
 }

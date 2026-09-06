@@ -116,6 +116,65 @@ func TestV4ScanCarriesAuthenticatedHumanBaselineToNewGeneration(t *testing.T) {
 	}
 }
 
+// Removing the active patch on restore must not strand the authenticated live
+// baseline on the old generation. Otherwise the next ordinary edit is rejected
+// even though the field and its original generated value still exist.
+func TestV4ScanCarriesRestoredLiveBaselineSoFieldCanBeEditedAgain(t *testing.T) {
+	accepted := v4AcceptedFixture(t)
+	generated := accepted.Review.CurrentState.Goal
+	edited, err := reviewv4.ApplyMarkdownEdits(accepted.Review, []reviewv4.FieldEdit{{
+		Key: reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}, Before: generated, After: "first human override",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := reviewv4.ApplyMarkdownEdits(edited, []reviewv4.FieldEdit{{
+		Key: reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}, Before: "first human override", After: generated,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.HumanPatches) != 0 || len(restored.GeneratedBaselines) != 1 {
+		t.Fatalf("restore did not retain only the generated baseline: patches=%+v baselines=%+v", restored.HumanPatches, restored.GeneratedBaselines)
+	}
+	beforeBaseline := restored.GeneratedBaselines[0]
+	accepted.Review = restored
+	accepted.Ledger.AcceptedRevision = restored.Revision
+	accepted.Ledger.HumanPatches = append([]reviewv4.Patch{}, restored.HumanPatches...)
+	accepted.Ledger.GeneratedBaselines = append([]reviewv4.Baseline(nil), restored.GeneratedBaselines...)
+	accepted.Ledger.DocumentProjection.PresentationBase = restored
+	accepted.Ledger.SyncHashes.LedgerSHA256 = reviewv4.CanonicalLedgerSHA256(accepted.Ledger)
+
+	index := accepted.SessionIndex
+	index.GenerationID = "generation-after-restore"
+	index.ProjectViewDigest = "sha256:" + strings.Repeat("7", 64)
+	indexBody, err := sessionindex.Render(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err = sessionindex.Parse(indexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _, err := mapV4Scan(v4MapInput{Accepted: accepted, Index: index})
+	if err != nil {
+		t.Fatal(err)
+	}
+	carried := next.GeneratedBaselines[0]
+	if carried.GenerationID != index.GenerationID || carried.Value == nil || *carried.Value != *beforeBaseline.Value || carried.GeneratedHash != beforeBaseline.GeneratedHash {
+		t.Fatalf("restored live baseline was not carried without changing its value/hash: got=%+v want=%+v", carried, beforeBaseline)
+	}
+	again, err := reviewv4.ApplyMarkdownEdits(next, []reviewv4.FieldEdit{{
+		Key: reviewv4.FieldKey{Entity: "project-overview", Name: "goal"}, Before: generated, After: "second human override",
+	}})
+	if err != nil {
+		t.Fatalf("restored field cannot be edited after a new generation: %v", err)
+	}
+	if len(again.HumanPatches) != 1 || again.HumanPatches[0].Value == nil || *again.HumanPatches[0].Value != "second human override" || again.HumanPatches[0].BaseGeneratedHash != beforeBaseline.GeneratedHash {
+		t.Fatalf("second edit did not retain the authenticated original baseline: %+v", again)
+	}
+}
+
 func TestV4ScanRejectsMalformedBaselineInsteadOfCarryingIt(t *testing.T) {
 	accepted := v4AcceptedFixture(t)
 	value := accepted.Review.CurrentState.Goal
@@ -151,6 +210,76 @@ func TestV4ScanKeepsValidHistoricalOrphanBaselineGeneration(t *testing.T) {
 	}
 	if next.GeneratedBaselines[0].GenerationID != "historical-generation" || !reflect.DeepEqual(next.OrphanPatches, accepted.Review.OrphanPatches) {
 		t.Fatalf("historical orphan was rewritten: baseline=%+v orphan=%+v", next.GeneratedBaselines[0], next.OrphanPatches)
+	}
+}
+
+func TestV4ScanAcceptsValidHistoricalListOrphanWithoutPromotingIt(t *testing.T) {
+	accepted := v4AcceptedFixture(t)
+	values := []string{"historical", "ordered"}
+	hash := baselinehash.SHA256("decision:removed", "tags", "list", "", values)
+	accepted.Review.GeneratedBaselines = []reviewv4.Baseline{{GenerationID: "historical-generation", EntityID: "decision:removed", Field: "tags", Kind: "list", Values: &values, GeneratedHash: hash}}
+	override := []string{"preserved", "human"}
+	accepted.Review.OrphanPatches = []reviewv4.Patch{{EntityID: "decision:removed", Field: "tags", Operation: "set", Values: &override, BaseGeneratedHash: hash}}
+	accepted.Ledger.GeneratedBaselines = append([]reviewv4.Baseline(nil), accepted.Review.GeneratedBaselines...)
+	accepted.Ledger.OrphanPatches = append([]reviewv4.Patch(nil), accepted.Review.OrphanPatches...)
+	accepted.Ledger.DocumentProjection.PresentationBase = accepted.Review
+	accepted.Ledger.SyncHashes.LedgerSHA256 = reviewv4.CanonicalLedgerSHA256(accepted.Ledger)
+
+	next, ledger, err := mapV4Scan(v4MapInput{Accepted: accepted, Index: accepted.SessionIndex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(next.GeneratedBaselines, accepted.Review.GeneratedBaselines) || !reflect.DeepEqual(next.OrphanPatches, accepted.Review.OrphanPatches) ||
+		!reflect.DeepEqual(ledger.GeneratedBaselines, accepted.Review.GeneratedBaselines) || !reflect.DeepEqual(ledger.OrphanPatches, accepted.Review.OrphanPatches) {
+		t.Fatalf("historical list orphan was changed: presentation=%+v ledger=%+v", next, ledger)
+	}
+}
+
+func TestV4ScanRejectsInvalidHistoricalBaselineAndPatchMetadata(t *testing.T) {
+	valid := func(t *testing.T) reviewv4.Accepted {
+		t.Helper()
+		accepted := v4AcceptedFixture(t)
+		values := []string{"historical", "ordered"}
+		hash := baselinehash.SHA256("decision:removed", "tags", "list", "", values)
+		accepted.Review.GeneratedBaselines = []reviewv4.Baseline{{GenerationID: "historical-generation", EntityID: "decision:removed", Field: "tags", Kind: "list", Values: &values, GeneratedHash: hash}}
+		override := []string{"preserved", "human"}
+		accepted.Review.OrphanPatches = []reviewv4.Patch{{EntityID: "decision:removed", Field: "tags", Operation: "set", Values: &override, BaseGeneratedHash: hash}}
+		return accepted
+	}
+	tests := []struct {
+		name   string
+		mutate func(*reviewv4.Presentation)
+	}{
+		{"duplicate baseline", func(p *reviewv4.Presentation) {
+			p.GeneratedBaselines = append(p.GeneratedBaselines, p.GeneratedBaselines[0])
+		}},
+		{"scalar carries list", func(p *reviewv4.Presentation) { p.GeneratedBaselines[0].Kind = "scalar" }},
+		{"list carries scalar", func(p *reviewv4.Presentation) { value := "wrong"; p.GeneratedBaselines[0].Value = &value }},
+		{"wrong hash", func(p *reviewv4.Presentation) { p.GeneratedBaselines[0].GeneratedHash = strings.Repeat("f", 64) }},
+		{"patch linkage", func(p *reviewv4.Presentation) { p.OrphanPatches[0].BaseGeneratedHash = strings.Repeat("e", 64) }},
+		{"duplicate orphan patch", func(p *reviewv4.Presentation) { p.OrphanPatches = append(p.OrphanPatches, p.OrphanPatches[0]) }},
+		{"stale live scalar", func(p *reviewv4.Presentation) {
+			value := p.CurrentState.Goal
+			hash := baselinehash.SHA256("project-overview", "goal", "scalar", value, nil)
+			p.GeneratedBaselines[0] = reviewv4.Baseline{GenerationID: "stale-generation", EntityID: "project-overview", Field: "goal", Kind: "scalar", Value: &value, GeneratedHash: hash}
+			p.OrphanPatches = []reviewv4.Patch{}
+		}},
+		{"live orphan collision", func(p *reviewv4.Presentation) {
+			value := p.CurrentState.Goal
+			hash := baselinehash.SHA256("project-overview", "goal", "scalar", value, nil)
+			override := "orphan override"
+			p.GeneratedBaselines[0] = reviewv4.Baseline{GenerationID: p.GenerationID, EntityID: "project-overview", Field: "goal", Kind: "scalar", Value: &value, GeneratedHash: hash}
+			p.OrphanPatches[0] = reviewv4.Patch{EntityID: "project-overview", Field: "goal", Operation: "set", Value: &override, BaseGeneratedHash: hash}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accepted := valid(t)
+			test.mutate(&accepted.Review)
+			if _, _, err := mapV4Scan(v4MapInput{Accepted: accepted, Index: accepted.SessionIndex}); err == nil {
+				t.Fatal("invalid historical baseline or patch metadata was accepted")
+			}
+		})
 	}
 }
 
