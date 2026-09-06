@@ -1,5 +1,7 @@
 # v4 Human Markdown Codec Implementation Plan
 
+> Current scope amendment (2026-09-06, user approved): native cross-platform CI and real legacy-project migration are no longer delivery gates for this batch; old projects may be rescanned separately. This does not authorize deletion, automatic migration, or overwriting human content. Existing compatibility and safety tests remain. Tasks 13–16 below close the three known Minor debts and the cold-start no-runtime verification gap. Earlier status entries are historical.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让 v4 的两个 Markdown 真正可读、可编辑，并在扫描、双向同步、显式升级和恢复中保留人工内容与机器证据边界。
@@ -609,3 +611,30 @@ git diff --check
 Task10–12 实现/任务审查完成；整分支发现的四项 Important 经一次统一修复及一次限定复审全部关闭。最终源码6ad0c05，在只追加证据文档的冻结HEADda3d2df上按序完成全部七项检查（包括完整Go、大Session、race既定排除、GateA、插件223项测试），全部exit0。最终实验Vault验证同一已打开页面编辑→同步自动恢复、冲突/机器区拒绝、失联后原生阅读与手动刷新、154Session零token扫描及完整历史重开。原始待办条目保留用于追溯，执行结论以本检查点和验收报告为准。
 
 本纠偏批次的实现与本地验证完成，原Session Index Task3可据此进入后续Task4；本次尚未执行Task4–7。M9整体交付仍保留平台CI、真实旧数据迁移/分类前置能力和冷启动无任何CLI候选的验收；原3项Minor未解决。没有推送、合并、发布、正式插件/Vault修改，也不删除本地实验与审查证据。详细命令、失败历史和最终证据见`docs/verification/2026-09-05-v4-human-markdown.md`。
+
+## Task 13: Accurate bounded Vault read diagnostics (M1 debt)
+
+Context: current `repository.ts:loadV4` collapses every four-file read failure to baseline_missing. Fix only this diagnostic path and consumers/tests.
+Files: plugin data/repository.ts, repository-v4.ts and necessary snapshot/presentation types or view helpers; tests/repository-v4.test.ts and focused related tests.
+Requirements: identify the failing relative document (one of the fixed four filenames), and a bounded safe category such as missing, permission-denied or read-failed. Never echo exception messages, absolute paths, arbitrary codes or document contents. Preserve first-load and same-project stale-snapshot diagnostics through the UI; retain stale read-only behavior and do not promote public validation to private acceptance. Parser validation failures must not be mislabeled IO failures. Read-only: no Vault/ledger writes or new acceptance API.
+TDD: actual RED for each of four file reads, category mapping, hostile exception text, first-load and stale UI; GREEN focused tests then full plugin npm run check. Self-review and commit only task files. Full report must include exact RED/GREEN output, files, commit, concerns.
+
+## Task 14: Preserve YAML binding presentation (M2 debt)
+
+Context: `replaceMarkdownFrontmatterBindings` matches bare literal keys and rewrites complete lines, losing quoted keys, spacing and comments.
+Files: internal/reviewv4/markdown_render.go, markdown_document.go or a focused scalar-span helper as necessary; adjacent tests and shared corpus only when needed.
+Requirements: use validated YAML scalar spans to replace only changed revision/generation values. Preserve all other bytes, including quoted keys, comments, spacing, CRLF/mixed line endings and unchanged-generation spelling. Respect accepted scalar styles, escapes, block scalars and tags; no global YAML pretty-print or broadened validator/sensitive-scan exemptions. Preserve bounds and malformed/duplicate/alias rejection. Do not change canonical JSON or fixed field contracts.
+TDD: actual failing valid quoted-key and comment/spacing examples through real render/parse, no-op byte equality, generation/revision changes, CRLF and supported scalar presentation boundaries; regress existing identity sensitivity tests. GREEN complete reviewv4 plus affected syncdoc tests, record output and self-review; precise source/test commit.
+
+## Task 15: Indexed bulk Markdown edits (M3 debt)
+
+Context: ApplyMarkdownEdits and recordMarkdownPatch repeatedly search entity/baseline/patch collections; stored semantic alias resolution repeats entity scans.
+Files: internal/reviewv4/markdown_draft.go, markdown_baseline.go and a focused internal lookup helper if useful; adjacent tests/benchmarks.
+Requirements: build reusable per-operation live-field/entity and semantic metadata indexes, reusing them across validation/application and carry where relevant. Preserve fixed field ownership, legacy-alias ambiguity and duplicate rejection, historical/orphan semantics, original stored identity/hash, restore-default behavior, provenance, entity revisions, no-op bytes and input immutability. Avoid persistent caches, schema changes or broad unrelated refactors.
+TDD: establish real pre-fix failing/scaling evidence, retain behavior regressions, add bounded large valid fixtures and reproducible benchmark sizes to measure growth. Do not use brittle wall-clock CI thresholds or assertions on source text. Report before/after latency and allocations, and remaining sorting/validation costs honestly; demonstrate full ApplyMarkdownEdits and baseline carry, not a helper-only speedup. GREEN reviewv4, contextupdate, syncdoc and relevant zero-token integration; exact outputs and self-review, precise commit.
+
+## Task 16: Cold-start no-runtime gate and final verification
+
+Files: necessary plugin discovery/startup tests and minimal source corrections only if reproduced; docs/verification/2026-09-05-v4-human-markdown.md and plan checkpoints are controller-owned.
+Requirements: verify fresh discovery with no CLI candidates, no stale selected runtime/cache fallback, native Markdown reading remains available, structural/acceptance actions stay unavailable with a clear diagnostic; no downloads/installs, model calls, production Vault/config edits or scanning real projects. Prefer existing injectable discovery boundaries and an isolated Obsidian experiment process/environment for native evidence. Any source fix follows RED/GREEN and independent review.
+After Tasks 13–15 task reviews, final whole-branch review and one stable-source ordered M9 local sequence (full Go including ordinary large-Session test; vet; tidy -diff; exact Gate A; existing race command/exclusion; diff --check; full plugin check). Keep scope exclusions explicit as user decisions, not passed tests. No push, merge, release, production replacement or automatic rescan. Original Session Index Tasks 4–7 remain separate feature work.
