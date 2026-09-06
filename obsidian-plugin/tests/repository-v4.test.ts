@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { WorkspaceLeaf } from "obsidian";
 import { ProjectRepository, type MarkdownSnapshotReady } from "../src/data/repository";
 import type { VaultFile, VaultPort } from "../src/data/vault-port";
@@ -45,7 +45,7 @@ describe("candidate discovery read isolation", () => {
   const failedReview = `${failedRoot}/项目回顾.md`;
   const privateFailure = "DO-NOT-EXPOSE /Users/private/secret.md";
 
-  function failCandidate(vault: V4Vault, source: string, failure: "permission" | "disappearance"): ReturnType<typeof vi.spyOn<V4Vault, "read">> {
+  function failCandidate(vault: V4Vault, source: string, failure: "permission" | "disappearance"): MockInstance<V4Vault["read"]> {
     vault.files.set(failedReview, source);
     vault.files.set(`${failedRoot}/项目历史.md`, "inventory candidate");
     const inventory = vault.getMarkdownFiles().sort((a, b) => Number(b.path.startsWith(failedRoot)) - Number(a.path.startsWith(failedRoot)));

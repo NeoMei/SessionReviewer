@@ -74,15 +74,21 @@ export class ProjectRepository {
       const root = parent(file.path);
       const historyPath = `${root}/项目历史.md`;
       if (!markdownPaths.has(historyPath)) continue;
+      let source: string;
       try {
-        const identity = readMarkdownIdentityV4(await this.vault.read(file.path));
+        source = await this.vault.read(file.path);
+      } catch {
+        // Inventory can outlive a file or its permissions. Isolate this candidate.
+        continue;
+      }
+      try {
+        const identity = readMarkdownIdentityV4(source);
         if (identity.document !== "review") continue;
         descriptors.push({ projectId: identity.projectId, root, name: identity.projectId, format: "markdown-v4" });
         continue;
       } catch {
         // Continue to legacy formats only when the source is not a known v4 Markdown document.
       }
-      const source = await this.vault.read(file.path);
       if (/^---\r?\n[\s\S]*?^schema_version:\s*4\s*$[\s\S]*?^document_format:\s*review-markdown-v1\s*$/m.test(source)) {
         const projectId = /^project_id:\s*([^\s]+)\s*$/m.exec(source)?.[1];
         if (projectId && validProjectId(projectId)) descriptors.push({ projectId, root, name: projectId, format: "markdown-v4" });

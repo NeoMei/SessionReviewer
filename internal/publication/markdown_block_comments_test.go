@@ -128,4 +128,13 @@ func TestMarkdownVaultBlockCommentEditStatusSyncReopenAndRejectInvalid(t *testin
 	if publishes != 1 || !bytes.Equal(readTestFile(t, projectReview), want) || !bytes.Equal(readTestFile(t, vaultReview), invalid) || !reflect.DeepEqual(receipt, loadAcceptedReceiptForTest(t, env)) || !reflect.DeepEqual(base, loadMarkdownBaseForTest(t, env)) {
 		t.Fatal("invalid edit changed accepted state or draft")
 	}
+	for path, before := range indexes {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(readTestFile(t, path), before) || !info.ModTime().Equal(mtimes[path]) {
+			t.Fatalf("invalid edit changed index: %s", path)
+		}
+	}
 }
