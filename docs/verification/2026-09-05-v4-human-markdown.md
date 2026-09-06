@@ -15,6 +15,31 @@ indexed bulk field edits), verify cold-start no-runtime behavior, independently
 review and rerun the complete local gate. Earlier completed-batch results below
 remain bound to their original source; they are not this follow-up's evidence.
 
+### Task 13 — read diagnostics closed
+
+Commits 8183b01 and b28f099 preserve the failed fixed relative document and a
+closed missing/permission-denied/read-failed category, including throwing error
+getters/proxies, without exposing source text. First-load and same-project stale
+UI remain read-only; the generic stale explanation no longer falsely attributes
+IO failures to identity/revision mismatch. Independent review and one scoped
+re-review closed both findings with no new finding. Original full plugin check
+passed 235 tests; final fix passed focused 41 tests, lint and build. The final
+whole-source full check is still pending.
+
+Native synthetic ColdStartVault on b28f099 used a fresh isolated Obsidian 1.13.7
+process/profile with all discovered executable candidates inaccessible, no
+preferred runtime and no selected runner. The actual renderer confirmed the
+home candidate denied and all system/PATH candidates absent. Read-only warning,
+current goal, milestone 16, manual read-only refresh and native-history reading
+worked. The human conclusion and independent verification text stayed visible;
+four public file hashes were unchanged. Removing only the copied index showed
+the exact relative missing-file reason and truthful stale banner, then its exact
+bytes were restored. Candidate bundle SHA256:
+2372870c681bda0d2b6ae87bfbff2d893afcc0172e05953bf1af9fd41cb84306.
+This closes the previously unobserved all-candidates-unavailable startup case
+for that plugin candidate; final-source hash equivalence/repeat remains required.
+No installed CLI, production Vault or regular Obsidian profile was modified.
+
 ## Current checkpoint — local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
