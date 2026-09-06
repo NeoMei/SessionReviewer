@@ -28,6 +28,7 @@ func TestV4BlockCommentOwnershipComposition(t *testing.T) {
 		{"folded keep owned blanks", "custom_owner: >+\n  content\n\n# keep B\ncustom_keep: two\n", "custom_owner: >+\n  changed\n\n# keep B\ncustom_keep: two\n", "custom_owner: >+\n  changed\n\n# keep B\ncustom_keep: two\n"},
 		{"tag and adjacent changes", "# head A\ncustom_owner: !!str one\n\n# head B\ncustom_keep: two\n", "# head A\ncustom_owner: !!str changed\n\n# head B\ncustom_keep: changed\n", "# head A\ncustom_owner: !!str changed\n\n# head B\ncustom_keep: changed\n"},
 		{"unchanged foot presentation", "custom_owner: one\n # owner foot  \n\ncustom_keep: two\n", "custom_owner: changed\n # owner foot  \n\ncustom_keep: two\n", "custom_owner: changed\n # owner foot  \n\ncustom_keep: two\n"},
+		{"two nested folded values", "custom_owner:\n  first: >+ # first header\n    one\n\n  # second head\n  second: !!str >+\n    two\n\n# keep B\ncustom_keep: three\n", "custom_owner:\n  first: >+ # first header\n    changed\n\n  # second head\n  second: !!str >+\n    changed\n\n# keep B\ncustom_keep: three\n", "custom_owner:\n  first: >+ # first header\n    changed\n\n  # second head\n  second: !!str >+\n    changed\n\n# keep B\ncustom_keep: three\n"},
 	}
 	for _, tc := range cases {
 		for _, indent := range []string{"", "  "} {
@@ -137,6 +138,24 @@ func TestV4BlockScalarSemanticUnitRoundTrip(t *testing.T) {
 			}
 			if value.Value != tc.value {
 				t.Fatalf("rendered scalar=%q want=%q", value.Value, tc.value)
+			}
+			original := encodeNode(node)
+			for round := 0; round < 3; round++ {
+				body, err := encodeV4YAMLNode(node)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next, err := decodeUnitValue(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !v4YAMLTypedEqual(node, next) || !v4YAMLCommentsEqual(node, next) {
+					t.Fatal("repeated scalar roundtrip changed typed value or comments")
+				}
+				if !bytes.Equal(encodeNode(node), original) {
+					t.Fatal("encoding mutated input nodes")
+				}
+				node = next
 			}
 			unchanged, err := doc.Render()
 			if err != nil || !bytes.Equal(unchanged, raw) {

@@ -46,37 +46,41 @@ func (d Document) rewriteV4Frontmatter(units UnitSet, limit int) ([]byte, error)
 		return d.rewriteV4FlowFrontmatter(units, limit)
 	}
 	raw := d.v4.shell.raw
-	newline := v4FrontmatterNewline(raw[:d.v4.bodyStart])
 	parts := make([][]byte, 0, len(d.v4.frontmatter)+2)
-	parts = append(parts, raw[:d.v4.frontStart])
+	cursor := 0
 	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
 	for index := 0; index+1 < len(d.v4.shell.frontmatter.Content); index += 2 {
 		key := UnitKey{Kind: UnitFrontmatter, Name: d.v4.shell.frontmatter.Content[index].Value}
+		span := d.v4.frontmatter[key]
+		if span.start < cursor || span.valueEnd < span.start || span.valueEnd > d.v4.frontEnd {
+			return nil, invalidDocument("overlapping v4 Markdown block frontmatter edits")
+		}
+		parts = append(parts, raw[cursor:span.start])
+		cursor = span.valueEnd
 		seen[key] = true
 		unit, present := units[key]
 		if !present || !unit.Present {
 			continue
 		}
 		if original, found := d.v4.shellAll[key]; found && unitsEqual(original, unit) {
-			span := d.v4.frontmatter[key]
 			parts = append(parts, raw[span.start:span.valueEnd])
 			continue
 		}
-		encoded, err := encodeV4FrontmatterUnit(key, unit)
+		encoded, err := d.encodeV4BlockEntry(key, unit, span)
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, applyV4NewlineStyle(encoded, newline))
+		parts = append(parts, encoded)
 	}
 	for _, name := range sortedFrontmatterNames(units, seen) {
 		key := UnitKey{Kind: UnitFrontmatter, Name: name}
-		encoded, err := encodeV4FrontmatterUnit(key, units[key])
+		encoded, err := d.encodeV4BlockEntry(key, units[key], v4FrontmatterSpan{blockIndent: d.v4.shell.frontmatter.Column - 1})
 		if err != nil {
 			return nil, err
 		}
-		parts = append(parts, applyV4NewlineStyle(encoded, newline))
+		parts = append(parts, encoded)
 	}
-	parts = append(parts, raw[d.v4.frontEnd:d.v4.bodyStart])
+	parts = append(parts, raw[cursor:d.v4.bodyStart])
 	return joinV4Bounded(parts, limit)
 }
 
@@ -274,16 +278,7 @@ func encodeV4FrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
 		return nil, err
 	}
 	mapping := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{keyNode, valueNode}}
-	var out bytes.Buffer
-	encoder := yaml.NewEncoder(&out)
-	encoder.SetIndent(2)
-	if err := encoder.Encode(mapping); err != nil {
-		return nil, invalidDocument("cannot encode v4 Markdown frontmatter unit")
-	}
-	if err := encoder.Close(); err != nil {
-		return nil, invalidDocument("cannot finish v4 Markdown frontmatter unit")
-	}
-	return bytes.Clone(out.Bytes()), nil
+	return encodeV4YAMLNode(mapping)
 }
 
 func rewriteV4Body(original, ordered Body, units UnitSet, limit int) ([]byte, error) {

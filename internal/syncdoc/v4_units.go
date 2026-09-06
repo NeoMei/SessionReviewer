@@ -28,6 +28,8 @@ type v4BlockState struct {
 
 type v4FrontmatterSpan struct {
 	start, valueEnd, delimiter       int
+	blockKeyStart, blockIndent       int
+	blockFootStart                   int
 	removalEnd                       int
 	lineCommentStart, lineCommentEnd int
 	lineComment                      string
@@ -83,6 +85,18 @@ func ParseV4(relative string, content []byte, ledger reviewv4.MachineLedger) (Do
 	state.shellAll = make(UnitSet)
 	for key, unit := range shell.Units() {
 		state.shellAll[key] = state.semanticShellUnit(unit)
+	}
+	for index := 0; index+1 < len(shell.frontmatter.Content); index += 2 {
+		if !v4YAMLHasBlockScalar(shell.frontmatter.Content[index+1]) {
+			continue
+		}
+		key := UnitKey{Kind: UnitFrontmatter, Name: shell.frontmatter.Content[index].Value}
+		unit := state.shellAll[key]
+		unit.Value, err = encodeV4YAMLNode(shell.frontmatter.Content[index+1])
+		if err != nil {
+			return Document{}, err
+		}
+		state.shellAll[key] = unit
 	}
 	if err := state.indexFrontmatter(shellSource); err != nil {
 		return Document{}, err
@@ -218,14 +232,7 @@ func (state *v4DocumentState) indexFrontmatter(source []byte) error {
 	if state.shell.frontmatter.Style&yaml.FlowStyle != 0 {
 		return state.indexFlowFrontmatter(source, frontmatter, lineStarts, keys, starts)
 	}
-	for index, key := range keys {
-		end := state.frontEnd
-		if index+1 < len(starts) {
-			end = starts[index+1]
-		}
-		state.frontmatter[key] = v4FrontmatterSpan{start: starts[index], valueEnd: end, delimiter: end, removalEnd: end}
-	}
-	return nil
+	return state.indexBlockFrontmatter(source, lineStarts, keys, starts)
 }
 
 func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, lineStarts []int, keys []UnitKey, starts []int) error {
