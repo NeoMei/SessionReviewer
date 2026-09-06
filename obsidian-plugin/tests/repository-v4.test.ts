@@ -103,6 +103,35 @@ describe("v4 bounded Vault read diagnostics", () => {
     expect(serialized).toContain('"category":"read-failed"');
   });
 
+  it.each([
+    {
+      label: "throwing code getter",
+      failure: () => Object.defineProperty(new Error("Vault read failed"), "code", { get: () => { throw new Error("getter secret"); } })
+    },
+    {
+      label: "throwing Proxy has trap",
+      failure: () => new Proxy(new Error("Vault read failed"), { has: () => { throw new Error("has secret"); } })
+    },
+    {
+      label: "throwing Proxy get trap",
+      failure: () => new Proxy(Object.assign(new Error("Vault read failed"), { code: "EACCES" }), { get: () => { throw new Error("get secret"); } })
+    }
+  ])("defaults a $label to the bounded read-failed category", async ({ failure }) => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    const originalRead = vault.read.bind(vault);
+    vi.spyOn(vault, "read").mockImplementation(async (path) => {
+      if (path === `${projectRoot}/.session-reviewer/ledger.json`) throw failure();
+      return originalRead(path);
+    });
+
+    await expect(repository.load(project)).resolves.toMatchObject({
+      kind: "markdown-v4",
+      state: { kind: "read_failed", document: ".session-reviewer/ledger.json", category: "read-failed" }
+    });
+  });
+
   it("shows a bounded first-load read diagnostic and remains read-only", async () => {
     const { vault, root: projectRoot } = configuredVault();
     const repository = new ProjectRepository(vault);
@@ -139,6 +168,24 @@ describe("v4 bounded Vault read diagnostics", () => {
     expect(view.textContent).toContain(".session-reviewer/session-index.json");
     expect(view.textContent).toContain("文件缺失");
     expect(view.textContent).toContain("已过期 · 只读");
+  });
+
+  it("renders an accurate stale read banner through the full project view", async () => {
+    vi.useFakeTimers();
+    const { vault, root: projectRoot } = configuredVault();
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), new ProjectRepository(vault));
+    await view.onOpen();
+    vault.files.delete(`${projectRoot}/.session-reviewer/session-index.json`);
+    vault.write(`${projectRoot}/项目回顾.md`, fixture("review.md"));
+
+    await vi.advanceTimersByTimeAsync(151);
+
+    expect(view.contentEl.textContent).toContain("正在显示上次可信内容");
+    expect(view.contentEl.textContent).toContain("当前文件无法读取或验证");
+    expect(view.contentEl.textContent).toContain(".session-reviewer/session-index.json：文件缺失");
+    expect(view.contentEl.textContent).toContain("已过期 · 只读");
+    expect(view.contentEl.textContent).not.toContain("当前文件身份、引用或 revision 不一致");
+    await view.onClose();
   });
 
   it("keeps parser validation failures distinct from Vault read failures", async () => {

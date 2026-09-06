@@ -15,9 +15,17 @@ export type MarkdownDocumentPath = "项目回顾.md" | "项目历史.md" | ".ses
 export type VaultReadFailureCategory = "missing" | "permission-denied" | "read-failed";
 
 export function vaultReadFailure(document: MarkdownDocumentPath, error: unknown): Extract<MarkdownSnapshot, { kind: "read_failed" }> {
-  const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
+  const code = safeErrorCode(error);
   const category = code === "ENOENT" ? "missing" : code === "EACCES" || code === "EPERM" ? "permission-denied" : "read-failed";
   return { kind: "read_failed", document, category };
+}
+
+function safeErrorCode(error: unknown): unknown {
+  try {
+    return typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function loadMarkdownSnapshot(input: { review: string; history: string; ledger: string; index: string }): MarkdownSnapshot {
