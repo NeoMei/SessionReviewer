@@ -248,6 +248,29 @@ func markdownIdentitySpans(raw []byte) ([]markdownIdentitySpan, error) {
 	if err != nil {
 		return nil, err
 	}
+	var spans []markdownIdentitySpan
+	for i := 0; i < len(mapping.Content); i += 2 {
+		key, node := mapping.Content[i].Value, mapping.Content[i+1]
+		if key != "id" && key != "project_id" && key != "generation_id" {
+			continue
+		}
+		start, end, err := markdownScalarValueSpan(raw, node)
+		if err != nil {
+			return nil, err
+		}
+		spans = append(spans, markdownIdentitySpan{start, end})
+	}
+	return spans, nil
+}
+
+// markdownScalarValueSpan returns only the presented scalar value bytes. YAML
+// syntax around the value (tags, anchors, quote delimiters, block indicators,
+// indentation, comments, and line endings) is deliberately outside the span.
+// Callers must first validate the parsed mapping and the replacement value.
+func markdownScalarValueSpan(raw []byte, node *yaml.Node) (int, int, error) {
+	if node == nil || node.Kind != yaml.ScalarNode {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
 	starts := []int{bytes.IndexByte(raw, '\n') + 1}
 	for cursor := starts[0]; cursor < len(raw); {
 		end, next := markdownPhysicalLine(raw, cursor)
@@ -257,75 +280,70 @@ func markdownIdentitySpans(raw []byte) ([]markdownIdentitySpan, error) {
 		starts = append(starts, next)
 		cursor = next
 	}
-	var spans []markdownIdentitySpan
-	for i := 0; i < len(mapping.Content); i += 2 {
-		key, node := mapping.Content[i].Value, mapping.Content[i+1]
-		if key != "id" && key != "project_id" && key != "generation_id" {
-			continue
+	if starts[0] == 0 || node.Line < 1 || node.Line > len(starts) {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	start := starts[node.Line-1]
+	for column := 1; column < node.Column && start < len(raw); column++ {
+		_, size := utf8.DecodeRune(raw[start:])
+		start += size
+	}
+	// Explicit tags and anchors are syntax, not scalar value bytes.
+	for start < len(raw) && (raw[start] == '!' || raw[start] == '&') {
+		for start < len(raw) && raw[start] != ' ' && raw[start] != '\t' && raw[start] != '\n' && raw[start] != '\r' {
+			start++
 		}
-		if node.Line < 1 || node.Line > len(starts) {
-			return nil, io.ErrUnexpectedEOF
+		for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+			start++
 		}
-		start := starts[node.Line-1]
-		for col := 1; col < node.Column && start < len(raw); col++ {
-			_, size := utf8.DecodeRune(raw[start:])
-			start += size
-		}
-		// Explicit tags and anchors are syntax, not the scalar VALUE.
-		for start < len(raw) && (raw[start] == '!' || raw[start] == '&') {
-			for start < len(raw) && raw[start] != ' ' && raw[start] != '\t' && raw[start] != '\n' && raw[start] != '\r' {
-				start++
+	}
+	if start >= len(raw) {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	end := start
+	switch raw[start] {
+	case '\'', '"':
+		quote := raw[start]
+		end = start + 1
+		for end < len(raw) {
+			if quote == '"' && raw[end] == '\\' {
+				end += 2
+				continue
 			}
-			for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
-				start++
-			}
-		}
-		if start >= len(raw) {
-			return nil, io.ErrUnexpectedEOF
-		}
-		end := start
-		switch raw[start] {
-		case '\'', '"':
-			quote := raw[start]
-			end = start + 1
-			for end < len(raw) {
-				if quote == '"' && raw[end] == '\\' {
+			if raw[end] == quote {
+				if quote == '\'' && end+1 < len(raw) && raw[end+1] == quote {
 					end += 2
 					continue
 				}
-				if raw[end] == quote {
-					if quote == '\'' && end+1 < len(raw) && raw[end+1] == quote {
-						end += 2
-						continue
-					}
-					break
-				}
-				end++
+				break
 			}
-			if end >= len(raw) {
-				return nil, io.ErrUnexpectedEOF
-			}
-			start++ // Leave quotes and all outside comments intact.
-		case '|', '>':
-			// A safe ID contains no whitespace: an authenticated block scalar
-			// can therefore have only one nonblank content line.
-			_, start = markdownPhysicalLine(raw, start)
-			for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
-				start++
-			}
-			end = start + len(node.Value)
-			if end > len(raw) || string(raw[start:end]) != node.Value {
-				return nil, io.ErrUnexpectedEOF
-			}
-		default:
-			end = start + len(node.Value)
-			if end > len(raw) || string(raw[start:end]) != node.Value {
-				return nil, io.ErrUnexpectedEOF
-			}
+			end++
 		}
-		spans = append(spans, markdownIdentitySpan{start, end})
+		if end >= len(raw) {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+		start++
+	case '|', '>':
+		// Bound metadata values contain no whitespace, so an accepted block
+		// scalar has one nonblank content line after its presentation header.
+		_, start = markdownPhysicalLine(raw, start)
+		for start < len(raw) && (raw[start] == ' ' || raw[start] == '\t' || raw[start] == '\n' || raw[start] == '\r') {
+			start++
+		}
+		end = start + len(node.Value)
+		if end > len(raw) || string(raw[start:end]) != node.Value {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
+	default:
+		end = start
+		for end < len(raw) && raw[end] != ' ' && raw[end] != '\t' && raw[end] != '\n' && raw[end] != '\r' && raw[end] != ',' && raw[end] != ']' && raw[end] != '}' {
+			end++
+		}
+		if end == start {
+			return 0, 0, io.ErrUnexpectedEOF
+		}
 	}
-	return spans, nil
+	return start, end, nil
 }
 
 func parseMarkdownAnchorLineID(anchor string) (string, bool) {

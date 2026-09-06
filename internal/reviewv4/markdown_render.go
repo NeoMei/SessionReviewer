@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
-	"strconv"
 )
 
 const (
@@ -638,42 +637,95 @@ func validateMarkdownAnchors(relative string, actual, expected []byte) error {
 }
 
 func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, error) {
-	replacements := map[string]string{
-		"revision":      strconv.Itoa(next.Revision),
-		"generation_id": next.GenerationID,
-	}
-	found := map[string]bool{}
-	out := newMarkdownBoundedWriter(maxMarkdownDocumentBytes)
-	cursor := 0
-	for start := 0; start < len(raw); {
-		end, nextLine := markdownPhysicalLine(raw, start)
-		line := raw[start:end]
-		if start > 0 && bytes.Equal(line, []byte("---")) {
-			out.Write(raw[cursor:nextLine])
-			cursor = nextLine
-			break
-		}
-		for key, value := range replacements {
-			prefix := []byte(key + ":")
-			if bytes.HasPrefix(line, prefix) {
-				if found[key] {
-					return nil, &MarkdownError{Code: MarkdownFormatInvalid}
-				}
-				found[key] = true
-				out.Write(raw[cursor:start])
-				out.WriteString(key + ": " + value)
-				out.Write(raw[end:nextLine])
-				cursor = nextLine
-			}
-		}
-		start = nextLine
-	}
-	if !found["revision"] || !found["generation_id"] {
+	mapping, err := markdownFrontmatter(raw)
+	if err != nil {
 		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	if _, err := validateMarkdownFrontmatter(mapping); err != nil {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	type bindingReplacement struct {
+		start, end int
+		value      string
+	}
+	replacements := make([]bindingReplacement, 0, 2)
+	for index := 0; index < len(mapping.Content); index += 2 {
+		key, node := mapping.Content[index].Value, mapping.Content[index+1]
+		value, changed := "", false
+		switch key {
+		case "revision":
+			old, ok := markdownInteger(node)
+			if !ok {
+				return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+			}
+			value, changed = fmt.Sprint(next.Revision), old != next.Revision
+		case "generation_id":
+			old, ok := markdownString(node)
+			if !ok {
+				return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+			}
+			value, changed = next.GenerationID, old != next.GenerationID
+		default:
+			continue
+		}
+		if !changed {
+			continue
+		}
+		start, end, spanErr := markdownScalarValueSpan(raw, node)
+		if spanErr != nil || start < 0 || end < start || end > len(raw) {
+			return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+		}
+		replacements = append(replacements, bindingReplacement{start: start, end: end, value: value})
+	}
+	if len(replacements) == 0 {
+		return bytes.Clone(raw), nil
+	}
+	if len(replacements) > 2 || len(replacements) == 2 && replacements[0].start >= replacements[1].start {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	removed, added := 0, 0
+	for _, replacement := range replacements {
+		removed += replacement.end - replacement.start
+		if len(replacement.value) > maxMarkdownDocumentBytes-added {
+			return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+		}
+		added += len(replacement.value)
+	}
+	prospective := len(raw) - removed
+	if prospective > maxMarkdownDocumentBytes-added {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	out := newMarkdownBoundedWriter(prospective + added)
+	cursor := 0
+	for _, replacement := range replacements {
+		out.Write(raw[cursor:replacement.start])
+		out.WriteString(replacement.value)
+		cursor = replacement.end
 	}
 	out.Write(raw[cursor:])
 	body, err := out.take()
 	if err != nil {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	updated, err := markdownFrontmatter(body)
+	if err != nil {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	if _, err := validateMarkdownFrontmatter(updated); err != nil {
+		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	revisionMatches, generationMatches := false, false
+	for index := 0; index < len(updated.Content); index += 2 {
+		switch updated.Content[index].Value {
+		case "revision":
+			revision, ok := markdownInteger(updated.Content[index+1])
+			revisionMatches = ok && revision == next.Revision
+		case "generation_id":
+			generation, ok := markdownString(updated.Content[index+1])
+			generationMatches = ok && generation == next.GenerationID
+		}
+	}
+	if !revisionMatches || !generationMatches {
 		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
 	}
 	return body, nil

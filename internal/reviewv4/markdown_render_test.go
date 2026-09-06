@@ -408,6 +408,188 @@ func TestMarkdownRenderAdvancesGenerationFromAuthenticatedPreviousBase(t *testin
 	}
 }
 
+func TestMarkdownRenderPreservesQuotedBindingKeysSpacingCommentsAndMixedNewlines(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := ledger.DocumentProjection.PresentationBase
+	previous := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	for _, body := range []*[]byte{&previous.Review, &previous.History} {
+		*body = bytes.Replace(*body, []byte("revision: 1\n"), []byte("\"revision\"  : !!int +1   # accepted revision\r\n"), 1)
+		*body = bytes.Replace(*body, []byte("generation_id: generation-1\n"), []byte("'generation_id' : \"generation-\\x31\" # authenticated generation\n"), 1)
+		if _, err := ParseMarkdownDocument(markdownRelativeForTest(body, &previous), *body); err != nil {
+			t.Fatalf("valid presentation fixture rejected: %v", err)
+		}
+	}
+	ledger = bindMarkdownPair(t, ledger, previous)
+
+	unchanged, err := RenderMarkdown(base, ledger, &previous)
+	if err != nil || !reflect.DeepEqual(unchanged, previous) {
+		t.Fatalf("no-op changed presented bindings: err=%v", err)
+	}
+
+	next := clonePresentation(base)
+	next.GenerationID = "generation-2"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
+	next.Revision++
+	for index := range next.Timeline {
+		next.Timeline[index].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdown(next, ledger, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := MarkdownPair{Review: bytes.Clone(previous.Review), History: bytes.Clone(previous.History)}
+	for _, body := range []*[]byte{&expected.Review, &expected.History} {
+		*body = bytes.Replace(*body, []byte("!!int +1"), []byte("!!int 2"), 1)
+		*body = bytes.Replace(*body, []byte("\"generation-\\x31\""), []byte("\"generation-2\""), 1)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatal("changed bindings modified bytes outside their scalar values")
+	}
+	for name, body := range map[string][]byte{"review": got.Review, "history": got.History} {
+		if !bytes.Contains(body, []byte("\"revision\"  : !!int 2   # accepted revision\r\n")) ||
+			!bytes.Contains(body, []byte("'generation_id' : \"generation-2\" # authenticated generation\n")) {
+			t.Fatalf("%s binding presentation changed:\n%s", name, body)
+		}
+		if _, err := ParseMarkdownDocument(map[string]string{"review": markdownReviewRelative, "history": markdownHistoryRelative}[name], body); err != nil {
+			t.Fatalf("%s rendered binding is not parseable: %v", name, err)
+		}
+	}
+}
+
+func markdownRelativeForTest(body *[]byte, pair *MarkdownPair) string {
+	if body == &pair.History {
+		return markdownHistoryRelative
+	}
+	return markdownReviewRelative
+}
+
+func TestMarkdownDraftRevisionAdvancePreservesUnchangedGenerationSpelling(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	pending := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	for _, body := range []*[]byte{&pending.Review, &pending.History} {
+		*body = bytes.Replace(*body, []byte("revision: 1\n"), []byte("revision: !!int '1' # revision binding\n"), 1)
+		*body = bytes.Replace(*body, []byte("generation_id: generation-1\n"), []byte("generation_id: \"generation-\\x31\" # retain exact spelling\n"), 1)
+	}
+	pending.Review = bytes.Replace(pending.Review, []byte("\n项目目标夹具\n"), []byte("\n人工编辑目标\n"), 1)
+	ledger = bindMarkdownPair(t, ledger, pending)
+	draft, err := ParseMarkdownDraft(pending, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := RenderMarkdownDraft(draft.Presentation, ledger, pending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := MarkdownPair{Review: bytes.Replace(bytes.Clone(pending.Review), []byte("!!int '1'"), []byte("!!int '2'"), 1), History: bytes.Replace(bytes.Clone(pending.History), []byte("!!int '1'"), []byte("!!int '2'"), 1)}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatal("revision advance modified bytes outside its scalar value")
+	}
+	for name, body := range map[string][]byte{"review": got.Review, "history": got.History} {
+		if !bytes.Contains(body, []byte("revision: !!int '2' # revision binding\n")) {
+			t.Fatalf("%s revision scalar style changed:\n%s", name, body)
+		}
+		if !bytes.Contains(body, []byte("generation_id: \"generation-\\x31\" # retain exact spelling\n")) {
+			t.Fatalf("%s unchanged generation spelling changed:\n%s", name, body)
+		}
+	}
+}
+
+func TestMarkdownRenderPreservesTaggedBlockScalarBindings(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := ledger.DocumentProjection.PresentationBase
+	previous := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	for _, body := range []*[]byte{&previous.Review, &previous.History} {
+		*body = bytes.Replace(*body, []byte("revision: 1\n"), []byte("revision: !!int |- # revision block\n  1\n"), 1)
+		*body = bytes.Replace(*body, []byte("generation_id: generation-1\n"), []byte("generation_id: !!str >- # generation block\r\n  generation-1\r\n"), 1)
+	}
+	ledger = bindMarkdownPair(t, ledger, previous)
+	next := clonePresentation(base)
+	next.GenerationID = "generation-2"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
+	next.Revision++
+	for index := range next.Timeline {
+		next.Timeline[index].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdown(next, ledger, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := MarkdownPair{Review: bytes.Clone(previous.Review), History: bytes.Clone(previous.History)}
+	for _, body := range []*[]byte{&expected.Review, &expected.History} {
+		*body = bytes.Replace(*body, []byte("\n  1\n"), []byte("\n  2\n"), 1)
+		*body = bytes.Replace(*body, []byte("\r\n  generation-1\r\n"), []byte("\r\n  generation-2\r\n"), 1)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatal("block binding update modified bytes outside scalar contents")
+	}
+	for name, body := range map[string][]byte{"review": got.Review, "history": got.History} {
+		if !bytes.Contains(body, []byte("revision: !!int |- # revision block\n  2\n")) ||
+			!bytes.Contains(body, []byte("generation_id: !!str >- # generation block\r\n  generation-2\r\n")) {
+			t.Fatalf("%s block scalar presentation changed:\n%s", name, body)
+		}
+	}
+}
+
+func TestMarkdownRenderPreservesFlowFrontmatterBindingDelimiters(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	base := ledger.DocumentProjection.PresentationBase
+	previous := MarkdownPair{Review: mustRead(t, "../../testdata/contracts/v4/markdown/review.md"), History: mustRead(t, "../../testdata/contracts/v4/markdown/history.md")}
+	for _, document := range []struct {
+		body       *[]byte
+		id, entity string
+	}{
+		{&previous.Review, "review-project-p", "project-review"},
+		{&previous.History, "history-project-p", "project-history"},
+	} {
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: \"generation-\\x31\", minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: 保留}\r\n", document.id, document.entity)
+		firstEnd := bytes.IndexByte(*document.body, '\n') + 1
+		_, rest, err := splitMarkdownFrontmatterForTest((*document.body)[firstEnd:])
+		if err != nil {
+			t.Fatal(err)
+		}
+		*document.body = append(append(bytes.Clone((*document.body)[:firstEnd]), []byte(flow)...), rest...)
+	}
+	ledger = bindMarkdownPair(t, ledger, previous)
+	next := clonePresentation(base)
+	next.GenerationID = "generation-2"
+	next.ProjectViewDigest = "sha256:" + strings.Repeat("2", 64)
+	next.Revision++
+	for index := range next.Timeline {
+		next.Timeline[index].GenerationID = next.GenerationID
+	}
+	got, err := RenderMarkdown(next, ledger, &previous)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := MarkdownPair{Review: bytes.Clone(previous.Review), History: bytes.Clone(previous.History)}
+	for _, body := range []*[]byte{&expected.Review, &expected.History} {
+		*body = bytes.Replace(*body, []byte("!!int +1,"), []byte("!!int 2,"), 1)
+		*body = bytes.Replace(*body, []byte("\"generation-\\x31\","), []byte("\"generation-2\","), 1)
+	}
+	if !reflect.DeepEqual(got, expected) {
+		t.Fatal("flow binding update modified bytes outside scalar values")
+	}
+	for name, body := range map[string][]byte{"review": got.Review, "history": got.History} {
+		if !bytes.Contains(body, []byte("revision: !!int 2, generation_id: \"generation-2\",")) {
+			t.Fatalf("%s flow delimiters changed:\n%s", name, body)
+		}
+		if _, err := ParseMarkdownDocument(map[string]string{"review": markdownReviewRelative, "history": markdownHistoryRelative}[name], body); err != nil {
+			t.Fatalf("%s rendered flow frontmatter is not parseable: %v", name, err)
+		}
+	}
+}
+
+func splitMarkdownFrontmatterForTest(raw []byte) (frontmatter, rest []byte, err error) {
+	for start := 0; start < len(raw); {
+		end, next := markdownPhysicalLine(raw, start)
+		if bytes.Equal(raw[start:end], []byte("---")) {
+			return raw[:start], raw[start:], nil
+		}
+		start = next
+	}
+	return nil, nil, errors.New("frontmatter terminator not found")
+}
+
 func TestMarkdownRenderAddsNewGenerationEntitiesWhilePreservingPreviousShell(t *testing.T) {
 	ledger := sharedMarkdownLedger(t)
 	base := ledger.DocumentProjection.PresentationBase
