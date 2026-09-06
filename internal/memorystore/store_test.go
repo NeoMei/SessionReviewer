@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strconv"
@@ -60,6 +61,116 @@ func TestOpenReadOnlyDoesNotCreateOrRecoverPrivateState(t *testing.T) {
 	if body, err := os.ReadFile(journal); err != nil || string(body) != "unresolved" {
 		t.Fatalf("prepared advance was mutated: %q err=%v", body, err)
 	}
+}
+
+func TestOpenReadOnlyAcceptsLegacyLayoutWithoutSessionIndexes(t *testing.T) {
+	data := t.TempDir()
+	store, err := Open(data, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := buildStoredFixture(t, store, "generation-legacy-layout")
+	if _, err := store.PrepareGeneration(fixture.manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	memoryRoot := filepath.Join(data, "projects", testProjectID, "memory-v1")
+	if err := os.Remove(filepath.Join(memoryRoot, "session-indexes")); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPrivateTree(t, memoryRoot)
+	readOnly, err := OpenReadOnly(data, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, _, err := readOnly.LoadPrepared()
+	if err != nil || prepared.GenerationID != fixture.manifest.GenerationID {
+		t.Fatalf("legacy prepared load: prepared=%+v err=%v", prepared, err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotPrivateTree(t, memoryRoot); !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only legacy load mutated tree: before=%v after=%v", before, after)
+	}
+}
+
+func TestReadOnlyPreparedLoadNeverCreatesLockOrRecoversRaceWindowJournal(t *testing.T) {
+	data := t.TempDir()
+	store, err := Open(data, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := buildStoredFixture(t, store, "generation-read-only-race")
+	prepared, err := store.PrepareGeneration(fixture.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	memoryRoot := filepath.Join(data, "projects", testProjectID, "memory-v1")
+	lockPath := filepath.Join(memoryRoot, "locks", "scan.lock")
+	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	readOnly, err := OpenReadOnly(data, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalBody, err := json.Marshal(preparedAdvanceJournal{Version: 1, ProjectID: testProjectID, Expected: prepared, Successor: prepared})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalPath := filepath.Join(memoryRoot, preparedAdvanceJournalLeaf)
+	if err := os.WriteFile(journalPath, append(journalBody, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotPrivateTree(t, memoryRoot)
+	if _, _, err := readOnly.LoadPrepared(); err == nil || !strings.Contains(err.Error(), "unresolved prepared advance") {
+		t.Fatalf("race-window journal was not refused: %v", err)
+	}
+	if _, err := os.Stat(lockPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only load created lock: %v", err)
+	}
+	if after := snapshotPrivateTree(t, memoryRoot); !reflect.DeepEqual(before, after) {
+		t.Fatalf("read-only load recovered or mutated tree: before=%v after=%v", before, after)
+	}
+	if err := readOnly.withStoreLock(func() error { t.Fatal("read-only mutation callback ran"); return nil }); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("mutating API accepted read-only handle: %v", err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func snapshotPrivateTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	result := map[string]string{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			result[filepath.ToSlash(relative)] = "dir"
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		result[filepath.ToSlash(relative)] = fmt.Sprintf("%x", sha256.Sum256(body))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestPrepareGenerationRejectsSessionIndexWithMissingDependency(t *testing.T) {

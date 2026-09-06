@@ -320,7 +320,7 @@ func RecoverMarkdownLocked(ctx context.Context, opts Options, owner *publication
 			return err
 		}
 		opts.Plan = presentation.RenderPlan{ProjectID: intent.ProjectID, GenerationID: intent.GenerationID, ProjectViewDigest: intent.ProjectViewDigest, Files: files}
-		return completeMarkdownAcceptance(intent, journal, opts, projectDir, vaultDir)
+		return completeMarkdownAcceptance(ctx, intent, journal, opts, projectDir, vaultDir)
 	})
 }
 
@@ -408,13 +408,16 @@ func markdownBaseStore(opts Options) (syncengine.BaseStore, func() error, error)
 	return syncengine.BaseStore{Root: root}, root.Close, nil
 }
 
-func completeMarkdownAcceptance(intent Intent, journal *Journal, opts Options, projectDir, vaultDir *pathguard.Directory) error {
+func completeMarkdownAcceptance(ctx context.Context, intent Intent, journal *Journal, opts Options, projectDir, vaultDir *pathguard.Directory) error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
 	currentIntent, err := journal.Load()
 	if err != nil || currentIntent.RevisionID != intent.RevisionID {
 		return errors.Join(errors.New("Markdown acceptance journal changed"), err)
 	}
 	intent = currentIntent
-	if err := verifyIntentDesired(context.Background(), intent, projectDir, vaultDir); err != nil {
+	if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
 		return err
 	}
 	if err := runPublishCheckpoint(opts, checkpointBeforeIndexGuard, "final", ""); err != nil {
@@ -426,6 +429,9 @@ func completeMarkdownAcceptance(intent Intent, journal *Journal, opts Options, p
 	}
 	if err := runPublishCheckpoint(opts, checkpointAfterIndexGuard, "final", ""); err != nil {
 		return err
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
 	}
 	review, history, err := markdownDesiredPair(opts.Plan)
 	if err != nil {
@@ -475,9 +481,15 @@ func completeMarkdownAcceptance(intent Intent, journal *Journal, opts Options, p
 	if err := runPublishCheckpoint(opts, checkpointBeforeReceiptCommit, "", ""); err != nil {
 		return err
 	}
-	return journal.commitMarkdownAccepted(func() error {
+	if cause := context.Cause(ctx); cause != nil {
+		return cause
+	}
+	if err := journal.commitMarkdownAccepted(func() error {
 		return runPublishCheckpoint(opts, checkpointAfterReceiptCommit, "", "")
-	})
+	}); err != nil {
+		return err
+	}
+	return context.Cause(ctx)
 }
 
 func markdownReceiptCommitted(journal *Journal, intent Intent) (bool, error) {

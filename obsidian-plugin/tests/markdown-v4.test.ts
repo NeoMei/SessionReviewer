@@ -143,6 +143,24 @@ describe("v4 human Markdown codec", () => {
     expect(ledger).toEqual(before);
   });
 
+  it("updates a carried human patch after an authenticated generation advance", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger-existing-patch.json")));
+    ledger.generation_id = "generation-after-scan";
+    ledger.document_projection!.presentation_base.generation_id = "generation-after-scan";
+    for (const milestone of ledger.document_projection!.presentation_base.timeline) milestone.generation_id = "generation-after-scan";
+    ledger.document_projection!.presentation_base.generated_baselines[0].generation_id = "generation-after-scan";
+    const review = read("review-existing-patch-draft.md").replaceAll("generation-1", "generation-after-scan");
+
+    const result = parseMarkdownV4({ review, history: read("history.md").replaceAll("generation-1", "generation-after-scan") }, ledger);
+
+    expect(result.presentation.current_state.goal).toBe("再次人工编辑目标");
+    expect(result.presentation.generated_baselines[0]).toMatchObject({
+      generation_id: "generation-after-scan",
+      value: "项目目标夹具",
+      generated_hash: ledger.generated_baselines[0].generated_hash
+    });
+  });
+
   it("removes an existing human patch when the field returns to its generated baseline", () => {
     const ledger = parseMachineLedgerV4(read("ledger-existing-patch.json"));
 

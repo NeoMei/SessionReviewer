@@ -286,6 +286,15 @@ func runGateBEndToEnd(t *testing.T) {
 	if !foundHumanStatus {
 		t.Fatalf("human status patch was not persisted: %+v", machine.HumanPatches)
 	}
+	// The same field remains editable after the scan advanced its generation.
+	editV4Field(t, projectReviewPath, reviewv2.ReviewRelativePath, reviewv4.FieldKey{Entity: "project-overview", Name: "status"}, "第二次人工状态")
+	publishes = 0
+	if _, err := syncproject.RunMarkdown(context.Background(), syncOptions); err != nil || publishes != 1 {
+		t.Fatalf("second edit after generation advance was not accepted: publishes=%d err=%v", publishes, err)
+	}
+	if reopened := loadGateBV4(t, filepath.Join(projectRoot, "docs", "session-review")); reopened.Review.CurrentState.Status != "第二次人工状态" {
+		t.Fatalf("second edit missing after reopen: %q", reopened.Review.CurrentState.Status)
+	}
 	if _, err := contextupdate.Run(context.Background(), cuOpts); err != nil {
 		t.Fatalf("post-human-edit idempotence run: %v", err)
 	}

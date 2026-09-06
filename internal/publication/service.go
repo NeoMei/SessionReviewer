@@ -103,6 +103,12 @@ const sessionIndexRelativePath = "docs/session-review/.session-reviewer/session-
 // Publish acquires the per-project public-projection lock and executes the
 // complete durable cross-root publication workflow.
 func Publish(ctx context.Context, opts Options) (_ Result, retErr error) {
+	if ctx == nil {
+		return Result{}, errors.New("publication context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return Result{}, cause
+	}
 	if opts.ProjectID == "" || !journalIDPattern.MatchString(opts.ProjectID) {
 		return Result{}, errors.New("valid project ID is required")
 	}
@@ -130,6 +136,12 @@ func Publish(ctx context.Context, opts Options) (_ Result, retErr error) {
 // migration can keep the same OS lock from preview recomputation through the
 // durable pointer commit without recursively acquiring it.
 func PublishLocked(ctx context.Context, opts Options, owner *publicationlock.Owner) (Result, error) {
+	if ctx == nil {
+		return Result{}, errors.New("publication context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return Result{}, cause
+	}
 	var result Result
 	err := owner.Use(opts.DataRoot, opts.ProjectID, func() error {
 		var err error
@@ -142,6 +154,9 @@ func PublishLocked(ctx context.Context, opts Options, owner *publicationlock.Own
 func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("publication context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return Result{}, cause
 	}
 	if opts.ProjectID == "" {
 		return Result{}, errors.New("project ID is required")
@@ -236,7 +251,13 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		})
 	}
 	rollbackFailure := func(ctx context.Context, intent Intent, primary error) error {
-		if rollbackErr := rollback(ctx, intent); rollbackErr != nil {
+		cleanupCtx := ctx
+		cancel := func() {}
+		if context.Cause(ctx) != nil {
+			cleanupCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		}
+		defer cancel()
+		if rollbackErr := rollback(cleanupCtx, intent); rollbackErr != nil {
 			return errors.Join(primary, fmt.Errorf("rollback publication: %w", rollbackErr))
 		}
 		return primary
@@ -260,7 +281,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 				if err := verifyIntentDesired(ctx, intent, projectDir, vaultDir); err != nil {
 					return err
 				}
-				return completeMarkdownAcceptance(intent, j, opts, projectDir, vaultDir)
+				return completeMarkdownAcceptance(ctx, intent, j, opts, projectDir, vaultDir)
 			}
 			return rollback(ctx, intent)
 		}
@@ -284,6 +305,9 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if err := j.Recover(ctx, recoveryHandler); err != nil {
 		return Result{}, fmt.Errorf("recover active publication journal: %w", err)
 	}
+	if cause := context.Cause(ctx); cause != nil {
+		return Result{}, cause
+	}
 
 	// Check if already published
 	pubID, _, err := store.LoadPublished()
@@ -295,6 +319,9 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		if err == nil {
 			return Result{GenerationID: pubID, ProjectFiles: projFiles, VaultFiles: vaultFiles, Recovered: recovered}, nil
 		}
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return Result{}, cause
 	}
 
 	// Pre-flight check Project files against expected plan preimages
@@ -563,7 +590,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, err
 	}
 	if intent.Version == 2 && intent.Kind == KindMarkdown {
-		if err := completeMarkdownAcceptance(intent, j, opts, projectDir, vaultDir); err != nil {
+		if err := completeMarkdownAcceptance(ctx, intent, j, opts, projectDir, vaultDir); err != nil {
 			accepted, receiptErr := markdownReceiptCommitted(j, intent)
 			if receiptErr != nil {
 				return Result{}, errors.Join(err, receiptErr)

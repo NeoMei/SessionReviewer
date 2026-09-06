@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/pricing"
@@ -71,6 +72,9 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 		if presentation.ProjectID != in.Index.ProjectID {
 			return reviewv4.Presentation{}, reviewv4.MachineLedger{}, errors.New("v4 scan project identity mismatch")
 		}
+		if err := carryV4GeneratedBaselines(&presentation, in.Index.GenerationID); err != nil {
+			return reviewv4.Presentation{}, reviewv4.MachineLedger{}, err
+		}
 		if presentation.GenerationID != in.Index.GenerationID || presentation.ProjectViewDigest != in.Index.ProjectViewDigest {
 			if presentation.Revision == in.Accepted.Ledger.DocumentProjection.PresentationBase.Revision {
 				presentation.Revision++
@@ -94,6 +98,33 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 	ledger.DocumentProjection = &reviewv4.DocumentProjection{SchemaVersion: 1, Format: "review-markdown-v1", PresentationBase: presentation}
 	ledger.SyncHashes.SessionIndexDigest = in.Index.Digest
 	return presentation, ledger, nil
+}
+
+func carryV4GeneratedBaselines(presentation *reviewv4.Presentation, generationID string) error {
+	baselines := make(map[string]int, len(presentation.GeneratedBaselines))
+	for index := range presentation.GeneratedBaselines {
+		baseline := &presentation.GeneratedBaselines[index]
+		key := baseline.EntityID + "\x00" + baseline.Field
+		if _, duplicate := baselines[key]; duplicate || baseline.Kind != "scalar" || baseline.Value == nil || baseline.Values != nil ||
+			baseline.GeneratedHash != baselinehash.SHA256(baseline.EntityID, baseline.Field, baseline.Kind, *baseline.Value, nil) {
+			return errors.New("v4 scan cannot carry malformed generated baseline")
+		}
+		baselines[key] = index
+	}
+	for _, patch := range presentation.HumanPatches {
+		index, found := baselines[patch.EntityID+"\x00"+patch.Field]
+		if !found || patch.BaseGeneratedHash != presentation.GeneratedBaselines[index].GeneratedHash || presentation.GeneratedBaselines[index].GenerationID != presentation.GenerationID {
+			return errors.New("v4 scan cannot carry unbound human patch")
+		}
+		presentation.GeneratedBaselines[index].GenerationID = generationID
+	}
+	for _, patch := range presentation.OrphanPatches {
+		index, found := baselines[patch.EntityID+"\x00"+patch.Field]
+		if !found || patch.BaseGeneratedHash != presentation.GeneratedBaselines[index].GeneratedHash {
+			return errors.New("v4 scan cannot carry unbound orphan patch")
+		}
+	}
+	return nil
 }
 
 func mapV4Accounting(value accounting.ProjectSummary, accepted reviewv4.Accounting, acceptedSessions, nextSessions []reviewv4.LedgerSession) reviewv4.Accounting {
@@ -219,6 +250,12 @@ type v4PublishInput struct {
 }
 
 func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result, retErr error) {
+	if ctx == nil {
+		return publication.Result{}, errors.New("v4 publication context is required")
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return publication.Result{}, cause
+	}
 	pubOpts := publication.Options{ProjectID: in.ProjectID, PreparedGeneration: in.PreparedGeneration, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now, AfterDestination: in.AfterDestination}
 	if !in.Existing {
 		p, ledger, err := mapV4Scan(v4MapInput{Index: in.Index, Accounting: in.Accounting})
@@ -248,9 +285,15 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	if err := publication.RecoverMarkdownLocked(ctx, pubOpts, owner); err != nil {
 		return publication.Result{}, err
 	}
+	if cause := context.Cause(ctx); cause != nil {
+		return publication.Result{}, cause
+	}
 	read, err := syncproject.ReadMarkdownForScan(ctx, syncproject.Options{ProjectID: in.ProjectID, CWD: in.Mapping.Root, DataDir: in.DataRoot, GOOS: runtime.GOOS, Now: in.Now, Trigger: syncengine.TriggerPeriodic}, owner)
 	if err != nil {
 		return publication.Result{}, err
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return publication.Result{}, cause
 	}
 	pendingAccepted := read.OldAccepted
 	pendingAccepted.Review = read.Pending.Presentation

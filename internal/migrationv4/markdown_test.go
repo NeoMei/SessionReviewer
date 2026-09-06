@@ -108,6 +108,29 @@ func TestOldV4OpaqueHistoryMayContainNestedRawHTMLMarkerLiteral(t *testing.T) {
 	}
 }
 
+func TestOldV4MigrationRejectsSensitivePreservedHistoryWithoutEchoingIt(t *testing.T) {
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	secret := "sk-1234567890abcdefghijklmnop"
+	history := []byte("# Historical source archive\n\nExisting custom note: " + secret + "\n")
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+
+	_, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "sensitive content blocks Markdown migration") {
+		t.Fatalf("sensitive legacy history accepted: %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("sensitive diagnostic echoed original text: %v", err)
+	}
+	if got := string(history); !strings.Contains(got, secret) {
+		t.Fatal("source bytes were modified on refusal")
+	}
+}
+
 func TestOldV4MalformedRealHistoryEventMarkerStillConflicts(t *testing.T) {
 	review, history, ledger, index := oldV4TimelineSource(t, "same", "same", "", "")
 	history = bytes.Replace(history, []byte("<!-- /session-reviewer:event -->"), nil, 1)

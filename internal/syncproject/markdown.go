@@ -64,6 +64,9 @@ func RunMarkdown(ctx context.Context, options Options) (_ syncengine.Report, ret
 	if ctx == nil || !filepath.IsAbs(options.DataDir) || options.Now == nil || strings.TrimSpace(options.GOOS) == "" || options.Trigger == "" {
 		return report, errors.New("Markdown sync requires context, absolute data directory, time source, GOOS, and trigger")
 	}
+	if cause := context.Cause(ctx); cause != nil {
+		return report, cause
+	}
 	pin, err := PinMapping(options)
 	if err != nil {
 		return report, err
@@ -106,12 +109,18 @@ func RunMarkdown(ctx context.Context, options Options) (_ syncengine.Report, ret
 	if err := options.RecoverMarkdown(ctx, owner); err != nil {
 		return report, err
 	}
+	if cause := context.Cause(ctx); cause != nil {
+		return report, cause
+	}
 	plan, _, err := build()
 	if err != nil {
 		return report, err
 	}
 	if len(plan.Plan.Files) == 0 {
 		return report, pin.verify(options)
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return report, cause
 	}
 	if err := options.PublishMarkdown(ctx, plan, owner); err != nil {
 		return report, err

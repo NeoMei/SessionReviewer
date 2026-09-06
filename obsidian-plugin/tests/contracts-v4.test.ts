@@ -218,16 +218,17 @@ describe("review-markdown-v1 ledger extension", () => {
     expect(cases).toHaveLength(23);
     expect(Object.keys(cases[0].expected_fields as JsonObject)).toHaveLength(24);
     for (const testCase of cases) {
-      const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_markdown_code", "expected_fields"];
+      const allowed = ["name", "review", "history", "ledger", "index", "expected_code", "expected_private_binding", "expected_document_code", "expected_markdown_code", "expected_fields"];
       expect(Object.keys(testCase).every((key) => allowed.includes(key))).toBe(true);
-      if ("expected_markdown_code" in testCase) {
-        expect(typeof testCase.expected_markdown_code).toBe("string");
-        expect((testCase.expected_markdown_code as string).length).toBeGreaterThan(0);
+      for (const syntaxCode of [testCase.expected_document_code, testCase.expected_markdown_code]) {
+        if (syntaxCode === undefined) continue;
+        expect(typeof syntaxCode).toBe("string");
+        expect((syntaxCode as string).length).toBeGreaterThan(0);
         expect([
           "markdown_format_invalid", "markdown_field_duplicate", "markdown_field_missing",
           "markdown_structure_edit_requires_command", "markdown_generated_region_modified",
           "markdown_baseline_missing", "markdown_field_conflict", "markdown_migration_conflict"
-        ]).toContain(testCase.expected_markdown_code);
+        ]).toContain(syntaxCode);
       }
       const reviewBytes = await markdownFixture(testCase.review as string);
       const historyBytes = await markdownFixture(testCase.history as string);

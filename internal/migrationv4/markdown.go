@@ -10,6 +10,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -225,6 +226,12 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 	pair, err := reviewv4.RenderMarkdown(presentation, ledger, nil)
 	if err != nil {
 		return Result{}, err
+	}
+	// The old-v4 pair has already been authenticated by its ledger above. Scan
+	// those exact source bytes before wrapping the history in the preservation
+	// fence so refusal cannot rewrite or echo the original secret.
+	if len(redact.Default().Text(string(input.Review)).Findings) != 0 || len(redact.Default().Text(string(input.History)).Findings) != 0 {
+		return Result{}, errors.New("sensitive content blocks Markdown migration")
 	}
 	pair.History = appendHistoricalPreservation(pair.History, input.History)
 	ledger.ReviewSHA256, ledger.HistorySHA256 = bareDigest(pair.Review), bareDigest(pair.History)

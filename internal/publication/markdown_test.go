@@ -203,6 +203,84 @@ func TestMarkdownRecoveryBeforeReceiptRollsBackBaseAndPreservesPriorAcceptance(t
 	}
 }
 
+func TestMarkdownCancellationBeforeReceiptPreservesPriorAcceptance(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-cancel")
+	prior := loadAcceptedReceiptForTest(t, env)
+	priorBase := loadMarkdownBaseForTest(t, env)
+	accepted := loadMarkdownProjectionForTest(t, env)
+	projectReview := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	review := replaceMarkdownFieldForTest(t, readTestFile(t, projectReview), "project-overview", "goal", accepted.Review.CurrentState.Goal, "cancelled goal")
+	if err := os.WriteFile(projectReview, review, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := captureMarkdownPlanForTest(t, env)
+	ctx, cancel := context.WithCancel(context.Background())
+	opts := env.publishOptions()
+	opts.checkpoint = func(stage publishCheckpoint, _, _ string) error {
+		if stage == checkpointBeforeReceiptCommit {
+			cancel()
+		}
+		return nil
+	}
+	owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = PublishMarkdownEditLocked(ctx, opts, edit, owner)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("publication error=%v, want cancellation", err)
+	}
+	if err := RecoverMarkdownLocked(context.Background(), env.publishOptions(), owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadAcceptedReceiptForTest(t, env); got.RevisionID != prior.RevisionID {
+		t.Fatal("cancellation advanced receipt")
+	}
+	if got := loadMarkdownBaseForTest(t, env); got.ContentHash != priorBase.ContentHash {
+		t.Fatal("cancellation advanced Base")
+	}
+}
+
+func TestMarkdownCancellationAfterReceiptReturnsCancellationAndKeepsAcceptedCommit(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-postcommit")
+	prior := loadAcceptedReceiptForTest(t, env)
+	priorBase := loadMarkdownBaseForTest(t, env)
+	accepted := loadMarkdownProjectionForTest(t, env)
+	path := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	if err := os.WriteFile(path, replaceMarkdownFieldForTest(t, readTestFile(t, path), "project-overview", "goal", accepted.Review.CurrentState.Goal, "committed goal"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	edit := captureMarkdownPlanForTest(t, env)
+	ctx, cancel := context.WithCancel(context.Background())
+	opts := env.publishOptions()
+	opts.checkpoint = func(stage publishCheckpoint, _, _ string) error {
+		if stage == checkpointAfterReceiptCommit {
+			cancel()
+		}
+		return nil
+	}
+	owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = PublishMarkdownEditLocked(ctx, opts, edit, owner)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("post-commit error=%v", err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadAcceptedReceiptForTest(t, env); got.RevisionID == prior.RevisionID {
+		t.Fatal("durable accepted receipt was rolled back")
+	}
+	if got := loadMarkdownBaseForTest(t, env); got.ContentHash == priorBase.ContentHash {
+		t.Fatal("accepted Base did not advance")
+	}
+}
+
 func TestMarkdownRecoveryAfterReceiptNeverRollsBackAcceptedRevision(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-after-receipt")
 	accepted := loadMarkdownProjectionForTest(t, env)

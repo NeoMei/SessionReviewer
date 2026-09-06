@@ -154,6 +154,13 @@ func openStore(dataRoot, projectID string, create bool) (*Store, error) {
 			continue
 		}
 		info, err := data.Root.Lstat(relative)
+		if errors.Is(err, os.ErrNotExist) && relative == projectBase+"/session-indexes" {
+			// Session indexes were introduced after the original v2/v3/v4 store
+			// layout. A read-only migration preview may inspect that layout, and
+			// loadGeneration will still reject a manifest that actually references
+			// a missing index object.
+			continue
+		}
 		if err != nil || info == nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || (runtime.GOOS != "windows" && info.Mode().Perm() != privateDirectoryMode) {
 			return nil, fmt.Errorf("existing private store directory %q is missing or unsafe", relative)
 		}
@@ -570,12 +577,53 @@ func requirePreparedPointerBytes(root *pathguard.Directory, expected []byte) err
 func (s *Store) LoadPrepared() (Prepared, memory.GenerationManifest, error) {
 	var prepared Prepared
 	var manifest memory.GenerationManifest
-	err := s.withStoreLock(func() error {
+	load := func() error {
+		if err := s.rejectPreparedAdvanceReadOnly(); err != nil {
+			return err
+		}
 		var err error
-		prepared, manifest, err = s.loadPreparedUnlocked()
-		return err
-	})
+		prepared, manifest, err = s.loadPreparedRawUnlocked()
+		if err != nil {
+			return err
+		}
+		return s.rejectPreparedAdvanceReadOnly()
+	}
+	var err error
+	if s != nil && s.readOnly {
+		s.mu.RLock()
+		if openErr := s.requireOpenLocked(); openErr != nil {
+			err = openErr
+		} else {
+			err = load()
+		}
+		s.mu.RUnlock()
+	} else {
+		err = s.withStoreLock(func() error {
+			var loadErr error
+			prepared, manifest, loadErr = s.loadPreparedUnlocked()
+			return loadErr
+		})
+	}
 	return prepared, manifest, err
+}
+
+func (s *Store) rejectPreparedAdvanceReadOnly() error {
+	root, err := s.reopenMemory()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	_, found, err := root.ReadRegular(preparedAdvanceJournalLeaf, maxManifestBytes)
+	if err != nil {
+		return fmt.Errorf("inspect prepared advance journal: %w", err)
+	}
+	if found {
+		if err := requirePrivateRegular(root.Root, preparedAdvanceJournalLeaf); err != nil {
+			return err
+		}
+		return errors.New("private store has an unresolved prepared advance")
+	}
+	return nil
 }
 
 // CommitPublished atomically records the published generation pointer after verifying
@@ -922,6 +970,9 @@ func (s *Store) withStoreLock(run func() error, contexts ...context.Context) err
 	defer s.mu.RUnlock()
 	if err := s.requireOpenLocked(); err != nil {
 		return err
+	}
+	if s.readOnly {
+		return errors.New("memory store is read-only")
 	}
 	var lock *project.ProjectLock
 	for {

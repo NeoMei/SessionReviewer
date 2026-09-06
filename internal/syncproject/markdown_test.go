@@ -35,6 +35,22 @@ func TestMarkdownBindingRejectsLoosePublicIndex(t *testing.T) {
 	}
 }
 
+func TestRunMarkdownCancelledBeforeSyncDoesNotRecoverOrPublish(t *testing.T) {
+	fixture, _ := newMarkdownLockFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	_, err := RunMarkdown(ctx, Options{
+		ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data,
+		GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI,
+		RecoverMarkdown: func(context.Context, *publicationlock.Owner) error { called = true; return nil },
+		PublishMarkdown: func(context.Context, MarkdownSyncPlan, *publicationlock.Owner) error { called = true; return nil },
+	})
+	if !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("cancelled sync err=%v callbacks=%v", err, called)
+	}
+}
+
 func TestReadMarkdownForScanKeepsOldAcceptanceSeparateFromVaultOnlyDraft(t *testing.T) {
 	fixture, accepted := newMarkdownLockFixture(t)
 	vaultReview := filepath.Join(fixture.vault, "Projects", "Migration", "Session Review", "项目回顾.md")
