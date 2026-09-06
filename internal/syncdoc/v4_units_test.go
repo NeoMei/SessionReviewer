@@ -300,6 +300,16 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"} # owner value comment\n , custom_keep: yes}",
 			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"} # owner value comment\n , custom_keep: yes}",
 		},
+		{
+			name:   "no space separator comment with punctuation",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep,# punctuation },#\n custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: changed,# punctuation },#\n custom_keep: yes}",
+		},
+		{
+			name:   "no space separator CRLF comment",
+			before: "{\r\n id: review-project-p,\r\n entity_type: project-review,\r\n project_id: project-p,\r\n schema_version: 4,\r\n document_format: review-markdown-v1,\r\n revision: 1,\r\n generation_id: generation-1,\r\n minimum_reader_version: 0.4.1,\r\n minimum_writer_version: 0.4.1,\r\n custom_owner: keep,# punctuation ],#\r\n custom_keep: yes\r\n}",
+			after:  "{\r\n id: review-project-p,\r\n entity_type: project-review,\r\n project_id: project-p,\r\n schema_version: 4,\r\n document_format: review-markdown-v1,\r\n revision: 1,\r\n generation_id: generation-1,\r\n minimum_reader_version: 0.4.1,\r\n minimum_writer_version: 0.4.1,\r\n custom_owner: changed,# punctuation ],#\r\n custom_keep: yes\r\n}",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -355,6 +365,80 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			}
 			if !bytes.Equal(stableRaw, got) {
 				t.Fatal("merged accepted flow YAML changed on no-op")
+			}
+		})
+	}
+}
+
+func TestV4ShellFlowSeparatorCommentComposesWithSuffixDeletion(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	tests := []struct {
+		name, before, after string
+		remove              []string
+		add                 map[string]string
+	}{
+		{
+			name: "unchanged comment and final two", remove: []string{"custom_a", "custom_b"},
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner comment\n custom_a: one, custom_b: two}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # owner comment\n }",
+		},
+		{
+			name: "changed comment and final three", remove: []string{"custom_a", "custom_b", "custom_c"},
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner comment\n custom_a: one, custom_b: two, custom_c: three}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # human comment\n }",
+		},
+		{
+			name: "changed comment deletion and addition", remove: []string{"custom_a", "custom_b"}, add: map[string]string{"custom_team": "codec\n"},
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner comment\n custom_a: one, custom_b: two}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # human comment\n custom_team: codec}",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			projectRaw := replaceV4TestFrontmatter(t, raw, []byte(test.before))
+			vaultRaw := replaceV4TestFrontmatter(t, raw, []byte(test.after))
+			project, err := ParseV4("项目回顾.md", projectRaw, ledger)
+			if err != nil {
+				t.Fatalf("parse Project combination: %v", err)
+			}
+			vault, err := ParseV4("项目回顾.md", vaultRaw, ledger)
+			if err != nil {
+				t.Fatalf("parse Vault combination: %v", err)
+			}
+			units := project.SemanticUnits()
+			owner := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+			units[owner] = vault.SemanticUnits()[owner]
+			for _, name := range test.remove {
+				delete(units, UnitKey{Kind: UnitFrontmatter, Name: name})
+			}
+			for name, value := range test.add {
+				units[UnitKey{Kind: UnitFrontmatter, Name: name}] = Unit{Present: true, Value: []byte(value)}
+			}
+			merged, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatalf("merge combination: %v", err)
+			}
+			got, err := merged.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, vaultRaw) {
+				t.Fatalf("combination changed surviving bytes\ngot:\n%s\nwant:\n%s", got, vaultRaw)
+			}
+			reopened, err := ParseV4("项目回顾.md", got, ledger)
+			if err != nil {
+				t.Fatalf("reopen combination: %v", err)
+			}
+			stable, err := reopened.WithSemanticUnits(reopened.SemanticUnits())
+			if err != nil {
+				t.Fatalf("no-op combination: %v", err)
+			}
+			stableRaw, err := stable.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(stableRaw, got) {
+				t.Fatal("combination changed on no-op")
 			}
 		})
 	}
