@@ -48,6 +48,8 @@ describe("plugin lifecycle", () => {
     ]);
     const process = vi.fn();
     const openLinkText = vi.fn();
+    const eventRefs = Array.from({ length: 4 }, (_value, index) => ({ index }));
+    let nextEventRef = 0;
     const workspace = { getLeaf: vi.fn(), revealLeaf: vi.fn(), openLinkText };
     const vault = {
       getMarkdownFiles: () => [...files.keys()].filter((path) => path.endsWith(".md")).map((path) => ({
@@ -63,7 +65,7 @@ describe("plugin lifecycle", () => {
         }
       },
       process,
-      on: vi.fn(() => ({})),
+      on: vi.fn(() => eventRefs[nextEventRef++]),
       offref: vi.fn()
     };
     const app = { workspace, vault, metadataCache: { getFileCache: vi.fn() } };
@@ -95,19 +97,24 @@ describe("plugin lifecycle", () => {
     const view = createView!(new WorkspaceLeaf());
     Object.assign(view, { app });
     await view.onOpen();
-
-    expect(runtimeResolver).toHaveBeenCalledWith({ legacyCliPath: "/stale/session-reviewer" });
-    expect(checked).toContain("/stale/session-reviewer");
-    expect(view.contentEl.textContent).toContain("待私有验证 · 只读");
-    expect(view.contentEl.textContent).toContain("公开文件校验不等于私有接受证明");
-    expect(view.contentEl.textContent).toContain("CLI 不可用：只能原生阅读或编辑 Markdown，不能验证或同步");
-    expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4'], .sr-review-action")).toBeNull();
-    const nativeOpenActions = [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")]
-      .filter((button) => button.textContent?.startsWith("打开项目"));
-    expect(nativeOpenActions.map((button) => button.textContent)).toEqual(["打开项目回顾", "打开项目历史"]);
-    nativeOpenActions.forEach((button) => button.click());
-    expect(openLinkText).toHaveBeenNthCalledWith(1, `${projectRoot}/项目回顾.md`, "", false);
-    expect(openLinkText).toHaveBeenNthCalledWith(2, `${projectRoot}/项目历史.md`, "", false);
-    expect(process).not.toHaveBeenCalled();
+    try {
+      expect(runtimeResolver).toHaveBeenCalledWith({ legacyCliPath: "/stale/session-reviewer" });
+      expect(checked).toContain("/stale/session-reviewer");
+      expect(view.contentEl.textContent).toContain("待私有验证 · 只读");
+      expect(view.contentEl.textContent).toContain("公开文件校验不等于私有接受证明");
+      expect(view.contentEl.textContent).toContain("CLI 不可用：只能原生阅读或编辑 Markdown，不能验证或同步");
+      expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4'], .sr-review-action")).toBeNull();
+      const nativeOpenActions = [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")]
+        .filter((button) => button.textContent?.startsWith("打开项目"));
+      expect(nativeOpenActions.map((button) => button.textContent)).toEqual(["打开项目回顾", "打开项目历史"]);
+      nativeOpenActions.forEach((button) => button.click());
+      expect(openLinkText).toHaveBeenNthCalledWith(1, `${projectRoot}/项目回顾.md`, "", false);
+      expect(openLinkText).toHaveBeenNthCalledWith(2, `${projectRoot}/项目历史.md`, "", false);
+      expect(process).not.toHaveBeenCalled();
+    } finally {
+      await view.onClose();
+    }
+    expect(vault.offref).toHaveBeenCalledTimes(4);
+    eventRefs.forEach((ref, index) => expect(vault.offref).toHaveBeenNthCalledWith(index + 1, ref));
   });
 });
