@@ -64,7 +64,7 @@ a94ee8eb1b4a018bb73f38720abce2188490ce375609e27bf41d333cba67cd1d.
 An initial unsupported sync --json invocation exited2 before mutation; the
 successful sync used the documented plain command. No real project was scanned.
 
-### Task 15 — indexed bulk-edit candidate, review pending
+### Task 15 — indexed bulk edits closed
 
 Implementation commit b347274 changes only four reviewv4 Go files. Per-operation
 live-field and semantic metadata indexes replace repeated entity/baseline/patch
@@ -82,9 +82,20 @@ optimized Apply took20.26–20.80ms. Baseline carry at512 fields changed from
 not all validation/sorting cost; Apply still includes final deterministic sort.
 
 Complete affected reviewv4/contextupdate/syncdoc tests and focused MarkdownV4 /
-GateB zero-token integration passed. Independent task review, cold-start
-automated coverage and the new final frozen-source full gate remain pending.
-These measurements are not a whole-repository completion or release claim.
+GateB zero-token integration passed. Independent task review approved spec and
+quality with no Critical/Important/Minor findings. The surrounding byte
+preservation, human precedence, failure atomicity and authentication gates remain
+in the final whole-flow suite rather than being inferred from the index diff.
+
+The controller also built the candidate CLI at clean2bddfc7 (code b347274),
+SHA256 c8dcc079e561dd30eddab4263b72ad935a55d7370f17add363c7ce4a20c3d7f5,
+and ran actual synthetic-project status→scan→sync→status. All four commands
+exited0 with empty stderr. The scan reported154 source/indexed Sessions,
+0 issues and0 review tokens, same generation; final status was in_sync1.
+All eight public files retained exact bytes and mtimes, including revision9's
+quoted/tagged YAML bindings and comments. No production project was scanned.
+Cold-start automated coverage and the new final frozen-source full gate remain
+pending. These measurements are not a whole-repository completion or release claim.
 
 ## Historical checkpoint — preceding local corrective batch complete
 
