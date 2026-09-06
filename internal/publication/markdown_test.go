@@ -285,6 +285,11 @@ func TestMarkdownVaultFlowCommentEditAndGroupedDeletionWithQuotedPunctuation(t *
 	if publishes != 1 {
 		t.Fatalf("grouped-deletion no-op republished: calls=%d", publishes)
 	}
+	for _, path := range []string{projectReviewPath, vaultReviewPath} {
+		if got := readTestFile(t, path); !bytes.Equal(got, expectedReview) {
+			t.Fatalf("grouped-deletion no-op changed published bytes: %s", path)
+		}
+	}
 }
 
 func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {

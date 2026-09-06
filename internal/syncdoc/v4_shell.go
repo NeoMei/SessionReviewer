@@ -89,7 +89,7 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 	raw := d.v4.shell.raw
 	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
 	edits := make([]v4SourceEdit, 0, len(d.v4.frontmatter)+1)
-	preservedFinalSeparator := false
+	lastSurvivor := 0
 	for index := 0; index < len(d.v4.frontmatterOrder); {
 		key := d.v4.frontmatterOrder[index]
 		seen[key] = true
@@ -116,7 +116,6 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 				end := lastSpan.removalEnd
 				if previous.lineCommentAfterDelimiter {
 					start = span.start
-					preservedFinalSeparator = true
 					if lastSpan.delimiter < d.v4.frontmatterClose && end <= lastSpan.delimiter {
 						end = lastSpan.delimiter + 1
 					}
@@ -127,6 +126,7 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 			}
 			continue
 		}
+		lastSurvivor = index
 		if original, found := d.v4.shellAll[key]; found && unitsEqual(original, unit) {
 			index++
 			continue
@@ -141,16 +141,30 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 		}
 		index++
 	}
+	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
 	additions := sortedFrontmatterNames(units, seen)
 	if len(additions) != 0 {
 		var addition bytes.Buffer
-		last := d.v4.frontmatter[d.v4.frontmatterOrder[len(d.v4.frontmatterOrder)-1]]
-		if !preservedFinalSeparator {
-			if last.delimiter == d.v4.frontmatterClose {
-				addition.WriteString(", ")
-			} else if last.delimiter+1 == d.v4.frontmatterClose {
-				addition.WriteByte(' ')
+		// Only a comma that survives the planned edits can separate the last
+		// remaining entry from additions. It may belong to that survivor or
+		// to the removed suffix; the original final delimiter alone is stale.
+		separator, editIndex := -1, 0
+		for _, key := range d.v4.frontmatterOrder[lastSurvivor:] {
+			delimiter := d.v4.frontmatter[key].delimiter
+			if delimiter == d.v4.frontmatterClose {
+				break
 			}
+			for editIndex < len(edits) && edits[editIndex].end <= delimiter {
+				editIndex++
+			}
+			if editIndex == len(edits) || edits[editIndex].start > delimiter {
+				separator = delimiter
+			}
+		}
+		if separator < 0 {
+			addition.WriteString(", ")
+		} else if separator+1 == d.v4.frontmatterClose {
+			addition.WriteByte(' ')
 		}
 		for index, name := range additions {
 			key := UnitKey{Kind: UnitFrontmatter, Name: name}
@@ -165,7 +179,6 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 		}
 		edits = append(edits, v4SourceEdit{start: d.v4.frontmatterClose, end: d.v4.frontmatterClose, value: addition.Bytes()})
 	}
-	sort.Slice(edits, func(i, j int) bool { return edits[i].start < edits[j].start })
 	parts := make([][]byte, 0, len(edits)*2+1)
 	cursor := 0
 	for _, edit := range edits {
