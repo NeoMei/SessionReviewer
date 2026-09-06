@@ -2,7 +2,7 @@
 
 Date: 2026-09-06
 
-## Current follow-up — final review blocked, not debt-free
+## Current follow-up — authorized N1/N2 repair in progress, not debt-free
 
 The user explicitly removed cross-platform CI and real legacy-project migration
 from this batch's delivery gates, choosing separately initiated rescans for old
@@ -23,6 +23,15 @@ branch is not approved for integration and remaining technical debt is not clear
 The prescribed single final repair/re-review wave is exhausted; no second wave
 was silently started. A new bounded continuation is required for N1/N2, followed
 by complete frozen-source verification. Scope exclusions remain unchanged.
+
+The user subsequently authorized that bounded continuation with “好的继续”.
+Task 17 starts at scope commit `3e5fe7d` (unchanged production source `90e8e62`).
+The controller re-ran the independent read-only probe: both legal-input cases
+still pass the core codec but fail sync entry indexing, and consecutive suffix
+deletion still fails the overlap guard. The existing syncdoc suite passes using
+valid Go cache, demonstrating its missing coverage rather than refuting the
+defects. New regression-first repair, independent review and the complete local
+gate are in progress; no completion or integration is implied by this approval.
 
 ### Task 13 — read diagnostics closed
 
