@@ -310,6 +310,26 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 			before: "{\r\n id: review-project-p,\r\n entity_type: project-review,\r\n project_id: project-p,\r\n schema_version: 4,\r\n document_format: review-markdown-v1,\r\n revision: 1,\r\n generation_id: generation-1,\r\n minimum_reader_version: 0.4.1,\r\n minimum_writer_version: 0.4.1,\r\n custom_owner: keep,# punctuation ],#\r\n custom_keep: yes\r\n}",
 			after:  "{\r\n id: review-project-p,\r\n entity_type: project-review,\r\n project_id: project-p,\r\n schema_version: 4,\r\n document_format: review-markdown-v1,\r\n revision: 1,\r\n generation_id: generation-1,\r\n minimum_reader_version: 0.4.1,\r\n minimum_writer_version: 0.4.1,\r\n custom_owner: changed,# punctuation ],#\r\n custom_keep: yes\r\n}",
 		},
+		{
+			name:   "no space comment after quoted scalar",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: \"team,#blue\"# punctuation },#\n, custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: \"team,#green\"# punctuation },#\n, custom_keep: yes}",
+		},
+		{
+			name:   "no space comment after sequence",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: [blue]# punctuation },#\n, custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: [green]# punctuation },#\n, custom_keep: yes}",
+		},
+		{
+			name:   "no space comment after mapping",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: blue}# punctuation },#\n, custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: green}# punctuation },#\n, custom_keep: yes}",
+		},
+		{
+			name:   "plain scalar embedded hash stays data",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: team#blue, custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: team#green, custom_keep: yes}",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -379,7 +399,7 @@ func TestV4ShellFlowSeparatorCommentComposesWithSuffixDeletion(t *testing.T) {
 	}{
 		{
 			name: "unchanged comment and final two", remove: []string{"custom_a", "custom_b"},
-			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner comment\n custom_a: one, custom_b: two}",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner comment\n custom_a: one, custom_b: two,}",
 			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # owner comment\n }",
 		},
 		{
