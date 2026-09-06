@@ -16,6 +16,8 @@ const PRESENTATIONS: Record<Diagnostic["code"], StatusPresentation> = {
   review_parse_failed: { title: "项目回顾暂时无法解析", explanation: "页面仍显示上一次可信快照。", action: "打开项目回顾" },
   stale_snapshot: { title: "正在显示上次可信内容", explanation: "当前文件身份、引用或 revision 不一致。", action: "重新加载" },
   sync_not_run: { title: "等待同步到代码目录", explanation: "新的人类内容已显示，机器用量仍来自上次验收。", action: "立即同步" },
+  sync_status_failed: { title: "同步状态验证失败", explanation: "CLI 未能验证当前同步状态。请检查项目绑定、文件修改或未完成的发布，再重新查询。" },
+  markdown_sync_pending: { title: "等待同步", explanation: "Project 或 Obsidian 中有未同步修改；当前页面仍按本地 Markdown 显示。" },
   cli_unavailable: { title: "尚未发现 SessionReviewer", explanation: "阅读和 Markdown 编辑仍可用；如需更新脉络或同步，请确保已安装 SessionReviewer。" }
 };
 

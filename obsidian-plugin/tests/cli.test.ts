@@ -1,9 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 import { CliRunner } from "../src/cli/runner";
+import { syncStatusFixture } from "./fixtures/sync-status";
 
 describe("CLI runner", () => {
+  it.each([
+    { code: "ENOENT", expected: "cli_unavailable" },
+    { code: "EACCES", expected: "cli_unavailable" },
+    { code: 1, expected: "sync_status_failed" },
+    { code: "ETIMEDOUT", expected: "sync_status_failed" }
+  ])("classifies status failure $code without echoing process output", async ({ code, expected }) => {
+    const secret = "/private/customer/project secret-output";
+    const runner = new CliRunner("/missing/session-reviewer", (_file, _args, _options, callback) => {
+      callback(Object.assign(new Error(secret), { code }), JSON.stringify(syncStatusFixture()), secret.repeat(5000));
+    });
+    await expect(runner.status("project-0123456789abcdef")).rejects.toMatchObject({ code: expected });
+    await runner.status("project-0123456789abcdef").catch((error: Error) => {
+      expect(error.message.length).toBeLessThan(150);
+      expect(error.message).not.toContain(secret);
+    });
+  });
+
+  it.each([
+    null, [], { project_id: "project-0123456789abcdef" },
+    syncStatusFixture("project-other"), syncStatusFixture(undefined, { conflicted: -1 }),
+    syncStatusFixture(undefined, { hidden_conflict_ids: "conflict-a" }),
+    syncStatusFixture(undefined, { pending_operations: [{ entity_id: "x", kind: 3 }] }),
+    syncStatusFixture(undefined, { machine_state: "accepted" }), syncStatusFixture(undefined, { machine_state: ["current"] })
+  ])("rejects invalid sync Status payload %# without accepting success", async (payload) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(payload), ""));
+    await expect(runner.status("project-0123456789abcdef")).rejects.toMatchObject({ code: "sync_status_failed" });
+  });
+
+  it("returns the existing Status wire for a pending authenticated aggregate", async () => {
+    const status = syncStatusFixture(undefined, { in_sync: 0, machine_state: "pending", derived_state: "pending", pending: [{ entity_id: "project-overview", kind: "update_project", target: "project", relative_path: "项目回顾.md" }] });
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(status), ""));
+    await expect(runner.status("project-0123456789abcdef")).resolves.toEqual(status);
+  });
   it("uses execFile without shell and rejects non-allowlisted arguments", async () => {
-    const execFile = vi.fn((_file, _args, _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, '{"project_id":"project-0123456789abcdef"}', ""));
+    const execFile = vi.fn((_file, _args, _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify(syncStatusFixture()), ""));
     const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
     await runner.status("project-0123456789abcdef");
     expect(execFile).toHaveBeenCalledWith(

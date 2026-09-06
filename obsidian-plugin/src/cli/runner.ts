@@ -33,6 +33,39 @@ export interface VerifiedExecutable {
   reviewSchemaVersion: 3;
 }
 
+export interface SyncOperation {
+  entity_id: string;
+  kind: string;
+  target?: string;
+  relative_path?: string;
+  before_hash?: string;
+  after_hash?: string;
+}
+
+export interface SyncStatus {
+  project_id: string;
+  in_sync: number;
+  conflicted: number;
+  malformed: number;
+  queued: number;
+  blocked: number;
+  open_conflicts: string[];
+  pending: SyncOperation[];
+  derived_state: string;
+  derived_files: number;
+  migration: string;
+  machine_state: string;
+  last_successful_sync: string;
+  pending_operations: SyncOperation[];
+  hidden_conflict_ids: string[];
+}
+
+export class SyncStatusError extends Error {
+  constructor(readonly code: "cli_unavailable" | "sync_status_failed") {
+    super(code === "cli_unavailable" ? "SessionReviewer CLI is unavailable" : "SessionReviewer sync status failed");
+  }
+}
+
 export class CliRunner {
   constructor(
     readonly executable: string,
@@ -64,10 +97,15 @@ export class CliRunner {
     return (await this.run(["sync", "--project-id", projectId], 120_000)).stdout;
   }
 
-  async status(projectId: string): Promise<Record<string, unknown>> {
+  async status(projectId: string): Promise<SyncStatus> {
     validateProject(projectId);
-    const { stdout } = await this.run(["sync", "status", "--json", "--project-id", projectId]);
-    return parseJson(stdout) as Record<string, unknown>;
+    try {
+      const { stdout } = await this.run(["sync", "status", "--json", "--project-id", projectId]);
+      return parseSyncStatus(parseJson(stdout), projectId);
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      throw new SyncStatusError(code === "ENOENT" || code === "EACCES" || code === "ENOEXEC" ? "cli_unavailable" : "sync_status_failed");
+    }
   }
 
   async migrationDryRun(projectId: string): Promise<string> {
@@ -105,7 +143,7 @@ export class CliRunner {
     if (!allowedArgs(args)) throw new Error("command is not allowed");
     return new Promise((resolve, reject) => {
       this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
-        if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { stdout: stdout || (error as { stdout?: unknown }).stdout }));
+        if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { code: (error as { code?: unknown }).code, stdout: stdout || (error as { stdout?: unknown }).stdout }));
         else resolve({ stdout, stderr });
       });
     });
@@ -160,6 +198,42 @@ function absoluteExecutable(value: string): boolean {
 
 function parseJson(source: string): unknown {
   try { return JSON.parse(source); } catch { throw new Error("CLI returned malformed JSON"); }
+}
+
+function parseSyncStatus(value: unknown, projectId: string): SyncStatus {
+  const fail = (): never => { throw new SyncStatusError("sync_status_failed"); };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return fail();
+  const status = value as Record<string, unknown>;
+  if (status.project_id !== projectId) return fail();
+  for (const key of ["in_sync", "conflicted", "malformed", "queued", "blocked", "derived_files"]) {
+    if (scanCount(status[key]) === undefined) return fail();
+  }
+  for (const key of ["open_conflicts", "hidden_conflict_ids"]) {
+    const values = status[key];
+    if (!Array.isArray(values) || values.length > 65_536 || values.some((item: unknown) => !syncText(item))) return fail();
+  }
+  for (const key of ["pending", "pending_operations"]) {
+    const operations = status[key];
+    if (!Array.isArray(operations) || operations.length > 65_536 || operations.some((item: unknown) => !syncOperation(item))) return fail();
+  }
+  // Legacy status can leave publisher states empty when that publisher does
+  // not apply. Keep that existing wire shape readable.
+  if (!syncText(status.derived_state) || !["", "current", "pending", "deferred", "failed"].includes(status.derived_state) ||
+      !syncText(status.machine_state) || !["", "current", "pending", "blocked"].includes(status.machine_state) ||
+      !syncText(status.migration) || !["current", "required"].includes(status.migration) || !syncText(status.last_successful_sync)) return fail();
+  return status as unknown as SyncStatus;
+}
+
+function syncText(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 4096 && !value.includes("\0");
+}
+
+function syncOperation(value: unknown): value is SyncOperation {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const operation = value as Record<string, unknown>;
+  return syncText(operation.entity_id) && operation.entity_id.length > 0 && syncText(operation.kind) &&
+    ["add_project", "add_vault", "update_project", "update_vault", "archive", "restore", "rename", "conflict", "queue", "establish_base"].includes(operation.kind) &&
+    ["target", "relative_path", "before_hash", "after_hash"].every((key) => operation[key] === undefined || syncText(operation[key]));
 }
 
 function parseScanStatus(value: Record<string, unknown>, expectedProjectId: string): ScanStatus {

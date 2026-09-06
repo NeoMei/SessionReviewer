@@ -1,7 +1,7 @@
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
-import type { CliRunner } from "../cli/runner";
+import { SyncStatusError, type CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
 import type { Diagnostic, MarkdownSnapshotReady, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
 import { ConflictModal, type ConflictAction } from "./conflict-modal";
@@ -99,6 +99,7 @@ export class ProjectEvolutionView extends ItemView {
       );
       if (projects.length > 1) browser.prepend(this.projectPicker(projects));
       if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
+      if (this.cliDiagnostic && this.cliDiagnostic.code !== "cli_unavailable") browser.prepend(renderStatusBanner(this.cliDiagnostic));
       this.contentEl.append(browser);
       return;
     }
@@ -143,12 +144,20 @@ export class ProjectEvolutionView extends ItemView {
     }
     try {
       const status = await this.runner.status(this.selected.projectId);
+      if (this.selected.format === "markdown-v4") {
+        // This status observes private sync state but carries no acceptance
+        // proof for the independently loaded public snapshot.
+        if (status.conflicted > 0 || status.open_conflicts.length > 0 || status.hidden_conflict_ids.length > 0) this.cliDiagnostic = { code: "content_conflict", message: "请在原生 Markdown 中比较并修改双方内容，然后重新查询同步状态。" };
+        else if (status.machine_state === "blocked" || status.blocked > 0 || status.malformed > 0) this.cliDiagnostic = { code: "sync_status_failed", message: "" };
+        else if (status.pending_operations.length > 0 || status.machine_state === "pending") this.cliDiagnostic = { code: "markdown_sync_pending", message: "" };
+        return;
+      }
       this.hiddenConflictIds = Array.isArray(status.hidden_conflict_ids) ? status.hidden_conflict_ids.filter((value): value is string => typeof value === "string") : [];
       if (this.hiddenConflictIds.length) this.cliDiagnostic = { code: "content_conflict", message: `待处理冲突 ${this.hiddenConflictIds.length} 个。` };
       else if (status.migration === "required") this.cliDiagnostic = { code: "migration_required", message: "" };
       else if (status.machine_state === "blocked") this.cliDiagnostic = { code: "machine_ledger_modified", message: "" };
     } catch (error) {
-      this.cliDiagnostic = { code: "cli_unavailable", message: error instanceof Error ? error.message : String(error) };
+      this.cliDiagnostic = { code: error instanceof SyncStatusError && error.code === "cli_unavailable" ? "cli_unavailable" : "sync_status_failed", message: "" };
     }
   }
 
@@ -159,6 +168,7 @@ export class ProjectEvolutionView extends ItemView {
       return () => { void this.app.workspace.openLinkText(file, "", false); };
     }
     if (!this.runner || !this.selected) return undefined;
+    if (this.selected.format === "markdown-v4") return undefined;
     if (diagnostic.code === "migration_required") return () => { void this.runCliAction(() => this.runner!.migrationDryRun(this.selected!.projectId), "迁移预览已完成。"); };
     if (diagnostic.code === "machine_ledger_modified") return () => { void this.runCliAction(() => this.runner!.repairMachineLedger(this.selected!.projectId), "机器账本已修复。"); };
     if (diagnostic.code === "content_conflict") return () => { void this.openConflict(); };

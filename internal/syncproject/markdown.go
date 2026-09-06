@@ -31,6 +31,8 @@ const (
 	markdownIndexRelative   = ".session-reviewer/session-index.json"
 )
 
+var errMarkdownFieldsConflict = errors.New("Markdown fields conflict")
+
 type MarkdownSyncPlan struct {
 	Plan                    presentation.RenderPlan
 	Pending                 reviewv4.MarkdownPair
@@ -153,6 +155,10 @@ func markdownOperations(plan MarkdownSyncPlan) []syncengine.Operation {
 }
 
 func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Report) (MarkdownSyncPlan, syncengine.BaseRecord, error) {
+	return buildMarkdownPlanWithReadSet(pin, options, report, nil)
+}
+
+func buildMarkdownPlanWithReadSet(pin *MappingPin, options Options, report *syncengine.Report, readSet *markdownStatusReadSet) (MarkdownSyncPlan, syncengine.BaseRecord, error) {
 	store, err := memorystore.OpenReadOnly(pin.data.Path, pin.mapping.ID)
 	if err != nil {
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, fmt.Errorf("open private store read-only: %w", err)
@@ -167,6 +173,13 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
 	}
 	defer state.Close()
+	var intent publicationstate.Intent
+	if readSet != nil {
+		intent, err = state.Intent()
+		if err != nil {
+			return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
+		}
+	}
 	receipt, err := state.Accepted()
 	if err != nil {
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, fmt.Errorf("authenticate accepted Markdown receipt: %w", err)
@@ -248,12 +261,22 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 	if err := VerifyMarkdownBinding(accepted, manifest); err != nil {
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
 	}
-	if _, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest); err != nil {
+	storedView, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	if err != nil {
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, fmt.Errorf("verify private ProjectView: %w", err)
 	}
 	storedIndex, err := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
 	if err != nil || !bytes.Equal(storedIndex, indexBody) {
 		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, errors.Join(errors.New("public session index is not the private canonical object"), err)
+	}
+	if readSet != nil {
+		*readSet = markdownStatusReadSet{
+			privateRoots: readSet.privateRoots,
+			intent:       intent, receipt: receipt, generation: publishedID, manifest: manifest, base: baseRecord,
+			viewHash: bareHash(storedView), indexHash: bareHash(storedIndex),
+			project: map[string]string{markdownReviewRelative: bareHash(projectReview), markdownHistoryRelative: bareHash(projectHistory), markdownLedgerRelative: bareHash(ledgerBody), markdownIndexRelative: bareHash(indexBody)},
+			vault:   map[string]string{markdownReviewRelative: bareHash(vaultReview), markdownHistoryRelative: bareHash(vaultHistory), markdownLedgerRelative: bareHash(vaultLedger), markdownIndexRelative: bareHash(vaultIndex)},
+		}
 	}
 
 	mergeOne := func(relative string, base, projectBytes, vaultBytes []byte) ([]byte, error) {
@@ -283,7 +306,7 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 			for _, conflict := range merged.Conflicts {
 				report.Conflicts = append(report.Conflicts, string(conflict.Key.Kind)+":"+conflict.Key.Name)
 			}
-			return nil, errors.New("Markdown fields conflict")
+			return nil, errMarkdownFieldsConflict
 		}
 		document, err := projectDoc.WithSemanticUnits(merged.Units)
 		if err != nil {
@@ -291,13 +314,16 @@ func buildMarkdownPlan(pin *MappingPin, options Options, report *syncengine.Repo
 		}
 		return document.Render()
 	}
-	mergedReview, err := mergeOne(markdownReviewRelative, baseReview, projectReview, vaultReview)
-	if err != nil {
-		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
+	mergedReview, reviewErr := mergeOne(markdownReviewRelative, baseReview, projectReview, vaultReview)
+	mergedHistory, historyErr := mergeOne(markdownHistoryRelative, baseHistory, projectHistory, vaultHistory)
+	// An invalid document must not be hidden by a conflict in the other one.
+	for _, err := range []error{reviewErr, historyErr} {
+		if err != nil && err != errMarkdownFieldsConflict {
+			return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
+		}
 	}
-	mergedHistory, err := mergeOne(markdownHistoryRelative, baseHistory, projectHistory, vaultHistory)
-	if err != nil {
-		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, err
+	if reviewErr != nil || historyErr != nil {
+		return MarkdownSyncPlan{}, syncengine.BaseRecord{}, errMarkdownFieldsConflict
 	}
 	draftPair := reviewv4.MarkdownPair{Review: mergedReview, History: mergedHistory}
 	draft, err := reviewv4.ParseMarkdownDraft(draftPair, ledger)

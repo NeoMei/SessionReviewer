@@ -24,6 +24,8 @@ export interface Diagnostic {
     | "sync_not_run"
     | "migration_required"
     | "content_conflict"
+    | "sync_status_failed"
+    | "markdown_sync_pending"
     | "cli_unavailable";
   message: string;
 }

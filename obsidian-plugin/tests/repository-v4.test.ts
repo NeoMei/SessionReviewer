@@ -6,6 +6,8 @@ import { WorkspaceLeaf } from "obsidian";
 import { ProjectRepository, type MarkdownSnapshotReady } from "../src/data/repository";
 import type { VaultFile, VaultPort } from "../src/data/vault-port";
 import { ProjectEvolutionView } from "../src/view/project-view";
+import { CliRunner } from "../src/cli/runner";
+import { syncStatusFixture } from "./fixtures/sync-status";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/contracts/v4/markdown");
 const fixture = (name: string): string => readFileSync(resolve(root, name), "utf8");
@@ -32,6 +34,50 @@ function configuredVault(): { vault: V4Vault; root: string } {
 }
 
 describe("v4 project repository", () => {
+  it.each([
+    { label: "clean", patch: {}, code: undefined, text: "待私有验证" },
+    { label: "pending Project edit", patch: { in_sync: 0, machine_state: "pending", derived_state: "pending" }, code: undefined, text: "等待同步" },
+    { label: "semantic conflict", patch: { in_sync: 0, conflicted: 1, open_conflicts: ["section:session-reviewer/v4/project-overview/goal"], machine_state: "blocked", derived_state: "deferred" }, code: undefined, text: "两边修改了同一内容" },
+    { label: "legacy IDs on v4", patch: { hidden_conflict_ids: ["conflict-old"], conflicted: 1 }, code: undefined, text: "两边修改了同一内容" },
+    { label: "blocked status", patch: { machine_state: "blocked" }, code: undefined, text: "同步状态验证失败" },
+    { label: "command failed", patch: {}, code: 1, text: "同步状态验证失败" },
+    { label: "runtime disappeared", patch: {}, code: "ENOENT", text: "CLI 不可用" }
+  ])("interprets $label without promoting public validity or enabling legacy actions", async ({ patch, code, text }) => {
+    const { vault } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const runner = new CliRunner("/bin/session-reviewer", (_file, args, _options, callback) => {
+      if (args[0] !== "sync") return callback(new Error("scan not available"), "", "");
+      callback(code === undefined ? null : Object.assign(new Error("/private/secret"), { code }), JSON.stringify(syncStatusFixture("project-p", patch)), "/private/secret");
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository, undefined, runner);
+    await view.onOpen();
+    expect(view.contentEl.textContent).toContain(text);
+    expect(view.contentEl.textContent).toContain("待私有验证");
+    expect(view.contentEl.textContent).toContain("只读");
+    expect(view.contentEl.textContent).not.toContain("/private/secret");
+    if (code !== "ENOENT") expect(view.contentEl.textContent).not.toContain("CLI 不可用");
+    expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4']")).toBeNull();
+    expect(view.contentEl.querySelectorAll("button")).toHaveLength(2);
+    const snapshot = await repository.load((await repository.discover())[0]);
+    expect(snapshot.kind === "markdown-v4" && snapshot.state.kind).toBe("public_valid");
+    expect(vault.process).not.toHaveBeenCalled();
+    await view.onClose();
+  });
+
+  it("retains a local pending draft when status validation fails", async () => {
+    const { vault, root: projectRoot } = configuredVault();
+    vault.files.set(`${projectRoot}/项目回顾.md`, fixture("review.md").replace("项目目标夹具", "pending draft stays visible"));
+    const repository = new ProjectRepository(vault);
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(Object.assign(new Error("sensitive"), { code: 1 }), "", "sensitive"));
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository, undefined, runner);
+    await view.onOpen();
+    expect(view.contentEl.textContent).toContain("pending draft stays visible");
+    expect(view.contentEl.textContent).toContain("未同步修改");
+    expect(view.contentEl.textContent).toContain("同步状态验证失败");
+    expect(view.contentEl.textContent).not.toContain("CLI 不可用");
+    expect(vault.process).not.toHaveBeenCalled();
+    await view.onClose();
+  });
   it("discovers and loads the real four-file route without any write", async () => {
     const { vault, root: projectRoot } = configuredVault();
     const repository = new ProjectRepository(vault);

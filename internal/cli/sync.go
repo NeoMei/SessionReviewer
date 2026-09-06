@@ -144,6 +144,24 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return writeDiagnostic(stderr, "sync", err)
 	}
+	if mode == "status" {
+		options := syncproject.Options{ProjectID: mapping.ID, CWD: *cwd, DataDir: filepath.Dir(filepath.Dir(projectData)), GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI}
+		// Status must classify without invoking the recovery-before-format write path.
+		format, err := syncproject.DetectFormat(context.Background(), options)
+		if err != nil {
+			return writeDiagnostic(stderr, "sync", err)
+		}
+		if format == syncproject.ProjectionMarkdown {
+			status, err := syncproject.StatusMarkdown(context.Background(), options)
+			if err != nil {
+				return writeDiagnostic(stderr, "sync", err)
+			}
+			return writeSyncStatus(stdout, stderr, status, *jsonOutput)
+		}
+		if format == syncproject.ProjectionJSONV4 {
+			return writeDiagnostic(stderr, "sync", syncproject.ErrMigrationRequired)
+		}
+	}
 	engine, err := syncengine.NewEngine(syncengine.Options{
 		ProjectRoot: root.Path, VaultRoot: mapping.VaultRoot, VaultReviewPath: mapping.VaultReviewPath,
 		ProjectRootExpected: root.Expected,
@@ -161,16 +179,7 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 		if err != nil {
 			return writeDiagnostic(stderr, "sync", err)
 		}
-		if *jsonOutput {
-			encoder := json.NewEncoder(stdout)
-			encoder.SetEscapeHTML(false)
-			if err := encoder.Encode(status); err != nil {
-				return writeDiagnostic(stderr, "sync", err)
-			}
-		} else {
-			fmt.Fprintln(stdout, status.String())
-		}
-		return 0
+		return writeSyncStatus(stdout, stderr, status, *jsonOutput)
 	case "resolve":
 		report, err := engine.Resolve(context.Background(), resolution)
 		if err != nil {
@@ -191,6 +200,19 @@ func runSync(args []string, stdout, stderr io.Writer) int {
 	default:
 		panic("unreachable sync mode")
 	}
+}
+
+func writeSyncStatus(stdout, stderr io.Writer, status syncengine.Status, jsonOutput bool) int {
+	if jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetEscapeHTML(false)
+		if err := encoder.Encode(status); err != nil {
+			return writeDiagnostic(stderr, "sync", err)
+		}
+	} else {
+		fmt.Fprintln(stdout, status.String())
+	}
+	return 0
 }
 
 func defaultSyncProject(ctx context.Context, options syncproject.Options) (syncengine.Report, error) {
