@@ -27,7 +27,9 @@ type v4BlockState struct {
 }
 
 type v4FrontmatterSpan struct {
-	start, end, delimiter int
+	start, end, delimiter            int
+	lineCommentStart, lineCommentEnd int
+	lineComment                      string
 }
 
 type v4YAMLSourceSpan struct {
@@ -254,16 +256,36 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 			end--
 		}
 		absoluteDelimiter := state.frontStart + delimiter
+		commentStart, commentEnd, lineComment := v4FlowSeparatorLineComment(frontmatter, delimiter, entryLimit, valueNode.LineComment)
 		state.frontmatter[key] = v4FrontmatterSpan{
-			start:     starts[index],
-			end:       state.frontStart + end,
-			delimiter: absoluteDelimiter,
+			start:            starts[index],
+			end:              state.frontStart + end,
+			delimiter:        absoluteDelimiter,
+			lineCommentStart: state.frontStart + commentStart,
+			lineCommentEnd:   state.frontStart + commentEnd,
+			lineComment:      lineComment,
 		}
 	}
 	if state.frontmatterClose < frontmatterOpen || state.frontmatterClose >= state.frontEnd || source[state.frontmatterClose] != '}' {
 		return invalidDocument("invalid v4 Markdown flow frontmatter close")
 	}
 	return nil
+}
+
+func v4FlowSeparatorLineComment(source []byte, delimiter, limit int, lineComment string) (int, int, string) {
+	if lineComment == "" || delimiter < 0 || delimiter >= limit || limit > len(source) || source[delimiter] != ',' {
+		return 0, 0, ""
+	}
+	line := source[delimiter+1 : limit]
+	if newline := bytes.IndexByte(line, '\n'); newline >= 0 {
+		line = line[:newline]
+	}
+	offset := bytes.Index(line, []byte(lineComment))
+	if offset < 0 || len(bytes.Trim(line[:offset], " \t\r")) != 0 {
+		return 0, 0, ""
+	}
+	start := delimiter + 1 + offset
+	return start, start + len(lineComment), lineComment
 }
 
 func v4YAMLNodeOffset(source []byte, lineStarts []int, node *yaml.Node) (int, bool) {

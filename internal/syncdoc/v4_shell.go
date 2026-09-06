@@ -121,11 +121,14 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 			index++
 			continue
 		}
-		encoded, err := encodeV4FlowFrontmatterUnit(key, unit)
+		encoded, lineComment, err := encodeV4FlowFrontmatterUnit(key, unit, span.lineComment != "")
 		if err != nil {
 			return nil, err
 		}
 		edits = append(edits, v4SourceEdit{start: span.start, end: span.end, value: encoded})
+		if span.lineComment != "" && lineComment != span.lineComment {
+			edits = append(edits, v4SourceEdit{start: span.lineCommentStart, end: span.lineCommentEnd, value: []byte(lineComment)})
+		}
 		index++
 	}
 	additions := sortedFrontmatterNames(units, seen)
@@ -139,7 +142,7 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 		}
 		for index, name := range additions {
 			key := UnitKey{Kind: UnitFrontmatter, Name: name}
-			encoded, err := encodeV4FlowFrontmatterUnit(key, units[key])
+			encoded, _, err := encodeV4FlowFrontmatterUnit(key, units[key], false)
 			if err != nil {
 				return nil, err
 			}
@@ -164,29 +167,33 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 	return joinV4Bounded(parts, limit)
 }
 
-func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
+func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit, sourceOwnsLineComment bool) ([]byte, string, error) {
 	encoded, err := encodeV4FrontmatterUnit(key, unit)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	mapping, err := decodeFrontmatter(encoded)
 	if err != nil || len(mapping.Content) != 2 {
-		return nil, invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
+	}
+	lineComment := mapping.Content[1].LineComment
+	if sourceOwnsLineComment {
+		mapping.Content[1].LineComment = ""
 	}
 	mapping.Style |= yaml.FlowStyle
 	var out bytes.Buffer
 	encoder := yaml.NewEncoder(&out)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(mapping); err != nil {
-		return nil, invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot encode v4 Markdown flow frontmatter unit")
 	}
 	if err := encoder.Close(); err != nil {
-		return nil, invalidDocument("cannot finish v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot finish v4 Markdown flow frontmatter unit")
 	}
 	source := out.Bytes()
 	flowMapping, err := decodeFrontmatter(source)
 	if err != nil || len(flowMapping.Content) != 2 {
-		return nil, invalidDocument("cannot decode encoded v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot decode encoded v4 Markdown flow frontmatter unit")
 	}
 	lineStarts := []int{0}
 	for index, value := range source {
@@ -196,21 +203,21 @@ func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
 	}
 	start, ok := v4YAMLNodeOffset(source, lineStarts, flowMapping.Content[0])
 	if !ok {
-		return nil, invalidDocument("cannot locate encoded v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot locate encoded v4 Markdown flow frontmatter unit")
 	}
 	quoted, ok := v4YAMLQuotedScalarSpans(source, lineStarts, flowMapping)
 	if !ok {
-		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
 	close, ok := v4FlowMappingClose(source, 0, quoted)
 	if !ok {
-		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
 	delimiter, ok := v4FlowEntryDelimiter(source, start, close, true, quoted)
 	if !ok {
-		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+		return nil, "", invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}
-	return bytes.Clone(bytes.TrimRight(source[start:delimiter], " \t\r\n")), nil
+	return bytes.Clone(bytes.TrimRight(source[start:delimiter], " \t\r\n")), lineComment, nil
 }
 
 func v4FrontmatterNewline(source []byte) []byte {

@@ -293,7 +293,12 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 		{
 			name:   "changed nested value with separator side comment",
 			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"}, # owner separator comment\n custom_keep: yes}",
-			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # owner separator comment\n custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"}, # human separator comment\n custom_keep: yes}",
+		},
+		{
+			name:   "changed nested value with value side comment",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#blue\"} # owner value comment\n , custom_keep: yes}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: {label: \"team,#green\"} # owner value comment\n , custom_keep: yes}",
 		},
 	}
 	for _, test := range tests {
