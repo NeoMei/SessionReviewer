@@ -39,4 +39,56 @@ describe("runtime discovery", () => {
     expect(runtime).toEqual({ runner });
     expect(verifyExecutable).toHaveBeenCalledOnce();
   });
+
+  it("returns no runtime when every fresh candidate is inaccessible", async () => {
+    const checked: string[] = [];
+    const createRunner = vi.fn();
+
+    const runtime = await discoverRuntime({
+      legacyCliPath: "/stale/session-reviewer",
+      home: "/isolated/home",
+      platform: "darwin",
+      env: {
+        PATH: "",
+        SESSIONREVIEWER_CLI_PATH: "/stale/from-environment/session-reviewer"
+      },
+      executableExists: async (candidate) => {
+        checked.push(candidate);
+        return false;
+      },
+      createRunner
+    });
+
+    expect(runtime).toBeUndefined();
+    expect(checked).toEqual([
+      "/stale/session-reviewer",
+      "/stale/from-environment/session-reviewer",
+      "/isolated/home/.local/bin/session-reviewer",
+      "/opt/homebrew/bin/session-reviewer",
+      "/usr/local/bin/session-reviewer",
+      "/usr/bin/session-reviewer"
+    ]);
+    expect(checked.every((candidate) => candidate.startsWith("/"))).toBe(true);
+    expect(createRunner).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse a previously selected runtime after the executable disappears", async () => {
+    const cli = "/isolated/home/.local/bin/session-reviewer";
+    let available = true;
+    const verifyExecutable = vi.fn().mockResolvedValue({ version: "0.3.5", reviewSchemaVersion: 4 });
+    const runner = { executable: cli, verifyExecutable } as unknown as CliRunner;
+    const options = {
+      home: "/isolated/home",
+      platform: "darwin" as const,
+      env: { PATH: "" },
+      executableExists: async (candidate: string) => available && candidate === cli,
+      createRunner: (candidate: string) => candidate === cli ? runner : (() => { throw new Error("unexpected CLI"); })()
+    };
+
+    await expect(discoverRuntime(options)).resolves.toEqual({ runner });
+    available = false;
+    await expect(discoverRuntime(options)).resolves.toBeUndefined();
+
+    expect(verifyExecutable).toHaveBeenCalledOnce();
+  });
 });
