@@ -99,6 +99,7 @@ func TestV4BlockScalarSemanticUnitRoundTrip(t *testing.T) {
 		{"folded clip", ">\n  changed\n", "changed\n", false},
 		{"literal keep", "|+\n  changed\n\n", "changed\n\n", false},
 		{"folded empty keep", ">+\n\n\n", "\n\n", false},
+		{"literal empty keep", "|+\n\n\n", "\n\n", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := bytes.Replace(fixture, []byte("custom_owner: 保留\n"), []byte("custom_owner: "+tc.source+"# next head\ncustom_keep: two\n"), 1)
@@ -119,7 +120,7 @@ func TestV4BlockScalarSemanticUnitRoundTrip(t *testing.T) {
 			if value.Value != tc.value {
 				t.Fatalf("semantic unit scalar=%q want=%q", value.Value, tc.value)
 			}
-			if value.Style&yaml.FoldedStyle == 0 && tc.name != "literal keep" {
+			if value.Style&yaml.FoldedStyle == 0 && tc.name != "literal keep" && tc.name != "literal empty keep" {
 				t.Fatal("folded style lost")
 			}
 			encoded, err := encodeV4FrontmatterUnit(key, unit)
