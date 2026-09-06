@@ -71,7 +71,7 @@ func legacyStatusFormat(pin *MappingPin) (ProjectionFormat, bool, error) {
 			return ProjectionV3, true, nil
 		}
 	case reviewv2.VersionV2:
-		if review, err := reviewv2.ParseReview(projectReview); err == nil && review.Model.ProjectID == pin.mapping.ID {
+		if legacyStatusReviewKnown(pin, projectReview) {
 			return ProjectionV2, true, nil
 		}
 		if ledger, err := reviewv2.ParseMachineLedger(projectLedger); err == nil && ledger.ProjectID == pin.mapping.ID {

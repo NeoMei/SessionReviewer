@@ -193,7 +193,7 @@ func TestSyncCLIStatusOldV4JSONRefusesWithoutMigrationWrites(t *testing.T) {
 }
 
 func TestSyncCLIStatusPreservesMalformedV3EngineDiagnostics(t *testing.T) {
-	for _, relative := range []string{reviewv2.MachineLedgerRelativePath, reviewv2.HistoryRelativePath} {
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.MachineLedgerRelativePath, reviewv2.HistoryRelativePath} {
 		t.Run(filepath.Base(relative), func(t *testing.T) {
 			f := newCLIV3FormatFixture(t)
 			locks := filepath.Join(f.data, "projects", f.projectID, "locks")
