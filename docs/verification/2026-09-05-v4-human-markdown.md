@@ -370,3 +370,28 @@ batch is needed; no residual was waived as completed, and no push, merge or
 release occurred. The reviewer also qualified one test-evidence claim: the
 prepared-journal test inserts a journal before the readonly load, not between
 its two checks, so mutation coverage of deleting the second check is not proven.
+
+### Approved corrective batch — Task 10 closed (2026-09-06)
+
+The user explicitly approved a new bounded batch for I1, N1, I5 and readonly
+v4 status. Task 10 closes I1/N1 in `a4aab3b`, `bcd6378`, `508c4cb` after
+independent task review and two scoped fix reviews. Carry now includes restored
+live baselines, preserves authenticated historical scalar/list metadata, resolves
+unique legacy entity aliases consistently in Go and TypeScript, and rejects
+ambiguous aliases, semantic duplicates and mixed stored baseline/patch identities.
+
+Actual RED tests reproduced restored-but-unpatched generation failure, historical
+list rejection/generation rewrite, duplicate legacy aliases and mixed-ID linkage.
+Final affected Go packages passed (`reviewv4`, `migrationv4`, `contextupdate`),
+TypeScript codec passed 52 tests, and the publication-backed Gate B passed in
+45.636s. Gate B checks original baseline value/hash and new live generation after
+the final edit/sync/reopen. An authenticated migration output is also fed into
+the real scan mapper with exact historical list metadata checks. Non-project
+legacy migration/edit/restore/reopen uses production codec/ledger composition;
+publication synchronization is separately covered by Gate B.
+
+This is scoped completion only. I5 and native readonly status are still being
+implemented; the final frozen-source whole-repository/race/plugin check, final
+branch review and native UI gates have not yet run on the corrected branch.
+The previously recorded three Minor findings, native CI and applicable real-data
+migration prerequisites remain separate. No merge, push or release occurred.
