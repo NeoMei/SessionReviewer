@@ -7,7 +7,18 @@ export type MarkdownSnapshot =
   | { kind: "public_valid"; value: MarkdownRead; index: SessionIndexV1 }
   | { kind: "pending_edit"; value: MarkdownRead }
   | { kind: "unverified"; reason: "cli_unavailable" | "baseline_missing" | "private_binding_unavailable" }
+  | { kind: "read_failed"; document: MarkdownDocumentPath; category: VaultReadFailureCategory }
   | { kind: "invalid"; code: string };
+
+export type MarkdownDocumentPath = "项目回顾.md" | "项目历史.md" | ".session-reviewer/ledger.json" | ".session-reviewer/session-index.json";
+
+export type VaultReadFailureCategory = "missing" | "permission-denied" | "read-failed";
+
+export function vaultReadFailure(document: MarkdownDocumentPath, error: unknown): Extract<MarkdownSnapshot, { kind: "read_failed" }> {
+  const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: unknown }).code : undefined;
+  const category = code === "ENOENT" ? "missing" : code === "EACCES" || code === "EPERM" ? "permission-denied" : "read-failed";
+  return { kind: "read_failed", document, category };
+}
 
 export function loadMarkdownSnapshot(input: { review: string; history: string; ledger: string; index: string }): MarkdownSnapshot {
   let ledger: MachineLedgerV4;

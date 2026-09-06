@@ -112,7 +112,7 @@ export class ProjectEvolutionView extends ItemView {
     this.scheduleScanPolling();
     const delays = [250, 750, 2000];
     const attempt = options.settlingAttempt ?? 0;
-    const unsettled = cli.diagnostic?.code === "sync_status_failed" || snapshot.kind === "markdown-v4-stale" || (snapshot.kind === "markdown-v4" && (snapshot.state.kind === "invalid" || snapshot.state.kind === "unverified"));
+    const unsettled = cli.diagnostic?.code === "sync_status_failed" || snapshot.kind === "markdown-v4-stale" || (snapshot.kind === "markdown-v4" && (snapshot.state.kind === "invalid" || snapshot.state.kind === "unverified" || snapshot.state.kind === "read_failed"));
     if (selected.format === "markdown-v4" && unsettled && attempt < delays.length) {
       this.settlingTimer = window.setTimeout(() => {
         this.settlingTimer = undefined;

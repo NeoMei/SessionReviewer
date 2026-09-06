@@ -18,7 +18,7 @@ class V4Vault implements VaultPort {
   private readonly listeners = new Set<(path: string) => void>();
   getMarkdownFiles(): VaultFile[] { return [...this.files.keys()].filter((path) => path.endsWith(".md")).map((path) => ({ path, basename: path.split("/").at(-1)!.replace(/\.md$/, "") })); }
   getFrontmatter(): Record<string, unknown> | undefined { return undefined; }
-  async read(path: string): Promise<string> { const value = this.files.get(path); if (value === undefined) throw new Error("missing file"); return value; }
+  async read(path: string): Promise<string> { const value = this.files.get(path); if (value === undefined) throw Object.assign(new Error("missing file"), { code: "ENOENT" }); return value; }
   onChange(listener: (path: string) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
   write(path: string, value: string): void { this.files.set(path, value); for (const listener of this.listeners) listener(path); }
 }
@@ -34,6 +34,126 @@ function configuredVault(): { vault: V4Vault; root: string } {
 }
 
 afterEach(() => { vi.useRealTimers(); });
+
+describe("v4 bounded Vault read diagnostics", () => {
+  const documents = [
+    "项目回顾.md",
+    "项目历史.md",
+    ".session-reviewer/ledger.json",
+    ".session-reviewer/session-index.json"
+  ] as const;
+
+  it.each(documents)("identifies a missing %s without treating it as a Markdown baseline failure", async (document) => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    vault.files.delete(`${projectRoot}/${document}`);
+
+    const snapshot = await repository.load(project);
+
+    expect(snapshot.kind).toBe("markdown-v4");
+    if (snapshot.kind !== "markdown-v4") throw new Error("expected v4 snapshot");
+    expect(snapshot.state).toEqual({ kind: "read_failed", document, category: "missing" });
+  });
+
+  it.each([
+    ["EACCES", "permission-denied"],
+    ["EPERM", "permission-denied"],
+    ["EBUSY", "read-failed"],
+    [undefined, "read-failed"]
+  ] as const)("maps Vault read code %s to the bounded %s category", async (code, category) => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    const originalRead = vault.read.bind(vault);
+    vi.spyOn(vault, "read").mockImplementation(async (path) => {
+      if (path === `${projectRoot}/.session-reviewer/ledger.json`) {
+        throw Object.assign(new Error("hostile"), code === undefined ? {} : { code });
+      }
+      return originalRead(path);
+    });
+
+    const snapshot = await repository.load(project);
+
+    expect(snapshot.kind).toBe("markdown-v4");
+    if (snapshot.kind !== "markdown-v4") throw new Error("expected v4 snapshot");
+    expect(snapshot.state).toEqual({ kind: "read_failed", document: ".session-reviewer/ledger.json", category });
+  });
+
+  it("never exposes hostile exception messages, absolute paths, arbitrary codes, or document contents", async () => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    const secret = "DO-NOT-EXPOSE-CONTENT";
+    const hostilePath = "/Users/private/Secret Vault/.session-reviewer/ledger.json";
+    const originalRead = vault.read.bind(vault);
+    vi.spyOn(vault, "read").mockImplementation(async (path) => {
+      if (path === `${projectRoot}/.session-reviewer/ledger.json`) {
+        throw Object.assign(new Error(`cannot read ${hostilePath}: ${secret}`), { code: "TOP_SECRET_ARBITRARY_CODE", body: secret });
+      }
+      return originalRead(path);
+    });
+
+    const snapshot = await repository.load(project);
+
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).not.toContain(hostilePath);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain("TOP_SECRET_ARBITRARY_CODE");
+    expect(serialized).toContain('"category":"read-failed"');
+  });
+
+  it("shows a bounded first-load read diagnostic and remains read-only", async () => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    vault.files.delete(`${projectRoot}/项目历史.md`);
+    const snapshot = await repository.load(project);
+    if (snapshot.kind !== "markdown-v4") throw new Error("expected v4 snapshot");
+    const { renderMarkdownV4View } = await import("../src/view/presentation");
+
+    const view = renderMarkdownV4View(snapshot, () => {});
+
+    expect(view.textContent).toContain("项目历史.md");
+    expect(view.textContent).toContain("文件缺失");
+    expect(view.textContent).toContain("只读");
+    expect(view.textContent).toContain("公开文件校验不等于私有接受证明");
+    expect(view.querySelector("[data-action='edit-v4']")).toBeNull();
+  });
+
+  it("preserves a same-project public snapshot and shows the bounded read diagnostic as stale", async () => {
+    const { vault, root: projectRoot } = configuredVault();
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+    const first = await repository.load(project);
+    if (first.kind !== "markdown-v4" || first.state.kind !== "public_valid") throw new Error("expected public-valid v4");
+    vault.files.delete(`${projectRoot}/.session-reviewer/session-index.json`);
+
+    const stale = await repository.load(project, first as MarkdownSnapshotReady);
+
+    expect(stale.kind).toBe("markdown-v4-stale");
+    if (stale.kind !== "markdown-v4-stale") throw new Error("expected stale v4");
+    const { renderMarkdownV4View } = await import("../src/view/presentation");
+    const view = renderMarkdownV4View(stale, () => {});
+    expect(view.textContent).toContain("项目目标夹具");
+    expect(view.textContent).toContain(".session-reviewer/session-index.json");
+    expect(view.textContent).toContain("文件缺失");
+    expect(view.textContent).toContain("已过期 · 只读");
+  });
+
+  it("keeps parser validation failures distinct from Vault read failures", async () => {
+    const { vault, root: projectRoot } = configuredVault();
+    vault.files.set(`${projectRoot}/.session-reviewer/session-index.json`, "{}");
+    const repository = new ProjectRepository(vault);
+    const project = (await repository.discover())[0];
+
+    const snapshot = await repository.load(project);
+
+    expect(snapshot.kind).toBe("markdown-v4");
+    if (snapshot.kind !== "markdown-v4") throw new Error("expected v4 snapshot");
+    expect(snapshot.state).toEqual({ kind: "invalid", code: "wire_shape_invalid" });
+  });
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

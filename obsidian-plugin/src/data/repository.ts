@@ -4,7 +4,7 @@ import { parseLedger } from "./ledger";
 import { parseHistory, parseReview } from "./markdown";
 import { parseReviewPresentationV4 } from "./contracts-v4";
 import { readMarkdownIdentityV4 } from "./markdown-v4";
-import { loadMarkdownSnapshot, type MarkdownSnapshot } from "./repository-v4";
+import { loadMarkdownSnapshot, vaultReadFailure, type MarkdownDocumentPath, type MarkdownSnapshot } from "./repository-v4";
 import type { VaultPort } from "./vault-port";
 import type { ConflictCandidate } from "../view/conflict-modal";
 
@@ -52,7 +52,7 @@ export type Snapshot =
   | { kind: "migration_required"; descriptor: ProjectDescriptor; diagnostic: Diagnostic }
   | { kind: "stale"; lastValid: SnapshotReady; diagnostic: Diagnostic }
   | { kind: "markdown-v4"; descriptor: ProjectDescriptor; state: MarkdownSnapshot; loadedAt: number }
-  | { kind: "markdown-v4-stale"; lastValid: MarkdownSnapshotReady; state: Extract<MarkdownSnapshot, { kind: "invalid" | "unverified" }>; diagnostic: Diagnostic }
+  | { kind: "markdown-v4-stale"; lastValid: MarkdownSnapshotReady; state: Extract<MarkdownSnapshot, { kind: "invalid" | "unverified" | "read_failed" }>; diagnostic: Diagnostic }
   | { kind: "empty"; diagnostic?: Diagnostic };
 
 interface PendingWrite {
@@ -162,20 +162,23 @@ export class ProjectRepository {
   }
 
   private async loadV4(project: ProjectDescriptor, previous?: LastValidSnapshot): Promise<Snapshot> {
-    const paths = {
-      review: `${project.root}/项目回顾.md`, history: `${project.root}/项目历史.md`,
-      ledger: `${project.root}/.session-reviewer/ledger.json`, index: `${project.root}/.session-reviewer/session-index.json`
-    };
+    const documents = {
+      review: "项目回顾.md", history: "项目历史.md",
+      ledger: ".session-reviewer/ledger.json", index: ".session-reviewer/session-index.json"
+    } as const satisfies Record<string, MarkdownDocumentPath>;
     let state: MarkdownSnapshot;
     try {
       state = loadMarkdownSnapshot({
-        review: await this.vault.read(paths.review), history: await this.vault.read(paths.history),
-        ledger: await this.vault.read(paths.ledger), index: await this.vault.read(paths.index)
+        review: await readV4Document(this.vault, project.root, documents.review),
+        history: await readV4Document(this.vault, project.root, documents.history),
+        ledger: await readV4Document(this.vault, project.root, documents.ledger),
+        index: await readV4Document(this.vault, project.root, documents.index)
       });
-    } catch {
-      state = { kind: "unverified", reason: "baseline_missing" };
+    } catch (error) {
+      if (!(error instanceof VaultDocumentReadError)) throw error;
+      state = vaultReadFailure(error.document, error.cause);
     }
-    if ((state.kind === "invalid" || state.kind === "unverified") && previous?.kind === "markdown-v4" && previous.descriptor.projectId === project.projectId && previous.descriptor.root === project.root) {
+    if ((state.kind === "invalid" || state.kind === "unverified" || state.kind === "read_failed") && previous?.kind === "markdown-v4" && previous.descriptor.projectId === project.projectId && previous.descriptor.root === project.root) {
       return { kind: "markdown-v4-stale", lastValid: previous, state, diagnostic: { code: "stale_snapshot", message: "当前四文件快照无法验证，正在显示此项目上一次公开校验快照（已过期、只读）。" } };
     }
     return { kind: "markdown-v4", descriptor: project, state, loadedAt: Date.now() };
@@ -230,6 +233,20 @@ export class ProjectRepository {
     const entityId = value.entity_id;
     const unit = typeof entityId === "string" || typeof entityId === "number" ? String(entityId) : "未知语义单元";
     return { id: conflictId, unit, base, project: projectText, obsidian };
+  }
+}
+
+class VaultDocumentReadError extends Error {
+  constructor(readonly document: MarkdownDocumentPath, readonly cause: unknown) {
+    super("Vault document read failed");
+  }
+}
+
+async function readV4Document(vault: VaultPort, root: string, document: MarkdownDocumentPath): Promise<string> {
+  try {
+    return await vault.read(`${root}/${document}`);
+  } catch (error) {
+    throw new VaultDocumentReadError(document, error);
   }
 }
 

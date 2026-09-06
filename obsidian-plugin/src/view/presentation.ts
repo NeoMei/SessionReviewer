@@ -80,10 +80,10 @@ export function renderMarkdownV4View(
       : state.kind === "public_valid" ? "待私有验证 · 只读" : "当前快照不可验证 · 只读";
   root.append(element("p", { className: "sr-v4-status", text: status }));
   if (snapshot.kind === "markdown-v4-stale") {
-    const reason = snapshot.state.kind === "invalid" ? snapshot.state.code : snapshot.state.reason;
+    const reason = markdownSnapshotReason(snapshot.state);
     root.append(element("p", { className: "sr-v4-stale-reason", text: `当前快照拒绝原因：${reason}` }));
-  } else if (state.kind === "invalid" || state.kind === "unverified") {
-    const reason = state.kind === "invalid" ? state.code : state.reason;
+  } else if (state.kind === "invalid" || state.kind === "unverified" || state.kind === "read_failed") {
+    const reason = markdownSnapshotReason(state);
     root.append(element("p", { className: "sr-v4-reason", text: `拒绝原因：${reason}` }));
   }
   root.append(element("p", { text: "公开文件校验不等于私有接受证明；请在原生 Markdown 中阅读或编辑白名单正文。结构操作当前不可用。" }));
@@ -125,4 +125,14 @@ export function renderMarkdownV4View(
     root.append(element("p", { text: `检测到 ${state.value.changedFields.length} 个白名单字段修改；尚未同步，不会触发写入。` }));
   }
   return root;
+}
+
+function markdownSnapshotReason(state: Extract<Snapshot, { kind: "markdown-v4-stale" }>["state"] | Extract<Snapshot, { kind: "markdown-v4" }>["state"]): string {
+  if (state.kind === "invalid") return state.code;
+  if (state.kind === "unverified") return state.reason;
+  if (state.kind === "read_failed") {
+    const category = state.category === "missing" ? "文件缺失" : state.category === "permission-denied" ? "无权读取" : "读取失败";
+    return `${state.document}：${category}`;
+  }
+  return "";
 }
