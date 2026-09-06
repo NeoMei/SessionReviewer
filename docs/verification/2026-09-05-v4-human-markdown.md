@@ -115,6 +115,30 @@ no plugin source/dependency changes since b28f099, nor Go source/module changes
 since b347274. Thus native UI and synthetic CLI evidence have explicit code
 equivalence; the final full-suite run is still required.
 
+### Final branch review — one cross-layer correction required
+
+At frozen5f1835e, all original three Minor debts were triaged as addressed.
+Task16's independent review found only lifecycle-test cleanup; fix5f1835e closes
+the view in finally and checks all four watcher disposals. Scoped re-review
+closed that finding with no new issues.
+
+The single whole-branch review found0 Critical,1 Important,0 new Minor. The
+Important finding is supported flow-style YAML custom-field merging: the shell
+adapter indexes each top-level entry by whole physical lines, so entries sharing
+one line have empty/overlapping spans. A Vault-only custom-field edit can drop
+fixed bindings from the intermediate merge and fail its final parse. This refuses
+a legitimate edit before publication; it is not evidence of corrupted files
+being published. Binding-only YAML tests did not exercise this merge boundary.
+A bounded source-span correction with authenticated sync/status/reopen regression
+is in progress; no entire-mapping normalization or validator weakening is allowed.
+
+The preliminary full Go command at the same clean HEAD passed (approximately
+312.9s;59 package result lines,41 cached and3 no-test packages). The ordinary
+large-Session test was not excluded; scan reported a cached package result.
+Commands2–7 were not launched after the review finding. Therefore the full
+ordered gate is incomplete, not passed. A fresh ordered sequence will follow
+the reviewed correction. No merge, push, release or production mutation occurred.
+
 ## Historical checkpoint — preceding local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
