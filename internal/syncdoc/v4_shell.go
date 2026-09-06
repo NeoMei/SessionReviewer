@@ -89,6 +89,7 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 	raw := d.v4.shell.raw
 	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
 	edits := make([]v4SourceEdit, 0, len(d.v4.frontmatter)+1)
+	preservedFinalSeparator := false
 	for index := 0; index < len(d.v4.frontmatterOrder); {
 		key := d.v4.frontmatterOrder[index]
 		seen[key] = true
@@ -111,7 +112,16 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 			} else if first > 0 {
 				previous := d.v4.frontmatter[d.v4.frontmatterOrder[first-1]]
 				lastSpan := d.v4.frontmatter[d.v4.frontmatterOrder[last]]
-				edits = append(edits, v4SourceEdit{start: previous.delimiter, end: lastSpan.end})
+				start := previous.delimiter
+				end := lastSpan.end
+				if previous.lineComment != "" {
+					start = span.start
+					preservedFinalSeparator = true
+					if lastSpan.delimiter < d.v4.frontmatterClose {
+						end = lastSpan.delimiter + 1
+					}
+				}
+				edits = append(edits, v4SourceEdit{start: start, end: end})
 			} else {
 				return nil, invalidDocument("v4 Markdown flow frontmatter cannot be empty")
 			}
@@ -135,10 +145,12 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 	if len(additions) != 0 {
 		var addition bytes.Buffer
 		last := d.v4.frontmatter[d.v4.frontmatterOrder[len(d.v4.frontmatterOrder)-1]]
-		if last.delimiter == d.v4.frontmatterClose {
-			addition.WriteString(", ")
-		} else if last.delimiter+1 == d.v4.frontmatterClose {
-			addition.WriteByte(' ')
+		if !preservedFinalSeparator {
+			if last.delimiter == d.v4.frontmatterClose {
+				addition.WriteString(", ")
+			} else if last.delimiter+1 == d.v4.frontmatterClose {
+				addition.WriteByte(' ')
+			}
 		}
 		for index, name := range additions {
 			key := UnitKey{Kind: UnitFrontmatter, Name: name}

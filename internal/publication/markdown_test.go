@@ -196,7 +196,7 @@ func TestMarkdownVaultFlowCustomEditStatusSyncReopenAndRejectInvalid(t *testing.
 	}
 }
 
-func TestMarkdownVaultFlowGroupedDeletionWithQuotedPunctuationAndTrailingComma(t *testing.T) {
+func TestMarkdownVaultFlowCommentEditAndGroupedDeletionWithQuotedPunctuation(t *testing.T) {
 	env := setupFlowMarkdownPublication(t, "project-markdown-flow-group-delete")
 	projectReviewPath := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
 	vaultReviewPath := filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, reviewv2.ReviewRelativePath)))
@@ -216,6 +216,7 @@ func TestMarkdownVaultFlowGroupedDeletionWithQuotedPunctuationAndTrailingComma(t
 	}
 	originalVault := readTestFile(t, vaultReviewPath)
 	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two,"), []byte(","), 1)
+	vaultEdit = bytes.Replace(vaultEdit, []byte(`custom_owner: {label: "team,#blue"}, # owner separator comment`), []byte(`custom_owner: {label: "team,#green"}, # human separator comment`), 1)
 	if bytes.Equal(vaultEdit, originalVault) {
 		t.Fatal("flow grouped-deletion fixture was not edited")
 	}
@@ -255,6 +256,9 @@ func TestMarkdownVaultFlowGroupedDeletionWithQuotedPunctuationAndTrailingComma(t
 	}
 	if !bytes.Contains(expectedReview, []byte(`custom_note: "team,#blue",`)) {
 		t.Fatal("grouped-deletion publication lost quoted punctuation or trailing comma")
+	}
+	if bytes.Count(expectedReview, []byte("# human separator comment")) != 1 || bytes.Contains(expectedReview, []byte("# owner separator comment")) {
+		t.Fatal("grouped-deletion publication lost or duplicated the human separator comment")
 	}
 	for path, before := range beforeIndex {
 		if got := readTestFile(t, path); !bytes.Equal(got, before) {

@@ -256,7 +256,13 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 			end--
 		}
 		absoluteDelimiter := state.frontStart + delimiter
-		commentStart, commentEnd, lineComment := v4FlowSeparatorLineComment(frontmatter, delimiter, entryLimit, valueNode.LineComment)
+		commentStart, commentEnd, lineComment, valueSide := v4FlowLineComment(frontmatter, valueStart, delimiter, entryLimit, valueNode.LineComment, quoted)
+		if valueSide {
+			end = commentStart
+			for end > valueStart && (frontmatter[end-1] == ' ' || frontmatter[end-1] == '\t' || frontmatter[end-1] == '\r' || frontmatter[end-1] == '\n') {
+				end--
+			}
+		}
 		state.frontmatter[key] = v4FrontmatterSpan{
 			start:            starts[index],
 			end:              state.frontStart + end,
@@ -272,9 +278,20 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 	return nil
 }
 
-func v4FlowSeparatorLineComment(source []byte, delimiter, limit int, lineComment string) (int, int, string) {
-	if lineComment == "" || delimiter < 0 || delimiter >= limit || limit > len(source) || source[delimiter] != ',' {
-		return 0, 0, ""
+func v4FlowLineComment(source []byte, valueStart, delimiter, limit int, lineComment string, quoted []v4YAMLSourceSpan) (int, int, string, bool) {
+	if lineComment == "" || valueStart < 0 || valueStart > delimiter || delimiter >= limit || limit > len(source) || source[delimiter] != ',' {
+		return 0, 0, "", false
+	}
+	for offset := bytes.Index(source[valueStart:delimiter], []byte(lineComment)); offset >= 0; {
+		start := valueStart + offset
+		if !v4YAMLSpanContains(quoted, start) && len(bytes.Trim(source[start+len(lineComment):delimiter], " \t\r\n")) == 0 {
+			return start, start + len(lineComment), lineComment, true
+		}
+		next := start + 1
+		offset = bytes.Index(source[next:delimiter], []byte(lineComment))
+		if offset >= 0 {
+			offset += next - valueStart
+		}
 	}
 	line := source[delimiter+1 : limit]
 	if newline := bytes.IndexByte(line, '\n'); newline >= 0 {
@@ -282,10 +299,15 @@ func v4FlowSeparatorLineComment(source []byte, delimiter, limit int, lineComment
 	}
 	offset := bytes.Index(line, []byte(lineComment))
 	if offset < 0 || len(bytes.Trim(line[:offset], " \t\r")) != 0 {
-		return 0, 0, ""
+		return 0, 0, "", false
 	}
 	start := delimiter + 1 + offset
-	return start, start + len(lineComment), lineComment
+	return start, start + len(lineComment), lineComment, false
+}
+
+func v4YAMLSpanContains(spans []v4YAMLSourceSpan, offset int) bool {
+	index := sort.Search(len(spans), func(index int) bool { return spans[index].end > offset })
+	return index < len(spans) && spans[index].start <= offset
 }
 
 func v4YAMLNodeOffset(source []byte, lineStarts []int, node *yaml.Node) (int, bool) {
@@ -384,12 +406,14 @@ func v4FlowBoundary(source []byte, start, limit int, boundary byte, quoted []v4Y
 	braceDepth, bracketDepth := 0, 0
 	quotedIndex := sort.Search(len(quoted), func(index int) bool { return quoted[index].end > start })
 	inComment := false
+	commentBoundary := false
 	for index := start; index < limit; index++ {
 		for quotedIndex < len(quoted) && quoted[quotedIndex].end <= index {
 			quotedIndex++
 		}
 		if quotedIndex < len(quoted) && index >= quoted[quotedIndex].start && index < quoted[quotedIndex].end {
 			index = quoted[quotedIndex].end - 1
+			commentBoundary = true
 			continue
 		}
 		if inComment {
@@ -400,18 +424,22 @@ func v4FlowBoundary(source []byte, start, limit int, boundary byte, quoted []v4Y
 		}
 		switch source[index] {
 		case '#':
-			if index == start || source[index-1] == ' ' || source[index-1] == '\t' || source[index-1] == '\r' || source[index-1] == '\n' {
+			if index == start || commentBoundary || source[index-1] == ' ' || source[index-1] == '\t' || source[index-1] == '\r' || source[index-1] == '\n' {
 				inComment = true
 			}
+			commentBoundary = false
 		case '{':
 			braceDepth++
+			commentBoundary = false
 		case '[':
 			bracketDepth++
+			commentBoundary = false
 		case ']':
 			if bracketDepth == 0 {
 				return 0, false
 			}
 			bracketDepth--
+			commentBoundary = true
 		case '}':
 			if braceDepth == 0 {
 				if boundary == '}' && bracketDepth == 0 {
@@ -420,9 +448,15 @@ func v4FlowBoundary(source []byte, start, limit int, boundary byte, quoted []v4Y
 				return 0, false
 			}
 			braceDepth--
+			commentBoundary = true
 		case ',':
 			if boundary == ',' && braceDepth == 0 && bracketDepth == 0 {
 				return index, true
+			}
+			commentBoundary = true
+		default:
+			if source[index] != ' ' && source[index] != '\t' && source[index] != '\r' && source[index] != '\n' {
+				commentBoundary = false
 			}
 		}
 	}
