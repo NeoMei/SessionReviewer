@@ -64,6 +64,28 @@ a94ee8eb1b4a018bb73f38720abce2188490ce375609e27bf41d333cba67cd1d.
 An initial unsupported sync --json invocation exited2 before mutation; the
 successful sync used the documented plain command. No real project was scanned.
 
+### Task 15 — indexed bulk-edit candidate, review pending
+
+Implementation commit b347274 changes only four reviewv4 Go files. Per-operation
+live-field and semantic metadata indexes replace repeated entity/baseline/patch
+searches; validation, original identity/hash, no-op and historical orphan rules
+remain required. The maximum valid 65,536-field Apply plus baseline-carry test
+passed in1.207s package time; the pre-fix Apply experiment exceeded an external
+45s timeout. The committed test has no wall-clock threshold.
+
+On the same Apple M5 host, fixed three-iteration benchmarks repeated three times
+showed full Apply at512 fields changing from2.361–2.877s,93.47MB and2.103M
+allocations to2.630–2.765ms,2.139MB and11.9K allocations. At4096 fields the
+optimized Apply took20.26–20.80ms. Baseline carry at512 fields changed from
+3.799–3.850ms to0.473–0.486ms; its operation-local allocations increased from
+679928B to1406778B. This explicit memory tradeoff removes repeated searches,
+not all validation/sorting cost; Apply still includes final deterministic sort.
+
+Complete affected reviewv4/contextupdate/syncdoc tests and focused MarkdownV4 /
+GateB zero-token integration passed. Independent task review, cold-start
+automated coverage and the new final frozen-source full gate remain pending.
+These measurements are not a whole-repository completion or release claim.
+
 ## Historical checkpoint — preceding local corrective batch complete
 
 Source: `6ad0c05a56eb097a27c1c044f5b0f43bc49e8c7e`. Complete ordered tests ran
