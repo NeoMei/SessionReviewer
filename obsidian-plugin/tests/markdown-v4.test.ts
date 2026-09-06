@@ -276,6 +276,21 @@ describe("v4 human Markdown codec", () => {
     expect(() => parseMarkdownV4({ review: review.replace(decision.title, "ambiguous edit"), history }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_baseline_missing" }));
   });
 
+  it.each([
+    ["bare baseline qualified patch", "decision:alpha", "decision:decision:alpha", "a9816e82efb51cbf2bed59687f40939a9c4e5b54aff984778267a777737fc4b9"],
+    ["qualified baseline bare patch", "decision:decision:alpha", "decision:alpha", "19ffa1597d3b097a53f7bfe8f73a42341ef3f6eee23e2cf2684ce7ae80fd2c63"]
+  ])("rejects mixed stored identities: %s", (_name, baselineEntity, patchEntity, hash) => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const decision = ledger.document_projection!.presentation_base.decisions[0];
+    const value = decision.title;
+    ledger.document_projection!.presentation_base.generated_baselines = [{ generation_id: ledger.generation_id, entity_id: baselineEntity, field: "title", kind: "scalar", value, generated_hash: hash }];
+    ledger.document_projection!.presentation_base.human_patches = [{ entity_id: patchEntity, field: "title", operation: "set", value, base_generated_hash: hash }];
+    ledger.generated_baselines = structuredClone(ledger.document_projection!.presentation_base.generated_baselines);
+    ledger.human_patches = structuredClone(ledger.document_projection!.presentation_base.human_patches);
+
+    expect(() => parseMarkdownV4({ review: read("review.md").replace(value, "mixed identity edit"), history: read("history.md") }, ledger)).toThrowError(expect.objectContaining({ code: "markdown_baseline_missing" }));
+  });
+
   it("validates Go baseline hashes containing HTML and line-separator characters", () => {
     const ledger = parseMachineLedgerV4(read("ledger-special-baseline.json"));
     expect(ledger.generated_baselines[0].generated_hash).toBe("112173e9eb315eaffc9ce7b55ca9fc1a768be05486a426a2365c1354301476bd");

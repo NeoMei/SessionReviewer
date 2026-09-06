@@ -253,7 +253,7 @@ interface PresentationEntities {
 interface PatchState {
   baselines: Map<string, { first: ReviewPresentationV4["generated_baselines"][number]; duplicate: boolean }>;
   human: Map<string, { index: number; duplicate: boolean }>;
-  orphan: Set<string>;
+  orphan: Map<string, { first: ReviewPresentationV4["orphan_patches"][number]; duplicate: boolean }>;
   removedHuman: Set<number>;
 }
 
@@ -295,10 +295,17 @@ function patchState(p: ReviewPresentationV4, expected: readonly Block[]): PatchS
     if (prior) prior.duplicate = true;
     else human.set(key, { index, duplicate: false });
   }
+  const orphan = new Map<string, { first: ReviewPresentationV4["orphan_patches"][number]; duplicate: boolean }>();
+  for (const patch of p.orphan_patches) {
+    const key = storedSemanticKey(liveFields, patch.entity_id, patch.field).key;
+    const prior = orphan.get(key);
+    if (prior) prior.duplicate = true;
+    else orphan.set(key, { first: patch, duplicate: false });
+  }
   return {
     baselines,
     human,
-    orphan: new Set(p.orphan_patches.map((patch) => storedSemanticKey(liveFields, patch.entity_id, patch.field).key)),
+    orphan,
     removedHuman: new Set()
   };
 }
@@ -339,7 +346,13 @@ function recordPatch(p: ReviewPresentationV4, state: PatchState, entity: string,
     fail("markdown_baseline_missing");
   }
   const humanEntry = state.human.get(key);
-  if (humanEntry?.duplicate || state.orphan.has(key)) fail("markdown_field_duplicate");
+  if (humanEntry) {
+    const stored = p.human_patches[humanEntry.index];
+    if (stored.entity_id !== baseline.entity_id || stored.field !== baseline.field) fail("markdown_baseline_missing");
+  }
+  const orphanEntry = state.orphan.get(key);
+  if (orphanEntry && (orphanEntry.first.entity_id !== baseline.entity_id || orphanEntry.first.field !== baseline.field)) fail("markdown_baseline_missing");
+  if (humanEntry?.duplicate || orphanEntry) fail("markdown_field_duplicate");
   const patchIndex = humanEntry?.index ?? -1;
   if (after === baseline.value) {
     if (patchIndex >= 0) state.removedHuman.add(patchIndex);

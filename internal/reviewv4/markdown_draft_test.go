@@ -186,6 +186,36 @@ func TestApplyMarkdownEditsRejectsStoredIdentityWithQualifiedAndLegacyInterpreta
 	}
 }
 
+func TestApplyMarkdownEditsRejectsMixedStoredBaselineAndPatchIdentities(t *testing.T) {
+	for _, test := range []struct {
+		name, baselineEntity, patchEntity string
+	}{
+		{"bare baseline qualified patch", "decision-1", "decision:decision-1"},
+		{"qualified baseline bare patch", "decision:decision-1", "decision-1"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := minimumPresentation()
+			p.Decisions = []Decision{{
+				ID: "decision-1", Kind: "decision", OccurredAt: "2026-09-05", Title: "human title", Status: DecisionActive,
+				Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []SessionRef{}, Provenance: "human_created", Revision: 1,
+			}}
+			generated := "generated title"
+			hash := baselinehash.SHA256(test.baselineEntity, "title", "scalar", generated, nil)
+			p.GeneratedBaselines = []Baseline{{GenerationID: p.GenerationID, EntityID: test.baselineEntity, Field: "title", Kind: "scalar", Value: &generated, GeneratedHash: hash}}
+			human := p.Decisions[0].Title
+			p.HumanPatches = []Patch{{EntityID: test.patchEntity, Field: "title", Operation: "set", Value: &human, BaseGeneratedHash: hash}}
+
+			if err := CarryMarkdownGeneratedBaselines(&p, "generation-next"); err == nil {
+				t.Fatal("carry accepted mixed stored baseline/patch identities")
+			}
+			_, err := ApplyMarkdownEdits(p, []FieldEdit{{Key: FieldKey{Entity: "decision:decision-1", Name: "title"}, Before: human, After: "edited"}})
+			if MarkdownCodeOf(err) != MarkdownBaselineMissing {
+				t.Fatalf("Markdown edit accepted and healed mixed stored identities: %v", err)
+			}
+		})
+	}
+}
+
 func TestApplyMarkdownEditsCoversEntireCatalogAndRejectsUntrustedChanges(t *testing.T) {
 	ledger := sharedMarkdownLedger(t)
 	base := ledger.DocumentProjection.PresentationBase

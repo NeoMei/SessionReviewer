@@ -607,6 +607,9 @@ func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
 			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
 		}
 		if key == semanticKey {
+			if patch.EntityID != baseline.EntityID || patch.Field != baseline.Field {
+				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
+			}
 			if patchIndex >= 0 {
 				return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
 			}
@@ -619,6 +622,9 @@ func recordMarkdownPatch(p *Presentation, edit FieldEdit) error {
 			return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name, Cause: resolveErr}
 		}
 		if key == semanticKey {
+			if patch.EntityID != baseline.EntityID || patch.Field != baseline.Field {
+				return &MarkdownError{Code: MarkdownBaselineMissing, Entity: edit.Key.Entity, Field: edit.Key.Name}
+			}
 			return &MarkdownError{Code: MarkdownFieldDuplicate, Entity: edit.Key.Entity, Field: edit.Key.Name}
 		}
 	}

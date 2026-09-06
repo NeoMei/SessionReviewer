@@ -111,7 +111,7 @@ func validMarkdownBaselineShape(baseline Baseline) bool {
 }
 
 func validMarkdownPatchBinding(patch Patch, baseline Baseline) bool {
-	if patch.BaseGeneratedHash != baseline.GeneratedHash {
+	if patch.EntityID != baseline.EntityID || patch.Field != baseline.Field || patch.BaseGeneratedHash != baseline.GeneratedHash {
 		return false
 	}
 	switch patch.Operation {
