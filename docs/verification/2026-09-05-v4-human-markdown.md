@@ -245,3 +245,99 @@ The long stable-HEAD full Go/race/vet/tidy/Gate A/npm sequence is intentionally
 deferred until the scoped re-review confirms this fix. Candidate-plugin approval
 and plugin/no-CLI UI acceptance also remain pending; no plugin acceptance is
 claimed here.
+
+## Follow-up verification at `64f2535` — 2026-09-06
+
+This section supersedes the pending statuses immediately above without changing
+the historical failed/interrupted results. The exact ordered suite completed at
+clean `64f253563caa37db5996b3b2729e240f2170e2e0` with no source changes between
+commands:
+
+| Check | Exit | Evidence |
+|---|---:|---|
+| `go test ./...` | 0 | All emitted packages passed; zerotoken 223.321s; large Session test included. |
+| `go vet ./...` | 0 | No output. |
+| `go mod tidy -diff` | 0 | No output. |
+| Gate A exact selector | 0 | zerotoken 36.617s. |
+| Prescribed race command | 0 | No race report; scan 936.131s, zerotoken 530.482s. Only the previously specified large Session race exclusion applied. |
+| `git diff --check .` | 0 | No output. |
+| Plugin `npm run check` | 1 | 186/187 tests passed; contracts-v4 corpus-key allowlist omitted `expected_document_code`; build not reached. |
+
+Full local acceptance remains **red**, not all-green. A separate explicit
+`npm run build` subsequently exited0 to freeze the native candidate; this does
+not override the failed complete check.
+
+### Fresh fixture and authorized native candidate
+
+The authenticated fixture was provisioned at its final isolated path at
+`64f2535`; the real end-to-end test passed in 25.572s. Native Obsidian1.13.7
+showed the sixteenth milestone, preserved first conclusion and verification,
+neutral section guidance, and review total16/recent5 with a working complete
+history link. This uses synthetic accepted milestones, not automatic semantic
+promotion or real legacy migration.
+
+The user subsequently authorized enabling the candidate plugin **only in the
+experimental Vault**. The built main.js SHA256 was
+`c0d5a413e98504fdeb47493b4f10280615b3c597c8007f2145f22a850573565f`.
+Its native command opened the v4 read-only project view; the native-note button
+opened the sole editable Markdown body. Editing the goal to
+`Native plugin pending goal` in Obsidian triggered `有未同步修改 · 只读` and a
+one-field pending count, without accepting the change automatically. Explicit
+fixture-bound CLI sync exited0, paired review hashes matched, and the plugin
+watcher cleared pending to `待私有验证 · 只读`, not accepted/ready.
+
+A controlled generated-evidence modification caused the plugin to retain its
+prior public snapshot with `已过期 · 只读` and
+`markdown_generated_region_modified`; real CLI sync exited1. The exact known
+evidence string was restored. All four Project/Vault file pairs were subsequently
+verified byte-identical. No production Vault, installed production plugin,
+source sessions or mapping was changed.
+
+This experiment exposed a separate integration defect: the present candidate CLI
+can perform ordinary v4 sync, but `sync status` still routes through the legacy
+engine and fails. The plugin labels that failure `CLI 不可用`. This proves a
+safe service-failure fallback, **not** absent-executable discovery or a healthy
+v4 status connection. Those gates remain open.
+
+### Whole-branch review and remaining gates
+
+Independent review of `c7fd0bb..64f2535` found0Critical,5Important,3Minor. Important
+items concern repeat editing across scan generations, genuine legacy directory
+layout, read-only prepared-pointer loading, cancellation before acceptance, and
+sensitive-content checks during migration. They require fixes despite the Go
+suite passing. One combined fix wave is in progress; its modified working tree
+has not inherited the preceding test results.
+
+Candidate healthy-status integration, true no-CLI runtime, complete native
+conflict workflow, reviewed fix HEAD full verification, native Windows/macOS CI
+and applicable real old-data migration remain unproven. No push, merge, release
+or deployment is claimed. Original Session Index Task3 is not promoted to local
+completion by this report.
+
+### Combined fix commit `e281a89`
+
+The combined source/test fix wave is committed as
+`e281a89c2735a27fca50698e34e284dae2c9a0bb`. It adds authenticated generation-only
+baseline carry-forward, legacy-layout readonly opening, non-mutating prepared
+loads, cancellation checks around accepted-receipt durability, migration
+sensitive-content refusal, and the missing corpus-key validation.
+
+The implementer's covering command
+`go test ./internal/reviewv4 ./internal/contextupdate ./internal/memorystore ./internal/syncproject ./internal/publication ./internal/migrationv4 ./test/zerotoken -count=1`
+passed; the real Gate B new-Session/new-generation/second-edit/sync/reopen path
+passed. Plugin `npm run check` passed lint,19 files/188 tests and build. Both
+before-receipt rollback and after-receipt cancellation-reporting cases passed.
+These are covering results, not the required final whole-repository gate.
+
+The single scoped final re-review is pending. All three Minor findings remain
+explicitly unresolved: precise Vault read diagnostics, YAML key/comment byte
+preservation during rebinding, and quadratic bulk field-edit lookup. The native
+v4 status route remains unfixed; no readiness API or fake status success was
+introduced.
+
+An additional native experiment temporarily moved only the already-bound
+experiment startup wrapper out of its executable path. A newly opened project
+view remained readonly with its CLI-unavailable explanation and could still open
+the native history. The exact wrapper was restored. This covers loss of a bound
+runtime after plugin load, not cold-start discovery with every CLI candidate
+absent. Production binaries were untouched.
