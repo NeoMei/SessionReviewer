@@ -638,3 +638,9 @@ TDD: establish real pre-fix failing/scaling evidence, retain behavior regression
 Files: necessary plugin discovery/startup tests and minimal source corrections only if reproduced; docs/verification/2026-09-05-v4-human-markdown.md and plan checkpoints are controller-owned.
 Requirements: verify fresh discovery with no CLI candidates, no stale selected runtime/cache fallback, native Markdown reading remains available, structural/acceptance actions stay unavailable with a clear diagnostic; no downloads/installs, model calls, production Vault/config edits or scanning real projects. Prefer existing injectable discovery boundaries and an isolated Obsidian experiment process/environment for native evidence. Any source fix follows RED/GREEN and independent review.
 After Tasks 13–15 task reviews, final whole-branch review and one stable-source ordered M9 local sequence (full Go including ordinary large-Session test; vet; tidy -diff; exact Gate A; existing race command/exclusion; diff --check; full plugin check). Keep scope exclusions explicit as user decisions, not passed tests. No push, merge, release, production replacement or automatic rescan. Original Session Index Tasks 4–7 remain separate feature work.
+
+### 2026-09-06 最后检查点：复审阻塞，尚未清零
+
+Tasks13–15 的原三项债务已实现并独立审查；Task16 冷启动回归与原生同哈希证据成立，测试清理小项由5f1835e关闭。最终整分支审查在5f1835e发现跨侧flow YAML自定义字段合并缺陷，90e8e62经实际RED/GREEN修复其原始触发场景，但本轮唯一一次限定复审发现新N1/N2两个Important：内部引号/尾随逗号的合法flow输入被拒绝、末尾连续自定义键删除生成重叠编辑。控制器只读诊断均已复现，不作延期或降级处理。
+
+90e8e62完整Go命令exit0（含普通大Session，部分包使用有效缓存），其余六项因复审阻塞未启动，最终全套未通过。一次最终修复/复审额度已用完，保留分支和证据，等待新一轮明确限定为N1/N2的修复授权；不启动后续功能、不合并/推送/发布。最新结论以验收报告顶部及“N1/N2 remain open”小节为准；旧结项条目只是历史来源，不代表这些新问题已解决。
