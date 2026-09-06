@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Prerequisite: the original `2026-09-04-obsidian-context-gate-0-contracts.md` contracts are implemented; ordinary v4 publication additionally requires the Markdown supplement `2026-09-05-v4-human-markdown-codec.md`. Its implementation/local regression completed on 2026-09-06 at source6ad0c05; platform/real-data delivery gates and three Minor items remain explicitly open.
+- Prerequisite: the original `2026-09-04-obsidian-context-gate-0-contracts.md` contracts are implemented; ordinary v4 publication additionally requires the Markdown supplement `2026-09-05-v4-human-markdown-codec.md`. Its implementation/local regression completed on 2026-09-06 at source6ad0c05. The user subsequently excluded cross-platform CI and real legacy-project migration from this batch (not marked passed); remaining-debt Tasks13–16 and their final local verification are in progress. No automatic rescan or overwrite is authorized.
 - Begin from released 0.3.5 v3 (`ea5b1ba`) in the isolated implementation worktree and preserve the original dirty user changes. No destructive Git cleanup.
 - `session-index.json` is complete or not published. Limits are 65,536 entries and 64 MiB; overflow returns `session_index_capacity_exceeded` and retains the previous accepted generation.
 - Index order is `started_at desc nulls last, provider asc, session_id asc`. Identity is always `(project_id, provider, session_id)`.
@@ -140,7 +140,7 @@ doc.Coverage = calculateCoverage(doc.Sessions)
 
 ### Task 3: Publish and recover the four-file atomic set
 
-**Status:** implementation and local regression complete (2026-09-06), not final product acceptance. Source6ad0c05 / frozen full-gate HEADda3d2df passed all seven ordered commands, independent reviews, and the authorized native experimental-Vault repeat. See `docs/verification/2026-09-05-v4-human-markdown.md`. Three Minor debts, native platform CI, applicable real old-data migration/classification prerequisites and cold-start no-runtime discovery remain open; no merge/push/release. The checklist below retains the original requirements; this status is the verified checkpoint.
+**Status:** implementation and local regression complete (2026-09-06), not final product acceptance. Source6ad0c05 / frozen full-gate HEADda3d2df passed all seven ordered commands, independent reviews, and the authorized native experimental-Vault repeat. See `docs/verification/2026-09-05-v4-human-markdown.md`. Follow-up Tasks13–16 address the three known Minor debts and cold-start no-runtime verification; their final frozen-source gate is still pending. Native cross-platform CI and real legacy migration are excluded by the user's later scope decision, not passed tests. No merge/push/release or automatic rescan. The checklist below retains the original requirements; later checkpoints govern the amended delivery scope.
 
 **Implementation owner:** `docs/superpowers/plans/2026-09-05-v4-human-markdown-codec.md`, tasks M1–M9. That plan contains exact file ownership, interfaces, RED/GREEN tests, migration prerequisites and failure-recovery gates. Its M6 produces `presentation.RenderV4(V4RenderInput) (RenderPlan, error)` using the current cumulative index and the existing transaction engine.
 
