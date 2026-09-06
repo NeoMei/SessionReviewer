@@ -395,3 +395,49 @@ implemented; the final frozen-source whole-repository/race/plugin check, final
 branch review and native UI gates have not yet run on the corrected branch.
 The previously recorded three Minor findings, native CI and applicable real-data
 migration prerequisites remain separate. No merge, push or release occurred.
+
+### Corrective Task 11 closed; Task 12 in review (2026-09-06)
+
+Task 11 closes I5 in `aec1430` after independent review. Migration now scans
+both complete prospective Markdown documents after historical preservation,
+using authenticated marker-aware sensitive-content extraction. JSON-escaped
+sensitive text is rejected after decoding; machine identifiers do not become
+false positives merely because they are high entropy. Actual RED cases showed
+an unsafe preview and a coordinator publication; GREEN cases reject preview and
+confirm with zero publisher calls and unchanged source/public/private snapshots.
+Final affected `migrationv4` and `syncproject` package tests passed. The reviewer
+approved the code; an intervening controller-owned documentation commit was
+explicitly accounted for in review provenance.
+
+Task 12's initial `5ddb0d2` adds typed readonly v4 status and distinguishes
+runtime unavailability from status-command failure in the plugin. Its covering
+Go tests and plugin check (217 tests) passed, and the frozen candidate CLI
+returned `in_sync=1` on the existing experiment fixture. Independent review
+nevertheless found two Important gaps: legacy malformed-v3 diagnostic dispatch,
+and domain-invalid human fields masked by an otherwise ordinary conflict.
+Both are in the scoped fix loop. The experiment plugin is backed up and disabled
+pending the corrected candidate; this provisional CLI result is not final native
+acceptance. The same-source full suite and whole-branch review are still pending.
+
+Task 12 subsequently closes its task review in `3db7588` and `37c5e72`.
+Both recorded Project/Vault draft pairs receive domain validation before conflict
+reporting. A bounded status-specific discriminator preserves actual legacy
+Engine diagnostics for malformed review, history and ledger while refusing
+partial-v4 downgrade attempts. Actual RED/GREEN tests cover these cases and
+ordinary legacy prose mentioning v4. Final covering Go packages passed:
+CLI85.751s, syncproject55.351s, sync59.837s. Two scoped re-reviews closed all
+Important findings with no new findings; no plugin source changed in those fixes.
+
+Native Obsidian candidate3db7588 verified healthy status without misleading
+CLI warning, a native goal edit followed by pending display and explicit sync
+clearing, dual-sided conflict display/refused sync with both drafts preserved,
+generated-region refusal/stale display, and loss of the chosen runtime while
+native history remains readable. Its restored public file pairs match exactly.
+The subsequent37c5e72 diff is legacy-only; the candidate wrapper is now rebound
+to that frozen CLI for final checks. Earlier native observations remain labeled
+with their actual source version, not silently promoted to final-version proof.
+
+The corrected batch now enters whole-branch review and the exact ordered local
+gate. Those results are pending. The three pre-existing Minor items, platform CI,
+real old-project migration prerequisites and cold-start all-candidates-absent
+runtime discovery remain separately open. This branch is not merged or published.
