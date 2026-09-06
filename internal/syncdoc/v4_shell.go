@@ -89,23 +89,36 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 	raw := d.v4.shell.raw
 	seen := make(map[UnitKey]bool, len(d.v4.frontmatter))
 	edits := make([]v4SourceEdit, 0, len(d.v4.frontmatter)+1)
-	for index, key := range d.v4.frontmatterOrder {
+	for index := 0; index < len(d.v4.frontmatterOrder); {
+		key := d.v4.frontmatterOrder[index]
 		seen[key] = true
 		span := d.v4.frontmatter[key]
 		unit, present := units[key]
 		if !present || !unit.Present {
-			if index+1 < len(d.v4.frontmatterOrder) {
-				next := d.v4.frontmatter[d.v4.frontmatterOrder[index+1]]
+			first := index
+			for index++; index < len(d.v4.frontmatterOrder); index++ {
+				groupKey := d.v4.frontmatterOrder[index]
+				seen[groupKey] = true
+				groupUnit, groupPresent := units[groupKey]
+				if groupPresent && groupUnit.Present {
+					break
+				}
+			}
+			last := index - 1
+			if index < len(d.v4.frontmatterOrder) {
+				next := d.v4.frontmatter[d.v4.frontmatterOrder[index]]
 				edits = append(edits, v4SourceEdit{start: span.start, end: next.start})
-			} else if index > 0 {
-				previous := d.v4.frontmatter[d.v4.frontmatterOrder[index-1]]
-				edits = append(edits, v4SourceEdit{start: previous.delimiter, end: span.end})
+			} else if first > 0 {
+				previous := d.v4.frontmatter[d.v4.frontmatterOrder[first-1]]
+				lastSpan := d.v4.frontmatter[d.v4.frontmatterOrder[last]]
+				edits = append(edits, v4SourceEdit{start: previous.delimiter, end: lastSpan.end})
 			} else {
 				return nil, invalidDocument("v4 Markdown flow frontmatter cannot be empty")
 			}
 			continue
 		}
 		if original, found := d.v4.shellAll[key]; found && unitsEqual(original, unit) {
+			index++
 			continue
 		}
 		encoded, err := encodeV4FlowFrontmatterUnit(key, unit)
@@ -113,17 +126,26 @@ func (d Document) rewriteV4FlowFrontmatter(units UnitSet, limit int) ([]byte, er
 			return nil, err
 		}
 		edits = append(edits, v4SourceEdit{start: span.start, end: span.end, value: encoded})
+		index++
 	}
 	additions := sortedFrontmatterNames(units, seen)
 	if len(additions) != 0 {
 		var addition bytes.Buffer
-		for _, name := range additions {
+		last := d.v4.frontmatter[d.v4.frontmatterOrder[len(d.v4.frontmatterOrder)-1]]
+		if last.delimiter == d.v4.frontmatterClose {
+			addition.WriteString(", ")
+		} else if last.delimiter+1 == d.v4.frontmatterClose {
+			addition.WriteByte(' ')
+		}
+		for index, name := range additions {
 			key := UnitKey{Kind: UnitFrontmatter, Name: name}
 			encoded, err := encodeV4FlowFrontmatterUnit(key, units[key])
 			if err != nil {
 				return nil, err
 			}
-			addition.WriteString(", ")
+			if index > 0 {
+				addition.WriteString(", ")
+			}
 			addition.Write(encoded)
 		}
 		edits = append(edits, v4SourceEdit{start: d.v4.frontmatterClose, end: d.v4.frontmatterClose, value: addition.Bytes()})
@@ -176,7 +198,11 @@ func encodeV4FlowFrontmatterUnit(key UnitKey, unit Unit) ([]byte, error) {
 	if !ok {
 		return nil, invalidDocument("cannot locate encoded v4 Markdown flow frontmatter unit")
 	}
-	delimiter, ok := v4FlowEntryDelimiter(source, start)
+	close, ok := v4FlowMappingClose(source, 0)
+	if !ok {
+		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
+	}
+	delimiter, ok := v4FlowEntryDelimiter(source, start, close, true)
 	if !ok {
 		return nil, invalidDocument("cannot bound encoded v4 Markdown flow frontmatter unit")
 	}

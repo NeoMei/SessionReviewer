@@ -221,14 +221,23 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 	}
 	state.frontmatterFlow = true
 	frontmatterOpen := state.frontStart + open
+	close, ok := v4FlowMappingClose(frontmatter, open)
+	if !ok {
+		return invalidDocument("invalid v4 Markdown flow frontmatter close")
+	}
+	state.frontmatterClose = state.frontStart + close
 	for index, key := range keys {
 		valueNode := state.shell.frontmatter.Content[index*2+1]
 		valueStart, ok := v4YAMLNodeOffset(frontmatter, lineStarts, valueNode)
 		if !ok {
 			return invalidDocument("invalid v4 Markdown flow frontmatter value position")
 		}
-		delimiter, ok := v4FlowEntryDelimiter(frontmatter, valueStart)
-		if !ok || index+1 < len(keys) && frontmatter[delimiter] != ',' || index+1 == len(keys) && frontmatter[delimiter] != '}' {
+		entryLimit := close
+		if index+1 < len(starts) {
+			entryLimit = starts[index+1] - state.frontStart
+		}
+		delimiter, ok := v4FlowEntryDelimiter(frontmatter, valueStart, entryLimit, index+1 == len(keys))
+		if !ok {
 			return invalidDocument("invalid v4 Markdown flow frontmatter entry boundary")
 		}
 		end := delimiter
@@ -240,9 +249,6 @@ func (state *v4DocumentState) indexFlowFrontmatter(source, frontmatter []byte, l
 			start:     starts[index],
 			end:       state.frontStart + end,
 			delimiter: absoluteDelimiter,
-		}
-		if index+1 == len(keys) {
-			state.frontmatterClose = absoluteDelimiter
 		}
 	}
 	if state.frontmatterClose < frontmatterOpen || state.frontmatterClose >= state.frontEnd || source[state.frontmatterClose] != '}' {
@@ -269,68 +275,44 @@ func v4YAMLNodeOffset(source []byte, lineStarts []int, node *yaml.Node) (int, bo
 	return offset, offset < len(source)
 }
 
-func v4FlowEntryDelimiter(source []byte, start int) (int, bool) {
-	braceDepth, bracketDepth := 0, 0
-	inSingle, inDouble, inComment := false, false, false
-	for index := start; index < len(source); index++ {
-		value := source[index]
-		if inComment {
-			if value == '\n' {
-				inComment = false
-			}
-			continue
-		}
-		if inSingle {
-			if value == '\'' {
-				if index+1 < len(source) && source[index+1] == '\'' {
-					index++
-				} else {
-					inSingle = false
-				}
-			}
-			continue
-		}
-		if inDouble {
-			if value == '\\' {
-				index++
-			} else if value == '"' {
-				inDouble = false
-			}
-			continue
-		}
-		switch value {
-		case '#':
-			if index == start || source[index-1] == ' ' || source[index-1] == '\t' || source[index-1] == '\r' || source[index-1] == '\n' {
-				inComment = true
-			}
-		case '\'':
-			inSingle = true
-		case '"':
-			inDouble = true
-		case '{':
-			braceDepth++
-		case '[':
-			bracketDepth++
-		case ']':
-			if bracketDepth == 0 {
-				return 0, false
-			}
-			bracketDepth--
-		case '}':
-			if braceDepth == 0 && bracketDepth == 0 {
-				return index, true
-			}
-			if braceDepth == 0 {
-				return 0, false
-			}
-			braceDepth--
-		case ',':
-			if braceDepth == 0 && bracketDepth == 0 {
-				return index, true
-			}
+func v4FlowMappingClose(source []byte, open int) (int, bool) {
+	for index := open + 1; index < len(source); index++ {
+		if source[index] == '}' && v4FlowTrivia(source[index+1:]) {
+			return index, true
 		}
 	}
 	return 0, false
+}
+
+func v4FlowEntryDelimiter(source []byte, start, limit int, final bool) (int, bool) {
+	if start < 0 || start >= limit || limit > len(source) {
+		return 0, false
+	}
+	for index := start; index < limit; index++ {
+		if source[index] == ',' && v4FlowTrivia(source[index+1:limit]) {
+			return index, true
+		}
+	}
+	if final && limit < len(source) && source[limit] == '}' {
+		return limit, true
+	}
+	return 0, false
+}
+
+func v4FlowTrivia(source []byte) bool {
+	for index := 0; index < len(source); {
+		switch source[index] {
+		case ' ', '\t', '\r', '\n':
+			index++
+		case '#':
+			for index < len(source) && source[index] != '\n' {
+				index++
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func v4MachineFrontmatter(name string) bool {

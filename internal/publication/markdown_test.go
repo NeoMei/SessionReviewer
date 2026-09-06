@@ -215,7 +215,7 @@ func TestMarkdownVaultFlowGroupedDeletionWithPlainQuoteAndTrailingComma(t *testi
 		beforeIndexModTime[path] = info.ModTime()
 	}
 	originalVault := readTestFile(t, vaultReviewPath)
-	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two,"), nil, 1)
+	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two,"), []byte(","), 1)
 	if bytes.Equal(vaultEdit, originalVault) {
 		t.Fatal("flow grouped-deletion fixture was not edited")
 	}
