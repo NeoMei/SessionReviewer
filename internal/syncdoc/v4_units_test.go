@@ -390,6 +390,91 @@ func TestV4ShellFlowScalarBoundariesUseValidatedYAMLContext(t *testing.T) {
 	}
 }
 
+func TestV4ShellFlowPlainHashMatchingCommentDoesNotShortenValue(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	before := `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: team#note, #note
+ custom_keep: yes}`
+	after := `{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: other#note, #note
+ custom_keep: yes}`
+	project, err := ParseV4("项目回顾.md", replaceV4TestFrontmatter(t, raw, []byte(before)), ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vaultRaw := replaceV4TestFrontmatter(t, raw, []byte(after))
+	vault, err := ParseV4("项目回顾.md", vaultRaw, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := UnitKey{Kind: UnitFrontmatter, Name: "custom_owner"}
+	units := project.SemanticUnits()
+	units[key] = vault.SemanticUnits()[key]
+	merged, err := project.WithSemanticUnits(units)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := merged.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, vaultRaw) {
+		t.Fatalf("matching hash text corrupted selected value\ngot:\n%s\nwant:\n%s", got, vaultRaw)
+	}
+	reopened, err := ParseV4("项目回顾.md", got, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, err := decodeUnitValue(reopened.SemanticUnits()[key].Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selected.Value != "other#note" || selected.LineComment != "#note" {
+		t.Fatalf("selected semantic value = %q, comment = %q", selected.Value, selected.LineComment)
+	}
+}
+
+func TestV4ShellFlowDeletionConsumesRemovedValueSideComment(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	tests := []struct {
+		name, before, after string
+	}{
+		{
+			name:   "uncommented survivor with trailing comma",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, custom_remove: [blue] # removed value comment\n ,}",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes}",
+		},
+		{
+			name:   "commented survivor without trailing comma",
+			before: "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, # survivor comment\n custom_remove: {label: blue} # removed value comment\n }",
+			after:  "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_keep: yes, # survivor comment\n }",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			project, err := ParseV4("项目回顾.md", replaceV4TestFrontmatter(t, raw, []byte(test.before)), ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			units := project.SemanticUnits()
+			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_remove"})
+			merged, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := merged.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := replaceV4TestFrontmatter(t, raw, []byte(test.after))
+			if !bytes.Equal(got, want) || bytes.Contains(got, []byte("# removed value comment")) {
+				t.Fatalf("deletion retained removed entry comment\ngot:\n%s\nwant:\n%s", got, want)
+			}
+			if _, err := ParseV4("项目回顾.md", got, ledger); err != nil {
+				t.Fatalf("reopen deletion: %v", err)
+			}
+		})
+	}
+}
+
 func TestV4ShellFlowSeparatorCommentComposesWithSuffixDeletion(t *testing.T) {
 	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
 	tests := []struct {
