@@ -215,7 +215,7 @@ func TestMarkdownVaultFlowCommentEditAndGroupedDeletionWithQuotedPunctuation(t *
 		beforeIndexModTime[path] = info.ModTime()
 	}
 	originalVault := readTestFile(t, vaultReviewPath)
-	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two,"), []byte(","), 1)
+	vaultEdit := bytes.Replace(originalVault, []byte(", custom_a: one, custom_b: two, # removed separator comment\r\n"), []byte("\r\n, custom_team: green"), 1)
 	vaultEdit = bytes.Replace(vaultEdit, []byte(`custom_owner: {label: "team,#blue"}, # owner separator comment`), []byte(`custom_owner: {label: "team,#green"}, # human separator comment`), 1)
 	if bytes.Equal(vaultEdit, originalVault) {
 		t.Fatal("flow grouped-deletion fixture was not edited")
@@ -254,8 +254,8 @@ func TestMarkdownVaultFlowCommentEditAndGroupedDeletionWithQuotedPunctuation(t *
 			t.Fatalf("grouped-deletion publication changed unrelated bytes in %s\ngot:\n%s\nwant:\n%s", path, got, expectedReview)
 		}
 	}
-	if !bytes.Contains(expectedReview, []byte(`custom_note: "team,#blue",`)) {
-		t.Fatal("grouped-deletion publication lost quoted punctuation or trailing comma")
+	if !bytes.Contains(expectedReview, []byte("custom_note: \"team,#blue\"\r\n, custom_team: green}")) || bytes.Contains(expectedReview, []byte("# removed separator comment")) {
+		t.Fatal("grouped-deletion publication lost quoted punctuation, retained a removed comment, or omitted the addition")
 	}
 	if bytes.Count(expectedReview, []byte("# human separator comment")) != 1 || bytes.Contains(expectedReview, []byte("# owner separator comment")) {
 		t.Fatal("grouped-deletion publication lost or duplicated the human separator comment")
@@ -1340,7 +1340,7 @@ func setupFlowMarkdownPublication(t *testing.T, projectID string) markdownPublic
 		if file == nil {
 			t.Fatalf("missing flow fixture file %s", document.relative)
 		}
-		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: {label: \"team,#blue\"}, # owner separator comment\r\n schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: \"team,#blue\", custom_a: one, custom_b: two,}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
+		flow := fmt.Sprintf("{id: %s, entity_type: %s, project_id: %s, custom_owner: {label: \"team,#blue\"}, # owner separator comment\r\n schema_version: 4, document_format: review-markdown-v1, revision: !!int +1, generation_id: %q, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_note: \"team,#blue\", custom_a: one, custom_b: two, # removed separator comment\r\n}\r\n", document.id, document.entity, projectID, manifest.GenerationID)
 		file.Desired = replaceMarkdownFrontmatterForTest(t, file.Desired, []byte(flow))
 		if document.relative == reviewv2.ReviewRelativePath {
 			file.Desired = bytes.Replace(file.Desired, []byte("---\n# 项目回顾"), []byte("---\n自定义段落和 [链接](https://example.test/custom) 必须保留。\n\n```yaml\ncustom: code-block\n```\n\n# 项目回顾"), 1)

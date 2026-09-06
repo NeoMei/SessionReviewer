@@ -482,6 +482,73 @@ func TestV4ShellFlowDeletionConsumesRemovedValueSideComment(t *testing.T) {
 	}
 }
 
+func TestV4ShellFlowDeletionAdditionUsesRemainingSeparator(t *testing.T) {
+	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
+	const prefix = "{id: review-project-p, entity_type: project-review, project_id: project-p, schema_version: 4, document_format: review-markdown-v1, revision: 1, generation_id: generation-1, minimum_reader_version: 0.4.1, minimum_writer_version: 0.4.1, custom_owner: keep, "
+	// Literal suffixes expose separator ownership without rebuilding the shell.
+	tests := []struct{ name, before, after string }{
+		{"separator comment consumed", "custom_keep: yes, custom_remove: [blue], # removed separator comment\n}", "custom_keep: yes\n, custom_team: green}"},
+		{"separator comment consumed CRLF", "custom_keep: yes, custom_remove: [blue], # removed separator comment\r\n}", "custom_keep: yes\r\n, custom_team: green}"},
+		{"no trailing comma", "custom_keep: yes, custom_remove: [blue]}", "custom_keep: yes, custom_team: green}"},
+		{"trailing comma retained", "custom_keep: yes, custom_remove: [blue],}", "custom_keep: yes, custom_team: green}"},
+		{"value comment without trailing comma", "custom_keep: yes, custom_remove: [blue] # removed value comment\n}", "custom_keep: yes, custom_team: green}"},
+		{"value comment with trailing comma", "custom_keep: yes, custom_remove: [blue] # removed value comment\n ,}", "custom_keep: yes, custom_team: green}"},
+		{"survivor separator comment and removed separator comment", "custom_keep: yes, # survivor comment\n custom_remove: [blue], # removed separator comment\n}", "custom_keep: yes, # survivor comment\n \ncustom_team: green}"},
+		{"survivor separator comment without trailing comma", "custom_keep: yes, # survivor comment\n custom_remove: [blue] # removed value comment\n}", "custom_keep: yes, # survivor comment\n custom_team: green}"},
+		{"survivor separator comment with trailing comma", "custom_keep: yes, # survivor comment\n custom_remove: [blue] # removed value comment\n ,}", "custom_keep: yes, # survivor comment\n custom_team: green}"},
+		{"survivor value comment and removed separator comment", "custom_keep: yes # survivor comment\n , custom_remove: [blue], # removed separator comment\n}", "custom_keep: yes # survivor comment\n \n, custom_team: green}"},
+		{"multi-field suffix and removed separator comment", "custom_keep: yes, custom_a: one # removed a\n , custom_remove: [blue], # removed separator comment\n}", "custom_keep: yes\n, custom_team: green}"},
+		{"multi-field suffix without trailing comma", "custom_keep: yes, custom_a: one, custom_remove: [blue] # removed value comment\n}", "custom_keep: yes, custom_team: green}"},
+		{"multi-field suffix with survivor comment", "custom_keep: yes, # survivor comment\n custom_a: one, custom_remove: [blue], # removed separator comment\n}", "custom_keep: yes, # survivor comment\n \ncustom_team: green}"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			project, err := ParseV4("项目回顾.md", replaceV4TestFrontmatter(t, raw, []byte(prefix+test.before)), ledger)
+			if err != nil {
+				t.Fatalf("parse source: %v", err)
+			}
+			want := replaceV4TestFrontmatter(t, raw, []byte(prefix+test.after))
+			selected, err := ParseV4("项目回顾.md", want, ledger)
+			if err != nil {
+				t.Fatalf("parse selection: %v", err)
+			}
+			units := project.SemanticUnits()
+			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_remove"})
+			delete(units, UnitKey{Kind: UnitFrontmatter, Name: "custom_a"})
+			team := UnitKey{Kind: UnitFrontmatter, Name: "custom_team"}
+			units[team] = selected.SemanticUnits()[team]
+			merged, err := project.WithSemanticUnits(units)
+			if err != nil {
+				t.Fatalf("delete suffix and add team: %v", err)
+			}
+			got, err := merged.Render()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("changed surviving source bytes\ngot:\n%s\nwant:\n%s", got, want)
+			}
+			reopened, err := ParseV4("项目回顾.md", got, ledger)
+			if err != nil {
+				t.Fatalf("reopen composition: %v", err)
+			}
+			for _, key := range unionUnitKeys(units, reopened.SemanticUnits()) {
+				if !unitsEqual(units[key], reopened.SemanticUnits()[key]) {
+					t.Fatalf("reopen changed selected semantic unit %v", key)
+				}
+			}
+			stable, err := reopened.WithSemanticUnits(reopened.SemanticUnits())
+			if err != nil {
+				t.Fatalf("no-op composition: %v", err)
+			}
+			stableRaw, err := stable.Render()
+			if err != nil || !bytes.Equal(stableRaw, got) {
+				t.Fatalf("no-op changed composition: %v", err)
+			}
+		})
+	}
+}
+
 func TestV4ShellFlowSeparatorCommentComposesWithSuffixDeletion(t *testing.T) {
 	_, raw, ledger := v4FixtureDocument(t, "项目回顾.md", "review.md")
 	tests := []struct {
