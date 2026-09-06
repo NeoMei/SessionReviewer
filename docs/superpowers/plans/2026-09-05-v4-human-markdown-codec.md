@@ -644,3 +644,23 @@ After Tasks 13–15 task reviews, final whole-branch review and one stable-sourc
 Tasks13–15 的原三项债务已实现并独立审查；Task16 冷启动回归与原生同哈希证据成立，测试清理小项由5f1835e关闭。最终整分支审查在5f1835e发现跨侧flow YAML自定义字段合并缺陷，90e8e62经实际RED/GREEN修复其原始触发场景，但本轮唯一一次限定复审发现新N1/N2两个Important：内部引号/尾随逗号的合法flow输入被拒绝、末尾连续自定义键删除生成重叠编辑。控制器只读诊断均已复现，不作延期或降级处理。
 
 90e8e62完整Go命令exit0（含普通大Session，部分包使用有效缓存），其余六项因复审阻塞未启动，最终全套未通过。一次最终修复/复审额度已用完，保留分支和证据，等待新一轮明确限定为N1/N2的修复授权；不启动后续功能、不合并/推送/发布。最新结论以验收报告顶部及“N1/N2 remain open”小节为准；旧结项条目只是历史来源，不代表这些新问题已解决。
+
+## Task 17: Correct validated flow YAML boundaries and grouped deletions
+
+User authorized this bounded continuation with “好的继续” after the N1/N2 report. Start at b6b83ea (source 90e8e62); Tasks 1–16 are not to be redispatched. This is a bug correction under the existing spec, not a new format or feature design.
+
+Files: internal/syncdoc/v4_units.go, v4_shell.go and v4_units_test.go; internal/publication/markdown_test.go for authenticated regression. A focused private helper/test file within syncdoc is permitted if needed to keep the boundary logic readable. Controller owns plan and verification documentation.
+
+Requirements:
+- N1: accepted flow frontmatter with an apostrophe or double quote inside a plain scalar, including nested plain scalars, must parse, merge and remain stable on no-op. Legal trailing commas (same-line or before newline/comments/closing brace) must work. Quoted scalars with escaped/doubled quotes, nested collections, tags, Unicode, comments and existing CRLF behavior must not regress. Determine boundaries using validated YAML node/token context; do not treat every quote as a new quoted scalar. Preserve unchanged original bytes and machine bindings; no whole-map pretty-print or dependency addition.
+- N2: removing consecutive final custom keys must produce non-overlapping valid edits. Cover two and longer suffixes, adjacent middle/prefix deletions, deletion combined with custom addition/value change, and optional trailing comma. Preserve remaining entries/comments outside changed entry spans. Retain the overlap guard; correct its inputs rather than bypassing it.
+- Reuse the real ParseV4 / SemanticUnits / WithSemanticUnits and authenticated status -> locked sync/publish -> reopen -> stable no-op paths. All required bindings and non-edited content must survive, accepted revision advances only as expected, generation/index bytes and mtime are unchanged for human edits. Invalid/machine edits remain refused without advancing Base/receipts or overwriting drafts. Existing duplicate/alias/merge-key, bounds, sensitivity and authentication safeguards are unchanged.
+- Default zero model calls and zero Agent child processes in product execution. No real project rescan, production Vault/config/install changes, push, merge or release. Cross-platform CI and real legacy migration remain excluded, not passed; existing safety regression tests remain.
+
+Execution:
+- [ ] Reproduce both defects with actual failing committed regression tests before source edits, recording exact commands/output and root causes separately.
+- [ ] Implement minimal boundary and deletion fixes, self-review and run focused regressions during iteration. Before source commit run full affected syncdoc/syncproject/publication tests once; record covering tests, RED/GREEN, files, commits and concerns in the task report.
+- [ ] Independent task review (spec + quality), with scoped fixes/re-review if needed. No task completion before validated findings are closed.
+- [ ] Freeze candidate source; final whole-branch review plus the exact ordered seven-command M9 local sequence (ordinary full Go including large Session; vet; tidy -diff; exact Gate A; prescribed race exclusion; diff --check; full plugin check). Do not assemble green status from earlier candidates.
+- [ ] Rebuild the fixture-only CLI and repeat approved synthetic status -> scan -> sync -> status, checking complete artifact hashes/mtime and zero-token output. Existing native no-CLI evidence can be retained only with unchanged plugin source/dependency/bundle proof; this backend repair requires authenticated test coverage on its own candidate.
+- [ ] Update tracked verification and both plan checkpoints with exact results and remaining gates. Retain local evidence; no integration, publishing or unrelated feature work without separate direction.
