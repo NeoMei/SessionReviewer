@@ -19,52 +19,68 @@ func TestV4BlockCommentOwnershipComposition(t *testing.T) {
 		{"folded strip separator", "custom_owner: >-\n  # scalar content\n\n# keep B\ncustom_keep: two\n", "custom_owner: >-\n  # changed content\n\n# keep B\ncustom_keep: two\n", "custom_owner: >-\n  # changed content\n\n# keep B\ncustom_keep: two\n"},
 		{"literal keep owned blanks", "custom_owner: |+\n  # scalar content\n\n# keep B\ncustom_keep: two\n", "custom_owner: |+\n  # changed content\n\n# keep B\ncustom_keep: two\n", "custom_owner: |+\n  # changed content\n\n# keep B\ncustom_keep: two\n"},
 		{"unchanged head presentation", " # owner head  \ncustom_owner: one\n# keep B\ncustom_keep: two\n", " # owner head  \ncustom_owner: changed\n# keep B\ncustom_keep: two\n", " # owner head  \ncustom_owner: changed\n# keep B\ncustom_keep: two\n"},
+		{"remove owned head and line", "# owner head\ncustom_owner: one # owner line\n# keep B\ncustom_keep: two\n", "custom_owner: changed\n# keep B\ncustom_keep: two\n", "custom_owner: changed\n# keep B\ncustom_keep: two\n"},
+		{"change owned foot", "custom_owner: one\n# old foot\n\ncustom_keep: two\n", "custom_owner: changed\n# new foot\n\ncustom_keep: two\n", "custom_owner: changed\n# new foot\n\ncustom_keep: two\n"},
+		{"remove owned foot", "custom_owner: one\n# old foot\n\ncustom_keep: two\n", "custom_owner: changed\n\ncustom_keep: two\n", "custom_owner: changed\n\ncustom_keep: two\n"},
+		{"addition before final trivia", "custom_owner: one\n\n", "custom_owner: changed\n# new team\ncustom_team: codec\n\n", "custom_owner: changed\n# new team\ncustom_team: codec\n\n"},
+		{"delete keep scalar owned blanks", "custom_owner: |+\n  content\n\n# keep B\ncustom_keep: two\n", "# keep B\ncustom_keep: two\n", "# keep B\ncustom_keep: two\n"},
+		{"folded keep owned blanks", "custom_owner: >+\n  content\n\n# keep B\ncustom_keep: two\n", "custom_owner: >+\n  changed\n\n# keep B\ncustom_keep: two\n", "custom_owner: >+\n  changed\n\n# keep B\ncustom_keep: two\n"},
+		{"tag and adjacent changes", "# head A\ncustom_owner: !!str one\n\n# head B\ncustom_keep: two\n", "# head A\ncustom_owner: !!str changed\n\n# head B\ncustom_keep: changed\n", "# head A\ncustom_owner: !!str changed\n\n# head B\ncustom_keep: changed\n"},
+		{"unchanged foot presentation", "custom_owner: one\n # owner foot  \n\ncustom_keep: two\n", "custom_owner: changed\n # owner foot  \n\ncustom_keep: two\n", "custom_owner: changed\n # owner foot  \n\ncustom_keep: two\n"},
 	}
 	for _, tc := range cases {
-		for _, newline := range []string{"\n", "\r\n"} {
-			t.Run(tc.name+map[string]string{"\n": "/LF", "\r\n": "/CRLF"}[newline], func(t *testing.T) {
-				front := func(s string) []byte {
-					return bytes.ReplaceAll([]byte("# source leading comment\n\n"+bindings+s), []byte("\n"), []byte(newline))
-				}
-				base := bytes.ReplaceAll(fixture, []byte("\n"), []byte(newline))
-				before := replaceV4TestFrontmatter(t, base, front(tc.before))
-				selected := replaceV4TestFrontmatter(t, base, front(tc.selected))
-				want := replaceV4TestFrontmatter(t, base, front(tc.want))
-				sourceDoc, err := ParseV4("项目回顾.md", before, ledger)
-				if err != nil {
-					t.Fatal(err)
-				}
-				selection, err := ParseV4("项目回顾.md", selected, ledger)
-				if err != nil {
-					t.Fatal(err)
-				}
-				edited, err := sourceDoc.WithSemanticUnits(selection.SemanticUnits())
-				if err != nil {
-					t.Fatal(err)
-				}
-				got, err := edited.Render()
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !bytes.Equal(got, want) {
-					t.Fatalf("lossless block composition\ngot: %q\nwant: %q", got[:bytes.Index(got, []byte("# 项目回顾"))], want[:bytes.Index(want, []byte("# 项目回顾"))])
-				}
-				reparsed, err := ParseV4("项目回顾.md", got, ledger)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !reparsed.SemanticEqual(selection) {
-					t.Fatal("selected semantic units changed")
-				}
-				noop, err := reparsed.WithSemanticUnits(reparsed.SemanticUnits())
-				if err != nil {
-					t.Fatal(err)
-				}
-				again, err := noop.Render()
-				if err != nil || !bytes.Equal(again, got) {
-					t.Fatalf("unstable no-op: %v", err)
-				}
-			})
+		for _, indent := range []string{"", "  "} {
+			for _, newline := range []string{"\n", "\r\n"} {
+				t.Run(tc.name+map[string]string{"\n": "/LF", "\r\n": "/CRLF"}[newline]+"/indent="+string(rune('0'+len(indent))), func(t *testing.T) {
+					front := func(s string) []byte {
+						lines := bytes.SplitAfter([]byte("# source leading comment\n\n"+bindings+s), []byte("\n"))
+						for i, line := range lines {
+							if len(bytes.TrimSpace(line)) != 0 {
+								lines[i] = append([]byte(indent), line...)
+							}
+						}
+						return bytes.ReplaceAll(bytes.Join(lines, nil), []byte("\n"), []byte(newline))
+					}
+					base := bytes.ReplaceAll(fixture, []byte("\n"), []byte(newline))
+					before := replaceV4TestFrontmatter(t, base, front(tc.before))
+					selected := replaceV4TestFrontmatter(t, base, front(tc.selected))
+					want := replaceV4TestFrontmatter(t, base, front(tc.want))
+					sourceDoc, err := ParseV4("项目回顾.md", before, ledger)
+					if err != nil {
+						t.Fatal(err)
+					}
+					selection, err := ParseV4("项目回顾.md", selected, ledger)
+					if err != nil {
+						t.Fatal(err)
+					}
+					edited, err := sourceDoc.WithSemanticUnits(selection.SemanticUnits())
+					if err != nil {
+						t.Fatal(err)
+					}
+					got, err := edited.Render()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(got, want) {
+						t.Fatalf("lossless block composition\ngot: %q\nwant: %q", got[:bytes.Index(got, []byte("# 项目回顾"))], want[:bytes.Index(want, []byte("# 项目回顾"))])
+					}
+					reparsed, err := ParseV4("项目回顾.md", got, ledger)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !reparsed.SemanticEqual(selection) {
+						t.Fatal("selected semantic units changed")
+					}
+					noop, err := reparsed.WithSemanticUnits(reparsed.SemanticUnits())
+					if err != nil {
+						t.Fatal(err)
+					}
+					again, err := noop.Render()
+					if err != nil || !bytes.Equal(again, got) {
+						t.Fatalf("unstable no-op: %v", err)
+					}
+				})
+			}
 		}
 	}
 }
