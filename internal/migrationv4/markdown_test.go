@@ -10,6 +10,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/baselinehash"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -128,6 +129,80 @@ func TestOldV4MigrationRejectsSensitivePreservedHistoryWithoutEchoingIt(t *testi
 	}
 	if got := string(history); !strings.Contains(got, secret) {
 		t.Fatal("source bytes were modified on refusal")
+	}
+}
+
+// Removing the prospective Markdown scan would let JSON escapes hide a secret
+// from the source-byte scan and publish it after the presentation is decoded.
+func TestOldV4MigrationRejectsEscapedSensitiveGoalAfterRendering(t *testing.T) {
+	const secret = "sk-1234567890abcdefghijklmnop"
+	const escaped = `\u0073\u006b\u002d\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039\u0030\u0061\u0062\u0063\u0064\u0065\u0066\u0067\u0068\u0069\u006a\u006b\u006c\u006d\u006e\u006f\u0070`
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	history := compatibilityArtifact(t, "v4", HistoryRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	review = bytes.Replace(review, []byte(`"goal":"Preserve"`), []byte(`"goal":"`+escaped+`"`), 1)
+	if bytes.Contains(review, []byte(secret)) || len(redact.Default().Text(string(review)).Findings) != 0 {
+		t.Fatal("escaped fixture exposed the secret to the raw source scan")
+	}
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+	authenticated, err := reviewv4.LoadProjection(review, history, ledger, index)
+	if err != nil || authenticated.Review.CurrentState.Goal != secret {
+		t.Fatalf("escaped source was not a valid authenticated old-v4 input: goal=%q err=%v", authenticated.Review.CurrentState.Goal, err)
+	}
+	beforeReview, beforeHistory, beforeLedger := bytes.Clone(review), bytes.Clone(history), bytes.Clone(ledger)
+
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "sensitive content blocks Markdown migration") {
+		t.Fatalf("decoded sensitive goal produced publishable result: result=%+v err=%v", result.Preview, err)
+	}
+	if result.Review != nil || result.History != nil || result.Ledger != nil || result.SessionIndex != nil || result.Preview.PreviewDigest != "" {
+		t.Fatalf("sensitive refusal returned a publishable result: %+v", result.Preview)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("sensitive diagnostic echoed decoded text: %v", err)
+	}
+	if !bytes.Equal(review, beforeReview) || !bytes.Equal(history, beforeHistory) || !bytes.Equal(ledger, beforeLedger) {
+		t.Fatal("authenticated source bytes were modified on refusal")
+	}
+}
+
+// Scanning the complete Markdown without authenticating structural spans would
+// reject legitimate machine identities rendered into markers and anchors.
+func TestOldV4MigrationAllowsAuthenticatedMachineIDMarkers(t *testing.T) {
+	const machineID = "MachineID_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0"
+	review := compatibilityArtifact(t, "v4", ReviewRelativePath)
+	history := compatibilityArtifact(t, "v4", HistoryRelativePath)
+	ledger := compatibilityArtifact(t, "v4", LedgerRelativePath)
+	index := compatibilityArtifact(t, "v4", SessionIndexRelativePath)
+	authenticated, err := reviewv4.LoadProjection(review, history, ledger, index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authenticated.Review.Decisions = []reviewv4.Decision{{
+		ID: machineID, Kind: "decision", OccurredAt: "2026-09-05", Title: "Keep safe identifiers", Rationale: "needed", Impact: "none",
+		Status: reviewv4.DecisionActive, ReevaluateWhen: "later", Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []reviewv4.SessionRef{}, Provenance: "human_created", Pinned: true, Revision: 1,
+	}}
+	review, err = strictjson.Encode(authenticated.Review)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger = rehashOldV4Ledger(t, review, history, ledger)
+	result, err := BuildMarkdownPreview(MarkdownMigrationInput{Source: Input{
+		Review: review, History: history, Ledger: ledger, SourceSessionIndex: index, SessionIndex: index,
+		TargetPreimages: map[string]Preimage{}, TargetVaultPreimages: map[string]Preimage{},
+	}})
+	if err != nil {
+		t.Fatalf("authenticated machine ID was treated as sensitive: %v", err)
+	}
+	if !bytes.Contains(result.Review, []byte(machineID)) || result.Preview.PreviewDigest == "" {
+		t.Fatalf("machine ID was not preserved in publishable Markdown: %+v", result.Preview)
+	}
+	if findings := redact.Default().Text(string(result.Review)).Findings; len(findings) == 0 {
+		t.Fatal("fixture did not exercise marker-aware masking")
 	}
 }
 

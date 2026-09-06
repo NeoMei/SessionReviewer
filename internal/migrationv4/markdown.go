@@ -227,12 +227,6 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 	if err != nil {
 		return Result{}, err
 	}
-	// The old-v4 pair has already been authenticated by its ledger above. Scan
-	// those exact source bytes before wrapping the history in the preservation
-	// fence so refusal cannot rewrite or echo the original secret.
-	if len(redact.Default().Text(string(input.Review)).Findings) != 0 || len(redact.Default().Text(string(input.History)).Findings) != 0 {
-		return Result{}, errors.New("sensitive content blocks Markdown migration")
-	}
 	pair.History = appendHistoricalPreservation(pair.History, input.History)
 	ledger.ReviewSHA256, ledger.HistorySHA256 = bareDigest(pair.Review), bareDigest(pair.History)
 	ledger.SyncHashes.ReviewSHA256, ledger.SyncHashes.HistorySHA256 = ledger.ReviewSHA256, ledger.HistorySHA256
@@ -243,6 +237,22 @@ func buildOldV4MarkdownPreview(input Input, source reviewv4.Accepted) (Result, e
 	accepted, err := reviewv4.LoadProjection(pair.Review, pair.History, ledgerBody, index)
 	if err != nil {
 		return Result{}, fmt.Errorf("validate Markdown migration target: %w", err)
+	}
+	for _, target := range []struct {
+		relative string
+		body     []byte
+	}{{"项目回顾.md", pair.Review}, {"项目历史.md", pair.History}} {
+		document, err := reviewv4.ParseMarkdownDocumentAgainstLedger(target.relative, target.body, accepted.Ledger)
+		if err != nil {
+			return Result{}, fmt.Errorf("validate Markdown migration target: %w", err)
+		}
+		source, err := document.SensitiveScanSource()
+		if err != nil {
+			return Result{}, fmt.Errorf("validate Markdown migration target: %w", err)
+		}
+		if len(redact.Default().Text(string(source)).Findings) != 0 {
+			return Result{}, errors.New("sensitive content blocks Markdown migration")
+		}
 	}
 	result := Result{Review: pair.Review, History: pair.History, Ledger: ledgerBody, SessionIndex: bytes.Clone(index), Accepted: accepted, TargetPreimages: clonePreimages(input.TargetPreimages), TargetVaultPreimages: clonePreimages(input.TargetVaultPreimages)}
 	result.Preview = MigrationPreview{

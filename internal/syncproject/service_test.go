@@ -84,7 +84,65 @@ func TestMarkdownMigrationPreviewRejectsPrivateEvidenceMutationDuringBuild(t *te
 	}
 }
 
-func newOldV4EvidenceFixture(t *testing.T) (migrationServiceFixture, memory.GenerationManifest) {
+// A refused target must stop both coordinator modes before a publication
+// callback can mutate public files, Base/receipt state, or private pointers.
+func TestMarkdownMigrationCoordinatorRefusesEscapedSensitiveTargetWithoutMutation(t *testing.T) {
+	const secret = "sk-1234567890abcdefghijklmnop"
+	const escaped = `\u0073\u006b\u002d\u0031\u0032\u0033\u0034\u0035\u0036\u0037\u0038\u0039\u0030\u0061\u0062\u0063\u0064\u0065\u0066\u0067\u0068\u0069\u006a\u006b\u006c\u006d\u006e\u006f\u0070`
+	fixture, _ := newOldV4EvidenceFixture(t, func(review []byte) []byte {
+		result := bytes.Replace(review, []byte(`"goal":"Preserve"`), []byte(`"goal":"`+escaped+`"`), 1)
+		if bytes.Equal(result, review) || bytes.Contains(result, []byte(secret)) {
+			t.Fatal("failed to build escaped old-v4 review fixture")
+		}
+		return result
+	})
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotMigrationTrees(t, fixture)
+	options := MigrationOptions{
+		Options: Options{ProjectID: fixture.projectID, CWD: fixture.project, DataDir: fixture.data, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI},
+		Mode:    MigrationDryRun,
+	}
+	dry, dryErr := RunMigration(t.Context(), options)
+	expectedDigest := "sha256:" + strings.Repeat("0", 64)
+	if dryErr == nil {
+		expectedDigest = dry.Preview.PreviewDigest
+	}
+	published := 0
+	options.Mode = MigrationConfirm
+	options.ExpectedPreviewDigest = expectedDigest
+	options.Publish = func(context.Context, MigrationPublication) error {
+		published++
+		return nil
+	}
+	confirmed, confirmErr := RunMigration(t.Context(), options)
+
+	for mode, err := range map[string]error{"dry-run": dryErr, "confirm": confirmErr} {
+		if err == nil {
+			t.Errorf("%s did not return the bounded sensitive refusal: %v", mode, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "sensitive content blocks Markdown migration") {
+			t.Errorf("%s did not return the bounded sensitive refusal: %v", mode, err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("%s diagnostic echoed decoded sensitive text: %v", mode, err)
+		}
+	}
+	if dry.Preview.PreviewDigest != "" || confirmed.Preview.PreviewDigest != "" || dry.Applied || confirmed.Applied || published != 0 {
+		t.Errorf("refused target became publishable: dry=%+v confirmed=%+v published=%d", dry, confirmed, published)
+	}
+	if after := snapshotMigrationTrees(t, fixture); !reflect.DeepEqual(before, after) {
+		t.Errorf("refused migration mutated Project/Vault/private trees:\n before=%v\n after=%v", before, after)
+	}
+}
+
+func newOldV4EvidenceFixture(t *testing.T, transformReview ...func([]byte) []byte) (migrationServiceFixture, memory.GenerationManifest) {
 	t.Helper()
 	fixture, accepted := newMarkdownLockFixture(t)
 	store, err := memorystore.Open(fixture.data, fixture.projectID)
@@ -182,6 +240,12 @@ func newOldV4EvidenceFixture(t *testing.T) (migrationServiceFixture, memory.Gene
 	review, err := strictjson.Encode(accepted.Review)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(transformReview) > 1 {
+		t.Fatal("old-v4 fixture accepts at most one review transform")
+	}
+	if len(transformReview) == 1 {
+		review = transformReview[0](review)
 	}
 	history, err := reviewv2.RenderHistoryV3(fixture.projectID, accepted.Review.Revision, manifest.GenerationID, []reviewv2.Event{})
 	if err != nil {
