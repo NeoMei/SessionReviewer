@@ -35,6 +35,100 @@ function configuredVault(): { vault: V4Vault; root: string } {
 
 afterEach(() => { vi.useRealTimers(); });
 
+describe("candidate discovery read isolation", () => {
+  const candidates = [
+    { label: "Markdown v4", source: fixture("review.md"), projectId: "project-p", name: "project-p", format: "markdown-v4" },
+    { label: "legacy v4 JSON", source: readFileSync(resolve(root, "../review-presentation-v4.valid.json"), "utf8"), projectId: "project-p", name: "project-p", format: "legacy-v4-json" },
+    { label: "legacy v3", source: readFileSync(resolve(root, "../../../review-v3/项目回顾.valid.md"), "utf8"), projectId: "project-0123456789abcdef", name: "SessionReviewer v2" }
+  ];
+  const failedRoot = "Projects/Unreadable";
+  const failedReview = `${failedRoot}/项目回顾.md`;
+  const privateFailure = "DO-NOT-EXPOSE /Users/private/secret.md";
+
+  function failCandidate(vault: V4Vault, source: string, failure: "permission" | "disappearance"): ReturnType<typeof vi.spyOn<V4Vault, "read">> {
+    vault.files.set(failedReview, source);
+    vault.files.set(`${failedRoot}/项目历史.md`, "inventory candidate");
+    const inventory = vault.getMarkdownFiles().sort((a, b) => Number(b.path.startsWith(failedRoot)) - Number(a.path.startsWith(failedRoot)));
+    vi.spyOn(vault, "getMarkdownFiles").mockImplementation(() => {
+      if (failure === "disappearance") vault.files.delete(failedReview);
+      return inventory;
+    });
+    const original = vault.read.bind(vault);
+    return vi.spyOn(vault, "read").mockImplementation(async (path) => {
+      if (path === failedReview && failure === "permission") throw Object.assign(new Error(privateFailure), { code: "EACCES" });
+      return original(path);
+    });
+  }
+
+  for (const failure of ["permission", "disappearance"] as const) {
+    it.each(candidates)(`isolates ${failure} of a $label candidate from a valid unrelated project`, async ({ source }) => {
+      const { vault, root: projectRoot } = configuredVault();
+      const reads = failCandidate(vault, source, failure);
+      const repository = new ProjectRepository(vault);
+
+      await expect(repository.discover()).resolves.toEqual([{ projectId: "project-p", root: projectRoot, name: "project-p", format: "markdown-v4" }]);
+
+      expect(reads.mock.calls.filter(([path]) => path === failedReview)).toHaveLength(1);
+      expect(reads.mock.calls.filter(([path]) => path === `${projectRoot}/项目回顾.md`)).toHaveLength(1);
+      expect(vault.process).not.toHaveBeenCalled();
+    });
+
+    it(`settles the real view startup after candidate ${failure}`, async () => {
+      const { vault } = configuredVault();
+      const reads = failCandidate(vault, candidates[0].source, failure);
+      const view = new ProjectEvolutionView(new WorkspaceLeaf(), new ProjectRepository(vault));
+      Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+      try {
+        await expect(view.onOpen()).resolves.toBeUndefined();
+        expect(view.contentEl.querySelector(".sr-loading")).toBeNull();
+        expect(view.contentEl.textContent).toContain("项目目标夹具");
+        expect(view.contentEl.textContent).not.toContain(privateFailure);
+        expect(reads.mock.calls.filter(([path]) => path === failedReview)).toHaveLength(1);
+        expect(vault.process).not.toHaveBeenCalled();
+      } finally { await view.onClose(); }
+    });
+
+    it(`settles to the existing empty view when all candidates have ${failure}`, async () => {
+      const vault = new V4Vault();
+      const reads = failCandidate(vault, candidates[2].source, failure);
+      const view = new ProjectEvolutionView(new WorkspaceLeaf(), new ProjectRepository(vault));
+      try {
+        await expect(view.onOpen()).resolves.toBeUndefined();
+        expect(view.contentEl.querySelector(".sr-loading")).toBeNull();
+        expect(view.contentEl.textContent).toContain("还没有项目回顾");
+        expect(view.contentEl.textContent).not.toContain(privateFailure);
+        expect(reads).toHaveBeenCalledTimes(1);
+        expect(vault.process).not.toHaveBeenCalled();
+      } finally { await view.onClose(); }
+    });
+  }
+
+  it.each(candidates)("reads a valid $label candidate exactly once across format detection", async ({ source, projectId, name, format }) => {
+    const vault = new V4Vault();
+    vault.files.set("Projects/Valid/项目回顾.md", source);
+    vault.files.set("Projects/Valid/项目历史.md", "inventory candidate");
+    const reads = vi.spyOn(vault, "read");
+
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([{ projectId, root: "Projects/Valid", name, ...(format ? { format } : {}) }]);
+
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves known malformed-v4 fallback and excludes invalid identities from the captured source", async () => {
+    const vault = new V4Vault();
+    const malformed = fixture("review.md").replace("custom_owner: 保留", "custom_owner: [invalid");
+    for (const [projectRoot, source] of [["Projects/Malformed", malformed], ["Projects/Invalid", malformed.replace("project_id: project-p", "project_id: ../invalid")], ["Projects/Unknown", "unrecognized document"]]) {
+      vault.files.set(`${projectRoot}/项目回顾.md`, source);
+      vault.files.set(`${projectRoot}/项目历史.md`, "inventory candidate");
+    }
+    const reads = vi.spyOn(vault, "read");
+
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([{ projectId: "project-p", root: "Projects/Malformed", name: "project-p", format: "markdown-v4" }]);
+
+    expect(reads).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("v4 bounded Vault read diagnostics", () => {
   const documents = [
     "项目回顾.md",
