@@ -33,7 +33,23 @@ valid Go cache, demonstrating its missing coverage rather than refuting the
 defects. New regression-first repair, independent review and the complete local
 gate are in progress; no completion or integration is implied by this approval.
 
-Latest Task 17 checkpoint: source `9b0ab71`, second task fix round in progress.
+Latest Task 17 checkpoint: source `c095253`, fourth task fix round in progress.
+The second round (`fea199e`) corrected surviving-comment/deletion composition
+and no-space comments. Its two new findings (plain `#` text mistaken for a
+comment and a deleted value's comment retained) were corrected by `c095253`'s
+separate value, lexical-comment and removal spans. Scoped round 3 confirmed
+both closed; the controller reproduced the correct scalar and comment removal.
+Affected syncdoc/syncproject/publication tests passed in 0.629s/51.868s/121.753s.
+
+One new Important composition remains: deleting a final separator-comment
+entry while adding a new field removes the required separator. Both input
+documents parse, but the real semantic merge refuses with
+`markdown_format_invalid`; no publication was attempted. Round 4 is assigned
+to a fresh higher-tier implementer, with exact-byte and authenticated lifecycle
+regressions required. The final ordered seven-command gate remains unstarted;
+this candidate is not approved for integration or declared debt-free.
+
+Earlier Task 17 checkpoint at source `9b0ab71` (historical evidence):
 Original N1/N2 reproductions now pass after `418498a`/`13f38c8`; task review
 found quoted `,#` token ambiguity, fixed by validated quoted-node spans in
 `ff1e397`. Its disclosed nested-value separator-comment duplication and edited
