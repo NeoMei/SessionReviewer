@@ -7,7 +7,7 @@
   "required": ["schema_version", "provider", "session_id", "source_identity", "started_at", "ended_at", "frozen_boundary", "availability", "usage", "project_ids"],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
-    "provider": { "type": "string", "const": "codex" },
+    "provider": { "$ref": "#/$defs/safe_id" },
     "session_id": { "$ref": "#/$defs/safe_id" },
     "source_identity": { "$ref": "#/$defs/safe_id" },
     "started_at": { "$ref": "#/$defs/timestamp" },

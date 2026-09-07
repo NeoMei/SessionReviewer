@@ -112,7 +112,7 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "digest"],
       "properties": {
-        "provider": { "type": "string", "const": "codex" },
+        "provider": { "$ref": "#/$defs/safe_id" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "digest": { "$ref": "#/$defs/digest" }
       }
@@ -147,7 +147,7 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "usage_record_digest", "shared"],
       "properties": {
-        "provider": { "type": "string", "const": "codex" },
+        "provider": { "$ref": "#/$defs/safe_id" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "usage_record_digest": { "$ref": "#/$defs/digest" },
         "shared": { "type": "boolean" }

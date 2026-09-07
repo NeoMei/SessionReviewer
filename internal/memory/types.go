@@ -1067,9 +1067,6 @@ func validateSourceRef(value SourceRef) error {
 }
 
 func validateSourceIdentity(provider, sessionID, sourceIdentity string) error {
-	if provider != "codex" {
-		return fmt.Errorf("unsupported provider %q for private schema v1", provider)
-	}
 	if !safeIDPattern.MatchString(provider) || !safeIDPattern.MatchString(sessionID) || !safeIDPattern.MatchString(sourceIdentity) {
 		return errors.New("invalid provider/session/source identity")
 	}
@@ -1077,11 +1074,11 @@ func validateSourceIdentity(provider, sessionID, sourceIdentity string) error {
 }
 
 func validateSourceLocation(provider string, value SourceLocation) error {
-	if provider != "codex" {
-		return fmt.Errorf("unsupported provider %q for source location v1", provider)
+	if !safeIDPattern.MatchString(provider) {
+		return errors.New("invalid provider for source location v1")
 	}
 	if value.Kind != SourceLocationJSONL || value.JSONL == nil {
-		return errors.New("Codex v1 requires an exact JSONL source location")
+		return errors.New("private schema v1 requires an exact JSONL source location")
 	}
 	if value.JSONL.Line < 0 || value.JSONL.Line > maxSafeInteger || value.JSONL.ByteOffset < 0 || value.JSONL.ByteOffset > maxSafeInteger {
 		return errors.New("invalid JSONL source coordinates")
@@ -1266,7 +1263,7 @@ func validateSessionDependencies(values []SessionViewDependency, maximum int, ch
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid SessionView dependency")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -1291,7 +1288,7 @@ func validateLineageDependencies(values []SessionLineageDependency, sessions []S
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid Session lineage dependency")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -1328,7 +1325,7 @@ func validateAssociatedUsage(values []AssociatedUsage, checkpoints ...func() err
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if value.Provider != "codex" || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
+		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
 			return errors.New("invalid associated usage row")
 		}
 		key := value.Provider + "\x00" + value.SessionID

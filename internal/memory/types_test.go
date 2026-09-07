@@ -191,7 +191,7 @@ func TestSourceRecordOwnsOneValidatedUsageAtFrozenBoundary(t *testing.T) {
 	}
 }
 
-func TestCodexV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
+func TestProviderNeutralV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
 	t.Run("wire envelope has no flat coordinates", func(t *testing.T) {
 		body, err := json.Marshal(validObservation(validObservationKey(), "adapter-1", map[string]string{"exit_code": "0"}).Ref)
 		if err != nil {
@@ -215,15 +215,21 @@ func TestCodexV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
 	})
 
 	for name, mutate := range map[string]func(*ObservationRevision){
-		"unsupported provider": func(value *ObservationRevision) {
-			value.Key.Provider = "claude"
-			value.Ref.Provider = "claude"
+		"invalid provider": func(value *ObservationRevision) {
+			value.Key.Provider = "Claude"
+			value.Ref.Provider = "Claude"
 		},
 		"wrong discriminator": func(value *ObservationRevision) {
 			value.Ref.Location.Kind = "stream"
 		},
 		"missing JSONL payload": func(value *ObservationRevision) {
 			value.Ref.Location.JSONL = nil
+		},
+		"negative JSONL line": func(value *ObservationRevision) {
+			value.Ref.Location.JSONL.Line = -1
+		},
+		"oversized JSONL byte offset": func(value *ObservationRevision) {
+			value.Ref.Location.JSONL.ByteOffset = maxSafeInteger + 1
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -238,13 +244,19 @@ func TestCodexV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
 
 	t.Run("observation schema mismatches", func(t *testing.T) {
 		for _, mutate := range []func(map[string]any){
-			func(object map[string]any) { object["key"].(map[string]any)["provider"] = "claude" },
-			func(object map[string]any) { object["source_ref"].(map[string]any)["provider"] = "claude" },
+			func(object map[string]any) { object["key"].(map[string]any)["provider"] = "Claude" },
+			func(object map[string]any) { object["source_ref"].(map[string]any)["provider"] = "Claude" },
 			func(object map[string]any) {
 				object["source_ref"].(map[string]any)["source_location"].(map[string]any)["kind"] = "stream"
 			},
 			func(object map[string]any) {
 				delete(object["source_ref"].(map[string]any)["source_location"].(map[string]any), "jsonl")
+			},
+			func(object map[string]any) {
+				object["source_ref"].(map[string]any)["source_location"].(map[string]any)["jsonl"].(map[string]any)["line"] = float64(-1)
+			},
+			func(object map[string]any) {
+				object["source_ref"].(map[string]any)["source_location"].(map[string]any)["jsonl"].(map[string]any)["byte_offset"] = float64(maxSafeInteger + 1)
 			},
 		} {
 			assertObservationSchemaRejectsMutation(t, mutate)
@@ -270,19 +282,19 @@ func TestCodexV1UsesExactDiscriminatedJSONLSourceLocations(t *testing.T) {
 		}
 	})
 
-	t.Run("derived provider references do not claim another adapter", func(t *testing.T) {
+	t.Run("derived provider references reject malformed identities", func(t *testing.T) {
 		view := validProjectView()
-		view.SessionViewDependencies[0].Provider = "claude"
-		view.AssociatedUsage[0].Provider = "claude"
+		view.SessionViewDependencies[0].Provider = "Claude"
+		view.AssociatedUsage[0].Provider = "Claude"
 		view.Digest = mustProjectViewDigest(view)
 		if err := ValidateProjectView(view); err == nil {
-			t.Fatal("ProjectView accepted a provider without a v1 adapter")
+			t.Fatal("ProjectView accepted malformed provider identities")
 		}
 
 		manifest := validGenerationManifest()
-		manifest.SessionViews[0].Provider = "claude"
+		manifest.SessionViews[0].Provider = "Claude"
 		if err := ValidateGenerationManifest(manifest); err == nil {
-			t.Fatal("GenerationManifest accepted a provider without a v1 adapter")
+			t.Fatal("GenerationManifest accepted a malformed provider identity")
 		}
 	})
 }

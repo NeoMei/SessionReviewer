@@ -51,7 +51,7 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "source_identity", "sequence", "project_id", "kind", "subject"],
       "properties": {
-        "provider": { "type": "string", "const": "codex" },
+        "provider": { "$ref": "#/$defs/safe_id" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
         "sequence": { "$ref": "#/$defs/nonnegative_integer" },
@@ -65,7 +65,7 @@
       "additionalProperties": false,
       "required": ["provider", "session_id", "source_identity", "source_location", "source_hash"],
       "properties": {
-        "provider": { "type": "string", "const": "codex" },
+        "provider": { "$ref": "#/$defs/safe_id" },
         "session_id": { "$ref": "#/$defs/safe_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
         "source_location": { "$ref": "#/$defs/source_location" },
