@@ -14,6 +14,14 @@ export interface ScanRecordsOptions {
 
 export type ScanRecordsElement = HTMLElement & { dispose: () => void };
 type EventNavigation = { cursor?: string; anchor?: number };
+type SessionHandlers = {
+  onQuery: (value: string) => void;
+  onPage: (value: number) => void;
+  onSelect: (session: SessionIndexEntryV1) => void;
+};
+type SessionRailElement = HTMLElement & {
+  update: (sessions: SessionIndexEntryV1[], selected: SessionIndexEntryV1 | undefined, query: string, page: number) => void;
+};
 
 export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOptions = {}): ScanRecordsElement {
   const root = element("section", { className: "sr-scan-records", attrs: { "aria-label": "扫描记录" } }) as ScanRecordsElement;
@@ -28,6 +36,13 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let requestEpoch = 0;
   let disposed = false;
   const cache = options.eventPageCache ?? new Map<string, SessionEventPageV1>();
+  const heading = element("div", { className: "sr-scan-heading" }, [
+    element("h2", { text: "扫描记录" }),
+    element("p", { text: presentIndexCoverage(index) })
+  ]);
+  const browser = element("div", { className: "sr-scan-browser" });
+  let eventArea: HTMLElement | undefined;
+  let sessionRail: SessionRailElement;
 
   const eligible = (session: SessionIndexEntryV1 | undefined): session is SessionIndexEntryV1 =>
     Boolean(session && session.source_availability === "available" && session.session_view_digest && session.indexed_event_count > 0);
@@ -88,21 +103,14 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
 
   const draw = (): void => {
     if (disposed) return;
-    const heading = element("div", { className: "sr-scan-heading" }, [
-      element("h2", { text: "扫描记录" }),
-      element("p", { text: presentIndexCoverage(index) })
-    ]);
-    const browser = element("div", { className: "sr-scan-browser" });
-    browser.append(renderSessions(index.sessions, selected, query, sessionPage, {
-      onQuery: (value) => { query = value; sessionPage = 0; draw(); },
-      onPage: (value) => { sessionPage = value; draw(); },
-      onSelect: selectSession
-    }));
-    browser.append(renderEventArea(selected, eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
+    sessionRail.update(index.sessions, selected, query, sessionPage);
+    const nextEventArea = renderEventArea(selected, eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
       onEvent: (value) => { selectedEvent = value; draw(); },
       onLoad: (navigation) => { void load(navigation); }
-    }));
-    root.replaceChildren(heading, browser);
+    });
+    if (eventArea) eventArea.replaceWith(nextEventArea);
+    else browser.append(nextEventArea);
+    eventArea = nextEventArea;
   };
 
   root.dispose = () => {
@@ -111,52 +119,55 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     if (!options.eventPageCache) cache.clear();
     root.replaceChildren();
   };
+  sessionRail = renderSessions({
+    onQuery: (value) => { query = value; sessionPage = 0; draw(); },
+    onPage: (value) => { sessionPage = value; draw(); },
+    onSelect: selectSession
+  });
+  browser.append(sessionRail);
+  root.append(heading, browser);
   draw();
   void load();
   return root;
 }
 
-function renderSessions(
-  sessions: SessionIndexEntryV1[],
-  selected: SessionIndexEntryV1 | undefined,
-  query: string,
-  page: number,
-  handlers: { onQuery: (value: string) => void; onPage: (value: number) => void; onSelect: (session: SessionIndexEntryV1) => void }
-): HTMLElement {
-  const rail = element("aside", { className: "sr-session-rail", attrs: { "aria-label": "扫描 Session" } });
-  const search = element("input", { attrs: { type: "search", "aria-label": "搜索 Session", placeholder: "搜索 provider 或 Session ID", value: query } });
+function renderSessions(handlers: SessionHandlers): SessionRailElement {
+  const rail = element("aside", { className: "sr-session-rail", attrs: { "aria-label": "扫描 Session" } }) as SessionRailElement;
+  const search = element("input", { attrs: { type: "search", "aria-label": "搜索 Session", placeholder: "搜索 provider 或 Session ID" } });
   search.addEventListener("input", () => handlers.onQuery(search.value));
-  rail.append(search);
-  const normalized = query.trim().toLocaleLowerCase();
-  const filtered = normalized
-    ? sessions.filter((session) => `${session.provider} ${session.session_id}`.toLocaleLowerCase().includes(normalized))
-    : sessions;
-  const pageCount = Math.max(1, Math.ceil(filtered.length / SESSION_PAGE_SIZE));
-  const safePage = Math.min(page, pageCount - 1);
-  const shown = filtered.slice(safePage * SESSION_PAGE_SIZE, (safePage + 1) * SESSION_PAGE_SIZE);
   const list = element("div", { className: "sr-session-list" });
-  for (const session of shown) {
-    const node = button("", {
-      "data-session-id": session.session_id,
-      "aria-selected": String(sessionIdentity(session) === sessionIdentity(selected))
-    });
-    const label = element("strong", { className: "sr-session-label", text: `${session.provider} / ${session.session_id}` });
-    label.title = `${session.provider} / ${session.session_id}`;
-    node.append(label, element("span", { className: "sr-session-state", text: presentProcessingState(session.processing_state) }));
-    node.addEventListener("click", () => handlers.onSelect(session));
-    list.append(node);
-  }
-  if (shown.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的 Session。" }));
-  rail.append(list);
   const navigation = element("div", { className: "sr-session-navigation" });
-  const previous = button("上一页", { "data-action": "previous-session-page" });
-  previous.disabled = safePage === 0;
-  previous.addEventListener("click", () => handlers.onPage(safePage - 1));
-  const next = button("下一页", { "data-action": "next-session-page" });
-  next.disabled = safePage + 1 >= pageCount;
-  next.addEventListener("click", () => handlers.onPage(safePage + 1));
-  navigation.append(previous, element("span", { text: `${safePage + 1} / ${pageCount}` }), next);
-  rail.append(navigation);
+  rail.append(search, list, navigation);
+  rail.update = (sessions, selected, query, page) => {
+    if (search.value !== query) search.value = query;
+    const normalized = query.trim().toLocaleLowerCase();
+    const filtered = normalized
+      ? sessions.filter((session) => `${session.provider} ${session.session_id}`.toLocaleLowerCase().includes(normalized))
+      : sessions;
+    const pageCount = Math.max(1, Math.ceil(filtered.length / SESSION_PAGE_SIZE));
+    const safePage = Math.min(page, pageCount - 1);
+    const shown = filtered.slice(safePage * SESSION_PAGE_SIZE, (safePage + 1) * SESSION_PAGE_SIZE);
+    list.replaceChildren();
+    for (const session of shown) {
+      const node = button("", {
+        "data-session-id": session.session_id,
+        "aria-selected": String(sessionIdentity(session) === sessionIdentity(selected))
+      });
+      const label = element("strong", { className: "sr-session-label", text: `${session.provider} / ${session.session_id}` });
+      label.title = `${session.provider} / ${session.session_id}`;
+      node.append(label, element("span", { className: "sr-session-state", text: presentProcessingState(session.processing_state) }));
+      node.addEventListener("click", () => handlers.onSelect(session));
+      list.append(node);
+    }
+    if (shown.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的 Session。" }));
+    const previous = button("上一页", { "data-action": "previous-session-page" });
+    previous.disabled = safePage === 0;
+    previous.addEventListener("click", () => handlers.onPage(safePage - 1));
+    const next = button("下一页", { "data-action": "next-session-page" });
+    next.disabled = safePage + 1 >= pageCount;
+    next.addEventListener("click", () => handlers.onPage(safePage + 1));
+    navigation.replaceChildren(previous, element("span", { text: `${safePage + 1} / ${pageCount}` }), next);
+  };
   return rail;
 }
 

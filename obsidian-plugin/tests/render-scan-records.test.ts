@@ -198,6 +198,34 @@ describe("v4 scanned Session renderer", () => {
     expect(root.textContent).toContain("session-03");
   });
 
+  it("preserves the connected focused search input while typing and when an event request resolves", async () => {
+    const pending = deferred<SessionEventPageV1>();
+    const sessions = [sessionFixture(), sessionFixture({ session_id: "session-2" })];
+    const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { loadSessionEvents: () => pending.promise });
+    document.body.append(root);
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.focus();
+
+    search.value = "s";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(search.isConnected).toBe(true);
+    expect(document.activeElement).toBe(search);
+    expect(root.querySelector('[aria-label="搜索 Session"]')).toBe(search);
+
+    search.value = "session-2";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(search.isConnected).toBe(true);
+    expect(document.activeElement).toBe(search);
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+
+    pending.resolve(eventPage());
+    await settle();
+    expect(search.isConnected).toBe(true);
+    expect(document.activeElement).toBe(search);
+    expect(root.querySelector('[aria-label="搜索 Session"]')).toBe(search);
+    root.remove();
+  });
+
   it("states unavailable sources, empty excerpts and absent responses without inventing roles", async () => {
     const loadSessionEvents = vi.fn().mockResolvedValue(eventPage({
       items: [{ kind: "artifact", excerpt: "", revision_id: "revision-1", sequence: 10, occurred_at: "2026-09-06T16:00:00Z" }]
