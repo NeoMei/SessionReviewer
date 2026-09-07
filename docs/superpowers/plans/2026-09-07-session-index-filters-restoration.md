@@ -29,6 +29,8 @@
 - Modify `obsidian-plugin/tests/render-scan-records.test.ts`, `v4-shell.test.ts` and state-related host tests only as required; do not weaken existing behavioral assertions.
 - Reuse summary UI and conversation components unchanged. Do not refactor their loading code into filters.
 
+**Preflight clarification (2026-09-07):** A selected eligible Session must remain visible: filter changes reset to page0 when selecting a fallback, but if the retained eligible selection lies on another filtered page, locate that page instead. This takes precedence over the unconditional page0 wording below. Live invalid/backwards dates display a polite error and preserve the previous valid applied filter/selection; invalid persisted dates normalize to defaults. Reuse the v4 pane container introduced by d57b4e3 for responsive filter controls, preserving its no-clipping behavior.
+
 **Interfaces:**
 
 ```ts
