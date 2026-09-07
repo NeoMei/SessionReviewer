@@ -135,10 +135,10 @@ function renderHeader(descriptor: ProjectDescriptor, presentation: ReviewPresent
   const header = element("header", { className: "sr-v4-header" }, [
     element("div", { className: "sr-v4-title" }, [element("h1", { text: descriptor.name }), element("span", { className: "sr-v4-status", text: options.snapshotStatus ?? "只读" }), renderCoverage(index)]),
     element("div", { className: "sr-v4-state-grid" }, [
-      stateField("项目目标", presentation.current_state.goal, () => open(`${descriptor.root}/项目回顾.md`)),
-      stateField("当前阶段", presentation.current_state.stage, () => open(`${descriptor.root}/项目回顾.md`)),
-      stateField("当前状态", presentation.current_state.status, () => open(`${descriptor.root}/项目回顾.md`), status.label),
-      stateField("下一步", presentation.current_state.next_action, () => open(`${descriptor.root}/项目回顾.md`))
+      stateField("goal", "项目目标", presentation.current_state.goal, () => open(`${descriptor.root}/项目回顾.md`)),
+      stateField("stage", "当前阶段", presentation.current_state.stage, () => open(`${descriptor.root}/项目回顾.md`)),
+      stateField("status", "当前状态", presentation.current_state.status, () => open(`${descriptor.root}/项目回顾.md`), status.label),
+      stateField("next_action", "下一步", presentation.current_state.next_action, () => open(`${descriptor.root}/项目回顾.md`))
     ]),
     element("div", { className: "sr-v4-support" }, [
       renderAttention(presentation),
@@ -155,8 +155,25 @@ function renderCoverage(index: SessionIndexV1 | undefined): HTMLElement {
   return element("span", { className: "sr-v4-coverage", text: `Sessions ${value.total} · 完整 ${value.complete} · 部分 ${value.partial} · 异常 ${value.error} · 未处理 ${value.unprocessed} · 来源不可用 ${value.source_unavailable}` });
 }
 
-function stateField(label: string, value: string, open: () => void, shown = value): HTMLElement {
-  const wrapper = element("div", { className: "sr-v4-state-field" }, [element("span", { text: label })]);
+function stateField(key: string, label: string, value: string, open: () => void, shown = value): HTMLElement {
+  const normalized = shown.trim();
+  const isLong = normalized.length > 72 || normalized.split(/\r?\n/).length > 2;
+  if (value.trim() && isLong) {
+    const details = element("details", { className: "sr-v4-state-field sr-v4-state-expanded", attrs: { "data-v4-state-field": key } });
+    const summary = element("summary", {}, [
+      element("span", { text: label }),
+      element("strong", { text: boundedPreview(normalized) }),
+      element("em", { text: "展开全文" })
+    ]);
+    summary.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      details.open = !details.open;
+    });
+    details.append(summary, element("p", { className: "sr-v4-state-full", text: shown }));
+    return details;
+  }
+  const wrapper = element("div", { className: "sr-v4-state-field", attrs: { "data-v4-state-field": key } }, [element("span", { text: label })]);
   if (value.trim()) wrapper.append(element("strong", { text: shown }));
   else {
     const action = button("未填写 · 打开 Markdown", { "data-v4-open": "review" });
@@ -164,6 +181,11 @@ function stateField(label: string, value: string, open: () => void, shown = valu
     wrapper.append(action);
   }
   return wrapper;
+}
+
+function boundedPreview(value: string): string {
+  const compact = value.replace(/\s+/g, " ");
+  return compact.length > 72 ? `${compact.slice(0, 72).trimEnd()}…` : compact;
 }
 
 function renderAttention(presentation: ReviewPresentationV4): HTMLElement {

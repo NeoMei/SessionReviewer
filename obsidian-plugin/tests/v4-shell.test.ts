@@ -61,6 +61,31 @@ describe("v4 five-tab shell", () => {
     expect(root.textContent?.match(/公开文件校验不等于私有接受证明/g)).toHaveLength(1);
   });
 
+  it("marks long accepted header fields as bounded previews and exposes their full text by keyboard", () => {
+    const snapshot = v4SnapshotFixture();
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+    const longGoal = `长目标 ${"恢复可读且可验证的项目上下文。".repeat(12)}`;
+    const longNext = `长下一步 ${"先完成测试再进行真实环境验收。".repeat(12)}`;
+    snapshot.state.value.presentation.current_state.goal = longGoal;
+    snapshot.state.value.presentation.current_state.next_action = longNext;
+    const root = renderMarkdownV4View(snapshot, vi.fn());
+    document.body.append(root);
+
+    const goal = root.querySelector<HTMLDetailsElement>('[data-v4-state-field="goal"]');
+    const next = root.querySelector<HTMLDetailsElement>('[data-v4-state-field="next_action"]');
+    expect(goal).not.toBeNull();
+    expect(next).not.toBeNull();
+    expect(goal!.querySelector("summary")?.textContent).toContain("展开全文");
+    expect(next!.querySelector("summary")?.textContent).toContain("展开全文");
+    const nextSummary = next!.querySelector<HTMLElement>("summary")!;
+    nextSummary.focus();
+    nextSummary.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    expect(next!.open).toBe(true);
+    expect(next!.querySelector(".sr-v4-state-full")?.textContent).toBe(longNext);
+    expect(document.activeElement).toBe(nextSummary);
+    root.remove();
+  });
+
   it("supports roving focus and selection with ArrowLeft, ArrowRight, Home and End", () => {
     const root = renderMarkdownV4View(v4SnapshotFixture(), vi.fn());
     document.body.append(root);

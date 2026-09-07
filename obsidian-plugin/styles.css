@@ -184,8 +184,14 @@
 .sr-v4-state-grid { display: grid; gap: 8px; grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .sr-v4-state-field { background: var(--background-secondary); border: 1px solid var(--sr-border); border-radius: 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; padding: 8px 10px; }
 .sr-v4-state-field > span { color: var(--sr-muted); font-size: 10px; }
-.sr-v4-state-field > strong { font-size: 12px; line-height: 1.4; max-height: 3.1em; overflow: hidden; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sr-v4-state-field > strong { font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
 .sr-v4-state-field button { font-size: 11px; height: auto; justify-content: flex-start; padding: 2px 0; white-space: normal; }
+.sr-v4-state-expanded { display: block; }
+.sr-v4-state-expanded summary { cursor: pointer; display: grid; gap: 3px; list-style-position: inside; }
+.sr-v4-state-expanded summary > span { color: var(--sr-muted); font-size: 10px; }
+.sr-v4-state-expanded summary > strong { font-size: 12px; font-style: normal; line-height: 1.4; overflow-wrap: anywhere; }
+.sr-v4-state-expanded summary > em { color: var(--text-accent); font-size: 10px; font-style: normal; }
+.sr-v4-state-full { border-top: 1px solid var(--sr-border); font-size: 12px; margin: 8px 0 0; overflow-wrap: anywhere; padding-top: 8px; white-space: pre-wrap; }
 .sr-v4-support { align-items: start; display: grid; gap: 8px 14px; grid-template-columns: auto minmax(220px, 1fr) auto; }
 .sr-v4-attention, .sr-v4-provenance { border-top: 1px solid var(--sr-border); padding-top: 8px; }
 .sr-v4-attention summary, .sr-v4-provenance summary { cursor: pointer; font-size: 11px; font-weight: 700; }
