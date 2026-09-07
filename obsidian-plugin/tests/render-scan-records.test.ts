@@ -418,6 +418,41 @@ describe("v4 scanned Session renderer", () => {
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(3);
   });
 
+  it("clears nonempty select controls in sync with the applied and persisted filter state", () => {
+    const sessions = [
+      sessionFixture({ provider: "codex", session_id: "codex-complete", processing_state: "complete", state_reason_codes: [], indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "claude", session_id: "claude-error", processing_state: "error", source_availability: "unavailable", state_reason_codes: ["source_unavailable"], indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "opencode", session_id: "opencode-partial", processing_state: "partial", indexed_event_count: 0, session_view_digest: null })
+    ];
+    const saveStatePatch = vi.fn<(patch: V4ViewStatePatch) => void>();
+    const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { cliUnavailable: true, saveStatePatch });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    const provider = root.querySelector<HTMLSelectElement>('[aria-label="筛选 Provider"]')!;
+    const processing = root.querySelector<HTMLSelectElement>('[aria-label="筛选处理状态"]')!;
+    const availability = root.querySelector<HTMLSelectElement>('[aria-label="筛选来源可用性"]')!;
+
+    provider.value = "claude";
+    provider.dispatchEvent(new Event("change", { bubbles: true }));
+    processing.value = "error";
+    processing.dispatchEvent(new Event("change", { bubbles: true }));
+    availability.value = "unavailable";
+    availability.dispatchEvent(new Event("change", { bubbles: true }));
+    expect([...root.querySelectorAll<HTMLElement>("[data-session-id]")].map((node) => node.dataset.sessionId)).toEqual(["claude-error"]);
+
+    root.querySelector<HTMLButtonElement>('[data-action="clear-session-filters"]')!.click();
+
+    expect(provider.value).toBe("");
+    expect(processing.value).toBe("");
+    expect(availability.value).toBe("");
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(3);
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("claude / claude-error");
+    expect(saveStatePatch.mock.lastCall?.[0].sessionBrowser).toEqual({
+      query: "", provider: null, processingState: null, sourceAvailability: null,
+      dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0,
+      selected: { provider: "claude", sessionId: "claude-error" }
+    });
+  });
+
   it("restores a namespaced same-ID selection on its filtered page after leaving Sessions", () => {
     const sessions = Array.from({ length: 60 }, (_value, index) => sessionFixture({
       provider: index === 35 ? "claude" : "codex",

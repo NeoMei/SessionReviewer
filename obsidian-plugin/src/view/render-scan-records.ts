@@ -308,10 +308,9 @@ function renderSessions(handlers: SessionHandlers): SessionRailElement {
   rail.update = (sessions, filtered, selected, state, error) => {
     if (search.value !== state.query) search.value = state.query;
     const providerValues = [...new Set(sessions.map((session) => session.provider))];
-    const wanted = provider.control.value;
     provider.control.replaceChildren(element("option", { text: "全部 Provider", attrs: { value: "" } }));
     for (const value of providerValues) provider.control.append(element("option", { text: value, attrs: { value } }));
-    provider.control.value = state.provider ?? (wanted && providerValues.includes(wanted) ? wanted : "");
+    provider.control.value = state.provider ?? "";
     processing.control.value = state.processingState ?? "";
     availability.control.value = state.sourceAvailability ?? "";
     dateFrom.control.value = state.dateFrom ?? "";
