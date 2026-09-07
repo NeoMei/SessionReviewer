@@ -6,18 +6,21 @@ import { ReviewEditor } from "./data/editor";
 import { ObsidianVaultPort } from "./data/vault-port";
 import { ProjectEvolutionView } from "./view/project-view";
 import { defaultViewState, type ViewState } from "./view/render-shell";
+import { normalizeV4ViewStates, type V4ViewStates } from "./state/v4-view-state";
 
 export { VIEW_TYPE } from "./constants";
 
 export default class SessionReviewerPlugin extends Plugin {
   private viewState: ViewState = defaultViewState();
+  private v4ViewStates: V4ViewStates = {};
   private runtime: DiscoveredRuntime | undefined;
   private runtimeResolver: RuntimeResolver = discoverRuntime;
   private legacyPaths: { cliPath?: string } = {};
 
   async onload(): Promise<void> {
-    const stored = await this.loadData() as { viewState?: Partial<ViewState>; cliPath?: unknown } | null;
+    const stored = await this.loadData() as { viewState?: Partial<ViewState>; v4ViewStates?: unknown; cliPath?: unknown } | null;
     this.viewState = { ...defaultViewState(), ...(stored?.viewState ?? {}) };
+    this.v4ViewStates = normalizeV4ViewStates(stored?.v4ViewStates);
     this.legacyPaths = {
       ...(typeof stored?.cliPath === "string" ? { cliPath: stored.cliPath } : {})
     };
@@ -26,14 +29,17 @@ export default class SessionReviewerPlugin extends Plugin {
     });
     if (this.runtime && this.legacyPaths.cliPath) {
       this.legacyPaths = {};
-      await this.saveData({ viewState: this.viewState });
+      await this.saveData({ viewState: this.viewState, v4ViewStates: this.v4ViewStates });
     }
     const vault = new ObsidianVaultPort(this.app);
     const repository = new ProjectRepository(vault);
     const editor = new ReviewEditor(vault);
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.runtime?.runner, this.viewState, async (viewState) => {
       this.viewState = viewState;
-      await this.saveData({ viewState, ...this.legacyPaths });
+      await this.saveData({ viewState, v4ViewStates: this.v4ViewStates, ...this.legacyPaths });
+    }, this.v4ViewStates, async (v4ViewStates) => {
+      this.v4ViewStates = v4ViewStates;
+      await this.saveData({ viewState: this.viewState, v4ViewStates, ...this.legacyPaths });
     }));
     this.addRibbonIcon("history", "打开项目脉络", () => void this.activateView());
     this.addCommand({

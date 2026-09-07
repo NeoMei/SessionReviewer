@@ -35,7 +35,7 @@ describe("plugin lifecycle", () => {
 
     expect(runtimeResolver).toHaveBeenCalledWith({ legacyCliPath: "/bin/sr" });
     expect(addSettingTab).not.toHaveBeenCalled();
-    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything() as never });
+    expect(saveData).toHaveBeenLastCalledWith({ viewState: expect.anything() as never, v4ViewStates: {} });
   });
 
   it("cold-starts without a runtime and still opens public-valid Markdown natively in a read-only view", async () => {
@@ -82,10 +82,11 @@ describe("plugin lifecycle", () => {
         return false;
       }
     }));
+    const saveData = vi.fn();
 
     Object.assign(plugin, {
       loadData: vi.fn().mockResolvedValue({ cliPath: "/stale/session-reviewer" }),
-      saveData: vi.fn(),
+      saveData,
       runtimeResolver,
       registerView: vi.fn((_type: string, creator: (leaf: WorkspaceLeaf) => ProjectEvolutionView) => { createView = creator; }),
       addRibbonIcon: vi.fn(),
@@ -104,6 +105,11 @@ describe("plugin lifecycle", () => {
       expect(view.contentEl.textContent).toContain("公开文件校验不等于私有接受证明");
       expect(view.contentEl.textContent).toContain("CLI 不可用：只能原生阅读或编辑 Markdown，不能验证或同步");
       expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4'], .sr-review-action")).toBeNull();
+      view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="usage"]')!.click();
+      await Promise.resolve();
+      expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
+        v4ViewStates: { "project-p": { projectId: "project-p", view: "usage", selectedMilestoneId: null, selectedProblemId: null } }
+      }));
       const nativeOpenActions = [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")]
         .filter((button) => button.textContent?.startsWith("打开项目"));
       expect(nativeOpenActions.map((button) => button.textContent)).toEqual(["打开项目回顾", "打开项目历史"]);

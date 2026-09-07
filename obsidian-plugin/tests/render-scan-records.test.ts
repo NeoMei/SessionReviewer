@@ -2,7 +2,7 @@ import { WorkspaceLeaf } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
 import type { CliRunner, ConversationRequest } from "../src/cli/runner";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
-import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../src/contracts/review-v4";
+import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../src/contracts/review-v4";
 import type { Snapshot } from "../src/data/repository";
 import { renderMarkdownV4View } from "../src/view/presentation";
 import { ProjectEvolutionView } from "../src/view/project-view";
@@ -10,6 +10,20 @@ import { defaultViewState } from "../src/view/render-shell";
 
 const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
 const PROJECT_DIGEST = `sha256:${"2".repeat(64)}`;
+
+const emptyPresentation: ReviewPresentationV4 = {
+  schema_version: 4, minimum_reader_version: "0.4.0", minimum_writer_version: "0.4.0", project_id: "project-p", generation_id: "generation-1",
+  project_view_digest: PROJECT_DIGEST, revision: 1,
+  current_state: { goal: "goal", stage: "stage", status: "status", next_action: "next", last_verification: "" },
+  timeline: [], decisions: [], risks: [], open_loops: [], problem_map_revision: 0, problem_root_ids: [], problem_nodes: [], chain_dependencies: [], human_patches: [], orphan_patches: [], generated_baselines: []
+};
+
+const emptyLedger: MachineLedgerV4 = {
+  schema_version: 4, minimum_reader_version: "0.4.0", minimum_writer_version: "0.4.0", project_id: "project-p", generation_id: "generation-1",
+  project_view_digest: PROJECT_DIGEST, accepted_revision: 1, review_sha256: "0".repeat(64), history_sha256: "0".repeat(64),
+  accounting: { total_duration_ms: 0, total_tokens: 0, total_cost_usd: null, models: [] }, sessions: [], human_patches: [], orphan_patches: [], generated_baselines: [], pricing_snapshots: [], current_pricing_snapshot_ids: [],
+  sync_hashes: { review_sha256: "0".repeat(64), history_sha256: "0".repeat(64), ledger_sha256: "0".repeat(64), session_index_digest: `sha256:${"0".repeat(64)}` }
+};
 
 function sessionFixture(overrides: Partial<SessionIndexEntryV1> = {}): SessionIndexEntryV1 {
   return {
@@ -73,11 +87,9 @@ function snapshot(index = indexFixture()): Extract<Snapshot, { kind: "markdown-v
       kind: "public_valid",
       index,
       value: {
-        presentation: {
-          current_state: { goal: "goal", stage: "stage", status: "status", next_action: "next", last_verification: "" },
-          timeline: []
-        }
-      } as never
+        presentation: { ...emptyPresentation, project_id: index.project_id }, changedFields: [], changedDocuments: [], fields: []
+      },
+      ledger: { ...emptyLedger, project_id: index.project_id }
     },
     loadedAt: 1
   };
@@ -157,6 +169,7 @@ describe("v4 scanned Session renderer", () => {
         next_cursor: null
       }));
     const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
 
     expect(root.querySelector('[aria-label="扫描 Session"]')).not.toBeNull();
     expect(root.textContent).toContain("部分");
@@ -184,6 +197,7 @@ describe("v4 scanned Session renderer", () => {
       .mockRejectedValueOnce(new Error("第二页暂时不可用"))
       .mockResolvedValueOnce(secondPage);
     const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
 
     root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')?.click();
@@ -208,6 +222,7 @@ describe("v4 scanned Session renderer", () => {
       session_view_digest: null
     }));
     const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
 
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(25);
     expect(root.textContent).not.toContain("session-26");
@@ -224,6 +239,7 @@ describe("v4 scanned Session renderer", () => {
     const pending = deferred<SessionEventPageV1>();
     const sessions = [sessionFixture(), sessionFixture({ session_id: "session-2" })];
     const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { loadSessionEvents: () => pending.promise });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     document.body.append(root);
     const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
     search.focus();
@@ -253,6 +269,7 @@ describe("v4 scanned Session renderer", () => {
       items: [{ kind: "artifact", excerpt: "", revision_id: "revision-1", sequence: 10, occurred_at: "2026-09-06T16:00:00Z" }]
     }));
     const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
 
     expect(root.textContent).toContain("该索引事件没有可用摘录");
@@ -269,6 +286,7 @@ describe("v4 scanned Session renderer", () => {
       session_view_digest: null
     });
     const unavailableRoot = renderMarkdownV4View(snapshot(indexFixture([unavailable])), () => {}, { cliUnavailable: true });
+    unavailableRoot.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     expect(unavailableRoot.textContent).toContain("来源不可用");
     expect(unavailableRoot.textContent).toContain("无法读取扫描记录：CLI 不可用");
   });
@@ -282,6 +300,7 @@ describe("v4 scanned Session renderer", () => {
     const loadSessionEvents = vi.fn();
     const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
     const root = renderMarkdownV4View(snapshot(indexFixture([zeroFacts])), () => {}, { loadSessionEvents, loadConversation });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
     await settle();
 
@@ -297,6 +316,7 @@ describe("v4 scanned Session renderer", () => {
     const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
     const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
     const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents, loadConversation });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     document.body.append(root);
     await settle();
     await settle();
@@ -336,10 +356,13 @@ describe("v4 project and event lifecycle", () => {
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
 
     await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     const picker = view.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
     picker.value = projectB.projectId;
     picker.dispatchEvent(new Event("change"));
     expect(saveState).toHaveBeenCalledWith(expect.objectContaining({ projectId: projectB.projectId }));
+    await settle();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
     expect(view.contentEl.textContent).toContain("B 项目记录");
 
@@ -433,6 +456,7 @@ describe("v4 project and event lifecycle", () => {
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
 
     await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="refresh-v4-status"]')?.click();
     await settle();

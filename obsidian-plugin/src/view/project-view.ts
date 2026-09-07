@@ -13,6 +13,7 @@ import { defaultViewState, renderReadyView, type SaveViewState, type ViewState }
 import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
 import { renderMarkdownV4View } from "./presentation";
 import type { ScanRecordsElement } from "./render-scan-records";
+import { normalizeV4ViewState, normalizeV4ViewStates, type SaveV4ViewStates, type V4ViewStates } from "../state/v4-view-state";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -32,6 +33,7 @@ export class ProjectEvolutionView extends ItemView {
   private closed = false;
   private settlingTimer?: number;
   private scanRecords?: ScanRecordsElement;
+  private v4Browser?: HTMLElement & { dispose?: () => void };
   private eventPageCache = new Map<string, SessionEventPageV1>();
   private eventCacheGeneration = "";
 
@@ -41,11 +43,16 @@ export class ProjectEvolutionView extends ItemView {
     private readonly editor?: ReviewEditor,
     private readonly runner?: CliRunner,
     private readonly initialState: ViewState = defaultViewState(),
-    private readonly saveState?: SaveViewState
+    private readonly saveState?: SaveViewState,
+    initialV4States: unknown = {},
+    private readonly saveV4States?: SaveV4ViewStates
   ) {
     super(leaf);
     this.currentState = initialState;
+    this.v4States = normalizeV4ViewStates(initialV4States);
   }
+
+  private v4States: V4ViewStates;
 
   getViewType(): string {
     return VIEW_TYPE;
@@ -164,9 +171,15 @@ export class ProjectEvolutionView extends ItemView {
           loadConversation: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getConversation === "function"
             ? (request) => this.runner!.getConversation(request)
             : undefined,
-          eventPageCache: this.eventPageCache
+          eventPageCache: this.eventPageCache,
+          initialState: this.v4States[current.descriptor.projectId],
+          saveState: (viewState) => {
+            this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
+            return this.saveV4States?.(this.v4States);
+          }
         }
       );
+      this.v4Browser = browser;
       this.scanRecords = browser.scanRecords;
       browser.prepend(this.projectPicker(projects));
       if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
@@ -389,6 +402,10 @@ export class ProjectEvolutionView extends ItemView {
       this.selected = next;
       this.currentState = { ...this.currentState, projectId: next.projectId };
       void this.saveState?.(this.currentState);
+      if (next.format === "markdown-v4" && !(next.projectId in this.v4States)) {
+        this.v4States = { ...this.v4States, [next.projectId]: normalizeV4ViewState(undefined, next.projectId) };
+        void this.saveV4States?.(this.v4States);
+      }
       this.lastReady = undefined;
       this.lastMarkdownReady = undefined;
       this.disposeScanRecords();
@@ -439,8 +456,12 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   private disposeScanRecords(): void {
-    this.scanRecords?.dispose();
+    const browser = this.v4Browser;
+    const records = this.scanRecords;
+    this.v4Browser = undefined;
     this.scanRecords = undefined;
+    if (browser) browser.dispose?.();
+    else records?.dispose();
   }
 
   private resetEventCache(): void {

@@ -377,6 +377,8 @@ describe("v4 live refresh lifecycle", () => {
     await vi.advanceTimersByTimeAsync(6000);
     expect(view.contentEl.textContent).not.toContain("同步状态验证失败");
     expect(view.contentEl.textContent).toContain("待私有验证");
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await vi.advanceTimersByTimeAsync(0);
     const refresh = view.contentEl.querySelector<HTMLButtonElement>("[data-action='refresh-v4-status']");
     expect(refresh).not.toBeNull();
     failing = true;
@@ -475,6 +477,8 @@ describe("v4 project repository", () => {
     expect(snapshot.kind).toBe("markdown-v4");
     if (snapshot.kind !== "markdown-v4") throw new Error("expected v4 snapshot");
     expect(snapshot.state.kind).toBe("public_valid");
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected public-valid state");
+    expect(snapshot.state.ledger.accounting).toEqual({ total_duration_ms: 0, total_tokens: 0, total_cost_usd: null, models: [] });
     expect(vault.process).not.toHaveBeenCalled();
   });
 
@@ -491,6 +495,7 @@ describe("v4 project repository", () => {
     expect(snapshot.state.kind).toBe("pending_edit");
     if (snapshot.state.kind !== "pending_edit") throw new Error("expected pending edit");
     expect(snapshot.state.value.changedFields).toContainEqual({ entity: "project-overview", name: "goal" });
+    expect(snapshot.state.ledger.project_id).toBe("project-p");
   });
 
   it("rejects an invalid index and never falls through to v3", async () => {

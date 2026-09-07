@@ -3,7 +3,9 @@ import type { ConversationRequest, SessionEventRequest } from "../cli/runner";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { SessionEventPageV1 } from "../contracts/review-v4";
 import { element } from "./dom";
-import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
+import type { V4ViewState } from "../state/v4-view-state";
+import { renderV4Shell, type V4ShellElement } from "./render-v4-shell";
+import type { ScanRecordsElement } from "./render-scan-records";
 
 export type StatusTone = "success" | "warning" | "danger" | "neutral";
 
@@ -77,57 +79,39 @@ export function renderMarkdownV4View(
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
+    initialState?: unknown;
+    saveState?: (state: V4ViewState) => void | Promise<void>;
   } = {}
-): HTMLElement & { scanRecords?: ScanRecordsElement } {
+): HTMLElement & { scanRecords?: ScanRecordsElement; dispose?: () => void } {
   const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
   const state = current.state;
   const root = element("div", { className: "session-reviewer-browser sr-v4-readonly" });
-  root.append(element("h1", { text: "项目脉络（v4 Markdown）" }));
   const status = snapshot.kind === "markdown-v4-stale"
     ? "已过期 · 只读"
     : state.kind === "pending_edit" ? "有未同步修改 · 只读"
       : state.kind === "public_valid" ? "待私有验证 · 只读" : "当前快照不可验证 · 只读";
-  root.append(element("p", { className: "sr-v4-status", text: status }));
+  const trusted = state.kind === "public_valid" || state.kind === "pending_edit" ? state : undefined;
+  if (!trusted) root.append(element("h1", { text: "暂时无法打开项目脉络" }));
+  const trustDetails = element("details", { className: "sr-v4-trust-details" }, [
+    element("summary", { text: "校验与只读说明" }),
+    element("p", { text: "公开文件校验不等于私有接受证明；请在原生 Markdown 中阅读或编辑白名单正文。结构操作当前不可用。" }),
+    element("p", { text: `project_id ${current.descriptor.projectId} · generation ${trusted?.value.presentation.generation_id ?? "未验证"} · revision ${trusted?.value.presentation.revision ?? "未验证"}` })
+  ]);
   if (snapshot.kind === "markdown-v4-stale") {
     const reason = markdownSnapshotReason(snapshot.state);
-    root.append(element("p", { className: "sr-v4-stale-reason", text: `当前快照拒绝原因：${reason}` }));
+    trustDetails.append(element("p", { className: "sr-v4-stale-reason", text: `当前快照拒绝原因：${reason}` }));
   } else if (state.kind === "invalid" || state.kind === "unverified" || state.kind === "read_failed") {
     const reason = markdownSnapshotReason(state);
-    root.append(element("p", { className: "sr-v4-reason", text: `拒绝原因：${reason}` }));
+    trustDetails.append(element("p", { className: "sr-v4-reason", text: `拒绝原因：${reason}` }));
   }
-  root.append(element("p", { text: "公开文件校验不等于私有接受证明；请在原生 Markdown 中阅读或编辑白名单正文。结构操作当前不可用。" }));
-  if (options.cliUnavailable) root.append(element("p", { className: "sr-v4-cli-status", text: "CLI 不可用：只能原生阅读或编辑 Markdown，不能验证或同步。" }));
-  const presentation = state.kind === "public_valid" || state.kind === "pending_edit" ? state.value.presentation : undefined;
-  if (presentation) {
-    const summary = element("section", { className: "sr-v4-summary" }, [
-      element("h2", { text: "当前状态" }),
-      element("p", { text: `目标：${presentation.current_state.goal}` }),
-      element("p", { text: `阶段：${presentation.current_state.stage}` }),
-      element("p", { text: `状态：${presentation.current_state.status}` }),
-      element("p", { text: `下一步：${presentation.current_state.next_action}` })
-    ]);
-    const milestone = presentation.timeline.at(-1);
-    if (milestone) {
-      const verification = milestone.closed_loop.verification;
-      const details = [
-        element("h2", { text: "最近里程碑" }),
-        element("h3", { text: milestone.title }),
-        element("p", { text: milestone.summary }),
-        element("p", { text: `结论：${milestone.closed_loop.conclusion.text || "未记录"}` }),
-        element("p", { text: `验证状态：${verification.state}` })
-      ];
-      if (verification.text) details.push(element("p", { text: `验证文本：${verification.text}` }));
-      if (verification.missing_reason) details.push(element("p", { text: `验证缺失原因：${verification.missing_reason}` }));
-      for (const ref of verification.source_turn_refs) details.push(element("p", { text: `验证引用：${ref.provider}/${ref.session_id}#${ref.turn_unit_id}` }));
-      summary.append(element("section", { className: "sr-v4-milestone" }, details));
-    }
-    root.append(summary);
-  }
-  if (state.kind === "public_valid") {
-    const records = renderScanRecords(state.index, options);
-    root.append(records);
-    (root as HTMLElement & { scanRecords?: ScanRecordsElement }).scanRecords = records;
-  }
+  if (options.cliUnavailable) trustDetails.append(element("p", { className: "sr-v4-cli-status", text: "CLI 不可用：只能原生阅读或编辑 Markdown，不能验证或同步。" }));
+  let shell: V4ShellElement | undefined;
+  if (trusted) {
+    shell = renderV4Shell(current.descriptor, trusted.value.presentation, state.kind === "public_valid" ? state.index : undefined, trusted.ledger, open, { ...options, snapshotStatus: status, trustDetail: trustDetails });
+    root.append(shell);
+    Object.defineProperty(root, "scanRecords", { configurable: true, get: () => shell?.scanRecords });
+    (root as HTMLElement & { dispose?: () => void }).dispose = () => shell?.dispose();
+  } else root.append(element("p", { className: "sr-v4-status", text: status }), trustDetails);
   const actions = element("div", { className: "sr-v4-actions" });
   for (const [label, relative] of [["打开项目回顾", "项目回顾.md"], ["打开项目历史", "项目历史.md"]] as const) {
     const button = element("button", { text: label, attrs: { type: "button" } });
