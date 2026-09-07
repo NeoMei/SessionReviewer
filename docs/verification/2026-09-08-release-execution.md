@@ -45,3 +45,11 @@ Models listing keys include all previously known fields plus category, context_w
 ## Read-only provider preflight
 
 Installed OpenCode executable resolves to `/Users/neomei/.npm-global/bin/opencode` (native package binary) and reports1.18.29. Its installed help supports `session list --format json --pure`. Exact bounded invocation with both isolated-worktree and real-project cwd returned status0, stdout0bytes and stderr0bytes. This is an incompatible/empty response, not a valid empty JSON list and not proof of zero Sessions. Preserve provider-local diagnostics and implement synthetic command-contract tests before revisiting native acceptance; no user configuration changes or database reads were made.
+
+## Resumed controller verification
+
+On2026-09-08, GitHub still lists0.4.2 as latest. No new release or push has occurred. Main's two review documents and brainstorm directory remain untouched; the resumed implementation continues on the existing linked worktree, not main.
+
+Native Obsidian1.13.7 temporary Vault now contains the current plugin bundle: local and installed main.js both SHA256 `fd1897d5e90827a4bac26e5feeb04153b7980a57a5874179faa1ac69324ca1b4`. Controller observed actual search `session-001` selects the corresponding detail; clearing search preserves it on the last page; 首页 displays1–25/154 and selects session-154; 末页 displays151–154/154; selecting session-001 then visiting 问题脉络 and returning retains that selection and page. No bundle install or daily-Vault modification was performed during these checks. These are synthetic-index native navigation checks; authenticated real-source summary/Q&A remain unavailable in this fixture and are not accepted by this evidence.
+
+New native finding: zero filtered rows correctly dispose the old detail but the right pane says “公开索引中没有 Session。” despite total154. This is inaccurate empty-state copy, not lost indexed data. Correct as a bounded follow-up during Session search/UI integration, with tests distinguishing genuinely empty index from no filter matches. Do not discard it as completed navigation acceptance.
