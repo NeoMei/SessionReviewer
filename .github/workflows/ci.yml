@@ -42,7 +42,8 @@ jobs:
         run: |
           npm ci
           npm run check
-      - run: go test ./...
+      # Large authenticated scan fixtures need a bounded budget on slower runners.
+      - run: go test -timeout 30m ./...
       - name: Repeat review v2 migration and CLI contract tests
         run: go test ./internal/reviewv2 ./internal/sync ./internal/cli ./internal/config ./internal/project -run 'Migration|MachineLedger|ProjectID|ProjectFragment|FragmentCommit|SharedConfig|ReviewV2' -count=2
       - name: Review job end-to-end acceptance

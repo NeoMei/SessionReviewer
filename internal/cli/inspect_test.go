@@ -22,7 +22,7 @@ import (
 
 func TestInspectSessionEventsRunsAtRealCommandBoundary(t *testing.T) {
 	fixture := newCLIInspectFixture(t)
-	setCurrentEnv(t, platform.Env{GOOS: runtime.GOOS, Home: fixture.home})
+	setCurrentEnv(t, fixture.env)
 	before := snapshotCLITree(t, fixture.data)
 	var out, errOut bytes.Buffer
 	code := Run([]string{"inspect", "session-events", "--project-id", fixture.projectID,
@@ -51,7 +51,7 @@ func TestInspectSessionEventsRunsAtRealCommandBoundary(t *testing.T) {
 
 func TestInspectSessionEventsWritesBoundedMachineErrors(t *testing.T) {
 	fixture := newCLIInspectFixture(t)
-	setCurrentEnv(t, platform.Env{GOOS: runtime.GOOS, Home: fixture.home})
+	setCurrentEnv(t, fixture.env)
 	tests := []struct {
 		name string
 		args []string
@@ -78,11 +78,14 @@ func TestInspectSessionEventsWritesBoundedMachineErrors(t *testing.T) {
 	}
 }
 
-type cliInspectFixture struct{ home, data, projectRoot, projectID, generationID string }
+type cliInspectFixture struct {
+	env                                        platform.Env
+	data, projectRoot, projectID, generationID string
+}
 
 func TestInspectConversationAuthenticatesBeforeSourceDiagnostic(t *testing.T) {
 	fixture := newCLIInspectFixture(t)
-	setCurrentEnv(t, platform.Env{GOOS: runtime.GOOS, Home: fixture.home})
+	setCurrentEnv(t, fixture.env)
 	var out, errOut bytes.Buffer
 	code := Run([]string{"inspect", "conversation-chain", "--project-id", fixture.projectID, "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", fixture.generationID, "--limit", "2", "--json"}, &out, &errOut)
 	if code == 0 || !strings.Contains(out.String(), `"code":"source_unavailable"`) {
@@ -104,7 +107,11 @@ func TestConversationIndexCursorIsSeparateFromMessageCursor(t *testing.T) {
 func newCLIInspectFixture(t *testing.T) cliInspectFixture {
 	t.Helper()
 	home := t.TempDir()
-	dataRoot := filepath.Join(home, ".local", "share", "session-reviewer")
+	env := platform.Env{GOOS: runtime.GOOS, Home: home, LocalAppData: filepath.Join(home, "AppData", "Local")}
+	dataRoot, err := platform.DataDir(env)
+	if err != nil {
+		t.Fatal(err)
+	}
 	projectRoot := t.TempDir()
 	projectID, generationID := "project-inspect-cli", "generation-inspect-cli"
 	legacy := config.ProjectMapping{ID: projectID, Root: projectRoot}
@@ -196,7 +203,7 @@ func newCLIInspectFixture(t *testing.T) cliInspectFixture {
 	if err := store.CommitPublished(generationID, proof); err != nil {
 		t.Fatal(err)
 	}
-	return cliInspectFixture{home: home, data: dataRoot, projectRoot: projectRoot, projectID: projectID, generationID: generationID}
+	return cliInspectFixture{env: env, data: dataRoot, projectRoot: projectRoot, projectID: projectID, generationID: generationID}
 }
 
 func cliInspectDigest(value string) string {
