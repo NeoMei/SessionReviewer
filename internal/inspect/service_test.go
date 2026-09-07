@@ -124,11 +124,54 @@ func TestLoadSessionEventPageRejectsDivergentSummaryFromImmutableRevision(t *tes
 
 func TestLoadSessionEventPageRejectsConcurrentPublishedGenerationAdvance(t *testing.T) {
 	fixture := buildEventFixture(t, "project-events-race", "generation-events-race", "session-1")
+	writer, err := memorystore.Open(fixture.dataRoot, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = writer.Close() })
+	prepared, manifest, err := writer.LoadPrepared()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.GenerationID = "generation-concurrent"
+	manifest.CreatedAt = "2026-09-07T00:00:05Z"
+	projectBody, err := writer.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var project memory.ProjectView
+	if err := json.Unmarshal(projectBody, &project); err != nil {
+		t.Fatal(err)
+	}
+	views := make(map[sessionindex.SessionKey]*memory.SessionView, len(manifest.SessionViews))
+	for _, dependency := range manifest.SessionViews {
+		viewBody, err := writer.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var view memory.SessionView
+		if err := json.Unmarshal(viewBody, &view); err != nil {
+			t.Fatal(err)
+		}
+		views[sessionindex.SessionKey{Provider: dependency.Provider, SessionID: dependency.SessionID}] = &view
+	}
+	index, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: project, Manifest: manifest, SessionViews: views, GeneratedAt: time.Date(2026, 9, 7, 0, 0, 5, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SessionIndexDigest, err = writer.PutSessionIndex(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	successor, err := writer.AdvancePrepared(prepared, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{Version: 4, ProjectID: fixture.projectID, GenerationID: manifest.GenerationID, ManifestDigest: successor.ManifestDigest, ProjectViewDigest: successor.ProjectViewDigest, ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64), SessionIndexSHA256: strings.TrimPrefix(manifest.SessionIndexDigest, "sha256:"), JournalVerified: true}
 	before := snapshotEventTree(t, fixture.dataRoot)
 	inspectCheckpoint = func(phase string) {
 		if phase == "before_published_recheck" {
-			pointer := filepath.Join(fixture.dataRoot, "projects", fixture.projectID, "memory-v1", "published_generation")
-			if err := os.WriteFile(pointer, []byte("generation-concurrent\n"), 0o600); err != nil {
+			if err := writer.CommitPublished(manifest.GenerationID, proof); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -144,6 +187,23 @@ func TestLoadSessionEventPageRejectsConcurrentPublishedGenerationAdvance(t *test
 	delete(after, filepath.Join("projects", fixture.projectID, "memory-v1", "published_generation"))
 	if !reflect.DeepEqual(before, after) {
 		t.Fatal("inspection changed data other than injected concurrent publication pointer")
+	}
+}
+
+func TestLoadSessionEventPageClassifiesFailedFinalPublishedReadAsInvalidArgument(t *testing.T) {
+	fixture := buildEventFixture(t, "project-events-recheck-error", "generation-events-recheck-error", "session-1")
+	inspectCheckpoint = func(phase string) {
+		if phase == "before_published_recheck" {
+			manifest := filepath.Join(fixture.dataRoot, "projects", fixture.projectID, "memory-v1", "generations", fixture.generationID+".json")
+			if err := os.WriteFile(manifest, []byte("corrupt-generation\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(func() { inspectCheckpoint = nil })
+	request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 2}
+	if _, err := LoadSessionEventPage(context.Background(), request); eventErrorCode(err) != CodeInvalidArgument {
+		t.Fatalf("code=%q err=%v", eventErrorCode(err), err)
 	}
 }
 

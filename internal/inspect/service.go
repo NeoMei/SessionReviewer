@@ -243,7 +243,10 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 	if context.Cause(ctx) != nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
 	}
-	if err != nil || currentID != publishedID || !reflect.DeepEqual(currentManifest, manifest) {
+	if err != nil {
+		return SessionEventPage{}, publicError(CodeInvalidArgument, "published private state became unavailable during inspection")
+	}
+	if currentID != publishedID || !reflect.DeepEqual(currentManifest, manifest) {
 		return SessionEventPage{}, publicError(CodeGenerationMismatch, "published generation changed during inspection")
 	}
 	return page, nil
