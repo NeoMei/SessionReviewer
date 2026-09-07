@@ -12,7 +12,7 @@ The panel reads the validated public Session index; event excerpts are requested
 
 `session-reviewer inspect session-events --project-id ID --provider codex --session-id ID --expected-generation-id ID --limit 25 --json [--cursor TOKEN | --anchor SEQUENCE]`
 
-The existing parser permits limits 1–100. Return canonical contract JSON; cursors are opaque and bind project/provider/session/generation/view/limit/offset. A successful page identifies total and inclusive page range, with first/last/previous/next navigation. Error responses are bounded machine-readable diagnostics, never arbitrary private paths. Empty is distinct from failed.
+The existing parser permits limits 1–100. Return canonical contract JSON; cursors are opaque and bind project/provider/session/generation/view/limit/offset. A successful page identifies total and a zero-based half-open wire range, with first/last/previous/next navigation; UI converts it to a one-based inclusive display. Error responses are bounded machine-readable diagnostics, never arbitrary private paths. Empty is distinct from failed.
 
 ## Panel
 

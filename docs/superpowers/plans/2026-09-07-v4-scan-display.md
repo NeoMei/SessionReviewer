@@ -26,7 +26,7 @@
 
 **Interfaces:** Consumes `ParseInspectContract`, `memorystore.OpenReadOnly/LoadPublished/LoadObject`, validated memory observations and existing `inspect.RenderEventPage`. Produces the CLI argv specified in the spec and canonical `SessionEventPage` JSON for Task 2. Nonzero failures emit `{ "error": { "code": "generation_mismatch", "message": "..." } }` (with the corresponding existing contract error code for other failures). Reuse frozen `generation_mismatch`, `stale_cursor` and `anchor_out_of_range` names.
 
-- [ ] Write failing CLI and service tests using isolated fixture stores, never real user sources. Literal expectations: 3 events with limit 2 returns sequences 1/2, range 1–2, total 3; next returns sequence 3, range 3–3 and null next; first/last and anchor navigate deterministically.
+- [ ] Write failing CLI and service tests using isolated fixture stores, never real user sources. Literal expectations: 3 events with limit 2 returns sequences 1/2, half-open range 0–2, total 3; next returns sequence 3, half-open range 2–3 and null next; first/last and anchor navigate deterministically.
 
 ```go
 // Test at the real command boundary; fixture helper publishes immutable test observations.
@@ -35,7 +35,7 @@ code := Run([]string{"inspect", "session-events", "--project-id", fixture.projec
   "--limit", "2", "--json"}, &out, &errOut)
 if code != 0 { t.Fatalf("code=%d stderr=%s", code, errOut.String()) }
 page, err := inspect.ParseEventPage(out.Bytes())
-if err != nil || page.Total != 3 || page.RangeStart != 1 || page.RangeEnd != 2 { t.Fatalf("page=%+v err=%v", page, err) }
+if err != nil || page.Total != 3 || page.RangeStart != 0 || page.RangeEnd != 2 { t.Fatalf("page=%+v err=%v", page, err) }
 ```
 
 - [ ] Run `go test ./internal/cli ./internal/inspect` and record expected RED before production code.
