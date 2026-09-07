@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { WorkspaceLeaf } from "obsidian";
+import { describe, expect, it, vi } from "vitest";
+import type { CliRunner, SessionEventRequest, SessionSummaryRequest } from "../src/cli/runner";
+import type { SessionEventPageV1, SessionSummaryV1 } from "../src/contracts/review-v4";
+import type { Snapshot } from "../src/data/repository";
+import { ProjectEvolutionView } from "../src/view/project-view";
 import { renderReadyView } from "../src/view/render-shell";
 import { browserModelFixture } from "./fixtures/browser";
+import { populatedSessionSummary } from "./fixtures/session-summary";
+import { v4SnapshotFixture } from "./fixtures/v4-shell";
 
 function click(root: ParentNode, selector: string): void {
   const element = root.querySelector<HTMLElement>(selector);
@@ -10,6 +17,56 @@ function click(root: ParentNode, selector: string): void {
 
 function text(root: ParentNode, selector: string): string {
   return root.querySelector(selector)?.textContent?.trim() ?? "";
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+function controllerSnapshot(projectId: string, name: string): Extract<Snapshot, { kind: "markdown-v4" }> {
+  const result = v4SnapshotFixture(projectId, name);
+  if (result.state.kind !== "public_valid") throw new Error("expected public-valid fixture");
+  result.state.index.sessions[0].session_id = `session-${name.toLocaleLowerCase()}`;
+  return result;
+}
+
+function eventPageFor(request: SessionEventRequest, excerpt: string): SessionEventPageV1 {
+  return {
+    schema_version: 1,
+    minimum_reader_version: "0.4.0",
+    project_id: request.projectId,
+    provider: request.provider,
+    session_id: request.sessionId,
+    generation_id: request.expectedGenerationId,
+    session_view_digest: request.expectedSessionViewDigest,
+    total: 1,
+    range_start: 0,
+    range_end: 1,
+    items: [{ kind: "message", excerpt, revision_id: "revision-1", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }],
+    previous_cursor: null,
+    next_cursor: null,
+    first_cursor: "first-token",
+    last_cursor: "last-token",
+    coverage: { seen: 1, indexed: 1, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
+  };
+}
+
+function summaryFor(request: SessionSummaryRequest, textValue: string): SessionSummaryV1 {
+  const result = populatedSessionSummary({
+    project_id: request.projectId,
+    provider: request.provider,
+    session_id: request.sessionId,
+    generation_id: request.expectedGenerationId,
+    session_view_digest: request.expectedSessionViewDigest
+  });
+  result.phase_boundaries.items[0].text = textValue;
+  return result;
+}
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("project evolution browser", () => {
@@ -157,5 +214,84 @@ describe("review header action", () => {
     const metaAfter = after.querySelector(".sr-header-meta")!;
     expect([...metaAfter.children].map((node) => (node as HTMLElement).className)).toEqual(["sr-status", "", "sr-review-action"]);
     expect(after.querySelectorAll(".sr-review-action")).toHaveLength(1);
+  });
+});
+
+describe("ProjectEvolutionView retained summary lifecycle", () => {
+  it("persists a project switch immediately and ignores old pending event and summary responses", async () => {
+    const projectA = { projectId: "project-a", root: "Projects/A", name: "A", format: "markdown-v4" as const };
+    const projectB = { projectId: "project-b", root: "Projects/B", name: "B", format: "markdown-v4" as const };
+    const pendingEventA = deferred<SessionEventPageV1>();
+    const pendingSummaryA = deferred<SessionSummaryV1>();
+    const repository = {
+      discover: vi.fn().mockResolvedValue([projectA, projectB]),
+      load: vi.fn(async (project: typeof projectA) => controllerSnapshot(project.projectId, project.name)),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const runner = {
+      status: vi.fn().mockResolvedValue({}),
+      getSessionEvents: vi.fn((request: SessionEventRequest) => request.projectId === projectA.projectId
+        ? pendingEventA.promise
+        : Promise.resolve(eventPageFor(request, "B 项目记录"))),
+      getSessionSummary: vi.fn((request: SessionSummaryRequest) => request.projectId === projectA.projectId
+        ? pendingSummaryA.promise
+        : Promise.resolve(summaryFor(request, "B 项目摘要")))
+    };
+    const saveState = vi.fn();
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner, undefined, saveState);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+
+    await view.onOpen();
+    click(view.contentEl, '[data-v4-tab="sessions"]');
+    const picker = view.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    picker.value = projectB.projectId;
+    picker.dispatchEvent(new Event("change"));
+    expect(saveState).toHaveBeenCalledWith(expect.objectContaining({ projectId: projectB.projectId }));
+    await settle();
+    click(view.contentEl, '[data-v4-tab="sessions"]');
+    await settle();
+    expect(view.contentEl.textContent).toContain("B 项目记录");
+    expect(view.contentEl.textContent).toContain("B 项目摘要");
+
+    const requestA = runner.getSessionSummary.mock.calls[0][0];
+    pendingEventA.resolve(eventPageFor(runner.getSessionEvents.mock.calls[0][0], "A 过期记录"));
+    pendingSummaryA.resolve(summaryFor(requestA, "A 过期摘要"));
+    await settle();
+    expect(view.contentEl.textContent).not.toContain("A 过期记录");
+    expect(view.contentEl.textContent).not.toContain("A 过期摘要");
+    await view.onClose();
+  });
+
+  it("invalidates a pending summary on project refresh and close", async () => {
+    const project = { projectId: "project-p", root: "Projects/P", name: "P", format: "markdown-v4" as const };
+    const pendingBeforeRefresh = deferred<SessionSummaryV1>();
+    const pendingAfterRefresh = deferred<SessionSummaryV1>();
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockImplementation(() => Promise.resolve(controllerSnapshot(project.projectId, project.name))),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const runner = {
+      status: vi.fn().mockResolvedValue({}),
+      getSessionEvents: vi.fn((request: SessionEventRequest) => Promise.resolve(eventPageFor(request, "P 项目记录"))),
+      getSessionSummary: vi.fn().mockReturnValueOnce(pendingBeforeRefresh.promise).mockReturnValueOnce(pendingAfterRefresh.promise)
+    };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+
+    await view.onOpen();
+    click(view.contentEl, '[data-v4-tab="sessions"]');
+    click(view.contentEl, '[data-action="refresh-v4-status"]');
+    await settle();
+    expect(runner.getSessionSummary).toHaveBeenCalledTimes(2);
+    const request = runner.getSessionSummary.mock.calls[0][0] as SessionSummaryRequest;
+    pendingAfterRefresh.resolve(summaryFor(request, "刷新后摘要"));
+    pendingBeforeRefresh.resolve(summaryFor(request, "刷新前过期摘要"));
+    await settle();
+    expect(view.contentEl.textContent).toContain("刷新后摘要");
+    expect(view.contentEl.textContent).not.toContain("刷新前过期摘要");
+
+    await view.onClose();
+    expect(view.contentEl.childElementCount).toBe(0);
   });
 });

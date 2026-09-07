@@ -34,6 +34,7 @@ describe("retained Session summary", () => {
     expect(view.textContent).toContain("<script>window.pwned = true</script>");
     expect(view.querySelector("script")).toBeNull();
     expect(view.textContent).toContain("没有捕获到匹配事实");
+    expect(view.querySelector(".sr-summary-item-meta")?.textContent).toBe("2026-09-07T00:01:00Z · 序列 1");
     view.remove();
   });
 
