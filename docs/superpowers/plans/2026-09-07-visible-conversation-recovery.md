@@ -26,9 +26,9 @@
 **Files:** `internal/source/codex/decode.go`, its tests, `internal/accounting/accounting_test.go` if needed.
 **Interfaces:** Existing DecodeReport and accounting Accumulator remain unchanged.
 
-- [ ] Write a regression using the current valid `token_usage_record` envelope between a user message and `event_msg/token_count`; assert zero unsupported records, preserved user observation, unchanged token totals, and unchanged rejection of a genuinely unknown top-level type.
-- [ ] Run `go test ./internal/source/codex ./internal/accounting -count=1` and record the expected RED failure.
-- [ ] Recognize the duplicate usage envelope as known metadata without adding its usage again. The compatibility change is an explicit switch case, not a catch-all default. Preserve malformed JSON reporting.
+- [x] Write a regression using the current valid `token_usage_record` envelope between a user message and `event_msg/token_count`; assert zero unsupported records, preserved user observation, unchanged token totals, and unchanged rejection of a genuinely unknown top-level type.
+- [x] Run `go test ./internal/source/codex ./internal/accounting -count=1` and record the expected RED failure.
+- [x] Recognize the duplicate usage envelope as known metadata without adding its usage again. The compatibility change is an explicit switch case, not a catch-all default. Preserve malformed JSON reporting.
 
 ```go
 // token_count remains the authoritative accounting input; this envelope is
@@ -37,15 +37,15 @@ case "world_state", "compacted", "inter_agent_communication_metadata", "token_us
     return nil
 ```
 
-- [ ] Run the focused tests GREEN, self-review and commit only task files. Report exact RED/GREEN evidence.
+- [x] Run the focused tests GREEN, self-review and commit only task files. Report exact RED/GREEN evidence.
 
 ### Task 2: Implement authenticated private visible-conversation query
 
 **Files:** Create focused files under `internal/inspect` for conversation query, source loading and paging; `internal/conversationchain/materialize.go` and tests; modify `internal/cli/inspect.go` and tests. Source-adapter helper extensions are allowed where required for exact accepted-prefix reads. Add a separate page schema and fixtures if paging differs from the frozen whole-document schema; do not change session-event-page-v1 semantics.
 **Interfaces:** Export `ConversationRequest` with DataRoot, ProjectID, Provider, SessionID, ExpectedGenerationID, TurnUnitID, Cursor, MessageCursor and Limit; export `LoadConversationPage(context.Context, ConversationRequest)` and a bounded JSON renderer. Default query pages turn indexes via new optional `--cursor`; selected turn query pages visible messages via existing `--message-cursor`. Reject index cursor on a selected turn and message cursor without a turn. Publish exact wire types for Task 3 in the report.
 
-- [ ] Add RED integration tests using a real private-store fixture and source files: user/assistant/tool/user ordering; commentary and final_answer visibility; analysis/system/developer/encrypted exclusion; unanswered tail; UTF-8 truncation; first/middle/last paging; no raw tools; stale cross-turn/Session/limit/generation cursor; wrong source hash; missing/shrunk/replaced source; accepted prefix still readable after append; context cancellation; response caps. Reuse existing inspect generation authentication tests rather than weakening them.
-- [ ] Implement deterministic turn grouping from visible source messages and bounded machine facts only. Stable IDs derive from source identity and record identity; source hash/revision changes invalidate dependencies. Return source-unavailable diagnostics instead of fabricated empty success. Distinguish partial-only commentary from completed final answer when source supplies phase.
+- [x] Add RED integration tests using a real private-store fixture and source files: user/assistant/tool/user ordering; commentary and final_answer visibility; analysis/system/developer/encrypted exclusion; unanswered tail; UTF-8 truncation; first/middle/last paging; no raw tools; stale cross-turn/Session/limit/generation cursor; wrong source hash; missing/shrunk/replaced source; accepted prefix still readable after append; context cancellation; response caps. Reuse existing inspect generation authentication tests rather than weakening them.
+- [x] Implement deterministic turn grouping from visible source messages and bounded machine facts only. Stable IDs derive from source identity and record identity; source hash/revision changes invalidate dependencies. Return source-unavailable diagnostics instead of fabricated empty success. Distinguish partial-only commentary from completed final answer when source supplies phase.
 
 ```go
 type ConversationRequest struct {
@@ -57,18 +57,18 @@ type ConversationRequest struct {
 // published Session. Never rediscover arbitrary unrelated Session logs.
 ```
 
-- [ ] Reuse existing adapters' path/symlink/inode/hash defenses. The queried source boundary must be the published prefix, never new appended messages. If generic provider support cannot safely reuse an existing adapter, return a typed unsupported-provider error rather than silently claiming no answers; Codex segmented Session recovery is mandatory for this task.
-- [ ] Wire existing `inspect conversation-chain` grammar. Return bounded, content-free errors. No source path/raw payload in public errors. Reading must not mutate private store or Vault. Queries use deterministic extraction/redaction only.
-- [ ] Turn-index messages are 4096-byte excerpts. Selected-turn responses expose the available full visible text from each authenticated source record up to the 64 KiB read ceiling; if needed, reduce messages in a page to fit the 1 MiB response cap and continue via cursor. Do not silently substitute a permanently clipped excerpt for expanded answer text.
-- [ ] Run focused RED/GREEN and then `go test ./...`, `go vet ./...`, `go mod tidy -diff` once. Commit task files and report the complete frontend wire contract and exact test evidence.
+- [x] Reuse existing adapters' path/symlink/inode/hash defenses. The queried source boundary must be the published prefix, never new appended messages. If generic provider support cannot safely reuse an existing adapter, return a typed unsupported-provider error rather than silently claiming no answers; Codex segmented Session recovery is mandatory for this task.
+- [x] Wire existing `inspect conversation-chain` grammar. Return bounded, content-free errors. No source path/raw payload in public errors. Reading must not mutate private store or Vault. Queries use deterministic extraction/redaction only.
+- [x] Turn-index messages are 4096-byte excerpts. Selected-turn responses expose the available full visible text from each authenticated source record up to the 64 KiB read ceiling; if needed, reduce messages in a page to fit the 1 MiB response cap and continue via cursor. Do not silently substitute a permanently clipped excerpt for expanded answer text.
+- [x] Run focused RED/GREEN and then `go test ./...`, `go vet ./...`, `go mod tidy -diff` once. Commit task files and report the complete frontend wire contract and exact test evidence.
 
 ### Task 3: Connect visible Q/A to Obsidian and verify the real flow
 
 **Files:** `obsidian-plugin/src/cli/runner.ts`, new conversation page types/parser, focused new `src/view/render-conversation.ts`, `src/view/render-scan-records.ts`, `src/view/project-view.ts`, relevant tests and styles; durable verification document.
 **Interfaces:** Consume Task 2's reported wire contract through fixed CLI argv, never a shell string. Add `getConversation` to the runner and inject the loader in the scan view.
 
-- [ ] Write RED tests for strict wire validation, fixed argv, user/Agent labels, loading/error/retry, stale response suppression after Session/project changes, first/middle/last page controls, explicit truncation and unanswered state. Existing facts and legacy view must still work when conversation query is unavailable.
-- [ ] Add a clearly labeled conversation section to the selected Session detail, separate from execution facts. Default turn rows show the user question and answer availability; selecting a turn shows user text and Agent responses in chronological order, with final answer distinguishable from progress text where the wire supports it. Render text safely, never injected HTML. Page long replies/turns and keep controls reachable. Do not add a duplicate top-level navigation category.
-- [ ] Run plugin tests/build once, review diff and commit. Report covering test output.
-- [ ] Controller runs full final gates and independent whole-branch review. After clean review, back up installed CLI/plugin and selected public/private project state; install the candidate, rescan only logical Session `01a06a33-fe42-77c3-b850-c4eeaa4c13fa`, sync accepted projections and reload only SessionReviewer.
-- [ ] Controller verifies actual Obsidian project switching plus first/middle/last Q/A pages, visible final Agent answers, honest coverage and CLI/Vault hash consistency. Record results and any remaining blockers in `docs/verification/2026-09-07-visible-conversation-recovery.md`. Do not publish.
+- [x] Write RED tests for strict wire validation, fixed argv, user/Agent labels, loading/error/retry, stale response suppression after Session/project changes, first/middle/last page controls, explicit truncation and unanswered state. Existing facts and legacy view must still work when conversation query is unavailable.
+- [x] Add a clearly labeled conversation section to the selected Session detail, separate from execution facts. Default turn rows show the user question and answer availability; selecting a turn shows user text and Agent responses in chronological order, with final answer distinguishable from progress text where the wire supports it. Render text safely, never injected HTML. Page long replies/turns and keep controls reachable. Do not add a duplicate top-level navigation category.
+- [x] Run plugin tests/build once, review diff and commit. Report covering test output.
+- [x] Controller runs full final gates and independent whole-branch review. After clean review, back up installed CLI/plugin and selected public/private project state; install the candidate, rescan only logical Session `01a06a33-fe42-77c3-b850-c4eeaa4c13fa`, sync accepted projections and reload only SessionReviewer.
+- [x] Controller verifies actual Obsidian project switching plus first/middle/last Q/A pages, visible final Agent answers, honest coverage and CLI/Vault hash consistency. Record results and any remaining blockers in `docs/verification/2026-09-07-visible-conversation-recovery.md`. Do not publish.

@@ -26,11 +26,33 @@
 
 覆盖边界：已确定性排除 5 条纯上下文 user 包装；认证源前缀仍有 242 条超过 64 KiB 的记录，查询只报告它们被省略，不把它们误称为缺失回答。独立源统计确认它们是非可见记录；查询侧保守 `complete=false`，不以关闭限制换取“全量”标记。
 
-## 真实流程验收清单
+## 最终验收（2026-09-07）
 
-- [ ] 候选 CLI 固定参数查询，第一页／中间页／最后一页身份、范围和去重校验。
-- [ ] 展开长回答正文，用户／Agent 角色和最终回答标记正确。
-- [ ] 追加源文件不进入旧 generation，真实查询不修改 public/private 状态。
-- [ ] 备份后安装本地候选，限定本 Session 重新扫描，同步项目与 Vault。
-- [ ] Obsidian 项目切换、问答列表、选中问题、Agent 正文、翻页和重试验证。
-- [ ] 记录新 generation、覆盖统计、构建提交与安装哈希；保留未发布边界。
+以上为阶段性记录；本节为最终结果。生产代码固定在 `84a1b3b4a15e168b84f04acc08e29a62a6adacfb`。整分支审查及单次最终修复后的定点复审全部关闭，无未处理 Critical/Important finding。
+
+- 最终 `go test ./...` 退出 0：CLI 75.277s、inspect 25.072s、zero-token 104.927s；`go vet ./...`、`go mod tidy -diff` 退出 0。
+- 最终插件 `npm run check` 退出 0：22 个测试文件、322 项测试通过，lint、TypeScript 和生产构建通过。
+- 最终修复补充了真正的 Go 响应 → TypeScript 解析回归：索引预览不继承完整正文的截断标记；完整正文与覆盖计数仍保留真实截断信息。Codex 解码回归同时要求恰好两个预期观测且用户内容不变。
+
+### 安装、扫描与同步
+
+- 已安装本地 CLI 0.4.1 候选，构建参数绑定上述代码提交；SHA-256：`bea375c3cdf6cf3e6503b533a66f20cd663e9f95b15d3d0929c57095375c502b`。
+- 已安装插件 `main.js` 与最终构建哈希一致：`ce2bffb29059f5a8cbb253727334da6072ae8a363d02ea82fdb1b822d152858f`。manifest 与用户配置保留，不伪装成新 GitHub 版本。
+- 回滚备份：`/Users/neomei/.local/share/session-reviewer-install-backups/visible-conversation-repair.RRtzFf`，含旧 CLI、插件、目标项目私有状态、发布日志、项目与 Vault 文档、目录记录和配置。
+- 从该备份目录的 `selected-source`（目标逻辑 Session 的五份物理分段副本）限定重扫，没有扫描其他项目或 Session。
+- 新 generation：`scan-4535e7a655a4f9d09395b30f55293de5`；38,063 条源记录，1 个 Session 完整、0 个问题 Session，88 个事实索引项，未解码／未投影／截断均为 0，`review_run_tokens=0`。
+- 扫描发布结果中项目与 Vault 的四个对应文件全部同哈希；`sync status` 为 in_sync=1、conflicted=0、malformed=0、queued=0、blocked=0、machine_state=current。
+
+### 真实问答遍历与原生界面
+
+- 对新 generation 遍历全部 78 组问答：78 条用户消息、1,528 条 Agent 消息（含 66 条最终回答），共 1,606 个唯一消息修订；无重复／分页缺口，全部源记录引用、哈希、角色与阶段独立校验匹配。
+- 95 次 CLI 查询，单次最大 1,169ms、最大响应 64,171 字节；2 条正文超过摘录上限但可展开，正文截断 0。查询前后公开 Markdown 文件哈希和发布指针不变；私有状态只读、追加不跨越已接受前缀另由集成回归验证。
+- Obsidian 实测首页 `1–20 / 78`、中页 `21–40 / 78`、末页 `61–78 / 78`；第 61 组问答的消息末页 `61–80 / 80` 能看到最终回答及末段正文，截图确认内容可到达且没有遮挡。
+- 真实项目切换 SessionReviewer → AgentWiki → SessionReviewer 成功，回到目标项目后问答重新加载；仅重载 SessionReviewer 插件后，覆盖状态、问题列表和 Agent 最终回答仍可见。
+- 加载失败与重试、旧异步响应丢弃、分页期间旧问题禁用、身份与范围不符拒绝，均有插件自动化回归。未在真实 Vault 人为破坏 CLI 或源文件以制造故障。
+
+### 保留的诚实边界
+
+扫描完整不等于语义总结已获人工接受；Agent 回答也不等于执行已验证。查询仍保留 64 KiB 单记录上限，当前 269 条超限源记录使问答覆盖保守标记为不完整。独立检查确认它们是 210 条 item_completed、29 条 compacted、20 条 function_call_output、10 条 custom_tool_call_output，用户／Agent 可见消息为 0；不将此数冒充缺失回答，也不展示隐藏推理或原始工具输出。已排除 5 条纯上下文包装，无孤立消息。
+
+本轮批准的扫描／展示恢复任务完成；按范围不实现跨平台迁移、旧项目迁移或新的问题脑图功能。主分支未合并、远端未推送、GitHub 未发布；本地候选验收不等于官方发布。原 main 的用户改动保留，目标 review 文件仅由此次授权扫描更新。
