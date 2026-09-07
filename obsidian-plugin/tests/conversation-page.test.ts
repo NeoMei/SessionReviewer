@@ -46,6 +46,8 @@ describe("conversation page wire", () => {
       execFileSync("go", ["test", "./internal/inspect", "-run", "^TestConversationEmitsProductionExpansionWireForFrontend$", "-count=1"], {
         cwd: resolve(process.cwd(), ".."),
         env: { ...process.env, SESSION_REVIEWER_CONVERSATION_WIRE_OUT: output },
+        // Cold CI workers compile the Go producer before checking its wire output.
+        timeout: 120_000,
         stdio: "pipe"
       });
       const page = parseConversationPageV1(readFileSync(output, "utf8"));
@@ -53,7 +55,7 @@ describe("conversation page wire", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 150_000);
 
   it.each([
     ["unknown root field", () => conversationPage({ extra: true })],
