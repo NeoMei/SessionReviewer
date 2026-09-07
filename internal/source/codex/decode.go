@@ -272,9 +272,9 @@ func (d *recordDecoder) add(record session.Record) error {
 		return d.addResponseItem(record)
 	case "event_msg":
 		return d.addEvent(record)
-	case "world_state", "compacted", "inter_agent_communication_metadata":
-		// State snapshots, compaction summaries, and agent routing metadata are
-		// harness context, not durable project facts.
+	// token_count remains the authoritative accounting input; this envelope is
+	// supplementary host metadata and is not a fact observation.
+	case "world_state", "compacted", "inter_agent_communication_metadata", "token_usage_record":
 		return nil
 	default:
 		d.unsupported()

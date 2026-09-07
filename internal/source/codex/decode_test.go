@@ -456,6 +456,74 @@ func TestDecodeIgnoresKnownNonEvidenceCodexRecordsWithoutIssue(t *testing.T) {
 	}
 }
 
+func TestDecodeTreatsTokenUsageRecordAsSupplementaryMetadataWithoutWeakeningUnknownTypeRejection(t *testing.T) {
+	t.Run("token usage record", func(t *testing.T) {
+		fixture := newAdapterFixture(t)
+		body := encodedRecord(t, "2026-09-07T08:00:00Z", "session_meta", map[string]any{"id": "token-usage-record", "cwd": fixture.projectA}) +
+			encodedRecord(t, "2026-09-07T08:00:01Z", "response_item", map[string]any{
+				"type": "message", "id": "user-before-usage", "role": "user",
+				"content": []map[string]any{{"type": "input_text", "text": "keep this request"}},
+			}) +
+			encodedRecord(t, "2026-09-07T08:00:02Z", "token_usage_record", map[string]any{
+				"info": map[string]any{
+					"last_token_usage":  map[string]any{"input_tokens": 40, "cached_input_tokens": 10, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 42},
+					"total_token_usage": map[string]any{"input_tokens": 40, "cached_input_tokens": 10, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 42},
+				},
+				"rate_limits": map[string]any{"limit_id": "codex"},
+			}) +
+			encodedRecord(t, "2026-09-07T08:00:03Z", "event_msg", map[string]any{
+				"type": "token_count",
+				"info": map[string]any{
+					"last_token_usage":  map[string]any{"input_tokens": 40, "cached_input_tokens": 10, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 42},
+					"total_token_usage": map[string]any{"input_tokens": 40, "cached_input_tokens": 10, "cache_write_input_tokens": 0, "output_tokens": 2, "reasoning_output_tokens": 1, "total_tokens": 42},
+				},
+			})
+		if err := os.WriteFile(filepath.Join(fixture.sessions, "token-usage-record.jsonl"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		adapter := fixture.adapter(t, "v1")
+		boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "token-usage-record"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		observations, report := decodeBoundary(t, adapter, boundary)
+		if report.UnsupportedRecords != 0 {
+			t.Fatalf("supplementary usage envelope counted as unsupported: %+v", report)
+		}
+		foundUserRequest := false
+		for _, observation := range observations {
+			if observation.Operation == "user_request" && observation.Key.Subject == "user-before-usage" {
+				foundUserRequest = true
+			}
+		}
+		if !foundUserRequest {
+			t.Fatalf("user request before usage envelope was not preserved: %+v", observations)
+		}
+		if report.ProposedSource.Usage.TotalTokens != 42 || len(report.ProposedSource.Usage.Models) != 1 || report.ProposedSource.Usage.Models[0].TotalTokens != 42 {
+			t.Fatalf("supplementary usage envelope changed authoritative token_count totals: %+v", report.ProposedSource.Usage)
+		}
+	})
+
+	t.Run("unknown top-level type", func(t *testing.T) {
+		fixture := newAdapterFixture(t)
+		body := encodedRecord(t, "2026-09-07T08:01:00Z", "session_meta", map[string]any{"id": "unknown-top-level", "cwd": fixture.projectA}) +
+			encodedRecord(t, "2026-09-07T08:01:01Z", "future_usage_envelope", map[string]any{"version": 99}) +
+			usageEvent("2026-09-07T08:01:02Z")
+		if err := os.WriteFile(filepath.Join(fixture.sessions, "unknown-top-level.jsonl"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		adapter := fixture.adapter(t, "v1")
+		boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, "unknown-top-level"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, report := decodeBoundary(t, adapter, boundary)
+		if report.UnsupportedRecords != 1 {
+			t.Fatalf("unknown top-level type was not rejected: %+v", report)
+		}
+	})
+}
+
 func TestDecodeRejectsUnrelatedAdditionalSessionMetadata(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	body := encodedRecord(t, "2026-08-31T14:00:00Z", "session_meta", map[string]any{"id": "metadata-mismatch", "cwd": fixture.projectA}) +
