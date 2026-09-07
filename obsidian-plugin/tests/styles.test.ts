@@ -124,3 +124,29 @@ describe("review job layout", () => {
     expect(getComputedStyle(banner.querySelector<HTMLElement>(".sr-review-actions")!).flexWrap).toBe("wrap");
   });
 });
+
+describe("conversation layout", () => {
+  it("keeps long visible messages wrapped in a roomy two-column detail that can stack", () => {
+    installStyles();
+    const browser = document.createElement("div");
+    browser.className = "sr-conversation-browser";
+    const list = document.createElement("div");
+    list.className = "sr-turn-list";
+    const turn = document.createElement("button");
+    turn.textContent = "很长的用户问题";
+    list.append(turn);
+    const detail = document.createElement("section");
+    detail.className = "sr-conversation-detail";
+    const body = document.createElement("pre");
+    body.className = "sr-message-body";
+    body.textContent = "很长的 agent 回答";
+    detail.append(body);
+    browser.append(list, detail);
+    document.body.append(browser);
+
+    expect(getComputedStyle(browser).gridTemplateColumns).toContain("minmax(0, 1.45fr)");
+    expect(getComputedStyle(turn).whiteSpace).toBe("normal");
+    expect(getComputedStyle(body).whiteSpace).toBe("pre-wrap");
+    expect(getComputedStyle(body).overflowWrap).toBe("anywhere");
+  });
+});

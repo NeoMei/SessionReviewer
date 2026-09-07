@@ -60,7 +60,8 @@ const UNAMBIGUOUS_INTEGER_KEYS = new Set([
   "total_duration_ms", "total_tokens", "duration_ms", "warning_count", "record_count",
   "indexed_event_count", "total", "shown", "omitted", "sequence", "range_start", "range_end",
   "record_ordinal", "ordinal", "source_messages", "captured_messages", "turn_units",
-  "unanswered_units", "truncated_messages"
+  "unanswered_units", "truncated_messages", "source_records", "visible_messages", "truncated_bodies",
+  "context_messages", "orphan_messages", "oversized_records", "malformed_records", "assistant_message_count"
 ]);
 const COVERAGE_INTEGER_KEYS = new Set([
   ...COVERAGE_KEYS, "complete", "partial", "error", "unprocessed", "source_available",
@@ -1424,6 +1425,10 @@ function atWireBoundary<T>(action: () => T): T {
   } catch (error) {
     throw rejection("wire_contract_invalid", error);
   }
+}
+
+export function parseStrictWireDocument<T>(source: string, kind: string, validate: (row: Record<string, unknown>) => T): T {
+  return atWireBoundary(() => validate(documentObject(source, kind)));
 }
 
 function rejection(code: WireRejectionCode, cause: unknown): WireRejectionError {

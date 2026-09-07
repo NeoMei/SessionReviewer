@@ -161,6 +161,9 @@ export class ProjectEvolutionView extends ItemView {
           loadSessionEvents: this.runner && this.cliDiagnostic?.code !== "cli_unavailable"
             ? (request) => this.runner!.getSessionEvents(request)
             : undefined,
+          loadConversation: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getConversation === "function"
+            ? (request) => this.runner!.getConversation(request)
+            : undefined,
           eventPageCache: this.eventPageCache
         }
       );

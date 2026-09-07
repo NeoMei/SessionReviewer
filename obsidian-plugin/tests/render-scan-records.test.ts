@@ -1,6 +1,7 @@
 import { WorkspaceLeaf } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import type { CliRunner } from "../src/cli/runner";
+import type { CliRunner, ConversationRequest } from "../src/cli/runner";
+import type { ConversationPageV1 } from "../src/contracts/conversation-page";
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../src/contracts/review-v4";
 import type { Snapshot } from "../src/data/repository";
 import { renderMarkdownV4View } from "../src/view/presentation";
@@ -116,6 +117,27 @@ function eventPage(overrides: Partial<SessionEventPageV1> = {}): SessionEventPag
     last_cursor: "last-token",
     coverage: { seen: 4_767, indexed: 2, collapsed: 0, unprojected: 0, undecodable: 4_765, truncated: 0 },
     ...overrides
+  };
+}
+
+function conversationFor(request: { projectId?: string; sessionId?: string; expectedGenerationId?: string; turnUnitId?: string }, excerpt = "可见用户问题"): ConversationPageV1 {
+  const sessionId = request.sessionId ?? "session-1";
+  const selected = request.turnUnitId !== undefined;
+  const user = {
+    role: "user" as const, phase: null, revision_id: `sha256:${"4".repeat(64)}`,
+    source_ref: { provider: "codex" as const, session_id: sessionId, source_identity: "source-1", record_ordinal: 1, source_hash: "5".repeat(64) },
+    occurred_at: "2026-09-07T00:00:00Z", visible_excerpt: excerpt, truncated: false,
+    text: selected ? excerpt : null, text_truncated: false
+  };
+  return {
+    schema_version: 1, minimum_reader_version: "0.4.0", mode: selected ? "turn_messages" : "turn_index",
+    project_id: request.projectId ?? "project-p", provider: "codex", session_id: sessionId,
+    generation_id: request.expectedGenerationId ?? "generation-1", session_view_digest: VIEW_DIGEST,
+    dependency_digest: `sha256:${"6".repeat(64)}`, redaction_version: "visible-redaction-v1", turn_unit_id: selected ? request.turnUnitId! : null,
+    total: 1, range_start: 0, range_end: 1, first_cursor: "first", previous_cursor: null, next_cursor: null, last_cursor: "last",
+    turn_units: [{ turn_unit_id: "turn-1", ordinal: 1, started_at: "2026-09-07T00:00:00Z", ended_at: null, user_message: { ...user, text: null }, answer_state: "no_answer", assistant_message_count: 0 }],
+    messages: selected ? [user] : [],
+    coverage: { source_records: 1, visible_messages: 1, captured_messages: 1, truncated_messages: 0, truncated_bodies: 0, context_messages: 0, orphan_messages: 0, oversized_records: 0, malformed_records: 0, complete: true }
   };
 }
 
@@ -249,6 +271,47 @@ describe("v4 scanned Session renderer", () => {
     const unavailableRoot = renderMarkdownV4View(snapshot(indexFixture([unavailable])), () => {}, { cliUnavailable: true });
     expect(unavailableRoot.textContent).toContain("来源不可用");
     expect(unavailableRoot.textContent).toContain("无法读取扫描记录：CLI 不可用");
+  });
+
+  it("loads visible Q/A for a zero-fact Session and keeps execution facts separate", async () => {
+    const zeroFacts = sessionFixture({
+      indexed_event_count: 0,
+      coverage: { seen: 1, indexed: 0, collapsed: 1, unprojected: 0, undecodable: 0, truncated: 0 },
+      fact_counts: { file_change: 0, command: 0, verification: 0, error: 0, artifact: 0 }
+    });
+    const loadSessionEvents = vi.fn();
+    const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
+    const root = renderMarkdownV4View(snapshot(indexFixture([zeroFacts])), () => {}, { loadSessionEvents, loadConversation });
+    await settle();
+    await settle();
+
+    expect(loadConversation).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "session-1", limit: 20 }));
+    expect(loadSessionEvents).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("可见用户问题");
+    expect(root.textContent).toContain("这个 Session 没有可读的已索引事件");
+    expect(root.querySelector('[aria-label="问答记录"]')).not.toBeNull();
+    expect(root.querySelector('[aria-label="已索引执行事实"]')).not.toBeNull();
+  });
+
+  it("does not recreate or rerequest Q/A while event selection and Session search redraw", async () => {
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
+    const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
+    const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents, loadConversation });
+    document.body.append(root);
+    await settle();
+    await settle();
+    const conversation = root.querySelector('[aria-label="问答记录"]');
+    const calls = loadConversation.mock.calls.length;
+    root.querySelector<HTMLButtonElement>("[data-event-ordinal]")?.click();
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.focus();
+    search.value = "session";
+    search.dispatchEvent(new Event("input"));
+
+    expect(root.querySelector('[aria-label="问答记录"]')).toBe(conversation);
+    expect(loadConversation).toHaveBeenCalledTimes(calls);
+    expect(document.activeElement).toBe(search);
+    root.remove();
   });
 });
 

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ScanStatus } from "../contracts/review-v3";
 import type { SessionEventPageV1 } from "../contracts/review-v4";
+import type { ConversationPageV1 } from "../contracts/conversation-page";
+import { parseConversationPageV1 } from "../data/conversation-page";
 import { parseSessionEventPageV1 } from "../data/contracts-v4";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
@@ -47,6 +49,27 @@ export interface SessionEventRequest {
   limit: number;
   cursor?: string;
   anchor?: number;
+}
+
+export interface ConversationRequest {
+  projectId: string;
+  provider: string;
+  sessionId: string;
+  expectedGenerationId: string;
+  expectedSessionViewDigest: string;
+  limit: number;
+  turnUnitId?: string;
+  cursor?: string;
+  messageCursor?: string;
+}
+
+export type ConversationErrorCode = "source_unavailable" | "generation_mismatch" | "stale_cursor" | "unsupported_provider" | "conversation_failed";
+
+export class ConversationQueryError extends Error {
+  constructor(readonly code: ConversationErrorCode, message: string) {
+    super(message);
+    this.name = "ConversationQueryError";
+  }
 }
 
 export interface SyncOperation {
@@ -130,6 +153,36 @@ export class CliRunner {
       return page;
     } catch {
       throw new Error(SESSION_EVENTS_FAILED);
+    }
+  }
+
+  async getConversation(request: ConversationRequest): Promise<ConversationPageV1> {
+    validateConversationRequest(request);
+    const args = [
+      "inspect", "conversation-chain",
+      "--project-id", request.projectId,
+      "--provider", request.provider,
+      "--session-id", request.sessionId,
+      "--expected-generation-id", request.expectedGenerationId,
+      "--limit", String(request.limit),
+      "--json"
+    ];
+    if (request.turnUnitId !== undefined) args.push("--turn-unit-id", request.turnUnitId);
+    if (request.cursor !== undefined) args.push("--cursor", request.cursor);
+    if (request.messageCursor !== undefined) args.push("--message-cursor", request.messageCursor);
+    try {
+      const page = parseConversationPageV1((await this.run(args)).stdout);
+      if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
+          page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest ||
+          page.mode !== (request.turnUnitId === undefined ? "turn_index" : "turn_messages") ||
+          page.turn_unit_id !== (request.turnUnitId ?? null)) {
+        throw new ConversationQueryError("generation_mismatch", conversationErrorMessage("generation_mismatch"));
+      }
+      return page;
+    } catch (error) {
+      if (error instanceof ConversationQueryError) throw error;
+      const code = conversationErrorCode(error);
+      throw new ConversationQueryError(code, conversationErrorMessage(code));
     }
   }
 
@@ -230,6 +283,21 @@ function allowedArgs(args: readonly string[]): boolean {
     if (args[13] === "--cursor") return boundedCursor(args[14]);
     return args[13] === "--anchor" && validAnchor(args[14]);
   }
+  if (args.length >= 13 && args.length <= 17 && args[0] === "inspect" && args[1] === "conversation-chain" &&
+      args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
+      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[10] === "--limit" && validConversationLimit(args[11]) && args[12] === "--json") {
+    const rest = args.slice(13);
+    if (rest.length === 0) return true;
+    if (rest.length === 2) {
+      return (rest[0] === "--cursor" && boundedCursor(rest[1])) ||
+        (rest[0] === "--turn-unit-id" && INSPECT_ID.test(rest[1] ?? ""));
+    }
+    if (rest.length === 4 && rest[0] === "--turn-unit-id" && INSPECT_ID.test(rest[1] ?? "")) {
+      return rest[2] === "--message-cursor" && boundedCursor(rest[3]);
+    }
+    return false;
+  }
   return false;
 }
 
@@ -243,6 +311,46 @@ function validateSessionEventRequest(request: SessionEventRequest): void {
   if (request.cursor !== undefined && request.anchor !== undefined) throw new Error("cursor and anchor are mutually exclusive");
   if (request.cursor !== undefined && !boundedCursor(request.cursor)) throw new Error("invalid cursor");
   if (request.anchor !== undefined && (!Number.isSafeInteger(request.anchor) || request.anchor < 1)) throw new Error("invalid anchor");
+}
+
+function validateConversationRequest(request: ConversationRequest): void {
+  validateProject(request.projectId);
+  if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
+  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
+  if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
+  if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 64) throw new Error("invalid conversation page limit");
+  if (request.turnUnitId !== undefined && !INSPECT_ID.test(request.turnUnitId)) throw new Error("invalid turn unit ID");
+  if (request.cursor !== undefined && request.turnUnitId !== undefined) throw new Error("index cursor cannot select a turn");
+  if (request.messageCursor !== undefined && request.turnUnitId === undefined) throw new Error("message cursor requires a turn");
+  if (request.cursor !== undefined && !boundedCursor(request.cursor)) throw new Error("invalid cursor");
+  if (request.messageCursor !== undefined && !boundedCursor(request.messageCursor)) throw new Error("invalid message cursor");
+}
+
+function validConversationLimit(value: string | undefined): boolean {
+  return Boolean(value && /^[1-9][0-9]?$/.test(value) && Number(value) <= 64);
+}
+
+function conversationErrorCode(error: unknown): ConversationErrorCode {
+  const stdout = (error as { stdout?: unknown } | null)?.stdout;
+  if (typeof stdout === "string" && Buffer.byteLength(stdout, "utf8") <= 4096) {
+    try {
+      const parsed = JSON.parse(stdout) as { error?: { code?: unknown } };
+      const code = parsed?.error?.code;
+      if (code === "source_unavailable" || code === "generation_mismatch" || code === "stale_cursor" || code === "unsupported_provider") return code;
+    } catch { /* The generic bounded error below is intentional. */ }
+  }
+  return "conversation_failed";
+}
+
+function conversationErrorMessage(code: ConversationErrorCode): string {
+  return {
+    source_unavailable: "问答来源暂不可用；现有执行事实仍可阅读。",
+    generation_mismatch: "项目已更新；请刷新后重新读取问答。",
+    stale_cursor: "问答分页已失效；请从首页重新读取。",
+    unsupported_provider: "当前来源暂不支持问答读取。",
+    conversation_failed: "无法读取问答记录；请刷新项目后重试，并确认 CLI 已更新。"
+  }[code];
 }
 
 function validInspectLimit(value: string | undefined): boolean {

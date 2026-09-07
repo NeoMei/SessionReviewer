@@ -1,0 +1,207 @@
+import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { CliRunner, ConversationQueryError } from "../src/cli/runner";
+import { parseConversationPageV1 } from "../src/data/conversation-page";
+
+const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
+const DEPENDENCY_DIGEST = `sha256:${"2".repeat(64)}`;
+const SOURCE_HASH = "3".repeat(64);
+const REVISION_ID = `sha256:${"4".repeat(64)}`;
+
+function message(role: "user" | "assistant", overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    role,
+    phase: role === "assistant" ? "final_answer" : null,
+    revision_id: REVISION_ID,
+    source_ref: {
+      provider: "codex",
+      session_id: "session-1",
+      source_identity: "source-1",
+      record_ordinal: role === "user" ? 1 : 2,
+      source_hash: SOURCE_HASH
+    },
+    occurred_at: role === "user" ? "2026-09-07T00:00:00Z" : "2026-09-07T00:01:00Z",
+    visible_excerpt: role === "user" ? "如何恢复可见问答？" : "已经恢复。",
+    truncated: false,
+    text: null,
+    text_truncated: false,
+    ...overrides
+  };
+}
+
+function turn(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    turn_unit_id: "turn-1",
+    ordinal: 1,
+    started_at: "2026-09-07T00:00:00Z",
+    ended_at: null,
+    user_message: message("user"),
+    answer_state: "answered",
+    assistant_message_count: 1,
+    ...overrides
+  };
+}
+
+function coverage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    source_records: 2,
+    visible_messages: 2,
+    captured_messages: 2,
+    truncated_messages: 0,
+    truncated_bodies: 0,
+    context_messages: 0,
+    orphan_messages: 0,
+    oversized_records: 0,
+    malformed_records: 0,
+    complete: true,
+    ...overrides
+  };
+}
+
+export function conversationPage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    minimum_reader_version: "0.4.0",
+    mode: "turn_index",
+    project_id: "project-p",
+    provider: "codex",
+    session_id: "session-1",
+    generation_id: "generation-1",
+    session_view_digest: VIEW_DIGEST,
+    dependency_digest: DEPENDENCY_DIGEST,
+    redaction_version: "visible-redaction-v1",
+    turn_unit_id: null,
+    total: 1,
+    range_start: 0,
+    range_end: 1,
+    first_cursor: "first-index",
+    previous_cursor: null,
+    next_cursor: null,
+    last_cursor: "last-index",
+    turn_units: [turn()],
+    messages: [],
+    coverage: coverage(),
+    ...overrides
+  };
+}
+
+export function selectedConversationPage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return conversationPage({
+    mode: "turn_messages",
+    turn_unit_id: "turn-1",
+    total: 2,
+    range_start: 0,
+    range_end: 2,
+    first_cursor: "first-message",
+    last_cursor: "last-message",
+    turn_units: [turn()],
+    messages: [
+      message("user", { text: "如何恢复可见问答？" }),
+      message("assistant", { text: "完整最终回答\n第二行" })
+    ],
+    ...overrides
+  });
+}
+
+describe("conversation page wire", () => {
+  it("accepts the shared backend fixture", () => {
+    const source = readFileSync(resolve(process.cwd(), "../testdata/contracts/v4/conversation-page-v1.valid.json"), "utf8");
+    expect(parseConversationPageV1(source).total).toBe(0);
+  });
+
+  it("accepts bound index and selected-message pages", () => {
+    expect(parseConversationPageV1(JSON.stringify(conversationPage())).turn_units[0]?.answer_state).toBe("answered");
+    const selected = parseConversationPageV1(JSON.stringify(selectedConversationPage()));
+    expect(selected.messages.map((item) => item.text)).toEqual(["如何恢复可见问答？", "完整最终回答\n第二行"]);
+  });
+
+  it.each([
+    ["unknown root field", () => conversationPage({ extra: true })],
+    ["cross-Session source", () => conversationPage({ turn_units: [turn({ user_message: message("user", { source_ref: { provider: "codex", session_id: "session-other", source_identity: "source-1", record_ordinal: 1, source_hash: SOURCE_HASH } }) })] })],
+    ["forged range", () => conversationPage({ range_end: 2 })],
+    ["index body", () => conversationPage({ turn_units: [turn({ user_message: message("user", { text: "must stay preview-only" }) })] })],
+    ["selected excerpt substitution", () => selectedConversationPage({ messages: [message("user", { text: null }), message("assistant", { text: null })] })],
+    ["unanswered with assistant count", () => conversationPage({ turn_units: [turn({ answer_state: "no_answer", assistant_message_count: 1 })] })],
+    ["noncanonical turn ordinal", () => conversationPage({ turn_units: [turn({ ordinal: 2 })] })],
+    ["selected message total", () => selectedConversationPage({ total: 3 })],
+    ["malformed timestamp", () => conversationPage({ turn_units: [turn({ started_at: "today" })] })],
+    ["false complete coverage", () => conversationPage({ coverage: coverage({ oversized_records: 1 }) })]
+  ])("rejects %s", (_label, make) => {
+    expect(() => parseConversationPageV1(JSON.stringify(make()))).toThrow();
+  });
+
+  it("rejects duplicate keys and invalid Unicode before accepting JSON shape", () => {
+    const valid = JSON.stringify(conversationPage());
+    expect(() => parseConversationPageV1(valid.replace('{"schema_version":1', '{"schema_version":1,"schema_version":1'))).toThrow(/duplicate/i);
+    expect(() => parseConversationPageV1(valid.replace("project-p", "\\ud800"))).toThrow(/unicode|surrogate/i);
+  });
+});
+
+describe("conversation CLI query", () => {
+  it("uses exact fixed argv for index and selected message cursors", async () => {
+    const execFile = vi.fn((_file: string, args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      callback(null, JSON.stringify(args.includes("--turn-unit-id") ? selectedConversationPage() : conversationPage()), "");
+    });
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20, cursor: "index-token"
+    });
+    await runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20, turnUnitId: "turn-1", messageCursor: "message-token"
+    });
+    await runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20, turnUnitId: "turn-1"
+    });
+
+    expect(execFile.mock.calls[0]?.[1]).toEqual([
+      "inspect", "conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1",
+      "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--cursor", "index-token"
+    ]);
+    expect(execFile.mock.calls[1]?.[1]).toEqual([
+      "inspect", "conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1",
+      "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--turn-unit-id", "turn-1", "--message-cursor", "message-token"
+    ]);
+    expect(execFile.mock.calls[2]?.[1]).toEqual([
+      "inspect", "conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1",
+      "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--turn-unit-id", "turn-1"
+    ]);
+    expect(execFile.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ shell: false, timeout: 10_000, maxBuffer: 1 << 20 }));
+  });
+
+  it("rejects response binding mismatches and invalid cursor modes", async () => {
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify(conversationPage({ generation_id: "generation-old" })), ""));
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    const base = {
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20
+    };
+    await expect(runner.getConversation(base)).rejects.toBeInstanceOf(ConversationQueryError);
+    await expect(runner.getConversation({ ...base, turnUnitId: "turn-1", cursor: "wrong-mode" })).rejects.toThrow(/cursor/i);
+    await expect(runner.getConversation({ ...base, messageCursor: "wrong-mode" })).rejects.toThrow(/turn/i);
+  });
+
+  it.each([
+    ["source_unavailable", "问答来源暂不可用"],
+    ["generation_mismatch", "项目已更新"],
+    ["stale_cursor", "分页已失效"],
+    ["unsupported_provider", "暂不支持问答读取"]
+  ])("maps %s without exposing stderr", async (code, expected) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(
+      Object.assign(new Error("/private/path"), { code: 1 }),
+      JSON.stringify({ error: { code, message: "/private/source detail" } }),
+      "/private/stderr"
+    ));
+    await runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20
+    }).catch((error: ConversationQueryError) => {
+      expect(error.message).toContain(expected);
+      expect(error.message).not.toContain("/private");
+      expect(error.code).toBe(code);
+    });
+  });
+});

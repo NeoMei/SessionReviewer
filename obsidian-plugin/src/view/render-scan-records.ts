@@ -1,6 +1,7 @@
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../contracts/review-v4";
 import type { SessionEventRequest } from "../cli/runner";
 import { button, element } from "./dom";
+import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
 
 const SESSION_PAGE_SIZE = 25;
 const EVENT_PAGE_SIZE = 25;
@@ -8,6 +9,7 @@ const EMPTY_EXCERPT = "（该索引事件没有可用摘录）";
 
 export interface ScanRecordsOptions {
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
+  loadConversation?: ConversationLoader;
   cliUnavailable?: boolean;
   eventPageCache?: Map<string, SessionEventPageV1>;
 }
@@ -42,6 +44,8 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   ]);
   const browser = element("div", { className: "sr-scan-browser" });
   let eventArea: HTMLElement | undefined;
+  let conversation: ConversationElement | undefined;
+  let conversationIdentity = "";
   let sessionRail: SessionRailElement;
 
   const eligible = (session: SessionIndexEntryV1 | undefined): session is SessionIndexEntryV1 =>
@@ -56,6 +60,31 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     limit: EVENT_PAGE_SIZE,
     ...navigation
   });
+
+  const conversationFor = (session: SessionIndexEntryV1 | undefined): HTMLElement => {
+    const available = Boolean(session && session.source_availability === "available" && session.session_view_digest && options.loadConversation);
+    if (!available || !session || !session.session_view_digest || !options.loadConversation) {
+      conversation?.dispose();
+      conversation = undefined;
+      conversationIdentity = "";
+      return element("section", { className: "sr-conversation sr-conversation-unavailable", attrs: { "aria-label": "问答记录" } }, [
+        element("h3", { text: "问答记录" }),
+        element("p", { text: options.cliUnavailable || !options.loadConversation ? "无法读取问答记录：CLI 不可用或版本过旧。已索引执行事实仍可阅读。" : "该 Session 的问答来源不可用。已索引执行事实仍可阅读。" })
+      ]);
+    }
+    const identity = `${index.project_id}\0${session.provider}\0${session.session_id}\0${index.generation_id}\0${session.session_view_digest}`;
+    const binding = {
+      projectId: index.project_id,
+      provider: session.provider,
+      sessionId: session.session_id,
+      expectedGenerationId: index.generation_id,
+      expectedSessionViewDigest: session.session_view_digest
+    };
+    if (!conversation) conversation = renderConversation(binding, options.loadConversation);
+    else if (conversationIdentity !== identity) conversation.updateIdentity(binding);
+    conversationIdentity = identity;
+    return conversation;
+  };
 
   const load = async (navigation?: EventNavigation): Promise<void> => {
     if (!eligible(selected) || !options.loadSessionEvents || disposed) return;
@@ -104,7 +133,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   const draw = (): void => {
     if (disposed) return;
     sessionRail.update(index.sessions, selected, query, sessionPage);
-    const nextEventArea = renderEventArea(selected, eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
+    const nextEventArea = renderEventArea(selected, conversationFor(selected), eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
       onEvent: (value) => { selectedEvent = value; draw(); },
       onLoad: (navigation) => { void load(navigation); }
     });
@@ -116,6 +145,9 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   root.dispose = () => {
     disposed = true;
     requestEpoch += 1;
+    conversation?.dispose();
+    conversation = undefined;
+    conversationIdentity = "";
     if (!options.eventPageCache) cache.clear();
     root.replaceChildren();
   };
@@ -173,6 +205,7 @@ function renderSessions(handlers: SessionHandlers): SessionRailElement {
 
 function renderEventArea(
   session: SessionIndexEntryV1 | undefined,
+  conversation: HTMLElement,
   page: SessionEventPageV1 | undefined,
   selectedEvent: number,
   loading: boolean,
@@ -187,25 +220,28 @@ function renderEventArea(
     return area;
   }
   area.append(renderSessionCoverage(session));
+  area.append(conversation);
+  const facts = element("section", { className: "sr-execution-facts", attrs: { "aria-label": "已索引执行事实" } }, [element("h3", { text: "已索引执行事实" })]);
+  area.append(facts);
   if (session.source_availability === "unavailable") {
-    area.append(element("p", { className: "sr-event-unavailable", text: "来源不可用；公开覆盖信息仍可阅读。" }));
+    facts.append(element("p", { className: "sr-event-unavailable", text: "来源不可用；公开覆盖信息仍可阅读。" }));
   }
   if (options.cliUnavailable || !options.loadSessionEvents) {
-    area.append(element("p", { className: "sr-event-unavailable", text: "无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。" }));
+    facts.append(element("p", { className: "sr-event-unavailable", text: "无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。" }));
     return area;
   }
   if (session.indexed_event_count === 0 || session.session_view_digest === null) {
-    area.append(element("p", { className: "sr-empty", text: "这个 Session 没有可读的已索引事件。" }));
+    facts.append(element("p", { className: "sr-empty", text: "这个 Session 没有可读的已索引事件。" }));
     return area;
   }
   if (loading) {
-    area.append(element("p", { className: "sr-loading", text: "正在读取已索引事件…" }));
+    facts.append(element("p", { className: "sr-loading", text: "正在读取已索引事件…" }));
     return area;
   }
   if (loadError) {
     const retry = button("重试", { "data-action": "retry-event-page" });
     retry.addEventListener("click", () => handlers.onLoad(retryNavigation));
-    area.append(element("p", { className: "sr-event-error", text: loadError }), retry);
+    facts.append(element("p", { className: "sr-event-error", text: loadError }), retry);
     return area;
   }
   if (!page) return area;
@@ -236,7 +272,7 @@ function renderEventArea(
     );
   }
   content.append(list, detail);
-  area.append(renderEventNavigation(page, handlers.onLoad), content);
+  facts.append(renderEventNavigation(page, handlers.onLoad), content);
   return area;
 }
 

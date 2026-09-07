@@ -1,5 +1,6 @@
 import type { Snapshot } from "../data/repository";
-import type { SessionEventRequest } from "../cli/runner";
+import type { ConversationRequest, SessionEventRequest } from "../cli/runner";
+import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { SessionEventPageV1 } from "../contracts/review-v4";
 import { element } from "./dom";
 import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
@@ -74,6 +75,7 @@ export function renderMarkdownV4View(
   options: {
     cliUnavailable?: boolean;
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
+    loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
   } = {}
 ): HTMLElement & { scanRecords?: ScanRecordsElement } {
