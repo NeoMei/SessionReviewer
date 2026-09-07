@@ -8,7 +8,6 @@ export interface V4ViewState {
 }
 
 export type V4ViewStates = Record<string, V4ViewState>;
-export type SaveV4ViewStates = (states: V4ViewStates) => void | Promise<void>;
 
 const PROJECT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
 const TABS = new Set<V4Tab>(["evolution", "problems", "decisions", "sessions", "usage"]);
