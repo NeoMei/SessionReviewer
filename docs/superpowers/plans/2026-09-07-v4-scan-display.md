@@ -24,7 +24,7 @@
 
 **Files:** Create `internal/inspect/service.go`, `internal/inspect/service_test.go`, `internal/cli/inspect.go`, `internal/cli/inspect_test.go`; modify `internal/cli/run.go`; extend existing read-only store helpers only if required.
 
-**Interfaces:** Consumes `ParseInspectContract`, `memorystore.OpenReadOnly/LoadPublished/LoadObject`, validated memory observations and existing `inspect.RenderEventPage`. Produces the CLI argv specified in the spec and canonical `SessionEventPage` JSON for Task 2. Nonzero failures emit `{ "error": { "code": "stale_generation", "message": "..." } }` (with the corresponding bounded safe error code for other failures).
+**Interfaces:** Consumes `ParseInspectContract`, `memorystore.OpenReadOnly/LoadPublished/LoadObject`, validated memory observations and existing `inspect.RenderEventPage`. Produces the CLI argv specified in the spec and canonical `SessionEventPage` JSON for Task 2. Nonzero failures emit `{ "error": { "code": "generation_mismatch", "message": "..." } }` (with the corresponding existing contract error code for other failures). Reuse frozen `generation_mismatch`, `stale_cursor` and `anchor_out_of_range` names.
 
 - [ ] Write failing CLI and service tests using isolated fixture stores, never real user sources. Literal expectations: 3 events with limit 2 returns sequences 1/2, range 1–2, total 3; next returns sequence 3, range 3–3 and null next; first/last and anchor navigate deterministically.
 
