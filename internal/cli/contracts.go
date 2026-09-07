@@ -291,7 +291,7 @@ func ParseInspectContract(args []string) (InspectRequest, error) {
 }
 
 func parseConversationChainContract(args []string) (InspectRequest, error) {
-	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "turn-unit-id": true, "message-cursor": true, "limit": true, "json": true}
+	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "turn-unit-id": true, "cursor": true, "message-cursor": true, "limit": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
 	if err != nil {
 		return InspectRequest{}, err
@@ -315,11 +315,19 @@ func parseConversationChainContract(args []string) (InspectRequest, error) {
 			return InspectRequest{}, err
 		}
 	}
+	if flags.values["cursor"] != "" {
+		if flags.values["turn-unit-id"] != "" {
+			return InspectRequest{}, contractError("index cursor cannot select a turn unit")
+		}
+		if err = requireBoundedUTF8(flags.values["cursor"], MaxOpaqueCursorBytes, "cursor"); err != nil {
+			return InspectRequest{}, err
+		}
+	}
 	limit, err := requirePositiveInt(flags.values["limit"])
 	if err != nil || limit > 64 {
 		return InspectRequest{}, contractError("limit must be between 1 and 64")
 	}
-	return InspectRequest{Command: "conversation-chain", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], TurnUnitID: flags.values["turn-unit-id"], MessageCursor: flags.values["message-cursor"], Limit: limit}, nil
+	return InspectRequest{Command: "conversation-chain", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], TurnUnitID: flags.values["turn-unit-id"], Cursor: flags.values["cursor"], MessageCursor: flags.values["message-cursor"], Limit: limit}, nil
 }
 
 func ValidateConversationSourceCoverage(coverage ConversationSourceCoverage) error {

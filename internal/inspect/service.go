@@ -75,6 +75,13 @@ type eventCursor struct {
 // published immutable generation. It never opens source logs or a writable
 // store and derives event rows only from the selected validated SessionView.
 func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ SessionEventPage, retErr error) {
+	return inspectPublishedSession(ctx, request, nil)
+}
+
+// inspectPublishedSession shares the complete publication and revision
+// authentication boundary with source-backed inspection. The callback runs
+// before the final physical binding and published-generation recheck.
+func inspectPublishedSession(ctx context.Context, request EventPageRequest, read func(memory.SessionView) error) (_ SessionEventPage, retErr error) {
 	if ctx == nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection context is required")
 	}
@@ -184,6 +191,15 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
 	}
 
+	if read != nil {
+		if err := read(view); err != nil {
+			return SessionEventPage{}, err
+		}
+		if err := projectidentity.Reauthenticate(binding); err != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "configured project mapping changed during inspection")
+		}
+		return SessionEventPage{}, recheckPublished(ctx, store, publishedID, manifest)
+	}
 	items := make([]EventItem, len(revisions))
 	for index, revision := range revisions {
 		if err := inspectionCheckpoint(ctx, "event_item"); err != nil {
@@ -236,20 +252,27 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 	if _, err := RenderEventPage(page); err != nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session event page is invalid")
 	}
+	if err := recheckPublished(ctx, store, publishedID, manifest); err != nil {
+		return SessionEventPage{}, err
+	}
+	return page, nil
+}
+
+func recheckPublished(ctx context.Context, store *memorystore.Store, publishedID string, manifest memory.GenerationManifest) error {
 	if err := inspectionCheckpoint(ctx, "before_published_recheck"); err != nil {
-		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		return publicError(CodeInvalidArgument, "inspection timed out")
 	}
 	currentID, currentManifest, err := store.LoadPublishedContext(ctx)
 	if context.Cause(ctx) != nil {
-		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		return publicError(CodeInvalidArgument, "inspection timed out")
 	}
 	if err != nil {
-		return SessionEventPage{}, publicError(CodeInvalidArgument, "published private state became unavailable during inspection")
+		return publicError(CodeInvalidArgument, "published private state became unavailable during inspection")
 	}
 	if currentID != publishedID || !reflect.DeepEqual(currentManifest, manifest) {
-		return SessionEventPage{}, publicError(CodeGenerationMismatch, "published generation changed during inspection")
+		return publicError(CodeGenerationMismatch, "published generation changed during inspection")
 	}
-	return page, nil
+	return nil
 }
 
 func publicError(code, message string) error { return &Error{Code: code, Message: message} }

@@ -47,6 +47,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/atomicfile
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/baselinehash
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/config
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/conversationchain
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/ledger
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memory
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memorystore

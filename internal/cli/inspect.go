@@ -16,6 +16,9 @@ Usage:
   session-reviewer inspect session-events --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
     --limit 1..100 --json
+  session-reviewer inspect conversation-chain --project-id ID --provider ID --session-id ID
+    --expected-generation-id ID [--cursor TOKEN | --turn-unit-id ID [--message-cursor TOKEN]]
+    --limit 1..64 --json
 `
 
 type inspectDiagnostic struct {
@@ -37,7 +40,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		writeInspectError(stdout, err)
 		return 2
 	}
-	if request.Command != "session-events" {
+	if request.Command != "session-events" && request.Command != "conversation-chain" {
 		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "inspect subcommand is not implemented"})
 		return 2
 	}
@@ -48,16 +51,28 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), InspectExecutionTimeout)
 	defer cancel()
-	page, err := inspectapi.LoadSessionEventPage(ctx, inspectapi.EventPageRequest{
-		DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID,
-		ExpectedGenerationID: request.ExpectedGenerationID, Cursor: request.Cursor, Anchor: request.Anchor, Limit: request.Limit,
-	})
+	var body []byte
+	if request.Command == "conversation-chain" {
+		page, loadErr := inspectapi.LoadConversationPage(ctx, inspectapi.ConversationRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, TurnUnitID: request.TurnUnitID, Cursor: request.Cursor, MessageCursor: request.MessageCursor, Limit: request.Limit})
+		err = loadErr
+		if err == nil {
+			body, err = inspectapi.RenderConversationPage(page)
+		}
+	} else {
+		page, loadErr := inspectapi.LoadSessionEventPage(ctx, inspectapi.EventPageRequest{
+			DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID,
+			ExpectedGenerationID: request.ExpectedGenerationID, Cursor: request.Cursor, Anchor: request.Anchor, Limit: request.Limit,
+		})
+		err = loadErr
+		if err == nil {
+			body, err = inspectapi.RenderEventPage(page)
+		}
+	}
 	if err != nil {
 		writeInspectError(stdout, err)
 		return 1
 	}
-	body, err := inspectapi.RenderEventPage(page)
-	if err != nil || len(body) > MaxInspectResponseBytes {
+	if len(body) > MaxInspectResponseBytes {
 		writeInspectError(stdout, ContractError{Code: ContractCodeResponseTooLarge, Message: "inspection response exceeds its byte limit"})
 		return 1
 	}

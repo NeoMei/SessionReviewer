@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sessionreviewer.local/schemas/conversation-page-v1.schema.json",
+  "title": "Authenticated visible conversation page v1",
+  "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "minimum_reader_version", "mode", "project_id", "provider", "session_id", "generation_id", "session_view_digest", "dependency_digest", "redaction_version", "turn_unit_id", "total", "range_start", "range_end", "first_cursor", "previous_cursor", "next_cursor", "last_cursor", "turn_units", "messages", "coverage"],
+  "properties": {
+    "schema_version": {"const": 1}, "minimum_reader_version": {"const": "0.4.0"},
+    "mode": {"enum": ["turn_index", "turn_messages"]},
+    "project_id": {"$ref": "#/$defs/id"}, "provider": {"const": "codex"}, "session_id": {"$ref": "#/$defs/id"}, "generation_id": {"$ref": "#/$defs/id"},
+    "session_view_digest": {"$ref": "#/$defs/digest"}, "dependency_digest": {"$ref": "#/$defs/digest"}, "redaction_version": {"const": "visible-redaction-v1"},
+    "turn_unit_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
+    "total": {"$ref": "#/$defs/count"}, "range_start": {"$ref": "#/$defs/count"}, "range_end": {"$ref": "#/$defs/count"},
+    "first_cursor": {"$ref": "#/$defs/cursor"}, "previous_cursor": {"$ref": "#/$defs/cursor"}, "next_cursor": {"$ref": "#/$defs/cursor"}, "last_cursor": {"$ref": "#/$defs/cursor"},
+    "turn_units": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/turn"}},
+    "messages": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/message"}},
+    "coverage": {"$ref": "#/$defs/coverage"}
+  },
+  "allOf": [
+    {"if": {"properties": {"mode": {"const": "turn_index"}}}, "then": {"properties": {"turn_unit_id": {"type": "null"}, "messages": {"maxItems": 0}}}},
+    {"if": {"properties": {"mode": {"const": "turn_messages"}}}, "then": {"properties": {"turn_unit_id": {"$ref": "#/$defs/id"}, "turn_units": {"minItems": 1, "maxItems": 1}}}}
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
+    "cursor": {"type": ["string", "null"], "maxLength": 4096},
+    "timestamp": {"type": "string", "maxLength": 128},
+    "source_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"],
+      "properties": {"provider": {"const": "codex"}, "session_id": {"$ref": "#/$defs/id"}, "source_identity": {"$ref": "#/$defs/id"}, "record_ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+    },
+    "message": {
+      "type": "object", "additionalProperties": false,
+      "required": ["role", "phase", "revision_id", "source_ref", "occurred_at", "visible_excerpt", "truncated", "text", "text_truncated"],
+      "properties": {
+        "role": {"enum": ["user", "assistant"]}, "phase": {"enum": [null, "commentary", "final_answer"]},
+        "revision_id": {"$ref": "#/$defs/digest"}, "source_ref": {"$ref": "#/$defs/source_ref"}, "occurred_at": {"$ref": "#/$defs/timestamp"},
+        "visible_excerpt": {"type": "string", "maxLength": 4096, "description": "Additionally capped at 4096 UTF-8 bytes."},
+        "truncated": {"type": "boolean", "description": "Only the preview was clipped. This does not mean text is clipped."},
+        "text": {"type": ["string", "null"], "maxLength": 65536, "description": "Full redacted selected-message body, additionally capped at 64 KiB UTF-8; null in turn-index previews."},
+        "text_truncated": {"type": "boolean", "description": "Full redacted body exceeded 64 KiB and was clipped."}
+      }
+    },
+    "turn": {
+      "type": "object", "additionalProperties": false,
+      "required": ["turn_unit_id", "ordinal", "started_at", "ended_at", "user_message", "answer_state", "assistant_message_count"],
+      "properties": {"turn_unit_id": {"$ref": "#/$defs/id"}, "ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "started_at": {"$ref": "#/$defs/timestamp"}, "ended_at": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]}, "user_message": {"$ref": "#/$defs/message"}, "answer_state": {"enum": ["no_answer", "partial", "answered"]}, "assistant_message_count": {"$ref": "#/$defs/count"}}
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_records", "visible_messages", "captured_messages", "truncated_messages", "truncated_bodies", "context_messages", "orphan_messages", "oversized_records", "malformed_records", "complete"],
+      "properties": {"source_records": {"$ref": "#/$defs/count"}, "visible_messages": {"$ref": "#/$defs/count"}, "captured_messages": {"$ref": "#/$defs/count"}, "truncated_messages": {"$ref": "#/$defs/count"}, "truncated_bodies": {"$ref": "#/$defs/count"}, "context_messages": {"$ref": "#/$defs/count"}, "orphan_messages": {"$ref": "#/$defs/count"}, "oversized_records": {"$ref": "#/$defs/count"}, "malformed_records": {"$ref": "#/$defs/count"}, "complete": {"type": "boolean", "description": "False when oversized/malformed records or orphan assistant messages prevent complete grouping; oversized records have unknown roles and must not be labeled missing answers."}}
+    }
+  }
+}

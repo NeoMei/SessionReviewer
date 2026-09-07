@@ -80,6 +80,27 @@ func TestInspectSessionEventsWritesBoundedMachineErrors(t *testing.T) {
 
 type cliInspectFixture struct{ home, data, projectRoot, projectID, generationID string }
 
+func TestInspectConversationAuthenticatesBeforeSourceDiagnostic(t *testing.T) {
+	fixture := newCLIInspectFixture(t)
+	setCurrentEnv(t, platform.Env{GOOS: runtime.GOOS, Home: fixture.home})
+	var out, errOut bytes.Buffer
+	code := Run([]string{"inspect", "conversation-chain", "--project-id", fixture.projectID, "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", fixture.generationID, "--limit", "2", "--json"}, &out, &errOut)
+	if code == 0 || !strings.Contains(out.String(), `"code":"source_unavailable"`) {
+		t.Fatalf("expected authenticated source diagnostic: code=%d out=%s", code, out.String())
+	}
+}
+
+func TestConversationIndexCursorIsSeparateFromMessageCursor(t *testing.T) {
+	args := []string{"conversation-chain", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--limit", "2", "--json", "--cursor", "opaque"}
+	request, err := ParseInspectContract(args)
+	if err != nil || request.Cursor != "opaque" {
+		t.Fatalf("request=%+v err=%v", request, err)
+	}
+	if _, err := ParseInspectContract(append(args, "--turn-unit-id", "turn-1")); err == nil {
+		t.Fatal("index cursor accepted in message mode")
+	}
+}
+
 func newCLIInspectFixture(t *testing.T) cliInspectFixture {
 	t.Helper()
 	home := t.TempDir()

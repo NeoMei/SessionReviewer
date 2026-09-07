@@ -445,7 +445,7 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 		views[key] = &viewCopy
 		dependencies = append(dependencies, memory.SessionViewDependency{Provider: "codex", SessionID: sessionID, Digest: view.Digest})
 		lineages = append(lineages, memory.SessionLineageDependency{Provider: "codex", SessionID: sessionID, Digest: lineage.Digest})
-		sourceDigests = append(sourceDigests, sourceDigest)
+		sourceDigests = append(sourceDigests, view.SourceRecordDigest)
 		measurements = append(measurements, memory.SessionIndexMeasurement{Provider: "codex", SessionID: sessionID, RecordCount: eventUint64(5), Seen: 5, Indexed: 3, Undecodable: 2})
 		sessionDigests[sessionID] = view.Digest
 	}

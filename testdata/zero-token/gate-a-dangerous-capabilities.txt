@@ -53,6 +53,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	compatibleLegacyExtension	reflect.DeepEqual	occurrence=4
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/config/config.go	sharedConfigForSave	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/conversationchain/codec.go	Render	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderCurrentDocument	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderDecisionDocument	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/ledger/render.go	renderDecisionDocument	reflect.DeepEqual	occurrence=2
@@ -126,6 +127,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	inter
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	network	internal/projectprobe/git.go	net/url	alias=url
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	process	internal/projectprobe/git.go	os/exec	alias=exec
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/config/config.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/conversationchain/codec.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/ledger/render.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/canonical.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/memory/digest.go	reflect	alias=reflect
