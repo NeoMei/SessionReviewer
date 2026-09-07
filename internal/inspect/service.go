@@ -71,6 +71,14 @@ type eventCursor struct {
 	Checksum     string `json:"checksum"`
 }
 
+type authenticatedSession struct {
+	generationID string
+	view         memory.SessionView
+	revisions    []memory.ObservationRevision
+	entry        sessionindex.Entry
+	project      memory.ProjectView
+}
+
 // LoadSessionEventPage authenticates an existing configured project and its
 // published immutable generation. It never opens source logs or a writable
 // store and derives event rows only from the selected validated SessionView.
@@ -81,7 +89,7 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 // inspectPublishedSession shares the complete publication and revision
 // authentication boundary with source-backed inspection. The callback runs
 // before the final physical binding and published-generation recheck.
-func inspectPublishedSession(ctx context.Context, request EventPageRequest, read func(memory.SessionView) error) (_ SessionEventPage, retErr error) {
+func inspectPublishedSession(ctx context.Context, request EventPageRequest, read func(memory.SessionView) error, authenticatedRead ...func(authenticatedSession) error) (_ SessionEventPage, retErr error) {
 	if ctx == nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection context is required")
 	}
@@ -191,8 +199,16 @@ func inspectPublishedSession(ctx context.Context, request EventPageRequest, read
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
 	}
 
-	if read != nil {
-		if err := read(view); err != nil {
+	if read != nil || len(authenticatedRead) != 0 {
+		if len(authenticatedRead) > 1 {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection reader is invalid")
+		}
+		if read != nil {
+			err = read(view)
+		} else {
+			err = authenticatedRead[0](authenticatedSession{generationID: publishedID, view: view, revisions: revisions, entry: entry, project: project})
+		}
+		if err != nil {
 			return SessionEventPage{}, err
 		}
 		if err := projectidentity.Reauthenticate(binding); err != nil {

@@ -93,6 +93,27 @@ func TestInspectConversationAuthenticatesBeforeSourceDiagnostic(t *testing.T) {
 	}
 }
 
+func TestInspectSummaryDispatchesAuthenticatedRuntime(t *testing.T) {
+	fixture := newCLIInspectFixture(t)
+	setCurrentEnv(t, fixture.env)
+	var out, errOut bytes.Buffer
+	code := Run([]string{"inspect", "session-summary", "--project-id", fixture.projectID, "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", fixture.generationID, "--json"}, &out, &errOut)
+	if code != 0 || errOut.Len() != 0 {
+		t.Fatalf("code=%d stdout=%s stderr=%s", code, out.String(), errOut.String())
+	}
+	summary, err := inspectapi.ParseSummary(out.Bytes())
+	if err != nil || summary.ProjectID != fixture.projectID || summary.GenerationID != fixture.generationID || summary.KeyOperations.Total != 1 || summary.VerificationResults.Total != 1 {
+		t.Fatalf("summary=%+v err=%v raw=%s", summary, err, out.String())
+	}
+}
+
+func TestInspectSummaryHelpListsRuntime(t *testing.T) {
+	var out, errOut bytes.Buffer
+	if code := Run([]string{"inspect", "--help"}, &out, &errOut); code != 0 || errOut.Len() != 0 || !strings.Contains(out.String(), "inspect session-summary") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
+	}
+}
+
 func TestConversationIndexCursorIsSeparateFromMessageCursor(t *testing.T) {
 	args := []string{"conversation-chain", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--limit", "2", "--json", "--cursor", "opaque"}
 	request, err := ParseInspectContract(args)

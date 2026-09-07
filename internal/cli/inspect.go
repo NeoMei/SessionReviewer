@@ -13,6 +13,8 @@ import (
 const inspectHelp = `Read one validated page from a published Session index.
 
 Usage:
+  session-reviewer inspect session-summary --project-id ID --provider ID --session-id ID
+    --expected-generation-id ID --json
   session-reviewer inspect session-events --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
     --limit 1..100 --json
@@ -40,7 +42,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		writeInspectError(stdout, err)
 		return 2
 	}
-	if request.Command != "session-events" && request.Command != "conversation-chain" {
+	if request.Command != "session-summary" && request.Command != "session-events" && request.Command != "conversation-chain" {
 		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "inspect subcommand is not implemented"})
 		return 2
 	}
@@ -52,7 +54,16 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), InspectExecutionTimeout)
 	defer cancel()
 	var body []byte
-	if request.Command == "conversation-chain" {
+	if request.Command == "session-summary" {
+		summary, loadErr := inspectapi.LoadSessionSummary(ctx, inspectapi.SummaryRequest{
+			DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider,
+			SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID,
+		})
+		err = loadErr
+		if err == nil {
+			body, err = inspectapi.RenderSummary(summary)
+		}
+	} else if request.Command == "conversation-chain" {
 		page, loadErr := inspectapi.LoadConversationPage(ctx, inspectapi.ConversationRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, TurnUnitID: request.TurnUnitID, Cursor: request.Cursor, MessageCursor: request.MessageCursor, Limit: request.Limit})
 		err = loadErr
 		if err == nil {
