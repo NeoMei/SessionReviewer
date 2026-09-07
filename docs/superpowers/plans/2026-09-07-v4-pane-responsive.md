@@ -23,7 +23,7 @@
 **Files:**
 - Modify: `obsidian-plugin/styles.css`
 - Create: `obsidian-plugin/scripts/check-v4-pane-layout.mjs` (real renderer/browser assertions and documented CLI arguments)
-- Create: `obsidian-plugin/scripts/fixtures/v4-pane-layout.ts` (synthetic ledger/index fixture wrapper using the actual renderer; only Obsidian runtime primitive shim)
+- Create: `obsidian-plugin/tests/fixtures/v4-pane-layout.ts` (synthetic ledger/index fixture wrapper using the actual renderer; only Obsidian runtime primitive shim; existing typed lint and TypeScript project apply)
 
 **Interfaces:**
 - Consumes `renderMarkdownV4View` from `obsidian-plugin/src/view/presentation.ts`, existing contract ledger/index JSON, and production CSS.
@@ -54,4 +54,4 @@ assert(detail.x + detail.width <= shell.x + shell.width + 1);
 This snippet shows the boundary, not the entire patch: include existing header/support/model/pricing compact rules and v4-scoped nested scan/event/conversation grids and definition layout. Avoid duplicating the same v4 compact block in both query types.
 
 - [ ] **Step 4: Run GREEN and regression.** Repeat the browser script, capture narrow/wide screenshots to a uniquely created temporary output folder, then `npm --prefix obsidian-plugin run check` once. Record exact command/results, screenshot paths and limitations in the task report. Self-review no global layout/data changes.
-- [ ] **Step 5: Commit only the three listed production/test files.** Use `git add obsidian-plugin/styles.css obsidian-plugin/scripts/check-v4-pane-layout.mjs obsidian-plugin/scripts/fixtures/v4-pane-layout.ts` then `git commit -m "fix(obsidian): adapt v4 layout to native pane width"`. Controller independently reviews and reinstalls the candidate into the authorized temporary Vault; full spec restoration remains open.
+- [ ] **Step 5: Commit only the three listed production/test files.** Use `git add obsidian-plugin/styles.css obsidian-plugin/scripts/check-v4-pane-layout.mjs obsidian-plugin/tests/fixtures/v4-pane-layout.ts` then `git commit -m "fix(obsidian): adapt v4 layout to native pane width"`. Controller independently reviews and reinstalls the candidate into the authorized temporary Vault; full spec restoration remains open.
