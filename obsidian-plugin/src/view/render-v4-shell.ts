@@ -1,6 +1,6 @@
-import type { ConversationRequest, SessionEventRequest } from "../cli/runner";
+import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
-import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexV1 } from "../contracts/review-v4";
+import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ProjectDescriptor } from "../data/repository";
 import type { V4Tab, V4ViewState } from "../state/v4-view-state";
 import { normalizeV4ViewState } from "../state/v4-view-state";
@@ -18,6 +18,7 @@ export interface RenderV4ShellOptions {
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
+  loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   eventPageCache?: Map<string, SessionEventPageV1>;
   snapshotStatus?: string;
   trustDetail?: HTMLElement;

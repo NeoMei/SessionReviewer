@@ -3,10 +3,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ScanStatus } from "../contracts/review-v3";
-import type { SessionEventPageV1 } from "../contracts/review-v4";
+import type { SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import { parseConversationPageV1 } from "../data/conversation-page";
-import { parseSessionEventPageV1 } from "../data/contracts-v4";
+import { parseSessionEventPageV1, parseSessionSummaryV1 } from "../data/contracts-v4";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
 const CONFLICT_ID = /^conflict-[a-z0-9][a-z0-9._-]{0,191}$/;
@@ -15,6 +15,7 @@ const SCAN_GENERATION_ID = /^(?:generation|scan)-[a-z0-9][a-z0-9._-]{0,127}$/;
 const SCAN_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/;
 const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
 const SESSION_EVENTS_FAILED = "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。";
+const SESSION_SUMMARY_FAILED = "无法读取 Session 摘要；请刷新项目后重试，并确认 CLI 已更新。";
 const INSPECT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SCAN_STATES = ["queued", "running", "completed", "completed_with_issues", "failed"] as const;
@@ -49,6 +50,21 @@ export interface SessionEventRequest {
   limit: number;
   cursor?: string;
   anchor?: number;
+}
+
+export interface SessionSummaryRequest {
+  projectId: string;
+  provider: string;
+  sessionId: string;
+  expectedGenerationId: string;
+  expectedSessionViewDigest: string;
+}
+
+export class SessionSummaryQueryError extends Error {
+  constructor(readonly code: "summary_failed") {
+    super(SESSION_SUMMARY_FAILED);
+    this.name = "SessionSummaryQueryError";
+  }
 }
 
 export interface ConversationRequest {
@@ -153,6 +169,28 @@ export class CliRunner {
       return page;
     } catch {
       throw new Error(SESSION_EVENTS_FAILED);
+    }
+  }
+
+  async getSessionSummary(request: SessionSummaryRequest): Promise<SessionSummaryV1> {
+    validateSessionSummaryRequest(request);
+    const args = [
+      "inspect", "session-summary",
+      "--project-id", request.projectId,
+      "--provider", request.provider,
+      "--session-id", request.sessionId,
+      "--expected-generation-id", request.expectedGenerationId,
+      "--json"
+    ];
+    try {
+      const summary = parseSessionSummaryV1((await this.run(args, 5_000)).stdout);
+      if (summary.project_id !== request.projectId || summary.provider !== request.provider || summary.session_id !== request.sessionId ||
+          summary.generation_id !== request.expectedGenerationId || summary.session_view_digest !== request.expectedSessionViewDigest) {
+        throw new Error("Session summary binding mismatch");
+      }
+      return summary;
+    } catch {
+      throw new SessionSummaryQueryError("summary_failed");
     }
   }
 
@@ -275,6 +313,10 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args.length === 3 && args[0] === "sync" && args[1] === "--project-id") return PROJECT_ID.test(args[2] ?? "");
   if (args.length === 5 && args[0] === "scan" && args[1] === "start" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   if (args.length === 5 && args[0] === "scan" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
+  if (args.length === 11 && args[0] === "inspect" && args[1] === "session-summary" &&
+      args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
+      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[10] === "--json") return true;
   if ((args.length === 13 || args.length === 15) && args[0] === "inspect" && args[1] === "session-events" &&
       args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
       args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
@@ -299,6 +341,14 @@ function allowedArgs(args: readonly string[]): boolean {
     return false;
   }
   return false;
+}
+
+function validateSessionSummaryRequest(request: SessionSummaryRequest): void {
+  validateProject(request.projectId);
+  if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
+  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
+  if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
 }
 
 function validateSessionEventRequest(request: SessionEventRequest): void {

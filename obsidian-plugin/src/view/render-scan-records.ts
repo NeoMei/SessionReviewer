@@ -1,7 +1,9 @@
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../contracts/review-v4";
-import type { SessionEventRequest } from "../cli/runner";
+import type { SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import { button, element } from "./dom";
 import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
+import { renderSessionSummary, type SessionSummaryElement } from "./render-session-summary";
+import type { SessionSummaryV1 } from "../contracts/review-v4";
 
 const SESSION_PAGE_SIZE = 25;
 const EVENT_PAGE_SIZE = 25;
@@ -10,6 +12,7 @@ const EMPTY_EXCERPT = "（该索引事件没有可用摘录）";
 export interface ScanRecordsOptions {
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: ConversationLoader;
+  loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   cliUnavailable?: boolean;
   eventPageCache?: Map<string, SessionEventPageV1>;
 }
@@ -46,6 +49,8 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let eventArea: HTMLElement | undefined;
   let conversation: ConversationElement | undefined;
   let conversationIdentity = "";
+  let summary: SessionSummaryElement | undefined;
+  let summaryIdentity = "";
   let sessionRail: SessionRailElement;
 
   const eligible = (session: SessionIndexEntryV1 | undefined): session is SessionIndexEntryV1 =>
@@ -69,7 +74,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       conversationIdentity = "";
       return element("section", { className: "sr-conversation sr-conversation-unavailable", attrs: { "aria-label": "问答记录" } }, [
         element("h3", { text: "问答记录" }),
-        element("p", { text: options.cliUnavailable || !options.loadConversation ? "无法读取问答记录：CLI 不可用或版本过旧。已索引执行事实仍可阅读。" : "该 Session 的问答来源不可用。已索引执行事实仍可阅读。" })
+        element("p", { text: options.cliUnavailable || !options.loadConversation ? "无法读取问答记录：CLI 不可用或版本过旧。完整 Session 清单仍可浏览。" : "该 Session 的问答来源不可用。已索引执行事实仍可阅读。" })
       ]);
     }
     const identity = `${index.project_id}\0${session.provider}\0${session.session_id}\0${index.generation_id}\0${session.session_view_digest}`;
@@ -84,6 +89,39 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     else if (conversationIdentity !== identity) conversation.updateIdentity(binding);
     conversationIdentity = identity;
     return conversation;
+  };
+
+  const summaryFor = (session: SessionIndexEntryV1 | undefined): HTMLElement | undefined => {
+    if (!session?.session_view_digest) {
+      summary?.dispose();
+      summary = undefined;
+      summaryIdentity = "";
+      return element("section", { className: "sr-session-summary sr-summary-unavailable", attrs: { "aria-label": "Session 保留摘要" } }, [
+        element("h3", { text: "Session 摘要" }),
+        element("p", { text: "当前 Session 没有可验证的摘要绑定；未显示保留摘要。" })
+      ]);
+    }
+    if (!options.loadSessionSummary) {
+      summary?.dispose();
+      summary = undefined;
+      summaryIdentity = "";
+      return element("section", { className: "sr-session-summary sr-summary-unavailable", attrs: { "aria-label": "Session 保留摘要" } }, [
+        element("h3", { text: "Session 摘要" }),
+        element("p", { text: "无法读取 Session 摘要：CLI 不可用或版本过旧。完整 Session 清单仍可浏览。" })
+      ]);
+    }
+    const binding: SessionSummaryRequest = {
+      projectId: index.project_id,
+      provider: session.provider,
+      sessionId: session.session_id,
+      expectedGenerationId: index.generation_id,
+      expectedSessionViewDigest: session.session_view_digest
+    };
+    const identity = sessionIdentity(session);
+    if (!summary) summary = renderSessionSummary(binding, options.loadSessionSummary);
+    else if (summaryIdentity !== identity) summary.updateIdentity(binding);
+    summaryIdentity = identity;
+    return summary;
   };
 
   const load = async (navigation?: EventNavigation): Promise<void> => {
@@ -133,7 +171,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   const draw = (): void => {
     if (disposed) return;
     sessionRail.update(index.sessions, selected, query, sessionPage);
-    const nextEventArea = renderEventArea(selected, conversationFor(selected), eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
+    const nextEventArea = renderEventArea(selected, summaryFor(selected), conversationFor(selected), eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
       onEvent: (value) => { selectedEvent = value; draw(); },
       onLoad: (navigation) => { void load(navigation); }
     });
@@ -148,6 +186,9 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     conversation?.dispose();
     conversation = undefined;
     conversationIdentity = "";
+    summary?.dispose();
+    summary = undefined;
+    summaryIdentity = "";
     if (!options.eventPageCache) cache.clear();
     root.replaceChildren();
   };
@@ -205,6 +246,7 @@ function renderSessions(handlers: SessionHandlers): SessionRailElement {
 
 function renderEventArea(
   session: SessionIndexEntryV1 | undefined,
+  summary: HTMLElement | undefined,
   conversation: HTMLElement,
   page: SessionEventPageV1 | undefined,
   selectedEvent: number,
@@ -220,6 +262,7 @@ function renderEventArea(
     return area;
   }
   area.append(renderSessionCoverage(session));
+  if (summary) area.append(summary);
   area.append(conversation);
   const facts = element("section", { className: "sr-execution-facts", attrs: { "aria-label": "已索引执行事实" } }, [element("h3", { text: "已索引执行事实" })]);
   area.append(facts);

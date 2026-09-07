@@ -172,6 +172,9 @@ export class ProjectEvolutionView extends ItemView {
           loadConversation: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getConversation === "function"
             ? (request) => this.runner!.getConversation(request)
             : undefined,
+          loadSessionSummary: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getSessionSummary === "function"
+            ? (request) => this.runner!.getSessionSummary(request)
+            : undefined,
           eventPageCache: this.eventPageCache,
           initialState: this.currentV4State(current.descriptor.projectId),
           saveState: (viewState) => {

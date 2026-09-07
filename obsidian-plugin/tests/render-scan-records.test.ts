@@ -1,12 +1,13 @@
 import { WorkspaceLeaf } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import type { CliRunner, ConversationRequest } from "../src/cli/runner";
+import type { CliRunner, ConversationRequest, SessionSummaryRequest } from "../src/cli/runner";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
-import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../src/contracts/review-v4";
+import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1, SessionSummaryV1 } from "../src/contracts/review-v4";
 import type { Snapshot } from "../src/data/repository";
 import { renderMarkdownV4View } from "../src/view/presentation";
 import { ProjectEvolutionView } from "../src/view/project-view";
 import { defaultViewState } from "../src/view/render-shell";
+import { populatedSessionSummary } from "./fixtures/session-summary";
 
 const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
 const PROJECT_DIGEST = `sha256:${"2".repeat(64)}`;
@@ -153,11 +154,95 @@ function conversationFor(request: { projectId?: string; sessionId?: string; expe
   };
 }
 
+function summaryFor(request: SessionSummaryRequest, text = "已保留关键事实"): SessionSummaryV1 {
+  const result = populatedSessionSummary({
+    project_id: request.projectId,
+    provider: request.provider,
+    session_id: request.sessionId,
+    generation_id: request.expectedGenerationId,
+    session_view_digest: request.expectedSessionViewDigest
+  });
+  result.phase_boundaries.items[0].text = text;
+  return result;
+}
+
 async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("v4 scanned Session renderer", () => {
+  it("mounts retained summary before Q/A and execution facts in the actual Sessions host", async () => {
+    const loadSessionSummary = vi.fn((request: SessionSummaryRequest) => Promise.resolve(summaryFor(request)));
+    const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
+    const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionSummary, loadConversation, loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    await settle();
+
+    const area = root.querySelector('[class="sr-event-area"]')!;
+    const children = [...area.children];
+    expect(children.map((node) => node.getAttribute("aria-label"))).toEqual([
+      "Session 覆盖", "Session 保留摘要", "问答记录", "已索引执行事实"
+    ]);
+    expect(root.textContent).toContain("已保留关键事实");
+  });
+
+  it("loads retained authenticated facts without raw sources and never starts source-backed Q/A", async () => {
+    const retained = sessionFixture({ source_availability: "unavailable", indexed_event_count: 0 });
+    const loadSessionSummary = vi.fn((request: SessionSummaryRequest) => Promise.resolve(summaryFor(request)));
+    const loadConversation = vi.fn();
+    const root = renderMarkdownV4View(snapshot(indexFixture([retained])), () => {}, { loadSessionSummary, loadConversation });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+
+    expect(loadSessionSummary).toHaveBeenCalledTimes(1);
+    expect(loadConversation).not.toHaveBeenCalled();
+    expect(root.textContent).toContain("已保留关键事实");
+    expect(root.textContent).toContain("该 Session 的问答来源不可用");
+  });
+
+  it("does not request retained summary without a SessionView digest and explains why none is shown", () => {
+    const loadSessionSummary = vi.fn();
+    const noDigest = sessionFixture({ session_view_digest: null });
+    const root = renderMarkdownV4View(snapshot(indexFixture([noDigest])), () => {}, { loadSessionSummary });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    expect(loadSessionSummary).not.toHaveBeenCalled();
+    expect(root.querySelectorAll(".sr-summary-unavailable")).toHaveLength(1);
+    expect(root.textContent).toContain("当前 Session 没有可验证的摘要绑定；未显示保留摘要。");
+  });
+
+  it("keeps summary identity independent from event paging and disposes it on tab departure", async () => {
+    const late = deferred<SessionSummaryV1>();
+    const loadSessionSummary = vi.fn().mockReturnValue(late.promise);
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
+    const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionSummary, loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle();
+    expect(loadSessionSummary).toHaveBeenCalledTimes(1);
+
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="evolution"]')!.click();
+    late.resolve(summaryFor({ projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: VIEW_DIGEST }, "过期摘要"));
+    await settle();
+    expect(root.textContent).not.toContain("过期摘要");
+  });
+
+  it("keeps the full index usable with one summary recovery notice when CLI is missing", () => {
+    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
+    expect(root.querySelectorAll(".sr-summary-unavailable")).toHaveLength(1);
+    expect(root.textContent?.match(/无法读取 Session 摘要/g)).toHaveLength(1);
+    expect(root.textContent).toContain("完整 Session 清单仍可浏览");
+    expect(root.textContent).not.toContain("已索引执行事实仍可阅读");
+    root.querySelector<HTMLButtonElement>('[data-session-id="session-2"]')!.click();
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
+  });
+
   it("renders partial coverage and pages through literal indexed excerpts", async () => {
     const loadSessionEvents = vi.fn()
       .mockResolvedValueOnce(eventPage())
@@ -340,6 +425,7 @@ describe("v4 project and event lifecycle", () => {
     const projectA = { projectId: "project-a", root: "Projects/A", name: "A", format: "markdown-v4" as const };
     const projectB = { projectId: "project-b", root: "Projects/B", name: "B", format: "markdown-v4" as const };
     const pendingA = deferred<SessionEventPageV1>();
+    const pendingSummaryA = deferred<SessionSummaryV1>();
     const repository = {
       discover: vi.fn().mockResolvedValue([projectA, projectB]),
       load: vi.fn(async (project: typeof projectA) => project.projectId === projectA.projectId ? projectSnapshot(projectA.projectId, "A") : projectSnapshot(projectB.projectId, "B")),
@@ -349,7 +435,10 @@ describe("v4 project and event lifecycle", () => {
       status: vi.fn().mockResolvedValue({}),
       getSessionEvents: vi.fn((request: { projectId: string }) => request.projectId === projectA.projectId
         ? pendingA.promise
-        : Promise.resolve(eventPage({ project_id: projectB.projectId, session_id: "session-b", items: [{ kind: "message", excerpt: "B 项目记录", revision_id: "revision-b", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }] })))
+        : Promise.resolve(eventPage({ project_id: projectB.projectId, session_id: "session-b", items: [{ kind: "message", excerpt: "B 项目记录", revision_id: "revision-b", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }]}))),
+      getSessionSummary: vi.fn((request: SessionSummaryRequest) => request.projectId === projectA.projectId
+        ? pendingSummaryA.promise
+        : Promise.resolve(summaryFor(request, "B 项目摘要")))
     };
     const saveState = vi.fn();
     const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner, defaultViewState(), saveState);
@@ -365,11 +454,46 @@ describe("v4 project and event lifecycle", () => {
     view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
     expect(view.contentEl.textContent).toContain("B 项目记录");
+    expect(view.contentEl.textContent).toContain("B 项目摘要");
 
     pendingA.resolve(eventPage({ project_id: projectA.projectId, session_id: "session-a", items: [{ kind: "message", excerpt: "A 过期记录", revision_id: "revision-a", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }] }));
+    pendingSummaryA.resolve(summaryFor({ projectId: projectA.projectId, provider: "codex", sessionId: "session-a", expectedGenerationId: "generation-1", expectedSessionViewDigest: VIEW_DIGEST }, "A 过期摘要"));
     await settle();
     expect(view.contentEl.textContent).not.toContain("A 过期记录");
+    expect(view.contentEl.textContent).not.toContain("A 过期摘要");
     await view.onClose();
+  });
+
+  it("invalidates a pending summary on project refresh and close", async () => {
+    const project = { projectId: "project-p", root: "Projects/P", name: "P", format: "markdown-v4" as const };
+    const pendingBeforeRefresh = deferred<SessionSummaryV1>();
+    const pendingAfterRefresh = deferred<SessionSummaryV1>();
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockResolvedValue(projectSnapshot(project.projectId, "P")),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const runner = {
+      status: vi.fn().mockResolvedValue({}),
+      getSessionEvents: vi.fn().mockResolvedValue(eventPage({ session_id: "session-p" })),
+      getSessionSummary: vi.fn().mockReturnValueOnce(pendingBeforeRefresh.promise).mockReturnValueOnce(pendingAfterRefresh.promise)
+    };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="refresh-v4-status"]')!.click();
+    await settle();
+    expect(runner.getSessionSummary).toHaveBeenCalledTimes(2);
+    pendingAfterRefresh.resolve(summaryFor({ projectId: "project-p", provider: "codex", sessionId: "session-p", expectedGenerationId: "generation-1", expectedSessionViewDigest: VIEW_DIGEST }, "刷新后摘要"));
+    pendingBeforeRefresh.resolve(summaryFor({ projectId: "project-p", provider: "codex", sessionId: "session-p", expectedGenerationId: "generation-1", expectedSessionViewDigest: VIEW_DIGEST }, "刷新前过期摘要"));
+    await settle();
+    expect(view.contentEl.textContent).toContain("刷新后摘要");
+    expect(view.contentEl.textContent).not.toContain("刷新前过期摘要");
+
+    await view.onClose();
+    expect(view.contentEl.childElementCount).toBe(0);
   });
 
   it("restores a persisted project selection on reload", async () => {

@@ -1,7 +1,7 @@
 import type { Snapshot } from "../data/repository";
-import type { ConversationRequest, SessionEventRequest } from "../cli/runner";
+import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
-import type { SessionEventPageV1 } from "../contracts/review-v4";
+import type { SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
 import { element } from "./dom";
 import type { V4ViewState } from "../state/v4-view-state";
 import { renderV4Shell, type V4ShellElement } from "./render-v4-shell";
@@ -78,6 +78,7 @@ export function renderMarkdownV4View(
     cliUnavailable?: boolean;
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
+    loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
     initialState?: unknown;
     saveState?: (state: V4ViewState) => void | Promise<void>;

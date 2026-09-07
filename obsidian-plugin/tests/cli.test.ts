@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { CliRunner } from "../src/cli/runner";
 import { syncStatusFixture } from "./fixtures/sync-status";
+import { SESSION_SUMMARY_SOURCE, sessionSummaryFixture } from "./fixtures/session-summary";
 
 const DIGEST_A = `sha256:${"1".repeat(64)}`;
 
@@ -27,6 +28,48 @@ function eventPageFixture(overrides: Record<string, unknown> = {}): Record<strin
 }
 
 describe("CLI runner", () => {
+  it("runs inspect session-summary with exact fixed argv and the frozen five-second bound", async () => {
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, SESSION_SUMMARY_SOURCE, ""));
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    const request = { projectId: "project-p", provider: "opencode", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A };
+
+    await expect(runner.getSessionSummary(request)).resolves.toEqual(sessionSummaryFixture());
+    expect(execFile).toHaveBeenCalledWith("/bin/session-reviewer", [
+      "inspect", "session-summary", "--project-id", request.projectId, "--provider", request.provider,
+      "--session-id", request.sessionId, "--expected-generation-id", request.expectedGenerationId, "--json"
+    ], expect.objectContaining({ shell: false, timeout: 5_000, maxBuffer: 1 << 20 }), expect.any(Function));
+  });
+
+  it.each([
+    ["wrong project", { project_id: "project-other" }], ["wrong provider", { provider: "codex" }],
+    ["wrong Session", { session_id: "session-other" }], ["wrong generation", { generation_id: "generation-old" }],
+    ["wrong digest", { session_view_digest: `sha256:${"2".repeat(64)}` }], ["unknown field", { surprise: true }]
+  ])("rejects a summary response with %s using one localized recovery error", async (_label, patch) => {
+    const payload = { ...sessionSummaryFixture(), ...patch };
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(payload), "/secret/stderr"));
+    await expect(runner.getSessionSummary({ projectId: "project-p", provider: "opencode", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A }))
+      .rejects.toMatchObject({ code: "summary_failed", message: "无法读取 Session 摘要；请刷新项目后重试，并确认 CLI 已更新。" });
+  });
+
+  it.each([
+    ["malformed JSON", "not-json"],
+    ["duplicate JSON", SESSION_SUMMARY_SOURCE.replace('{\n  "schema_version": 1', '{\n  "schema_version": 1, "schema_version": 1')]
+  ])("rejects %s without exposing wire details", async (_label, stdout) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, stdout, "/secret/stderr"));
+    await expect(runner.getSessionSummary({ projectId: "project-p", provider: "opencode", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A }))
+      .rejects.toThrow("无法读取 Session 摘要");
+  });
+
+  it.each([
+    { projectId: "../project" }, { provider: "Codex" }, { sessionId: "--json" },
+    { expectedGenerationId: "../generation" }, { expectedSessionViewDigest: "sha256:nope" }
+  ])("rejects unsafe summary request %# before starting a process", async (patch) => {
+    const execFile = vi.fn();
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await expect(runner.getSessionSummary({ projectId: "project-p", provider: "opencode", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A, ...patch })).rejects.toThrow(/invalid/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
   it("runs inspect session-events with exact allowlisted argv and validates the bound page", async () => {
     const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
       callback(null, JSON.stringify(eventPageFixture()), "");
