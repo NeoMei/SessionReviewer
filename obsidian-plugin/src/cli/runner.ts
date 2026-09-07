@@ -3,6 +3,8 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ScanStatus } from "../contracts/review-v3";
+import type { SessionEventPageV1 } from "../contracts/review-v4";
+import { parseSessionEventPageV1 } from "../data/contracts-v4";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
 const CONFLICT_ID = /^conflict-[a-z0-9][a-z0-9._-]{0,191}$/;
@@ -10,6 +12,9 @@ const SCAN_JOB_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SCAN_GENERATION_ID = /^(?:generation|scan)-[a-z0-9][a-z0-9._-]{0,127}$/;
 const SCAN_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/;
 const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
+const SESSION_EVENTS_FAILED = "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。";
+const INSPECT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SCAN_STATES = ["queued", "running", "completed", "completed_with_issues", "failed"] as const;
 const SCAN_PHASES = ["discovering", "extracting", "reducing", "rendering", "syncing"] as const;
 const SCAN_STATUS_FIELDS = new Set([
@@ -31,6 +36,17 @@ export type ExecFileLike = (file: string, args: readonly string[], options: Exec
 export interface VerifiedExecutable {
   version: string;
   reviewSchemaVersion: 3;
+}
+
+export interface SessionEventRequest {
+  projectId: string;
+  provider: string;
+  sessionId: string;
+  expectedGenerationId: string;
+  expectedSessionViewDigest: string;
+  limit: number;
+  cursor?: string;
+  anchor?: number;
 }
 
 export interface SyncOperation {
@@ -90,6 +106,31 @@ export class CliRunner {
   async getScanStatus(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
     return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]), projectId);
+  }
+
+  async getSessionEvents(request: SessionEventRequest): Promise<SessionEventPageV1> {
+    validateSessionEventRequest(request);
+    const args = [
+      "inspect", "session-events",
+      "--project-id", request.projectId,
+      "--provider", request.provider,
+      "--session-id", request.sessionId,
+      "--expected-generation-id", request.expectedGenerationId,
+      "--limit", String(request.limit),
+      "--json"
+    ];
+    if (request.cursor !== undefined) args.push("--cursor", request.cursor);
+    else if (request.anchor !== undefined) args.push("--anchor", String(request.anchor));
+    try {
+      const page = parseSessionEventPageV1((await this.run(args)).stdout);
+      if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
+          page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest) {
+        throw new Error("Session event page binding mismatch");
+      }
+      return page;
+    } catch {
+      throw new Error(SESSION_EVENTS_FAILED);
+    }
   }
 
   async syncProject(projectId: string): Promise<string> {
@@ -181,7 +222,41 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args.length === 3 && args[0] === "sync" && args[1] === "--project-id") return PROJECT_ID.test(args[2] ?? "");
   if (args.length === 5 && args[0] === "scan" && args[1] === "start" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   if (args.length === 5 && args[0] === "scan" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
+  if ((args.length === 13 || args.length === 15) && args[0] === "inspect" && args[1] === "session-events" &&
+      args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
+      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[10] === "--limit" && validInspectLimit(args[11]) && args[12] === "--json") {
+    if (args.length === 13) return true;
+    if (args[13] === "--cursor") return boundedCursor(args[14]);
+    return args[13] === "--anchor" && validAnchor(args[14]);
+  }
   return false;
+}
+
+function validateSessionEventRequest(request: SessionEventRequest): void {
+  validateProject(request.projectId);
+  if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
+  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
+  if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
+  if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100) throw new Error("invalid event page limit");
+  if (request.cursor !== undefined && request.anchor !== undefined) throw new Error("cursor and anchor are mutually exclusive");
+  if (request.cursor !== undefined && !boundedCursor(request.cursor)) throw new Error("invalid cursor");
+  if (request.anchor !== undefined && (!Number.isSafeInteger(request.anchor) || request.anchor < 1)) throw new Error("invalid anchor");
+}
+
+function validInspectLimit(value: string | undefined): boolean {
+  if (!value || !/^[1-9][0-9]{0,2}$/.test(value)) return false;
+  const parsed = Number(value);
+  return parsed >= 1 && parsed <= 100;
+}
+
+function validAnchor(value: string | undefined): boolean {
+  return Boolean(value && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)));
+}
+
+function boundedCursor(value: string | undefined): boolean {
+  return typeof value === "string" && value.length > 0 && !value.startsWith("--") && Buffer.byteLength(value, "utf8") <= 4096 && !value.includes("\0");
 }
 
 function validateProject(value: string): void {

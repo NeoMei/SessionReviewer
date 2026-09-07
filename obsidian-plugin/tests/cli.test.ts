@@ -2,7 +2,133 @@ import { describe, expect, it, vi } from "vitest";
 import { CliRunner } from "../src/cli/runner";
 import { syncStatusFixture } from "./fixtures/sync-status";
 
+const DIGEST_A = `sha256:${"1".repeat(64)}`;
+
+function eventPageFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    minimum_reader_version: "0.4.0",
+    project_id: "project-0123456789abcdef",
+    provider: "codex",
+    session_id: "session-1",
+    generation_id: "generation-1",
+    session_view_digest: DIGEST_A,
+    total: 1,
+    range_start: 0,
+    range_end: 1,
+    items: [{ kind: "message", excerpt: "用户问题示例", revision_id: "revision-1", sequence: 10, occurred_at: "2026-09-07T00:00:00Z" }],
+    previous_cursor: null,
+    next_cursor: null,
+    first_cursor: "first-token",
+    last_cursor: "last-token",
+    coverage: { seen: 1, indexed: 1, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 },
+    ...overrides
+  };
+}
+
 describe("CLI runner", () => {
+  it("runs inspect session-events with exact allowlisted argv and validates the bound page", async () => {
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      callback(null, JSON.stringify(eventPageFixture()), "");
+    });
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
+
+    const page = await runner.getSessionEvents({
+      projectId: "project-0123456789abcdef",
+      provider: "codex",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: DIGEST_A,
+      limit: 25,
+      cursor: "opaque-cursor-token"
+    });
+
+    expect(page.items[0]?.excerpt).toBe("用户问题示例");
+    expect(execFile).toHaveBeenCalledWith(
+      "/usr/local/bin/session-reviewer",
+      ["inspect", "session-events", "--project-id", "project-0123456789abcdef", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--limit", "25", "--json", "--cursor", "opaque-cursor-token"],
+      expect.objectContaining({ shell: false, windowsHide: true, timeout: 10_000 }),
+      expect.any(Function)
+    );
+  });
+
+  it.each([
+    { label: "wrong project", patch: { project_id: "project-other" } },
+    { label: "wrong provider", patch: { provider: "claude" } },
+    { label: "wrong Session", patch: { session_id: "session-other" } },
+    { label: "stale generation", patch: { generation_id: "generation-old" } },
+    { label: "wrong public digest", patch: { session_view_digest: `sha256:${"2".repeat(64)}` } },
+    { label: "invalid event contract", patch: { range_end: 2 } }
+  ])("rejects an inspect page with $label using retryable guidance", async ({ patch }) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => {
+      callback(null, JSON.stringify(eventPageFixture(patch)), "");
+    });
+
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef",
+      provider: "codex",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: DIGEST_A,
+      limit: 25
+    })).rejects.toThrow("无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。");
+  });
+
+  it.each([
+    { label: "old CLI failure", error: Object.assign(new Error("unknown command"), { code: 1 }), stdout: "" },
+    { label: "malformed JSON", error: null, stdout: "not-json" },
+    { label: "machine error payload", error: Object.assign(new Error("exit 1"), { code: 1 }), stdout: JSON.stringify({ error: { code: "stale_generation", message: "published generation changed" } }) }
+  ])("never turns $label into an empty event page", async ({ error, stdout }) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(error, stdout, "/private/secret"));
+
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef",
+      provider: "codex",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: DIGEST_A,
+      limit: 25,
+      anchor: 1
+    })).rejects.toThrow("无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。");
+  });
+
+  it("rejects unsafe inspect request values before execution", async () => {
+    const execFile = vi.fn();
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef",
+      provider: "codex",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: DIGEST_A,
+      limit: 25,
+      cursor: "cursor",
+      anchor: 1
+    })).rejects.toThrow(/cursor and anchor/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: "uppercase provider", patch: { provider: "Codex" } },
+    { label: "overlong Session ID", patch: { sessionId: `s${"x".repeat(128)}` } },
+    { label: "flag-like cursor", patch: { cursor: "--project-id" } }
+  ])("keeps $label outside the inspect argv allowlist", async ({ patch }) => {
+    const execFile = vi.fn();
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef",
+      provider: "codex",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: DIGEST_A,
+      limit: 25,
+      ...patch
+    })).rejects.toThrow(/invalid/);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
   it.each([
     { code: "ENOENT", expected: "cli_unavailable" },
     { code: "EACCES", expected: "cli_unavailable" },

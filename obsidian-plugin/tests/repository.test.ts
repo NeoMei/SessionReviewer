@@ -55,6 +55,17 @@ async function configuredVault(): Promise<{ vault: FakeVault; root: string }> {
 }
 
 describe("project repository", () => {
+  it("uses a readable containing-folder name for v4 Markdown while retaining the stable project ID", async () => {
+    const root = "Projects/SessionReviewer";
+    const vault = new FakeVault();
+    vault.write(`${root}/项目回顾.md`, `---\nschema_version: 4\ndocument_format: review-markdown-v1\nentity_type: project-review\nproject_id: project-readable-name\n---\n`);
+    vault.write(`${root}/项目历史.md`, "inventory candidate");
+
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([
+      { projectId: "project-readable-name", root, name: "SessionReviewer", format: "markdown-v4" }
+    ]);
+  });
+
   it("discovers valid project files before the metadata cache is warm", async () => {
     const { vault, root } = await configuredVault();
     vault.frontmatter.clear();

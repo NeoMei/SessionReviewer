@@ -1,5 +1,8 @@
 import type { Snapshot } from "../data/repository";
+import type { SessionEventRequest } from "../cli/runner";
+import type { SessionEventPageV1 } from "../contracts/review-v4";
 import { element } from "./dom";
+import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
 
 export type StatusTone = "success" | "warning" | "danger" | "neutral";
 
@@ -68,8 +71,12 @@ export function summarizeRisk(detail: string, limit = 72): string {
 export function renderMarkdownV4View(
   snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>,
   open: (path: string) => void,
-  options: { cliUnavailable?: boolean } = {}
-): HTMLElement {
+  options: {
+    cliUnavailable?: boolean;
+    loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
+    eventPageCache?: Map<string, SessionEventPageV1>;
+  } = {}
+): HTMLElement & { scanRecords?: ScanRecordsElement } {
   const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
   const state = current.state;
   const root = element("div", { className: "session-reviewer-browser sr-v4-readonly" });
@@ -113,6 +120,11 @@ export function renderMarkdownV4View(
       summary.append(element("section", { className: "sr-v4-milestone" }, details));
     }
     root.append(summary);
+  }
+  if (state.kind === "public_valid") {
+    const records = renderScanRecords(state.index, options);
+    root.append(records);
+    (root as HTMLElement & { scanRecords?: ScanRecordsElement }).scanRecords = records;
   }
   const actions = element("div", { className: "sr-v4-actions" });
   for (const [label, relative] of [["打开项目回顾", "项目回顾.md"], ["打开项目历史", "项目历史.md"]] as const) {

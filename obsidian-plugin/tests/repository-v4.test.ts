@@ -37,8 +37,8 @@ afterEach(() => { vi.useRealTimers(); });
 
 describe("candidate discovery read isolation", () => {
   const candidates = [
-    { label: "Markdown v4", source: fixture("review.md"), projectId: "project-p", name: "project-p", format: "markdown-v4" },
-    { label: "legacy v4 JSON", source: readFileSync(resolve(root, "../review-presentation-v4.valid.json"), "utf8"), projectId: "project-p", name: "project-p", format: "legacy-v4-json" },
+    { label: "Markdown v4", source: fixture("review.md"), projectId: "project-p", name: "Valid", format: "markdown-v4" },
+    { label: "legacy v4 JSON", source: readFileSync(resolve(root, "../review-presentation-v4.valid.json"), "utf8"), projectId: "project-p", name: "Valid", format: "legacy-v4-json" },
     { label: "legacy v3", source: readFileSync(resolve(root, "../../../review-v3/项目回顾.valid.md"), "utf8"), projectId: "project-0123456789abcdef", name: "SessionReviewer v2" }
   ];
   const failedRoot = "Projects/Unreadable";
@@ -66,7 +66,7 @@ describe("candidate discovery read isolation", () => {
       const reads = failCandidate(vault, source, failure);
       const repository = new ProjectRepository(vault);
 
-      await expect(repository.discover()).resolves.toEqual([{ projectId: "project-p", root: projectRoot, name: "project-p", format: "markdown-v4" }]);
+      await expect(repository.discover()).resolves.toEqual([{ projectId: "project-p", root: projectRoot, name: "V4", format: "markdown-v4" }]);
 
       expect(reads.mock.calls.filter(([path]) => path === failedReview)).toHaveLength(1);
       expect(reads.mock.calls.filter(([path]) => path === `${projectRoot}/项目回顾.md`)).toHaveLength(1);
@@ -123,7 +123,7 @@ describe("candidate discovery read isolation", () => {
     }
     const reads = vi.spyOn(vault, "read");
 
-    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([{ projectId: "project-p", root: "Projects/Malformed", name: "project-p", format: "markdown-v4" }]);
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([{ projectId: "project-p", root: "Projects/Malformed", name: "Malformed", format: "markdown-v4" }]);
 
     expect(reads).toHaveBeenCalledTimes(3);
   });
@@ -391,7 +391,10 @@ describe("v4 live refresh lifecycle", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(view.contentEl.textContent).not.toContain("同步状态验证失败");
     expect(view.contentEl.textContent).toContain("待私有验证");
-    expect(commands).toEqual(commands.map(() => "sync status --json --project-id project-p"));
+    expect(commands.filter((command) => command.startsWith("sync "))).toEqual(
+      commands.filter((command) => command.startsWith("sync ")).map(() => "sync status --json --project-id project-p")
+    );
+    expect(commands.some((command) => command.startsWith("inspect session-events "))).toBe(true);
     expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4']")).toBeNull();
     expect(vault.process).not.toHaveBeenCalled();
     await view.onClose();
@@ -440,7 +443,7 @@ describe("v4 project repository", () => {
     expect(view.contentEl.textContent).not.toContain("/private/secret");
     if (code !== "ENOENT") expect(view.contentEl.textContent).not.toContain("CLI 不可用");
     expect(view.contentEl.querySelector("[data-resolution-action], [data-status-action], [data-action='edit-v4']")).toBeNull();
-    expect(view.contentEl.querySelectorAll("button:not([data-action='refresh-v4-status'])")).toHaveLength(2);
+    expect([...view.contentEl.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.startsWith("打开项目"))).toHaveLength(2);
     const snapshot = await repository.load((await repository.discover())[0]);
     expect(snapshot.kind === "markdown-v4" && snapshot.state.kind).toBe("public_valid");
     expect(vault.process).not.toHaveBeenCalled();
@@ -466,7 +469,7 @@ describe("v4 project repository", () => {
     const repository = new ProjectRepository(vault);
 
     const projects = await repository.discover();
-    expect(projects).toEqual([{ projectId: "project-p", root: projectRoot, name: "project-p", format: "markdown-v4" }]);
+    expect(projects).toEqual([{ projectId: "project-p", root: projectRoot, name: "V4", format: "markdown-v4" }]);
     const snapshot = await repository.load(projects[0]);
 
     expect(snapshot.kind).toBe("markdown-v4");
@@ -572,8 +575,9 @@ describe("v4 project repository", () => {
     expect(view.textContent).toContain("验证缺失原因：not_verified");
     expect(view.textContent).toContain("CLI 不可用");
     expect(view.querySelector("[data-action='edit-v4']")).toBeNull();
-    view.querySelectorAll<HTMLButtonElement>("button")[0].click();
-    view.querySelectorAll<HTMLButtonElement>("button")[1].click();
+    const nativeActions = [...view.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.startsWith("打开项目"));
+    nativeActions[0]?.click();
+    nativeActions[1]?.click();
     expect(opens).toEqual(["Projects/V4/项目回顾.md", "Projects/V4/项目历史.md"]);
     expect(vault.process).not.toHaveBeenCalled();
   });
@@ -616,7 +620,7 @@ describe("v4 project repository", () => {
     Object.assign(view, { app: { workspace: { openLinkText } } });
 
     await view.onOpen();
-    view.contentEl.querySelector<HTMLButtonElement>("button")!.click();
+    [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "打开项目回顾")?.click();
 
     expect(view.contentEl.textContent).toContain("待私有验证");
     expect(view.contentEl.textContent).toContain("CLI 不可用");
@@ -636,8 +640,8 @@ describe("v4 project repository", () => {
     await view.onOpen();
 
     expect(view.contentEl.textContent).toContain("wire_shape_invalid");
-    expect(view.contentEl.querySelectorAll("button:not([data-action='refresh-v4-status'])")).toHaveLength(2);
-    view.contentEl.querySelector<HTMLButtonElement>("button")!.click();
+    expect([...view.contentEl.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.startsWith("打开项目"))).toHaveLength(2);
+    [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "打开项目回顾")?.click();
     expect(openLinkText).toHaveBeenCalledWith("Projects/V4/项目回顾.md", "", false);
     expect(editor.apply).not.toHaveBeenCalled();
   });

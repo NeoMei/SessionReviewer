@@ -84,19 +84,19 @@ export class ProjectRepository {
       try {
         const identity = readMarkdownIdentityV4(source);
         if (identity.document !== "review") continue;
-        descriptors.push({ projectId: identity.projectId, root, name: identity.projectId, format: "markdown-v4" });
+        descriptors.push({ projectId: identity.projectId, root, name: projectFolderName(root), format: "markdown-v4" });
         continue;
       } catch {
         // Continue to legacy formats only when the source is not a known v4 Markdown document.
       }
       if (/^---\r?\n[\s\S]*?^schema_version:\s*4\s*$[\s\S]*?^document_format:\s*review-markdown-v1\s*$/m.test(source)) {
         const projectId = /^project_id:\s*([^\s]+)\s*$/m.exec(source)?.[1];
-        if (projectId && validProjectId(projectId)) descriptors.push({ projectId, root, name: projectId, format: "markdown-v4" });
+        if (projectId && validProjectId(projectId)) descriptors.push({ projectId, root, name: projectFolderName(root), format: "markdown-v4" });
         continue;
       }
       try {
         const legacy = parseReviewPresentationV4(source);
-        descriptors.push({ projectId: legacy.project_id, root, name: legacy.project_id, format: "legacy-v4-json" });
+        descriptors.push({ projectId: legacy.project_id, root, name: projectFolderName(root), format: "legacy-v4-json" });
         continue;
       } catch {
         // Try v3 below.
@@ -265,6 +265,11 @@ function parent(path: string): string {
   const normalized = normalize(path);
   const index = normalized.lastIndexOf("/");
   return index < 0 ? "" : normalized.slice(0, index);
+}
+
+function projectFolderName(root: string): string {
+  const normalized = normalize(root);
+  return normalized.slice(normalized.lastIndexOf("/") + 1) || normalized;
 }
 
 function normalize(path: string): string {

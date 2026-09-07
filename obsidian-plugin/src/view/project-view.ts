@@ -1,6 +1,7 @@
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
+import type { SessionEventPageV1 } from "../contracts/review-v4";
 import { SyncStatusError, type CliRunner } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
 import type { Diagnostic, MarkdownSnapshotReady, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
@@ -11,6 +12,7 @@ import { EditModal } from "./edit-modal";
 import { defaultViewState, renderReadyView, type SaveViewState, type ViewState } from "./render-shell";
 import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
 import { renderMarkdownV4View } from "./presentation";
+import type { ScanRecordsElement } from "./render-scan-records";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -29,6 +31,9 @@ export class ProjectEvolutionView extends ItemView {
   private refreshEpoch = 0;
   private closed = false;
   private settlingTimer?: number;
+  private scanRecords?: ScanRecordsElement;
+  private eventPageCache = new Map<string, SessionEventPageV1>();
+  private eventCacheGeneration = "";
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -66,6 +71,8 @@ export class ProjectEvolutionView extends ItemView {
     this.stopScanPolling();
     this.disposeWatch?.();
     this.disposeWatch = undefined;
+    this.disposeScanRecords();
+    this.resetEventCache();
     this.contentEl.replaceChildren();
   }
 
@@ -77,6 +84,7 @@ export class ProjectEvolutionView extends ItemView {
     this.projects = projects;
     if (projects.length === 0) {
       this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
+        this.projectPicker(projects),
         element("h1", { text: "还没有项目回顾" }),
         element("p", { text: "请先运行 SessionReviewer 扫描或同步，生成项目回顾、项目历史和机器账本。" })
       ]));
@@ -136,14 +144,28 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   private renderSnapshot(snapshot: Snapshot, projects: ProjectDescriptor[]): void {
+    this.disposeScanRecords();
     this.contentEl.replaceChildren();
     if (snapshot.kind === "markdown-v4" || snapshot.kind === "markdown-v4-stale") {
+      const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
+      const generation = current.state.kind === "public_valid" ? `${current.descriptor.projectId}\0${current.state.index.generation_id}` : "";
+      if (generation !== this.eventCacheGeneration) {
+        this.eventPageCache.clear();
+        this.eventCacheGeneration = generation;
+      }
       const browser = renderMarkdownV4View(
         snapshot,
         (path) => { void this.app.workspace.openLinkText(path, "", false); },
-        { cliUnavailable: this.cliDiagnostic?.code === "cli_unavailable" }
+        {
+          cliUnavailable: this.cliDiagnostic?.code === "cli_unavailable" || !this.runner,
+          loadSessionEvents: this.runner && this.cliDiagnostic?.code !== "cli_unavailable"
+            ? (request) => this.runner!.getSessionEvents(request)
+            : undefined,
+          eventPageCache: this.eventPageCache
+        }
       );
-      if (projects.length > 1) browser.prepend(this.projectPicker(projects));
+      this.scanRecords = browser.scanRecords;
+      browser.prepend(this.projectPicker(projects));
       if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
       if (this.cliDiagnostic && this.cliDiagnostic.code !== "cli_unavailable") browser.prepend(renderStatusBanner(this.cliDiagnostic));
       const refresh = element("button", { text: "刷新同步状态", attrs: { type: "button", "data-action": "refresh-v4-status" } });
@@ -155,6 +177,7 @@ export class ProjectEvolutionView extends ItemView {
     if (snapshot.kind === "empty" || snapshot.kind === "migration_required") {
       const diagnostic = snapshot.diagnostic;
       this.contentEl.append(element("div", { className: "session-reviewer-browser" }, [
+        this.projectPicker(projects),
         element("h1", { text: "暂时无法打开项目回顾" }),
         element("p", { text: diagnostic?.message ?? "项目还没有可用快照。" })
       ]));
@@ -172,7 +195,7 @@ export class ProjectEvolutionView extends ItemView {
       this.currentState = viewState;
       return this.saveState?.(viewState);
     }, this.editor ? (field) => this.openEditor(field, model) : undefined, scanAction);
-    if (projects.length > 1) browser.prepend(this.projectPicker(projects));
+    browser.prepend(this.projectPicker(projects));
     if (snapshot.kind === "pending_edit" || snapshot.kind === "stale") browser.prepend(renderStatusBanner(snapshot.diagnostic, this.actionFor(snapshot.diagnostic)));
     if (this.cliDiagnostic) browser.prepend(renderStatusBanner(this.cliDiagnostic, this.actionFor(this.cliDiagnostic)));
     if (this.announcement) browser.prepend(element("div", { className: "sr-sr-only", text: this.announcement, attrs: { "aria-live": "polite" } }));
@@ -346,26 +369,80 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   private projectPicker(projects: ProjectDescriptor[]): HTMLElement {
-    const wrapper = element("label", { className: "sr-project-picker", text: "项目 " });
+    const wrapper = element("div", { className: "sr-project-picker" });
+    wrapper.append(element("span", { text: "项目" }));
     const select = element("select", { attrs: { "aria-label": "选择项目" } });
     for (const project of projects) {
-      const option = element("option", { text: project.name, attrs: { value: project.projectId } });
+      const option = element("option", { text: `${project.name} · ${project.projectId}`, attrs: { value: project.projectId } });
       option.selected = project.projectId === this.selected?.projectId;
       select.append(option);
     }
+    select.disabled = projects.length === 0;
     select.addEventListener("change", () => {
       const next = projects.find((project) => project.projectId === select.value);
       if (!next) return;
       this.stopScanPolling();
       this.scanStatus = undefined;
       this.selected = next;
+      this.currentState = { ...this.currentState, projectId: next.projectId };
+      void this.saveState?.(this.currentState);
       this.lastReady = undefined;
       this.lastMarkdownReady = undefined;
+      this.disposeScanRecords();
+      this.resetEventCache();
       this.watchSelectedProject();
       void this.refresh(projects);
     });
-    wrapper.append(select);
+    const refresh = element("button", { text: "刷新项目", attrs: { type: "button", "data-action": "refresh-projects" } });
+    refresh.addEventListener("click", () => { void this.rediscoverProjects(); });
+    wrapper.append(select, refresh);
     return wrapper;
+  }
+
+  private async rediscoverProjects(): Promise<void> {
+    if (!this.repository || this.closed) return;
+    const previous = this.selected;
+    const epoch = ++this.refreshEpoch;
+    const projects = await this.repository.discover();
+    if (this.closed || epoch !== this.refreshEpoch) return;
+    this.projects = projects;
+    if (projects.length === 0) {
+      this.selected = undefined;
+      this.lastReady = undefined;
+      this.lastMarkdownReady = undefined;
+      this.disposeWatch?.();
+      this.disposeWatch = undefined;
+      this.disposeScanRecords();
+      this.resetEventCache();
+      this.contentEl.replaceChildren(element("div", { className: "session-reviewer-browser" }, [
+        this.projectPicker(projects),
+        element("h1", { text: "还没有项目回顾" }),
+        element("p", { text: "请先运行 SessionReviewer 扫描或同步，生成项目回顾、项目历史和机器账本。" })
+      ]));
+      return;
+    }
+    const next = projects.find((project) => project.projectId === previous?.projectId) ?? projects[0];
+    const descriptorChanged = previous?.root !== next.root || previous?.format !== next.format;
+    this.selected = next;
+    if (descriptorChanged) {
+      this.lastReady = undefined;
+      this.lastMarkdownReady = undefined;
+      this.resetEventCache();
+    }
+    this.currentState = { ...this.currentState, projectId: next.projectId };
+    void this.saveState?.(this.currentState);
+    this.watchSelectedProject();
+    await this.refresh(projects);
+  }
+
+  private disposeScanRecords(): void {
+    this.scanRecords?.dispose();
+    this.scanRecords = undefined;
+  }
+
+  private resetEventCache(): void {
+    this.eventPageCache.clear();
+    this.eventCacheGeneration = "";
   }
 }
 
