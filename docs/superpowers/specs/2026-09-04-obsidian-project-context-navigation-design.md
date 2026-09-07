@@ -765,7 +765,7 @@ session-reviewer evolution summary-candidates list
 session-reviewer inspect conversation-chain
   --project-id <id> --provider <id> --session-id <id>
   --expected-generation-id <id>
-  [--turn-unit-id <id>] [--message-cursor <opaque>]
+  [--cursor <opaque> | --turn-unit-id <id> [--message-cursor <opaque>]]
   --limit <1..64> --json
 
 session-reviewer problems candidates list
@@ -799,6 +799,8 @@ coverage
 事件项只包含类型化字段、有限脱敏 excerpt、revision ID、sequence 和 occurred_at。CLI 不返回原始系统/开发者指令、隐藏推理、令牌、绝对路径或未脱敏工具输出。cursor 最大长度、响应最大字节数和执行超时必须进入合同测试。
 
 `conversation-chain` 默认返回问答单元索引和有限摘录；指定 `--turn-unit-id` 后按需从认证 source refs 读取该单元的可见人类/Agent 正文、动作和结果。`--message-cursor` 只用于同一问答单元的后续可见消息，绑定 project、provider、session、generation、turn unit、脱敏版本和 limit；绑定不符返回 `stale_cursor`。每条源读取仍受 64 KiB 上限和总响应上限约束，超限必须返回 coverage。即使私有源包含其他角色，该命令也只能返回 user/assistant 可见正文和受限工具摘要。
+
+2026-09-07 展示恢复补充：默认问答单元索引通过 `--cursor` 分页，该参数不得用于已选择单元的消息页；消息页继续使用 `--message-cursor`。分页响应使用独立页合同，不把整份 `conversation-chain-v1` 冒充为一页。索引摘录保持 4,096 字节上限，展开消息提供 64 KiB 单条认证读取范围内的可见正文；按响应字节预算减少每页消息数量时仍须提供后续 cursor。环境信息、推荐插件列表和浏览器环境等可确定识别的纯上下文 user 包装不产生问题节点；混合包装保留实际用户请求，不任意删除用户自己的 XML 或引用文本。恢复查询可从已发布 SessionView 绑定的认证源前缀按需确定性构建，不要求将会话正文扩充进机器事实观察库，也不得混入尚未扫描的追加内容。
 
 ### 18.5 写入与异步 CLI
 

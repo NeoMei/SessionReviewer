@@ -14,6 +14,7 @@
 
 - Ordinary scans and deterministic projection start zero Agent processes. No model summarizes a reply unless the user explicitly requests an AI candidate.
 - Only visible `user` and `assistant` content participates. System/developer instructions, hidden reasoning, encrypted compaction and opaque content are excluded.
+- Known synthetic context-only user envelopes (environment context, recommended plugin list, ambient browser context) do not open turns; mixed request wrappers retain actual user text. Do not generically strip arbitrary user XML or quoted content.
 - A turn unit starts at one visible user message and ends immediately before the next visible user message in the same provider Session.
 - Visible excerpts are at most 4,096 UTF-8 bytes; truncation must be explicit. Expanded per-source reads are at most 64 KiB, with the existing CLI total response cap and timeout.
 - Authenticate project, published generation, Session dependencies and source prefix. Cursors bind project/provider/session/generation/view/turn/limit/redaction version and cannot cross those boundaries.
@@ -58,6 +59,7 @@ type ConversationRequest struct {
 
 - [ ] Reuse existing adapters' path/symlink/inode/hash defenses. The queried source boundary must be the published prefix, never new appended messages. If generic provider support cannot safely reuse an existing adapter, return a typed unsupported-provider error rather than silently claiming no answers; Codex segmented Session recovery is mandatory for this task.
 - [ ] Wire existing `inspect conversation-chain` grammar. Return bounded, content-free errors. No source path/raw payload in public errors. Reading must not mutate private store or Vault. Queries use deterministic extraction/redaction only.
+- [ ] Turn-index messages are 4096-byte excerpts. Selected-turn responses expose the available full visible text from each authenticated source record up to the 64 KiB read ceiling; if needed, reduce messages in a page to fit the 1 MiB response cap and continue via cursor. Do not silently substitute a permanently clipped excerpt for expanded answer text.
 - [ ] Run focused RED/GREEN and then `go test ./...`, `go vet ./...`, `go mod tidy -diff` once. Commit task files and report the complete frontend wire contract and exact test evidence.
 
 ### Task 3: Connect visible Q/A to Obsidian and verify the real flow
