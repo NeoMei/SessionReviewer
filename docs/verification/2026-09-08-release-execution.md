@@ -9,6 +9,7 @@ Authoritative spec is `docs/superpowers/specs/2026-09-04-obsidian-project-contex
 ## Execution queue
 
 - [ ] Recover current Codex tool envelopes and conservative exec wrappers; then bind visible Q/A and typed execution/verification into retained chains.
+- [ ] Reproduce and correct aggregate-shell/no-execution command verification attribution before qualifying milestones (`2026-09-08-command-verification-attribution.md`); retain generic command outcomes.
 - [x] Before mixed-provider chain/search integration, remove obsolete Codex-only restrictions from generic memory contracts with unchanged hash/location/identity safeguards (`2026-09-08-provider-neutral-memory-contracts.md`). Reviewed at01218cb+cf81296; this does not activate an adapter.
 - [ ] Current-contract Claude/OpenCode adapter registration, authenticated source reads and provider parity (port reusable legacy Claude parser, not its obsolete architecture).
 - [ ] Authenticate current and historical answer snapshots in public source refs and fixed-argv drilldown (`2026-09-08-historical-turn-bindings.md`); no relabeling a historical answer as the current view.
