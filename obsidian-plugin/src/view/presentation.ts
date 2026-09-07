@@ -3,7 +3,7 @@ import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } 
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
 import { element } from "./dom";
-import type { V4ViewState } from "../state/v4-view-state";
+import type { V4ViewState, V4ViewStatePatch } from "../state/v4-view-state";
 import { renderV4Shell, type V4ShellElement } from "./render-v4-shell";
 import type { ScanRecordsElement } from "./render-scan-records";
 
@@ -82,6 +82,7 @@ export function renderMarkdownV4View(
     eventPageCache?: Map<string, SessionEventPageV1>;
     initialState?: unknown;
     saveState?: (state: V4ViewState) => void | Promise<void>;
+    saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;
   } = {}
 ): HTMLElement & { scanRecords?: ScanRecordsElement; dispose?: () => void } {
   const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;

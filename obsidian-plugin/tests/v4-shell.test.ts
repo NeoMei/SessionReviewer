@@ -5,7 +5,7 @@ import type { Snapshot } from "../src/data/repository";
 import { renderMarkdownV4View } from "../src/view/presentation";
 import { ProjectEvolutionView } from "../src/view/project-view";
 import { defaultViewState } from "../src/view/render-shell";
-import type { V4ViewState } from "../src/state/v4-view-state";
+import { normalizeV4ViewState, type V4ViewState } from "../src/state/v4-view-state";
 import { v4SnapshotFixture } from "./fixtures/v4-shell";
 
 const labels = ["项目演进", "问题脉络", "决策与约定", "全部 Sessions", "用量"];
@@ -253,8 +253,41 @@ describe("v4 project state and lifecycle", () => {
     await settle();
     expect(view.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
     click(view.contentEl, "problems");
-    expect(saveV4).toHaveBeenLastCalledWith({ projectId: "project-b", view: "problems", selectedMilestoneId: null, selectedProblemId: "problem:alpha" });
+    expect(saveV4).toHaveBeenLastCalledWith(expect.objectContaining({ projectId: "project-b", view: "problems", selectedMilestoneId: "milestone-b", selectedProblemId: "problem:alpha" }));
     await view.onClose();
+  });
+
+  it("merges cross-leaf state patches in both directions", async () => {
+    const project = { projectId: "project-p", root: "Projects/P", name: "P", format: "markdown-v4" as const };
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValue(v4SnapshotFixture()), watch: vi.fn().mockReturnValue(vi.fn()) };
+    let shared = normalizeV4ViewState(undefined, project.projectId);
+    const save = vi.fn((next: V4ViewState) => { shared = structuredClone(next); });
+    const load = () => structuredClone(shared);
+    const first = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, undefined, defaultViewState(), undefined, { [project.projectId]: shared }, save, load);
+    const second = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, undefined, defaultViewState(), undefined, { [project.projectId]: shared }, save, load);
+    Object.assign(first, { app: { workspace: { openLinkText: vi.fn() } } });
+    Object.assign(second, { app: { workspace: { openLinkText: vi.fn() } } });
+    await first.onOpen();
+    await second.onOpen();
+
+    click(first.contentEl, "sessions");
+    click(second.contentEl, "problems");
+    const search = first.contentEl.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "session-1";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(shared.view).toBe("problems");
+    expect(shared.selectedProblemId).toBe("problem:alpha");
+    expect(shared.sessionBrowser?.query).toBe("session-1");
+
+    click(first.contentEl, "sessions");
+    const nextSearch = first.contentEl.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    nextSearch.value = "codex";
+    nextSearch.dispatchEvent(new Event("input", { bubbles: true }));
+    click(second.contentEl, "usage");
+    expect(shared.view).toBe("usage");
+    expect(shared.sessionBrowser?.query).toBe("codex");
+    await first.onClose();
+    await second.onClose();
   });
 
   it("disposes the Sessions panel so a late response cannot update a detached tab", async () => {

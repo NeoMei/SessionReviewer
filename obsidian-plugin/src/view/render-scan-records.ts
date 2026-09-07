@@ -4,6 +4,13 @@ import { button, element } from "./dom";
 import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
 import { renderSessionSummary, type SessionSummaryElement } from "./render-session-summary";
 import type { SessionSummaryV1 } from "../contracts/review-v4";
+import {
+  DEFAULT_SESSION_BROWSER_STATE,
+  filterSessions,
+  normalizeSessionBrowserState,
+  validCalendarDate,
+  type SessionBrowserState
+} from "../state/session-browser-state";
 
 const SESSION_PAGE_SIZE = 25;
 const EVENT_PAGE_SIZE = 25;
@@ -15,24 +22,33 @@ export interface ScanRecordsOptions {
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   cliUnavailable?: boolean;
   eventPageCache?: Map<string, SessionEventPageV1>;
+  initialState?: unknown;
+  onStateChange?: (state: SessionBrowserState) => void;
 }
 
 export type ScanRecordsElement = HTMLElement & { dispose: () => void };
 type EventNavigation = { cursor?: string; anchor?: number };
 type SessionHandlers = {
-  onQuery: (value: string) => void;
+  onFilter: (patch: Partial<SessionBrowserState>) => void;
   onPage: (value: number) => void;
   onSelect: (session: SessionIndexEntryV1) => void;
 };
 type SessionRailElement = HTMLElement & {
-  update: (sessions: SessionIndexEntryV1[], selected: SessionIndexEntryV1 | undefined, query: string, page: number) => void;
+  update: (sessions: SessionIndexEntryV1[], filtered: SessionIndexEntryV1[], selected: SessionIndexEntryV1 | undefined, state: SessionBrowserState, error: string) => void;
 };
 
 export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOptions = {}): ScanRecordsElement {
   const root = element("section", { className: "sr-scan-records", attrs: { "aria-label": "扫描记录" } }) as ScanRecordsElement;
-  let query = "";
-  let sessionPage = 0;
-  let selected = index.sessions[0];
+  let state = normalizeSessionBrowserState(options.initialState);
+  let filtered = filterSessions(index.sessions, state);
+  let selected = findSelected(index.sessions, state.selected);
+  let filterError = "";
+  if (selected && filtered.includes(selected)) state.page = Math.floor(filtered.indexOf(selected) / SESSION_PAGE_SIZE);
+  else {
+    state.page = 0;
+    selected = filtered[0];
+    state.selected = selected ? sessionSelection(selected) : null;
+  }
   let eventPage: SessionEventPageV1 | undefined;
   let selectedEvent = 0;
   let loading = false;
@@ -157,20 +173,27 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     }
   };
 
-  const selectSession = (session: SessionIndexEntryV1): void => {
+  const setSelected = (session: SessionIndexEntryV1 | undefined): boolean => {
+    if (sessionIdentity(session) === sessionIdentity(selected)) return false;
     requestEpoch += 1;
     selected = session;
     eventPage = undefined;
     selectedEvent = 0;
     loading = false;
     loadError = "";
+    return true;
+  };
+
+  const selectSession = (session: SessionIndexEntryV1): void => {
+    const changed = setSelected(session);
+    commitState({ ...state, selected: sessionSelection(session) });
     draw();
-    void load();
+    if (changed) void load();
   };
 
   const draw = (): void => {
     if (disposed) return;
-    sessionRail.update(index.sessions, selected, query, sessionPage);
+    sessionRail.update(index.sessions, filtered, selected, state, filterError);
     const nextEventArea = renderEventArea(selected, summaryFor(selected), conversationFor(selected), eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
       onEvent: (value) => { selectedEvent = value; draw(); },
       onLoad: (navigation) => { void load(navigation); }
@@ -192,9 +215,61 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     if (!options.eventPageCache) cache.clear();
     root.replaceChildren();
   };
+  const commitState = (next: SessionBrowserState): void => {
+    state = next;
+    options.onStateChange?.(structuredClone(state));
+  };
+  const applyFilter = (patch: Partial<SessionBrowserState>): void => {
+    const previous = state;
+    const next = { ...state, ...patch };
+    if (new TextEncoder().encode(next.query).byteLength > 256) {
+      filterError = "搜索内容最多 256 个 UTF-8 字节。";
+      sessionRail.update(index.sessions, filtered, selected, previous, filterError);
+      return;
+    }
+    if (patch.unknownDateOnly === true) {
+      next.dateFrom = null;
+      next.dateTo = null;
+    } else if ((patch.dateFrom !== undefined && patch.dateFrom !== null) || (patch.dateTo !== undefined && patch.dateTo !== null)) {
+      next.unknownDateOnly = false;
+    }
+    if ((next.dateFrom !== null && !validCalendarDate(next.dateFrom)) || (next.dateTo !== null && !validCalendarDate(next.dateTo)) ||
+      (next.dateFrom !== null && next.dateTo !== null && next.dateFrom > next.dateTo)) {
+      filterError = "日期范围无效，请输入真实日期，且起始日期不能晚于结束日期。";
+      sessionRail.update(index.sessions, filtered, selected, previous, filterError);
+      return;
+    }
+    filterError = "";
+    const nextFiltered = filterSessions(index.sessions, next);
+    let selectionChanged = false;
+    if (selected && nextFiltered.includes(selected)) {
+      next.page = Math.floor(nextFiltered.indexOf(selected) / SESSION_PAGE_SIZE);
+      next.selected = sessionSelection(selected);
+    }
+    else {
+      next.page = 0;
+      const fallback = nextFiltered[0];
+      next.selected = fallback ? sessionSelection(fallback) : null;
+      selectionChanged = setSelected(fallback);
+    }
+    filtered = nextFiltered;
+    selected = findSelected(index.sessions, next.selected);
+    commitState(next);
+    draw();
+    if (selectionChanged) void load();
+  };
   sessionRail = renderSessions({
-    onQuery: (value) => { query = value; sessionPage = 0; draw(); },
-    onPage: (value) => { sessionPage = value; draw(); },
+    onFilter: applyFilter,
+    onPage: (value) => {
+      const pageCount = Math.max(1, Math.ceil(filtered.length / SESSION_PAGE_SIZE));
+      const page = Math.min(Math.max(0, value), pageCount - 1);
+      const fallback = filtered[page * SESSION_PAGE_SIZE];
+      const next = { ...state, page, selected: fallback ? sessionSelection(fallback) : null };
+      const selectionChanged = setSelected(fallback);
+      commitState(next);
+      draw();
+      if (selectionChanged) void load();
+    },
     onSelect: selectSession
   });
   browser.append(sessionRail);
@@ -206,42 +281,89 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
 
 function renderSessions(handlers: SessionHandlers): SessionRailElement {
   const rail = element("aside", { className: "sr-session-rail", attrs: { "aria-label": "扫描 Session" } }) as SessionRailElement;
-  const search = element("input", { attrs: { type: "search", "aria-label": "搜索 Session", placeholder: "搜索 provider 或 Session ID" } });
-  search.addEventListener("input", () => handlers.onQuery(search.value));
+  const search = element("input", { attrs: { type: "search", "aria-label": "搜索 Session", placeholder: "搜索 provider 或 Session ID", maxlength: "256" } });
+  search.addEventListener("input", () => handlers.onFilter({ query: search.value }));
+  const filters = element("details", { className: "sr-session-filters" });
+  filters.append(element("summary", { text: "筛选" }));
+  const provider = filterSelect("Provider", "筛选 Provider", [["", "全部 Provider"]]);
+  const processing = filterSelect("处理状态", "筛选处理状态", [["", "全部状态"], ["complete", "完整"], ["partial", "部分"], ["error", "错误"], ["unprocessed", "未处理"]]);
+  const availability = filterSelect("来源可用性", "筛选来源可用性", [["", "全部来源"], ["available", "可用"], ["unavailable", "不可用"]]);
+  const dateFrom = labeledInput("开始日期", "起始日期", "date");
+  const dateTo = labeledInput("结束日期", "结束日期", "date");
+  const unknown = element("input", { attrs: { type: "checkbox", "aria-label": "仅未知日期" } });
+  const unknownLabel = element("label", { className: "sr-session-filter-toggle" }, [unknown, element("span", { text: "仅未知日期" })]);
+  const clear = button("清除筛选", { "data-action": "clear-session-filters" });
+  const filterError = element("p", { className: "sr-session-filter-error", attrs: { role: "status", "aria-live": "polite" } });
+  provider.control.addEventListener("change", () => handlers.onFilter({ provider: provider.control.value || null }));
+  processing.control.addEventListener("change", () => handlers.onFilter({ processingState: processing.control.value as SessionBrowserState["processingState"] || null }));
+  availability.control.addEventListener("change", () => handlers.onFilter({ sourceAvailability: availability.control.value as SessionBrowserState["sourceAvailability"] || null }));
+  dateFrom.control.addEventListener("change", () => handlers.onFilter({ dateFrom: dateFrom.control.value || null }));
+  dateTo.control.addEventListener("change", () => handlers.onFilter({ dateTo: dateTo.control.value || null }));
+  unknown.addEventListener("change", () => handlers.onFilter({ unknownDateOnly: unknown.checked }));
+  clear.addEventListener("click", () => handlers.onFilter({ ...DEFAULT_SESSION_BROWSER_STATE }));
+  filters.append(provider.wrapper, processing.wrapper, availability.wrapper, dateFrom.wrapper, dateTo.wrapper, unknownLabel, clear, filterError);
   const list = element("div", { className: "sr-session-list" });
   const navigation = element("div", { className: "sr-session-navigation" });
-  rail.append(search, list, navigation);
-  rail.update = (sessions, selected, query, page) => {
-    if (search.value !== query) search.value = query;
-    const normalized = query.trim().toLocaleLowerCase();
-    const filtered = normalized
-      ? sessions.filter((session) => `${session.provider} ${session.session_id}`.toLocaleLowerCase().includes(normalized))
-      : sessions;
+  rail.append(search, filters, list, navigation);
+  rail.update = (sessions, filtered, selected, state, error) => {
+    if (search.value !== state.query) search.value = state.query;
+    const providerValues = [...new Set(sessions.map((session) => session.provider))];
+    const wanted = provider.control.value;
+    provider.control.replaceChildren(element("option", { text: "全部 Provider", attrs: { value: "" } }));
+    for (const value of providerValues) provider.control.append(element("option", { text: value, attrs: { value } }));
+    provider.control.value = state.provider ?? (wanted && providerValues.includes(wanted) ? wanted : "");
+    processing.control.value = state.processingState ?? "";
+    availability.control.value = state.sourceAvailability ?? "";
+    dateFrom.control.value = state.dateFrom ?? "";
+    dateTo.control.value = state.dateTo ?? "";
+    unknown.checked = state.unknownDateOnly;
+    filterError.textContent = error;
     const pageCount = Math.max(1, Math.ceil(filtered.length / SESSION_PAGE_SIZE));
-    const safePage = Math.min(page, pageCount - 1);
+    const safePage = Math.min(state.page, pageCount - 1);
     const shown = filtered.slice(safePage * SESSION_PAGE_SIZE, (safePage + 1) * SESSION_PAGE_SIZE);
     list.replaceChildren();
     for (const session of shown) {
       const node = button("", {
         "data-session-id": session.session_id,
+        "aria-label": `${session.provider} / ${session.session_id}，${presentStartedAt(session.started_at)}，${presentProcessingState(session.processing_state)}，来源${session.source_availability === "available" ? "可用" : "不可用"}`,
         "aria-selected": String(sessionIdentity(session) === sessionIdentity(selected))
       });
       const label = element("strong", { className: "sr-session-label", text: `${session.provider} / ${session.session_id}` });
       label.title = `${session.provider} / ${session.session_id}`;
-      node.append(label, element("span", { className: "sr-session-state", text: presentProcessingState(session.processing_state) }));
+      node.append(label, element("span", { className: "sr-session-state", text: `${presentStartedAt(session.started_at)} · ${presentProcessingState(session.processing_state)} · 来源${session.source_availability === "available" ? "可用" : "不可用"}` }));
       node.addEventListener("click", () => handlers.onSelect(session));
       list.append(node);
     }
     if (shown.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的 Session。" }));
+    const first = button("首页", { "data-action": "first-session-page" });
+    first.disabled = safePage === 0;
+    first.addEventListener("click", () => handlers.onPage(0));
     const previous = button("上一页", { "data-action": "previous-session-page" });
     previous.disabled = safePage === 0;
     previous.addEventListener("click", () => handlers.onPage(safePage - 1));
     const next = button("下一页", { "data-action": "next-session-page" });
     next.disabled = safePage + 1 >= pageCount;
     next.addEventListener("click", () => handlers.onPage(safePage + 1));
-    navigation.replaceChildren(previous, element("span", { text: `${safePage + 1} / ${pageCount}` }), next);
+    const last = button("末页", { "data-action": "last-session-page" });
+    last.disabled = safePage + 1 >= pageCount;
+    last.addEventListener("click", () => handlers.onPage(pageCount - 1));
+    const start = filtered.length === 0 ? 0 : safePage * SESSION_PAGE_SIZE + 1;
+    const end = Math.min((safePage + 1) * SESSION_PAGE_SIZE, filtered.length);
+    const omitted = Math.max(0, filtered.length - (end - start + (filtered.length === 0 ? 0 : 1)));
+    navigation.replaceChildren(first, previous, element("span", { text: `${start}–${end} / 共${filtered.length} · 未展示 ${omitted}` }), next, last);
   };
   return rail;
+}
+
+function filterSelect(label: string, ariaLabel: string, options: Array<readonly [string, string]>): { wrapper: HTMLElement; control: HTMLSelectElement } {
+  const control = element("select", { attrs: { "aria-label": ariaLabel } });
+  for (const [value, text] of options) control.append(element("option", { text, attrs: { value } }));
+  return { wrapper: element("label", { className: "sr-session-filter-field" }, [element("span", { text: label }), control]), control };
+}
+
+function labeledInput(label: string, ariaLabel: string, type: string): { wrapper: HTMLElement; control: HTMLInputElement } {
+  const control = element("input", { attrs: { type, "aria-label": ariaLabel } });
+  return { wrapper: element("label", { className: "sr-session-filter-field" }, [element("span", { text: label }), control]), control };
 }
 
 function renderEventArea(
@@ -355,7 +477,12 @@ function renderSessionCoverage(session: SessionIndexEntryV1): HTMLElement {
 
 function presentIndexCoverage(index: SessionIndexV1): string {
   const coverage = index.coverage;
-  return `Session 覆盖：共 ${formatCount(coverage.total)} · 完整 ${formatCount(coverage.complete)} · 部分 ${formatCount(coverage.partial)} · 错误 ${formatCount(coverage.error)} · 未处理 ${formatCount(coverage.unprocessed)} · 来源不可用 ${formatCount(coverage.source_unavailable)}`;
+  const providers = [...new Set(index.sessions.map((session) => session.provider))]
+    .map((provider) => `${provider} ${index.sessions.filter((session) => session.provider === provider).length}`)
+    .join(" / ") || "无";
+  const known = index.sessions.flatMap((session) => session.started_at === null ? [] : [session.started_at]).sort();
+  const sourceRange = known.length === 0 ? "未知" : `${presentEventTime(known[0])} – ${presentEventTime(known.at(-1)!)}`;
+  return `Session 覆盖：共 ${formatCount(coverage.total)} · 完整 ${formatCount(coverage.complete)} · 部分 ${formatCount(coverage.partial)} · 错误 ${formatCount(coverage.error)} · 未处理 ${formatCount(coverage.unprocessed)} · 来源不可用 ${formatCount(coverage.source_unavailable)} · 来源分布 ${providers} · Session 开始时间 ${sourceRange} · 时间未知 ${coverage.total - coverage.started_at_known} · 索引生成时间 ${presentEventTime(index.generated_at)}`;
 }
 
 function presentProcessingState(value: SessionIndexEntryV1["processing_state"]): string {
@@ -388,10 +515,22 @@ function presentEventTime(value: string): string {
   }).format(parsed);
 }
 
+function presentStartedAt(value: string | null): string {
+  return value === null ? "时间未知" : presentEventTime(value);
+}
+
 function formatCount(value: number | null): string {
   return value === null ? "未知" : value.toLocaleString("en-US");
 }
 
 function sessionIdentity(session: SessionIndexEntryV1 | undefined): string {
   return session ? `${session.provider}\0${session.session_id}` : "";
+}
+
+function sessionSelection(session: SessionIndexEntryV1): NonNullable<SessionBrowserState["selected"]> {
+  return { provider: session.provider, sessionId: session.session_id };
+}
+
+function findSelected(sessions: SessionIndexEntryV1[], selected: SessionBrowserState["selected"]): SessionIndexEntryV1 | undefined {
+  return selected === null ? undefined : sessions.find((session) => session.provider === selected.provider && session.session_id === selected.sessionId);
 }

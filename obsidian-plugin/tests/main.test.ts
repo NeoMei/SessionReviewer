@@ -193,7 +193,10 @@ describe("plugin lifecycle", () => {
       view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="usage"]')!.click();
       await Promise.resolve();
       expect(saveData).toHaveBeenLastCalledWith(expect.objectContaining({
-        v4ViewStates: { "project-p": { projectId: "project-p", view: "usage", selectedMilestoneId: null, selectedProblemId: null } }
+        v4ViewStates: { "project-p": {
+          projectId: "project-p", view: "usage", selectedMilestoneId: null, selectedProblemId: null,
+          sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null }
+        } }
       }));
       const nativeOpenActions = [...view.contentEl.querySelectorAll<HTMLButtonElement>("button")]
         .filter((button) => button.textContent?.startsWith("打开项目"));

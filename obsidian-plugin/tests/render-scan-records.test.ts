@@ -1,6 +1,6 @@
 import { WorkspaceLeaf } from "obsidian";
 import { describe, expect, it, vi } from "vitest";
-import type { CliRunner, ConversationRequest, SessionSummaryRequest } from "../src/cli/runner";
+import { SyncStatusError, type CliRunner, type ConversationRequest, type SessionSummaryRequest } from "../src/cli/runner";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
 import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1, SessionSummaryV1 } from "../src/contracts/review-v4";
 import type { Snapshot } from "../src/data/repository";
@@ -8,6 +8,7 @@ import { renderMarkdownV4View } from "../src/view/presentation";
 import { ProjectEvolutionView } from "../src/view/project-view";
 import { defaultViewState } from "../src/view/render-shell";
 import { populatedSessionSummary } from "./fixtures/session-summary";
+import { normalizeV4ViewState, type V4ViewState, type V4ViewStatePatch } from "../src/state/v4-view-state";
 
 const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
 const PROJECT_DIGEST = `sha256:${"2".repeat(64)}`;
@@ -320,6 +321,136 @@ describe("v4 scanned Session renderer", () => {
     expect(root.textContent).toContain("session-03");
   });
 
+  function manySessions(): SessionIndexEntryV1[] {
+    return Array.from({ length: 154 }, (_value, index) => sessionFixture({
+      session_id: `session-${String(154 - index).padStart(3, "0")}`,
+      processing_state: index === 1 ? "error" : "complete",
+      source_availability: index === 2 ? "unavailable" : "available",
+      state_reason_codes: [], indexed_event_count: 0,
+      coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 },
+      session_view_digest: null
+    }));
+  }
+
+  it("selects the first filtered row when a local query excludes the current detail", () => {
+    const root = renderMarkdownV4View(snapshot(indexFixture(manySessions())), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "session-001";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-001");
+  });
+
+  it("removes stale Session detail when a local query returns no rows", () => {
+    const root = renderMarkdownV4View(snapshot(indexFixture(manySessions())), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "does-not-exist";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
+    expect(root.textContent).toContain("Session 覆盖：共 154");
+  });
+
+  it("renders the current filtered range and global accepted count independently", () => {
+    const root = renderMarkdownV4View(snapshot(indexFixture(manySessions())), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(25);
+    expect(root.textContent).toContain("1–25 / 共154");
+    expect(root.textContent).toContain("Session 覆盖：共 154");
+  });
+
+  it("uses first, previous, next and last navigation and selects a visible row after page changes", () => {
+    const sessions = Array.from({ length: 154 }, (_value, index) => sessionFixture({
+      session_id: `session-${String(154 - index).padStart(3, "0")}`,
+      processing_state: "complete", state_reason_codes: [], indexed_event_count: 0,
+      coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }, session_view_digest: null
+    }));
+    const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    root.querySelector<HTMLButtonElement>('[data-action="last-session-page"]')!.click();
+    expect(root.textContent).toContain("151–154 / 共154");
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-004");
+    expect(root.textContent).toContain("session-001");
+    root.querySelector<HTMLButtonElement>('[data-action="first-session-page"]')!.click();
+    expect(root.textContent).toContain("1–25 / 共154");
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-154");
+  });
+
+  it("applies every local rail filter without CLI, reports invalid dates and clears filters", () => {
+    const sessions = [
+      sessionFixture({ provider: "codex", session_id: "known-complete", processing_state: "complete", state_reason_codes: [], started_at: "2026-09-07T16:30:00Z", indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "claude", session_id: "known-error", processing_state: "error", source_availability: "unavailable", state_reason_codes: ["source_unavailable"], started_at: "2026-09-06T00:00:00Z", indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "opencode", session_id: "unknown-partial", processing_state: "partial", started_at: null, indexed_event_count: 0, session_view_digest: null })
+    ];
+    const saveStatePatch = vi.fn<(patch: V4ViewStatePatch) => void>();
+    const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { cliUnavailable: true, saveStatePatch });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    const provider = root.querySelector<HTMLSelectElement>('[aria-label="筛选 Provider"]')!;
+    provider.value = "claude";
+    provider.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    expect(root.textContent).toContain("known-error");
+    expect(saveStatePatch.mock.lastCall?.[0].sessionBrowser?.provider).toBe("claude");
+    expect(saveStatePatch.mock.lastCall?.[0].sessionBrowser?.selected).toEqual({ provider: "claude", sessionId: "known-error" });
+
+    root.querySelector<HTMLButtonElement>('[data-action="clear-session-filters"]')!.click();
+    const unknown = root.querySelector<HTMLInputElement>('[aria-label="仅未知日期"]')!;
+    unknown.checked = true;
+    unknown.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    expect(root.textContent).toContain("unknown-partial");
+
+    root.querySelector<HTMLButtonElement>('[data-action="clear-session-filters"]')!.click();
+    const from = root.querySelector<HTMLInputElement>('[aria-label="起始日期"]')!;
+    const to = root.querySelector<HTMLInputElement>('[aria-label="结束日期"]')!;
+    from.value = "2026-09-08";
+    from.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    to.value = "2026-09-07";
+    to.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("日期范围无效");
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
+
+    root.querySelector<HTMLButtonElement>('[data-action="clear-session-filters"]')!.click();
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(3);
+  });
+
+  it("restores a namespaced same-ID selection on its filtered page after leaving Sessions", () => {
+    const sessions = Array.from({ length: 60 }, (_value, index) => sessionFixture({
+      provider: index === 35 ? "claude" : "codex",
+      session_id: index === 0 || index === 35 ? "same-id" : `session-${String(index).padStart(3, "0")}`,
+      processing_state: "complete", state_reason_codes: [], indexed_event_count: 0, session_view_digest: null
+    }));
+    const initialState = {
+      projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null,
+      sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "claude", sessionId: "same-id" } }
+    };
+    const root = renderMarkdownV4View(snapshot(indexFixture(sessions)), () => {}, { cliUnavailable: true, initialState });
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("claude / same-id");
+    expect(root.textContent).toContain("26–50 / 共60");
+
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="usage"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("claude / same-id");
+    expect(root.textContent).toContain("26–50 / 共60");
+  });
+
+  it("rejects an oversized live query without applying or persisting it", () => {
+    const saveStatePatch = vi.fn<(patch: V4ViewStatePatch) => void>();
+    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), () => {}, { cliUnavailable: true, saveStatePatch });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    const callsBefore = saveStatePatch.mock.calls.length;
+    search.value = "🙂".repeat(65);
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
+    expect(root.querySelector('[role="status"]')?.textContent).toContain("256 个 UTF-8 字节");
+    expect(saveStatePatch).toHaveBeenCalledTimes(callsBefore);
+  });
+
   it("preserves the connected focused search input while typing and when an event request resolves", async () => {
     const pending = deferred<SessionEventPageV1>();
     const sessions = [sessionFixture(), sessionFixture({ session_id: "session-2" })];
@@ -347,6 +478,30 @@ describe("v4 scanned Session renderer", () => {
     expect(document.activeElement).toBe(search);
     expect(root.querySelector('[aria-label="搜索 Session"]')).toBe(search);
     root.remove();
+  });
+
+  it("rejects pending Session detail responses after a filter becomes empty", async () => {
+    const pendingEvent = deferred<SessionEventPageV1>();
+    const pendingSummary = deferred<SessionSummaryV1>();
+    const pendingConversation = deferred<ConversationPageV1>();
+    const root = renderMarkdownV4View(snapshot(), () => {}, {
+      loadSessionEvents: () => pendingEvent.promise,
+      loadSessionSummary: () => pendingSummary.promise,
+      loadConversation: () => pendingConversation.promise
+    });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    const search = root.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "no-match";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
+
+    pendingEvent.resolve(eventPage({ items: [{ kind: "message", excerpt: "late event", revision_id: "revision-late", sequence: 1, occurred_at: "2026-09-08T00:00:00Z" }] }));
+    pendingSummary.resolve(summaryFor({ projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1", expectedSessionViewDigest: VIEW_DIGEST }, "late summary"));
+    pendingConversation.resolve(conversationFor({}, "late conversation"));
+    await settle();
+    expect(root.textContent).not.toContain("late event");
+    expect(root.textContent).not.toContain("late summary");
+    expect(root.textContent).not.toContain("late conversation");
   });
 
   it("states unavailable sources, empty excerpts and absent responses without inventing roles", async () => {
@@ -421,6 +576,60 @@ describe("v4 scanned Session renderer", () => {
 });
 
 describe("v4 project and event lifecycle", () => {
+  it("does not call any private loader when the actual host reports CLI unavailable", async () => {
+    const project = { projectId: "project-p", root: "Projects/SessionReviewer", name: "SessionReviewer", format: "markdown-v4" as const };
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValue(projectSnapshot(project.projectId, "SessionReviewer")), watch: vi.fn().mockReturnValue(vi.fn()) };
+    const runner = {
+      status: vi.fn().mockRejectedValue(new SyncStatusError("cli_unavailable")),
+      getSessionEvents: vi.fn(), getConversation: vi.fn(), getSessionSummary: vi.fn()
+    };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    expect(runner.getSessionEvents).not.toHaveBeenCalled();
+    expect(runner.getConversation).not.toHaveBeenCalled();
+    expect(runner.getSessionSummary).not.toHaveBeenCalled();
+    expect(view.contentEl.querySelectorAll("[data-session-id]")).toHaveLength(1);
+    await view.onClose();
+  });
+
+  it("restores independent Session browser state after project A to B to A", async () => {
+    const projectA = { projectId: "project-a", root: "Projects/A", name: "A", format: "markdown-v4" as const };
+    const projectB = { projectId: "project-b", root: "Projects/B", name: "B", format: "markdown-v4" as const };
+    const repository = {
+      discover: vi.fn().mockResolvedValue([projectA, projectB]),
+      load: vi.fn(async (project: typeof projectA) => projectSnapshot(project.projectId, project.name)),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const states: Record<string, V4ViewState> = {};
+    const save = (next: V4ViewState) => { states[next.projectId] = structuredClone(next); };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, undefined, defaultViewState(), undefined, states, save, (projectId) => states[projectId]);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    let search = view.contentEl.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "session-a";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    let picker = view.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    picker.value = "project-b";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    search = view.contentEl.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')!;
+    search.value = "session-b";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+
+    picker = view.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    picker.value = "project-a";
+    picker.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    expect(view.contentEl.querySelector<HTMLInputElement>('[aria-label="搜索 Session"]')?.value).toBe("session-a");
+    expect(states["project-b"].sessionBrowser?.query).toBe("session-b");
+    await view.onClose();
+  });
   it("restores a persisted project selection on reload", async () => {
     const projectA = { projectId: "project-a", root: "Projects/A", name: "A" };
     const projectB = { projectId: "project-b", root: "Projects/B", name: "B" };
@@ -515,6 +724,63 @@ describe("v4 project and event lifecycle", () => {
     await settle();
     expect(runner.getSessionEvents).toHaveBeenCalledTimes(2);
     expect(runner.getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ expectedGenerationId: "generation-2" }));
+    await view.onClose();
+  });
+
+  it("retains a selected Session on its containing page after generation refresh and requests only the new binding", async () => {
+    const project = { projectId: "project-p", root: "Projects/SessionReviewer", name: "SessionReviewer", format: "markdown-v4" as const };
+    const sessions = Array.from({ length: 60 }, (_value, index) => sessionFixture({
+      session_id: `session-${String(60 - index).padStart(3, "0")}`,
+      processing_state: "complete", state_reason_codes: [], indexed_event_count: 1,
+      coverage: { seen: 1, indexed: 1, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
+    }));
+    const first = snapshot(indexFixture(sessions));
+    const second = structuredClone(first);
+    if (second.state.kind !== "public_valid") throw new Error("expected public-valid snapshot");
+    const newDigest = `sha256:${"9".repeat(64)}`;
+    second.state.index.generation_id = "generation-2";
+    second.state.index.sessions[35].session_view_digest = newDigest;
+    second.state.index.sessions.forEach((entry) => {
+      entry.last_seen_generation_id = "generation-2";
+      entry.last_successful_generation_id = "generation-2";
+    });
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const runner = {
+      status: vi.fn().mockResolvedValue({}),
+      getSessionEvents: vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string }) => Promise.resolve(eventPage({
+        session_id: request.sessionId, generation_id: request.expectedGenerationId, session_view_digest: request.expectedSessionViewDigest
+      }))),
+      getSessionSummary: vi.fn((request: SessionSummaryRequest) => Promise.resolve(summaryFor(request)))
+    };
+    const initial = normalizeV4ViewState({
+      projectId: "project-p", view: "sessions",
+      sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-025" } }
+    }, "project-p");
+    const states = { "project-p": initial };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner, defaultViewState(), undefined, states, undefined, () => states["project-p"]);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+
+    await view.onOpen();
+    await settle();
+    expect(view.contentEl.textContent).toContain("26–50 / 共60");
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-025");
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="refresh-v4-status"]')!.click();
+    await settle();
+    await settle();
+
+    expect(view.contentEl.textContent).toContain("26–50 / 共60");
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-025");
+    expect(runner.getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: "session-025", expectedGenerationId: "generation-2", expectedSessionViewDigest: newDigest
+    }));
+    expect(runner.getSessionEvents.mock.lastCall?.[0]).not.toHaveProperty("cursor");
+    expect(runner.getSessionSummary).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: "session-025", expectedGenerationId: "generation-2", expectedSessionViewDigest: newDigest
+    }));
     await view.onClose();
   });
 });

@@ -2,7 +2,7 @@ import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } 
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ProjectDescriptor } from "../data/repository";
-import type { V4Tab, V4ViewState } from "../state/v4-view-state";
+import type { V4Tab, V4ViewState, V4ViewStatePatch } from "../state/v4-view-state";
 import { normalizeV4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
 import { presentStatus, summarizeRisk } from "./presentation";
@@ -15,6 +15,7 @@ import { renderV4Usage } from "./render-v4-usage";
 export interface RenderV4ShellOptions {
   initialState?: unknown;
   saveState?: (state: V4ViewState) => void | Promise<void>;
+  saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
@@ -46,6 +47,11 @@ export function renderV4Shell(
   let disposed = false;
   const evolutionUi: V4EvolutionUiState = { fullHistory: false, page: 0 };
 
+  const persist = (patch: V4ViewStatePatch): void => {
+    if (options.saveStatePatch) void options.saveStatePatch(patch);
+    else void options.saveState?.(state);
+  };
+
   const update = (patch: Partial<V4ViewState>, focus = false): void => {
     if (disposed) return;
     const focusedMilestoneId = root.ownerDocument.activeElement instanceof HTMLElement && root.contains(root.ownerDocument.activeElement)
@@ -53,16 +59,21 @@ export function renderV4Shell(
       : undefined;
     const previous = state.view;
     const next = { ...state, ...patch, projectId: descriptor.projectId };
+    const requestedMilestoneId = next.selectedMilestoneId;
+    const requestedProblemId = next.selectedProblemId;
     if (sameState(state, next)) {
       if (focus) root.querySelector<HTMLButtonElement>(`[data-v4-tab="${state.view}"]`)?.focus();
       return;
     }
     state = next;
+    const persisted: V4ViewStatePatch = { ...patch };
     if (state.view === "evolution" && state.selectedMilestoneId === null) state.selectedMilestoneId = presentation.timeline.at(-1)?.id ?? null;
     if (state.view === "problems" && state.selectedProblemId === null) state.selectedProblemId = presentation.problem_root_ids[0] ?? presentation.problem_nodes[0]?.id ?? null;
+    if (state.selectedMilestoneId !== requestedMilestoneId) persisted.selectedMilestoneId = state.selectedMilestoneId;
+    if (state.selectedProblemId !== requestedProblemId) persisted.selectedProblemId = state.selectedProblemId;
     if (previous === "sessions" && state.view !== "sessions") disposeRecords();
     draw();
-    void options.saveState?.(state);
+    persist(persisted);
     if (focus) root.querySelector<HTMLButtonElement>(`[data-v4-tab="${state.view}"]`)?.focus();
     else if (focusedMilestoneId) [...root.querySelectorAll<HTMLButtonElement>("[data-v4-milestone-id]")]
       .find((control) => control.dataset.v4MilestoneId === focusedMilestoneId)?.focus();
@@ -84,7 +95,14 @@ export function renderV4Shell(
       const panel = element("section", { className: "sr-v4-sessions", attrs: { "data-v4-panel": "sessions", role: "tabpanel" } });
       if (!index) panel.append(element("p", { className: "sr-empty", text: "当前快照没有已验证的 Session 索引；需要重新扫描后才能建立完整清单。" }));
       else {
-        records = renderScanRecords(index, options);
+        records = renderScanRecords(index, {
+          ...options,
+          initialState: state.sessionBrowser,
+          onStateChange: (sessionBrowser) => {
+            state = { ...state, sessionBrowser };
+            persist({ sessionBrowser });
+          }
+        });
         root.scanRecords = records;
         panel.append(records);
       }
@@ -107,7 +125,8 @@ export function renderV4Shell(
 }
 
 function sameState(left: V4ViewState, right: V4ViewState): boolean {
-  return left.projectId === right.projectId && left.view === right.view && left.selectedMilestoneId === right.selectedMilestoneId && left.selectedProblemId === right.selectedProblemId;
+  return left.projectId === right.projectId && left.view === right.view && left.selectedMilestoneId === right.selectedMilestoneId &&
+    left.selectedProblemId === right.selectedProblemId && JSON.stringify(left.sessionBrowser) === JSON.stringify(right.sessionBrowser);
 }
 
 function renderTabs(selected: V4Tab, select: (view: V4Tab, focus: boolean) => void): HTMLElement {

@@ -13,7 +13,7 @@ import { defaultViewState, renderReadyView, type SaveViewState, type ViewState }
 import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
 import { renderMarkdownV4View } from "./presentation";
 import type { ScanRecordsElement } from "./render-scan-records";
-import { normalizeV4ViewState, normalizeV4ViewStates, type V4ViewState, type V4ViewStates } from "../state/v4-view-state";
+import { normalizeV4ViewState, normalizeV4ViewStates, type V4ViewState, type V4ViewStatePatch, type V4ViewStates } from "../state/v4-view-state";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -180,7 +180,8 @@ export class ProjectEvolutionView extends ItemView {
           saveState: (viewState) => {
             this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
             return this.saveV4State?.(viewState);
-          }
+          },
+          saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch)
         }
       );
       this.v4Browser = browser;
@@ -476,6 +477,13 @@ export class ProjectEvolutionView extends ItemView {
     const current = this.loadV4State?.(projectId);
     if (current) this.v4States = { ...this.v4States, [projectId]: current };
     return current ?? this.v4States[projectId];
+  }
+
+  private saveV4Patch(projectId: string, patch: V4ViewStatePatch): void | Promise<void> {
+    const latest = normalizeV4ViewState(this.currentV4State(projectId), projectId);
+    const next = normalizeV4ViewState({ ...latest, ...patch, projectId }, projectId);
+    this.v4States = { ...this.v4States, [projectId]: next };
+    return this.saveV4State?.(next);
   }
 
   private resetEventCache(): void {
