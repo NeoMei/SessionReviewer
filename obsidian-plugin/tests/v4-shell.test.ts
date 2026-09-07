@@ -184,7 +184,7 @@ describe("v4 project state and lifecycle", () => {
       watch: vi.fn().mockReturnValue(vi.fn())
     };
     let persisted: Record<string, V4ViewState> = {};
-    const saveV4 = vi.fn((next: Record<string, V4ViewState>) => { persisted = structuredClone(next); });
+    const saveV4 = vi.fn((next: V4ViewState) => { persisted = { ...persisted, [next.projectId]: structuredClone(next) }; });
     const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, undefined, defaultViewState(), undefined, persisted, saveV4);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
 
@@ -228,10 +228,7 @@ describe("v4 project state and lifecycle", () => {
     await settle();
     expect(view.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
     click(view.contentEl, "problems");
-    expect(saveV4).toHaveBeenLastCalledWith({
-      "project-a": states["project-a"],
-      "project-b": { projectId: "project-b", view: "problems", selectedMilestoneId: null, selectedProblemId: "problem:alpha" }
-    });
+    expect(saveV4).toHaveBeenLastCalledWith({ projectId: "project-b", view: "problems", selectedMilestoneId: null, selectedProblemId: "problem:alpha" });
     await view.onClose();
   });
 
@@ -247,6 +244,19 @@ describe("v4 project state and lifecycle", () => {
 
     expect(sessions.isConnected).toBe(false);
     expect(root.textContent).not.toContain("late detached response");
+  });
+
+  it("does not remount or leak the Sessions reader when its active tab is clicked again", () => {
+    const loadSessionEvents = vi.fn(() => new Promise<never>(() => {}));
+    const root = renderMarkdownV4View(v4SnapshotFixture(), vi.fn(), { loadSessionEvents });
+    click(root, "sessions");
+    const firstRecords = root.scanRecords;
+
+    click(root, "sessions");
+
+    expect(root.scanRecords).toBe(firstRecords);
+    expect(loadSessionEvents).toHaveBeenCalledTimes(1);
+    root.dispose?.();
   });
 
   it("does not start scan or model work while switching v4 tabs", async () => {

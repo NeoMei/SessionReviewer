@@ -51,7 +51,12 @@ export function renderV4Shell(
       ? root.ownerDocument.activeElement.dataset.v4MilestoneId
       : undefined;
     const previous = state.view;
-    state = { ...state, ...patch, projectId: descriptor.projectId };
+    const next = { ...state, ...patch, projectId: descriptor.projectId };
+    if (sameState(state, next)) {
+      if (focus) root.querySelector<HTMLButtonElement>(`[data-v4-tab="${state.view}"]`)?.focus();
+      return;
+    }
+    state = next;
     if (state.view === "evolution" && state.selectedMilestoneId === null) state.selectedMilestoneId = presentation.timeline.at(-1)?.id ?? null;
     if (state.view === "problems" && state.selectedProblemId === null) state.selectedProblemId = presentation.problem_root_ids[0] ?? presentation.problem_nodes[0]?.id ?? null;
     if (previous === "sessions" && state.view !== "sessions") disposeRecords();
@@ -98,6 +103,10 @@ export function renderV4Shell(
   };
   draw();
   return root;
+}
+
+function sameState(left: V4ViewState, right: V4ViewState): boolean {
+  return left.projectId === right.projectId && left.view === right.view && left.selectedMilestoneId === right.selectedMilestoneId && left.selectedProblemId === right.selectedProblemId;
 }
 
 function renderTabs(selected: V4Tab, select: (view: V4Tab, focus: boolean) => void): HTMLElement {

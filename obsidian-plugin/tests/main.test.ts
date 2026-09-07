@@ -2,15 +2,92 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { WorkspaceLeaf } from "obsidian";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { discoverRuntime, type RuntimeDiscoveryOptions } from "../src/cli/discovery";
 import SessionReviewerPlugin from "../src/main";
 import type { ProjectEvolutionView } from "../src/view/project-view";
+import { ProjectRepository } from "../src/data/repository";
+import { v4SnapshotFixture } from "./fixtures/v4-shell";
 
 const fixtureRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../testdata/contracts/v4/markdown");
 const fixture = (name: string): string => readFileSync(resolve(fixtureRoot, name), "utf8");
 
+afterEach(() => { vi.restoreAllMocks(); });
+
 describe("plugin lifecycle", () => {
+  it("merges alternating saves from two leaves and serializes persistence before reload", async () => {
+    const projects = [
+      { projectId: "project-a", root: "Projects/A", name: "A", format: "markdown-v4" as const },
+      { projectId: "project-b", root: "Projects/B", name: "B", format: "markdown-v4" as const }
+    ];
+    vi.spyOn(ProjectRepository.prototype, "discover").mockResolvedValue(projects);
+    vi.spyOn(ProjectRepository.prototype, "load").mockImplementation(async (project) => v4SnapshotFixture(project.projectId, project.name));
+    vi.spyOn(ProjectRepository.prototype, "watch").mockReturnValue(vi.fn());
+    let stored: unknown = null;
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const saveData = vi.fn(async (value: unknown) => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      stored = structuredClone(value);
+      inFlight -= 1;
+    });
+    let createView: ((leaf: WorkspaceLeaf) => ProjectEvolutionView) | undefined;
+    const plugin = new SessionReviewerPlugin({ workspace: {} } as never, {} as never);
+    Object.assign(plugin, {
+      loadData: vi.fn().mockResolvedValue(null), saveData,
+      runtimeResolver: vi.fn().mockResolvedValue(undefined),
+      registerView: vi.fn((_type: string, creator: (leaf: WorkspaceLeaf) => ProjectEvolutionView) => { createView = creator; }),
+      addRibbonIcon: vi.fn(), addCommand: vi.fn()
+    });
+    await plugin.onload();
+    const leafA = createView!(new WorkspaceLeaf());
+    const leafB = createView!(new WorkspaceLeaf());
+    const app = { workspace: { openLinkText: vi.fn() } };
+    Object.assign(leafA, { app });
+    Object.assign(leafB, { app });
+    await leafA.onOpen();
+    await leafB.onOpen();
+    const pickerB = leafB.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    pickerB.value = "project-b";
+    pickerB.dispatchEvent(new Event("change"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    leafA.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="decisions"]')!.click();
+    leafB.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="usage"]')!.click();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await leafA.onClose();
+    await leafB.onClose();
+
+    expect(maxInFlight).toBe(1);
+    expect(stored).toMatchObject({
+      v4ViewStates: {
+        "project-a": { projectId: "project-a", view: "decisions" },
+        "project-b": { projectId: "project-b", view: "usage" }
+      }
+    });
+
+    let createReloaded: ((leaf: WorkspaceLeaf) => ProjectEvolutionView) | undefined;
+    const reloaded = new SessionReviewerPlugin({ workspace: {} } as never, {} as never);
+    Object.assign(reloaded, {
+      loadData: vi.fn().mockResolvedValue(stored), saveData: vi.fn(),
+      runtimeResolver: vi.fn().mockResolvedValue(undefined),
+      registerView: vi.fn((_type: string, creator: (leaf: WorkspaceLeaf) => ProjectEvolutionView) => { createReloaded = creator; }),
+      addRibbonIcon: vi.fn(), addCommand: vi.fn()
+    });
+    await reloaded.onload();
+    const restoredA = createReloaded!(new WorkspaceLeaf());
+    Object.assign(restoredA, { app });
+    await restoredA.onOpen();
+    expect(restoredA.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
+    const restoredPicker = restoredA.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    restoredPicker.value = "project-a";
+    restoredPicker.dispatchEvent(new Event("change"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(restoredA.contentEl.querySelector('[data-v4-tab="decisions"]')?.getAttribute("aria-selected")).toBe("true");
+    await restoredA.onClose();
+  });
+
   it("auto-discovers the runtime, removes the settings tab, and clears legacy path fields", async () => {
     const plugin = new SessionReviewerPlugin({} as never, {} as never);
     const addSettingTab = vi.fn();

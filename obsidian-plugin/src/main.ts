@@ -16,6 +16,7 @@ export default class SessionReviewerPlugin extends Plugin {
   private runtime: DiscoveredRuntime | undefined;
   private runtimeResolver: RuntimeResolver = discoverRuntime;
   private legacyPaths: { cliPath?: string } = {};
+  private persistence = Promise.resolve();
 
   async onload(): Promise<void> {
     const stored = await this.loadData() as { viewState?: Partial<ViewState>; v4ViewStates?: unknown; cliPath?: unknown } | null;
@@ -29,17 +30,17 @@ export default class SessionReviewerPlugin extends Plugin {
     });
     if (this.runtime && this.legacyPaths.cliPath) {
       this.legacyPaths = {};
-      await this.saveData({ viewState: this.viewState, v4ViewStates: this.v4ViewStates });
+      await this.persist();
     }
     const vault = new ObsidianVaultPort(this.app);
     const repository = new ProjectRepository(vault);
     const editor = new ReviewEditor(vault);
     this.registerView(VIEW_TYPE, (leaf: WorkspaceLeaf) => new ProjectEvolutionView(leaf, repository, editor, this.runtime?.runner, this.viewState, async (viewState) => {
       this.viewState = viewState;
-      await this.saveData({ viewState, v4ViewStates: this.v4ViewStates, ...this.legacyPaths });
-    }, this.v4ViewStates, async (v4ViewStates) => {
-      this.v4ViewStates = v4ViewStates;
-      await this.saveData({ viewState: this.viewState, v4ViewStates, ...this.legacyPaths });
+      await this.persist();
+    }, this.v4ViewStates, async (v4ViewState) => {
+      this.v4ViewStates = { ...this.v4ViewStates, [v4ViewState.projectId]: v4ViewState };
+      await this.persist();
     }));
     this.addRibbonIcon("history", "打开项目脉络", () => void this.activateView());
     this.addCommand({
@@ -53,5 +54,12 @@ export default class SessionReviewerPlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE, active: true });
     void this.app.workspace.revealLeaf(leaf);
+  }
+
+  private persist(): Promise<void> {
+    const snapshot = { viewState: this.viewState, v4ViewStates: this.v4ViewStates, ...this.legacyPaths };
+    const write = this.persistence.then(() => this.saveData(snapshot));
+    this.persistence = write.catch(() => undefined);
+    return write;
   }
 }

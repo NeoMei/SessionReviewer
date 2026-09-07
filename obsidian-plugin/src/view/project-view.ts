@@ -13,7 +13,7 @@ import { defaultViewState, renderReadyView, type SaveViewState, type ViewState }
 import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./status-banner";
 import { renderMarkdownV4View } from "./presentation";
 import type { ScanRecordsElement } from "./render-scan-records";
-import { normalizeV4ViewState, normalizeV4ViewStates, type SaveV4ViewStates, type V4ViewStates } from "../state/v4-view-state";
+import { normalizeV4ViewState, normalizeV4ViewStates, type V4ViewState, type V4ViewStates } from "../state/v4-view-state";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -45,7 +45,7 @@ export class ProjectEvolutionView extends ItemView {
     private readonly initialState: ViewState = defaultViewState(),
     private readonly saveState?: SaveViewState,
     initialV4States: unknown = {},
-    private readonly saveV4States?: SaveV4ViewStates
+    private readonly saveV4State?: (state: V4ViewState) => void | Promise<void>
   ) {
     super(leaf);
     this.currentState = initialState;
@@ -175,7 +175,7 @@ export class ProjectEvolutionView extends ItemView {
           initialState: this.v4States[current.descriptor.projectId],
           saveState: (viewState) => {
             this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
-            return this.saveV4States?.(this.v4States);
+            return this.saveV4State?.(viewState);
           }
         }
       );
@@ -404,7 +404,7 @@ export class ProjectEvolutionView extends ItemView {
       void this.saveState?.(this.currentState);
       if (next.format === "markdown-v4" && !(next.projectId in this.v4States)) {
         this.v4States = { ...this.v4States, [next.projectId]: normalizeV4ViewState(undefined, next.projectId) };
-        void this.saveV4States?.(this.v4States);
+        void this.saveV4State?.(this.v4States[next.projectId]);
       }
       this.lastReady = undefined;
       this.lastMarkdownReady = undefined;
