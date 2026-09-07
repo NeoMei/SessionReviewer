@@ -149,6 +149,33 @@ describe("v4 scanned Session renderer", () => {
     expect(loadSessionEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-token", limit: 25 }));
   });
 
+  it("retries a failed next page with the same cursor instead of returning to page one", async () => {
+    const secondPage = eventPage({
+      range_start: 1,
+      range_end: 2,
+      items: [{ kind: "tool_result", excerpt: "重试后的第二页", revision_id: "revision-2", sequence: 20, occurred_at: "2026-09-06T17:36:34.520Z" }],
+      previous_cursor: "previous-token",
+      next_cursor: null
+    });
+    const loadSessionEvents = vi.fn()
+      .mockResolvedValueOnce(eventPage())
+      .mockRejectedValueOnce(new Error("第二页暂时不可用"))
+      .mockResolvedValueOnce(secondPage);
+    const root = renderMarkdownV4View(snapshot(), () => {}, { loadSessionEvents });
+    await settle();
+
+    root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')?.click();
+    await settle();
+    expect(root.textContent).toContain("第二页暂时不可用");
+    root.querySelector<HTMLButtonElement>('[data-action="retry-event-page"]')?.click();
+    await settle();
+
+    expect(root.textContent).toContain("重试后的第二页");
+    expect(root.textContent).not.toContain("用户问题示例");
+    expect(loadSessionEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-token" }));
+    expect(loadSessionEvents).toHaveBeenNthCalledWith(3, expect.objectContaining({ cursor: "next-token" }));
+  });
+
   it("pages and searches a bounded Session list", () => {
     const sessions = Array.from({ length: 26 }, (_value, index) => sessionFixture({
       session_id: `session-${String(index + 1).padStart(2, "0")}`,

@@ -13,6 +13,7 @@ export interface ScanRecordsOptions {
 }
 
 export type ScanRecordsElement = HTMLElement & { dispose: () => void };
+type EventNavigation = { cursor?: string; anchor?: number };
 
 export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOptions = {}): ScanRecordsElement {
   const root = element("section", { className: "sr-scan-records", attrs: { "aria-label": "扫描记录" } }) as ScanRecordsElement;
@@ -23,6 +24,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let selectedEvent = 0;
   let loading = false;
   let loadError = "";
+  let retryNavigation: EventNavigation | undefined;
   let requestEpoch = 0;
   let disposed = false;
   const cache = options.eventPageCache ?? new Map<string, SessionEventPageV1>();
@@ -30,7 +32,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   const eligible = (session: SessionIndexEntryV1 | undefined): session is SessionIndexEntryV1 =>
     Boolean(session && session.source_availability === "available" && session.session_view_digest && session.indexed_event_count > 0);
 
-  const requestFor = (session: SessionIndexEntryV1, navigation?: { cursor?: string; anchor?: number }): SessionEventRequest => ({
+  const requestFor = (session: SessionIndexEntryV1, navigation?: EventNavigation): SessionEventRequest => ({
     projectId: index.project_id,
     provider: session.provider,
     sessionId: session.session_id,
@@ -40,7 +42,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     ...navigation
   });
 
-  const load = async (navigation?: { cursor?: string; anchor?: number }): Promise<void> => {
+  const load = async (navigation?: EventNavigation): Promise<void> => {
     if (!eligible(selected) || !options.loadSessionEvents || disposed) return;
     const epoch = ++requestEpoch;
     const identity = sessionIdentity(selected);
@@ -48,16 +50,21 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     const cached = cache.get(cacheKey);
     loading = !cached;
     loadError = "";
+    retryNavigation = navigation;
     eventPage = cached;
     selectedEvent = 0;
     draw();
-    if (cached) return;
+    if (cached) {
+      retryNavigation = undefined;
+      return;
+    }
     try {
       const page = await options.loadSessionEvents(requestFor(selected, navigation));
       if (disposed || epoch !== requestEpoch || identity !== sessionIdentity(selected)) return;
       cache.set(cacheKey, page);
       eventPage = page;
       loading = false;
+      retryNavigation = undefined;
       draw();
     } catch (error) {
       if (disposed || epoch !== requestEpoch || identity !== sessionIdentity(selected)) return;
@@ -91,7 +98,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       onPage: (value) => { sessionPage = value; draw(); },
       onSelect: selectSession
     }));
-    browser.append(renderEventArea(selected, eventPage, selectedEvent, loading, loadError, options, {
+    browser.append(renderEventArea(selected, eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
       onEvent: (value) => { selectedEvent = value; draw(); },
       onLoad: (navigation) => { void load(navigation); }
     }));
@@ -159,8 +166,9 @@ function renderEventArea(
   selectedEvent: number,
   loading: boolean,
   loadError: string,
+  retryNavigation: EventNavigation | undefined,
   options: ScanRecordsOptions,
-  handlers: { onEvent: (value: number) => void; onLoad: (navigation?: { cursor?: string; anchor?: number }) => void }
+  handlers: { onEvent: (value: number) => void; onLoad: (navigation?: EventNavigation) => void }
 ): HTMLElement {
   const area = element("div", { className: "sr-event-area" });
   if (!session) {
@@ -185,7 +193,7 @@ function renderEventArea(
   }
   if (loadError) {
     const retry = button("重试", { "data-action": "retry-event-page" });
-    retry.addEventListener("click", () => handlers.onLoad());
+    retry.addEventListener("click", () => handlers.onLoad(retryNavigation));
     area.append(element("p", { className: "sr-event-error", text: loadError }), retry);
     return area;
   }
@@ -221,7 +229,7 @@ function renderEventArea(
   return area;
 }
 
-function renderEventNavigation(page: SessionEventPageV1, load: (navigation?: { cursor?: string; anchor?: number }) => void): HTMLElement {
+function renderEventNavigation(page: SessionEventPageV1, load: (navigation?: EventNavigation) => void): HTMLElement {
   const navigation = element("div", { className: "sr-event-navigation" });
   const definitions = [
     ["首页", "first-event-page", page.first_cursor],
