@@ -63,9 +63,10 @@ func reduceSessionSummary(ctx context.Context, input summaryInput) (SessionSumma
 			return SessionSummary{}, publicError(CodeInvalidArgument, "inspection timed out")
 		}
 		entry := summaryEntry(fact)
-		switch fact.Key.Kind {
-		case "command", "file", "artifact", "commit", "release":
+		if isSummaryOperation(fact) {
 			operations = append(operations, entry)
+		}
+		switch fact.Key.Kind {
 		case "verification", "test", "build", "lint":
 			verifications = append(verifications, entry)
 		}
@@ -98,7 +99,7 @@ func reduceSessionSummary(ctx context.Context, input summaryInput) (SessionSumma
 		VerificationResults: makeSummaryBlock(verifications, 0),
 		Errors:              makeSummaryErrorBlock(errors),
 		UnresolvedQuestions: makeSummaryBlock(unresolved, 0),
-		Rules:               Rules{RuleID: "summary-rules", RuleVersion: "v1", DependencyDigests: summaryDependencyDigests(input)},
+		Rules:               Rules{RuleID: "summary-rules", RuleVersion: "summary-typed-fact-text-v2", DependencyDigests: summaryDependencyDigests(input)},
 		Coverage:            coverageFromIndex(input.entry.Coverage),
 	}
 	if err := ValidateSummary(summary); err != nil {
@@ -110,7 +111,7 @@ func reduceSessionSummary(ctx context.Context, input summaryInput) (SessionSumma
 func summaryEntry(fact memory.ObservationRevision) Entry {
 	return Entry{
 		OccurredAt: fact.Timestamp, Sequence: uint64(fact.Key.Sequence), RevisionID: fact.RevisionID,
-		Text: safeEventExcerpt(fact.Excerpt), SourceRevisionIDs: []string{fact.RevisionID},
+		Text: summaryFactText(fact), SourceRevisionIDs: []string{fact.RevisionID},
 	}
 }
 

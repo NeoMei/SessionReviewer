@@ -102,6 +102,78 @@ func TestLoadSessionSummaryWorksWhenPublishedSourceIsMarkedUnavailable(t *testin
 	}
 }
 
+func TestLoadSessionSummaryExcludesBookkeepingTypedOperations(t *testing.T) {
+	fixture := buildEventFixtureCustomizedAt(t, t.TempDir(), "project-summary-bookkeeping", "generation-summary-bookkeeping", []string{"session-1"}, func(observations []memory.ObservationRevision) {
+		operations := []struct {
+			kind, operation, outcome string
+			fields                   map[string]string
+		}{
+			{kind: "artifact", operation: "session_started"},
+			{kind: "artifact", operation: "cwd_changed"},
+			{kind: "command", operation: "command_finished", outcome: "success", fields: map[string]string{"exit_code": "0"}},
+		}
+		for index := range observations {
+			observations[index].Key.Kind = operations[index].kind
+			observations[index].Operation = operations[index].operation
+			observations[index].Outcome = operations[index].outcome
+			observations[index].Fields = operations[index].fields
+			observations[index].Excerpt = ""
+			observations[index].RevisionID = memory.ObservationRevisionID(observations[index])
+		}
+	}, nil)
+	before := snapshotEventTree(t, fixture.dataRoot)
+	got, err := LoadSessionSummary(context.Background(), SummaryRequest{
+		DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex",
+		SessionID: "session-1", ExpectedGenerationID: fixture.generationID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KeyOperations.Total != 1 || len(got.KeyOperations.Items) != 1 {
+		t.Fatalf("key operations=%+v", got.KeyOperations)
+	}
+	if item := got.KeyOperations.Items[0]; item.Text != "命令已完成 · 成功 · 退出码 0" || !reflect.DeepEqual(item.SourceRevisionIDs, []string{item.RevisionID}) {
+		t.Fatalf("typed command=%+v", item)
+	}
+	if got.Coverage != (Coverage{Seen: 5, Indexed: 3, Undecodable: 2}) {
+		t.Fatalf("accepted coverage changed: %+v", got.Coverage)
+	}
+	if got.Rules.RuleVersion != "summary-typed-fact-text-v2" {
+		t.Fatalf("rule version=%q", got.Rules.RuleVersion)
+	}
+	if after := snapshotEventTree(t, fixture.dataRoot); !reflect.DeepEqual(before, after) {
+		t.Fatal("summary inspection changed configured or private state")
+	}
+}
+
+func TestSessionSummaryReducerExcludesBookkeepingAndKeepsRealTypedOperations(t *testing.T) {
+	sessionStarted := summaryTestRevision(t, 1, "artifact", "", "", map[string]string{"status": "session_started"})
+	cwdChanged := summaryTestRevision(t, 2, "artifact", "", "", map[string]string{"status": "cwd_changed"})
+	command := summaryTestRevision(t, 3, "command", "success", "", map[string]string{"status": "command_finished", "exit_code": "0"})
+	artifact := summaryTestRevision(t, 4, "artifact", "success", "", map[string]string{"status": "artifact_created", "artifact_id": "artifact-1"})
+
+	got, err := reduceSessionSummary(context.Background(), summaryTestInput([]memory.ObservationRevision{sessionStarted, cwdChanged, command, artifact}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantIDs := []string{command.RevisionID, artifact.RevisionID}
+	gotIDs := []string{got.KeyOperations.Items[0].RevisionID, got.KeyOperations.Items[1].RevisionID}
+	if got.KeyOperations.Total != 2 || !reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("key operations=%+v", got.KeyOperations)
+	}
+	if got.Coverage != (Coverage{Seen: 4, Indexed: 4}) {
+		t.Fatalf("accepted coverage changed: %+v", got.Coverage)
+	}
+
+	metadataOnly, err := reduceSessionSummary(context.Background(), summaryTestInput([]memory.ObservationRevision{sessionStarted, cwdChanged}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if metadataOnly.KeyOperations.Total != 0 || len(metadataOnly.KeyOperations.Items) != 0 {
+		t.Fatalf("metadata-only operations=%+v", metadataOnly.KeyOperations)
+	}
+}
+
 func TestLoadSessionSummaryRejectsTamperedImmutableDependency(t *testing.T) {
 	fixture := buildEventFixture(t, "project-summary-tamper", "generation-summary-tamper", "session-1")
 	path := filepath.Join(fixture.dataRoot, "projects", fixture.projectID, "memory-v1", "sessions", strings.TrimPrefix(fixture.sessionDigests["session-1"], "sha256:")+".json")
