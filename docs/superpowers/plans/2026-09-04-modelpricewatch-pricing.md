@@ -32,6 +32,34 @@
 - `internal/reviewv4/`: snapshot chains and nullable accounting aggregates.
 - `obsidian-plugin/src/view/render-usage.ts`: one full-width card per model with status and source links.
 
+## Current-interface preflight supplement (2026-09-08)
+
+This is an implementation correction under the accepted spec, not a new pricing design. The existing `internal/pricing/types.go` already defines `Snapshot`, `Supplement`, `Rates`, `Quantities`, `LineCosts`, and `BillingRuleVersion`; reuse them instead of reintroducing the illustrative structs below. Existing reviewv4 snapshot graph validation remains mandatory. Migration and new cross-platform expansion steps are excluded by the user's later scope decision; existing safety regressions remain.
+
+Read-only live requests to both fixed endpoints returned200/application-json, count248 matching248 rows, updated2026-09-06. Only aggregate shape metadata was recorded. The supported strict adapter must cover all observed fields, not just the small original fixture:
+
+- Listing required fields: `id`, `provider`, `model`, `category`, nullable `input_per_mtok`, `output_per_mtok`, `cached_input_per_mtok`, `promo`, nullable `promo_until`, `price_note`, `context_window`, `parameters`, `evidence`, plus `modality`, `tags`, `released`, `status`, `open_source`, `blended_cost_per_mtok`, `pricing_url`, `last_updated`, `detail_url`.
+- Non-null listing evidence: `as_of`, `basis`, nullable `event`, `source`, `confidence`, nullable HTTPS `evidence_url`, `captured_at`, `snapshot`, `sha`, `anchor_sku`, `anchor_scope`. These are source metadata, never executable paths or authority to infer billing conditions.
+- History entry required fields remain `date`, nullable input/output/cached-input rates, nullable `context_window`, `event`, and `changes`. Each change is `{field,old,new,direction,change_pct}`, with nullable numeric old/change_pct. Recognize optional source metadata `source`, `confidence`, nullable `evidence_url`, nullable `captured_at`, `sha`, `snapshot`, `supersedes_from`, `supersedes_to`, `corrected_from`, `note`. `corrected_from` contains optional `input_per_mtok`, `output_per_mtok`, `provider`. Unknown fields remain rejected; all arrays/strings/numbers have explicit bounds in Task1.
+- Observed history events: `baseline`, `snapshot`, `backfill`, `correction`, `price_increase`, `price_change`, `price_drop`, `reverify`, `new_model`. Decode them as bounded source categories; only a separately proven temporal applicability rule may price a Session. A correction/backfill metadata string is not by itself proof of original-time billing validity.
+
+Task1 fixtures must include one full listing, non-null evidence, history change objects and optional correction metadata, plus minimal supported history entries without those optional fields. Cover each nullable shape and malformed nested field. Use synthetic values rather than committing downloaded catalogs.
+
+Ruling: Any nonempty unstructured `price_note` remains a condition requiring reviewed structured support, not only text containing a keyword — the spec forbids parsing prose into billing rules — cost if wrong is conservative pending pricing that can be supplemented explicitly.
+
+Ruling: Cache throttling records refresh attempts separately from successful `retrieved_at`, under the same private lock — repeated failures must not cause every scan to contact the service, while failure cannot make an old cache look fresh — cost if wrong is delayed retry within the24-hour budget. Validate the successful models/history pair before atomically publishing a pointer to it; a failure-attempt record must never replace validated catalog bytes.
+
+| Shared interface | Required reconciliation before dispatch |
+|---|---|
+| Task1/Task2 | Strict full recognized catalog shape; HTTP/cache accepts only fully decoded responses |
+| Task2/Task5 | Attempt throttle and successful retrieval age are distinct; failed refresh preserves original pair/time |
+| Task3/Task4 | Actual source route metadata required; current ModelUsage only has a model label, so do not infer billing host from agent provider |
+| Task4/Task5 | Versioned provider rule consumes the adapter's normalized usage definition, not an assumed raw API meaning |
+| Task5/Task6 | Reuse existing Snapshot/Supplement fields and strict server-side cost validation; caller totals remain forbidden |
+| Task7/current UI | Actual v4 shell and renderer paths supersede legacy render-usage.ts when wiring; keep accepted full-width layout |
+
+Task4's illustrative Claude subtraction assumes normalized inclusive input. The adapter must prove that normalization before this equation is used; do not apply it directly to raw provider input fields. Exact observed route and reviewed provider rule propagation are prerequisites to an automatically priced snapshot.
+
 ---
 
 ### Task 1: Implement strict ModelPriceWatch response adapters
