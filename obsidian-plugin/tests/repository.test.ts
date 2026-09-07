@@ -66,6 +66,28 @@ describe("project repository", () => {
     ]);
   });
 
+  it("derives the project name above a conventional Session Review container", async () => {
+    const root = "Projects/SessionReviewer--269b8cab/Session Review";
+    const vault = new FakeVault();
+    vault.write(`${root}/项目回顾.md`, `---\nschema_version: 4\ndocument_format: review-markdown-v1\nentity_type: project-review\nproject_id: project-269b8cab6cbf69dd\n---\n`);
+    vault.write(`${root}/项目历史.md`, "inventory candidate");
+
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([
+      { projectId: "project-269b8cab6cbf69dd", root, name: "SessionReviewer", format: "markdown-v4" }
+    ]);
+  });
+
+  it("preserves an arbitrary legitimate v4 leaf folder name", async () => {
+    const root = "Projects/Client--Notes";
+    const vault = new FakeVault();
+    vault.write(`${root}/项目回顾.md`, `---\nschema_version: 4\ndocument_format: review-markdown-v1\nentity_type: project-review\nproject_id: project-client-notes\n---\n`);
+    vault.write(`${root}/项目历史.md`, "inventory candidate");
+
+    await expect(new ProjectRepository(vault).discover()).resolves.toEqual([
+      { projectId: "project-client-notes", root, name: "Client--Notes", format: "markdown-v4" }
+    ]);
+  });
+
   it("discovers valid project files before the metadata cache is warm", async () => {
     const { vault, root } = await configuredVault();
     vault.frontmatter.clear();

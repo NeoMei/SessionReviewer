@@ -269,7 +269,10 @@ function parent(path: string): string {
 
 function projectFolderName(root: string): string {
   const normalized = normalize(root);
-  return normalized.slice(normalized.lastIndexOf("/") + 1) || normalized;
+  const folders = normalized.split("/").filter(Boolean);
+  const leaf = folders.at(-1) ?? normalized;
+  if (leaf !== "Session Review" || folders.length < 2) return leaf;
+  return folders.at(-2)!.replace(/--[0-9a-f]{8}$/, "");
 }
 
 function normalize(path: string): string {
