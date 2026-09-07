@@ -69,3 +69,9 @@ Projection integration audit: `RenderMarkdownUpdate` currently authenticates onl
 ## Provider contract checkpoint
 
 Generic provider correction01218cb passed full Go, scoped vet, full plugin26files/381tests and independent review after correctioncf81296 added previously missing SessionIndexMeasurement provider fixture coverage. Re-review approved spec and quality with no remaining findings. Controller independently ran the entire memory package atcf81296, exit0 (0.716s), and diff check passed. This closes only generic contract neutrality; production Claude/OpenCode readers and registration remain open. Retained pure materializer is the next active task, followed by immutable chain CAS and scan/query wiring. GitHub fresh read still lists0.4.2; no push or release has occurred.
+
+## Retained builder review checkpoint
+
+Implementationfe0ab0c preserves stable turn IDs, joins exact active typed evidence by source ordinal, retains bounded redacted excerpts and explicitly marks interrupted commentary partial. Focused conversation/inspect/Codex/privacy tests and scoped vet passed. Full Go functional packages passed, but Gate A failed on four new production dependency edges: conversationchain -> memory/redact/sort/time. The baseline remains unchanged pending independent task review; this is not a green full-suite gate.
+
+Controller frozen plugin check atfe0ab0c passed26files/381tests, lint, TypeScript and production build; diff check clean. The shared sanitizer extraction did not break the Go-backed plugin wire fixture. Independent reviewer is checking both spec/quality and the concrete new dependency purposes. Persistence, scan wiring and product acceptance remain open.
