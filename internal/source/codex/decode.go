@@ -146,6 +146,7 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	for range summary.MalformedLines {
 		decoder.diagnostic("malformed_jsonl")
 	}
+	decoder.reconcilePendingWrappers()
 	if err := a.verifyExactFrozen(ctx, files, frozen); err != nil {
 		return decoder.report, err
 	}
@@ -567,6 +568,10 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		return nil
 	}
 	if pending.kind == "patch" {
+		if pending.wrapperResultMode == execWrapperResultBody {
+			d.unsupportedExecWrapper()
+			return nil
+		}
 		outcome, valid := parsePatchOutcome(output)
 		if !valid {
 			if pending.wrapperResultMode != execWrapperResultNone {
@@ -984,20 +989,31 @@ func parseExitCode(output string) (int, bool) {
 }
 
 func parsePatchOutcome(output terminalOutput) (string, bool) {
-	if output.finished && output.exitCode != nil && *output.exitCode != 0 {
-		return "failure", true
-	}
+	bodyOutcome := ""
 	switch strings.TrimSpace(output.body) {
 	case "Done!":
-		return "success", true
+		bodyOutcome = "success"
 	case "Failed!":
-		return "failure", true
+		bodyOutcome = "failure"
 	default:
 		if nativePatchSucceeded(output.body) {
-			return "success", true
+			bodyOutcome = "success"
 		}
+	}
+	if !output.finished || output.exitCode == nil {
+		return bodyOutcome, bodyOutcome != ""
+	}
+	metadataOutcome := "success"
+	if *output.exitCode != 0 {
+		metadataOutcome = "failure"
+	}
+	if bodyOutcome != "" && bodyOutcome != metadataOutcome {
 		return "", false
 	}
+	if metadataOutcome == "failure" {
+		return "failure", true
+	}
+	return bodyOutcome, bodyOutcome == "success"
 }
 
 func parseGitOutput(operation, output string) (map[string]string, bool) {
@@ -1151,6 +1167,14 @@ func (d *recordDecoder) unsupported() {
 func (d *recordDecoder) unsupportedExecWrapper() {
 	d.report.UnsupportedRecords++
 	d.diagnostic("unsupported_exec_wrapper")
+}
+
+func (d *recordDecoder) reconcilePendingWrappers() {
+	for _, pending := range d.pending {
+		if pending.wrapperResultMode != execWrapperResultNone {
+			d.unsupportedExecWrapper()
+		}
+	}
 }
 
 func (d *recordDecoder) malformedPayload() {

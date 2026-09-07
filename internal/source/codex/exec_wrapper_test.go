@@ -73,6 +73,43 @@ func TestExecWrapperOutputSelectorNeverProvesCommandTerminalStatus(t *testing.T)
 	}
 }
 
+func TestExecWrapperCallWithoutOutputRemainsVisiblePartialCoverage(t *testing.T) {
+	observations, report := decodeToolEnvelopeSession(t, []map[string]any{
+		{"type": "custom_tool_call", "call_id": "wrapper-missing-output", "name": "exec", "input": `text(await tools.exec_command({"cmd":"go test ./..."}));`},
+	})
+	if findToolObservation(observations, "wrapper-missing-output", "command_started") == nil {
+		t.Fatalf("supported wrapper lost command start: %+v", observations)
+	}
+	if findToolObservation(observations, "wrapper-missing-output", "command_finished") != nil || findToolObservation(observations, "wrapper-missing-output", "verification") != nil {
+		t.Fatalf("missing wrapper output invented terminal evidence: %+v", observations)
+	}
+	if report.UnsupportedRecords == 0 || !hasDiagnostic(report.Diagnostics, "unsupported_exec_wrapper") {
+		t.Fatalf("missing wrapper output disappeared: %+v", report)
+	}
+}
+
+func TestExecWrapperBodyOnlyPatchNeverProvesOutcome(t *testing.T) {
+	patch := "*** Begin Patch\n*** Add File: unsafe.go\n+unsafe\n*** End Patch"
+	for _, body := range []string{
+		"Done!",
+		"Failed!",
+		"Success. Updated the following files:\nA unsafe.go",
+	} {
+		observations, report := decodeToolEnvelopeSession(t, []map[string]any{
+			{"type": "custom_tool_call", "call_id": "wrapper-body-patch", "name": "exec", "input": "const r = await tools.apply_patch(" + quotedJSON(t, patch) + "); text(r.output);"},
+			{"type": "custom_tool_call_output", "call_id": "wrapper-body-patch", "output": wrapperOutput(
+				"Script completed\nWall time 0.1 seconds\nOutput:", body,
+			)},
+		})
+		if changes := toolObservations(observations, "wrapper-body-patch", "file_change"); len(changes) != 0 {
+			t.Fatalf("body-only patch invented file change for %q: %+v", body, changes)
+		}
+		if report.UnsupportedRecords == 0 || !hasDiagnostic(report.Diagnostics, "unsupported_exec_wrapper") {
+			t.Fatalf("body-only patch outcome disappeared for %q: %+v", body, report)
+		}
+	}
+}
+
 func TestExecWrapperWholeResultPatchRequiresSupportedSuccessBody(t *testing.T) {
 	patch := "*** Begin Patch\n*** Add File: unsafe.go\n+unsafe\n*** End Patch"
 	for _, test := range []struct {
@@ -80,7 +117,9 @@ func TestExecWrapperWholeResultPatchRequiresSupportedSuccessBody(t *testing.T) {
 		wantFailure     bool
 		wantUnsupported bool
 	}{
-		{result: `{"exit_code":1,"output":"Success. Updated the following files:\nA unsafe.go"}`, wantFailure: true},
+		{result: `{"exit_code":1,"output":"Failed!"}`, wantFailure: true},
+		{result: `{"exit_code":1,"output":"Success. Updated the following files:\nA unsafe.go"}`, wantUnsupported: true},
+		{result: `{"exit_code":0,"output":"Failed!"}`, wantUnsupported: true},
 		{result: `{"exit_code":0,"output":"unexpected wrapper text"}`, wantUnsupported: true},
 	} {
 		observations, report := decodeToolEnvelopeSession(t, []map[string]any{
