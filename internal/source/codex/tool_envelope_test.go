@@ -191,6 +191,20 @@ func TestNativePatchMalformedFailedAndDuplicateNeverProduceSuccess(t *testing.T)
 			},
 		},
 		{
+			name: "zero exit with unknown patch body",
+			items: []map[string]any{
+				{"type": "custom_tool_call", "call_id": "patch-case", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: unsafe.go\n+unsafe\n*** End Patch"},
+				{"type": "custom_tool_call_output", "call_id": "patch-case", "output": `{"exit_code":0,"output":"unexpected wrapper text"}`},
+			},
+		},
+		{
+			name: "zero exit with empty patch body",
+			items: []map[string]any{
+				{"type": "custom_tool_call", "call_id": "patch-case", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: unsafe.go\n+unsafe\n*** End Patch"},
+				{"type": "custom_tool_call_output", "call_id": "patch-case", "output": `{"exit_code":0,"output":""}`},
+			},
+		},
+		{
 			name: "duplicate across raw and modern",
 			items: []map[string]any{
 				{"type": "custom_tool_call", "call_id": "patch-case", "name": "apply_patch", "input": "*** Begin Patch\n*** Add File: unsafe.go\n+unsafe\n*** End Patch"},

@@ -972,9 +972,6 @@ func parsePatchOutcome(output terminalOutput) (string, bool) {
 		if nativePatchSucceeded(output.body) {
 			return "success", true
 		}
-		if output.finished && output.exitCode != nil {
-			return "success", true
-		}
 		return "", false
 	}
 }
