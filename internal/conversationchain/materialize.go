@@ -157,6 +157,7 @@ func MaterializeVisible(provider, sessionID, sourceIdentity string, messages []S
 			id := sha256.Sum256([]byte(provider + "\x00" + sessionID + "\x00" + key))
 			preview := message
 			preview.Text = nil
+			preview.TextTruncated = false
 			turns = append(turns, VisibleTurn{TurnUnitID: "turn-" + hex.EncodeToString(id[:]), Ordinal: uint64(len(turns) + 1), StartedAt: source.OccurredAt, UserMessage: preview, AnswerState: AnswerNone, Messages: []VisibleMessage{message}})
 		} else {
 			turn := &turns[len(turns)-1]

@@ -84,6 +84,7 @@ type wireConversationMessage struct {
 	Text           *string
 	VisibleExcerpt string `json:"visible_excerpt"`
 	Truncated      bool
+	TextTruncated  bool `json:"text_truncated"`
 }
 type wireConversationTurn struct {
 	TurnUnitID            string                  `json:"turn_unit_id"`
@@ -106,6 +107,7 @@ type wireConversationPage struct {
 		OversizedRecords int `json:"oversized_records"`
 		MalformedRecords int `json:"malformed_records"`
 		ContextMessages  int `json:"context_messages"`
+		TruncatedBodies  int `json:"truncated_bodies"`
 		Complete         bool
 	}
 }
@@ -162,6 +164,38 @@ func TestConversationReadsAuthenticatedVisibleTurnsAndFullSelectedText(t *testin
 	}
 	if !reflect.DeepEqual(before, snapshotEventTree(t, fixture.request.DataRoot)) {
 		t.Fatal("read mutated private state")
+	}
+}
+
+func TestConversationRedactionExpansionKeepsBodyTruncationOffTurnPreview(t *testing.T) {
+	fixture := newConversationFixture(t, visibleRecord("user", "", strings.Repeat("/a ", 3000)))
+	index, indexWire := readConversation(t, fixture.request)
+	if len(index.TurnUnits) != 1 || index.TurnUnits[0].UserMessage.Text != nil || index.TurnUnits[0].UserMessage.TextTruncated {
+		t.Fatalf("turn preview exposes selected-body state: %s", indexWire)
+	}
+
+	selectedRequest := fixture.request
+	selectedRequest.TurnUnitID = index.TurnUnits[0].TurnUnitID
+	selected, selectedWire := readConversation(t, selectedRequest)
+	if len(selected.Messages) != 1 || selected.Messages[0].Text == nil || !selected.Messages[0].TextTruncated || len(*selected.Messages[0].Text) > 64<<10 {
+		t.Fatalf("selected user body lost bounded truncation state: %s", selectedWire)
+	}
+	if selected.Coverage.TruncatedBodies != 1 {
+		t.Fatalf("truncated body coverage=%d want 1: %s", selected.Coverage.TruncatedBodies, selectedWire)
+	}
+}
+
+// TestConversationEmitsProductionExpansionWireForFrontend is also invoked by
+// the TypeScript contract suite. The optional output is a real
+// LoadConversationPage -> RenderConversationPage index response, not a
+// hand-authored frontend fixture.
+func TestConversationEmitsProductionExpansionWireForFrontend(t *testing.T) {
+	fixture := newConversationFixture(t, visibleRecord("user", "", strings.Repeat("/a ", 3000)))
+	_, wire := readConversation(t, fixture.request)
+	if output := os.Getenv("SESSION_REVIEWER_CONVERSATION_WIRE_OUT"); output != "" {
+		if err := os.WriteFile(output, wire, 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

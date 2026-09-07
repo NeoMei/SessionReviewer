@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { CliRunner, ConversationQueryError } from "../src/cli/runner";
 import { parseConversationPageV1 } from "../src/data/conversation-page";
@@ -35,6 +37,22 @@ describe("conversation page wire", () => {
       coverage: coverage({ truncated_messages: 1, truncated_bodies: 1 })
     })));
     expect(fullBody.messages[0]?.text).toContain("完整正文");
+  });
+
+  it("accepts the production Go-rendered index after user redaction expands past the body limit", () => {
+    const directory = mkdtempSync(resolve(tmpdir(), "session-reviewer-conversation-wire-"));
+    const output = resolve(directory, "conversation-page.json");
+    try {
+      execFileSync("go", ["test", "./internal/inspect", "-run", "^TestConversationEmitsProductionExpansionWireForFrontend$", "-count=1"], {
+        cwd: resolve(process.cwd(), ".."),
+        env: { ...process.env, SESSION_REVIEWER_CONVERSATION_WIRE_OUT: output },
+        stdio: "pipe"
+      });
+      const page = parseConversationPageV1(readFileSync(output, "utf8"));
+      expect(page.turn_units[0]?.user_message).toMatchObject({ text: null, text_truncated: false });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it.each([

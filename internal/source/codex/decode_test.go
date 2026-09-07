@@ -490,14 +490,8 @@ func TestDecodeTreatsTokenUsageRecordAsSupplementaryMetadataWithoutWeakeningUnkn
 		if report.UnsupportedRecords != 0 {
 			t.Fatalf("supplementary usage envelope counted as unsupported: %+v", report)
 		}
-		foundUserRequest := false
-		for _, observation := range observations {
-			if observation.Operation == "user_request" && observation.Key.Subject == "user-before-usage" {
-				foundUserRequest = true
-			}
-		}
-		if !foundUserRequest {
-			t.Fatalf("user request before usage envelope was not preserved: %+v", observations)
+		if len(observations) != 2 || observations[0].Operation != "session_started" || observations[1].Operation != "user_request" || observations[1].Key.Subject != "user-before-usage" || observations[1].Excerpt != "keep this request" {
+			t.Fatalf("observations did not preserve exactly the Session start and preceding user request: %+v", observations)
 		}
 		if report.ProposedSource.Usage.TotalTokens != 42 || len(report.ProposedSource.Usage.Models) != 1 || report.ProposedSource.Usage.Models[0].TotalTokens != 42 {
 			t.Fatalf("supplementary usage envelope changed authoritative token_count totals: %+v", report.ProposedSource.Usage)
