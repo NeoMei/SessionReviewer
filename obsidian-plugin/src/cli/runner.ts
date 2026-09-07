@@ -175,7 +175,7 @@ export class CliRunner {
       if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
           page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest ||
           page.mode !== (request.turnUnitId === undefined ? "turn_index" : "turn_messages") ||
-          page.turn_unit_id !== (request.turnUnitId ?? null)) {
+          page.turn_unit_id !== (request.turnUnitId ?? null) || !conversationPageMatchesRequest(page, request)) {
         throw new ConversationQueryError("generation_mismatch", conversationErrorMessage("generation_mismatch"));
       }
       return page;
@@ -325,6 +325,16 @@ function validateConversationRequest(request: ConversationRequest): void {
   if (request.messageCursor !== undefined && request.turnUnitId === undefined) throw new Error("message cursor requires a turn");
   if (request.cursor !== undefined && !boundedCursor(request.cursor)) throw new Error("invalid cursor");
   if (request.messageCursor !== undefined && !boundedCursor(request.messageCursor)) throw new Error("invalid message cursor");
+}
+
+function conversationPageMatchesRequest(page: ConversationPageV1, request: ConversationRequest): boolean {
+  const pageLength = page.range_end - page.range_start;
+  const requestCursor = request.turnUnitId === undefined ? request.cursor : request.messageCursor;
+  if (pageLength > request.limit || (requestCursor === undefined && page.range_start !== 0)) return false;
+  if (page.total === 0) return true;
+  return pageLength > 0 && page.first_cursor !== null && page.last_cursor !== null &&
+    (page.previous_cursor === null) === (page.range_start === 0) &&
+    (page.next_cursor === null) === (page.range_end === page.total);
 }
 
 function validConversationLimit(value: string | undefined): boolean {

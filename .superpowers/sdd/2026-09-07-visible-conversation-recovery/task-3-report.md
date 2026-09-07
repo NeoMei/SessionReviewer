@@ -24,11 +24,11 @@ Status: plugin implementation complete. Focused tests and the final plugin check
 ### Conversation view and selected Session integration
 
 - RED: initial renderer tests failed until the independent conversation component existed; subsequent behavioral failures exposed an incorrect descendant assertion and a test double that manually requested the already-default selected turn. The assertions were corrected to exercise the real default-loading behavior.
-- GREEN: `tests/render-conversation.test.ts` passed 17 tests for labels, safe full bodies, phases, truncation, honest coverage, retry, both paging modes, identity replacement, and disposal.
+- GREEN: `tests/render-conversation.test.ts` contained 3 renderer tests and passed them for labels, safe full bodies, phases, truncation, honest coverage, retry, both paging modes, identity replacement, and disposal. The earlier displayed count of 17 included 14 parser/runner tests registered a second time through an accidental import from another `*.test.ts` module.
 - RED: zero-fact and persistent-child assertions failed before integration into `render-scan-records`.
 - GREEN: `tests/render-scan-records.test.ts` passed 12 tests after Q/A/facts separation, zero-fact loading, search focus retention, and no-rerequest behavior.
 - RED: the new conversation layout test failed before styles existed.
-- GREEN: focused combined command passed 4 files / 59 tests.
+- GREEN: the focused combined command reported 4 files / 59 test registrations. Of those, 40 were distinct tests; 19 parser/runner tests were registered again because the renderer spec imported their `*.test.ts` module. The shared builders now live in `tests/fixtures/conversation.ts`, so Vitest no longer double-registers that suite.
 
 ## Final verification
 
@@ -36,7 +36,7 @@ Status: plugin implementation complete. Focused tests and the final plugin check
 - Focused package rerun after the single narrowing fix: `npm test -- --run tests/package.test.ts` passed 2/2.
 - Final `npm run check`: PASS, exit 0.
   - ESLint: PASS, no diagnostics.
-  - Vitest: 22 test files passed, 327 tests passed.
+  - Vitest: 22 test files passed and reported 327 registrations; 308 were distinct tests and 19 were the parser/runner suite registered a second time by the renderer-spec import corrected below.
   - Build: `tsc --noEmit --skipLibCheck && node esbuild.config.mjs production` PASS.
 - `git diff --check`: PASS.
 
@@ -52,6 +52,7 @@ Status: plugin implementation complete. Focused tests and the final plugin check
 - `obsidian-plugin/src/view/project-view.ts`
 - `obsidian-plugin/styles.css`
 - `obsidian-plugin/tests/conversation-page.test.ts`
+- `obsidian-plugin/tests/fixtures/conversation.ts`
 - `obsidian-plugin/tests/render-conversation.test.ts`
 - `obsidian-plugin/tests/render-scan-records.test.ts`
 - `obsidian-plugin/tests/styles.test.ts`
@@ -62,3 +63,20 @@ Status: plugin implementation complete. Focused tests and the final plugin check
 - No native Obsidian UI, real first/middle/last page, real 73-user/1,372-assistant body, project switch, installed artifact, or CLI/Vault consistency claim is made here. Those are controller acceptance gates after independent review.
 - Conversation bodies are intentionally not cached beyond the mounted selected Session child. Selecting the same turn again rereads that turn; event facts retain their existing project/generation cache.
 - The backend reports incomplete conservative coverage when oversized source records have unknown roles. The UI preserves that boundary and does not infer that those records are missing replies.
+
+## Review fix round 1
+
+Three Important findings and the duplicate-test-registration minor finding were corrected after review:
+
+1. `CliRunner.getConversation` now binds the returned range to the requested limit, requires uncursored index and selected-message calls to start at zero, rejects empty pages for nonempty results, and reconciles first/previous/next/last cursor presence with the returned range. It still accepts deterministic byte-budget pages smaller than the requested limit.
+2. On the first selected-message page, the returned user message must match the turn preview's role, phase, revision, complete source reference, timestamp, visible excerpt, and preview-truncation flag. Only the selected body fields `text` and `text_truncated` may differ; a positive regression covers an expanded/truncated body.
+3. While a turn-index page is loading, retained rows from the prior page are disabled. They therefore cannot advance the shared epoch and strand the authoritative index request in a permanent loading state.
+4. Conversation fixtures were moved from `conversation-page.test.ts` into `tests/fixtures/conversation.ts`, eliminating cross-imported test registration.
+
+RED: `npm test -- --run tests/conversation-page.test.ts tests/render-conversation.test.ts` reported 2 failed files, 10 failed and 22 passed tests. The failures reproduced three selected-user metadata mismatches, request-limit and uncursored-range acceptance, invalid nonempty cursor/range shapes, and the old-row/index-loading race.
+
+GREEN after the minimal fixes: the same command passed all 32 tests. After adding positive adaptive-page and body-expansion assertions plus the remaining timestamp/truncation metadata cases, the focused command passed 2 files / 35 tests.
+
+Final `npm run check`: PASS, exit 0. ESLint passed with no diagnostics; Vitest passed 22 files / 321 tests; `tsc --noEmit --skipLibCheck && node esbuild.config.mjs production` passed. The reduction from the earlier displayed 327 registrations reflects removal of 19 duplicate registrations plus 13 new review regressions, not deleted production coverage.
+
+`git diff --check`: PASS before the final check and report update.

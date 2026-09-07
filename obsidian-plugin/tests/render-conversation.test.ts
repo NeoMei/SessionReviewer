@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
 import type { ConversationRequest } from "../src/cli/runner";
 import { renderConversation } from "../src/view/render-conversation";
-import { conversationPage, selectedConversationPage } from "./conversation-page.test";
+import { conversationPage, selectedConversationPage } from "./fixtures/conversation";
 
 function page(value: Record<string, unknown>): ConversationPageV1 {
   return value as unknown as ConversationPageV1;
@@ -115,5 +115,51 @@ describe("selected Session conversation", () => {
     disposedPending.resolve(page(conversationPage()));
     await settle();
     expect(disposed.textContent).toBe("");
+  });
+
+  it("keeps an index-page request authoritative when an old turn row is clicked during loading", async () => {
+    const firstTurn = (conversationPage().turn_units as Record<string, unknown>[])[0];
+    const secondTurn = {
+      ...firstTurn,
+      turn_unit_id: "turn-2",
+      ordinal: 2,
+      user_message: {
+        ...(firstTurn?.user_message as Record<string, unknown>),
+        revision_id: `sha256:${"6".repeat(64)}`,
+        visible_excerpt: "第二页问题"
+      }
+    };
+    const first = page(conversationPage({ total: 2, range_end: 1, next_cursor: "next-index" }));
+    const next = page(conversationPage({
+      total: 2,
+      range_start: 1,
+      range_end: 2,
+      previous_cursor: "previous-index",
+      turn_units: [secondTurn]
+    }));
+    const nextPending = deferred<ConversationPageV1>();
+    const load = vi.fn((request: ConversationRequest) => {
+      if (!request.turnUnitId && request.cursor === "next-index") return nextPending.promise;
+      if (!request.turnUnitId) return Promise.resolve(first);
+      return Promise.resolve(page(selectedConversationPage({
+        turn_unit_id: request.turnUnitId,
+        turn_units: [request.turnUnitId === "turn-2" ? secondTurn : firstTurn]
+      })));
+    });
+    const root = renderConversation(identity, load);
+    await settle();
+    await settle();
+
+    root.querySelector<HTMLButtonElement>('[data-action="next-turn-page"]')?.click();
+    await settle();
+    const oldRow = root.querySelector<HTMLButtonElement>('[data-turn-unit-id="turn-1"]');
+    expect(oldRow?.disabled).toBe(true);
+    oldRow?.click();
+    nextPending.resolve(next);
+    await settle();
+    await settle();
+
+    expect(root.textContent).toContain("第二页问题");
+    expect(root.textContent).not.toContain("正在读取问答记录");
   });
 });

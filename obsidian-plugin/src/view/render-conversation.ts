@@ -107,6 +107,7 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
       const list = element("div", { className: "sr-turn-list", attrs: { "aria-label": "用户问题" } });
       for (const turn of indexPage.turn_units) {
         const node = button("", { "data-turn-unit-id": turn.turn_unit_id, "aria-selected": String(turn.turn_unit_id === selectedTurn?.turn_unit_id) });
+        node.disabled = loadingIndex;
         node.append(
           element("span", { className: "sr-turn-meta", text: "第 " + turn.ordinal + " 个用户问题 · " + answerLabel(turn) }),
           element("span", { className: "sr-turn-excerpt", text: turn.user_message.visible_excerpt || "（问题文本为空）" })

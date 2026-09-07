@@ -3,106 +3,16 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { CliRunner, ConversationQueryError } from "../src/cli/runner";
 import { parseConversationPageV1 } from "../src/data/conversation-page";
+import {
+  conversationPage,
+  selectedConversationPage,
+  visibleCoverage as coverage,
+  visibleMessage as message,
+  visibleTurn as turn
+} from "./fixtures/conversation";
 
 const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
-const DEPENDENCY_DIGEST = `sha256:${"2".repeat(64)}`;
 const SOURCE_HASH = "3".repeat(64);
-const REVISION_ID = `sha256:${"4".repeat(64)}`;
-
-function message(role: "user" | "assistant", overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    role,
-    phase: role === "assistant" ? "final_answer" : null,
-    revision_id: REVISION_ID,
-    source_ref: {
-      provider: "codex",
-      session_id: "session-1",
-      source_identity: "source-1",
-      record_ordinal: role === "user" ? 1 : 2,
-      source_hash: SOURCE_HASH
-    },
-    occurred_at: role === "user" ? "2026-09-07T00:00:00Z" : "2026-09-07T00:01:00Z",
-    visible_excerpt: role === "user" ? "如何恢复可见问答？" : "已经恢复。",
-    truncated: false,
-    text: null,
-    text_truncated: false,
-    ...overrides
-  };
-}
-
-function turn(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    turn_unit_id: "turn-1",
-    ordinal: 1,
-    started_at: "2026-09-07T00:00:00Z",
-    ended_at: null,
-    user_message: message("user"),
-    answer_state: "answered",
-    assistant_message_count: 1,
-    ...overrides
-  };
-}
-
-function coverage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    source_records: 2,
-    visible_messages: 2,
-    captured_messages: 2,
-    truncated_messages: 0,
-    truncated_bodies: 0,
-    context_messages: 0,
-    orphan_messages: 0,
-    oversized_records: 0,
-    malformed_records: 0,
-    complete: true,
-    ...overrides
-  };
-}
-
-export function conversationPage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    schema_version: 1,
-    minimum_reader_version: "0.4.0",
-    mode: "turn_index",
-    project_id: "project-p",
-    provider: "codex",
-    session_id: "session-1",
-    generation_id: "generation-1",
-    session_view_digest: VIEW_DIGEST,
-    dependency_digest: DEPENDENCY_DIGEST,
-    redaction_version: "visible-redaction-v1",
-    turn_unit_id: null,
-    total: 1,
-    range_start: 0,
-    range_end: 1,
-    first_cursor: "first-index",
-    previous_cursor: null,
-    next_cursor: null,
-    last_cursor: "last-index",
-    turn_units: [turn()],
-    messages: [],
-    coverage: coverage(),
-    ...overrides
-  };
-}
-
-export function selectedConversationPage(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return conversationPage({
-    mode: "turn_messages",
-    turn_unit_id: "turn-1",
-    total: 2,
-    range_start: 0,
-    range_end: 2,
-    first_cursor: "first-message",
-    last_cursor: "last-message",
-    turn_units: [turn()],
-    messages: [
-      message("user", { text: "如何恢复可见问答？" }),
-      message("assistant", { text: "完整最终回答\n第二行" })
-    ],
-    ...overrides
-  });
-}
 
 describe("conversation page wire", () => {
   it("accepts the shared backend fixture", () => {
@@ -114,6 +24,17 @@ describe("conversation page wire", () => {
     expect(parseConversationPageV1(JSON.stringify(conversationPage())).turn_units[0]?.answer_state).toBe("answered");
     const selected = parseConversationPageV1(JSON.stringify(selectedConversationPage()));
     expect(selected.messages.map((item) => item.text)).toEqual(["如何恢复可见问答？", "完整最终回答\n第二行"]);
+
+    const preview = message("user", { visible_excerpt: "被截断的问题预览", truncated: true });
+    const fullBody = parseConversationPageV1(JSON.stringify(selectedConversationPage({
+      turn_units: [turn({ user_message: preview })],
+      messages: [
+        message("user", { visible_excerpt: "被截断的问题预览", truncated: true, text: "被截断的问题预览后的完整正文", text_truncated: true }),
+        message("assistant", { text: "完整最终回答\n第二行" })
+      ],
+      coverage: coverage({ truncated_messages: 1, truncated_bodies: 1 })
+    })));
+    expect(fullBody.messages[0]?.text).toContain("完整正文");
   });
 
   it.each([
@@ -125,6 +46,11 @@ describe("conversation page wire", () => {
     ["unanswered with assistant count", () => conversationPage({ turn_units: [turn({ answer_state: "no_answer", assistant_message_count: 1 })] })],
     ["noncanonical turn ordinal", () => conversationPage({ turn_units: [turn({ ordinal: 2 })] })],
     ["selected message total", () => selectedConversationPage({ total: 3 })],
+    ["selected user revision mismatch", () => selectedConversationPage({ messages: [message("user", { revision_id: `sha256:${"9".repeat(64)}`, text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })] })],
+    ["selected user source ordinal mismatch", () => selectedConversationPage({ messages: [message("user", { source_ref: { provider: "codex", session_id: "session-1", source_identity: "source-1", record_ordinal: 99, source_hash: SOURCE_HASH }, text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })] })],
+    ["selected user timestamp mismatch", () => selectedConversationPage({ messages: [message("user", { occurred_at: "2026-09-07T00:00:01Z", text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })] })],
+    ["selected user excerpt mismatch", () => selectedConversationPage({ messages: [message("user", { visible_excerpt: "不同的问题预览", text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })] })],
+    ["selected user truncation mismatch", () => selectedConversationPage({ messages: [message("user", { truncated: true, text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })], coverage: coverage({ truncated_messages: 1 }) })],
     ["malformed timestamp", () => conversationPage({ turn_units: [turn({ started_at: "today" })] })],
     ["false complete coverage", () => conversationPage({ coverage: coverage({ oversized_records: 1 }) })]
   ])("rejects %s", (_label, make) => {
@@ -182,6 +108,58 @@ describe("conversation CLI query", () => {
     await expect(runner.getConversation(base)).rejects.toBeInstanceOf(ConversationQueryError);
     await expect(runner.getConversation({ ...base, turnUnitId: "turn-1", cursor: "wrong-mode" })).rejects.toThrow(/cursor/i);
     await expect(runner.getConversation({ ...base, messageCursor: "wrong-mode" })).rejects.toThrow(/turn/i);
+  });
+
+  it.each([
+    ["uncursored index starting after zero", { range_start: 1, range_end: 1, total: 1, turn_units: [] }],
+    ["index page larger than the requested limit", { total: 2, range_end: 2, turn_units: [turn(), turn({ turn_unit_id: "turn-2", ordinal: 2 })] }]
+  ])("rejects %s even when the other response bindings match", async (_label, overrides) => {
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      callback(null, JSON.stringify(conversationPage(overrides)), "");
+    });
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 1
+    })).rejects.toBeInstanceOf(ConversationQueryError);
+  });
+
+  it("rejects an uncursored selected response that starts after the user message", async () => {
+    const response = selectedConversationPage({
+      range_start: 1,
+      range_end: 2,
+      previous_cursor: "previous-message",
+      messages: [message("assistant", { text: "完整最终回答\n第二行" })]
+    });
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(response), ""));
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 1, turnUnitId: "turn-1"
+    })).rejects.toBeInstanceOf(ConversationQueryError);
+  });
+
+  it("accepts an authenticated page smaller than the requested limit", async () => {
+    const response = conversationPage({ total: 2, range_end: 1, next_cursor: "next-index" });
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(response), ""));
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 2
+    })).resolves.toMatchObject({ range_start: 0, range_end: 1, next_cursor: "next-index" });
+  });
+
+  it.each([
+    ["empty nonterminal page", { range_end: 0, next_cursor: "next-index", turn_units: [] }],
+    ["missing previous cursor", { range_start: 1, range_end: 1, previous_cursor: null, turn_units: [] }],
+    ["missing next cursor", { total: 2, range_end: 1, next_cursor: null }]
+  ])("rejects %s cursor/range inconsistency", async (_label, overrides) => {
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+      callback(null, JSON.stringify(conversationPage(overrides)), "");
+    });
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 1, cursor: "page-token"
+    })).rejects.toBeInstanceOf(ConversationQueryError);
   });
 
   it.each([

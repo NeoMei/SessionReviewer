@@ -56,6 +56,9 @@ function parseConversationPageDocument(row: Record<string, unknown>): Conversati
       const userCount = messages.filter((message) => message.role === "user").length;
       if (rangeStart === 0 && (messages[0]?.role !== "user" || userCount !== 1)) throw new Error("selected turn must start with one user message");
       if (rangeStart > 0 && userCount !== 0) throw new Error("later selected pages cannot repeat the user message");
+      if (rangeStart === 0 && !sameVisibleMetadata(messages[0], turns[0].user_message)) {
+        throw new Error("selected user message does not match its turn preview");
+      }
     }
     for (let index = 1; index < messages.length; index += 1) {
       if (Date.parse(messages[index - 1].occurred_at) > Date.parse(messages[index].occurred_at)) throw new Error("selected messages are not chronological");
@@ -65,6 +68,14 @@ function parseConversationPageDocument(row: Record<string, unknown>): Conversati
     throw new Error("empty conversation page cannot have cursors");
   }
   return row as unknown as ConversationPageV1;
+}
+
+function sameVisibleMetadata(message: VisibleMessageV1, preview: VisibleMessageV1): boolean {
+  return message.role === preview.role && message.phase === preview.phase && message.revision_id === preview.revision_id &&
+    message.occurred_at === preview.occurred_at && message.visible_excerpt === preview.visible_excerpt && message.truncated === preview.truncated &&
+    message.source_ref.provider === preview.source_ref.provider && message.source_ref.session_id === preview.source_ref.session_id &&
+    message.source_ref.source_identity === preview.source_ref.source_identity &&
+    message.source_ref.record_ordinal === preview.source_ref.record_ordinal && message.source_ref.source_hash === preview.source_ref.source_hash;
 }
 
 function parseTurn(value: unknown, path: string, sessionId: string, mode: "turn_index" | "turn_messages"): VisibleTurnV1 {
