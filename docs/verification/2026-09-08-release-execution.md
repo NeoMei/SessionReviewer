@@ -9,6 +9,7 @@ Authoritative spec is `docs/superpowers/specs/2026-09-04-obsidian-project-contex
 ## Execution queue
 
 - [ ] Recover current Codex tool envelopes and conservative exec wrappers; then bind visible Q/A and typed execution/verification into retained chains.
+- [ ] Before mixed-provider chain/search integration, remove obsolete Codex-only restrictions from generic memory contracts with unchanged hash/location/identity safeguards (`2026-09-08-provider-neutral-memory-contracts.md`). This does not activate an adapter.
 - [ ] Current-contract Claude/OpenCode adapter registration, authenticated source reads and provider parity (port reusable legacy Claude parser, not its obsolete architecture).
 - [ ] Qualified milestone projection, five-part closure and authenticated answer/source/problem drilldown; preserve human changes.
 - [ ] Problem candidate rules/private CAS store, child/sibling/merge/move/reorder commands, confirmed tree and pending drawer.
@@ -32,6 +33,8 @@ Ruling: Recover direct tool metadata before semantic closure. Arbitrary JavaScri
 Task1 of `2026-09-08-codex-tool-evidence-recovery.md` dispatched to `modern_tool_evidence` from85d0ed7. Focused baseline source/inspect/conversation tests passed. Decoder root cause confirmed: `function_call` is explicitly ignored, `exec` wrapper is unknown, terminal parser only scans `exit code: N`, and production registration still uses `codex-jsonl-v1`. Remaining queue stays open until fresh evidence is recorded.
 
 Controller plugin check was attempted while Task1 production files were being edited. Its Go-backed wire test caught a transient `terminalOutput`/string compile mismatch (380 other tests passed), so this run is not a frozen-build gate or product regression verdict. Worker subsequently reported focused decoder GREEN; rerun the whole plugin check at the committed Task1 revision. Do not present an in-flight workspace test as accepted build evidence.
+
+Direct-tool task closed at8b156bd+b76dd12 after independent review found and verified correction of generic zero-exit patch-success fallback. Frozen plugincheck at8b156bd passed26files/381tests, lint/typecheck/build; controller repeated NativePatch/TerminalMetadata regression atb76dd12 exit0. Wrapper Task2 running fromb76dd12. Retained builder and immutable CAS plans are ready; generic provider validation is a newly identified prerequisite before their mixed-provider fixtures can execute.
 
 ## Read-only pricing preflight
 
