@@ -26,7 +26,13 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
-### 0.4.1: native Markdown project context
+### 0.4.2: Session scan records and visible Q/A
+
+The v4 view now includes project switching, paged Session facts, and authenticated
+user/Agent conversations. Long Sessions offer question and message pagination;
+final answers are distinguished from progress updates, without model calls.
+Known Codex usage metadata no longer produces false decode errors. Conversation
+coverage and truncation are explicit; an Agent answer is not execution proof.
 
 This release adds v4 human-editable Markdown, a cumulative Session index and
 complete accepted history alongside a concise project review. The v4 plugin
@@ -40,7 +46,7 @@ Back up existing review files and accepted local state before upgrading. A resca
 must be explicitly initiated; it is not permission to delete or overwrite human
 content. This release does not claim real legacy-project migration acceptance or
 the still-planned problem-placement and further Session-summary features.
-See [0.4.1 release notes](https://github.com/NeoMei/SessionReviewer/blob/0.4.1/docs/release/0.4.1.md) for the delivered scope.
+See [0.4.2 release notes](https://github.com/NeoMei/SessionReviewer/blob/0.4.2/docs/release/0.4.2.md) for the delivered scope.
 
 Download `main.js`, `manifest.json`, and `styles.css` from the [latest GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest). Place the three files in:
 

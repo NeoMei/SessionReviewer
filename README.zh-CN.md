@@ -13,12 +13,12 @@ SessionReviewer 默认使用零 Token 的整项目扫描：Go CLI 找出与当�
 
 ## 构建、测试与用户级安装
 
-无需 Go 工具链时，从 [最新 GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包。当前源码候选版本为 `0.4.1`：
+无需 Go 工具链时，从 [最新 GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest) 下载与平台对应的归档、Obsidian 插件和 `SHA256SUMS`。CLI 归档解压后包含 CLI、README、许可证以及完整的 `skill/session-reviewer` 包。当前源码候选版本为 `0.4.2`：
 
-- Apple Silicon Mac：`session-reviewer_0.4.1_darwin_arm64.tar.gz`
-- Intel Mac：`session-reviewer_0.4.1_darwin_amd64.tar.gz`
-- Windows x64：`session-reviewer_0.4.1_windows_amd64.zip`
-- Obsidian：`session-reviewer-obsidian-0.4.1.zip`
+- Apple Silicon Mac：`session-reviewer_0.4.2_darwin_arm64.tar.gz`
+- Intel Mac：`session-reviewer_0.4.2_darwin_amd64.tar.gz`
+- Windows x64：`session-reviewer_0.4.2_windows_amd64.zip`
+- Obsidian：`session-reviewer-obsidian-0.4.2.zip`
 
 macOS/Linux 终端可把四个文件放在同一目录后执行 `shasum -a 256 -c SHA256SUMS`。Windows 可用 `Get-FileHash -Algorithm SHA256` 计算归档摘要，并与 `SHA256SUMS` 中对应值比较。
 
@@ -148,18 +148,20 @@ session-reviewer sync --dry-run --project-id project-0123456789abcdef
 
 ### 安装项目演进浏览器
 
-发布包中的 `session-reviewer-obsidian-0.4.1.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
+发布包中的 `session-reviewer-obsidian-0.4.2.zip` 只包含三个可安装文件。解压后，将整个 `session-reviewer` 目录放到：
 
 - macOS/Linux：`<Vault>/.obsidian/plugins/session-reviewer/`
 - Windows：`<Vault>\.obsidian\plugins\session-reviewer\`
 
 目录中应当恰好有 `main.js`、`manifest.json` 和 `styles.css`。在 Obsidian 的“设置 → 第三方插件”中启用 SessionReviewer，然后从命令面板运行“SessionReviewer: 打开项目脉络”。
 
-#### 0.4.1 的 v4 Markdown 视图
+#### 0.4.2 的 Session 扫描记录与可见问答
+
+修复项目切换与新扫描内容展示，增加分页 Session 事实和用户／Agent 问答；长 Session 支持问题、消息两级翻页，区分过程说明与最终回答。读取经过已发布源前缀认证，不调用模型，不把 Agent 自述当作执行证明。Codex 补充用量元数据不再误报未解码，也不重复计费；覆盖不足与截断仍如实提示。
 
 v4 项目视图为只读入口：通过按钮打开原生 `项目回顾.md` 和 `项目历史.md`，在文档中编辑允许的人类字段，再通过 CLI 执行扫描或同步。未安装 CLI 时仍可阅读，但不能完成私有接受状态验证或同步；公开文件有效不等于已经同步验收。完整已接受历史与累计 Session 索引独立保留，不受摘要展示条数限制。
 
-升级前请备份已有回顾/历史文件及本机接受状态；重新扫描必须明确发起，不代表允许删除或覆盖人工内容。本次不宣称真实旧项目迁移已验收，也不包含仍在规划的问题拆分/归位推荐和后续 Session 摘要功能。详见 [0.4.1 发布说明](docs/release/0.4.1.md)。
+升级前请备份已有回顾/历史文件及本机接受状态；重新扫描必须明确发起，不代表允许删除或覆盖人工内容。本次不宣称真实旧项目迁移已验收，也不包含仍在规划的问题拆分/归位推荐和后续 Session 摘要功能。详见 [0.4.2 发布说明](docs/release/0.4.2.md)。
 
 #### 旧格式浏览器与兼容操作
 
@@ -281,23 +283,23 @@ session-reviewer history --ledger-only --project /path/to/project
 候选包通过 Go 标准库生成确定性的 macOS Intel、macOS Apple Silicon 和 Windows x64 归档，并生成统一 `SHA256SUMS`。每个归档包含 CLI、README 和完整的 `skill/session-reviewer` 包。源码树干净时可运行：
 
 ```bash
-./scripts/build-release.sh 0.4.1 dist
+./scripts/build-release.sh 0.4.2 dist
 ```
 
 Windows PowerShell 使用：
 
 ```powershell
-.\scripts\build-release.ps1 -Version 0.4.1 -Dist dist
+.\scripts\build-release.ps1 -Version 0.4.2 -Dist dist
 ```
 
 Obsidian 插件包可独立构建：
 
 ```bash
-./scripts/build-obsidian-plugin.sh 0.4.1 dist
+./scripts/build-obsidian-plugin.sh 0.4.2 dist
 ```
 
 ```powershell
-.\scripts\build-obsidian-plugin.ps1 -Version 0.4.1 -Dist dist
+.\scripts\build-obsidian-plugin.ps1 -Version 0.4.2 -Dist dist
 ```
 
 两个脚本都会核对 `package.json`、`manifest.json` 与 `versions.json`，并且只打包三个安装资产。
