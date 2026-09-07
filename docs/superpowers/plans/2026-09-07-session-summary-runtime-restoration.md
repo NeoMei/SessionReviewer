@@ -67,6 +67,6 @@ entry := Entry{OccurredAt: fact.OccurredAt, Sequence: uint64(fact.Sequence),
 // The public loader must return only after the common final generation recheck.
 ```
 
-- [ ] **Wire runtime dispatch and bounded output.** Existing `ParseInspectContract` already accepts summary identity. `runInspect` selects `LoadSessionSummary` and `RenderSummary`; preserves 10-second execution timeout, response byte cap and typed errors. Help lists the real new command. No new parser grammar.
+- [ ] **Wire runtime dispatch and bounded output.** Existing `ParseInspectContract` already accepts summary identity. `runInspect` selects `LoadSessionSummary` and `RenderSummary`; preserves the existing frozen `InspectExecutionTimeout` (5 seconds), response byte cap and typed errors. Help lists the real new command. No new parser grammar.
 - [ ] **Run focused GREEN** with the RED command, then `go test ./internal/inspect ./internal/cli -count=1` and `go vet ./internal/inspect ./internal/cli`. Existing event/conversation tests must pass unchanged. Run `git diff --check` and format only changed Go files.
 - [ ] **Commit exact task files** with `feat: restore authenticated session summary queries`. Report RED/GREEN, no-write proof, implemented behavior and unresolved product requirements to this plan's task report. Do not mark S07 complete until plugin summary/search/filter flows also pass.

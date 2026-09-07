@@ -44,3 +44,10 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 5. Complete decision/annotation commands and human confirmation UI.
 6. Complete ModelPriceWatch pricing runtime and source-linked usage UI.
 7. Run all code, regression, spec-matrix, independent-review and native acceptance gates; report exact remaining blockers before any release request.
+
+## Retained summary checkpoint
+
+- Backend summary runtime implemented at `ae742f4`; independent spec and code-quality review approved without findings. Full inspect/CLI tests and scoped vet passed in its task report; controller also verified a real retained-data read.
+- Read-only query against the actual retained Session `codex / 01a06a33-fe42-77c3-b850-c4eeaa4c13fa`, generation `scan-4535e7a655a4f9d09395b30f55293de5`, succeeded on 2026-09-07. It returned 5 key operations and no captured phase/verification/error/unresolved entries, with accepted coverage 88 seen / 88 indexed. This is a real runtime read, not proof of complete conversation/execution capture.
+- Root-cause follow-up for S02/S03/S09: the Codex machine-fact decoder currently excludes `function_call`/`function_call_output` and only dispatches `custom_tool_call`/`custom_tool_call_output`; its command exit-code grammar only recognizes `exit code: N`. These boundaries require fixture-backed investigation before milestone closure can claim current-host execution coverage. Do not treat zero summary verification entries as proof that no verification happened.
+- S07 remains open: plugin summary wiring, filters, private search and native acceptance are not closed by this backend query.
