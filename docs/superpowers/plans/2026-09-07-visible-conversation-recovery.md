@@ -41,7 +41,7 @@ case "world_state", "compacted", "inter_agent_communication_metadata", "token_us
 ### Task 2: Implement authenticated private visible-conversation query
 
 **Files:** Create focused files under `internal/inspect` for conversation query, source loading and paging; `internal/conversationchain/materialize.go` and tests; modify `internal/cli/inspect.go` and tests. Source-adapter helper extensions are allowed where required for exact accepted-prefix reads. Add a separate page schema and fixtures if paging differs from the frozen whole-document schema; do not change session-event-page-v1 semantics.
-**Interfaces:** Export `ConversationRequest` with DataRoot, ProjectID, Provider, SessionID, ExpectedGenerationID, TurnUnitID, MessageCursor and Limit; export `LoadConversationPage(context.Context, ConversationRequest)` and a bounded JSON renderer. Default query pages turn indexes, selected turn query pages visible messages. Publish exact wire types for Task 3 in the report.
+**Interfaces:** Export `ConversationRequest` with DataRoot, ProjectID, Provider, SessionID, ExpectedGenerationID, TurnUnitID, Cursor, MessageCursor and Limit; export `LoadConversationPage(context.Context, ConversationRequest)` and a bounded JSON renderer. Default query pages turn indexes via new optional `--cursor`; selected turn query pages visible messages via existing `--message-cursor`. Reject index cursor on a selected turn and message cursor without a turn. Publish exact wire types for Task 3 in the report.
 
 - [ ] Add RED integration tests using a real private-store fixture and source files: user/assistant/tool/user ordering; commentary and final_answer visibility; analysis/system/developer/encrypted exclusion; unanswered tail; UTF-8 truncation; first/middle/last paging; no raw tools; stale cross-turn/Session/limit/generation cursor; wrong source hash; missing/shrunk/replaced source; accepted prefix still readable after append; context cancellation; response caps. Reuse existing inspect generation authentication tests rather than weakening them.
 - [ ] Implement deterministic turn grouping from visible source messages and bounded machine facts only. Stable IDs derive from source identity and record identity; source hash/revision changes invalidate dependencies. Return source-unavailable diagnostics instead of fabricated empty success. Distinguish partial-only commentary from completed final answer when source supplies phase.
@@ -49,7 +49,7 @@ case "world_state", "compacted", "inter_agent_communication_metadata", "token_us
 ```go
 type ConversationRequest struct {
     DataRoot, ProjectID, Provider, SessionID, ExpectedGenerationID string
-    TurnUnitID, MessageCursor string
+    TurnUnitID, Cursor, MessageCursor string
     Limit int
 }
 // All source access is scoped to authenticated references for the selected
