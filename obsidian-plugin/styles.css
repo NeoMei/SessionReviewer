@@ -187,7 +187,7 @@
 .sr-v4-readonly > p:not(.sr-v4-status), .sr-v4-provenance { color: var(--sr-muted); font-size: 11px; }
 .sr-v4-trust-details { color: var(--sr-muted); font-size: 11px; margin-top: 5px; }
 .sr-v4-trust-details summary { cursor: pointer; }
-.sr-v4-shell { background: var(--background-primary); border: 1px solid var(--sr-border); border-radius: 14px; margin-top: 8px; overflow: hidden; }
+.sr-v4-shell { background: var(--background-primary); border: 1px solid var(--sr-border); border-radius: 14px; container: sr-v4-pane / inline-size; margin-top: 8px; overflow: hidden; }
 .sr-v4-header { display: grid; gap: 8px; padding: 12px 20px 8px; }
 .sr-v4-title { align-items: baseline; display: flex; flex-wrap: wrap; gap: 7px 12px; }
 .sr-v4-title h1 { font-size: 20px; margin: 0; }
@@ -231,8 +231,9 @@
 .sr-v4-closed-loop .sr-definition::before { background: var(--interactive-accent); border-radius: 50%; content: ""; height: 8px; left: -18px; position: absolute; top: 18px; width: 8px; }
 .sr-v4-closed-loop dd { margin-top: 5px; white-space: pre-wrap; }
 .sr-v4-problems { display: grid; grid-template-columns: minmax(220px, 275px) minmax(300px, 1fr) minmax(250px, 330px); }
+.sr-v4-problem-tree, .sr-v4-problem-context, .sr-v4-problem-detail { min-width: 0; }
 .sr-v4-problem-tree { background: var(--background-secondary); border-right: 1px solid var(--sr-border); display: flex; flex-direction: column; gap: 4px; padding: 12px; }
-.sr-v4-problem-tree button { background: transparent; border: 1px solid transparent; height: auto; margin-left: calc(var(--sr-problem-depth) * 14px); padding: 7px 8px; text-align: left; white-space: normal; }
+.sr-v4-problem-tree button { background: transparent; border: 1px solid transparent; height: auto; margin-left: calc(var(--sr-problem-depth) * 14px); min-width: 0; overflow-wrap: anywhere; padding: 7px 8px; text-align: left; white-space: normal; }
 .sr-v4-problem-tree button[aria-selected="true"] { background: color-mix(in srgb, var(--interactive-accent) 13%, var(--background-primary)); border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--sr-border)); color: var(--text-normal); }
 .sr-v4-problem-context { border-right: 1px solid var(--sr-border); padding: 15px; }
 .sr-v4-problem-path { background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary)); border-radius: 6px; color: var(--text-accent); font-size: 11px; padding: 7px 9px; }
@@ -257,6 +258,17 @@
 .sr-v4-price-line .sr-definition { display: block; margin-bottom: 6px; }
 .sr-v4-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 
+@container sr-v4-pane (max-width: 860px) {
+  .sr-v4-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sr-v4-support { grid-template-columns: minmax(0, 1fr); }
+  .sr-v4-evolution, .sr-v4-problems { grid-template-columns: minmax(0, 1fr); }
+  .sr-v4-timeline-rail, .sr-v4-problem-tree, .sr-v4-problem-context { border-bottom: 1px solid var(--sr-border); border-right: 0; }
+  .sr-v4-model-card, .sr-v4-price-lines { grid-template-columns: minmax(0, 1fr); }
+  .sr-v4-pricing { grid-column: auto; }
+  .sr-v4-sessions .sr-scan-browser, .sr-v4-sessions .sr-event-browser, .sr-v4-sessions .sr-conversation-browser { grid-template-columns: minmax(0, 1fr); }
+  .sr-v4-shell .sr-definition { gap: 8px; grid-template-columns: minmax(0, 1fr); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .session-reviewer-browser *, .session-reviewer-browser *::before, .session-reviewer-browser *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; }
 }
@@ -277,13 +289,6 @@
   .sr-definition { gap: 8px; grid-template-columns: minmax(0, 1fr); }
   .sr-risk-summary { grid-template-columns: minmax(0, 1fr); }
   .sr-risk-status { justify-self: start; }
-  .sr-v4-state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .sr-v4-support { grid-template-columns: minmax(0, 1fr); }
-  .sr-v4-evolution, .sr-v4-problems { grid-template-columns: minmax(0, 1fr); }
-  .sr-v4-timeline-rail, .sr-v4-problem-tree, .sr-v4-problem-context { border-bottom: 1px solid var(--sr-border); border-right: 0; }
-  .sr-v4-model-card { grid-template-columns: minmax(0, 1fr); }
-  .sr-v4-price-lines { grid-template-columns: minmax(0, 1fr); }
-  .sr-v4-pricing { grid-column: auto; }
 }
 
 @media (max-width: 860px) {
