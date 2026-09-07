@@ -25,6 +25,8 @@
 
 **Files:** Create `internal/conversationchain/retained.go`, `retained_test.go`; modify `materialize.go` and focused tests only where shared segmentation/completeness needs correction. Existing `types.go/codec.go/validate.go` wire fields remain unchanged. If runtime validation needs a stronger timestamp/source-ordinal check, add focused tests and ensure existing canonical fixtures remain accepted.
 
+Shared privacy helper extension (2026-09-08): extract the existing absolute-path sanitizer from `internal/inspect/service.go` into `internal/redact/paths.go` as `AbsolutePaths(string) string`; retain the inspect `redactAbsolutePaths` delegating wrapper. Move its private helper logic without changing semantics, and add focused redact tests while rerunning existing inspect path/privacy tests. The pure builder imports redact, never inspect; do not duplicate the sanitizer or introduce an import cycle.
+
 **Interfaces:**
 
 ```go
@@ -70,5 +72,7 @@ Ruling: Reuse the existing visible turn IDs; put rule changes into dependency di
 Ruling: Implement the pure provider-neutral builder first with Codex input, then register the other real adapters before release — this keeps one independently testable seam without reducing S11 scope — cost if wrong is provider-specific integration rework.
 
 Ruling: Missing completion/severity signals do not authorize an implementation-stage or major-failure milestone — only typed supported facts or human confirmation qualify — cost if wrong is an honest omission instead of fabricated semantic completion.
+
+Ruling: Share the existing absolute-path sanitizer through redact with an unchanged inspect wrapper — required retained privacy cannot import inspect because inspect already imports conversationchain — cost if wrong is regression in shared sanitization, covered by the existing inspect path/privacy tests and focused redact tests.
 
 Subsequent binding work remains required: immutable `ObjectConversationChain` + typed current/retained manifest dependencies and retention graph; scan integration immediately after SessionView materialization; bounded query fallback for source-unavailable retained excerpts; v4 generated-field rebase preserving pending human Markdown; qualified milestone projection and source-linked UI. Current `RenderMarkdownUpdate` only permits identity carry and must NOT be weakened with an unconditional bypass. Its next task must prove the generated delta and retained human values separately.
