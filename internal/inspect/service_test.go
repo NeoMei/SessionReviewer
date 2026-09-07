@@ -112,6 +112,22 @@ func TestSafeEventExcerptRedactsDelimitedAbsolutePaths(t *testing.T) {
 	}
 }
 
+func TestSafeEventExcerptRedactsTagDelimitedPathsAndPreservesClosingMarkup(t *testing.T) {
+	tests := []struct {
+		name, input, want string
+	}{
+		{"root tag", "<root>/Users/private/repo</root>", "<root>[REDACTED:ABSOLUTE_PATH]</root>"},
+		{"cwd tag", "prefix <cwd>/opt/private/project</cwd> suffix", "prefix <cwd>[REDACTED:ABSOLUTE_PATH]</cwd> suffix"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := safeEventExcerpt(test.input); got != test.want {
+				t.Fatalf("excerpt=%q want=%q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestLoadSessionEventPageRejectsDivergentSummaryFromImmutableRevision(t *testing.T) {
 	fixture := buildEventFixtureCustomizedAt(t, t.TempDir(), "project-events-divergent", "generation-events-divergent", []string{"session-1"}, nil, func(_ string, view *memory.SessionView) {
 		view.ObservationSummaries[0].Excerpt = "summary diverged from immutable revision"

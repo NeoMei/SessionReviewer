@@ -438,7 +438,7 @@ func redactAbsolutePaths(value string) string {
 				if value[end] == quote {
 					break
 				}
-			} else if end > start && (value[end] == ' ' || value[end] == '\t' || value[end] == '\r' || value[end] == '\n' || strings.ContainsRune(",;)]}>", rune(value[end]))) {
+			} else if end > start && (value[end] == ' ' || value[end] == '\t' || value[end] == '\r' || value[end] == '\n' || strings.ContainsRune(",;)]}<>", rune(value[end]))) {
 				break
 			}
 			end++
@@ -459,6 +459,9 @@ func redactAbsolutePaths(value string) string {
 
 func absolutePathStart(value string, offset int) bool {
 	if value[offset] == '/' {
+		if closingMarkupAt(value, offset) {
+			return false
+		}
 		return offset+1 < len(value) && value[offset+1] != '/'
 	}
 	if value[offset] == '\\' {
@@ -467,12 +470,30 @@ func absolutePathStart(value string, offset int) bool {
 	return offset+3 < len(value) && ((value[offset] >= 'A' && value[offset] <= 'Z') || (value[offset] >= 'a' && value[offset] <= 'z')) && value[offset+1] == ':' && (value[offset+2] == '/' || value[offset+2] == '\\')
 }
 
+func closingMarkupAt(value string, slash int) bool {
+	if slash == 0 || value[slash-1] != '<' {
+		return false
+	}
+	end := strings.IndexByte(value[slash+1:], '>')
+	if end < 1 {
+		return false
+	}
+	name := value[slash+1 : slash+1+end]
+	for index := range name {
+		current := name[index]
+		if !((current >= 'a' && current <= 'z') || (current >= 'A' && current <= 'Z') || (current >= '0' && current <= '9') || current == '_' || current == '-' || current == ':') {
+			return false
+		}
+	}
+	return true
+}
+
 func absolutePathBoundary(value string, offset int) bool {
 	if offset == 0 {
 		return true
 	}
 	previous := value[offset-1]
-	return previous == ' ' || previous == '\t' || previous == '\r' || previous == '\n' || strings.ContainsRune(":\"'([{<=", rune(previous))
+	return previous == ' ' || previous == '\t' || previous == '\r' || previous == '\n' || strings.ContainsRune(":\"'([{<=>", rune(previous))
 }
 
 func eventPageOffset(request EventPageRequest, viewDigest string, cursorKey []byte, total uint64) (uint64, error) {
