@@ -14,14 +14,14 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 
 | ID | Spec | Required outcome | Current evidence / gate |
 |---|---|---|---|
-| S01 | §3, §12.3.1 | Five top tabs in approved order; project header compact, risks/todos and coverage visible | Missing v4 shell; blocking |
-| S02 | §4, §13.3/13 | Qualified milestone list, full history, five-part closure; no raw-event homepage | Current v4 only last milestone; blocking |
+| S01 | §3, §12.3.1 | Five top tabs in approved order; project header compact, risks/todos and coverage visible | Shell restored at 8c8614d; 339 plugin tests and scoped reviews; native enablement/acceptance pending |
+| S02 | §4, §13.3/13 | Qualified milestone list, full history, five-part closure; no raw-event homepage | Accepted timeline now has bounded full history and five-part detail; automatic qualification/closure pipeline missing; blocking |
 | S03 | §4.1, §5.1, §13.14 | Visible answers plus execution/verification sources; bounded authenticated drilldown | Visible Codex Q/A implemented; full closure pipeline missing; blocking |
-| S04 | §5, §13.15/16 | Actual question tree, focus path/children/related nodes, orthogonal states | Contracts only; blocking |
+| S04 | §5, §13.15/16 | Actual question tree, focus path/children/related nodes, orthogonal states | Formal nodes render in approved three-pane geometry; full interactive graph/evidence workflow remains incomplete; blocking |
 | S05 | §5.3, §18.3/5 | Deterministic pending recommendations, explicit child/sibling/merge/move/reorder CAS | Runtime and UI missing; blocking |
 | S06 | §6, §18.2/5 | Decisions/agreements, manual create/edit, candidate extract/confirm/ignore/restore | Legacy view exists; v4 runtime incomplete; blocking |
 | S07 | §7, §13.1/2/12 | Full index, filters, retained unavailable sources, summary/search/paged events | Partial scan browser exists; filters/search/integration incomplete; blocking |
-| S08 | §8, §18.6 | ModelPriceWatch cache, exact routed price, immutable snapshots, honest full-width cards | Price types exist; service/UI incomplete; blocking |
+| S08 | §8, §18.6 | ModelPriceWatch cache, exact routed price, immutable snapshots, honest full-width cards | Validated accounting/current snapshots render honestly; ModelPriceWatch cache/matching service and full workflow missing; blocking |
 | S09 | §2, §13.4/5/14 | Zero Agent starts on scan/read/rule organization; explicit optional candidates only | Must rerun end-to-end instrumentation after integration |
 | S10 | §12.3.7/8/11 | Native Obsidian keyboard, project switching, reload, state persistence, no CLI/network/source recovery | Must repeat on completed product, not 0.4.2 |
 | S11 | §13.11 | Enabled providers use same index/drilldown/status experience | Multi-provider deep conversation recovery requires check; blocking |
