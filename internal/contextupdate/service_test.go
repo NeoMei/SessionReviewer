@@ -315,6 +315,16 @@ func TestNotifyPhasePropagatesObserverFailure(t *testing.T) {
 	}
 }
 
+func TestProductionCodexDecoderRegistrationSupersedesPreviousEvidenceVersion(t *testing.T) {
+	options := productionCodexAdapterOptions("/sessions", nil, nil, nil)
+	if options.AdapterVersion != "codex-jsonl-v2" {
+		t.Fatalf("production decoder version=%q want codex-jsonl-v2", options.AdapterVersion)
+	}
+	if fmt.Sprint(options.SupersedesAdapterVersions) != fmt.Sprint([]string{"codex-jsonl-v1"}) {
+		t.Fatalf("production decoder predecessors=%v want [codex-jsonl-v1]", options.SupersedesAdapterVersions)
+	}
+}
+
 func TestLoadCurrentProjectFilesRejectsUnreadableExistingFile(t *testing.T) {
 	projectRoot := t.TempDir()
 	reviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))

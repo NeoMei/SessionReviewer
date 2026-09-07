@@ -401,11 +401,11 @@ func (d *recordDecoder) addResponseItem(record session.Record) error {
 	switch header.Type {
 	case "message":
 		return d.addMessage(record)
-	case "custom_tool_call":
+	case "custom_tool_call", "function_call":
 		return d.addToolCall(record)
-	case "custom_tool_call_output":
+	case "custom_tool_call_output", "function_call_output":
 		return d.addToolOutput(record)
-	case "reasoning", "function_call", "function_call_output", "agent_message", "web_search_call":
+	case "reasoning", "agent_message", "web_search_call":
 		// These records can contain private chain-of-thought or opaque tool data.
 		// They are intentionally outside the zero-token evidence vocabulary.
 		return nil
@@ -455,20 +455,12 @@ func (d *recordDecoder) addMessage(record session.Record) error {
 }
 
 func (d *recordDecoder) addToolCall(record session.Record) error {
-	var payload struct {
-		ID     string `json:"id"`
-		CallID string `json:"call_id"`
-		Name   string `json:"name"`
-		Input  string `json:"input"`
-	}
-	if json.Unmarshal(record.Payload, &payload) != nil {
+	payload, err := decodeToolCallEnvelope(record.Payload)
+	if err != nil {
 		d.malformedPayload()
 		return nil
 	}
-	callID := payload.CallID
-	if callID == "" {
-		callID = payload.ID
-	}
+	callID := payload.callID
 	if !toolCallIDPattern.MatchString(callID) {
 		d.unsupported()
 		return nil
@@ -482,22 +474,19 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		return nil
 	}
 	d.seenCalls[callID] = struct{}{}
-	switch payload.Name {
+	switch payload.name {
 	case "exec_command":
-		var input struct {
-			Cmd     string `json:"cmd"`
-			Workdir string `json:"workdir"`
-		}
-		if json.Unmarshal([]byte(payload.Input), &input) != nil || strings.TrimSpace(input.Cmd) == "" {
+		cmd, inputWorkdir, valid := decodeExecCommandInput(payload.input)
+		if !valid {
 			d.malformedPayload()
 			return nil
 		}
-		workdir := rootedPath(input.Workdir, d.currentCWD)
+		workdir := rootedPath(inputWorkdir, d.currentCWD)
 		if workdir == "" {
 			d.unsupported()
 			return nil
 		}
-		command := classifyCommand(input.Cmd)
+		command := classifyCommand(cmd)
 		pending := pendingCall{
 			id: callID, kind: "exec", workdir: workdir, commandSignature: command.signature,
 			verificationComponent: command.verification, verificationOperation: command.verificationOperation,
@@ -509,16 +498,13 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 			fields: map[string]string{"command_signature": command.signature, "path": workdir, "tool_id": callID}, toolCallID: callID,
 		})
 	case "apply_patch":
-		var input struct {
-			Patch   string `json:"patch"`
-			Workdir string `json:"workdir"`
-		}
-		if json.Unmarshal([]byte(payload.Input), &input) != nil {
-			d.malformedPayload()
+		patch, inputWorkdir, valid := decodePatchInput(payload.input)
+		if !valid {
+			d.unsupported()
 			return nil
 		}
-		workdir := rootedPath(input.Workdir, d.currentCWD)
-		targets := parsePatchTargets(input.Patch, workdir)
+		workdir := rootedPath(inputWorkdir, d.currentCWD)
+		targets := parsePatchTargets(patch, workdir)
 		if workdir == "" || len(targets) == 0 {
 			d.unsupported()
 			return nil
@@ -533,10 +519,13 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 
 func (d *recordDecoder) addToolOutput(record session.Record) error {
 	var payload struct {
+		Type   string          `json:"type"`
 		CallID string          `json:"call_id"`
 		Output json.RawMessage `json:"output"`
 	}
-	if json.Unmarshal(record.Payload, &payload) != nil || !toolCallIDPattern.MatchString(payload.CallID) {
+	if json.Unmarshal(record.Payload, &payload) != nil ||
+		(payload.Type != "custom_tool_call_output" && payload.Type != "function_call_output") ||
+		!toolCallIDPattern.MatchString(payload.CallID) {
 		d.malformedPayload()
 		return nil
 	}
@@ -556,7 +545,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		return nil
 	}
 	delete(d.pending, payload.CallID)
-	output, err := decodeToolOutput(payload.Output)
+	output, err := decodeTerminalOutput(payload.Output)
 	if err != nil {
 		d.malformedPayload()
 		return nil
@@ -582,11 +571,11 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		}
 		return nil
 	}
-	exitCode, valid := parseExitCode(output)
-	if !valid {
+	if !output.finished || output.exitCode == nil {
 		d.unsupported()
 		return nil
 	}
+	exitCode := *output.exitCode
 	outcome := "success"
 	if exitCode != 0 {
 		outcome = "failure"
@@ -618,7 +607,7 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		}
 	}
 	if pending.gitOperation != "" && exitCode == 0 {
-		gitFields, valid := parseGitOutput(pending.gitOperation, output)
+		gitFields, valid := parseGitOutput(pending.gitOperation, output.body)
 		if valid {
 			gitFields["tool_id"] = pending.id
 			if err := d.observe(record, observedFact{
@@ -962,51 +951,29 @@ func containsAll(values []string, wanted ...string) bool {
 	return true
 }
 
-func decodeToolOutput(raw json.RawMessage) (string, error) {
-	var text string
-	if json.Unmarshal(raw, &text) == nil {
-		return text, nil
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if json.Unmarshal(raw, &blocks) != nil {
-		return "", errors.New("unsupported tool output envelope")
-	}
-	var parts []string
-	for _, block := range blocks {
-		if (block.Type == "text" || block.Type == "input_text" || block.Type == "output_text") && block.Text != "" {
-			parts = append(parts, block.Text)
-		}
-	}
-	return strings.Join(parts, "\n"), nil
-}
-
 func parseExitCode(output string) (int, bool) {
-	for _, line := range normalizedLines(output) {
-		match := exitCodePattern.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		value, err := strconv.Atoi(match[1])
-		return value, err == nil
+	decoded, err := decodeTextTerminalOutput(output)
+	if err != nil || !decoded.finished || decoded.exitCode == nil {
+		return 0, false
 	}
-	return 0, false
+	return *decoded.exitCode, true
 }
 
-func parsePatchOutcome(output string) (string, bool) {
-	switch strings.TrimSpace(output) {
+func parsePatchOutcome(output terminalOutput) (string, bool) {
+	if output.finished && output.exitCode != nil && *output.exitCode != 0 {
+		return "failure", true
+	}
+	switch strings.TrimSpace(output.body) {
 	case "Done!":
 		return "success", true
 	case "Failed!":
 		return "failure", true
 	default:
-		if exitCode, valid := parseExitCode(output); valid {
-			if exitCode == 0 {
-				return "success", true
-			}
-			return "failure", true
+		if nativePatchSucceeded(output.body) {
+			return "success", true
+		}
+		if output.finished && output.exitCode != nil {
+			return "success", true
 		}
 		return "", false
 	}

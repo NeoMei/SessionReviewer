@@ -796,14 +796,14 @@ func TestAdapterVersionCreatesStableKeySuccessorsWithoutMutatingAnActiveSet(t *t
 	fixture := newAdapterFixture(t)
 	fixture.installFixture(t, "session-shared.jsonl")
 
-	v1 := fixture.adapter(t, "v1")
+	v1 := fixture.adapter(t, "codex-jsonl-v1")
 	v1Boundary, err := v1.Freeze(context.Background(), discoverCandidate(t, v1, "session-shared"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	v1Observations, _ := decodeBoundary(t, v1, v1Boundary)
 
-	v2 := fixture.adapter(t, "v2", "v1")
+	v2 := fixture.adapter(t, "codex-jsonl-v2", "codex-jsonl-v1")
 	v2Boundary, err := v2.Freeze(context.Background(), discoverCandidate(t, v2, "session-shared"))
 	if err != nil {
 		t.Fatal(err)
@@ -818,7 +818,7 @@ func TestAdapterVersionCreatesStableKeySuccessorsWithoutMutatingAnActiveSet(t *t
 	}
 	successors := make(map[string]string, len(report.Supersessions))
 	for _, item := range report.Supersessions {
-		if item.SupersededAdapter != "v1" || item.SuccessorAdapter != "v2" {
+		if item.SupersededAdapter != "codex-jsonl-v1" || item.SuccessorAdapter != "codex-jsonl-v2" {
 			t.Fatalf("adapter lineage=%+v", item)
 		}
 		wantKeyDigest, err := memory.Digest(item.Key)

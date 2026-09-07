@@ -149,13 +149,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, errors.New("sessions root must be an absolute path")
 	}
 	r := redact.Default()
-	adapter, err := codex.New(codex.AdapterOptions{
-		SessionsRoot:   sessionsRoot,
-		Bindings:       []projectidentity.Binding{binding},
-		Catalog:        catalog,
-		Redactor:       &r,
-		AdapterVersion: "codex-jsonl-v1",
-	})
+	adapter, err := codex.New(productionCodexAdapterOptions(sessionsRoot, []projectidentity.Binding{binding}, catalog, &r))
 	if err != nil {
 		return Result{}, fmt.Errorf("open source adapter: %w", err)
 	}
@@ -381,6 +375,17 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		ReviewRunTokens:     0,
 		ProviderDiagnostics: append([]source.ProviderDiagnostic(nil), scanResult.ProviderDiagnostics...),
 	}, nil
+}
+
+func productionCodexAdapterOptions(sessionsRoot string, bindings []projectidentity.Binding, catalog *sourcecatalog.Catalog, redactor *redact.Redactor) codex.AdapterOptions {
+	return codex.AdapterOptions{
+		SessionsRoot:              sessionsRoot,
+		Bindings:                  bindings,
+		Catalog:                   catalog,
+		Redactor:                  redactor,
+		AdapterVersion:            "codex-jsonl-v2",
+		SupersedesAdapterVersions: []string{"codex-jsonl-v1"},
+	}
 }
 
 func validateCurrentProjectionProject(accepted reviewv2.AcceptedV3, projectID string) error {
