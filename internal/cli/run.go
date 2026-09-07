@@ -35,6 +35,7 @@ Commands:
   sync                  Synchronize editable Markdown with Obsidian
   review                Control durable Agent review jobs
   scan                  Execute or monitor zero-token project scans
+  inspect               Read published Session events (JSON only)
   version               Print the version
 
 Options:
@@ -52,6 +53,9 @@ Options:
   scan: [--project-id ID] [--sessions-root PATH] [--data-dir PATH] [--json]
         start [--project-id ID] [--data-dir PATH] [--json]
         status [--project-id ID] [--data-dir PATH] [--json]
+  inspect: session-events --project-id ID --provider ID --session-id ID
+           --expected-generation-id ID [--cursor TOKEN | --anchor SEQUENCE]
+           --limit 1..100 --json
 
 Apply validates a Skill proposal against its exact bounded evidence packet.
 Ledger-only resume and history do not process pending sessions.
@@ -113,6 +117,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runReview(args[1:], stdout, stderr)
 	case "scan":
 		return runScan(args[1:], stdout, stderr)
+	case "inspect":
+		return runInspect(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, rootHelp)
