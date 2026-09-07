@@ -79,6 +79,95 @@ func TestLoadSessionEventPagePaginatesAndNavigatesDeterministically(t *testing.T
 	}
 }
 
+func TestLoadSessionEventPageAnchorUsesOneBasedOrdinalWithSparseSequences(t *testing.T) {
+	fixture := buildEventFixtureCustomizedAt(t, t.TempDir(), "project-events-sparse", "generation-events-sparse", []string{"session-1"}, func(observations []memory.ObservationRevision) {
+		for index := range observations {
+			observations[index].Key.Sequence = (index + 1) * 10
+			observations[index].RevisionID = memory.ObservationRevisionID(observations[index])
+		}
+	}, nil)
+	request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Anchor: 3, Limit: 2}
+	page, err := LoadSessionEventPage(context.Background(), request)
+	if err != nil || page.RangeStart != 2 || page.RangeEnd != 3 || len(page.Items) != 1 || page.Items[0].Sequence != 30 {
+		t.Fatalf("page=%+v err=%v", page, err)
+	}
+}
+
+func TestSafeEventExcerptRedactsDelimitedAbsolutePaths(t *testing.T) {
+	tests := []struct {
+		name, input, secret string
+	}{
+		{"file URL", "open file:///Users/alice/private.txt now", "/Users/alice/private.txt"},
+		{"labelled Unix", "path:/Users/alice/private.txt", "/Users/alice/private.txt"},
+		{"labelled UNC", `share:\\server\private\file.txt`, `\\server\private\file.txt`},
+		{"labelled drive", `path:C:\Users\alice\private.txt`, `C:\Users\alice\private.txt`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := safeEventExcerpt(test.input)
+			if strings.Contains(got, test.secret) || !strings.Contains(got, "[REDACTED:ABSOLUTE_PATH]") || len(got) > eventExcerptBytes {
+				t.Fatalf("unsafe excerpt=%q", got)
+			}
+		})
+	}
+}
+
+func TestLoadSessionEventPageRejectsDivergentSummaryFromImmutableRevision(t *testing.T) {
+	fixture := buildEventFixtureCustomizedAt(t, t.TempDir(), "project-events-divergent", "generation-events-divergent", []string{"session-1"}, nil, func(_ string, view *memory.SessionView) {
+		view.ObservationSummaries[0].Excerpt = "summary diverged from immutable revision"
+	})
+	request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 2}
+	if _, err := LoadSessionEventPage(context.Background(), request); eventErrorCode(err) != CodeInvalidArgument {
+		t.Fatalf("code=%q err=%v", eventErrorCode(err), err)
+	}
+}
+
+func TestLoadSessionEventPageRejectsConcurrentPublishedGenerationAdvance(t *testing.T) {
+	fixture := buildEventFixture(t, "project-events-race", "generation-events-race", "session-1")
+	before := snapshotEventTree(t, fixture.dataRoot)
+	inspectCheckpoint = func(phase string) {
+		if phase == "before_published_recheck" {
+			pointer := filepath.Join(fixture.dataRoot, "projects", fixture.projectID, "memory-v1", "published_generation")
+			if err := os.WriteFile(pointer, []byte("generation-concurrent\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(func() { inspectCheckpoint = nil })
+	request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 2}
+	if _, err := LoadSessionEventPage(context.Background(), request); eventErrorCode(err) != CodeGenerationMismatch {
+		t.Fatalf("code=%q err=%v", eventErrorCode(err), err)
+	}
+	inspectCheckpoint = nil
+	after := snapshotEventTree(t, fixture.dataRoot)
+	delete(before, filepath.Join("projects", fixture.projectID, "memory-v1", "published_generation"))
+	delete(after, filepath.Join("projects", fixture.projectID, "memory-v1", "published_generation"))
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("inspection changed data other than injected concurrent publication pointer")
+	}
+}
+
+func TestLoadSessionEventPageObservesCancellationDuringItemWork(t *testing.T) {
+	for _, phase := range []string{"event_item", "event_sort"} {
+		t.Run(phase, func(t *testing.T) {
+			fixture := buildEventFixture(t, "project-events-cancel-"+phase, "generation-events-cancel-"+phase, "session-1")
+			ctx, cancel := context.WithCancelCause(context.Background())
+			cause := errors.New("cancel item work")
+			inspectCheckpoint = func(current string) {
+				if current == phase {
+					cancel(cause)
+				}
+			}
+			t.Cleanup(func() { inspectCheckpoint = nil })
+			request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 2}
+			if _, err := LoadSessionEventPage(ctx, request); eventErrorCode(err) != CodeInvalidArgument || !strings.Contains(err.Error(), "timed out") {
+				t.Fatalf("code=%q err=%v", eventErrorCode(err), err)
+			}
+			inspectCheckpoint = nil
+		})
+	}
+}
+
 func TestLoadSessionEventPageRejectsGenerationAnchorAndCursorMismatch(t *testing.T) {
 	fixture := buildEventFixture(t, "project-events-a", "generation-events-a", "session-1", "session-2")
 	base := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 1}
@@ -192,6 +281,10 @@ func buildEventFixture(t *testing.T, projectID, generationID string, sessionIDs 
 }
 
 func buildEventFixtureAt(t *testing.T, dataRoot, projectID, generationID string, sessionIDs ...string) eventFixture {
+	return buildEventFixtureCustomizedAt(t, dataRoot, projectID, generationID, sessionIDs, nil, nil)
+}
+
+func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generationID string, sessionIDs []string, mutateObservations func([]memory.ObservationRevision), mutateView func(string, *memory.SessionView)) eventFixture {
 	t.Helper()
 	projectRoot := t.TempDir()
 	legacy := config.ProjectMapping{ID: projectID, Root: projectRoot}
@@ -232,6 +325,9 @@ func buildEventFixtureAt(t *testing.T, dataRoot, projectID, generationID string,
 	sessionDigests := make(map[string]string, len(sessionIDs))
 	for _, sessionID := range sessionIDs {
 		observations := fixtureObservations(t, projectID, sessionID)
+		if mutateObservations != nil {
+			mutateObservations(observations)
+		}
 		chunkDigest, err := store.PutObservationChunk(observations)
 		if err != nil {
 			t.Fatal(err)
@@ -250,6 +346,9 @@ func buildEventFixtureAt(t *testing.T, dataRoot, projectID, generationID string,
 		}
 		sourceDigest := testDigest(projectID + "-" + sessionID + "-source")
 		view := memory.SessionView{SchemaVersion: 1, ProjectID: projectID, Provider: "codex", SessionID: sessionID, SourceIdentity: "source-" + sessionID, SourceRecordDigest: sourceDigest, UsageRecordDigest: sourceDigest, StartedAt: "2026-09-07T00:00:00Z", EndedAt: "2026-09-07T00:00:03Z", TerminalState: memory.Indexed, SourceAvailability: memory.SourceAvailable, ActiveRevisionIDs: active, ObservationSummaries: summaries, ObservationChunkDigests: []string{chunkDigest}, DependencyDigest: testDigest(projectID + "-" + sessionID + "-dependency"), MaterializerVersion: "v1"}
+		if mutateView != nil {
+			mutateView(sessionID, &view)
+		}
 		view.Digest, err = memory.SessionViewDigest(view)
 		if err != nil {
 			t.Fatal(err)

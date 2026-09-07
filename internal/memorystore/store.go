@@ -692,16 +692,28 @@ func (s *Store) CommitPublishedContext(ctx context.Context, generationID string,
 
 // LoadPublished returns the currently published generation ID and its manifest.
 func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
+	return s.LoadPublishedContext(context.Background())
+}
+
+// LoadPublishedContext is LoadPublished with cooperative cancellation during
+// the pointer snapshot and immutable generation decode and validation.
+func (s *Store) LoadPublishedContext(ctx context.Context) (string, memory.GenerationManifest, error) {
+	if ctx == nil {
+		return "", memory.GenerationManifest{}, errors.New("published read context is required")
+	}
 	var genID string
 	var manifest memory.GenerationManifest
 	load := func() error {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
 		root, err := s.reopenMemory()
 		if err != nil {
 			return err
 		}
 		defer root.Close()
 
-		body, found, err := root.ReadRegular("published_generation", maxManifestBytes)
+		body, found, err := root.ReadRegularContext(ctx, "published_generation", maxManifestBytes)
 		if err != nil {
 			return fmt.Errorf("read published generation: %w", err)
 		}
@@ -715,7 +727,7 @@ func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
 		if err := validateStoreID(genID); err != nil {
 			return fmt.Errorf("corrupt published generation pointer: %w", err)
 		}
-		manifest, err = s.loadGeneration(genID)
+		manifest, err = s.loadGenerationContext(ctx, genID)
 		return err
 	}
 	var err error
@@ -728,7 +740,7 @@ func (s *Store) LoadPublished() (string, memory.GenerationManifest, error) {
 		}
 		s.mu.RUnlock()
 	} else {
-		err = s.withStoreLock(load)
+		err = s.withStoreLock(load, ctx)
 	}
 	return genID, manifest, err
 }
@@ -781,6 +793,13 @@ func (s *Store) loadPreparedRawUnlocked() (Prepared, memory.GenerationManifest, 
 }
 
 func (s *Store) loadGeneration(generationID string) (memory.GenerationManifest, error) {
+	return s.loadGenerationContext(context.Background(), generationID)
+}
+
+func (s *Store) loadGenerationContext(ctx context.Context, generationID string) (memory.GenerationManifest, error) {
+	if ctx == nil {
+		return memory.GenerationManifest{}, errors.New("generation read context is required")
+	}
 	if err := validateStoreID(generationID); err != nil {
 		return memory.GenerationManifest{}, errors.New("prepared generation ID is invalid")
 	}
@@ -789,7 +808,7 @@ func (s *Store) loadGeneration(generationID string) (memory.GenerationManifest, 
 		return memory.GenerationManifest{}, err
 	}
 	defer generations.Close()
-	body, found, err := generations.ReadRegular(generationID+".json", maxManifestBytes)
+	body, found, err := generations.ReadRegularContext(ctx, generationID+".json", maxManifestBytes)
 	if err != nil {
 		return memory.GenerationManifest{}, fmt.Errorf("read immutable generation: %w", err)
 	}
@@ -799,11 +818,20 @@ func (s *Store) loadGeneration(generationID string) (memory.GenerationManifest, 
 	if err := requirePrivateRegular(generations.Root, generationID+".json"); err != nil {
 		return memory.GenerationManifest{}, err
 	}
-	return decodeGeneration(body, s.projectID, generationID, "")
+	return decodeGenerationContext(ctx, body, s.projectID, generationID, "")
 }
 
 // LoadObject returns a defensive copy of one validated canonical object.
 func (s *Store) LoadObject(kind ObjectKind, digest string) ([]byte, error) {
+	return s.LoadObjectContext(context.Background(), kind, digest)
+}
+
+// LoadObjectContext is LoadObject with cooperative cancellation during the
+// bounded snapshot, canonical decode, digest calculation, and validation.
+func (s *Store) LoadObjectContext(ctx context.Context, kind ObjectKind, digest string) ([]byte, error) {
+	if ctx == nil {
+		return nil, errors.New("object read context is required")
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if err := s.requireOpenLocked(); err != nil {
@@ -819,7 +847,7 @@ func (s *Store) LoadObject(kind ObjectKind, digest string) ([]byte, error) {
 	}
 	defer parent.Close()
 	leaf := digestLeafName(digest, suffix)
-	body, found, err := parent.ReadRegular(leaf, maxObjectBytes)
+	body, found, err := parent.ReadRegularContext(ctx, leaf, maxObjectBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read immutable object: %w", err)
 	}
@@ -829,10 +857,20 @@ func (s *Store) LoadObject(kind ObjectKind, digest string) ([]byte, error) {
 	if err := requirePrivateRegular(parent.Root, leaf); err != nil {
 		return nil, err
 	}
-	if err := validateObjectBytes(kind, digest, body, s.projectID); err != nil {
+	if err := validateObjectBytesContext(ctx, kind, digest, body, s.projectID); err != nil {
 		return nil, err
 	}
 	return bytes.Clone(body), nil
+}
+
+// LoadObservationChunkContext returns validated immutable revisions from one
+// private observation chunk while preserving the caller's cancellation.
+func (s *Store) LoadObservationChunkContext(ctx context.Context, digest string) ([]memory.ObservationRevision, error) {
+	body, err := s.LoadObjectContext(ctx, ObjectObservationChunk, digest)
+	if err != nil {
+		return nil, err
+	}
+	return decodeObservationChunkContext(ctx, body)
 }
 
 func validateObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) error {

@@ -10,8 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
-	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -31,6 +31,8 @@ const (
 	CodeAnchorOutOfRange   = "anchor_out_of_range"
 	eventExcerptBytes      = 512
 )
+
+var inspectCheckpoint func(string)
 
 // Error is a bounded, public diagnostic for the read-only inspection API.
 type Error struct {
@@ -108,8 +110,11 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 			retErr = publicError(CodeInvalidArgument, "published private state could not be closed safely")
 		}
 	}()
-	publishedID, manifest, err := store.LoadPublished()
+	publishedID, manifest, err := store.LoadPublishedContext(ctx)
 	if err != nil {
+		if context.Cause(ctx) != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published private state is unavailable")
 	}
 	if publishedID != request.ExpectedGenerationID || manifest.GenerationID != request.ExpectedGenerationID {
@@ -122,8 +127,11 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
 	}
 
-	projectBody, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	projectBody, err := store.LoadObjectContext(ctx, memorystore.ObjectProjectView, manifest.ProjectViewDigest)
 	if err != nil {
+		if context.Cause(ctx) != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published project view is unavailable or corrupt")
 	}
 	var project memory.ProjectView
@@ -131,8 +139,11 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published project view identity is invalid")
 	}
 
-	indexBody, err := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+	indexBody, err := store.LoadObjectContext(ctx, memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
 	if err != nil {
+		if context.Cause(ctx) != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session index is unavailable or corrupt")
 	}
 	index, err := sessionindex.Parse(indexBody)
@@ -145,8 +156,11 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 	if !exists || !indexed || entry.SessionViewDigest == nil || *entry.SessionViewDigest != dependency.Digest {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "requested Session is not in the published generation")
 	}
-	viewBody, err := store.LoadObject(memorystore.ObjectSessionView, dependency.Digest)
+	viewBody, err := store.LoadObjectContext(ctx, memorystore.ObjectSessionView, dependency.Digest)
 	if err != nil {
+		if context.Cause(ctx) != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session view is unavailable or corrupt")
 	}
 	var view memory.SessionView
@@ -156,6 +170,13 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 	if uint64(len(view.ObservationSummaries)) != entry.IndexedEventCount || entry.Coverage.Indexed != entry.IndexedEventCount {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session event coverage is inconsistent")
 	}
+	revisions, err := loadSelectedRevisions(ctx, store, view)
+	if err != nil {
+		if context.Cause(ctx) != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
+		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session revisions are unavailable or inconsistent")
+	}
 	if err := projectidentity.Reauthenticate(binding); err != nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "configured project mapping changed during inspection")
 	}
@@ -163,23 +184,20 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
 	}
 
-	items := make([]EventItem, len(view.ObservationSummaries))
-	for index, summary := range view.ObservationSummaries {
-		kind, ok := publicEventKind(summary.Kind)
+	items := make([]EventItem, len(revisions))
+	for index, revision := range revisions {
+		if err := inspectionCheckpoint(ctx, "event_item"); err != nil {
+			return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
+		kind, ok := publicEventKind(revision.Key.Kind)
 		if !ok {
 			return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session contains an unsupported event kind")
 		}
-		items[index] = EventItem{Kind: kind, Excerpt: safeEventExcerpt(summary.Excerpt), RevisionID: summary.RevisionID, Sequence: uint64(summary.Sequence), OccurredAt: summary.OccurredAt}
+		items[index] = EventItem{Kind: kind, Excerpt: safeEventExcerpt(revision.Excerpt), RevisionID: revision.RevisionID, Sequence: uint64(revision.Key.Sequence), OccurredAt: revision.Timestamp}
 	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].OccurredAt != items[j].OccurredAt {
-			return items[i].OccurredAt < items[j].OccurredAt
-		}
-		if items[i].Sequence != items[j].Sequence {
-			return items[i].Sequence < items[j].Sequence
-		}
-		return items[i].RevisionID < items[j].RevisionID
-	})
+	if err := sortEventItemsContext(ctx, items); err != nil {
+		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+	}
 
 	total := uint64(len(items))
 	cursorKey := cursorAuthenticationKey(view)
@@ -218,10 +236,118 @@ func LoadSessionEventPage(ctx context.Context, request EventPageRequest) (_ Sess
 	if _, err := RenderEventPage(page); err != nil {
 		return SessionEventPage{}, publicError(CodeInvalidArgument, "published Session event page is invalid")
 	}
+	if err := inspectionCheckpoint(ctx, "before_published_recheck"); err != nil {
+		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+	}
+	currentID, currentManifest, err := store.LoadPublishedContext(ctx)
+	if context.Cause(ctx) != nil {
+		return SessionEventPage{}, publicError(CodeInvalidArgument, "inspection timed out")
+	}
+	if err != nil || currentID != publishedID || !reflect.DeepEqual(currentManifest, manifest) {
+		return SessionEventPage{}, publicError(CodeGenerationMismatch, "published generation changed during inspection")
+	}
 	return page, nil
 }
 
 func publicError(code, message string) error { return &Error{Code: code, Message: message} }
+
+func inspectionCheckpoint(ctx context.Context, phase string) error {
+	if inspectCheckpoint != nil {
+		inspectCheckpoint(phase)
+	}
+	return context.Cause(ctx)
+}
+
+func loadSelectedRevisions(ctx context.Context, store *memorystore.Store, view memory.SessionView) ([]memory.ObservationRevision, error) {
+	active := make(map[string]struct{}, len(view.ActiveRevisionIDs))
+	for _, revisionID := range view.ActiveRevisionIDs {
+		active[revisionID] = struct{}{}
+	}
+	byID := make(map[string]memory.ObservationRevision, len(active))
+	for _, digest := range view.ObservationChunkDigests {
+		revisions, err := store.LoadObservationChunkContext(ctx, digest)
+		if err != nil {
+			return nil, err
+		}
+		for _, revision := range revisions {
+			if err := inspectionCheckpoint(ctx, "revision_item"); err != nil {
+				return nil, err
+			}
+			if _, selected := active[revision.RevisionID]; !selected {
+				continue
+			}
+			if revision.Key.ProjectID != view.ProjectID || revision.Key.Provider != view.Provider || revision.Key.SessionID != view.SessionID || revision.Key.SourceIdentity != view.SourceIdentity {
+				return nil, errors.New("active revision identity does not match Session view")
+			}
+			if _, duplicate := byID[revision.RevisionID]; duplicate {
+				return nil, errors.New("active revision occurs more than once")
+			}
+			byID[revision.RevisionID] = revision
+		}
+	}
+	result := make([]memory.ObservationRevision, len(view.ActiveRevisionIDs))
+	for index, revisionID := range view.ActiveRevisionIDs {
+		if err := inspectionCheckpoint(ctx, "revision_selection"); err != nil {
+			return nil, err
+		}
+		revision, found := byID[revisionID]
+		if !found || index >= len(view.ObservationSummaries) || !summaryMatchesRevision(view.ObservationSummaries[index], revision) {
+			return nil, errors.New("observation summary does not match active revision")
+		}
+		result[index] = revision
+	}
+	return result, nil
+}
+
+func summaryMatchesRevision(summary memory.ObservationSummary, revision memory.ObservationRevision) bool {
+	return summary.RevisionID == revision.RevisionID && summary.Sequence == revision.Key.Sequence && summary.Kind == revision.Key.Kind &&
+		summary.Subject == revision.Key.Subject && summary.OccurredAt == revision.Timestamp && summary.Operation == revision.Operation &&
+		summary.Object == revision.Object && summary.Outcome == revision.Outcome && reflect.DeepEqual(summary.Fields, revision.Fields) && summary.Excerpt == revision.Excerpt
+}
+
+func sortEventItemsContext(ctx context.Context, items []EventItem) error {
+	if len(items) < 2 {
+		return inspectionCheckpoint(ctx, "event_sort")
+	}
+	buffer := make([]EventItem, len(items))
+	for width := 1; width < len(items); width *= 2 {
+		for start := 0; start < len(items); start += 2 * width {
+			if err := inspectionCheckpoint(ctx, "event_sort"); err != nil {
+				return err
+			}
+			middle, end := start+width, start+2*width
+			if middle > len(items) {
+				middle = len(items)
+			}
+			if end > len(items) {
+				end = len(items)
+			}
+			left, right, output := start, middle, start
+			for left < middle && right < end {
+				if eventItemLess(items[right], items[left]) {
+					buffer[output], right = items[right], right+1
+				} else {
+					buffer[output], left = items[left], left+1
+				}
+				output++
+			}
+			output += copy(buffer[output:end], items[left:middle])
+			copy(buffer[output:end], items[right:end])
+		}
+		copy(items, buffer)
+	}
+	return inspectionCheckpoint(ctx, "event_sort")
+}
+
+func eventItemLess(left, right EventItem) bool {
+	if left.OccurredAt != right.OccurredAt {
+		return left.OccurredAt < right.OccurredAt
+	}
+	if left.Sequence != right.Sequence {
+		return left.Sequence < right.Sequence
+	}
+	return left.RevisionID < right.RevisionID
+}
 
 func sameSessionDependencies(left, right []memory.SessionViewDependency) bool {
 	if len(left) != len(right) {
@@ -293,10 +419,13 @@ func redactAbsolutePaths(value string) string {
 	var result strings.Builder
 	wrote, copied := false, 0
 	for start := 0; start < len(value); start++ {
-		if !absolutePathStart(value, start) || !absolutePathBoundary(value, start) {
+		pathStart := start
+		if strings.HasPrefix(value[start:], "file://") && start+7 < len(value) && absolutePathStart(value, start+7) && absolutePathBoundary(value, start) {
+			pathStart = start + 7
+		} else if !absolutePathStart(value, start) || !absolutePathBoundary(value, start) {
 			continue
 		}
-		end := start
+		end := pathStart
 		quote := byte(0)
 		if start > 0 && (value[start-1] == '\'' || value[start-1] == '"') {
 			quote = value[start-1]
@@ -340,7 +469,7 @@ func absolutePathBoundary(value string, offset int) bool {
 		return true
 	}
 	previous := value[offset-1]
-	return previous == ' ' || previous == '\t' || previous == '\r' || previous == '\n' || strings.ContainsRune("\"'([{<=", rune(previous))
+	return previous == ' ' || previous == '\t' || previous == '\r' || previous == '\n' || strings.ContainsRune(":\"'([{<=", rune(previous))
 }
 
 func eventPageOffset(request EventPageRequest, viewDigest string, cursorKey []byte, total uint64) (uint64, error) {

@@ -14,7 +14,7 @@ const inspectHelp = `Read one validated page from a published Session index.
 
 Usage:
   session-reviewer inspect session-events --project-id ID --provider ID --session-id ID
-    --expected-generation-id ID [--cursor TOKEN | --anchor SEQUENCE]
+    --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
     --limit 1..100 --json
 `
 

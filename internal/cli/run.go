@@ -54,7 +54,7 @@ Options:
         start [--project-id ID] [--data-dir PATH] [--json]
         status [--project-id ID] [--data-dir PATH] [--json]
   inspect: session-events --project-id ID --provider ID --session-id ID
-           --expected-generation-id ID [--cursor TOKEN | --anchor SEQUENCE]
+           --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
            --limit 1..100 --json
 
 Apply validates a Skill proposal against its exact bounded evidence packet.

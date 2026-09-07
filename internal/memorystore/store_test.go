@@ -63,6 +63,49 @@ func TestOpenReadOnlyDoesNotCreateOrRecoverPrivateState(t *testing.T) {
 	}
 }
 
+func TestReadOnlyContextLoadsReturnCancellationCause(t *testing.T) {
+	dataRoot := t.TempDir()
+	writable, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := buildStoredFixture(t, writable, "generation-context-read")
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenReadOnly(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	cause := errors.New("cancel read-only inspection")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	if _, _, err := store.LoadPublishedContext(ctx); !errors.Is(err, cause) {
+		t.Fatalf("LoadPublishedContext err=%v", err)
+	}
+	if _, err := store.LoadObjectContext(ctx, ObjectSessionView, fixture.session.Digest); !errors.Is(err, cause) {
+		t.Fatalf("LoadObjectContext err=%v", err)
+	}
+	if _, err := store.LoadObservationChunkContext(ctx, fixture.session.ObservationChunkDigests[0]); !errors.Is(err, cause) {
+		t.Fatalf("LoadObservationChunkContext err=%v", err)
+	}
+
+	ctx, cancel = context.WithCancelCause(context.Background())
+	decodeCalls := 0
+	storeContextCheckpoint = func(phase string) {
+		if phase == "decode" {
+			decodeCalls++
+			cancel(cause)
+		}
+	}
+	t.Cleanup(func() { storeContextCheckpoint = nil })
+	if _, err := store.LoadObjectContext(ctx, ObjectSessionView, fixture.session.Digest); !errors.Is(err, cause) || decodeCalls == 0 {
+		t.Fatalf("LoadObjectContext during decode err=%v calls=%d", err, decodeCalls)
+	}
+	storeContextCheckpoint = nil
+}
+
 func TestOpenReadOnlyAcceptsLegacyLayoutWithoutSessionIndexes(t *testing.T) {
 	data := t.TempDir()
 	store, err := Open(data, testProjectID)
