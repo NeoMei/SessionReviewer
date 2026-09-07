@@ -317,11 +317,11 @@ func TestNotifyPhasePropagatesObserverFailure(t *testing.T) {
 
 func TestProductionCodexDecoderRegistrationSupersedesPreviousEvidenceVersion(t *testing.T) {
 	options := productionCodexAdapterOptions("/sessions", nil, nil, nil)
-	if options.AdapterVersion != "codex-jsonl-v2" {
-		t.Fatalf("production decoder version=%q want codex-jsonl-v2", options.AdapterVersion)
+	if options.AdapterVersion != "codex-jsonl-v3" {
+		t.Fatalf("production decoder version=%q want codex-jsonl-v3", options.AdapterVersion)
 	}
-	if fmt.Sprint(options.SupersedesAdapterVersions) != fmt.Sprint([]string{"codex-jsonl-v1"}) {
-		t.Fatalf("production decoder predecessors=%v want [codex-jsonl-v1]", options.SupersedesAdapterVersions)
+	if fmt.Sprint(options.SupersedesAdapterVersions) != fmt.Sprint([]string{"codex-jsonl-v1", "codex-jsonl-v2"}) {
+		t.Fatalf("production decoder predecessors=%v want [codex-jsonl-v1 codex-jsonl-v2]", options.SupersedesAdapterVersions)
 	}
 }
 

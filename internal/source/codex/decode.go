@@ -48,6 +48,7 @@ var (
 type pendingCall struct {
 	id                    string
 	kind                  string
+	wrapperResultMode     execWrapperResultMode
 	workdir               string
 	commandSignature      string
 	verificationComponent string
@@ -474,6 +475,17 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		return nil
 	}
 	d.seenCalls[callID] = struct{}{}
+	var wrapperResultMode execWrapperResultMode
+	if payload.name == "exec" {
+		wrapper, supported := decodeLiteralExecWrapper(payload.input)
+		if !supported {
+			d.ignoredCalls[callID] = struct{}{}
+			d.unsupportedExecWrapper()
+			return nil
+		}
+		payload.name, payload.input = wrapper.name, wrapper.input
+		wrapperResultMode = wrapper.resultMode
+	}
 	switch payload.name {
 	case "exec_command":
 		cmd, inputWorkdir, valid := decodeExecCommandInput(payload.input)
@@ -488,7 +500,7 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 		}
 		command := classifyCommand(cmd)
 		pending := pendingCall{
-			id: callID, kind: "exec", workdir: workdir, commandSignature: command.signature,
+			id: callID, kind: "exec", wrapperResultMode: wrapperResultMode, workdir: workdir, commandSignature: command.signature,
 			verificationComponent: command.verification, verificationOperation: command.verificationOperation,
 			gitOperation: command.gitOperation,
 		}
@@ -509,7 +521,7 @@ func (d *recordDecoder) addToolCall(record session.Record) error {
 			d.unsupported()
 			return nil
 		}
-		d.pending[callID] = pendingCall{id: callID, kind: "patch", workdir: workdir, targets: targets}
+		d.pending[callID] = pendingCall{id: callID, kind: "patch", wrapperResultMode: wrapperResultMode, workdir: workdir, targets: targets}
 		return nil
 	default:
 		d.ignoredCalls[callID] = struct{}{}
@@ -545,15 +557,23 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		return nil
 	}
 	delete(d.pending, payload.CallID)
-	output, err := decodeTerminalOutput(payload.Output)
+	output, err := decodePendingToolOutput(payload.Output, pending.wrapperResultMode)
 	if err != nil {
-		d.malformedPayload()
+		if pending.wrapperResultMode != execWrapperResultNone {
+			d.unsupportedExecWrapper()
+		} else {
+			d.malformedPayload()
+		}
 		return nil
 	}
 	if pending.kind == "patch" {
 		outcome, valid := parsePatchOutcome(output)
 		if !valid {
-			d.unsupported()
+			if pending.wrapperResultMode != execWrapperResultNone {
+				d.unsupportedExecWrapper()
+			} else {
+				d.unsupported()
+			}
 			return nil
 		}
 		for _, target := range pending.targets {
@@ -572,7 +592,11 @@ func (d *recordDecoder) addToolOutput(record session.Record) error {
 		return nil
 	}
 	if !output.finished || output.exitCode == nil {
-		d.unsupported()
+		if pending.wrapperResultMode != execWrapperResultNone {
+			d.unsupportedExecWrapper()
+		} else {
+			d.unsupported()
+		}
 		return nil
 	}
 	exitCode := *output.exitCode
@@ -1122,6 +1146,11 @@ func validStructured(value string, maximum int) bool {
 func (d *recordDecoder) unsupported() {
 	d.report.UnsupportedRecords++
 	d.diagnostic("unsupported_record")
+}
+
+func (d *recordDecoder) unsupportedExecWrapper() {
+	d.report.UnsupportedRecords++
+	d.diagnostic("unsupported_exec_wrapper")
 }
 
 func (d *recordDecoder) malformedPayload() {

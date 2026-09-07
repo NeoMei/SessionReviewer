@@ -383,8 +383,8 @@ func productionCodexAdapterOptions(sessionsRoot string, bindings []projectidenti
 		Bindings:                  bindings,
 		Catalog:                   catalog,
 		Redactor:                  redactor,
-		AdapterVersion:            "codex-jsonl-v2",
-		SupersedesAdapterVersions: []string{"codex-jsonl-v1"},
+		AdapterVersion:            "codex-jsonl-v3",
+		SupersedesAdapterVersions: []string{"codex-jsonl-v1", "codex-jsonl-v2"},
 	}
 }
 
