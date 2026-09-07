@@ -71,3 +71,23 @@ Result: exit 1. Memory failed at the obsolete runtime/schema gates, memorystore 
 ## Concerns
 
 No implementation concern found. Acceptance of provider-shaped records proves only generic schema validity; Claude/OpenCode discovery, decoding, registration, visible reads, and parity remain explicitly out of scope. Independent review remains the controller's next gate.
+
+## Review round 1 fix
+
+The reviewer found that `providerManifest` left `SessionIndexMeasurements` empty, so the generation-manifest measurement provider was not exercised by accepted, malformed, or cross-field mismatch fixtures. The fixture now includes one reconciled measurement for every provider. Focused tests assert that the measurement accepts safe providers including the 128-byte boundary, rejects malformed providers in runtime and schema validation, and rejects a safe provider that does not match the SessionView at runtime while correctly allowing that independently valid shape through JSON Schema. The small test schema harness now supports the existing JSON Schema union type used by `record_count` (`integer` or `null`).
+
+### Round 1 RED
+
+```text
+go test ./internal/memory -run 'ProviderContractGenerationManifestFixtureIncludesProviderMeasurement' -count=1
+```
+
+Result: exit 1 with `provider manifest has 0 Session index measurements, want 1`. This directly proved the missing fixture coverage.
+
+### Round 1 GREEN
+
+```text
+go test ./internal/memory -run 'ProviderNeutral|ProviderContract' -count=1
+```
+
+Result: exit 0, `ok github.com/neomei/SessionReviewer/internal/memory 0.638s`. `git diff --check` also exited 0 with no output.

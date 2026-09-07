@@ -1047,6 +1047,19 @@ func validateSchemaValue(root, schema map[string]any, value any, path string) er
 		}
 		return validateSchemaValue(root, target, value, path)
 	}
+	if alternatives, ok := schema["type"].([]any); ok {
+		for _, alternative := range alternatives {
+			candidate := make(map[string]any, len(schema))
+			for key, item := range schema {
+				candidate[key] = item
+			}
+			candidate["type"] = alternative
+			if err := validateSchemaValue(root, candidate, value, path); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("%s does not match any allowed schema type", path)
+	}
 	for _, raw := range schemaArray(schema["allOf"]) {
 		branch, _ := raw.(map[string]any)
 		if branch == nil {
@@ -1090,6 +1103,10 @@ func validateSchemaValue(root, schema map[string]any, value any, path string) er
 		}
 	}
 	switch schema["type"] {
+	case "null":
+		if value != nil {
+			return fmt.Errorf("%s is not null", path)
+		}
 	case "object":
 		object, ok := value.(map[string]any)
 		if !ok {

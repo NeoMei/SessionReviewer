@@ -34,6 +34,49 @@ func TestProviderNeutralSchemasAcceptSafeProviderIDs(t *testing.T) {
 	}
 }
 
+func TestProviderContractGenerationManifestFixtureIncludesProviderMeasurement(t *testing.T) {
+	manifest := providerManifest("claude")
+	if len(manifest.SessionIndexMeasurements) != 1 {
+		t.Fatalf("provider manifest has %d Session index measurements, want 1", len(manifest.SessionIndexMeasurements))
+	}
+	measurement := manifest.SessionIndexMeasurements[0]
+	if measurement.Provider != "claude" || measurement.SessionID != manifest.SessionViews[0].SessionID {
+		t.Fatalf("measurement identity=%s/%s want %s/%s", measurement.Provider, measurement.SessionID, manifest.SessionViews[0].Provider, manifest.SessionViews[0].SessionID)
+	}
+}
+
+func TestProviderContractGenerationMeasurementRejectsMalformedAndMismatchedIdentity(t *testing.T) {
+	t.Run("malformed provider", func(t *testing.T) {
+		manifest := providerManifest("claude")
+		manifest.SessionIndexMeasurements[0].Provider = "Claude"
+		if err := ValidateGenerationManifest(manifest); err == nil || !strings.Contains(err.Error(), "identity") {
+			t.Fatalf("runtime accepted malformed measurement provider or misclassified it: %v", err)
+		}
+		body, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateJSONSchemaFixture("../../schemas/generation-manifest-v1.schema.json", body); err == nil {
+			t.Fatal("schema accepted malformed measurement provider")
+		}
+	})
+
+	t.Run("safe provider mismatches SessionView", func(t *testing.T) {
+		manifest := providerManifest("claude")
+		manifest.SessionIndexMeasurements[0].Provider = "opencode"
+		if err := ValidateGenerationManifest(manifest); err == nil || !strings.Contains(err.Error(), "identity") {
+			t.Fatalf("runtime accepted mismatched measurement provider or misclassified it: %v", err)
+		}
+		body, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateJSONSchemaFixture("../../schemas/generation-manifest-v1.schema.json", body); err != nil {
+			t.Fatalf("schema tried to enforce cross-field provider equality: %v", err)
+		}
+	})
+}
+
 func TestProviderContractRejectsUnsafeProviderIDs(t *testing.T) {
 	invalid := map[string]string{
 		"empty":          "",
@@ -200,5 +243,10 @@ func providerManifest(provider string) GenerationManifest {
 	value := validGenerationManifest()
 	value.SessionViews[0].Provider = provider
 	value.SessionLineages[0].Provider = provider
+	recordCount := uint64(1)
+	value.SessionIndexMeasurements = []SessionIndexMeasurement{{
+		Provider: provider, SessionID: value.SessionViews[0].SessionID, RecordCount: &recordCount,
+		Seen: 1, Indexed: 1,
+	}}
 	return value
 }
