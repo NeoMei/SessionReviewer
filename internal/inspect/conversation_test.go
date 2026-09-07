@@ -412,3 +412,50 @@ func TestConversationIgnoresUnrelatedFileContentsAndExcludesOpaqueMessages(t *te
 		}
 	}
 }
+
+func TestConversationQuarantinesInvalidTimestampWithoutLeakingPublicMetadata(t *testing.T) {
+	for _, timestamp := range []string{"/Users/private/secret", "sk-abcdefghijklmnopqrstuvwxyz1234567890", "", "2026-09-07T00:00:01Z /Users/private/secret"} {
+		t.Run(timestamp, func(t *testing.T) {
+			invalid := strings.Replace(visibleRecord("user", "", "untrusted timestamp question"), "2026-09-07T00:00:01Z", timestamp, 1)
+			invalid += strings.Replace(visibleRecord("assistant", "final_answer", "untrusted timestamp answer"), "2026-09-07T00:00:01Z", timestamp, 1)
+			fixture := newConversationFixture(t, visibleRecord("user", "", "real question")+invalid+visibleRecord("assistant", "commentary", "working"))
+			index, indexBody := readConversation(t, fixture.request)
+			if index.Total != 1 || index.Coverage.MalformedRecords != 2 || index.Coverage.Complete || index.TurnUnits[0].AnswerState != "partial" {
+				t.Fatalf("invalid timestamp altered grouping/coverage: %s", indexBody)
+			}
+			req := fixture.request
+			req.TurnUnitID = index.TurnUnits[0].TurnUnitID
+			req.Limit = 64
+			selected, body := readConversation(t, req)
+			if len(selected.Messages) != 2 {
+				t.Fatalf("untrusted timestamp message accepted: %s", body)
+			}
+			for _, secret := range []string{"/Users/private/secret", "sk-abcdefghijklmnopqrstuvwxyz1234567890", "untrusted timestamp"} {
+				if strings.Contains(string(indexBody), secret) || strings.Contains(string(body), secret) {
+					t.Fatalf("source metadata leaked into public output: %s", secret)
+				}
+			}
+		})
+	}
+}
+
+func TestConversationChannelOnlyPhasesPreserveAnswerState(t *testing.T) {
+	for _, test := range []struct{ channel, phase, state string }{{"commentary", "commentary", "partial"}, {"final", "final_answer", "answered"}, {"", "", "answered"}} {
+		t.Run(test.channel, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{"timestamp": "2026-09-07T00:00:01.123456789Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "channel": test.channel, "content": []any{map[string]string{"type": "output_text", "text": "visible reply"}}}})
+			fixture := newConversationFixture(t, visibleRecord("user", "", "question")+string(body)+"\n")
+			index, indexBody := readConversation(t, fixture.request)
+			if index.TurnUnits[0].AnswerState != test.state {
+				t.Fatalf("answer state ignores channel: %s", indexBody)
+			}
+			req := fixture.request
+			req.TurnUnitID = index.TurnUnits[0].TurnUnitID
+			req.Limit = 64
+			selected, raw := readConversation(t, req)
+			phase := selected.Messages[1].Phase
+			if test.phase == "" && phase != nil || test.phase != "" && (phase == nil || *phase != test.phase) {
+				t.Fatalf("normalized phase missing or incorrect: %s", raw)
+			}
+		})
+	}
+}

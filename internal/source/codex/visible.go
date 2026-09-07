@@ -298,6 +298,21 @@ func decodeVisibleRecord(raw []byte) (conversationchain.SourceMessage, bool, boo
 	if item.Type != "message" || (item.Role != conversationchain.RoleUser && item.Role != conversationchain.RoleAssistant) || (item.Phase != "" && item.Phase != "commentary" && item.Phase != "final_answer") || (item.Channel != "" && item.Channel != "commentary" && item.Channel != "final") || (item.Recipient != "" && item.Recipient != "all") {
 		return conversationchain.SourceMessage{}, false, false
 	}
+	// Timestamps are source metadata, not trusted display strings. Quarantine
+	// malformed visible records before they can populate public time fields.
+	if _, err := time.Parse(time.RFC3339Nano, env.Timestamp); err != nil {
+		return conversationchain.SourceMessage{}, false, true
+	}
+	// Older messages supply a visible channel instead of phase. Preserve that
+	// completion signal; only messages with neither use the legacy fallback.
+	if item.Phase == "" {
+		switch item.Channel {
+		case "commentary":
+			item.Phase = "commentary"
+		case "final":
+			item.Phase = "final_answer"
+		}
+	}
 	text := []string{}
 	for _, part := range item.Content {
 		if part.Type == "input_text" || part.Type == "output_text" {
