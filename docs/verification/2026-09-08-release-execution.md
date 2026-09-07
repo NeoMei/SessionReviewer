@@ -9,7 +9,7 @@ Authoritative spec is `docs/superpowers/specs/2026-09-04-obsidian-project-contex
 ## Execution queue
 
 - [ ] Recover current Codex tool envelopes and conservative exec wrappers; then bind visible Q/A and typed execution/verification into retained chains.
-- [ ] Before mixed-provider chain/search integration, remove obsolete Codex-only restrictions from generic memory contracts with unchanged hash/location/identity safeguards (`2026-09-08-provider-neutral-memory-contracts.md`). This does not activate an adapter.
+- [x] Before mixed-provider chain/search integration, remove obsolete Codex-only restrictions from generic memory contracts with unchanged hash/location/identity safeguards (`2026-09-08-provider-neutral-memory-contracts.md`). Reviewed at01218cb+cf81296; this does not activate an adapter.
 - [ ] Current-contract Claude/OpenCode adapter registration, authenticated source reads and provider parity (port reusable legacy Claude parser, not its obsolete architecture).
 - [ ] Authenticate current and historical answer snapshots in public source refs and fixed-argv drilldown (`2026-09-08-historical-turn-bindings.md`); no relabeling a historical answer as the current view.
 - [ ] Qualified milestone projection, five-part closure and authenticated answer/source/problem drilldown; preserve human changes.
@@ -64,3 +64,7 @@ Read-only actual first-Session diagnosis remains deliberately incomplete executi
 Provider-neutral contract implementation starts at33d4ccc. Source manager registration remains the capability boundary; removing a generic Codex literal does not constitute Claude/OpenCode support. No code was pushed or released; fresh GitHub check still lists0.4.2 as latest.
 
 Projection integration audit: `RenderMarkdownUpdate` currently authenticates only scan-identity carry and cannot yet accept new machine milestones. Public `ChainDependency` currently permits one view per provider/Session, unlike the planned private current/historical roots. These are explicit remaining integration requirements: generated deltas must prove preservation of pending human fields, and historical references must remain bound to their exact accepted evidence, never silently relabeled or combined under a fabricated digest.
+
+## Provider contract checkpoint
+
+Generic provider correction01218cb passed full Go, scoped vet, full plugin26files/381tests and independent review after correctioncf81296 added previously missing SessionIndexMeasurement provider fixture coverage. Re-review approved spec and quality with no remaining findings. Controller independently ran the entire memory package atcf81296, exit0 (0.716s), and diff check passed. This closes only generic contract neutrality; production Claude/OpenCode readers and registration remain open. Retained pure materializer is the next active task, followed by immutable chain CAS and scan/query wiring. GitHub fresh read still lists0.4.2; no push or release has occurred.
