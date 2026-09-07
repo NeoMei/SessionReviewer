@@ -45,7 +45,8 @@ export class ProjectEvolutionView extends ItemView {
     private readonly initialState: ViewState = defaultViewState(),
     private readonly saveState?: SaveViewState,
     initialV4States: unknown = {},
-    private readonly saveV4State?: (state: V4ViewState) => void | Promise<void>
+    private readonly saveV4State?: (state: V4ViewState) => void | Promise<void>,
+    private readonly loadV4State?: (projectId: string) => V4ViewState | undefined
   ) {
     super(leaf);
     this.currentState = initialState;
@@ -172,7 +173,7 @@ export class ProjectEvolutionView extends ItemView {
             ? (request) => this.runner!.getConversation(request)
             : undefined,
           eventPageCache: this.eventPageCache,
-          initialState: this.v4States[current.descriptor.projectId],
+          initialState: this.currentV4State(current.descriptor.projectId),
           saveState: (viewState) => {
             this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
             return this.saveV4State?.(viewState);
@@ -402,9 +403,13 @@ export class ProjectEvolutionView extends ItemView {
       this.selected = next;
       this.currentState = { ...this.currentState, projectId: next.projectId };
       void this.saveState?.(this.currentState);
-      if (next.format === "markdown-v4" && !(next.projectId in this.v4States)) {
-        this.v4States = { ...this.v4States, [next.projectId]: normalizeV4ViewState(undefined, next.projectId) };
-        void this.saveV4State?.(this.v4States[next.projectId]);
+      if (next.format === "markdown-v4") {
+        const current = this.loadV4State?.(next.projectId);
+        if (current) this.v4States = { ...this.v4States, [next.projectId]: current };
+        else if (!(next.projectId in this.v4States)) {
+          this.v4States = { ...this.v4States, [next.projectId]: normalizeV4ViewState(undefined, next.projectId) };
+          void this.saveV4State?.(this.v4States[next.projectId]);
+        }
       }
       this.lastReady = undefined;
       this.lastMarkdownReady = undefined;
@@ -462,6 +467,12 @@ export class ProjectEvolutionView extends ItemView {
     this.scanRecords = undefined;
     if (browser) browser.dispose?.();
     else records?.dispose();
+  }
+
+  private currentV4State(projectId: string): V4ViewState | undefined {
+    const current = this.loadV4State?.(projectId);
+    if (current) this.v4States = { ...this.v4States, [projectId]: current };
+    return current ?? this.v4States[projectId];
   }
 
   private resetEventCache(): void {

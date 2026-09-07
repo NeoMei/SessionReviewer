@@ -53,8 +53,16 @@ describe("plugin lifecycle", () => {
     pickerB.value = "project-b";
     pickerB.dispatchEvent(new Event("change"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    leafA.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="decisions"]')!.click();
     leafB.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="usage"]')!.click();
+    const pickerA = leafA.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
+    pickerA.value = "project-b";
+    pickerA.dispatchEvent(new Event("change"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(leafA.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
+    pickerA.value = "project-a";
+    pickerA.dispatchEvent(new Event("change"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    leafA.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="decisions"]')!.click();
     await new Promise((resolve) => setTimeout(resolve, 20));
     await leafA.onClose();
     await leafB.onClose();
@@ -79,12 +87,12 @@ describe("plugin lifecycle", () => {
     const restoredA = createReloaded!(new WorkspaceLeaf());
     Object.assign(restoredA, { app });
     await restoredA.onOpen();
-    expect(restoredA.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(restoredA.contentEl.querySelector('[data-v4-tab="decisions"]')?.getAttribute("aria-selected")).toBe("true");
     const restoredPicker = restoredA.contentEl.querySelector<HTMLSelectElement>('[aria-label="选择项目"]')!;
-    restoredPicker.value = "project-a";
+    restoredPicker.value = "project-b";
     restoredPicker.dispatchEvent(new Event("change"));
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(restoredA.contentEl.querySelector('[data-v4-tab="decisions"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(restoredA.contentEl.querySelector('[data-v4-tab="usage"]')?.getAttribute("aria-selected")).toBe("true");
     await restoredA.onClose();
   });
 

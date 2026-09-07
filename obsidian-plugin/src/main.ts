@@ -41,7 +41,7 @@ export default class SessionReviewerPlugin extends Plugin {
     }, this.v4ViewStates, async (v4ViewState) => {
       this.v4ViewStates = { ...this.v4ViewStates, [v4ViewState.projectId]: v4ViewState };
       await this.persist();
-    }));
+    }, (projectId) => this.v4ViewStates[projectId]));
     this.addRibbonIcon("history", "打开项目脉络", () => void this.activateView());
     this.addCommand({
       id: "open-project-evolution",
