@@ -40,8 +40,11 @@ describe("actual ProjectEvolutionView event recovery", () => {
       expect(repository.load).toHaveBeenCalledTimes(1);
       expect(view.contentEl.querySelector('[aria-label="选择项目"]')).not.toBeNull();
     } finally {
-      await view.onClose();
-      vi.useRealTimers();
+      try {
+        await view.onClose();
+      } finally {
+        vi.useRealTimers();
+      }
     }
   });
 
