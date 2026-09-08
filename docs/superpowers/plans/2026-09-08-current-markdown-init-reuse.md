@@ -25,6 +25,8 @@ Frozen Gate A inventory ruling: focused gate reproduced exactly two new producti
 
 ### Task 1: Reuse authenticated current-format identity without modifying its draft
 
+Status2026-09-09: COMPLETE for this bounded task, implementation02bf2bd and test correction307e5cc, independent spec/quality review and re-review approved with no open findings. FullGo5866/plugin473 and actual CLI no-write/draft-rescan checks pass; see execution queue and task ledger for exact gates. The steps below retain the original implementation checklist, not remaining product work. Fresh initialization and whole-product acceptance remain open.
+
 **Files:** Create `internal/reviewv4/markdown_projection.go`, `markdown_projection_test.go`; modify `internal/syncproject/format.go` and `format_test.go`, `internal/project/init.go` and `init_test.go`; add a focused real lifecycle test in `internal/cli/init_current_test.go`. Do not change `contextupdate` or fresh initialization seed behavior in this task.
 
 **Interfaces:** New pure type and helper:
