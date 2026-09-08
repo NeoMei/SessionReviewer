@@ -98,3 +98,7 @@ Retained builder task closed atfe0ab0c+b2c40c6+edbe8c4 after independent review 
 ## Additional publication recovery preflight
 
 Current publicationstate retains one `accepted-markdown-v1.json` receipt, not an immutable receipt per semantic operation. Candidate confirmation recovery cannot rely only on the latest receipt or current entity contents: a later scan/edit may replace the receipt and legitimately change the entity after publication succeeded but before private candidate finalization. The shared candidate/publication task must persist exact accepted-operation evidence or prevent subsequent publication until deterministic reconciliation, including restart tests that simulate a later scan. Do not infer acceptance merely from a matching title, source ref or generated entity ID. Keep this as an open cross-store requirement until the implementation and crash tests are reviewed.
+
+## Command attribution review round
+
+Implementation145d585 passed controller exact aggregate/no-execution regressions1.098s and full plugin check26files/381tests plus lint/types/build. Independent review found missing ordinary Go executing flags and absence of final post-amendment full Go evidence; original implementer is fixing both. No finding parked. Controller separate current pre-CAS race baseline `go test -race ./internal/memorystore ./internal/conversationchain -count=1` passed167.558s/1.644s; these packages were not being edited during the run. This is a baseline, not acceptance of the forthcoming chain storage integration.
