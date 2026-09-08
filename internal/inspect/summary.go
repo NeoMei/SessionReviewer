@@ -99,7 +99,7 @@ func reduceSessionSummary(ctx context.Context, input summaryInput) (SessionSumma
 		VerificationResults: makeSummaryBlock(verifications, 0),
 		Errors:              makeSummaryErrorBlock(errors),
 		UnresolvedQuestions: makeSummaryBlock(unresolved, 0),
-		Rules:               Rules{RuleID: "summary-rules", RuleVersion: "summary-typed-fact-text-v2", DependencyDigests: summaryDependencyDigests(input)},
+		Rules:               Rules{RuleID: "summary-rules", RuleVersion: "summary-typed-fact-text-v3", DependencyDigests: summaryDependencyDigests(input)},
 		Coverage:            coverageFromIndex(input.entry.Coverage),
 	}
 	if err := ValidateSummary(summary); err != nil {
@@ -162,12 +162,16 @@ func validatedRecoveredFailures(view memory.SessionView, revisions []memory.Obse
 		success, successFound := byID[record.DependencyRevisionIDs[1]]
 		identity := summaryRecoveryIdentity(failure)
 		expectedID, expectedSubject := summaryRecoveryRecordIdentity(failure.RevisionID, success.RevisionID, identity)
-		if !failureFound || !successFound || failure.Key.Sequence >= success.Key.Sequence || !summaryFailed(failure.Outcome) || !summarySucceeded(success.Outcome) || identity != summaryRecoveryIdentity(success) || identity.operation == "" || identity.component == "" || record.ID != expectedID || record.OccurredAt != success.Timestamp || record.Subject != expectedSubject || len(record.Fields) != 3 || record.Fields["operation"] != identity.operation || record.Fields["component"] != identity.component || record.Fields["outcome"] != "recovered" {
+		if !failureFound || !successFound || failure.Key.Sequence >= success.Key.Sequence || !summaryRecoveryOutcome(failure, summaryOutcomeFailure) || !summaryRecoveryOutcome(success, summaryOutcomeSuccess) || identity != summaryRecoveryIdentity(success) || identity.operation == "" || identity.component == "" || record.ID != expectedID || record.OccurredAt != success.Timestamp || record.Subject != expectedSubject || len(record.Fields) != 3 || record.Fields["operation"] != identity.operation || record.Fields["component"] != identity.component || record.Fields["outcome"] != "recovered" {
 			continue
 		}
 		result[failure.RevisionID] = struct{}{}
 	}
 	return result
+}
+
+func summaryRecoveryOutcome(fact memory.ObservationRevision, want summaryOutcome) bool {
+	return summaryTypedOutcome(fact, summaryTextMapping(fact)) == want
 }
 
 func summaryRecoveryIdentity(fact memory.ObservationRevision) summaryRecoveryKey {

@@ -121,6 +121,29 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	}
 }
 
+func TestSessionSummarySchemaRequiresNonemptyUniqueSources(t *testing.T) {
+	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-summary-v1.schema.json"))
+	summary := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-summary-v1.valid.json")).(map[string]any)
+	block := summary["key_operations"].(map[string]any)
+	block["total"], block["shown"] = json.Number("1"), json.Number("1")
+	block["coverage"] = map[string]any{
+		"seen": json.Number("1"), "indexed": json.Number("1"), "collapsed": json.Number("0"),
+		"unprojected": json.Number("0"), "undecodable": json.Number("0"), "truncated": json.Number("0"),
+	}
+	entry := map[string]any{
+		"occurred_at": "2026-09-08T00:00:00Z", "sequence": json.Number("1"), "revision_id": "revision-1",
+		"text": "safe", "source_revision_ids": []any{},
+	}
+	block["items"] = []any{entry}
+	if err := validateContractSchema(schema, summary, "$", schema); err == nil {
+		t.Fatal("summary schema accepted an empty source revision array")
+	}
+	entry["source_revision_ids"] = []any{"source-1", "source-1"}
+	if err := validateContractSchema(schema, summary, "$", schema); err == nil {
+		t.Fatal("summary schema accepted duplicate source revisions")
+	}
+}
+
 func TestV4SchemasBoundEveryPersistedIntegerToJavaScriptSafeMaximum(t *testing.T) {
 	names := []string{"review-presentation-v4", "machine-ledger-v4", "session-index-v1", "session-summary-v1", "session-event-page-v1", "agent-annotation-v1", "pricing-snapshot-v1", "pricing-supplement-v1", "conversation-chain-v1", "problem-map-candidate-v1"}
 	for _, name := range names {
@@ -533,6 +556,15 @@ func validateContractSchema(schema, value any, path string, root any) error {
 		}
 		if max, ok := s["maxItems"].(json.Number); ok && len(array) > int(numberInt(max)) {
 			return fmt.Errorf("%s: too many items", path)
+		}
+		if unique, ok := s["uniqueItems"].(bool); ok && unique {
+			for index := range array {
+				for previous := 0; previous < index; previous++ {
+					if reflect.DeepEqual(array[previous], array[index]) {
+						return fmt.Errorf("%s: duplicate item", path)
+					}
+				}
+			}
 		}
 		if items, ok := s["items"]; ok {
 			for index, child := range array {

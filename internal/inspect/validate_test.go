@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"testing"
@@ -107,6 +108,88 @@ func TestValidateSummaryRejectsInvalidItemsRulesAndSort(t *testing.T) {
 	s.PhaseBoundaries = Block{Total: 2, Shown: 2, Items: []Entry{{OccurredAt: "z", Sequence: 2, RevisionID: "revision-2", SourceRevisionIDs: []string{}}, {OccurredAt: "a", Sequence: 1, RevisionID: "revision-1", SourceRevisionIDs: []string{}}}, Coverage: Coverage{Seen: 2, Indexed: 2}}
 	if err := ValidateSummary(s); err == nil {
 		t.Fatal("accepted unstable summary item order")
+	}
+	s = minimumSummary()
+	s.PhaseBoundaries = Block{Total: 1, Shown: 1, Items: []Entry{{OccurredAt: "a", Sequence: 1, RevisionID: "revision-1", SourceRevisionIDs: []string{"source-1", "source-1"}}}, Coverage: Coverage{Seen: 1, Indexed: 1}}
+	if err := ValidateSummary(s); err == nil {
+		t.Fatal("accepted duplicate source revision IDs")
+	}
+}
+
+func TestValidateSummaryRequiresSourcesInEveryDisplayedBlock(t *testing.T) {
+	entry := Entry{OccurredAt: "2026-09-04T00:00:00Z", Sequence: 1, RevisionID: "revision-1", Text: "ok", SourceRevisionIDs: []string{}}
+	for _, name := range []string{"phase_boundaries", "key_operations", "verification_results", "errors", "unresolved_questions"} {
+		t.Run(name, func(t *testing.T) {
+			summary := minimumSummary()
+			setSummaryTestBlock(&summary, name, Block{Total: 1, Shown: 1, Coverage: Coverage{Seen: 1, Indexed: 1}, Items: []Entry{entry}})
+			if err := ValidateSummary(summary); err == nil {
+				t.Fatal("accepted displayed summary item without source revisions")
+			}
+		})
+	}
+}
+
+func TestValidateSummaryRequiresBlockProjectionCoverage(t *testing.T) {
+	valid := Block{
+		Total: 40, Shown: 32, Omitted: 8,
+		Coverage: Coverage{Seen: 40, Indexed: 32, Unprojected: 8},
+		Items:    make([]Entry, 32),
+	}
+	for index := range valid.Items {
+		valid.Items[index] = Entry{OccurredAt: "2026-09-04T00:00:00Z", Sequence: uint64(index + 1), RevisionID: fmt.Sprintf("revision-%02d", index+1), Text: "ok", SourceRevisionIDs: []string{fmt.Sprintf("source-%02d", index+1)}}
+	}
+	invalid := []struct {
+		name     string
+		coverage Coverage
+	}{
+		{name: "zero coverage", coverage: Coverage{}},
+		{name: "shifted buckets", coverage: Coverage{Seen: 40, Indexed: 31, Collapsed: 1, Unprojected: 8}},
+		{name: "collapsed omission", coverage: Coverage{Seen: 40, Indexed: 32, Collapsed: 8}},
+		{name: "undecodable omission", coverage: Coverage{Seen: 40, Indexed: 32, Undecodable: 8}},
+		{name: "truncated omission", coverage: Coverage{Seen: 40, Indexed: 32, Truncated: 8}},
+	}
+	for _, name := range []string{"phase_boundaries", "key_operations", "verification_results", "errors", "unresolved_questions"} {
+		t.Run(name, func(t *testing.T) {
+			for _, test := range invalid {
+				t.Run(test.name, func(t *testing.T) {
+					summary := minimumSummary()
+					block := valid
+					block.Coverage = test.coverage
+					setSummaryTestBlock(&summary, name, block)
+					if err := ValidateSummary(summary); err == nil {
+						t.Fatal("accepted block coverage that contradicts projection counts")
+					}
+				})
+			}
+			summary := minimumSummary()
+			setSummaryTestBlock(&summary, name, valid)
+			summary.Coverage = Coverage{Seen: 9, Indexed: 3, Unprojected: 2, Undecodable: 4}
+			if err := ValidateSummary(summary); err != nil {
+				t.Fatalf("valid capped block or independent top-level source gaps rejected: %v", err)
+			}
+		})
+	}
+	if err := ValidateSummary(minimumSummary()); err != nil {
+		t.Fatalf("valid zero blocks rejected: %v", err)
+	}
+}
+
+func setSummaryTestBlock(summary *SessionSummary, name string, block Block) {
+	switch name {
+	case "phase_boundaries":
+		summary.PhaseBoundaries = block
+	case "key_operations":
+		summary.KeyOperations = block
+	case "verification_results":
+		summary.VerificationResults = block
+	case "errors":
+		items := make([]ErrorEntry, len(block.Items))
+		for index, entry := range block.Items {
+			items[index] = ErrorEntry{Code: "observed_error", OccurredAt: entry.OccurredAt, Sequence: entry.Sequence, RevisionID: entry.RevisionID, Text: entry.Text, SourceRevisionIDs: entry.SourceRevisionIDs}
+		}
+		summary.Errors = ErrorBlock{Total: block.Total, Shown: block.Shown, Omitted: block.Omitted, Coverage: block.Coverage, Items: items}
+	case "unresolved_questions":
+		summary.UnresolvedQuestions = block
 	}
 }
 

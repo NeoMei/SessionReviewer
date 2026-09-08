@@ -138,7 +138,7 @@ func TestLoadSessionSummaryExcludesBookkeepingTypedOperations(t *testing.T) {
 	if got.Coverage != (Coverage{Seen: 5, Indexed: 3, Undecodable: 2}) {
 		t.Fatalf("accepted coverage changed: %+v", got.Coverage)
 	}
-	if got.Rules.RuleVersion != "summary-typed-fact-text-v2" {
+	if got.Rules.RuleVersion != "summary-typed-fact-text-v3" {
 		t.Fatalf("rule version=%q", got.Rules.RuleVersion)
 	}
 	if after := snapshotEventTree(t, fixture.dataRoot); !reflect.DeepEqual(before, after) {
@@ -318,6 +318,99 @@ func TestSessionSummaryReducerKeepsFailuresUnresolvedUntilExactRecovery(t *testi
 	if tampered.UnresolvedQuestions.Total != 3 {
 		t.Fatalf("tampered recovery link closed a failure: %+v", tampered.UnresolvedQuestions)
 	}
+	input.view.DerivedRecords[0].ID = recoveryID
+	input.view.DerivedRecords[0].DependencyRevisionIDs[0], input.view.DerivedRecords[0].DependencyRevisionIDs[1] = input.view.DerivedRecords[0].DependencyRevisionIDs[1], input.view.DerivedRecords[0].DependencyRevisionIDs[0]
+	tampered, err = reduceSessionSummary(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tampered.UnresolvedQuestions.Total != 3 {
+		t.Fatalf("reordered recovery dependencies closed a failure: %+v", tampered.UnresolvedQuestions)
+	}
+}
+
+func TestSessionSummaryRecoveryRequiresUnambiguousTypedOutcomes(t *testing.T) {
+	tests := []struct {
+		name            string
+		failureKind     string
+		failureOutcome  string
+		failureFields   map[string]string
+		successKind     string
+		successOutcome  string
+		successFields   map[string]string
+		wantUnresolved  uint64
+		wantSuccessText string
+	}{
+		{
+			name: "consistent supported recovery", failureKind: "verification", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "test", "exit_code": "1"},
+			successKind:   "verification", successOutcome: "passed",
+			successFields:  map[string]string{"component": "runtime", "status": "test", "exit_code": "0"},
+			wantUnresolved: 0, wantSuccessText: "通过",
+		},
+		{
+			name: "success conflicts with nonzero exit", failureKind: "verification", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "test", "exit_code": "1"},
+			successKind:   "verification", successOutcome: "passed",
+			successFields:  map[string]string{"component": "runtime", "status": "test", "exit_code": "1"},
+			wantUnresolved: 1, wantSuccessText: "结果冲突",
+		},
+		{
+			name: "failure conflicts with zero exit", failureKind: "verification", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "test", "exit_code": "0"},
+			successKind:   "verification", successOutcome: "passed",
+			successFields:  map[string]string{"component": "runtime", "status": "test", "exit_code": "0"},
+			wantUnresolved: 1, wantSuccessText: "通过",
+		},
+		{
+			name: "unknown success outcome", failureKind: "verification", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "test", "exit_code": "1"},
+			successKind:   "verification", successOutcome: "maybe",
+			successFields:  map[string]string{"component": "runtime", "status": "test", "exit_code": "0"},
+			wantUnresolved: 1, wantSuccessText: "结果未知",
+		},
+		{
+			name: "unknown success operation", failureKind: "verification", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "deploy", "exit_code": "1"},
+			successKind:   "verification", successOutcome: "passed",
+			successFields:  map[string]string{"component": "runtime", "status": "deploy", "exit_code": "0"},
+			wantUnresolved: 1, wantSuccessText: "结果未知",
+		},
+		{
+			name: "command started cannot recover", failureKind: "command", failureOutcome: "failed",
+			failureFields: map[string]string{"component": "runtime", "status": "command_started", "exit_code": "1"},
+			successKind:   "command", successOutcome: "passed",
+			successFields:  map[string]string{"component": "runtime", "status": "command_started", "exit_code": "0"},
+			wantUnresolved: 1, wantSuccessText: "结果未记录",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			failure := summaryTestRevision(t, 1, test.failureKind, test.failureOutcome, "failure", test.failureFields)
+			success := summaryTestRevision(t, 2, test.successKind, test.successOutcome, "success", test.successFields)
+			other := summaryTestRevision(t, 3, test.failureKind, "failed", "other exact failure", test.failureFields)
+			input := summaryTestInput([]memory.ObservationRevision{failure, success, other})
+			id, subject := summaryRecoveryRecordIdentity(failure.RevisionID, success.RevisionID, summaryRecoveryIdentity(failure))
+			input.view.DerivedRecords = []memory.DerivedRecord{{
+				ID: id, Kind: "recovery_link", Subject: subject, OccurredAt: success.Timestamp,
+				DependencyRevisionIDs: []string{failure.RevisionID, success.RevisionID}, RuleID: "matching-operation-component", RuleVersion: "session-view-v1",
+				Fields: map[string]string{"operation": summaryRecoveryIdentity(failure).operation, "component": "runtime", "outcome": "recovered"},
+			}}
+			got, err := reduceSessionSummary(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.UnresolvedQuestions.Total != test.wantUnresolved+1 {
+				t.Fatalf("unresolved=%d, want %d", got.UnresolvedQuestions.Total, test.wantUnresolved+1)
+			}
+			if !strings.Contains(summaryFactText(success), test.wantSuccessText) {
+				t.Fatalf("success text=%q, want %q", summaryFactText(success), test.wantSuccessText)
+			}
+			if got.UnresolvedQuestions.Items[len(got.UnresolvedQuestions.Items)-1].RevisionID != other.RevisionID {
+				t.Fatalf("recovery did not preserve exact failure identity: %+v", got.UnresolvedQuestions)
+			}
+		})
+	}
 }
 
 func TestSessionSummaryReducerIncludesOnlyDependencyClosedSessionPhases(t *testing.T) {
@@ -334,6 +427,27 @@ func TestSessionSummaryReducerIncludesOnlyDependencyClosedSessionPhases(t *testi
 	}
 	if got.PhaseBoundaries.Total != 1 || len(got.PhaseBoundaries.Items) != 1 || got.PhaseBoundaries.Items[0].RevisionID != "phase-selected" || !reflect.DeepEqual(got.PhaseBoundaries.Items[0].SourceRevisionIDs, []string{first.RevisionID, second.RevisionID}) {
 		t.Fatalf("phase boundaries=%+v", got.PhaseBoundaries)
+	}
+}
+
+func TestSessionSummaryReducerAccountsForUnprojectablePhaseRecords(t *testing.T) {
+	revisions := make([]memory.ObservationRevision, 65)
+	dependencies := make([]string, len(revisions))
+	for index := range revisions {
+		revisions[index] = summaryTestRevision(t, index+1, "release", "success", "release", nil)
+		dependencies[index] = revisions[index].RevisionID
+	}
+	input := summaryTestInput(revisions)
+	input.project.DerivedRecords = []memory.DerivedRecord{{
+		ID: "phase-too-many-sources", Kind: "phase_boundary", Subject: "bounded", OccurredAt: revisions[len(revisions)-1].Timestamp,
+		DependencyRevisionIDs: dependencies, RuleID: "structural-boundary", RuleVersion: "project-view-v1", Fields: map[string]string{"trigger": "release_change"},
+	}}
+	got, err := reduceSessionSummary(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PhaseBoundaries.Total != 1 || got.PhaseBoundaries.Shown != 0 || got.PhaseBoundaries.Omitted != 1 || got.PhaseBoundaries.Coverage != (Coverage{Seen: 1, Unprojected: 1}) || len(got.PhaseBoundaries.Items) != 0 {
+		t.Fatalf("unprojectable phase record was not accounted for: %+v", got.PhaseBoundaries)
 	}
 }
 

@@ -33,7 +33,7 @@ export function populatedSessionSummary(overrides: Parameters<typeof sessionSumm
   };
   fixture.key_operations = {
     total: 40, shown: 32, omitted: 8,
-    coverage: { seen: 40, indexed: 32, collapsed: 8, unprojected: 0, undecodable: 0, truncated: 0 },
+    coverage: { seen: 40, indexed: 32, collapsed: 0, unprojected: 8, undecodable: 0, truncated: 0 },
     items: Array.from({ length: 32 }, (_value, index) => summaryEntry(index + 1, index === 0 ? "<script>window.pwned = true</script>" : `关键操作 ${index + 1}`))
   };
   fixture.verification_results = {

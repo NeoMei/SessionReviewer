@@ -44,7 +44,7 @@ func validateIdentity(schemaVersion int, reader, project, provider, session, gen
 }
 
 func validateEntry(entry Entry) error {
-	if len(entry.OccurredAt) > 128 || entry.Sequence == 0 || entry.Sequence > maxWireInteger || !validID(entry.RevisionID) || len(entry.Text) > 512 || len(entry.SourceRevisionIDs) > 64 {
+	if len(entry.OccurredAt) > 128 || entry.Sequence == 0 || entry.Sequence > maxWireInteger || !validID(entry.RevisionID) || len(entry.Text) > 512 || len(entry.SourceRevisionIDs) == 0 || len(entry.SourceRevisionIDs) > 64 {
 		return errors.New("invalid summary entry")
 	}
 	seen := map[string]bool{}
@@ -57,8 +57,14 @@ func validateEntry(entry Entry) error {
 	return nil
 }
 
+func validSummaryBlockProjection(total, shown, omitted uint64, coverage Coverage, itemCount int) bool {
+	return total <= maxWireInteger && shown <= total && omitted == total-shown && uint64(itemCount) == shown && itemCount <= summaryItemLimit &&
+		validCoverage(coverage) && coverage.Seen == total && coverage.Indexed == shown && coverage.Unprojected == omitted &&
+		coverage.Collapsed == 0 && coverage.Undecodable == 0 && coverage.Truncated == 0
+}
+
 func validateBlock(block Block) error {
-	if block.Total > maxWireInteger || block.Shown > maxWireInteger || block.Omitted > maxWireInteger || block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
+	if !validSummaryBlockProjection(block.Total, block.Shown, block.Omitted, block.Coverage, len(block.Items)) {
 		return errors.New("summary block does not reconcile")
 	}
 	for _, entry := range block.Items {
@@ -73,7 +79,7 @@ func validateBlock(block Block) error {
 }
 
 func validateErrorBlock(block ErrorBlock) error {
-	if block.Total > maxWireInteger || block.Shown > maxWireInteger || block.Omitted > maxWireInteger || block.Shown > block.Total || block.Omitted != block.Total-block.Shown || uint64(len(block.Items)) != block.Shown || len(block.Items) > 32 || !validCoverage(block.Coverage) {
+	if !validSummaryBlockProjection(block.Total, block.Shown, block.Omitted, block.Coverage, len(block.Items)) {
 		return errors.New("summary error block does not reconcile")
 	}
 	entries := make([]Entry, len(block.Items))

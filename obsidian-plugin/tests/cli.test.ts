@@ -58,7 +58,8 @@ describe("CLI runner", () => {
   it.each([
     ["wrong project", { project_id: "project-other" }], ["wrong provider", { provider: "codex" }],
     ["wrong Session", { session_id: "session-other" }], ["wrong generation", { generation_id: "generation-old" }],
-    ["wrong digest", { session_view_digest: `sha256:${"2".repeat(64)}` }], ["unknown field", { surprise: true }]
+    ["wrong digest", { session_view_digest: `sha256:${"2".repeat(64)}` }], ["unknown field", { surprise: true }],
+    ["invalid summary block", { key_operations: { total: 1, shown: 1, omitted: 0, coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }, items: [{ occurred_at: "2026-09-08T00:00:00Z", sequence: 1, revision_id: "revision-1", text: "safe", source_revision_ids: [] }] } }]
   ])("rejects a summary response with %s using one localized recovery error", async (_label, patch) => {
     const payload = { ...sessionSummaryFixture(), ...patch };
     const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(payload), "/secret/stderr"));

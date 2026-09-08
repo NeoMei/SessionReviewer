@@ -1224,8 +1224,8 @@ function parseSummaryBlock(value: unknown, path: string): SessionSummaryBlockV1 
   const shown = integer(row.shown, `${path}.shown`);
   const omitted = integer(row.omitted, `${path}.omitted`);
   const items = boundedArray(row.items, `${path}.items`, 32);
-  if (shown > total || omitted !== total - shown || items.length !== shown) throw new Error(`${path} does not reconcile`);
-  parseCoverage(row.coverage, `${path}.coverage`);
+  const coverage = parseCoverage(row.coverage, `${path}.coverage`);
+  if (!summaryBlockProjectionReconciles(total, shown, omitted, coverage, items.length)) throw new Error(`${path} projection coverage does not reconcile`);
   const parsed = items.map((item, index) => parseSummaryEntry(item, `${path}.items[${index}]`));
   assertCanonicalOrder(parsed, compareSummaryEntry, `${path} items`);
   return row as unknown as SessionSummaryBlockV1;
@@ -1238,11 +1238,17 @@ function parseSummaryErrorBlock(value: unknown, path: string): SessionSummaryErr
   const shown = integer(row.shown, `${path}.shown`);
   const omitted = integer(row.omitted, `${path}.omitted`);
   const items = boundedArray(row.items, `${path}.items`, 32);
-  if (shown > total || omitted !== total - shown || items.length !== shown) throw new Error(`${path} does not reconcile`);
-  parseCoverage(row.coverage, `${path}.coverage`);
+  const coverage = parseCoverage(row.coverage, `${path}.coverage`);
+  if (!summaryBlockProjectionReconciles(total, shown, omitted, coverage, items.length)) throw new Error(`${path} projection coverage does not reconcile`);
   const parsed = items.map((item, index) => parseSummaryErrorEntry(item, `${path}.items[${index}]`));
   assertCanonicalOrder(parsed, compareSummaryEntry, `${path} items`);
   return row as unknown as SessionSummaryErrorBlockV1;
+}
+
+function summaryBlockProjectionReconciles(total: number, shown: number, omitted: number, coverage: CoverageV1, itemCount: number): boolean {
+  return shown <= total && omitted === total - shown && itemCount === shown && coverage.seen === total &&
+    coverage.indexed === shown && coverage.unprojected === omitted && coverage.collapsed === 0 &&
+    coverage.undecodable === 0 && coverage.truncated === 0;
 }
 
 function parseSummaryEntry(value: unknown, path: string): SessionSummaryEntryV1 {
@@ -1252,7 +1258,7 @@ function parseSummaryEntry(value: unknown, path: string): SessionSummaryEntryV1 
   positiveInteger(row.sequence, `${path}.sequence`);
   id(row.revision_id, `${path}.revision_id`);
   text(row.text, `${path}.text`, 512);
-  idArray(row.source_revision_ids, `${path}.source_revision_ids`, 64, true);
+  if (idArray(row.source_revision_ids, `${path}.source_revision_ids`, 64, true).length === 0) throw new Error(`${path}.source_revision_ids must not be empty`);
   return row as unknown as SessionSummaryEntryV1;
 }
 
@@ -1264,7 +1270,7 @@ function parseSummaryErrorEntry(value: unknown, path: string): SessionSummaryErr
   positiveInteger(row.sequence, `${path}.sequence`);
   id(row.revision_id, `${path}.revision_id`);
   text(row.text, `${path}.text`, 512);
-  idArray(row.source_revision_ids, `${path}.source_revision_ids`, 64, true);
+  if (idArray(row.source_revision_ids, `${path}.source_revision_ids`, 64, true).length === 0) throw new Error(`${path}.source_revision_ids must not be empty`);
   return row as unknown as SessionSummaryErrorEntryV1;
 }
 

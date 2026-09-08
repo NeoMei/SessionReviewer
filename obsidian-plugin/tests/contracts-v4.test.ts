@@ -426,6 +426,57 @@ describe("strict JSON boundary", () => {
 });
 
 describe("session contracts", () => {
+  it("requires exact provenance and projection coverage in all summary blocks", async () => {
+    const base = await fixtureObject("session-summary-v1.valid.json");
+    const zeroCoverage = { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 };
+    const entry = { occurred_at: "2026-09-08T00:00:00Z", sequence: 1, revision_id: "revision-1", text: "safe", source_revision_ids: ["revision-1"] };
+    const errorEntry = { ...entry, code: "observed_error" };
+    const populated = clone(base);
+    for (const name of ["phase_boundaries", "key_operations", "verification_results", "unresolved_questions"] as const) {
+      populated[name] = { total: 1, shown: 1, omitted: 0, coverage: { ...zeroCoverage, seen: 1, indexed: 1 }, items: [clone(entry)] };
+    }
+    populated.errors = { total: 1, shown: 1, omitted: 0, coverage: { ...zeroCoverage, seen: 1, indexed: 1 }, items: [errorEntry] };
+    expect(() => parseSessionSummaryV1(JSON.stringify(populated))).not.toThrow();
+
+    for (const name of ["phase_boundaries", "key_operations", "verification_results", "errors", "unresolved_questions"] as const) {
+      const missingSource = clone(populated) as Record<typeof name, { items: Array<{ source_revision_ids: string[] }> }>;
+      missingSource[name].items[0].source_revision_ids = [];
+      expect(() => parseSessionSummaryV1(JSON.stringify(missingSource))).toThrow(/source|revision|empty/i);
+
+      const duplicateSource = clone(populated) as Record<typeof name, { items: Array<{ source_revision_ids: string[] }> }>;
+      duplicateSource[name].items[0].source_revision_ids = ["revision-1", "revision-1"];
+      expect(() => parseSessionSummaryV1(JSON.stringify(duplicateSource))).toThrow(/source|revision|duplicate/i);
+    }
+
+    const capped = clone(base);
+    for (const name of ["phase_boundaries", "key_operations", "verification_results", "errors", "unresolved_questions"] as const) {
+      capped[name] = {
+        total: 40, shown: 32, omitted: 8,
+        coverage: { ...zeroCoverage, seen: 40, indexed: 32, unprojected: 8 },
+        items: Array.from({ length: 32 }, (_value, index) => ({
+          ...entry, ...(name === "errors" ? { code: "observed_error" } : {}), sequence: index + 1,
+          revision_id: `revision-${index + 1}`, source_revision_ids: [`source-${index + 1}`]
+        }))
+      };
+    }
+    capped.coverage = { ...zeroCoverage, seen: 9, indexed: 3, unprojected: 2, undecodable: 4 };
+    expect(() => parseSessionSummaryV1(JSON.stringify(capped))).not.toThrow();
+
+    for (const name of ["phase_boundaries", "key_operations", "verification_results", "errors", "unresolved_questions"] as const) {
+      for (const coverage of [
+        zeroCoverage,
+        { ...zeroCoverage, seen: 40, indexed: 31, collapsed: 1, unprojected: 8 },
+        { ...zeroCoverage, seen: 40, indexed: 32, collapsed: 8 },
+        { ...zeroCoverage, seen: 40, indexed: 32, undecodable: 8 },
+        { ...zeroCoverage, seen: 40, indexed: 32, truncated: 8 }
+      ]) {
+        const malformed = clone(capped) as Record<typeof name, { coverage: JsonObject }>;
+        malformed[name].coverage = coverage;
+        expect(() => parseSessionSummaryV1(JSON.stringify(malformed))).toThrow(/coverage|reconcile|projection/i);
+      }
+    }
+  });
+
   it("rejects counter addition overflow without relying on a wrapped sum", async () => {
     const summary = await fixtureObject("session-summary-v1.valid.json") as { coverage: JsonObject };
     summary.coverage.seen = 0;
