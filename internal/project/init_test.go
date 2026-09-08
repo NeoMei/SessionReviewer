@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -247,8 +248,9 @@ func TestCurrentMarkdownInitializeDetectsConcurrentIndexCreation(t *testing.T) {
 
 func TestCurrentMarkdownInitializeRejectsInvalidCurrentStateWithoutFallback(t *testing.T) {
 	for _, test := range []struct {
-		name   string
-		mutate func(t *testing.T, fixture currentMarkdownInitializationFixture)
+		name      string
+		wantError string
+		mutate    func(t *testing.T, fixture currentMarkdownInitializationFixture)
 	}{
 		{name: "mapped project mismatch", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
 			saveCurrentInitializationMapping(t, fixture, config.ProjectMapping{ID: "project-other", Root: fixture.project, VaultRoot: fixture.vault, VaultReviewPath: fixture.vaultReviewPath, VaultCaseMode: platform.CaseSensitive})
@@ -279,15 +281,26 @@ func TestCurrentMarkdownInitializeRejectsInvalidCurrentStateWithoutFallback(t *t
 				t.Fatal(err)
 			}
 		}},
-		{name: "unsupported minimum version", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+		{name: "unsupported minimum version", wantError: "invalid machine ledger metadata", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
 			path := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
-			ledger := mustReadProjectFixture(t, path)
-			changed := bytes.Replace(ledger, []byte(`"minimum_reader_version":"0.4.1"`), []byte(`"minimum_reader_version":"9.9.9"`), 1)
-			if bytes.Equal(changed, ledger) {
-				t.Fatal("fixture minimum version was not changed")
+			ledger, err := reviewv4.DecodeLedger(mustReadProjectFixture(t, path))
+			if err != nil {
+				t.Fatalf("positive ledger control: %v", err)
 			}
-			ledger = changed
-			if err := os.WriteFile(path, ledger, 0o600); err != nil {
+			ledger.MinimumReaderVersion = "9.9.9"
+			ledger.SyncHashes.LedgerSHA256 = reviewv4.CanonicalLedgerSHA256(ledger)
+			body, err := json.Marshal(ledger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var encoded reviewv4.MachineLedger
+			if err := json.Unmarshal(body, &encoded); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := reviewv4.CanonicalLedgerSHA256(encoded), encoded.SyncHashes.LedgerSHA256; got != want {
+				t.Fatalf("unsupported capability fixture self digest=%q want=%q", want, got)
+			}
+			if err := os.WriteFile(path, append(body, '\n'), 0o600); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -311,6 +324,9 @@ func TestCurrentMarkdownInitializeRejectsInvalidCurrentStateWithoutFallback(t *t
 			_, err := Initialize(InitOptions{ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{}})
 			if err == nil || !errors.Is(err, ErrConflictingInitializationIdentity) {
 				t.Fatalf("err=%v", err)
+			}
+			if test.wantError != "" && !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("err=%v want diagnostic containing %q", err, test.wantError)
 			}
 			if after := snapshotCurrentMarkdownPublicAllowMissing(t, fixture); !reflect.DeepEqual(after, before) {
 				t.Fatal("invalid current state was overwritten or repaired")
