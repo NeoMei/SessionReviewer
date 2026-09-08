@@ -4,6 +4,7 @@ import { SessionInspectError, type CliRunner } from "../src/cli/runner";
 import type { SessionEventPageV1 } from "../src/contracts/review-v4";
 import type { Snapshot } from "../src/data/repository";
 import { ProjectEvolutionView } from "../src/view/project-view";
+import { syncStatusFixture } from "./fixtures/sync-status";
 
 const DIGEST_1 = `sha256:${"1".repeat(64)}`;
 const DIGEST_2 = `sha256:${"2".repeat(64)}`;
@@ -25,8 +26,25 @@ function page(request: { expectedGenerationId: string; expectedSessionViewDigest
 
 async function settle(): Promise<void> { await new Promise((resolve) => setTimeout(resolve, 0)); }
 function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+function readyStatus(): Record<string, unknown> { return syncStatusFixture(project.projectId); }
 
 describe("actual ProjectEvolutionView event recovery", () => {
+  it("does not schedule a settling refresh for a ready CLI status", async () => {
+    vi.useFakeTimers();
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValue(snapshot("generation-1", 100, DIGEST_1)), watch: vi.fn().mockReturnValue(vi.fn()) };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()) } as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    try {
+      await view.onOpen();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(repository.load).toHaveBeenCalledTimes(1);
+      expect(view.contentEl.querySelector('[aria-label="选择项目"]')).not.toBeNull();
+    } finally {
+      await view.onClose();
+      vi.useRealTimers();
+    }
+  });
+
   it("refreshes once after stale navigation and reanchors the same namespaced Session with clamping", async () => {
     const first = snapshot("generation-1", 2_438, DIGEST_1);
     const second = snapshot("generation-2", 1_000, DIGEST_2);
@@ -35,7 +53,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       if (request.expectedGenerationId === "generation-1" && request.anchor === 1_220) return Promise.reject(new SessionInspectError("stale_cursor"));
       return Promise.resolve(page(request, request.expectedGenerationId === "generation-1" ? 2_438 : 1_000));
     });
-    const runner = { status: vi.fn().mockResolvedValue({}), getSessionEvents };
+    const runner = { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents };
     const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "session-long", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
@@ -54,7 +72,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
   it("does not loop after a second stale response", async () => {
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockResolvedValueOnce(snapshot("generation-2", 100, DIGEST_2)), watch: vi.fn().mockReturnValue(vi.fn()) };
     const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => request.anchor === undefined ? Promise.resolve(page(request, 100)) : Promise.reject(new SessionInspectError("stale_cursor")));
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
@@ -69,7 +87,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
   it("recovers the ordinary default Session even when its implicit selection was not persisted", async () => {
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockResolvedValueOnce(snapshot("generation-2", 100, DIGEST_2)), watch: vi.fn().mockReturnValue(vi.fn()) };
     const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => request.expectedGenerationId === "generation-1" && request.anchor === 50 ? Promise.reject(new SessionInspectError("generation_mismatch")) : Promise.resolve(page(request, 100)));
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen();
     view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click(); await settle();
@@ -95,7 +113,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
       return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
     });
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen();
     view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click(); await settle();
@@ -134,7 +152,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
     });
     const saveV4State = vi.fn();
     const initial = { "project-p": { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null } } };
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, initial, saveV4State);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, initial, saveV4State);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     view.contentEl.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click(); await settle();
@@ -169,7 +187,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
       return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
     });
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen();
     view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click(); await settle();
@@ -202,7 +220,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
     });
     let shared = { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null as null | { provider: string; sessionId: string } } };
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
@@ -229,7 +247,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
     });
     let shared = { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null as null | { provider: string; sessionId: string } } };
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
@@ -252,7 +270,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
       if (request.cursor === "next") return Promise.reject(new SessionInspectError("stale_cursor"));
       return Promise.resolve(page(request, 2_438));
     });
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const jump = async (ordinal: string) => {
@@ -281,7 +299,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
     removed.state.index.coverage = { total: 0, complete: 0, partial: 0, error: 0, unprocessed: 0, source_available: 0, source_unavailable: 0, started_at_known: 0, ended_at_known: 0, usage_known: 0 };
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockResolvedValueOnce(removed), watch: vi.fn().mockReturnValue(vi.fn()) };
     const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => request.anchor === undefined ? Promise.resolve(page(request, 100)) : Promise.reject(new SessionInspectError("stale_cursor")));
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
@@ -297,7 +315,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
     const pending = deferred<Extract<Snapshot, { kind: "markdown-v4" }>>();
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockReturnValueOnce(pending.promise), watch: vi.fn().mockReturnValue(vi.fn()) };
     const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => request.anchor === undefined ? Promise.resolve(page(request, 100)) : Promise.reject(new SessionInspectError("stale_cursor")));
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const jump = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
@@ -315,7 +333,7 @@ describe("actual ProjectEvolutionView event recovery", () => {
   it("keeps the authenticated page readable when repository refresh rejects", async () => {
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockRejectedValueOnce(new Error("private repository failure")), watch: vi.fn().mockReturnValue(vi.fn()) };
     const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => request.anchor === undefined ? Promise.resolve(page(request, 100)) : Promise.reject(new SessionInspectError("stale_cursor")));
-    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus()), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
     Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
     await view.onOpen(); await settle();
     const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
