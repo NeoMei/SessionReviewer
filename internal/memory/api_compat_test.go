@@ -184,6 +184,121 @@ func TestHistoricalSourceTurnSchemaCapabilities(t *testing.T) {
 	}
 }
 
+func TestHistoricalSourceTurnSchemaCapabilityReciprocity(t *testing.T) {
+	reviewSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "review-presentation-v4.schema.json"))
+	legacyView := "sha256:" + strings.Repeat("1", 64)
+	historicalView := "sha256:" + strings.Repeat("2", 64)
+
+	newReview := func(reader, writer string, dependencies []any) map[string]any {
+		review := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "review-presentation-v4.valid.json")).(map[string]any)
+		review["minimum_reader_version"], review["minimum_writer_version"] = reader, writer
+		review["chain_dependencies"] = dependencies
+		return review
+	}
+	dependency := func(sessionID, view, dependency string) map[string]any {
+		return map[string]any{
+			"provider": "codex", "session_id": sessionID, "session_view_digest": view,
+			"dependency_digest": dependency, "turn_unit_ids": []any{"turn-1"},
+		}
+	}
+	legacyDependency := dependency("session-1", legacyView, "sha256:"+strings.Repeat("3", 64))
+	historicalDependency := dependency("session-1", historicalView, "sha256:"+strings.Repeat("4", 64))
+
+	t.Run("multi-view unqualified data requires 0.4.3", func(t *testing.T) {
+		dependencies := []any{legacyDependency, historicalDependency}
+		legacyFloor := newReview("0.4.0", "0.4.0", dependencies)
+		if err := validateContractSchema(reviewSchema, legacyFloor, "$", reviewSchema); err != nil {
+			t.Fatalf("structural schema rejected sound multi-view shape at its structural 0.4.0 lower bound: %v", err)
+		}
+		historicalFloor := newReview("0.4.3", "0.4.3", dependencies)
+		if err := validateContractSchema(reviewSchema, historicalFloor, "$", reviewSchema); err != nil {
+			t.Fatalf("schema rejected valid same-provider/session multi-view data at 0.4.3: %v", err)
+		}
+	})
+
+	t.Run("zero and single-view unqualified data keep 0.4.0", func(t *testing.T) {
+		for name, dependencies := range map[string][]any{"zero": {}, "single": {legacyDependency}} {
+			t.Run(name, func(t *testing.T) {
+				legacyFloor := newReview("0.4.0", "0.4.0", dependencies)
+				if err := validateContractSchema(reviewSchema, legacyFloor, "$", reviewSchema); err != nil {
+					t.Fatalf("legacy data rejected at 0.4.0: schema=%v", err)
+				}
+				uplift := newReview("0.4.3", "0.4.3", dependencies)
+				if err := validateContractSchema(reviewSchema, uplift, "$", reviewSchema); err == nil {
+					t.Fatal("review schema accepted unqualified 0.4.3 with fewer than two dependencies")
+				}
+			})
+		}
+	})
+
+	t.Run("distinct sessions remain legacy despite two structural dependencies", func(t *testing.T) {
+		dependencies := []any{legacyDependency, dependency("session-2", historicalView, "sha256:"+strings.Repeat("4", 64))}
+		legacyFloor := newReview("0.4.0", "0.4.0", dependencies)
+		if err := validateContractSchema(reviewSchema, legacyFloor, "$", reviewSchema); err != nil {
+			t.Fatalf("distinct-session legacy data rejected at 0.4.0: schema=%v", err)
+		}
+		uplift := newReview("0.4.3", "0.4.3", dependencies)
+		if err := validateContractSchema(reviewSchema, uplift, "$", reviewSchema); err != nil {
+			t.Fatalf("structural schema must leave arbitrary cross-item grouping to runtime: %v", err)
+		}
+	})
+
+	ledgerSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "machine-ledger-v4.schema.json"))
+	newLedger := func(review map[string]any, reader, writer string) map[string]any {
+		ledger := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "machine-ledger-v4.valid.json")).(map[string]any)
+		ledger["minimum_reader_version"], ledger["minimum_writer_version"] = reader, writer
+		ledger["document_projection"] = map[string]any{
+			"schema_version": json.Number("1"), "format": "review-markdown-v1", "presentation_base": review,
+		}
+		return ledger
+	}
+
+	t.Run("ledger propagates multi-view requirement", func(t *testing.T) {
+		dependencies := []any{legacyDependency, historicalDependency}
+		legacyReview := newReview("0.4.0", "0.4.0", dependencies)
+		legacyLedger := newLedger(legacyReview, "0.4.1", "0.4.1")
+		if err := validateContractSchema(ledgerSchema, legacyLedger, "$", ledgerSchema); err != nil {
+			t.Fatalf("ledger structural schema rejected sound nested lower-bound shape: %v", err)
+		}
+		historicalReview := newReview("0.4.3", "0.4.3", dependencies)
+		historicalLedger := newLedger(historicalReview, "0.4.3", "0.4.3")
+		if err := validateContractSchema(ledgerSchema, historicalLedger, "$", ledgerSchema); err != nil {
+			t.Fatalf("valid nested historical ledger rejected: schema=%v", err)
+		}
+	})
+
+	t.Run("ledger keeps zero and single dependency projections at 0.4.1", func(t *testing.T) {
+		for name, dependencies := range map[string][]any{"zero": {}, "single": {legacyDependency}} {
+			t.Run(name, func(t *testing.T) {
+				legacyReview := newReview("0.4.0", "0.4.0", dependencies)
+				legacyLedger := newLedger(legacyReview, "0.4.1", "0.4.1")
+				if err := validateContractSchema(ledgerSchema, legacyLedger, "$", ledgerSchema); err != nil {
+					t.Fatalf("legacy nested projection rejected: schema=%v", err)
+				}
+				upliftReview := newReview("0.4.3", "0.4.3", dependencies)
+				upliftLedger := newLedger(upliftReview, "0.4.3", "0.4.3")
+				if err := validateContractSchema(ledgerSchema, upliftLedger, "$", ledgerSchema); err == nil {
+					t.Fatal("ledger schema accepted unqualified 0.4.3 projection with fewer than two dependencies")
+				}
+			})
+		}
+	})
+
+	t.Run("ledger leaves distinct-session grouping to runtime", func(t *testing.T) {
+		dependencies := []any{legacyDependency, dependency("session-2", historicalView, "sha256:"+strings.Repeat("4", 64))}
+		legacyReview := newReview("0.4.0", "0.4.0", dependencies)
+		legacyLedger := newLedger(legacyReview, "0.4.1", "0.4.1")
+		if err := validateContractSchema(ledgerSchema, legacyLedger, "$", ledgerSchema); err != nil {
+			t.Fatalf("distinct-session legacy ledger rejected: %v", err)
+		}
+		upliftReview := newReview("0.4.3", "0.4.3", dependencies)
+		upliftLedger := newLedger(upliftReview, "0.4.3", "0.4.3")
+		if err := validateContractSchema(ledgerSchema, upliftLedger, "$", ledgerSchema); err != nil {
+			t.Fatalf("structural ledger schema must leave arbitrary cross-item grouping to runtime: %v", err)
+		}
+	})
+}
+
 func TestSessionSummarySchemaRequiresNonemptyUniqueSources(t *testing.T) {
 	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-summary-v1.schema.json"))
 	summary := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-summary-v1.valid.json")).(map[string]any)
@@ -634,6 +749,18 @@ func validateContractSchema(schema, value any, path string, root any) error {
 				if err := validateContractSchema(items, child, fmt.Sprintf("%s[%d]", path, index), root); err != nil {
 					return err
 				}
+			}
+		}
+		if contains, ok := s["contains"]; ok {
+			matched := false
+			for index, child := range array {
+				if validateContractSchema(contains, child, fmt.Sprintf("%s[%d]", path, index), root) == nil {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("%s: contains did not match", path)
 			}
 		}
 	}

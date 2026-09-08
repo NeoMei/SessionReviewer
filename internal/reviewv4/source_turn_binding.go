@@ -26,6 +26,9 @@ type sourceTurnMatch struct {
 }
 
 func newSourceTurnBindingIndex(dependencies []ChainDependency) (sourceTurnBindingIndex, error) {
+	if len(dependencies) > 65536 {
+		return sourceTurnBindingIndex{}, errors.New("chain dependencies exceed array limit")
+	}
 	index := sourceTurnBindingIndex{
 		byTurn:  make(map[string]sourceTurnMatch),
 		byExact: make(map[string]ChainDependency),

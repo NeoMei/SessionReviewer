@@ -130,6 +130,45 @@ describe("historical source-turn bindings", () => {
     expect(JSON.stringify(legacy)).not.toContain("session_view_digest");
   });
 
+  it("derives exact presentation and ledger floors from same-session views, not dependency count", async () => {
+    const base = await fixtureObject("review-presentation-v4.valid.json");
+    const first = { provider: "codex", session_id: "session-1", session_view_digest: oldView, dependency_digest: `sha256:${"3".repeat(64)}`, turn_unit_ids: ["turn-a"] };
+    const sameSession = { provider: "codex", session_id: "session-1", session_view_digest: newView, dependency_digest: `sha256:${"4".repeat(64)}`, turn_unit_ids: ["turn-a"] };
+    const distinctSession = { ...sameSession, session_id: "session-2" };
+    const cases = [
+      { name: "zero dependencies legacy", dependencies: [], inner: "0.4.0", outer: "0.4.1", valid: true },
+      { name: "zero dependencies uplift", dependencies: [], inner: "0.4.3", outer: "0.4.3", valid: false },
+      { name: "single dependency legacy", dependencies: [first], inner: "0.4.0", outer: "0.4.1", valid: true },
+      { name: "single dependency uplift", dependencies: [first], inner: "0.4.3", outer: "0.4.3", valid: false },
+      { name: "same session multi-view old floor", dependencies: [first, sameSession], inner: "0.4.0", outer: "0.4.1", valid: false },
+      { name: "same session multi-view historical floor", dependencies: [first, sameSession], inner: "0.4.3", outer: "0.4.3", valid: true },
+      { name: "distinct sessions legacy", dependencies: [first, distinctSession], inner: "0.4.0", outer: "0.4.1", valid: true },
+      { name: "distinct sessions uplift", dependencies: [first, distinctSession], inner: "0.4.3", outer: "0.4.3", valid: false }
+    ] as const;
+
+    for (const testCase of cases) {
+      const review = clone(base);
+      review.minimum_reader_version = testCase.inner;
+      review.minimum_writer_version = testCase.inner;
+      review.chain_dependencies = testCase.dependencies;
+      const parseReview = () => parseReviewPresentationV4(JSON.stringify(review));
+      if (testCase.valid) expect(parseReview, testCase.name).not.toThrow();
+      else expect(parseReview, testCase.name).toThrow(/capability|version/i);
+
+      const ledger = await fixtureObject("machine-ledger-v4.valid.json");
+      review.project_id = ledger.project_id;
+      review.generation_id = ledger.generation_id;
+      review.project_view_digest = ledger.project_view_digest;
+      review.revision = ledger.accepted_revision;
+      ledger.minimum_reader_version = testCase.outer;
+      ledger.minimum_writer_version = testCase.outer;
+      ledger.document_projection = { schema_version: 1, format: "review-markdown-v1", presentation_base: review };
+      const parseLedger = () => parseMachineLedgerV4(JSON.stringify(ledger));
+      if (testCase.valid) expect(parseLedger, testCase.name).not.toThrow();
+      else expect(parseLedger, testCase.name).toThrow(/capability|version|metadata/i);
+    }
+  });
+
   it("gives qualified candidates a reader-only 0.4.3 floor", async () => {
     const store = await fixtureObject("problem-map-candidate-v1.valid.json");
     store.minimum_reader_version = "0.4.3";

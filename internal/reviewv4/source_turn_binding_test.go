@@ -132,6 +132,59 @@ func TestValidatePresentationDependencyTupleAndConditionalLegacyCapability(t *te
 	}
 }
 
+func TestHistoricalCapabilityUsesExactSessionViewGroupingAtRuntime(t *testing.T) {
+	oldView := "sha256:" + strings.Repeat("1", 64)
+	newView := "sha256:" + strings.Repeat("2", 64)
+	first := ChainDependency{
+		Provider: "codex", SessionID: "session-1", SessionViewDigest: oldView,
+		DependencyDigest: "sha256:" + strings.Repeat("3", 64), TurnUnitIDs: []string{"turn-a"},
+	}
+	sameSession := ChainDependency{
+		Provider: "codex", SessionID: "session-1", SessionViewDigest: newView,
+		DependencyDigest: "sha256:" + strings.Repeat("4", 64), TurnUnitIDs: []string{"turn-a"},
+	}
+	distinctSession := sameSession
+	distinctSession.SessionID = "session-2"
+
+	tests := []struct {
+		name         string
+		dependencies []ChainDependency
+		innerVersion string
+		outerVersion string
+		wantValid    bool
+	}{
+		{name: "zero dependencies legacy", dependencies: []ChainDependency{}, innerVersion: "0.4.0", outerVersion: "0.4.1", wantValid: true},
+		{name: "zero dependencies uplift", dependencies: []ChainDependency{}, innerVersion: "0.4.3", outerVersion: "0.4.3"},
+		{name: "single dependency legacy", dependencies: []ChainDependency{first}, innerVersion: "0.4.0", outerVersion: "0.4.1", wantValid: true},
+		{name: "single dependency uplift", dependencies: []ChainDependency{first}, innerVersion: "0.4.3", outerVersion: "0.4.3"},
+		{name: "same session multi-view old floor", dependencies: []ChainDependency{first, sameSession}, innerVersion: "0.4.0", outerVersion: "0.4.1"},
+		{name: "same session multi-view historical floor", dependencies: []ChainDependency{first, sameSession}, innerVersion: "0.4.3", outerVersion: "0.4.3", wantValid: true},
+		{name: "distinct sessions legacy", dependencies: []ChainDependency{first, distinctSession}, innerVersion: "0.4.0", outerVersion: "0.4.1", wantValid: true},
+		{name: "distinct sessions uplift", dependencies: []ChainDependency{first, distinctSession}, innerVersion: "0.4.3", outerVersion: "0.4.3"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			presentation := minimumPresentation()
+			presentation.MinimumReaderVersion = test.innerVersion
+			presentation.MinimumWriterVersion = test.innerVersion
+			presentation.ChainDependencies = append([]ChainDependency(nil), test.dependencies...)
+			if err := ValidatePresentation(presentation); (err == nil) != test.wantValid {
+				t.Fatalf("presentation validity = %v, want %v (err=%v)", err == nil, test.wantValid, err)
+			}
+
+			ledger := projectedLedger(t)
+			ledger.MinimumReaderVersion = test.outerVersion
+			ledger.MinimumWriterVersion = test.outerVersion
+			ledger.DocumentProjection.PresentationBase.MinimumReaderVersion = test.innerVersion
+			ledger.DocumentProjection.PresentationBase.MinimumWriterVersion = test.innerVersion
+			ledger.DocumentProjection.PresentationBase.ChainDependencies = append([]ChainDependency(nil), test.dependencies...)
+			if err := ValidateLedger(ledger); (err == nil) != test.wantValid {
+				t.Fatalf("ledger validity = %v, want %v (err=%v)", err == nil, test.wantValid, err)
+			}
+		})
+	}
+}
+
 func TestDecodePresentationStrictlyAcceptsOnlyTheOptionalQualifierOnce(t *testing.T) {
 	presentation := historicalPresentation("sha256:" + strings.Repeat("1", 64))
 	body, err := json.Marshal(presentation)
@@ -276,6 +329,23 @@ func TestResolveSourceTurnDependencyRejectsInvalidPublicReferenceShape(t *testin
 	}}
 	if _, err := ResolveSourceTurnDependency(invalid, matchingInvalidDependency); err == nil {
 		t.Fatal("resolver accepted an invalid source-turn reference because an invalid dependency happened to match")
+	}
+}
+
+func TestResolveSourceTurnDependencyRejectsMoreThanMaximumDependencies(t *testing.T) {
+	dependencies := make([]ChainDependency, 65537)
+	for index := range dependencies {
+		dependencies[index] = ChainDependency{
+			Provider:          "codex",
+			SessionID:         fmt.Sprintf("session-%d", index),
+			SessionViewDigest: fmt.Sprintf("sha256:%064x", index+1),
+			DependencyDigest:  fmt.Sprintf("sha256:%064x", index+65538),
+			TurnUnitIDs:       []string{"turn-a"},
+		}
+	}
+	ref := SourceTurnRef{Provider: "codex", SessionID: "session-0", TurnUnitID: "turn-a"}
+	if _, err := ResolveSourceTurnDependency(ref, dependencies); err == nil {
+		t.Fatal("public resolver accepted more than 65,536 chain dependencies")
 	}
 }
 
