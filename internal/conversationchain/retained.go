@@ -3,7 +3,6 @@ package conversationchain
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -53,7 +52,12 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 		return Document{}, report, err
 	}
 
-	visibleTurns, visibleCoverage := MaterializeVisible(input.View.Provider, input.View.SessionID, input.View.SourceIdentity, input.Messages)
+	sanitizedMessages := make([]SourceMessage, len(input.Messages))
+	copy(sanitizedMessages, input.Messages)
+	for index := range sanitizedMessages {
+		sanitizedMessages[index].Text = sanitizeRetainedText(sanitizedMessages[index].Text)
+	}
+	visibleTurns, visibleCoverage := MaterializeVisible(input.View.Provider, input.View.SessionID, input.View.SourceIdentity, sanitizedMessages)
 	report.SourceIncomplete = sourceCoverageIncomplete(input.SourceCoverage)
 	document := Document{
 		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Digest: zeroDigest(),
@@ -98,9 +102,10 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 		}
 		return left.RevisionID < right.RevisionID
 	})
+	var turnCursor retainedTurnCursor
 	for _, revision := range revisions {
-		turnIndex := retainedTurnForOrdinal(document.TurnUnits, uint64(revision.Ref.Location.JSONL.Line))
-		kind, state, action, supported := retainedFactSemantics(revision)
+		turnIndex := turnCursor.locate(document.TurnUnits, uint64(revision.Ref.Location.JSONL.Line))
+		policy, supported := retainedFactPolicyFor(revision)
 		if !supported {
 			report.UnsupportedFacts++
 			continue
@@ -113,11 +118,11 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 			Provider: revision.Ref.Provider, SessionID: revision.Ref.SessionID, SourceIdentity: revision.Ref.SourceIdentity,
 			RecordOrdinal: uint64(revision.Ref.Location.JSONL.Line), SourceHash: revision.Ref.SourceHash,
 		}
-		excerpt := retainedFactExcerpt(revision)
-		if action {
-			document.TurnUnits[turnIndex].Actions = append(document.TurnUnits[turnIndex].Actions, Action{RevisionID: revision.RevisionID, SourceRef: ref, Kind: kind, ToolName: nil, Excerpt: excerpt})
+		excerpt := retainedFactExcerpt(revision, policy)
+		if policy.action {
+			document.TurnUnits[turnIndex].Actions = append(document.TurnUnits[turnIndex].Actions, Action{RevisionID: revision.RevisionID, SourceRef: ref, Kind: policy.kind, ToolName: nil, Excerpt: excerpt})
 		} else {
-			document.TurnUnits[turnIndex].Results = append(document.TurnUnits[turnIndex].Results, Result{RevisionID: revision.RevisionID, SourceRef: ref, Kind: kind, VerificationState: state, Excerpt: excerpt})
+			document.TurnUnits[turnIndex].Results = append(document.TurnUnits[turnIndex].Results, Result{RevisionID: revision.RevisionID, SourceRef: ref, Kind: policy.kind, VerificationState: policy.state, Excerpt: excerpt})
 		}
 	}
 
@@ -224,11 +229,25 @@ func validateMaterializeInput(input MaterializeInput) error {
 			return errors.New("observation revision has invalid source ordinal")
 		}
 		summary, active := summaries[revision.RevisionID]
-		if !active || !reflect.DeepEqual(summary, observationSummary(revision)) {
+		if !active || !observationSummaryEqual(summary, observationSummary(revision)) {
 			return errors.New("supplied observation revision diverges from active SessionView summary")
 		}
 	}
 	return nil
+}
+
+func observationSummaryEqual(left, right memory.ObservationSummary) bool {
+	if left.RevisionID != right.RevisionID || left.Sequence != right.Sequence || left.Kind != right.Kind || left.Subject != right.Subject ||
+		left.OccurredAt != right.OccurredAt || left.Operation != right.Operation || left.Object != right.Object || left.Outcome != right.Outcome || left.Excerpt != right.Excerpt ||
+		(left.Fields == nil) != (right.Fields == nil) || len(left.Fields) != len(right.Fields) {
+		return false
+	}
+	for name, value := range left.Fields {
+		if right.Fields[name] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func observationSummary(revision memory.ObservationRevision) memory.ObservationSummary {
@@ -252,7 +271,7 @@ func retainedWireMessage(message VisibleMessage) Message {
 }
 
 func boundedRetainedText(value string, limit int) (string, bool) {
-	value = redact.AbsolutePaths(redact.Default().Text(value).Text)
+	value = sanitizeRetainedText(value)
 	if len(value) <= limit {
 		return value, false
 	}
@@ -264,40 +283,53 @@ func boundedRetainedText(value string, limit int) (string, bool) {
 	return value[:end] + suffix, true
 }
 
-func retainedTurnForOrdinal(turns []TurnUnit, ordinal uint64) int {
-	index := -1
-	for candidate := range turns {
-		if turns[candidate].UserMessage.SourceRef.RecordOrdinal > ordinal {
-			break
-		}
-		index = candidate
-	}
-	return index
+func sanitizeRetainedText(value string) string {
+	return redact.AbsolutePaths(redact.Default().Text(value).Text)
 }
 
-func retainedFactSemantics(revision memory.ObservationRevision) (kind, state string, action, supported bool) {
-	kind = revision.Operation
-	if kind == "" {
-		kind = revision.Key.Kind
+type retainedTurnCursor struct {
+	next int
+}
+
+func (cursor *retainedTurnCursor) locate(turns []TurnUnit, ordinal uint64) int {
+	for cursor.next < len(turns) && turns[cursor.next].UserMessage.SourceRef.RecordOrdinal <= ordinal {
+		cursor.next++
 	}
-	if !validID(kind) {
-		return "", "", false, false
-	}
+	return cursor.next - 1
+}
+
+type retainedFactPolicy struct {
+	kind          string
+	state         string
+	action        bool
+	allowExcerpt  bool
+	allowedFields []string
+}
+
+func retainedFactPolicyFor(revision memory.ObservationRevision) (retainedFactPolicy, bool) {
 	switch {
 	case revision.Key.Kind == "command" && revision.Operation == "command_started":
-		return kind, "", true, true
+		return retainedFactPolicy{kind: "command_started", action: true, allowedFields: []string{"command_signature", "tool_id"}}, true
 	case revision.Key.Kind == "command" && revision.Operation == "command_finished":
-		return kind, authoritativeState(revision.Outcome), false, true
+		return retainedFactPolicy{kind: "command_finished", state: authoritativeState(revision.Outcome), allowedFields: []string{"command_signature", "exit_code", "tool_id"}}, true
 	case revision.Key.Kind == "verification" && revision.Operation == "verification":
-		return kind, authoritativeState(revision.Outcome), false, true
+		return retainedFactPolicy{kind: "verification", state: authoritativeState(revision.Outcome), allowedFields: []string{"component", "status", "exit_code", "passed", "failed", "tool_id"}}, true
 	case revision.Key.Kind == "file" && revision.Operation == "file_change" && revision.Outcome == "success":
-		return kind, "", true, true
+		return retainedFactPolicy{kind: "file_change", action: true, allowedFields: []string{"path", "file_hash", "failed", "tool_id"}}, true
 	case revision.Key.Kind == "file" && revision.Operation == "file_change" && revision.Outcome == "failure":
-		return kind, "failed", false, true
-	case revision.Key.Kind == "commit" || revision.Key.Kind == "release" || revision.Key.Kind == "deployment" || revision.Key.Kind == "version" || revision.Key.Kind == "branch":
-		return kind, "unknown", false, true
+		return retainedFactPolicy{kind: "file_change", state: "failed", allowedFields: []string{"path", "file_hash", "failed", "tool_id"}}, true
+	case revision.Key.Kind == "commit" && (revision.Operation == "commit" || revision.Operation == "commit_created"):
+		return retainedFactPolicy{kind: revision.Operation, state: "unknown", allowedFields: []string{"git_head"}}, true
+	case revision.Key.Kind == "release" && (revision.Operation == "release" || revision.Operation == "release_created" || revision.Operation == "release_published"):
+		return retainedFactPolicy{kind: revision.Operation, state: "unknown", allowedFields: []string{"release_id", "tag", "version", "status", "target"}}, true
+	case revision.Key.Kind == "deployment" && revision.Operation == "deployment":
+		return retainedFactPolicy{kind: "deployment", state: "unknown", allowedFields: []string{"release_id", "version", "status", "target", "component"}}, true
+	case revision.Key.Kind == "version" && revision.Operation == "version":
+		return retainedFactPolicy{kind: "version", state: "unknown", allowedFields: []string{"version", "component"}}, true
+	case revision.Key.Kind == "branch" && (revision.Operation == "branch" || revision.Operation == "git_observation"):
+		return retainedFactPolicy{kind: revision.Operation, state: "unknown", allowedFields: []string{"branch", "git_head", "remote_hash"}}, true
 	default:
-		return "", "", false, false
+		return retainedFactPolicy{}, false
 	}
 }
 
@@ -312,18 +344,15 @@ func authoritativeState(outcome string) string {
 	}
 }
 
-func retainedFactExcerpt(revision memory.ObservationRevision) string {
-	parts := make([]string, 0, len(revision.Fields)+1)
-	if revision.Excerpt != "" {
+func retainedFactExcerpt(revision memory.ObservationRevision, policy retainedFactPolicy) string {
+	parts := make([]string, 0, len(policy.allowedFields)+1)
+	if policy.allowExcerpt && revision.Excerpt != "" {
 		parts = append(parts, revision.Excerpt)
 	}
-	keys := make([]string, 0, len(revision.Fields))
-	for key := range revision.Fields {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		parts = append(parts, key+"="+revision.Fields[key])
+	for _, key := range policy.allowedFields {
+		if value, present := revision.Fields[key]; present {
+			parts = append(parts, key+"="+value)
+		}
 	}
 	excerpt, _ := boundedRetainedText(strings.Join(parts, "; "), retainedEvidenceBytes)
 	return excerpt

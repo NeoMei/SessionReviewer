@@ -56,7 +56,7 @@ func TestMaterializeRetainedBuildsCausalTurnsAndTypedEvidence(t *testing.T) {
 	if bytes.Contains(body, []byte(`"text":`)) {
 		t.Fatal("full visible-body property persisted")
 	}
-	if bytes.Contains(body, []byte("/Users/neomei/private/project")) || bytes.Contains(body, []byte(secret)) || !bytes.Contains(body, []byte("[REDACTED:")) || len(doc.TurnUnits[0].Results[0].Excerpt) > retainedEvidenceBytes {
+	if bytes.Contains(body, []byte("/Users/neomei/private/project")) || bytes.Contains(body, []byte(secret)) || len(doc.TurnUnits[0].Results[0].Excerpt) > retainedEvidenceBytes {
 		t.Fatalf("private or unbounded evidence persisted: %s", body)
 	}
 	visible, _ := MaterializeVisible(view.Provider, view.SessionID, view.SourceIdentity, messages)
@@ -114,6 +114,41 @@ func TestMaterializeRetainedIgnoresAmbientUserAndBoundsUTF8(t *testing.T) {
 	}
 	if len(doc.TurnUnits) != 1 || doc.TurnUnits[0].AnswerState != AnswerAnswered || !doc.TurnUnits[0].AssistantMessages[0].Truncated || len(doc.TurnUnits[0].AssistantMessages[0].VisibleExcerpt) > 4096 {
 		t.Fatalf("ambient split or multibyte bound failed: %+v", doc)
+	}
+}
+
+func TestMaterializeRetainedRedactsSecretsBeforeExcerptBounds(t *testing.T) {
+	secret := "sk-" + strings.Repeat("a", 40)
+	path := "/Users/alice/private/session.txt"
+	tests := []struct {
+		name, text, forbidden, marker string
+	}{
+		{"credential crossing excerpt boundary", strings.Repeat("x", 4080) + " " + secret, "sk-aaaaaaaa", "[REDACTED:OP"},
+		{"path crossing excerpt boundary", strings.Repeat("x", 4068) + " " + path, path, "[REDACTED:ABSOLUTE_PATH]"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			messages := []SourceMessage{
+				retainedMessage(RoleUser, "", "q", testTime1, 1, 'a'),
+				retainedMessage(RoleAssistant, "final_answer", test.text, testTime2, 2, 'b'),
+			}
+			view := retainedView("codex", "session-1", "source-1", nil)
+			doc, _, err := Materialize(MaterializeInput{View: view, Messages: messages, SourceCoverage: completeVisibleCoverage(2, 2), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(body, []byte(test.forbidden)) || !bytes.Contains(body, []byte(test.marker)) {
+				t.Fatalf("pre-boundary secret or path leaked: %s", body)
+			}
+			visible, _ := MaterializeVisible(view.Provider, view.SessionID, view.SourceIdentity, messages)
+			if doc.TurnUnits[0].TurnUnitID != visible[0].TurnUnitID || doc.TurnUnits[0].AssistantMessages[0].RevisionID != visible[0].Messages[1].RevisionID {
+				t.Fatal("pre-boundary sanitization changed source-derived IDs")
+			}
+		})
 	}
 }
 
@@ -191,25 +226,25 @@ func TestMaterializeRetainedAssignsEvidenceToFirstMiddleAndLastTurns(t *testing.
 		retainedMessage(RoleUser, "", "last", testTime3, 7, '7'),
 	}
 	facts := []memory.ObservationRevision{
-		retainedRevision("command", "command_started", "", 2, 'b', testTime3, nil, "first action"),
-		retainedRevision("command", "command_started", "", 5, 'e', testTime1, nil, "middle action"),
-		retainedRevision("command", "command_started", "", 8, '8', testTime2, nil, "last action"),
+		retainedRevision("command", "command_started", "", 2, 'b', testTime3, map[string]string{"command_signature": "first action"}, "unretained raw first"),
+		retainedRevision("command", "command_started", "", 5, 'e', testTime1, map[string]string{"command_signature": "middle action"}, "unretained raw middle"),
+		retainedRevision("command", "command_started", "", 8, '8', testTime2, map[string]string{"command_signature": "last action"}, "unretained raw last"),
 	}
 	view := retainedView("codex", "session-1", "source-1", facts)
 	doc, _, err := Materialize(MaterializeInput{View: view, Messages: messages, Revisions: []memory.ObservationRevision{facts[2], facts[0], facts[1]}, SourceCoverage: completeVisibleCoverage(8, 3), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.TurnUnits) != 3 || doc.TurnUnits[0].Actions[0].Excerpt != "first action" || doc.TurnUnits[1].Actions[0].Excerpt != "middle action" || doc.TurnUnits[2].Actions[0].Excerpt != "last action" {
+	if len(doc.TurnUnits) != 3 || doc.TurnUnits[0].Actions[0].Excerpt != "command_signature=first action" || doc.TurnUnits[1].Actions[0].Excerpt != "command_signature=middle action" || doc.TurnUnits[2].Actions[0].Excerpt != "command_signature=last action" {
 		t.Fatalf("first/middle/last source assignment failed: %+v", doc.TurnUnits)
 	}
 }
 
 func TestMaterializeRetainedUsesSourceLineBeforeIndependentFactSequence(t *testing.T) {
-	first := retainedRevision("command", "command_started", "", 2, 'b', testTime2, nil, "sequence 20")
+	first := retainedRevision("command", "command_started", "", 2, 'b', testTime2, map[string]string{"command_signature": "sequence 20"}, "unretained raw 20")
 	first.Key.Sequence = 20
 	first.RevisionID = memory.ObservationRevisionID(first)
-	second := retainedRevision("command", "command_started", "", 2, 'b', testTime2, nil, "sequence 10")
+	second := retainedRevision("command", "command_started", "", 2, 'b', testTime2, map[string]string{"command_signature": "sequence 10"}, "unretained raw 10")
 	second.Key.Sequence = 10
 	second.Key.Subject = "command-second"
 	second.RevisionID = memory.ObservationRevisionID(second)
@@ -218,8 +253,24 @@ func TestMaterializeRetainedUsesSourceLineBeforeIndependentFactSequence(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.TurnUnits[0].Actions) != 2 || doc.TurnUnits[0].Actions[0].Excerpt != "sequence 10" || doc.TurnUnits[0].Actions[1].Excerpt != "sequence 20" {
+	if len(doc.TurnUnits[0].Actions) != 2 || doc.TurnUnits[0].Actions[0].Excerpt != "command_signature=sequence 10" || doc.TurnUnits[0].Actions[1].Excerpt != "command_signature=sequence 20" {
 		t.Fatalf("same-record facts ignored sequence secondary order: %+v", doc.TurnUnits[0].Actions)
+	}
+}
+
+func TestRetainedTurnCursorAdvancesMonotonicallyAcrossSortedFacts(t *testing.T) {
+	turns := []TurnUnit{
+		{UserMessage: Message{SourceRef: SourceRef{RecordOrdinal: 2}}},
+		{UserMessage: Message{SourceRef: SourceRef{RecordOrdinal: 5}}},
+		{UserMessage: Message{SourceRef: SourceRef{RecordOrdinal: 8}}},
+	}
+	var cursor retainedTurnCursor
+	ordinals := []uint64{1, 2, 4, 5, 7, 8, 9}
+	want := []int{-1, 0, 0, 1, 1, 2, 2}
+	for index, ordinal := range ordinals {
+		if got := cursor.locate(turns, ordinal); got != want[index] {
+			t.Fatalf("ordinal %d located at %d, want %d", ordinal, got, want[index])
+		}
 	}
 }
 
@@ -240,27 +291,44 @@ func TestMaterializeRetainedDependencyDigestBindsRuleAndRedactionVersions(t *tes
 }
 
 func TestMaterializeRetainedTypedFactSemanticsDoNotInferFromText(t *testing.T) {
+	assertionCanary := "user says PASSED and stdout says exit 0"
+	unsupportedCanary := "unsupported commit operation"
+	extraFieldCanary := "raw-tool-output-canary"
+	neutralExcerptCanary := "raw-neutral-excerpt-canary"
 	facts := []memory.ObservationRevision{
 		retainedRevision("file", "file_change", "success", 2, 'b', testTime2, map[string]string{"path": "/private/a.go"}, "patched"),
 		retainedRevision("file", "file_change", "failure", 3, 'c', testTime2, map[string]string{"path": "/private/b.go", "failed": "true"}, "failed"),
-		retainedRevision("command", "command_finished", "", 4, 'd', testTime2, nil, "user says PASSED and stdout says exit 0"),
-		retainedRevision("commit", "commit_observed", "observed", 5, 'e', testTime2, map[string]string{"git_head": strings.Repeat("a", 40)}, "commit"),
-		retainedRevision("release", "release_observed", "observed", 6, 'f', testTime2, map[string]string{"release_id": "v1"}, "release"),
-		retainedRevision("deployment", "deployment_observed", "observed", 7, '7', testTime2, map[string]string{"status": "ready"}, "deployment"),
-		retainedRevision("version", "version_observed", "observed", 8, '8', testTime2, map[string]string{"version": "1.0.0"}, "version"),
-		retainedRevision("branch", "branch_observed", "observed", 9, '9', testTime2, map[string]string{"branch": "main"}, "branch"),
+		retainedRevision("command", "command_finished", "", 4, 'd', testTime2, map[string]string{"exit_code": "", "model": extraFieldCanary}, assertionCanary),
+		retainedRevision("commit", "commit_created", "observed", 5, 'e', testTime2, map[string]string{"git_head": strings.Repeat("a", 40)}, neutralExcerptCanary),
+		retainedRevision("release", "release_published", "observed", 6, 'f', testTime2, map[string]string{"release_id": "v1"}, "release"),
+		retainedRevision("deployment", "deployment", "observed", 7, '7', testTime2, map[string]string{"status": "ready"}, "deployment"),
+		retainedRevision("version", "version", "observed", 8, '8', testTime2, map[string]string{"version": "1.0.0"}, "version"),
+		retainedRevision("branch", "git_observation", "observed", 9, '9', testTime2, map[string]string{"branch": "main"}, "branch"),
+		retainedRevision("commit", "startup", "observed", 10, '0', testTime2, map[string]string{"git_head": strings.Repeat("b", 40)}, unsupportedCanary),
 	}
 	view := retainedView("codex", "session-1", "source-1", facts)
-	doc, _, err := Materialize(MaterializeInput{View: view, Messages: []SourceMessage{retainedMessage(RoleUser, "", "q", testTime1, 1, 'a')}, Revisions: facts, SourceCoverage: completeVisibleCoverage(9, 1), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
+	doc, report, err := Materialize(MaterializeInput{View: view, Messages: []SourceMessage{retainedMessage(RoleUser, "", "q", testTime1, 1, 'a')}, Revisions: facts, SourceCoverage: completeVisibleCoverage(10, 1), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	turn := doc.TurnUnits[0]
-	if len(turn.Actions) != 1 || len(turn.Results) != 7 {
+	if len(turn.Actions) != 1 || len(turn.Results) != 7 || report.UnsupportedFacts != 1 {
 		t.Fatalf("typed fact mapping changed: %+v", turn)
 	}
 	if turn.Results[0].VerificationState != "failed" || turn.Results[1].VerificationState != "unknown" || turn.Results[2].VerificationState != "unknown" {
 		t.Fatalf("result state inferred from untrusted strings: %+v", turn.Results)
+	}
+	body, err := Render(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, canary := range []string{assertionCanary, unsupportedCanary, extraFieldCanary, neutralExcerptCanary} {
+		if bytes.Contains(body, []byte(canary)) {
+			t.Fatalf("unsupported evidence %q persisted: %s", canary, body)
+		}
+	}
+	if !bytes.Contains(body, []byte("exit_code=")) || !bytes.Contains(body, []byte("git_head=")) {
+		t.Fatalf("supported typed fields were lost: %s", body)
 	}
 }
 
