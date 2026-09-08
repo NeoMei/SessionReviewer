@@ -437,12 +437,25 @@ describe("v4 scanned Session renderer", () => {
     expect(root.querySelector('[data-event-jump-error]')?.textContent).toContain("请输入 1–2,438 的整数");
   });
 
-  it("disables ordinal jump for a zero-event Session", () => {
-    const zero = sessionFixture({ indexed_event_count: 0, session_view_digest: null, coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
-    const root = renderMarkdownV4View(snapshot(indexFixture([zero])), () => {}, { loadSessionEvents: vi.fn() });
+  it.each([
+    ["missing CLI", { cliUnavailable: true, loadSessionEvents: vi.fn() }, sessionFixture()],
+    ["missing event loader", {}, sessionFixture()],
+    ["zero event count", { loadSessionEvents: vi.fn() }, sessionFixture({ indexed_event_count: 0, coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } })],
+    ["missing authenticated view digest", { loadSessionEvents: vi.fn() }, sessionFixture({ session_view_digest: null })]
+  ])("disables ordinal jump for %s", (_label, options, session) => {
+    const root = renderMarkdownV4View(snapshot(indexFixture([session])), () => {}, options);
     root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     expect(root.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')?.disabled).toBe(true);
     expect(root.querySelector<HTMLButtonElement>('[data-action="jump-event-ordinal"]')?.disabled).toBe(true);
+  });
+
+  it("keeps retained-event ordinal jump enabled when CLI is available but raw source is unavailable", () => {
+    const retained = sessionFixture({ source_availability: "unavailable" });
+    const root = renderMarkdownV4View(snapshot(indexFixture([retained])), () => {}, { loadSessionEvents: vi.fn() });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    expect(root.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')?.disabled).toBe(false);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="jump-event-ordinal"]')?.disabled).toBe(false);
   });
 
   it.each([

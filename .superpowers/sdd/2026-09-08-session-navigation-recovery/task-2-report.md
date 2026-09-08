@@ -117,3 +117,45 @@ tsc --noEmit --skipLibCheck && node esbuild.config.mjs production
 - Brief checked line by line: one visible fixed recovery link; no private calls at noCLI host boundary; local 154-row index behavior retained; true-empty, filtered-empty, and missing-index states remain distinct; no duplicate component recovery action; source availability is not used as a global private-data gate.
 - Existing component-level summary/conversation APIs were left intact because direct use has loaders and no host recovery surface; the host explicitly suppresses nested loaders under noCLI. No new shared file was needed.
 - Native combined-candidate no-CLI recovery remains pending. No real Vault mutation, external installation/navigation, release, or native acceptance is claimed.
+
+## Follow-up: unavailable ordinal controls
+
+Controller functional review found that the ordinal input and submit button remained enabled even though their runtime guard correctly made them no-ops when CLI lookup was unavailable. The follow-up keeps that guard and the local recovery-cancellation callback intact, but disables both controls when CLI or the event loader is unavailable, or when the selected Session has zero indexed events or no authenticated view digest. Raw-source availability is deliberately absent from this condition, so eligible retained events remain navigable when CLI is available.
+
+RED command:
+
+```text
+cd obsidian-plugin && npm test -- --run tests/render-scan-records.test.ts
+```
+
+RED output (exit 1):
+
+```text
+Test Files  1 failed (1)
+Tests  3 failed | 48 passed (51)
+missing CLI: expected ordinal input disabled=true, received false
+missing event loader: expected ordinal input disabled=true, received false
+missing authenticated view digest: expected ordinal input disabled=true, received false
+```
+
+GREEN command and output (exit 0):
+
+```text
+cd obsidian-plugin && npm test -- --run tests/render-scan-records.test.ts
+Test Files  1 passed (1)
+Tests  51 passed (51)
+```
+
+The focused tests also prove the pre-existing zero-count case is disabled and a CLI-available, raw-source-unavailable retained-event case remains enabled.
+
+After rebuilding the current retained-event browser bundle, the updated controller command `node /tmp/session-reviewer-filter-qa.OYTCsf/no-cli-host-qa.mjs` exited 0 for both source states: all private loader counts remained zero, both ordinal controls were disabled, and the separate fixed recovery link remained keyboard-operable. The controller independently repeated this probe plus retained-event regression with the same result.
+
+Final full check command and output (exit 0):
+
+```text
+cd obsidian-plugin && npm run check
+eslint --flag unstable_native_nodejs_ts_config .
+Test Files  27 passed (27)
+Tests  435 passed (435)
+tsc --noEmit --skipLibCheck && node esbuild.config.mjs production
+```

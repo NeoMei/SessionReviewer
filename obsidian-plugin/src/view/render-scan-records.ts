@@ -472,7 +472,8 @@ function renderEventArea(
   area.append(conversation);
   const facts = element("section", { className: "sr-execution-facts", attrs: { "aria-label": "已索引执行事实" } }, [element("h3", { text: "已索引执行事实" })]);
   area.append(facts);
-  facts.append(renderOrdinalJump(session.indexed_event_count, jumpValue, jumpError, handlers.onJump));
+  const eventLookupUnavailable = options.cliUnavailable || !options.loadSessionEvents || session.indexed_event_count === 0 || session.session_view_digest === null;
+  facts.append(renderOrdinalJump(jumpValue, jumpError, eventLookupUnavailable, handlers.onJump));
   if (options.cliUnavailable || !options.loadSessionEvents) {
     facts.append(element("p", { className: "sr-event-unavailable", text: "CLI 不可用，当前无法读取扫描记录。已保留的公开索引仍可浏览。" }));
     return area;
@@ -547,12 +548,12 @@ function renderEventNavigation(page: SessionEventPageV1, load: (navigation?: Eve
   return navigation;
 }
 
-function renderOrdinalJump(total: number, value: string, error: string, jump: (value: string) => void): HTMLElement {
+function renderOrdinalJump(value: string, error: string, disabled: boolean, jump: (value: string) => void): HTMLElement {
   const input = element("input", { attrs: { type: "text", inputmode: "numeric", "aria-label": "跳转到事件序号", autocomplete: "off" } });
   input.value = value;
   const submit = button("跳转", { "data-action": "jump-event-ordinal" });
-  input.disabled = total === 0;
-  submit.disabled = total === 0;
+  input.disabled = disabled;
+  submit.disabled = disabled;
   const run = (): void => jump(input.value);
   input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); run(); } });
   submit.addEventListener("click", run);
