@@ -44,6 +44,8 @@ type MilestoneProjection struct {
 func ProjectMilestones(MilestoneInput) (MilestoneProjection, error)
 ```
 
+Input selection clarification2026-09-09: one invocation receives at most one selected current snapshot per `(provider, session_id)`, as supplied by the later scan loader's current roots. Reject duplicate Session identities even if their view digests differ; do not choose a newest snapshot or emit two versions of one stable milestone. Historical accepted sources are retained by the separate Markdown rebase, not projected again as parallel current inputs. The stable-ID evolution test calls the projector separately for the old and extended snapshots.
+
 - [ ] RED canonical value tests: user-only produces no milestone; successful generic command and successful patch alone produce none; supported verification passed creates one; duplicate command-finished+verification result for one operation does not create two; commit/release/version facts create neutral machine-marked events. Unknown/failure outcomes do not become passed verification. A plain failure is not automatically “重大失败”.
 - [ ] RED closure tests: trigger question, last nonempty answer, execution facts, verification facts and missing impact/follow-up appear in the exact existing five-part contract. Missing answer gives `ConclusionMissing`/`no_visible_answer`; no execution gives `no_execution_evidence`; no verification gives `not_verified`. Missing impact uses `not_captured`, never generated next-step prose.
 - [ ] RED identity tests: mixed providers with same native ID, foreign project/view, bad chain digest, inactive/substituted revision, duplicate Session snapshot, out-of-order timestamps and shuffled input. The complete revision set must exactly reconcile View.ActiveRevisionIDs and canonical revision digests. Each chain fact matches the same view's active revision and exact source coordinate; reject malformed caller input instead of silently dropping it.
@@ -78,5 +80,7 @@ if loop.Conclusion.Kind != reviewv4.ConclusionVisibleAnswerExcerpt || loop.Impac
 Ruling: Treat stage-completion/significance prose as unqualified unless an accepted human or supported typed fact establishes it — the spec separates machine facts from human intent — cost if wrong is an omitted machine milestone that can be explicitly confirmed, not fabricated completion.
 
 Ruling2026-09-09: distinguish fixed generator-family identity from changing strongest-evidence kind — otherwise “one milestone per turn” and “rescan-stable identity” conflict when a later scan adds stronger evidence — cost if wrong is a local generated-ID recipe adjustment before any implementation/publication, not duplicate accepted history.
+
+Ruling2026-09-09 input selection: reject multiple selected snapshots of one Session in a pure projection call — the scan loader supplies current roots, while human/history preservation belongs to rebase; accepting both would collide on the required rescan-stable ID — cost if wrong is a bounded caller/validation correction, not choosing a historical answer implicitly.
 
 This task does not close S02/S03 alone. Remaining mandatory steps are authenticated generated-delta rebase preserving pending human Markdown, publication graph proof, closure source controls, actual scanned candidate Vault and end-to-end acceptance.
