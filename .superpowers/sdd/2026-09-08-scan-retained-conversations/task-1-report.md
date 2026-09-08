@@ -89,3 +89,21 @@
 - No correctness blocker remains for Task 1.
 - Deliberate boundary for Task 2: the exact unsupported capability reason is persisted in the private authenticated SessionView and reflected as partial/warning in the index, but is not mapped to a misleading existing public reason enum. Task 2 must render/query that exact private diagnostic.
 - The controller's retained-query-after-source-removal and scan/query root-precedence probes remain Task 2 REDs and were intentionally not implemented here.
+
+## Fix round 1 — authenticate legacy project bindings before capability classification
+
+- Independent review found that `ReadVisiblePrefix` classified a non-UUID legacy/native Session identity as unsupported before authenticating its project associations. A foreign-project legacy record could therefore reach scan's bounded unsupported path (`completed_with_issues`, no chain) instead of failing closed.
+- RED external control:
+  - Command: `go test -overlay /tmp/session-reviewer-scan-chain-qa.6VBnCG/codex-binding-overlay.json ./internal/source/codex -run '^TestControllerLegacyVisibleProjectBinding$' -count=1 -v`
+  - Exit 1: `foreign project binding downgraded to capability limitation: source provider "codex": visible source reader capability is unsupported`.
+- RED repository control:
+  - Command: `go test ./internal/source/codex -run '^TestReadVisiblePrefixClassifiesLegacyIdentityButNeverIntegrityFailureAsUnsupported$' -count=1 -v`
+  - Exit 1 at `adapter_test.go:266`: the foreign legacy binding returned `ErrVisibleReaderUnsupported` instead of a fatal binding error.
+- Fix: moved the UUID/native-capability classification after complete project-binding authentication. Provider, availability, and source-record validation remain first; a bound legacy identity still returns typed unsupported, while a foreign-bound legacy identity now fails authentication and can never be caught as unsupported.
+- GREEN focused repository controls:
+  - Command: `go test ./internal/source/codex -run '^(TestReadVisiblePrefixAuthenticatesProjectAndReadsOnlyFrozenPrefix|TestReadVisiblePrefixClassifiesLegacyIdentityButNeverIntegrityFailureAsUnsupported)$' -count=1 -v`
+  - Exit 0: both tests passed, covering valid UUID/provider/frozen-prefix/hash behavior, bound legacy unsupported, foreign legacy fatal binding rejection, and UUID integrity failure never reclassified.
+- GREEN external control:
+  - Command: `go test -overlay /tmp/session-reviewer-scan-chain-qa.6VBnCG/codex-binding-overlay.json ./internal/source/codex -run '^TestControllerLegacyVisibleProjectBinding$' -count=1 -v`
+  - Exit 0: controller legacy project-binding probe passed.
+- Fix files: `internal/source/codex/visible.go`, `internal/source/codex/adapter_test.go`, and this report. No Task 2, schema, scan lifecycle, Vault, main, remote, or release changes.

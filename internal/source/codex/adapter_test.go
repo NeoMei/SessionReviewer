@@ -260,6 +260,11 @@ func TestReadVisiblePrefixClassifiesLegacyIdentityButNeverIntegrityFailureAsUnsu
 	if _, _, err := adapter.ReadVisiblePrefix(context.Background(), legacy); !errors.Is(err, source.ErrVisibleReaderUnsupported) {
 		t.Fatalf("legacy identity capability result=%v", err)
 	}
+	foreignLegacy := legacy
+	foreignLegacy.ProjectIDs = []string{"foreign-project"}
+	if _, _, err := adapter.ReadVisiblePrefix(context.Background(), foreignLegacy); err == nil || errors.Is(err, source.ErrVisibleReaderUnsupported) || !strings.Contains(err.Error(), "bound") {
+		t.Fatalf("foreign legacy project binding was not rejected before capability classification: %v", err)
+	}
 
 	const sessionID = "32345678-1234-4234-8234-123456789abc"
 	path := filepath.Join(fixture.sessions, "rollout-2026-09-08T03-00-00-"+sessionID+".jsonl")

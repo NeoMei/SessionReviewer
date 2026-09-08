@@ -176,9 +176,6 @@ func (a *adapter) ReadVisiblePrefix(ctx context.Context, record memory.SourceRec
 	if err := memory.ValidateSourceRecord(record); err != nil || record.Provider != providerCodex || record.Availability != memory.SourceAvailable {
 		return nil, conversationchain.VisibleCoverage{}, errors.Join(errors.New("invalid Codex visible source record"), err)
 	}
-	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).MatchString(record.SessionID) {
-		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
-	}
 	known := make(map[string]struct{}, len(a.bindings))
 	for _, binding := range a.bindings {
 		known[binding.ProjectID] = struct{}{}
@@ -190,6 +187,9 @@ func (a *adapter) ReadVisiblePrefix(ctx context.Context, record memory.SourceRec
 		if _, exists := known[projectID]; !exists {
 			return nil, conversationchain.VisibleCoverage{}, errors.New("Codex visible source project association is not bound to this adapter")
 		}
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).MatchString(record.SessionID) {
+		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
 	}
 	return ReadPublishedVisible(ctx, a.sessionsRoot, record)
 }
