@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -37,18 +38,24 @@ func TestPutConversationChainIsCanonicalImmutableCAS(t *testing.T) {
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("canonical chain load changed bytes: got=%q want=%q err=%v", got, want, err)
 	}
+	assertRejectedWithoutMutation := func(t *testing.T, value conversationchain.Document) {
+		t.Helper()
+		before := snapshotPrivateTree(t, store.memory.Path)
+		if _, err := store.PutConversationChain(value); err == nil {
+			t.Fatal("invalid conversation chain was accepted")
+		}
+		if after := snapshotPrivateTree(t, store.memory.Path); !reflect.DeepEqual(before, after) {
+			t.Fatalf("rejected conversation chain mutated immutable objects or pointers: before=%v after=%v", before, after)
+		}
+	}
 
 	changed := chain
 	changed.DependencyDigest = prefixedDigest("changed")
-	if _, err := store.PutConversationChain(changed); err == nil || !strings.Contains(err.Error(), "digest") {
-		t.Fatalf("changed chain body retained stale digest: %v", err)
-	}
+	assertRejectedWithoutMutation(t, changed)
 	foreign := chain
 	foreign.ProjectID = "project-2"
 	foreign.Digest = conversationchain.CanonicalDigest(foreign)
-	if _, err := store.PutConversationChain(foreign); err == nil || !strings.Contains(err.Error(), "different project") {
-		t.Fatalf("foreign chain accepted: %v", err)
-	}
+	assertRejectedWithoutMutation(t, foreign)
 	for name, mutate := range map[string]func(*conversationchain.Document){
 		"provider": func(value *conversationchain.Document) { value.Provider = "claude" },
 		"session":  func(value *conversationchain.Document) { value.SessionID = "other" },
@@ -58,9 +65,7 @@ func TestPutConversationChainIsCanonicalImmutableCAS(t *testing.T) {
 			value := chain
 			mutate(&value)
 			value.Digest = conversationchain.CanonicalDigest(value)
-			if _, err := store.PutConversationChain(value); err == nil || !strings.Contains(err.Error(), "SessionView") {
-				t.Fatalf("foreign %s accepted: %v", name, err)
-			}
+			assertRejectedWithoutMutation(t, value)
 		})
 	}
 }
