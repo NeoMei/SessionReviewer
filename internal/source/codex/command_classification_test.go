@@ -76,6 +76,9 @@ func TestCommandClassificationPreservesSupportedLiteralCommands(t *testing.T) {
 	}{
 		{name: "go test", command: "go test ./...", signature: "go:test", component: "package", operation: "test"},
 		{name: "quoted go test", command: `go test -run 'CommandAttribution|CommandClassification' -count=1 "./internal/source/codex"`, signature: "go:test", component: "package", operation: "test"},
+		{name: "repository acceptance go test", command: `go test -race -timeout 30m ./... -skip 'SlowAcceptance|NetworkOnly'`, signature: "go:test", component: "package", operation: "test"},
+		{name: "json failfast go test", command: "go test -json -failfast ./...", signature: "go:test", component: "package", operation: "test"},
+		{name: "test and benchmark selection", command: `go test -run TestUnit -bench BenchmarkDecode ./...`, signature: "go:test", component: "package", operation: "test"},
 		{name: "go build", command: "go build ./...", signature: "go:build", component: "package", operation: "build"},
 		{name: "go vet", command: "go vet ./...", signature: "go:vet", component: "package", operation: "lint"},
 		{name: "npm test", command: "npm test", signature: "npm:test", component: "npm:test", operation: "test"},
@@ -127,6 +130,7 @@ func TestCommandClassificationWithholdsNonExecutingAndUnknownModes(t *testing.T)
 		{name: "go test zero count equals", command: "go test -count=0 ./..."},
 		{name: "go test zero count padded", command: "go test -count=00 ./..."},
 		{name: "go test invalid count", command: "go test -count=not-a-count ./..."},
+		{name: "go test benchmark only", command: `go test -run '^$' -bench BenchmarkDecode ./...`},
 		{name: "go test exec wrapper", command: "go test -exec true ./..."},
 		{name: "go test exec wrapper equals", command: "go test -exec=true ./..."},
 		{name: "go test tool exec wrapper", command: "go test -toolexec true ./..."},

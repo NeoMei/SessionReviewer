@@ -1033,6 +1033,8 @@ func literalCommandFields(command string) ([]string, bool) {
 }
 
 func supportedGoArguments(operation string, arguments []string) bool {
+	benchmarkSelected := false
+	testPattern := ""
 	for index := 0; index < len(arguments); index++ {
 		argument := arguments[index]
 		if argument == "--" {
@@ -1062,14 +1064,27 @@ func supportedGoArguments(operation string, arguments []string) bool {
 		if !takesValue {
 			continue
 		}
-		if !hasValue {
-			if index+1 >= len(arguments) || strings.HasPrefix(arguments[index+1], "-") {
-				return false
+		value, found := commandFlagValue(arguments, index, argument, hasValue)
+		if !found {
+			return false
+		}
+		if operation == "test" {
+			switch name {
+			case "-bench":
+				benchmarkSelected = true
+			case "-run":
+				testPattern = value
 			}
+		}
+		if !hasValue {
 			index++
 		}
 	}
-	return true
+	return !benchmarkSelected || !knownEmptyTestPattern(testPattern)
+}
+
+func knownEmptyTestPattern(pattern string) bool {
+	return pattern == "^$" || pattern == "$^"
 }
 
 func commandFlagValue(arguments []string, index int, argument string, inline bool) (string, bool) {
@@ -1094,9 +1109,9 @@ func supportedGoFlag(operation, name string) (takesValue, known bool) {
 		return false, false
 	}
 	switch name {
-	case "-cover", "-short":
+	case "-cover", "-failfast", "-json", "-short":
 		return false, true
-	case "-count", "-run", "-shuffle", "-timeout", "-covermode", "-coverpkg", "-coverprofile", "-exec":
+	case "-bench", "-count", "-run", "-shuffle", "-skip", "-timeout", "-covermode", "-coverpkg", "-coverprofile", "-exec":
 		return true, true
 	default:
 		return false, false
