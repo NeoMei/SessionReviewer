@@ -170,7 +170,7 @@ Run: `go test ./internal/problemmap ./internal/presentation ./internal/cli ./int
 
 - [ ] **Step 4: Implement pure graph operations, then wrap them in one locked CAS transaction.** Validate review SHA, graph revision, candidate revision, target revisions and publication preimages before rendering. On any error write no Markdown, ledger, candidate state or sync pointer.
 
-- [ ] **Step 5: Project the formal tree into existing Markdown.** Add one bounded “问题脉络” block in `项目回顾.md`; keep full evidence private, preserve unknown blocks and use generated baselines/human patches for editable question, conclusion, criterion and state fields.
+- [ ] **Step 5: Project the formal tree into existing Markdown.** Follow `2026-09-05-v4-human-markdown-codec-design.md` §§3/6/7: the generated problem-tree region contains links, and each formal node has one authoritative human body. Keep full evidence private and preserve custom content. Only question, current_conclusion and completion_criterion are directly editable problem fields. workflow_state, answer_state, IDs, references, relations, order and revisions are not Markdown-editable; resolve/reopen requires the trusted explicit-confirmation operation and revision checks from Step2. Add draft rejection coverage for direct workflow-state edits and rescan preservation coverage for the three allowed fields. Do not create a duplicate editable tree block or let successful execution silently resolve a problem.
 
 - [ ] **Step 6: Run full gates and commit when authorized.**
 
