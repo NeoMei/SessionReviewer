@@ -873,8 +873,8 @@ type commandClass struct {
 }
 
 func classifyCommand(command string) commandClass {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+	fields, literal := literalCommandFields(command)
+	if !literal || len(fields) == 0 {
 		return commandClass{signature: "other"}
 	}
 	executable := strings.ToLower(filepath.Base(fields[0]))
@@ -896,33 +896,54 @@ func classifyCommand(command string) commandClass {
 	switch {
 	case executable == "go" && operation == "test":
 		result.signature = "go:test"
-		result.verification = commandComponent(fields[2:])
+		if !supportedGoArguments("test", fields[2:]) {
+			return result
+		}
+		result.verification = goCommandComponent("test", fields[2:])
 		result.verificationOperation = "test"
 	case executable == "go" && operation == "build":
 		result.signature = "go:build"
-		result.verification = commandComponent(fields[2:])
+		if !supportedGoArguments("build", fields[2:]) {
+			return result
+		}
+		result.verification = goCommandComponent("build", fields[2:])
 		result.verificationOperation = "build"
 	case executable == "go" && operation == "vet":
 		result.signature = "go:vet"
-		result.verification = commandComponent(fields[2:])
+		if !supportedGoArguments("vet", fields[2:]) {
+			return result
+		}
+		result.verification = goCommandComponent("vet", fields[2:])
 		result.verificationOperation = "lint"
 	case executable == "npm" && operation == "test":
 		result.signature = "npm:test"
+		if !supportedNPMArguments(fields[2:]) {
+			return result
+		}
 		result.verification = "npm:test"
 		result.verificationOperation = "test"
 	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "test":
 		result.signature = "npm:test"
+		if !supportedNPMArguments(fields[3:]) {
+			return result
+		}
 		result.verification = "npm:test"
 		result.verificationOperation = "test"
 	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "build":
 		result.signature = "npm:build"
+		if !supportedNPMArguments(fields[3:]) {
+			return result
+		}
 		result.verification = "npm:build"
 		result.verificationOperation = "build"
 	case executable == "npm" && operation == "run" && len(fields) > 2 && fields[2] == "lint":
 		result.signature = "npm:lint"
+		if !supportedNPMArguments(fields[3:]) {
+			return result
+		}
 		result.verification = "npm:lint"
 		result.verificationOperation = "lint"
-	case executable == "git" && operation == "status" && containsAll(fields[2:], "--porcelain=v1", "--branch"):
+	case executable == "git" && operation == "status" && sameArguments(fields[2:], "--porcelain=v1", "--branch"):
 		result.gitOperation = "status"
 		result.signature = "git:status"
 	case executable == "git" && operation == "rev-parse" && len(fields) == 3 && fields[2] == "HEAD":
@@ -931,15 +952,203 @@ func classifyCommand(command string) commandClass {
 	case executable == "git" && operation == "branch" && len(fields) == 3 && fields[2] == "--show-current":
 		result.gitOperation = "branch"
 		result.signature = "git:branch"
-	case executable == "git" && operation == "describe" && containsAll(fields[2:], "--tags", "--exact-match"):
+	case executable == "git" && operation == "describe" && sameArguments(fields[2:], "--tags", "--exact-match"):
 		result.gitOperation = "tag"
 		result.signature = "git:tag"
 	}
 	return result
 }
 
-func commandComponent(arguments []string) string {
-	for _, argument := range arguments {
+const (
+	maxClassifiedCommandBytes  = 4096
+	maxClassifiedArguments     = 128
+	maxClassifiedArgumentBytes = 512
+)
+
+func literalCommandFields(command string) ([]string, bool) {
+	if command == "" || len(command) > maxClassifiedCommandBytes || !utf8.ValidString(command) {
+		return nil, false
+	}
+	var fields []string
+	var field strings.Builder
+	inField := false
+	quote := byte(0)
+	for index := 0; index < len(command); index++ {
+		character := command[index]
+		if quote != 0 {
+			if character == quote {
+				quote = 0
+				continue
+			}
+			if character == '\n' || character == '\r' || character == 0 ||
+				(quote == '"' && (character == '$' || character == '`' || character == '\\')) {
+				return nil, false
+			}
+			field.WriteByte(character)
+			if field.Len() > maxClassifiedArgumentBytes {
+				return nil, false
+			}
+			continue
+		}
+		switch character {
+		case ' ', '\t':
+			if inField {
+				fields = append(fields, field.String())
+				if len(fields) > maxClassifiedArguments {
+					return nil, false
+				}
+				field.Reset()
+				inField = false
+			}
+		case '\'', '"':
+			quote = character
+			inField = true
+		case '\\':
+			if index+1 >= len(command) || command[index+1] == '\n' || command[index+1] == '\r' || command[index+1] == 0 {
+				return nil, false
+			}
+			index++
+			field.WriteByte(command[index])
+			inField = true
+		case '\n', '\r', 0, ';', '&', '|', '<', '>', '(', ')', '$', '`', '*', '?', '[', ']', '{', '}', '#':
+			return nil, false
+		default:
+			field.WriteByte(character)
+			inField = true
+		}
+		if field.Len() > maxClassifiedArgumentBytes {
+			return nil, false
+		}
+	}
+	if quote != 0 {
+		return nil, false
+	}
+	if inField {
+		fields = append(fields, field.String())
+	}
+	if len(fields) == 0 || len(fields) > maxClassifiedArguments {
+		return nil, false
+	}
+	return fields, true
+}
+
+func supportedGoArguments(operation string, arguments []string) bool {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if argument == "--" {
+			return false
+		}
+		if !strings.HasPrefix(argument, "-") || argument == "-" {
+			continue
+		}
+		name, hasValue := splitCommandFlag(argument)
+		if isNonExecutingGoFlag(operation, name) {
+			return false
+		}
+		if name == "-exec" || name == "-toolexec" {
+			return false
+		}
+		if operation == "test" && name == "-count" {
+			value, found := commandFlagValue(arguments, index, argument, hasValue)
+			count, err := strconv.Atoi(value)
+			if !found || err != nil || count <= 0 {
+				return false
+			}
+		}
+		takesValue, known := supportedGoFlag(operation, name)
+		if !known {
+			return false
+		}
+		if !takesValue {
+			continue
+		}
+		if !hasValue {
+			if index+1 >= len(arguments) || strings.HasPrefix(arguments[index+1], "-") {
+				return false
+			}
+			index++
+		}
+	}
+	return true
+}
+
+func commandFlagValue(arguments []string, index int, argument string, inline bool) (string, bool) {
+	if inline {
+		_, value, _ := strings.Cut(argument, "=")
+		return value, value != ""
+	}
+	if index+1 >= len(arguments) || strings.HasPrefix(arguments[index+1], "-") {
+		return "", false
+	}
+	return arguments[index+1], true
+}
+
+func supportedGoFlag(operation, name string) (takesValue, known bool) {
+	switch name {
+	case "-a", "-asan", "-msan", "-race", "-trimpath", "-v", "-work", "-x":
+		return false, true
+	case "-mod", "-modfile", "-p", "-pkgdir", "-tags", "-toolexec", "-gcflags", "-ldflags":
+		return true, true
+	}
+	if operation != "test" {
+		return false, false
+	}
+	switch name {
+	case "-cover", "-short":
+		return false, true
+	case "-count", "-run", "-shuffle", "-timeout", "-covermode", "-coverpkg", "-coverprofile", "-exec":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+func isNonExecutingGoFlag(operation, name string) bool {
+	if name == "-h" || name == "--help" || name == "-help" || name == "-n" {
+		return true
+	}
+	return operation == "test" && (name == "-c" || name == "-list")
+}
+
+func supportedNPMArguments(arguments []string) bool {
+	for index, argument := range arguments {
+		name, _ := splitCommandFlag(argument)
+		if name == "--help" || name == "-h" || name == "--dry-run" || name == "--ignore-scripts" {
+			return false
+		}
+		if argument == "--" {
+			for _, scriptArgument := range arguments[index+1:] {
+				if scriptArgument != "--runInBand" {
+					return false
+				}
+			}
+			return true
+		}
+		if strings.HasPrefix(argument, "-") {
+			return false
+		}
+	}
+	return len(arguments) == 0
+}
+
+func splitCommandFlag(argument string) (string, bool) {
+	if index := strings.IndexByte(argument, '='); index >= 0 {
+		return argument[:index], true
+	}
+	return argument, false
+}
+
+func goCommandComponent(operation string, arguments []string) string {
+	for index := 0; index < len(arguments); index++ {
+		argument := arguments[index]
+		if strings.HasPrefix(argument, "-") {
+			name, hasValue := splitCommandFlag(argument)
+			takesValue, _ := supportedGoFlag(operation, name)
+			if takesValue && !hasValue {
+				index++
+			}
+			continue
+		}
 		if !strings.HasPrefix(argument, "-") {
 			if validPackageComponent(argument) {
 				return "package"
@@ -967,7 +1176,10 @@ func validPackageComponent(value string) bool {
 	return true
 }
 
-func containsAll(values []string, wanted ...string) bool {
+func sameArguments(values []string, wanted ...string) bool {
+	if len(values) != len(wanted) {
+		return false
+	}
 	set := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		set[value] = struct{}{}

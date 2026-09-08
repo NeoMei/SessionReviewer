@@ -860,13 +860,21 @@ func assertGateMalformedContinuation(t *testing.T, harness *gateHarness, manifes
 	if view.TerminalState != memory.Unreadable || view.SourceAvailability != memory.SourceAvailable {
 		t.Fatalf("malformed terminal=%q availability=%q", view.TerminalState, view.SourceAvailability)
 	}
-	foundRequest, foundTool, foundDiagnostic := false, false, false
+	foundRequest, foundCommandStart, foundCommandFinish, foundVerification, foundDiagnostic := false, false, false, false, false
 	for _, observation := range view.ObservationSummaries {
 		if observation.Operation == "user_request" && observation.Subject == "user-"+gateMalformedID {
 			foundRequest = true
 		}
-		if observation.Operation == "verification" && observation.Subject == "call-"+gateMalformedID && observation.Outcome == "passed" {
-			foundTool = true
+		if observation.Subject != "call-"+gateMalformedID {
+			continue
+		}
+		switch observation.Operation {
+		case "command_started":
+			foundCommandStart = observation.Fields["command_signature"] == "other"
+		case "command_finished":
+			foundCommandFinish = observation.Outcome == "success" && observation.Fields["command_signature"] == "other" && observation.Fields["exit_code"] == "0"
+		case "verification":
+			foundVerification = true
 		}
 	}
 	for _, diagnostic := range view.Diagnostics {
@@ -878,8 +886,8 @@ func assertGateMalformedContinuation(t *testing.T, harness *gateHarness, manifes
 	if err != nil || !found || record.Usage.TotalTokens != 3 {
 		t.Fatalf("post-malformed usage record found=%v err=%v record=%+v", found, err, record)
 	}
-	if !foundRequest || !foundTool || !foundDiagnostic || len(view.Diagnostics) > 4 {
-		t.Fatalf("post-malformed evidence request=%v tool=%v diagnostic=%v diagnostics=%d view=%+v", foundRequest, foundTool, foundDiagnostic, len(view.Diagnostics), view)
+	if !foundRequest || !foundCommandStart || !foundCommandFinish || foundVerification || !foundDiagnostic || len(view.Diagnostics) > 4 {
+		t.Fatalf("post-malformed evidence request=%v command_start=%v command_finish=%v verification=%v diagnostic=%v diagnostics=%d view=%+v", foundRequest, foundCommandStart, foundCommandFinish, foundVerification, foundDiagnostic, len(view.Diagnostics), view)
 	}
 }
 
