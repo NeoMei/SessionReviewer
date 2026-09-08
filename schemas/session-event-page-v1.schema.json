@@ -18,7 +18,7 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
     "nonnegative": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
-    "cursor": { "type": ["string", "null"], "maxLength": 4096 },
+    "cursor": { "type": ["string", "null"], "minLength": 1, "maxLength": 4096 },
     "timestamp": { "type": "string", "maxLength": 128 },
     "item": {
       "type": "object", "additionalProperties": false,

@@ -86,6 +86,28 @@ function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
+async function eventPageAt(total: number, rangeStart: number, rangeEnd: number): Promise<JsonObject> {
+  const page = await fixtureObject("session-event-page-v1.valid.json");
+  Object.assign(page, {
+    total,
+    range_start: rangeStart,
+    range_end: rangeEnd,
+    items: Array.from({ length: rangeEnd - rangeStart }, (_value, index) => ({
+      kind: "command",
+      excerpt: "synthetic",
+      revision_id: `revision-${rangeStart + index + 1}`,
+      sequence: rangeStart + index + 1,
+      occurred_at: "2026-09-08T00:00:00Z"
+    })),
+    previous_cursor: rangeStart === 0 ? null : "opaque-previous-boundary",
+    next_cursor: rangeEnd === total ? null : "opaque-next-boundary",
+    first_cursor: total === 0 ? null : "opaque-first-boundary",
+    last_cursor: total === 0 ? null : "opaque-last-boundary",
+    coverage: { seen: total, indexed: total, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
+  });
+  return page;
+}
+
 function decision(id: string, supersedes: string[], status = "active"): JsonObject {
   return {
     id,
@@ -575,25 +597,39 @@ describe("session contracts", () => {
   });
 
   it.each([
-    ["empty first cursor", { first_cursor: "" }],
-    ["empty last cursor", { last_cursor: "" }],
-    ["hidden previous page", {
-      range_start: 1, range_end: 2,
-      items: [{ kind: "message", excerpt: "safe", revision_id: "revision-2", sequence: 2, occurred_at: "2026-09-07T00:00:00Z" }],
-      previous_cursor: null, next_cursor: null
-    }],
-    ["hidden next page", { next_cursor: null }]
-  ])("rejects invalid nonempty event cursor topology: %s", async (_label, patch) => {
-    const page = await fixtureObject("session-event-page-v1.valid.json");
-    Object.assign(page, {
-      total: 2, range_start: 0, range_end: 1,
-      items: [{ kind: "message", excerpt: "safe", revision_id: "revision-1", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }],
-      previous_cursor: null, next_cursor: "next", first_cursor: "first", last_cursor: "last",
-      coverage: { seen: 2, indexed: 2, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
-    });
+    ["first", 2, 0, 1],
+    ["middle", 3, 1, 2],
+    ["last", 2, 1, 2],
+    ["single page", 1, 0, 1],
+    ["empty", 0, 0, 0]
+  ])("accepts valid event cursor topology: %s", async (_label, total, rangeStart, rangeEnd) => {
+    const page = await eventPageAt(total, rangeStart, rangeEnd);
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).not.toThrow();
-    Object.assign(page, patch);
+  });
+
+  it.each([
+    ["missing next", 2, 0, 1, "next_cursor", null],
+    ["missing previous", 3, 1, 2, "previous_cursor", null],
+    ["missing first", 2, 0, 1, "first_cursor", null],
+    ["missing last", 2, 0, 1, "last_cursor", null],
+    ["empty first", 2, 0, 1, "first_cursor", ""],
+    ["empty last", 2, 0, 1, "last_cursor", ""],
+    ["empty previous", 3, 1, 2, "previous_cursor", ""],
+    ["empty next", 2, 0, 1, "next_cursor", ""],
+    ["unexpected previous on first page", 2, 0, 1, "previous_cursor", "opaque-unexpected"],
+    ["unexpected next on last page", 2, 1, 2, "next_cursor", "opaque-unexpected"]
+  ])("rejects invalid nonempty event cursor topology: %s", async (_label, total, rangeStart, rangeEnd, key, value) => {
+    const page = await eventPageAt(total, rangeStart, rangeEnd);
+    expect(() => parseSessionEventPageV1(JSON.stringify(page))).not.toThrow();
+    page[key as string] = value;
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/cursor|topology|range/i);
+  });
+
+  it("rejects a positive-total event page with no displayed items", async () => {
+    const control = await eventPageAt(2, 0, 1);
+    expect(() => parseSessionEventPageV1(JSON.stringify(control))).not.toThrow();
+    const page = await eventPageAt(2, 1, 1);
+    expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/cursor|topology|range|nonempty/i);
   });
 
   it("verifies non-zero canonical index digests and ledger self hashes", async () => {

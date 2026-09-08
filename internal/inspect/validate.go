@@ -144,12 +144,17 @@ func ValidateEventPage(page SessionEventPage) error {
 		return errors.New("event page range does not reconcile")
 	}
 	for _, cursor := range []*string{page.PreviousCursor, page.NextCursor, page.FirstCursor, page.LastCursor} {
-		if cursor != nil && len(*cursor) > 4096 {
-			return errors.New("event cursor is too large")
+		if cursor != nil && (len(*cursor) == 0 || len(*cursor) > 4096) {
+			return errors.New("event cursor must be nonempty and at most 4096 bytes")
 		}
 	}
 	if page.Total == 0 && (page.RangeStart != 0 || page.RangeEnd != 0 || page.PreviousCursor != nil || page.NextCursor != nil || page.FirstCursor != nil || page.LastCursor != nil) {
 		return errors.New("empty event page cannot have a range or cursors")
+	}
+	if page.Total > 0 && (len(page.Items) == 0 || page.FirstCursor == nil || page.LastCursor == nil ||
+		(page.PreviousCursor == nil) != (page.RangeStart == 0) ||
+		(page.NextCursor == nil) != (page.RangeEnd == page.Total)) {
+		return errors.New("event page cursor topology does not reconcile")
 	}
 	if !validCoverage(page.Coverage) {
 		return errors.New("event page coverage does not reconcile")

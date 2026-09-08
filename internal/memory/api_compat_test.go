@@ -84,6 +84,23 @@ func TestV4ContractFixtures(t *testing.T) {
 	}
 }
 
+func TestSessionEventPageSchemaRejectsEmptyCursorStrings(t *testing.T) {
+	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-event-page-v1.schema.json"))
+	valid := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-event-page-v1.valid.json"))
+	if err := validateContractSchema(schema, valid, "$", schema); err != nil {
+		t.Fatalf("valid fixture rejected: %v", err)
+	}
+	for _, key := range []string{"previous_cursor", "next_cursor", "first_cursor", "last_cursor"} {
+		t.Run(key, func(t *testing.T) {
+			invalid := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-event-page-v1.valid.json")).(map[string]any)
+			invalid[key] = ""
+			if err := validateContractSchema(schema, invalid, "$", schema); err == nil {
+				t.Fatalf("schema accepted empty %s", key)
+			}
+		})
+	}
+}
+
 func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) {
 	reviewSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "review-presentation-v4.schema.json"))
 	review := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "review-presentation-v4.valid.json")).(map[string]any)

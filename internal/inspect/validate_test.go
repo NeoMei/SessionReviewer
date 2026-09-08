@@ -1,6 +1,7 @@
 package inspect
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -234,6 +235,116 @@ func TestValidateEventPageRejectsUnknownKindAndTooManyItems(t *testing.T) {
 	p.Items = make([]EventItem, 101)
 	if err := ValidateEventPage(p); err == nil {
 		t.Fatal("accepted event page above 100 items")
+	}
+}
+
+func TestEventPageValidTopologyAcrossPublicBoundaries(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		total uint64
+		start uint64
+		end   uint64
+	}{
+		{name: "first", total: 2, start: 0, end: 1},
+		{name: "middle", total: 3, start: 1, end: 2},
+		{name: "last", total: 2, start: 1, end: 2},
+		{name: "single page", total: 1, start: 0, end: 1},
+		{name: "empty", total: 0, start: 0, end: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertEventPageAcceptedAtPublicBoundaries(t, eventPageWithTopology(test.total, test.start, test.end))
+		})
+	}
+}
+
+func TestEventPageRejectsInvalidTopologyAcrossPublicBoundaries(t *testing.T) {
+	empty := ""
+	cursor := "opaque-boundary"
+	for _, test := range []struct {
+		name    string
+		control SessionEventPage
+		mutate  func(*SessionEventPage)
+	}{
+		{name: "missing next", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.NextCursor = nil }},
+		{name: "missing previous", control: eventPageWithTopology(3, 1, 2), mutate: func(page *SessionEventPage) { page.PreviousCursor = nil }},
+		{name: "missing first", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.FirstCursor = nil }},
+		{name: "missing last", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.LastCursor = nil }},
+		{name: "empty first", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.FirstCursor = &empty }},
+		{name: "empty last", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.LastCursor = &empty }},
+		{name: "empty previous", control: eventPageWithTopology(3, 1, 2), mutate: func(page *SessionEventPage) { page.PreviousCursor = &empty }},
+		{name: "empty next", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.NextCursor = &empty }},
+		{name: "unexpected previous on first page", control: eventPageWithTopology(2, 0, 1), mutate: func(page *SessionEventPage) { page.PreviousCursor = &cursor }},
+		{name: "unexpected next on last page", control: eventPageWithTopology(2, 1, 2), mutate: func(page *SessionEventPage) { page.NextCursor = &cursor }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			assertEventPageAcceptedAtPublicBoundaries(t, test.control)
+			page := test.control
+			test.mutate(&page)
+			assertEventPageRejectedAtPublicBoundaries(t, page)
+		})
+	}
+
+	t.Run("positive total with no items", func(t *testing.T) {
+		assertEventPageAcceptedAtPublicBoundaries(t, eventPageWithTopology(2, 0, 1))
+		assertEventPageRejectedAtPublicBoundaries(t, eventPageWithTopology(2, 1, 1))
+	})
+}
+
+func eventPageWithTopology(total, start, end uint64) SessionEventPage {
+	page := minimumEventPage()
+	page.Total, page.RangeStart, page.RangeEnd = total, start, end
+	page.Coverage = Coverage{Seen: total, Indexed: total}
+	for sequence := start + 1; sequence <= end; sequence++ {
+		page.Items = append(page.Items, EventItem{
+			Kind: "command", RevisionID: fmt.Sprintf("revision-%d", sequence), Sequence: sequence,
+			OccurredAt: "2026-09-08T00:00:00Z", Excerpt: "synthetic",
+		})
+	}
+	if total > 0 {
+		page.FirstCursor = eventCursorPointer("opaque-first-boundary")
+		page.LastCursor = eventCursorPointer("opaque-last-boundary")
+		if start > 0 {
+			page.PreviousCursor = eventCursorPointer("opaque-previous-boundary")
+		}
+		if end < total {
+			page.NextCursor = eventCursorPointer("opaque-next-boundary")
+		}
+	}
+	return page
+}
+
+func eventCursorPointer(value string) *string { return &value }
+
+func assertEventPageAcceptedAtPublicBoundaries(t *testing.T, page SessionEventPage) {
+	t.Helper()
+	if err := ValidateEventPage(page); err != nil {
+		t.Fatalf("ValidateEventPage rejected valid control: %v", err)
+	}
+	body, err := RenderEventPage(page)
+	if err != nil {
+		t.Fatalf("RenderEventPage rejected valid control: %v", err)
+	}
+	if _, err := ParseEventPage(body); err != nil {
+		t.Fatalf("ParseEventPage rejected valid control: %v", err)
+	}
+}
+
+func assertEventPageRejectedAtPublicBoundaries(t *testing.T, page SessionEventPage) {
+	t.Helper()
+	if err := ValidateEventPage(page); err == nil {
+		t.Fatal("ValidateEventPage accepted malformed cursor topology")
+	}
+	if _, err := RenderEventPage(page); err == nil {
+		t.Fatal("RenderEventPage accepted malformed cursor topology")
+	}
+	body, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ParseEventPage(body); err == nil {
+		t.Fatal("ParseEventPage accepted malformed cursor topology")
+	} else if got := strictjson.CodeOf(err); got != string(strictjson.CodeContractInvalid) {
+		t.Fatalf("ParseEventPage rejection code = %q, want %s: %v", got, strictjson.CodeContractInvalid, err)
 	}
 }
 
