@@ -20,11 +20,13 @@
 
 ### Task 1: Expose ordinal jump and recover stale event pages
 
-**Files:** Modify `obsidian-plugin/src/cli/runner.ts`, `src/view/render-scan-records.ts`, `src/view/presentation.ts`, `src/view/render-v4-shell.ts`, `src/view/project-view.ts`; focused tests in `tests/cli.test.ts` and `tests/render-scan-records.test.ts`; add `tests/session-event-recovery.test.ts`. Modify only the relevant navigation styles in `styles.css` if needed.
+**Files:** Modify `obsidian-plugin/src/cli/runner.ts`, `src/data/contracts-v4.ts`, `src/view/render-scan-records.ts`, `src/view/presentation.ts`, `src/view/render-v4-shell.ts`, `src/view/project-view.ts`; focused tests in `tests/cli.test.ts`, `tests/contracts-v4.test.ts` and `tests/render-scan-records.test.ts`; add `tests/session-event-recovery.test.ts`. Modify only the relevant navigation styles in `styles.css` if needed.
 
 **Interfaces:** Add exported `SessionInspectError` with a closed code union: `stale_cursor | generation_mismatch | anchor_out_of_range | unavailable`. Its message is a fixed localized/public string, never CLI stderr. Existing event success parsing and identity checks remain unchanged. Add optional host callback `refreshSessionEvents(request: {provider: string; sessionId: string; ordinal: number}): Promise<void>` to the existing view options; source-backed conversation remains independent.
 
 - [ ] RED runner tests return nonzero exit with exact bounded `{error:{code,message}}` JSON for stale_cursor, generation_mismatch and anchor_out_of_range. Assert the closed typed error survives, while malformed/duplicate/unknown JSON, unsafe code, arbitrary stderr/path and success-binding mismatch become generic unavailable without leaking text. Parse through existing strict JSON utilities, not permissive JSON.parse. The caller-supplied message is never displayed.
+- [ ] RED successful-page binding regressions from the independent audit: a same-identity first response beginning at25 rather than0,100items for limit25, and a nonterminal25/50page with null next_cursor must all be rejected. Validate nonempty cursor topology, nonempty cursor strings, page item count against the request limit, first-request origin and inclusion of the requested anchor. Do not decode opaque cursors in the plugin. Preserve existing Go half-open ranges and legitimate final short pages.
+- [ ] RED rendered navigation-continuity regressions: a next response skipping25..50 to50..75, an overlapping previous response, a first response not starting0, a last response not ending at total, or a response with changed total/coverage in the same immutable binding must not enter cache or become the displayed valid page. Carry the navigation direction and expected source-page boundary; validate successful transitions before caching. Cover valid adjacent/first/last/anchor transitions, retry and cache hits as well as rejection. Keep the last valid page readable with a fixed error rather than silently losing events.
 - [ ] RED rendered tests use2438 events: enter ordinal1,1220 and2438; press Enter or the explicit 跳转 button; assert fixed authenticated request with `anchor` and no cursor, correct returned range, and selection of the requested event within its page. Zero events disables jump. Input0,2439,fractional,exponent,whitespace-only and unsafe integer makes no request and leaves the current valid page visible with an inline error.
 
 ```ts
@@ -65,7 +67,10 @@ expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
 | Task1 runner / renderer | typed bounded error -> stale refresh | only three recovery codes accepted; all other failures remain generic |
 | Task1 renderer / host | selected namespaced Session and ordinal -> new authenticated index | preserve identity and filters; one retry; never carry old cursor |
 | Task1 input / CLI | exact ordinal -> existing anchor | direct invalid input rejected; recovery clamp explicit |
+| Task1 success parser / runner / renderer | bounded cursor topology -> request binding -> adjacent page transition | all three layers must validate; five identity fields alone do not prove complete navigation |
 | Task1/Task2 renderer | navigation state -> accurate empty/recovery guidance | Task2 changes no paging, loader or cache authority |
 | Task2 components / host | no-CLI diagnostics -> one recovery action | host owns action, components do not create duplicates |
 
 Ruling: Use one fixed installation/documentation entry instead of restoring removed executable settings — current runtime intentionally discovers verified user installations — cost if wrong is a reversible recovery-link adjustment, not an expanded executable-input surface.
+
+Ruling: Include successful event-page request and transition authentication in Task1 — the2026-09-08 independent read-only audit found that identity-matching pages can exceed the requested limit, skip ranges or hide later events, violating the accepted no-silent-truncation requirement — cost if wrong is a bounded parser/runner/UI change caught by RED/GREEN and independent review. This does not expand the wire schema or relax source provenance.
