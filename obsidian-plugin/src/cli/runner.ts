@@ -74,6 +74,7 @@ export interface ConversationRequest {
   sessionId: string;
   expectedGenerationId: string;
   expectedSessionViewDigest: string;
+	sessionViewDigest?: string;
   limit: number;
   turnUnitId?: string;
   cursor?: string;
@@ -210,10 +211,13 @@ export class CliRunner {
     if (request.turnUnitId !== undefined) args.push("--turn-unit-id", request.turnUnitId);
     if (request.cursor !== undefined) args.push("--cursor", request.cursor);
     if (request.messageCursor !== undefined) args.push("--message-cursor", request.messageCursor);
+	if (request.sessionViewDigest !== undefined) args.push("--session-view-digest", request.sessionViewDigest);
     try {
       const page = parseConversationPageV1((await this.run(args)).stdout);
+	  const selectedViewDigest = request.sessionViewDigest ?? request.expectedSessionViewDigest;
       if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
-          page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest ||
+		  page.generation_id !== request.expectedGenerationId || page.session_view_digest !== selectedViewDigest ||
+		  (request.sessionViewDigest !== undefined && page.evidence_session_view_digest !== undefined && page.evidence_session_view_digest !== selectedViewDigest) ||
           page.mode !== (request.turnUnitId === undefined ? "turn_index" : "turn_messages") ||
           page.turn_unit_id !== (request.turnUnitId ?? null) || !conversationPageMatchesRequest(page, request)) {
         throw new ConversationQueryError("generation_mismatch", conversationErrorMessage("generation_mismatch"));
@@ -327,20 +331,17 @@ function allowedArgs(args: readonly string[]): boolean {
     if (args[13] === "--cursor") return boundedCursor(args[14]);
     return args[13] === "--anchor" && validAnchor(args[14]);
   }
-  if (args.length >= 13 && args.length <= 17 && args[0] === "inspect" && args[1] === "conversation-chain" &&
+  if (args.length >= 13 && args.length <= 19 && args[0] === "inspect" && args[1] === "conversation-chain" &&
       args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
       args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
       args[10] === "--limit" && validConversationLimit(args[11]) && args[12] === "--json") {
-    const rest = args.slice(13);
-    if (rest.length === 0) return true;
-    if (rest.length === 2) {
-      return (rest[0] === "--cursor" && boundedCursor(rest[1])) ||
-        (rest[0] === "--turn-unit-id" && INSPECT_ID.test(rest[1] ?? ""));
-    }
-    if (rest.length === 4 && rest[0] === "--turn-unit-id" && INSPECT_ID.test(rest[1] ?? "")) {
-      return rest[2] === "--message-cursor" && boundedCursor(rest[3]);
-    }
-    return false;
+	const rest = args.slice(13);
+	let index = 0;
+	if (rest[index] === "--turn-unit-id" && INSPECT_ID.test(rest[index + 1] ?? "")) index += 2;
+	else if (rest[index] === "--cursor" && boundedCursor(rest[index + 1])) index += 2;
+	if (rest[index] === "--message-cursor" && boundedCursor(rest[index + 1]) && rest[0] === "--turn-unit-id") index += 2;
+	if (rest[index] === "--session-view-digest" && DIGEST.test(rest[index + 1] ?? "")) index += 2;
+	return index === rest.length;
   }
   return false;
 }
@@ -389,6 +390,7 @@ function validateConversationRequest(request: ConversationRequest): void {
   if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
   if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
   if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
+	if (request.sessionViewDigest !== undefined && !DIGEST.test(request.sessionViewDigest)) throw new Error("invalid selected Session view digest");
   if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 64) throw new Error("invalid conversation page limit");
   if (request.turnUnitId !== undefined && !INSPECT_ID.test(request.turnUnitId)) throw new Error("invalid turn unit ID");
   if (request.cursor !== undefined && request.turnUnitId !== undefined) throw new Error("index cursor cannot select a turn");

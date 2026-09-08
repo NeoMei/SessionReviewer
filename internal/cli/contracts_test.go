@@ -520,12 +520,12 @@ func TestContractParsersEnforceEveryDigestFormat(t *testing.T) {
 }
 
 func TestConversationChainContractRequiresTurnForMessageCursorAndCapsSourceReads(t *testing.T) {
-	args := []string{"conversation-chain", "--project-id", "p", "--provider", "claude", "--session-id", "same", "--expected-generation-id", "g", "--turn-unit-id", "turn-1", "--message-cursor", "opaque", "--limit", "64", "--json"}
+	args := []string{"conversation-chain", "--project-id", "p", "--provider", "claude", "--session-id", "same", "--expected-generation-id", "g", "--session-view-digest", contractTestDigest, "--turn-unit-id", "turn-1", "--message-cursor", "opaque", "--limit", "64", "--json"}
 	request, err := ParseInspectContract(args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request.Provider != "claude" || request.SessionID != "same" || request.TurnUnitID != "turn-1" || request.MessageCursor != "opaque" || request.Limit != 64 {
+	if request.Provider != "claude" || request.SessionID != "same" || request.SessionViewDigest != contractTestDigest || request.TurnUnitID != "turn-1" || request.MessageCursor != "opaque" || request.Limit != 64 {
 		t.Fatalf("unexpected conversation-chain request: %+v", request)
 	}
 	withoutTurn := removeContractFlag(t, args, "--turn-unit-id")
@@ -535,6 +535,14 @@ func TestConversationChainContractRequiresTurnForMessageCursorAndCapsSourceReads
 	tooLarge := replaceContractFlagValue(t, args, "--limit", "65")
 	if _, err := ParseInspectContract(tooLarge); err == nil {
 		t.Fatal("accepted conversation page above 64 items")
+	}
+	for _, invalid := range []string{"../view", "sha256:" + strings.Repeat("A", 64), "sha256:" + strings.Repeat("a", 63), "sha512:" + strings.Repeat("a", 64)} {
+		if _, err := ParseInspectContract(replaceContractFlagValue(t, args, "--session-view-digest", invalid)); err == nil {
+			t.Fatalf("accepted invalid Session view digest %q", invalid)
+		}
+	}
+	if _, err := ParseInspectContract(append(args, "--session-view-digest", contractTestDigest)); err == nil {
+		t.Fatal("accepted duplicate Session view selector")
 	}
 	if MaxConversationSourceReadBytes != 64<<10 {
 		t.Fatalf("source read ceiling = %d", MaxConversationSourceReadBytes)

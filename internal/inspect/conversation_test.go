@@ -633,6 +633,20 @@ func TestConversationCancellationDuringMaterializationReturnsNoPartialPage(t *te
 	}
 }
 
+func TestHistoricalConversationSelectorChecksCancellationWhileScanningManifestRoots(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	authenticated := authenticatedSession{
+		view: memory.SessionView{Provider: "codex", SessionID: conversationSession},
+		manifest: memory.GenerationManifest{RetainedConversationChains: []memory.ConversationChainDependency{{
+			Provider: "codex", SessionID: conversationSession, SessionViewDigest: "sha256:" + strings.Repeat("1", 64), Digest: "sha256:" + strings.Repeat("2", 64),
+		}}},
+	}
+	if _, err := selectRetainedConversationByView(ctx, authenticated, authenticated.manifest.RetainedConversationChains[0].SessionViewDigest); eventErrorCode(err) != CodeInvalidArgument {
+		t.Fatalf("canceled historical selector error=%v", err)
+	}
+}
+
 func TestConversationRendererAcceptsProviderNeutralRetainedPage(t *testing.T) {
 	f := newConversationFixture(t, visibleRecord("user", "", "question")+visibleRecord("assistant", "final_answer", "answer"))
 	page, err := LoadConversationPage(context.Background(), f.request)

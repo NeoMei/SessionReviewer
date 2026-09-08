@@ -158,7 +158,7 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
 }
 
 function key(identity: ConversationIdentity): string {
-  return [identity.projectId, identity.provider, identity.sessionId, identity.expectedGenerationId, identity.expectedSessionViewDigest].join("\0");
+  return [identity.projectId, identity.provider, identity.sessionId, identity.expectedGenerationId, identity.expectedSessionViewDigest, identity.sessionViewDigest ?? ""].join("\0");
 }
 
 function renderCoverage(page: ConversationPageV1): HTMLElement {
@@ -249,8 +249,10 @@ function answerExplanation(turn: VisibleTurnV1): string {
 }
 
 function assertBoundPage(page: ConversationPageV1, identity: ConversationIdentity, mode: "turn_index" | "turn_messages", navigation?: ConversationNavigation, turnUnitId?: string, selectedTurn?: VisibleTurnV1): void {
+	const selectedViewDigest = identity.sessionViewDigest ?? identity.expectedSessionViewDigest;
 	if (page.project_id !== identity.projectId || page.provider !== identity.provider || page.session_id !== identity.sessionId ||
-		page.generation_id !== identity.expectedGenerationId || page.session_view_digest !== identity.expectedSessionViewDigest || page.mode !== mode ||
+		page.generation_id !== identity.expectedGenerationId || page.session_view_digest !== selectedViewDigest ||
+		(identity.sessionViewDigest !== undefined && page.evidence_session_view_digest !== undefined && page.evidence_session_view_digest !== selectedViewDigest) || page.mode !== mode ||
 		(mode === "turn_messages" && page.turn_unit_id !== turnUnitId) || (navigation === undefined && page.range_start !== 0) || page.range_end - page.range_start > PAGE_SIZE ||
 		(navigation?.direction === "first" && page.range_start !== 0) || (navigation?.direction === "last" && page.range_end !== page.total) ||
 		(navigation?.direction === "next" && page.range_start !== navigation.sourceEnd) || (navigation?.direction === "previous" && page.range_end !== navigation.sourceStart) ||

@@ -173,6 +173,35 @@ describe("selected Session conversation", () => {
     expect(disposed.textContent).toBe("");
   });
 
+  it("reloads and suppresses stale replies when only the selected snapshot changes", async () => {
+    const oldView = `sha256:${"8".repeat(64)}`;
+    const otherOldView = `sha256:${"9".repeat(64)}`;
+    const stale = deferred<ConversationPageV1>();
+    const load = vi.fn((request: ConversationRequest) => {
+      const selected = request.sessionViewDigest ?? request.expectedSessionViewDigest;
+      if (selected === oldView) return stale.promise;
+      const excerpt = selected === otherOldView ? "OTHER_OLD_ANSWER" : "CURRENT_ANSWER";
+      return Promise.resolve(page(request.turnUnitId === undefined
+        ? conversationPage({ session_view_digest: selected, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: excerpt } }] })
+        : selectedConversationPage({ session_view_digest: selected })));
+    });
+    const root = renderConversation(identity, load);
+    await settle();
+    await settle();
+    root.updateIdentity({ ...identity, sessionViewDigest: oldView });
+    root.updateIdentity({ ...identity, sessionViewDigest: otherOldView });
+    await settle();
+    await settle();
+    stale.resolve(page(conversationPage({ session_view_digest: oldView, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: "STALE_OLD_ANSWER" } }] })));
+    await settle();
+
+    expect(root.textContent).toContain("OTHER_OLD_ANSWER");
+    expect(root.textContent).not.toContain("STALE_OLD_ANSWER");
+	expect(load.mock.calls.filter(([request]) => request.sessionViewDigest === oldView)).toHaveLength(1);
+	expect(load.mock.calls.filter(([request]) => request.sessionViewDigest === otherOldView)).toHaveLength(2);
+    expect(load.mock.calls.at(-1)?.[0]).toMatchObject({ sessionViewDigest: otherOldView, turnUnitId: "turn-1" });
+  });
+
   it("keeps an index-page request authoritative when an old turn row is clicked during loading", async () => {
     const firstTurn = (conversationPage().turn_units as Record<string, unknown>[])[0];
     const secondTurn = {

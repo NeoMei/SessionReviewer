@@ -18,7 +18,7 @@ import (
 
 type ConversationRequest struct {
 	DataRoot, ProjectID, Provider, SessionID, ExpectedGenerationID string
-	TurnUnitID, Cursor, MessageCursor                              string
+	SessionViewDigest, TurnUnitID, Cursor, MessageCursor           string
 	Limit                                                          int
 }
 
@@ -61,11 +61,37 @@ type ConversationPage struct {
 }
 
 func LoadConversationPage(ctx context.Context, request ConversationRequest) (ConversationPage, error) {
-	if request.Limit < 1 || request.Limit > 64 || request.Cursor != "" && request.TurnUnitID != "" || request.MessageCursor != "" && request.TurnUnitID == "" || len(request.Cursor) > 8192 || len(request.MessageCursor) > 8192 || len(request.TurnUnitID) > 256 {
+	if request.Limit < 1 || request.Limit > 64 || request.Cursor != "" && request.TurnUnitID != "" || request.MessageCursor != "" && request.TurnUnitID == "" || len(request.Cursor) > 8192 || len(request.MessageCursor) > 8192 || len(request.TurnUnitID) > 256 || request.SessionViewDigest != "" && !digestRE.MatchString(request.SessionViewDigest) {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation request is invalid")
 	}
 	var page ConversationPage
 	_, err := inspectPublishedSession(ctx, EventPageRequest{DataRoot: request.DataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, Limit: request.Limit}, nil, func(authenticated authenticatedSession) error {
+		if request.SessionViewDigest != "" {
+			selected, err := selectRetainedConversationByView(ctx, authenticated, request.SessionViewDigest)
+			if err != nil {
+				return err
+			}
+			turns, coverage, err := retainedVisibleConversation(selected)
+			if err != nil {
+				return publicError(CodeInvalidArgument, "published retained conversation is unavailable or corrupt")
+			}
+			bodyAvailability := conversationBodyRetained
+			if record, available := selectedSourceRecord(ctx, request, selected.view); available && record.Availability == memory.SourceAvailable {
+				sourceTurns, sourceCoverage, sourceLoaded, _, readErr := loadConversationSource(ctx, request, selected.view, record)
+				if readErr != nil {
+					return readErr
+				}
+				if sourceLoaded {
+					turns, coverage = sourceTurns, sourceCoverage
+					if err := mergeRetainedEvidence(turns, selected.document); err != nil {
+						return publicError(CodeInvalidArgument, "published retained conversation does not match source")
+					}
+					bodyAvailability = conversationBodySource
+				}
+			}
+			page, err = selectedSnapshotConversationPage(request, selected, turns, coverage, bodyAvailability)
+			return err
+		}
 		view := authenticated.view
 		record, err := sourcecatalog.ReadAuthenticated(ctx, request.DataRoot, request.Provider, request.SessionID, view.SourceRecordDigest)
 		if err != nil || record.SourceIdentity != view.SourceIdentity {
@@ -92,34 +118,12 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		var coverage conversationchain.VisibleCoverage
 		bodyAvailability := ""
 		evidenceView := view.Digest
-		sourceLoaded := false
-		visibleReaderUnsupported := false
-		if record.Availability == memory.SourceAvailable {
-			visible, sourceCoverage, readErr := readPublishedVisible(ctx, record)
-			if context.Cause(ctx) != nil {
-				return publicError(CodeInvalidArgument, "inspection timed out")
-			}
-			if errors.Is(readErr, source.ErrVisibleReaderUnsupported) {
-				visibleReaderUnsupported = true
-			} else {
-				if readErr == nil {
-					sourceLoaded = true
-					redactor := redact.Default()
-					for i := range visible {
-						if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
-							return publicError(CodeInvalidArgument, "inspection timed out")
-						}
-						visible[i].Text = redactAbsolutePaths(redactor.Text(visible[i].Text).Text)
-					}
-					turns, coverage = conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, visible)
-					coverage.SourceRecords = sourceCoverage.SourceRecords
-					coverage.OversizedRecords = sourceCoverage.OversizedRecords
-					coverage.MalformedRecords = sourceCoverage.MalformedRecords
-					coverage.Complete = sourceCoverage.Complete && coverage.TruncatedBodies == 0 && coverage.OrphanMessages == 0
-					conversationchain.ApplyVisibleCoverage(turns, coverage)
-					bodyAvailability = conversationBodySource
-				}
-			}
+		turns, coverage, sourceLoaded, visibleReaderUnsupported, err := loadConversationSource(ctx, request, view, record)
+		if err != nil {
+			return err
+		}
+		if sourceLoaded {
+			bodyAvailability = conversationBodySource
 		}
 		if !sourceLoaded && retained != nil {
 			turns, coverage, err = retainedVisibleConversation(*retained)
@@ -149,6 +153,36 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		return ConversationPage{}, err
 	}
 	return page, nil
+}
+
+func loadConversationSource(ctx context.Context, request ConversationRequest, view memory.SessionView, record memory.SourceRecord) ([]conversationchain.VisibleTurn, conversationchain.VisibleCoverage, bool, bool, error) {
+	if record.Availability != memory.SourceAvailable {
+		return nil, conversationchain.VisibleCoverage{}, false, false, nil
+	}
+	visible, sourceCoverage, err := readPublishedVisible(ctx, record)
+	if context.Cause(ctx) != nil {
+		return nil, conversationchain.VisibleCoverage{}, false, false, publicError(CodeInvalidArgument, "inspection timed out")
+	}
+	if errors.Is(err, source.ErrVisibleReaderUnsupported) {
+		return nil, conversationchain.VisibleCoverage{}, false, true, nil
+	}
+	if err != nil {
+		return nil, conversationchain.VisibleCoverage{}, false, false, nil
+	}
+	redactor := redact.Default()
+	for i := range visible {
+		if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
+			return nil, conversationchain.VisibleCoverage{}, false, false, publicError(CodeInvalidArgument, "inspection timed out")
+		}
+		visible[i].Text = redactAbsolutePaths(redactor.Text(visible[i].Text).Text)
+	}
+	turns, coverage := conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, visible)
+	coverage.SourceRecords = sourceCoverage.SourceRecords
+	coverage.OversizedRecords = sourceCoverage.OversizedRecords
+	coverage.MalformedRecords = sourceCoverage.MalformedRecords
+	coverage.Complete = sourceCoverage.Complete && coverage.TruncatedBodies == 0 && coverage.OrphanMessages == 0
+	conversationchain.ApplyVisibleCoverage(turns, coverage)
+	return turns, coverage, true, false, nil
 }
 
 func readPublishedVisible(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
@@ -260,6 +294,18 @@ func conversationPage(request ConversationRequest, view memory.SessionView, sour
 	if err != nil {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation dependencies are invalid")
 	}
+	return conversationPageBound(request, view, turns, coverage, evidenceView, bodyAvailability, dependency)
+}
+
+func selectedSnapshotConversationPage(request ConversationRequest, selected retainedConversation, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, bodyAvailability string) (ConversationPage, error) {
+	dependency, err := memory.Digest([]string{selected.view.Digest, selected.document.Digest, selected.document.DependencyDigest, bodyAvailability, "visible-turn-v1", conversationRedactionVersion})
+	if err != nil {
+		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation dependencies are invalid")
+	}
+	return conversationPageBound(request, selected.view, turns, coverage, selected.view.Digest, bodyAvailability, dependency)
+}
+
+func conversationPageBound(request ConversationRequest, view memory.SessionView, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, evidenceView, bodyAvailability, dependency string) (ConversationPage, error) {
 	page := ConversationPage{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Mode: "turn_index", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, GenerationID: request.ExpectedGenerationID, SessionViewDigest: view.Digest, DependencyDigest: dependency, RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: coverage, BodyAvailability: bodyAvailability}
 	if evidenceView != "" && evidenceView != view.Digest {
 		page.EvidenceSessionViewDigest = &evidenceView

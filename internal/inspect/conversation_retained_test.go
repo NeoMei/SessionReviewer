@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +103,184 @@ func TestRetainedConversationSurvivesRemovalRescanAndRestoration(t *testing.T) {
 	if err != nil || restored.BodyAvailability != "source_full" || restored.SessionViewDigest != originalView || restored.Messages[1].Text == nil || *restored.Messages[1].Text != "Retained answer." {
 		t.Fatalf("restored source: page=%+v err=%v", restored, err)
 	}
+}
+
+func TestHistoricalConversationSelectionAfterAppendUsesExactRetainedSnapshot(t *testing.T) {
+	projectRoot, vaultRoot, dataRoot, sessionsRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	for _, args := range [][]string{{"init"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"}} {
+		command := exec.Command("git", args...)
+		command.Dir = projectRoot
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git: %v %s", err, output)
+		}
+	}
+	const projectID = "project-historical-query"
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{ID: projectID, Root: projectRoot, VaultRoot: vaultRoot, VaultReviewPath: "Projects/Historical/Session Review", VaultCaseMode: platform.CaseSensitive}}}); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "67676767-6767-4767-8767-676767676767"
+	records := []map[string]any{
+		{"timestamp": "2026-09-08T00:00:00Z", "type": "session_meta", "payload": map[string]any{"id": sessionID, "cwd": projectRoot}},
+		{"timestamp": "2026-09-08T00:00:01Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "Same turn identity?"}}}},
+		{"timestamp": "2026-09-08T00:00:02Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "Historical answer."}}}},
+	}
+	encode := func(values []map[string]any) []byte {
+		t.Helper()
+		var body bytes.Buffer
+		for _, record := range values {
+			if err := json.NewEncoder(&body).Encode(record); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return body.Bytes()
+	}
+	sourcePath := filepath.Join(sessionsRoot, "rollout-2026-09-08T00-00-00-"+sessionID+".jsonl")
+	if err := os.WriteFile(sourcePath, encode(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runScan := func() string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := cli.Run([]string{"scan", "--project-id", projectID, "--sessions-root", sessionsRoot, "--data-dir", dataRoot, "--json"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("scan code %d: %s %s", code, stdout.String(), stderr.String())
+		}
+		store, err := memorystore.OpenReadOnly(dataRoot, projectID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer store.Close()
+		generation, _, err := store.LoadPublished()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return generation
+	}
+	t.Setenv("SESSION_REVIEWER_SESSIONS_ROOT", sessionsRoot)
+	firstGeneration := runScan()
+	base := inspect.ConversationRequest{DataRoot: dataRoot, ProjectID: projectID, Provider: "codex", SessionID: sessionID, ExpectedGenerationID: firstGeneration, Limit: 1}
+	firstIndex, err := inspect.LoadConversationPage(context.Background(), base)
+	if err != nil || len(firstIndex.TurnUnits) != 1 {
+		t.Fatalf("first index=%+v err=%v", firstIndex, err)
+	}
+	oldView, turnID := firstIndex.SessionViewDigest, firstIndex.TurnUnits[0].TurnUnitID
+
+	records = append(records, map[string]any{"timestamp": "2026-09-08T00:00:03Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "Current revised answer."}}}})
+	if err := os.WriteFile(sourcePath, encode(records), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base.ExpectedGenerationID = runScan()
+	current, err := inspect.LoadConversationPage(context.Background(), base)
+	if err != nil || current.SessionViewDigest == oldView || current.BodyAvailability != "source_full" || len(current.TurnUnits) != 1 || current.TurnUnits[0].TurnUnitID != turnID || current.TurnUnits[0].AssistantMessageCount != 2 {
+		t.Fatalf("default current index=%+v err=%v", current, err)
+	}
+	store, err := memorystore.Open(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldViewBody, err := store.LoadObject(memorystore.ObjectSessionView, oldView)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unreferencedView memory.SessionView
+	if err := json.Unmarshal(oldViewBody, &unreferencedView); err != nil {
+		t.Fatal(err)
+	}
+	unreferencedView.Diagnostics = append(unreferencedView.Diagnostics, memory.Diagnostic{Code: "unreferenced-test-view"})
+	unreferencedView.Digest, err = memory.SessionViewDigest(unreferencedView)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PutSessionView(unreferencedView); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	beforeReads := snapshotHistoricalReadTrees(t, dataRoot, projectRoot, vaultRoot, sessionsRoot)
+
+	historical := base
+	historical.SessionViewDigest = oldView
+	historicalIndex, err := inspect.LoadConversationPage(context.Background(), historical)
+	if err != nil || historicalIndex.SessionViewDigest != oldView || historicalIndex.EvidenceSessionViewDigest != nil || historicalIndex.BodyAvailability != "retained_excerpt" || len(historicalIndex.TurnUnits) != 1 || historicalIndex.NextCursor != nil {
+		t.Fatalf("historical index=%+v err=%v", historicalIndex, err)
+	}
+	historical.TurnUnitID, historical.Limit = turnID, 1
+	historicalDetail, err := inspect.LoadConversationPage(context.Background(), historical)
+	if err != nil || len(historicalDetail.Messages) != 1 || historicalDetail.NextCursor == nil || historicalDetail.Messages[0].Text != nil {
+		t.Fatalf("historical detail=%+v err=%v", historicalDetail, err)
+	}
+	historical.MessageCursor = *historicalDetail.NextCursor
+	historicalAnswer, err := inspect.LoadConversationPage(context.Background(), historical)
+	if err != nil || len(historicalAnswer.Messages) != 1 || historicalAnswer.Messages[0].VisibleExcerpt != "Historical answer." || historicalAnswer.Messages[0].Text != nil || historicalAnswer.Messages[0].SourceRef.RecordOrdinal != 3 {
+		t.Fatalf("historical answer crossed snapshots: page=%+v err=%v", historicalAnswer, err)
+	}
+	currentDetail := base
+	currentDetail.TurnUnitID, currentDetail.Limit = turnID, 1
+	currentFull := currentDetail
+	currentFull.Limit = 64
+	currentAnswer, err := inspect.LoadConversationPage(context.Background(), currentFull)
+	if err != nil || len(currentAnswer.Messages) != 3 || currentAnswer.Messages[2].VisibleExcerpt != "Current revised answer." || currentAnswer.Messages[2].Text == nil || *currentAnswer.Messages[2].Text != "Current revised answer." {
+		t.Fatalf("current answer crossed snapshots: page=%+v err=%v", currentAnswer, err)
+	}
+	currentFirst, err := inspect.LoadConversationPage(context.Background(), currentDetail)
+	if err != nil || currentFirst.NextCursor == nil {
+		t.Fatalf("current detail=%+v err=%v", currentFirst, err)
+	}
+	historical.MessageCursor = *currentFirst.NextCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), historical); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("current cursor crossed into historical view: %v", err)
+	}
+	currentDetail.MessageCursor = *historicalDetail.NextCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), currentDetail); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("historical cursor crossed into current view: %v", err)
+	}
+	for name, mutate := range map[string]func(*inspect.ConversationRequest){
+		"wrong project":         func(request *inspect.ConversationRequest) { request.ProjectID = "project-foreign" },
+		"wrong provider":        func(request *inspect.ConversationRequest) { request.Provider = "claude" },
+		"wrong Session":         func(request *inspect.ConversationRequest) { request.SessionID = "session-foreign" },
+		"unreferenced CAS view": func(request *inspect.ConversationRequest) { request.SessionViewDigest = unreferencedView.Digest },
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := historical
+			request.MessageCursor = ""
+			mutate(&request)
+			if _, err := inspect.LoadConversationPage(context.Background(), request); retainedErrorCode(err) != "invalid_argument" {
+				t.Fatalf("selected foreign or unreferenced view error=%v", err)
+			}
+		})
+	}
+	if afterReads := snapshotHistoricalReadTrees(t, dataRoot, projectRoot, vaultRoot, sessionsRoot); !reflect.DeepEqual(beforeReads, afterReads) {
+		t.Fatal("historical conversation reads mutated synthetic project, Vault, private state, or source bytes")
+	}
+}
+
+func snapshotHistoricalReadTrees(t *testing.T, roots ...string) map[string]string {
+	t.Helper()
+	result := make(map[string]string)
+	for rootIndex, root := range roots {
+		err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				return nil
+			}
+			body, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			result[fmt.Sprintf("%d/%s", rootIndex, relative)] = string(body)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return result
 }
 
 type removedRetainedFixture struct {

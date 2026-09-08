@@ -163,6 +163,43 @@ describe("conversation CLI query", () => {
     expect(execFile.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ shell: false, timeout: 10_000, maxBuffer: 1 << 20 }));
   });
 
+  it("forwards an optional exact snapshot selector and binds the response to it", async () => {
+    const historical = `sha256:${"9".repeat(64)}`;
+    const execFile = vi.fn((_file: string, args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+	  callback(null, JSON.stringify(args.includes("--turn-unit-id") ? selectedConversationPage({ session_view_digest: historical }) : conversationPage({ session_view_digest: historical })), "");
+    });
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    const request = {
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, sessionViewDigest: historical, limit: 20
+    };
+    await expect(runner.getConversation(request)).resolves.toMatchObject({ session_view_digest: historical });
+	await expect(runner.getConversation({ ...request, turnUnitId: "turn-1" })).resolves.toMatchObject({ session_view_digest: historical });
+    expect(execFile.mock.calls[0]?.[1]).toEqual([
+      "inspect", "conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1",
+      "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--session-view-digest", historical
+    ]);
+	expect(execFile.mock.calls[1]?.[1]).toEqual([
+	  "inspect", "conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1",
+	  "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--turn-unit-id", "turn-1", "--session-view-digest", historical
+	]);
+
+    const wrong = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage()), ""));
+    await expect(wrong.getConversation(request)).rejects.toBeInstanceOf(ConversationQueryError);
+    const mismatchedEvidence = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ session_view_digest: historical, evidence_session_view_digest: VIEW_DIGEST })), ""));
+    await expect(mismatchedEvidence.getConversation(request)).rejects.toBeInstanceOf(ConversationQueryError);
+  });
+
+  it("rejects malformed snapshot selectors before launching the process", async () => {
+    const execFile = vi.fn();
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "codex", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, sessionViewDigest: "../view", limit: 20
+    })).rejects.toThrow(/digest/i);
+    expect(execFile).not.toHaveBeenCalled();
+  });
+
   it("keeps the fixed argv provider-neutral for retained conversation reads", async () => {
     const response = conversationPage({ provider: "claude", body_availability: "retained_excerpt" });
     const user = ((response.turn_units as Record<string, unknown>[])[0]?.user_message as Record<string, unknown>);

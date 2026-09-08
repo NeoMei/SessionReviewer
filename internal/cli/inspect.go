@@ -19,7 +19,8 @@ Usage:
     --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
     --limit 1..100 --json
   session-reviewer inspect conversation-chain --project-id ID --provider ID --session-id ID
-    --expected-generation-id ID [--cursor TOKEN | --turn-unit-id ID [--message-cursor TOKEN]]
+    --expected-generation-id ID [--session-view-digest DIGEST]
+    [--cursor TOKEN | --turn-unit-id ID [--message-cursor TOKEN]]
     --limit 1..64 --json
 `
 
@@ -64,7 +65,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 			body, err = inspectapi.RenderSummary(summary)
 		}
 	} else if request.Command == "conversation-chain" {
-		page, loadErr := inspectapi.LoadConversationPage(ctx, inspectapi.ConversationRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, TurnUnitID: request.TurnUnitID, Cursor: request.Cursor, MessageCursor: request.MessageCursor, Limit: request.Limit})
+		page, loadErr := inspectapi.LoadConversationPage(ctx, inspectapi.ConversationRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, SessionViewDigest: request.SessionViewDigest, TurnUnitID: request.TurnUnitID, Cursor: request.Cursor, MessageCursor: request.MessageCursor, Limit: request.Limit})
 		err = loadErr
 		if err == nil {
 			body, err = inspectapi.RenderConversationPage(page)

@@ -10,6 +10,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
 
 const (
@@ -22,6 +23,55 @@ type retainedConversation struct {
 	document  conversationchain.Document
 	view      memory.SessionView
 	revisions []memory.ObservationRevision
+}
+
+func selectRetainedConversationByView(ctx context.Context, authenticated authenticatedSession, sessionViewDigest string) (retainedConversation, error) {
+	var exact *memory.ConversationChainDependency
+	for _, dependencies := range [][]memory.ConversationChainDependency{authenticated.manifest.ConversationChains, authenticated.manifest.RetainedConversationChains} {
+		for index := range dependencies {
+			if err := inspectionCheckpoint(ctx, "conversation_snapshot"); err != nil {
+				return retainedConversation{}, publicError(CodeInvalidArgument, "inspection timed out")
+			}
+			dependency := &dependencies[index]
+			if dependency.Provider != authenticated.view.Provider || dependency.SessionID != authenticated.view.SessionID || dependency.SessionViewDigest != sessionViewDigest {
+				continue
+			}
+			if exact != nil {
+				return retainedConversation{}, publicError(CodeInvalidArgument, "selected conversation snapshot is ambiguous")
+			}
+			exact = dependency
+		}
+	}
+	if exact == nil {
+		return retainedConversation{}, publicError(CodeInvalidArgument, "selected conversation snapshot is unavailable")
+	}
+	var selected retainedConversation
+	var err error
+	if sessionViewDigest == authenticated.view.Digest {
+		selected, err = loadRetainedConversation(ctx, authenticated, *exact, &authenticated.view, authenticated.revisions)
+	} else {
+		selected, err = loadRetainedConversation(ctx, authenticated, *exact, nil, nil)
+	}
+	if err != nil {
+		if context.Cause(ctx) != nil {
+			return retainedConversation{}, publicError(CodeInvalidArgument, "inspection timed out")
+		}
+		return retainedConversation{}, publicError(CodeInvalidArgument, "published retained conversation is unavailable or corrupt")
+	}
+	return selected, nil
+}
+
+func selectedSourceRecord(ctx context.Context, request ConversationRequest, view memory.SessionView) (memory.SourceRecord, bool) {
+	record, err := sourcecatalog.ReadAuthenticated(ctx, request.DataRoot, request.Provider, request.SessionID, view.SourceRecordDigest)
+	if err != nil || record.SourceIdentity != view.SourceIdentity {
+		return memory.SourceRecord{}, false
+	}
+	for _, projectID := range record.ProjectIDs {
+		if projectID == request.ProjectID {
+			return record, true
+		}
+	}
+	return memory.SourceRecord{}, false
 }
 
 func selectRetainedConversation(ctx context.Context, authenticated authenticatedSession, source memory.SourceRecord) (*retainedConversation, error) {
