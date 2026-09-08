@@ -106,6 +106,7 @@ func TestProjectLockSerializesProcessesAndSurvivesOwnerCrash(t *testing.T) {
 	}()
 	stopped := false
 	defer func() {
+		_ = control.Close()
 		close(readerStop)
 		if !stopped {
 			_ = command.Process.Kill()
