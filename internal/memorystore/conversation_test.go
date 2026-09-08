@@ -315,28 +315,29 @@ func TestCurrentAndHistoricalSemanticForgeryFailsPrepareAndReload(t *testing.T) 
 
 func TestCurrentAndHistoricalDependencyProofForgeryFailsPrepareAndReload(t *testing.T) {
 	mutations := []struct {
-		name string
-		edit func(*conversationchain.Document)
+		name       string
+		codecLocal bool
+		edit       func(*conversationchain.Document)
 	}{
-		{"missing-proof", func(chain *conversationchain.Document) { chain.DependencyProofV1 = nil }},
-		{"arbitrary-dependency-digest", func(chain *conversationchain.Document) {
+		{"missing-proof", false, func(chain *conversationchain.Document) { chain.DependencyProofV1 = nil }},
+		{"arbitrary-dependency-digest", true, func(chain *conversationchain.Document) {
 			chain.DependencyDigest = prefixedDigest("arbitrary-dependency")
 		}},
-		{"mismatched-view", func(chain *conversationchain.Document) {
+		{"mismatched-view", true, func(chain *conversationchain.Document) {
 			chain.DependencyProofV1.SessionViewDigest = prefixedDigest("foreign-view")
 		}},
-		{"mismatched-source", func(chain *conversationchain.Document) {
+		{"mismatched-source", false, func(chain *conversationchain.Document) {
 			chain.DependencyProofV1.SourceRecordDigest = prefixedDigest("foreign-source")
 		}},
-		{"mismatched-active", func(chain *conversationchain.Document) { chain.DependencyProofV1.ActiveRevisionIDs = []string{} }},
-		{"mismatched-rule", func(chain *conversationchain.Document) { chain.DependencyProofV1.RuleVersion = "visible-turn-v2" }},
-		{"missing-visible-ref", func(chain *conversationchain.Document) {
+		{"mismatched-active", false, func(chain *conversationchain.Document) { chain.DependencyProofV1.ActiveRevisionIDs = []string{} }},
+		{"mismatched-rule", true, func(chain *conversationchain.Document) { chain.DependencyProofV1.RuleVersion = "visible-turn-v2" }},
+		{"missing-visible-ref", true, func(chain *conversationchain.Document) {
 			chain.DependencyProofV1.VisibleRecords = chain.DependencyProofV1.VisibleRecords[1:]
 		}},
-		{"mismatched-visible-ref", func(chain *conversationchain.Document) {
+		{"mismatched-visible-ref", true, func(chain *conversationchain.Document) {
 			chain.DependencyProofV1.VisibleRecords[0].SourceHash = strings.Repeat("f", 64)
 		}},
-		{"malformed-visible-ref", func(chain *conversationchain.Document) { chain.DependencyProofV1.VisibleRecords[0].RecordOrdinal = 0 }},
+		{"malformed-visible-ref", true, func(chain *conversationchain.Document) { chain.DependencyProofV1.VisibleRecords[0].RecordOrdinal = 0 }},
 	}
 	for _, historical := range []bool{false, true} {
 		for _, reload := range []bool{false, true} {
@@ -373,6 +374,13 @@ func TestCurrentAndHistoricalDependencyProofForgeryFailsPrepareAndReload(t *test
 					body, err := strictjson.Encode(chain)
 					if err != nil {
 						t.Fatal(err)
+					}
+					_, parseErr := conversationchain.Parse(body)
+					if mutation.codecLocal && parseErr == nil {
+						t.Fatal("document-local dependency proof mismatch parsed")
+					}
+					if !mutation.codecLocal && mutation.name != "missing-proof" && parseErr != nil {
+						t.Fatalf("view-aware dependency proof mismatch failed standalone codec: %v", parseErr)
 					}
 					if err := os.WriteFile(conversationChainPath(dataRoot, chain.Digest), body, 0o600); err != nil {
 						t.Fatal(err)

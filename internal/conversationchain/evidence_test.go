@@ -145,9 +145,11 @@ func TestValidateRetainedEvidenceAuthenticatesDependencyProof(t *testing.T) {
 			}
 			changed.Digest = CanonicalDigest(changed)
 			body, renderErr := Render(changed)
-			if test.name == "arbitrary dependency digest" {
+			localMismatch := test.name == "arbitrary dependency digest" || test.name == "view" || test.name == "rule" ||
+				test.name == "visible message missing from proof" || test.name == "visible message hash mismatch"
+			if localMismatch {
 				if renderErr == nil {
-					t.Fatal("arbitrary dependency digest remained structurally valid")
+					t.Fatal("document-local dependency proof mismatch remained structurally valid")
 				}
 				return
 			}

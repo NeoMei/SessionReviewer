@@ -138,6 +138,38 @@ func validateDependencyProof(document Document, proof DependencyProofV1) error {
 	if err != nil || document.DependencyDigest != want {
 		return errors.Join(errors.New("conversation dependency digest does not match proof"), err)
 	}
+	if proof.SessionViewDigest != document.SessionViewDigest {
+		return errors.New("conversation dependency proof view binding mismatch")
+	}
+	if proof.RuleVersion != document.SegmentationRuleVersion {
+		return errors.New("conversation dependency proof rule binding mismatch")
+	}
+	records := make(map[uint64]string, len(proof.VisibleRecords))
+	for _, record := range proof.VisibleRecords {
+		records[record.RecordOrdinal] = record.SourceHash
+	}
+	if err := forEachRetainedMessage(document, func(message Message) error {
+		if records[message.SourceRef.RecordOrdinal] != message.SourceRef.SourceHash {
+			return errors.New("retained message is absent from conversation dependency proof")
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func forEachRetainedMessage(document Document, visit func(Message) error) error {
+	for _, turn := range document.TurnUnits {
+		if err := visit(turn.UserMessage); err != nil {
+			return err
+		}
+		for _, message := range turn.AssistantMessages {
+			if err := visit(message); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 

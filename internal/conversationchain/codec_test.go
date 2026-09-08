@@ -145,6 +145,43 @@ func TestConversationChainDependencyProofIsStrictlyBounded(t *testing.T) {
 	})
 }
 
+func TestConversationChainCodecRejectsDocumentLocalDependencyProofMismatchAfterCanonicalRehash(t *testing.T) {
+	document, _, err := Materialize(MaterializeInput{
+		View: retainedView("codex", "session-1", "source-1", nil),
+		Messages: []SourceMessage{
+			retainedMessage(RoleUser, "", "question", testTime1, 1, 'a'),
+			retainedMessage(RoleAssistant, "final_answer", "answer", testTime2, 2, 'b'),
+		},
+		SourceCoverage: completeVisibleCoverage(2, 2), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*Document)
+	}{
+		{"proof view differs from document", func(doc *Document) { doc.DependencyProofV1.SessionViewDigest = "sha256:" + strings.Repeat("f", 64) }},
+		{"proof rule differs from document", func(doc *Document) { doc.DependencyProofV1.RuleVersion = "visible-turn-v2" }},
+		{"user record absent from proof", func(doc *Document) { doc.DependencyProofV1.VisibleRecords = doc.DependencyProofV1.VisibleRecords[1:] }},
+		{"assistant hash differs from proof", func(doc *Document) {
+			doc.TurnUnits[0].AssistantMessages[0].SourceRef.SourceHash = strings.Repeat("f", 64)
+		}},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cloneDocumentWithProof(document)
+			changed.TurnUnits[0].AssistantMessages = append([]Message(nil), document.TurnUnits[0].AssistantMessages...)
+			test.edit(&changed)
+			changed.DependencyDigest = dependencyProofDigest(*changed.DependencyProofV1)
+			changed.Digest = CanonicalDigest(changed)
+			if _, err := Render(changed); err == nil {
+				t.Fatal("document-local dependency proof mismatch rendered")
+			}
+		})
+	}
+}
+
 func TestRenderConversationChainNormalizesCollectionsAndBindsDigest(t *testing.T) {
 	document := frozenChain()
 	document.TurnUnits[0].AssistantMessages = nil

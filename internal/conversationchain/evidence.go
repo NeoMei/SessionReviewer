@@ -111,14 +111,11 @@ func ValidateDependencyProof(document Document, view memory.SessionView) error {
 	if proof == nil {
 		return errors.New("dependency proof is required")
 	}
-	if proof.SessionViewDigest != document.SessionViewDigest || proof.SessionViewDigest != view.Digest {
+	if proof.SessionViewDigest != view.Digest {
 		return errors.New("SessionView digest does not match authenticated view")
 	}
 	if proof.SourceRecordDigest != view.SourceRecordDigest {
 		return errors.New("source-record digest does not match authenticated view")
-	}
-	if proof.RuleVersion != document.SegmentationRuleVersion {
-		return errors.New("rule version does not match conversation chain")
 	}
 	active := append([]string(nil), view.ActiveRevisionIDs...)
 	sort.Strings(active)
@@ -130,22 +127,13 @@ func ValidateDependencyProof(document Document, view memory.SessionView) error {
 			return errors.New("active revisions do not match authenticated view")
 		}
 	}
-	records := make(map[uint64]string, len(proof.VisibleRecords))
-	for _, record := range proof.VisibleRecords {
-		records[record.RecordOrdinal] = record.SourceHash
-	}
-	match := func(message Message) bool {
-		return message.SourceRef.SourceIdentity == view.SourceIdentity && records[message.SourceRef.RecordOrdinal] == message.SourceRef.SourceHash
-	}
-	for _, turn := range document.TurnUnits {
-		if !match(turn.UserMessage) {
-			return errors.New("user message is absent from dependency proof")
+	if err := forEachRetainedMessage(document, func(message Message) error {
+		if message.SourceRef.SourceIdentity != view.SourceIdentity {
+			return errors.New("retained message source identity does not match authenticated view")
 		}
-		for _, message := range turn.AssistantMessages {
-			if !match(message) {
-				return errors.New("assistant message is absent from dependency proof")
-			}
-		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	return nil
 }
