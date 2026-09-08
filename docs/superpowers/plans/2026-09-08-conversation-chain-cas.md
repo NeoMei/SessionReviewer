@@ -25,6 +25,8 @@
 
 Evidence-authentication scope: create `internal/conversationchain/evidence.go` and `evidence_test.go` for a focused pure `ValidateRetainedEvidence(document Document, view memory.SessionView, revisions []memory.ObservationRevision) error` helper. Reuse the existing retained fact policy/formatting and factor its small common join from retained.go if necessary; do not duplicate policy tables in memorystore or refactor unrelated message segmentation.
 
+Reviewed capability inventory scope: add only the new `memorystore -> conversationchain` edge for the four existing targets to `testdata/zero-token/gate-a-production-import-edges.txt`. The exact static run reported added1/removed0; controller inspected canonical Render/Parse and shared evidence validation as its purpose. No dangerous-capability/process-site changes or broad inventory regeneration are permitted. Independent review and final frozen full Go still apply.
+
 **Interfaces:**
 
 ```go
