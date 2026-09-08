@@ -184,6 +184,67 @@ describe("actual ProjectEvolutionView event recovery", () => {
     await view.onClose();
   });
 
+  it("lets a newer explicit shared selection override recovered implicit state on refresh", async () => {
+    const withNewFirst = () => {
+      const result = snapshot("generation-2", 100, DIGEST_2);
+      if (result.state.kind !== "public_valid") throw new Error("expected public index");
+      result.state.index.sessions.unshift({ ...result.state.index.sessions[0], session_id: "session-new" });
+      Object.assign(result.state.index.coverage, { total: 2, complete: 2, source_available: 2, started_at_known: 2 });
+      return result;
+    };
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockResolvedValueOnce(withNewFirst()).mockResolvedValueOnce(withNewFirst()),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const getSessionEvents = vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => {
+      if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
+      return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
+    });
+    let shared = { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null as null | { provider: string; sessionId: string } } };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen(); await settle();
+    const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = "50"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle(); await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-long");
+    shared = { ...shared, sessionBrowser: { ...shared.sessionBrowser, selected: { provider: "codex", sessionId: "session-new" } } };
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="refresh-v4-status"]')!.click();
+    await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-new");
+    expect(getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-new", expectedGenerationId: "generation-2" }));
+    await view.onClose();
+  });
+
+  it("does not let a deferred recovery override a newer explicit shared selection", async () => {
+    const pending = deferred<Extract<Snapshot, { kind: "markdown-v4" }>>();
+    const second = snapshot("generation-2", 100, DIGEST_2);
+    if (second.state.kind !== "public_valid") throw new Error("expected public index");
+    second.state.index.sessions.unshift({ ...second.state.index.sessions[0], session_id: "session-new" });
+    Object.assign(second.state.index.coverage, { total: 2, complete: 2, source_available: 2, started_at_known: 2 });
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockReturnValueOnce(pending.promise), watch: vi.fn().mockReturnValue(vi.fn()) };
+    const getSessionEvents = vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => {
+      if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
+      return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
+    });
+    let shared = { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null as null | { provider: string; sessionId: string } } };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": shared }, undefined, () => shared);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen(); await settle();
+    const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = "50"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    shared = { ...shared, sessionBrowser: { ...shared.sessionBrowser, selected: { provider: "codex", sessionId: "session-new" } } };
+    pending.resolve(second);
+    await settle(); await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-new");
+    expect(getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-new", expectedGenerationId: "generation-2" }));
+    expect(getSessionEvents.mock.calls.some(([request]) => request.sessionId === "session-long" && request.expectedGenerationId === "generation-2" && request.anchor === 50)).toBe(false);
+    expect(view.contentEl.querySelector('.sr-event-recovery-status')).toBeNull();
+    await view.onClose();
+  });
+
   it("lets newer cached event navigation cancel an older pending recovery", async () => {
     const refresh = deferred<Extract<Snapshot, { kind: "markdown-v4" }>>();
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 2_438, DIGEST_1)).mockReturnValueOnce(refresh.promise), watch: vi.fn().mockReturnValue(vi.fn()) };

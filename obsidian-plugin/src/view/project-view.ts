@@ -560,10 +560,17 @@ export class ProjectEvolutionView extends ItemView {
     const recovery = this.pendingEventRecovery;
     if (!recovery || recovery.projectId !== snapshot.descriptor.projectId || snapshot.state.kind !== "public_valid") return undefined;
     const selection = { provider: recovery.provider, sessionId: recovery.sessionId };
+    const state = normalizeV4ViewState(this.currentV4State(snapshot.descriptor.projectId), snapshot.descriptor.projectId);
+    const browserState = normalizeSessionBrowserState(state.sessionBrowser);
+    if (browserState.selected !== null &&
+      (browserState.selected.provider !== recovery.provider || browserState.selected.sessionId !== recovery.sessionId)) {
+      this.invalidateEventRecovery();
+      this.recoveredEventSelection = undefined;
+      return undefined;
+    }
     const session = snapshot.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
     if (!session) return { selection, unavailable: "项目索引已更新；原 Session 已不在已验证索引中，未显示其他 Session 详情。" };
-    const state = normalizeV4ViewState(this.currentV4State(snapshot.descriptor.projectId), snapshot.descriptor.projectId);
-    if (!filterSessions(snapshot.state.index.sessions, normalizeSessionBrowserState(state.sessionBrowser)).includes(session)) {
+    if (!filterSessions(snapshot.state.index.sessions, browserState).includes(session)) {
       return { selection, unavailable: "项目索引已更新；原 Session 已不符合当前本地筛选，未绕过筛选显示详情。" };
     }
     if (session.indexed_event_count === 0 || session.session_view_digest === null) {
@@ -577,6 +584,10 @@ export class ProjectEvolutionView extends ItemView {
     const recovered = this.recoveredEventSelection?.projectId === snapshot.descriptor.projectId ? this.recoveredEventSelection : undefined;
     if (!recovered || snapshot.state.kind !== "public_valid") return state;
     const browserState = normalizeSessionBrowserState(state.sessionBrowser);
+    if (browserState.selected !== null) {
+      this.recoveredEventSelection = undefined;
+      return state;
+    }
     const session = snapshot.state.index.sessions.find((entry) => entry.provider === recovered.provider && entry.session_id === recovered.sessionId);
     if (!session || !filterSessions(snapshot.state.index.sessions, browserState).includes(session)) {
       this.recoveredEventSelection = undefined;
