@@ -263,13 +263,17 @@ describe("v4 scanned Session renderer", () => {
 
   it("does not request retained summary without a SessionView digest and explains why none is shown", () => {
     const loadSessionSummary = vi.fn();
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
     const noDigest = sessionFixture({ session_view_digest: null });
-    const root = renderMarkdownV4View(snapshot(indexFixture([noDigest])), () => {}, { loadSessionSummary });
+    const root = renderMarkdownV4View(snapshot(indexFixture([noDigest])), () => {}, { loadSessionSummary, loadSessionEvents });
     root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
 
     expect(loadSessionSummary).not.toHaveBeenCalled();
+    expect(loadSessionEvents).not.toHaveBeenCalled();
     expect(root.querySelectorAll(".sr-summary-unavailable")).toHaveLength(1);
     expect(root.textContent).toContain("当前 Session 没有可验证的摘要绑定；未显示保留摘要。");
+    expect(root.textContent).toContain("这个 Session 没有可读的已索引事件。");
+    expect(root.querySelector("[data-event-ordinal]")).toBeNull();
   });
 
   it("keeps summary identity independent from event paging and disposes it on tab departure", async () => {
@@ -290,15 +294,20 @@ describe("v4 scanned Session renderer", () => {
   });
 
   it("keeps the full index usable with one summary recovery notice when CLI is missing", () => {
-    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), () => {}, { cliUnavailable: true });
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
+    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), () => {}, { cliUnavailable: true, loadSessionEvents });
     root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
 
+    expect(loadSessionEvents).not.toHaveBeenCalled();
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
     expect(root.querySelectorAll(".sr-summary-unavailable")).toHaveLength(1);
     expect(root.textContent?.match(/无法读取 Session 摘要/g)).toHaveLength(1);
+    expect(root.textContent).toContain("无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。");
     expect(root.textContent).toContain("完整 Session 清单仍可浏览");
     expect(root.textContent).not.toContain("已索引执行事实仍可阅读");
+    expect(root.querySelector("[data-event-ordinal]")).toBeNull();
     root.querySelector<HTMLButtonElement>('[data-session-id="session-2"]')!.click();
+    expect(loadSessionEvents).not.toHaveBeenCalled();
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
   });
 
@@ -642,6 +651,7 @@ describe("v4 scanned Session renderer", () => {
     expect(loadSessionEvents).not.toHaveBeenCalled();
     expect(root.textContent).toContain("可见用户问题");
     expect(root.textContent).toContain("这个 Session 没有可读的已索引事件");
+    expect(root.querySelector("[data-event-ordinal]")).toBeNull();
     expect(root.querySelector('[aria-label="问答记录"]')).not.toBeNull();
     expect(root.querySelector('[aria-label="已索引执行事实"]')).not.toBeNull();
   });

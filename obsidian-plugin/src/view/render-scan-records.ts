@@ -141,7 +141,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   };
 
   const load = async (navigation?: EventNavigation): Promise<void> => {
-    if (!eligible(selected) || !options.loadSessionEvents || disposed) return;
+    if (options.cliUnavailable || !eligible(selected) || !options.loadSessionEvents || disposed) return;
     const epoch = ++requestEpoch;
     const identity = sessionIdentity(selected);
     const cacheKey = `${identity}\0${navigation?.cursor ?? `anchor:${navigation?.anchor ?? "first"}`}`;
