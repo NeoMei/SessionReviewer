@@ -20,7 +20,7 @@
 
 ### Task 1: Expose ordinal jump and recover stale event pages
 
-**Files:** Modify `obsidian-plugin/src/cli/runner.ts`, `src/data/contracts-v4.ts`, `src/view/render-scan-records.ts`, `src/view/presentation.ts`, `src/view/render-v4-shell.ts`, `src/view/project-view.ts`; focused tests in `tests/cli.test.ts`, `tests/contracts-v4.test.ts` and `tests/render-scan-records.test.ts`; add `tests/session-event-recovery.test.ts`. Modify only the relevant navigation styles in `styles.css` if needed.
+**Files:** Modify `obsidian-plugin/src/cli/runner.ts`, `src/data/contracts-v4.ts`, `src/view/render-scan-records.ts`, `src/view/presentation.ts`, `src/view/render-v4-shell.ts`, `src/view/project-view.ts`; focused tests in `tests/cli.test.ts`, `tests/contracts-v4.test.ts` and `tests/render-scan-records.test.ts`; add `tests/session-event-recovery.test.ts`. Modify only the relevant navigation styles in `styles.css` if needed. A small native-free shared `SessionInspectError` module is permitted; re-export from runner for caller compatibility and import directly in the renderer to preserve browser-build isolation.
 
 **Interfaces:** Add exported `SessionInspectError` with a closed code union: `stale_cursor | generation_mismatch | anchor_out_of_range | unavailable`. Its message is a fixed localized/public string, never CLI stderr. Existing event success parsing and identity checks remain unchanged. Add optional host callback `refreshSessionEvents(request: {provider: string; sessionId: string; ordinal: number}): Promise<void>` to the existing view options; source-backed conversation remains independent.
 
@@ -42,6 +42,7 @@ expect(root.querySelector('[data-event-ordinal="1220"]')?.getAttribute("aria-sel
 - [ ] Implement the closed error mapper only for event inspection first, using bounded stdout retained by `run`. Add a labeled numeric-text ordinal field and submit handler to the existing event navigation; validate exact decimal grammar and count before loading. Preserve request epochs/cache keys and select requested ordinal using returned range, not assumed page alignment.
 - [ ] Wire the refresh callback through presentation/shell to the existing ProjectEvolutionView repository refresh. Carry the original namespaced selection/ordinal only as ephemeral host state, with a recovery epoch and one-attempt guard; do not persist cursors or error payloads into Vault or plugin preferences. Reuse existing refresh/disposal/state-patch behavior instead of introducing a second project loader.
 - [ ] GREEN focused tests, full plugin check and diff check. Render actual host at1200px,580px pane and390px viewport; verify keyboard submit, labels, console health and no clipping. Commit exact files and obtain independent spec/quality review. Native combined acceptance remains required later.
+- [ ] Preserve the committed `scripts/check-v4-pane-layout.mjs` browser build: a renderer value import from native `runner.ts` pulls process/filesystem modules into the pure renderer and is a reproduced regression. Keep the closed error type/class in a native-free shared module and rerun the unchanged layout script; do not add native stubs to that test to hide production coupling.
 
 ### Task 2: Provide one actionable CLI recovery and accurate empty states
 
