@@ -10,13 +10,15 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 
 **Overall status: NOT COMPLETE. No merge, release, or completion claim until every applicable requirement below has evidence.** A completed subtask is not product acceptance. No fabricated milestones, problem parents, verification, or price values may fill an empty page.
 
+Authorization update2026-09-08: the user subsequently requested completing all remaining tasks and publishing the code to GitHub, then explicitly requested repeated comprehensive task, code and system/UI review rounds. GitHub integration/release is now authorized only after those gates; earlier checkpoint statements limiting publication authority describe their historical state. The live execution queue and convergence protocol are `2026-09-08-release-execution.md`.
+
 ## Binding acceptance matrix
 
 | ID | Spec | Required outcome | Current evidence / gate |
 |---|---|---|---|
 | S01 | §3, §12.3.1 | Five top tabs in approved order; project header compact, risks/todos and coverage visible | Shell restored at 8c8614d; native five-tab navigation observed in authorized temporary Vault; d57b4e3 fixes reproduced narrow-pane clipping with clean review and native retest |
 | S02 | §4, §13.3/13 | Qualified milestone list, full history, five-part closure; no raw-event homepage | Accepted timeline now has bounded full history and five-part detail; automatic qualification/closure pipeline missing; blocking |
-| S03 | §4.1, §5.1, §13.14 | Visible answers plus execution/verification sources; bounded authenticated drilldown | Visible Codex Q/A implemented; full closure pipeline missing; blocking |
+| S03 | §4.1, §5.1, §13.14 | Visible answers plus execution/verification sources; bounded authenticated drilldown | Visible Codex Q/A and pure retained materializer independently reviewed through edbe8c4; immutable persistence, scan/query wiring and full closure pipeline missing; blocking |
 | S04 | §5, §13.15/16 | Actual question tree, focus path/children/related nodes, orthogonal states | Formal nodes render in approved three-pane geometry; full interactive graph/evidence workflow remains incomplete; blocking |
 | S05 | §5.3, §18.3/5 | Deterministic pending recommendations, explicit child/sibling/merge/move/reorder CAS | Runtime and UI missing; blocking |
 | S06 | §6, §18.2/5 | Decisions/agreements, manual create/edit, candidate extract/confirm/ignore/restore | Legacy view exists; v4 runtime incomplete; blocking |
@@ -24,7 +26,7 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 | S08 | §8, §18.6 | ModelPriceWatch cache, exact routed price, immutable snapshots, honest full-width cards | Validated accounting/current snapshots render honestly; ModelPriceWatch cache/matching service and full workflow missing; blocking |
 | S09 | §2, §13.4/5/14 | Zero Agent starts on scan/read/rule organization; explicit optional candidates only | Must rerun end-to-end instrumentation after integration |
 | S10 | §12.3.7/8/11 | Native Obsidian keyboard, project switching, reload, state persistence, no CLI/network/source recovery | Must repeat on completed product, not 0.4.2 |
-| S11 | §13.11 | Enabled providers use same index/drilldown/status experience | Multi-provider deep conversation recovery requires check; blocking |
+| S11 | §13.11 | Enabled providers use same index/drilldown/status experience | Generic memory provider contracts reviewed at01218cb+cf81296; actual Claude/OpenCode adapters, complete discovery, source coordinates and frontend parity remain missing; blocking |
 | S12 | §9/10, §17.4 | Human preservation, generation/preimage/CAS integrity, private source content | Existing safeguards to retain and regression-test |
 
 ## Delivery rules
