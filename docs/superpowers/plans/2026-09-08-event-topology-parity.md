@@ -20,7 +20,7 @@
 
 ### Task 1: Align nonempty cursor validation without changing the producer
 
-**Files:** Modify `internal/inspect/validate.go`, `validate_test.go`, `schemas/session-event-page-v1.schema.json`; extend existing Go/schema contract tests in `internal/inspect/types_test.go` or the existing owning fixture harness only if needed. Modify frontend `tests/contracts-v4.test.ts` only for parity assertions; do not change the reviewed renderer/runner.
+**Files:** Modify `internal/inspect/validate.go`, `validate_test.go`, `schemas/session-event-page-v1.schema.json`; add structural schema cases in existing `internal/memory/api_compat_test.go` using `readContractJSON` and `validateContractSchema`. Modify frontend `tests/contracts-v4.test.ts` only for parity assertions; do not change the reviewed renderer/runner.
 
 **Interfaces:** Preserve `ValidateEventPage`, `ParseEventPage`, `RenderEventPage` and `parseSessionEventPageV1`. Existing nonempty cursor strings are opaque; never decode them for topology checks.
 
