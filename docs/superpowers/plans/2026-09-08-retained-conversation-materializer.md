@@ -27,6 +27,8 @@
 
 Shared privacy helper extension (2026-09-08): extract the existing absolute-path sanitizer from `internal/inspect/service.go` into `internal/redact/paths.go` as `AbsolutePaths(string) string`; retain the inspect `redactAbsolutePaths` delegating wrapper. Move its private helper logic without changing semantics, and add focused redact tests while rerunning existing inspect path/privacy tests. The pure builder imports redact, never inspect; do not duplicate the sanitizer or introduce an import cycle.
 
+Reviewed Gate A scope extension (2026-09-08): controller and independent task reviewer audited the four new conversationchain imports (`memory`, `redact`, `sort`, `time`) as validation/digest, existing sanitization, deterministic ordering and timestamp parsing only. Update those four exact edges in `testdata/zero-token/gate-a-production-import-edges.txt`; do not regenerate baselines or alter package, dangerous-capability or process-site checks. Run `TestGateAZeroTokenCore` after the scoped update. Record this as agent-reviewed maintenance, not fresh human line-by-line approval.
+
 **Interfaces:**
 
 ```go
