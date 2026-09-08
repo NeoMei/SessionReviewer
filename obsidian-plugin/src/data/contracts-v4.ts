@@ -445,6 +445,19 @@ export function parseSessionEventPageV1(source: string): SessionEventPageV1 {
   return atWireBoundary(() => parseSessionEventPageDocument(source));
 }
 
+export type SessionInspectWireErrorCode = "stale_cursor" | "generation_mismatch" | "anchor_out_of_range";
+
+export function parseSessionInspectWireError(source: string): SessionInspectWireErrorCode {
+  return parseStrictWireDocument(source, "session inspection error", (row) => {
+    exact(row, "$", ["error"]);
+    const error = object(row.error, "$.error");
+    exact(error, "$.error", ["code", "message"]);
+    const code = oneOf(error.code, "$.error.code", ["stale_cursor", "generation_mismatch", "anchor_out_of_range"]);
+    text(error.message, "$.error.message", 4096, true);
+    return code;
+  });
+}
+
 export function parseConversationChainV1(source: string): ConversationChainV1 {
   return atWireBoundary(() => {
     const row = documentObject(source, "conversation chain");
@@ -638,6 +651,19 @@ function parseSessionEventPageDocument(source: string): SessionEventPageV1 {
   if (total === 0 && (rangeStart !== 0 || rangeEnd !== 0 || row.previous_cursor !== null || row.next_cursor !== null ||
     row.first_cursor !== null || row.last_cursor !== null)) {
     throw new Error("empty event page cannot have a range or cursors");
+  }
+  if (total > 0) {
+    if (items.length === 0 || typeof row.first_cursor !== "string" || row.first_cursor.length === 0 ||
+      typeof row.last_cursor !== "string" || row.last_cursor.length === 0) {
+      throw new Error("nonempty event page requires nonempty boundary cursors");
+    }
+    if ((row.previous_cursor === null) !== (rangeStart === 0) || (row.next_cursor === null) !== (rangeEnd === total)) {
+      throw new Error("event page cursor topology does not match its range");
+    }
+    if ((typeof row.previous_cursor === "string" && row.previous_cursor.length === 0) ||
+      (typeof row.next_cursor === "string" && row.next_cursor.length === 0)) {
+      throw new Error("event page cursors must be nonempty");
+    }
   }
   const coverage = parseCoverage(row.coverage, "$.coverage");
   if (total !== coverage.indexed) throw new Error("event page total does not match indexed coverage");

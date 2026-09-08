@@ -523,6 +523,17 @@ describe("session contracts", () => {
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/empty|cursor/i);
   });
 
+  it.each([
+    ["empty first cursor", { first_cursor: "" }],
+    ["empty last cursor", { last_cursor: "" }],
+    ["hidden previous page", { range_start: 1, range_end: 1, items: [], previous_cursor: null }],
+    ["hidden next page", { total: 2, range_end: 1, next_cursor: null }]
+  ])("rejects invalid nonempty event cursor topology: %s", async (_label, patch) => {
+    const page = await fixtureObject("session-event-page-v1.valid.json");
+    Object.assign(page, patch);
+    expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/cursor|topology|range/i);
+  });
+
   it("verifies non-zero canonical index digests and ledger self hashes", async () => {
     const index = await fixtureObject("session-index-v1.valid.json");
     index.digest = "sha256:473d1dc1e8ebe67d6d14af9793c3272e0e78bc98b8c00c2cff2ba68111dc3565";

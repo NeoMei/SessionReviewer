@@ -1,5 +1,6 @@
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../contracts/review-v4";
 import type { SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
+import { SessionInspectError } from "../cli/session-inspect-error";
 import { button, element } from "./dom";
 import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
 import { renderSessionSummary, type SessionSummaryElement } from "./render-session-summary";
@@ -24,10 +25,20 @@ export interface ScanRecordsOptions {
   eventPageCache?: Map<string, SessionEventPageV1>;
   initialState?: unknown;
   onStateChange?: (state: SessionBrowserState) => void;
+  refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+  initialSessionEventOrdinal?: number;
+  recoveryAlreadyAttempted?: boolean;
+  recoverySelectionUnavailable?: string;
 }
 
 export type ScanRecordsElement = HTMLElement & { dispose: () => void };
-type EventNavigation = { cursor?: string; anchor?: number };
+type EventNavigation = {
+  cursor?: string;
+  anchor?: number;
+  direction?: "first" | "previous" | "next" | "last" | "anchor";
+  sourceStart?: number;
+  sourceEnd?: number;
+};
 type SessionHandlers = {
   onFilter: (patch: Partial<SessionBrowserState>) => void;
   onPage: (value: number) => void;
@@ -49,11 +60,18 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     selected = filtered[0];
     state.selected = selected ? sessionSelection(selected) : null;
   }
+  if (options.recoverySelectionUnavailable) {
+    selected = undefined;
+    state.selected = null;
+  }
   let eventPage: SessionEventPageV1 | undefined;
   let selectedEvent = 0;
   let loading = false;
   let loadError = "";
   let retryNavigation: EventNavigation | undefined;
+  let jumpError = "";
+  let jumpValue = options.initialSessionEventOrdinal === undefined ? "" : String(options.initialSessionEventOrdinal);
+  let recoveryAvailable = !options.recoveryAlreadyAttempted;
   let requestEpoch = 0;
   let disposed = false;
   const cache = options.eventPageCache ?? new Map<string, SessionEventPageV1>();
@@ -79,8 +97,22 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     expectedGenerationId: index.generation_id,
     expectedSessionViewDigest: session.session_view_digest!,
     limit: EVENT_PAGE_SIZE,
-    ...navigation
+    ...(navigation?.cursor !== undefined ? { cursor: navigation.cursor } : {}),
+    ...(navigation?.anchor !== undefined ? { anchor: navigation.anchor } : {})
   });
+
+  const validPage = (page: SessionEventPageV1, session: SessionIndexEntryV1, navigation?: EventNavigation): boolean => {
+    if (page.project_id !== index.project_id || page.provider !== session.provider || page.session_id !== session.session_id ||
+      page.generation_id !== index.generation_id || page.session_view_digest !== session.session_view_digest ||
+      page.total !== session.indexed_event_count || page.items.length !== page.range_end - page.range_start ||
+      page.items.length > EVENT_PAGE_SIZE) return false;
+    if (!navigation || navigation.direction === "first") return page.range_start === 0;
+    if (navigation.direction === "last") return page.range_end === page.total;
+    if (navigation.direction === "next") return page.range_start === navigation.sourceEnd;
+    if (navigation.direction === "previous") return page.range_end === navigation.sourceStart;
+    if (navigation.anchor !== undefined) return page.range_start < navigation.anchor && navigation.anchor <= page.range_end;
+    return false;
+  };
 
   const conversationFor = (session: SessionIndexEntryV1 | undefined): HTMLElement => {
     const available = Boolean(session && session.source_availability === "available" && session.session_view_digest && options.loadConversation);
@@ -143,34 +175,69 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   const load = async (navigation?: EventNavigation): Promise<void> => {
     if (options.cliUnavailable || !eligible(selected) || !options.loadSessionEvents || disposed) return;
     const epoch = ++requestEpoch;
-    const identity = sessionIdentity(selected);
+    const identity = eventBindingIdentity(index, selected);
     const cacheKey = `${identity}\0${navigation?.cursor ?? `anchor:${navigation?.anchor ?? "first"}`}`;
     const cached = cache.get(cacheKey);
     loading = !cached;
     loadError = "";
+    jumpError = "";
     retryNavigation = navigation;
-    eventPage = cached;
-    selectedEvent = 0;
+    if (cached && validPage(cached, selected, navigation)) {
+      eventPage = cached;
+      selectedEvent = selectedEventFor(cached, navigation?.anchor);
+    }
     draw();
-    if (cached) {
+    if (cached && validPage(cached, selected, navigation)) {
       retryNavigation = undefined;
       return;
     }
+    if (cached) cache.delete(cacheKey);
     try {
       const page = await options.loadSessionEvents(requestFor(selected, navigation));
-      if (disposed || epoch !== requestEpoch || identity !== sessionIdentity(selected)) return;
+      if (disposed || epoch !== requestEpoch || identity !== eventBindingIdentity(index, selected)) return;
+      if (!validPage(page, selected, navigation)) throw new SessionInspectError("unavailable");
       cache.set(cacheKey, page);
       eventPage = page;
+      selectedEvent = selectedEventFor(page, navigation?.anchor);
       loading = false;
       retryNavigation = undefined;
       draw();
     } catch (error) {
-      if (disposed || epoch !== requestEpoch || identity !== sessionIdentity(selected)) return;
+      if (disposed || epoch !== requestEpoch || identity !== eventBindingIdentity(index, selected)) return;
+      if (error instanceof SessionInspectError && error.code !== "unavailable" && recoveryAvailable && options.refreshSessionEvents) {
+        recoveryAvailable = false;
+        const ordinal = navigation?.anchor ?? (eventPage ? eventPage.range_start + selectedEvent + 1 : 1);
+        try {
+          await options.refreshSessionEvents({ provider: selected.provider, sessionId: selected.session_id, ordinal });
+        } catch {
+          if (disposed || epoch !== requestEpoch || identity !== eventBindingIdentity(index, selected)) return;
+          loading = false;
+          loadError = "无法刷新项目索引；当前已认证事件仍可阅读，请显式重试。";
+          draw();
+          return;
+        }
+        if (disposed || epoch !== requestEpoch || identity !== eventBindingIdentity(index, selected)) return;
+        loading = false;
+        loadError = "事件恢复已被当前视图状态取消；请显式重试。";
+        draw();
+        return;
+      }
       loading = false;
-      eventPage = undefined;
-      loadError = error instanceof Error ? error.message : "无法读取扫描 Session；请刷新项目后重试。";
+      loadError = "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。";
       draw();
     }
+  };
+
+  const jump = (value: string): void => {
+    jumpValue = value;
+    if (!eligible(selected)) return;
+    if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value)) || Number(value) > selected.indexed_event_count) {
+      jumpError = `请输入 1–${formatCount(selected.indexed_event_count)} 的整数。`;
+      draw();
+      return;
+    }
+    recoveryAvailable = true;
+    void load({ anchor: Number(value), direction: "anchor" });
   };
 
   const setSelected = (session: SessionIndexEntryV1 | undefined): boolean => {
@@ -181,6 +248,8 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     selectedEvent = 0;
     loading = false;
     loadError = "";
+    jumpError = "";
+    recoveryAvailable = true;
     return true;
   };
 
@@ -193,14 +262,18 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
 
   const draw = (): void => {
     if (disposed) return;
+    const restoreJumpFocus = root.ownerDocument.activeElement instanceof HTMLInputElement &&
+      root.ownerDocument.activeElement.getAttribute("aria-label") === "跳转到事件序号";
     sessionRail.update(index.sessions, filtered, selected, state, filterError);
-    const nextEventArea = renderEventArea(selected, summaryFor(selected), conversationFor(selected), eventPage, selectedEvent, loading, loadError, retryNavigation, options, {
-      onEvent: (value) => { selectedEvent = value; draw(); },
-      onLoad: (navigation) => { void load(navigation); }
+    const nextEventArea = renderEventArea(selected, summaryFor(selected), conversationFor(selected), eventPage, selectedEvent, loading, loadError, jumpValue, jumpError, retryNavigation, options, {
+      onEvent: (value) => { selectedEvent = value; recoveryAvailable = true; draw(); },
+      onLoad: (navigation) => { recoveryAvailable = true; void load(navigation); },
+      onJump: jump
     });
     if (eventArea) eventArea.replaceWith(nextEventArea);
     else browser.append(nextEventArea);
     eventArea = nextEventArea;
+    if (restoreJumpFocus) eventArea.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')?.focus();
   };
 
   root.dispose = () => {
@@ -275,7 +348,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   browser.append(sessionRail);
   root.append(heading, browser);
   draw();
-  void load();
+  void load(options.initialSessionEventOrdinal === undefined ? undefined : { anchor: options.initialSessionEventOrdinal, direction: "anchor" });
   return root;
 }
 
@@ -373,13 +446,15 @@ function renderEventArea(
   selectedEvent: number,
   loading: boolean,
   loadError: string,
+  jumpValue: string,
+  jumpError: string,
   retryNavigation: EventNavigation | undefined,
   options: ScanRecordsOptions,
-  handlers: { onEvent: (value: number) => void; onLoad: (navigation?: EventNavigation) => void }
+  handlers: { onEvent: (value: number) => void; onLoad: (navigation?: EventNavigation) => void; onJump: (value: string) => void }
 ): HTMLElement {
   const area = element("div", { className: "sr-event-area" });
   if (!session) {
-    area.append(element("p", { className: "sr-empty", text: "公开索引中没有 Session。" }));
+    area.append(element("p", { className: "sr-empty", text: options.recoverySelectionUnavailable ?? "公开索引中没有 Session。" }));
     return area;
   }
   area.append(renderSessionCoverage(session));
@@ -387,6 +462,7 @@ function renderEventArea(
   area.append(conversation);
   const facts = element("section", { className: "sr-execution-facts", attrs: { "aria-label": "已索引执行事实" } }, [element("h3", { text: "已索引执行事实" })]);
   area.append(facts);
+  facts.append(renderOrdinalJump(session.indexed_event_count, jumpValue, jumpError, handlers.onJump));
   if (options.cliUnavailable || !options.loadSessionEvents) {
     facts.append(element("p", { className: "sr-event-unavailable", text: "无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。" }));
     return area;
@@ -395,15 +471,15 @@ function renderEventArea(
     facts.append(element("p", { className: "sr-empty", text: "这个 Session 没有可读的已索引事件。" }));
     return area;
   }
-  if (loading) {
+  if (loading && !page) {
     facts.append(element("p", { className: "sr-loading", text: "正在读取已索引事件…" }));
     return area;
   }
   if (loadError) {
     const retry = button("重试", { "data-action": "retry-event-page" });
     retry.addEventListener("click", () => handlers.onLoad(retryNavigation));
-    facts.append(element("p", { className: "sr-event-error", text: loadError }), retry);
-    return area;
+    facts.append(element("p", { className: "sr-event-error", text: loadError, attrs: { "data-event-page-error": "true" } }), retry);
+    if (!page) return area;
   }
   if (!page) return area;
   if (session.source_availability === "unavailable") {
@@ -436,6 +512,7 @@ function renderEventArea(
     );
   }
   content.append(list, detail);
+  if (loading) facts.append(element("p", { className: "sr-loading", text: "正在读取已索引事件…" }));
   facts.append(renderEventNavigation(page, handlers.onLoad), content);
   return area;
 }
@@ -443,21 +520,44 @@ function renderEventArea(
 function renderEventNavigation(page: SessionEventPageV1, load: (navigation?: EventNavigation) => void): HTMLElement {
   const navigation = element("div", { className: "sr-event-navigation" });
   const definitions = [
-    ["首页", "first-event-page", page.first_cursor],
-    ["上一页", "previous-event-page", page.previous_cursor],
-    ["下一页", "next-event-page", page.next_cursor],
-    ["末页", "last-event-page", page.last_cursor]
+    ["首页", "first-event-page", page.first_cursor, "first"],
+    ["上一页", "previous-event-page", page.previous_cursor, "previous"],
+    ["下一页", "next-event-page", page.next_cursor, "next"],
+    ["末页", "last-event-page", page.last_cursor, "last"]
   ] as const;
-  for (const [label, action, cursor] of definitions) {
+  for (const [label, action, cursor, direction] of definitions) {
     const control = button(label, { "data-action": action });
     const alreadyThere = (action === "first-event-page" && page.range_start === 0) || (action === "last-event-page" && page.range_end === page.total);
     control.disabled = cursor === null || alreadyThere;
-    control.addEventListener("click", () => { if (cursor !== null) load({ cursor }); });
+    control.addEventListener("click", () => { if (cursor !== null) load({ cursor, direction, sourceStart: page.range_start, sourceEnd: page.range_end }); });
     navigation.append(control);
   }
   const range = page.total === 0 ? "0 / 0" : `${page.range_start + 1}–${page.range_end} / ${page.total}`;
   navigation.append(element("span", { text: range }));
   return navigation;
+}
+
+function renderOrdinalJump(total: number, value: string, error: string, jump: (value: string) => void): HTMLElement {
+  const input = element("input", { attrs: { type: "text", inputmode: "numeric", "aria-label": "跳转到事件序号", autocomplete: "off" } });
+  input.value = value;
+  const submit = button("跳转", { "data-action": "jump-event-ordinal" });
+  input.disabled = total === 0;
+  submit.disabled = total === 0;
+  const run = (): void => jump(input.value);
+  input.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); run(); } });
+  submit.addEventListener("click", run);
+  return element("div", { className: "sr-event-jump" }, [
+    element("label", {}, [element("span", { text: "事件序号" }), input]), submit,
+    element("p", { className: "sr-event-jump-error", text: error, attrs: { "data-event-jump-error": "true", role: "status", "aria-live": "polite" } })
+  ]);
+}
+
+function selectedEventFor(page: SessionEventPageV1, anchor?: number): number {
+  return anchor === undefined ? 0 : Math.max(0, Math.min(page.items.length - 1, anchor - page.range_start - 1));
+}
+
+function eventBindingIdentity(index: SessionIndexV1, session: SessionIndexEntryV1 | undefined): string {
+  return session ? `${index.project_id}\0${session.provider}\0${session.session_id}\0${index.generation_id}\0${session.session_view_digest ?? ""}` : "";
 }
 
 function renderSessionCoverage(session: SessionIndexEntryV1): HTMLElement {

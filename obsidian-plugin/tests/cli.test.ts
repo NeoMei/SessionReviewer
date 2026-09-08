@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CliRunner } from "../src/cli/runner";
+import { CliRunner, SessionInspectError } from "../src/cli/runner";
 import { syncStatusFixture } from "./fixtures/sync-status";
 import { SESSION_SUMMARY_SOURCE, sessionSummaryFixture } from "./fixtures/session-summary";
 
@@ -133,6 +133,55 @@ describe("CLI runner", () => {
       limit: 25,
       anchor: 1
     })).rejects.toThrow("无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。");
+  });
+
+  it.each(["stale_cursor", "generation_mismatch", "anchor_out_of_range"] as const)("retains the closed %s event-inspection error without displaying CLI text", async (code) => {
+    const secret = "/private/customer/session raw stderr";
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(
+      Object.assign(new Error(secret), { code: 1 }),
+      JSON.stringify({ error: { code, message: `${secret} caller supplied` } }),
+      secret
+    ));
+
+    const rejection = runner.getSessionEvents({
+      projectId: "project-0123456789abcdef", provider: "codex", sessionId: "session-1",
+      expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A, limit: 25
+    });
+    await expect(rejection).rejects.toBeInstanceOf(SessionInspectError);
+    await rejection.catch((error: SessionInspectError) => {
+      expect(error.code).toBe(code);
+      expect(error.message).not.toContain(secret);
+      expect(error.message.length).toBeLessThan(120);
+    });
+  });
+
+  it.each([
+    ["malformed", "not-json"],
+    ["duplicate", '{"error":{"code":"stale_cursor","code":"generation_mismatch","message":"x"}}'],
+    ["unknown field", JSON.stringify({ error: { code: "stale_cursor", message: "x", path: "/secret" } })],
+    ["unsafe code", JSON.stringify({ error: { code: "../../stale_cursor", message: "x" } })],
+    ["unknown code", JSON.stringify({ error: { code: "stale_generation", message: "x" } })],
+    ["oversized", JSON.stringify({ error: { code: "stale_cursor", message: "x".repeat((1 << 20) + 1) } })]
+  ])("maps a nonzero %s event error payload to fixed unavailable", async (_label, stdout) => {
+    const secret = "/private/customer/session raw stderr";
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(Object.assign(new Error(secret), { code: 1 }), stdout, secret));
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef", provider: "codex", sessionId: "session-1",
+      expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A, limit: 25
+    })).rejects.toMatchObject({ code: "unavailable", message: "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。" });
+  });
+
+  it.each([
+    ["first response away from origin", {}, eventPageFixture({ total: 50, range_start: 25, range_end: 50, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 26}`, sequence: index + 26, occurred_at: "2026-09-07T00:00:00Z" })), previous_cursor: "previous", next_cursor: null })],
+    ["more items than requested", {}, eventPageFixture({ total: 100, range_end: 100, items: Array.from({ length: 100 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })) })],
+    ["nonterminal page without next cursor", {}, eventPageFixture({ total: 50, range_end: 25, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })), next_cursor: null })],
+    ["anchor outside returned range", { anchor: 40 }, eventPageFixture({ total: 50, range_end: 25, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })), next_cursor: "next" })]
+  ])("rejects successful event-page binding regression: %s", async (_label, navigation, payload) => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(payload), ""));
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef", provider: "codex", sessionId: "session-1",
+      expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A, limit: 25, ...navigation
+    })).rejects.toMatchObject({ code: "unavailable" });
   });
 
   it("rejects unsafe inspect request values before execution", async () => {

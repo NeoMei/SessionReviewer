@@ -21,6 +21,10 @@ export interface RenderV4ShellOptions {
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   eventPageCache?: Map<string, SessionEventPageV1>;
+  refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+  initialSessionEventOrdinal?: number;
+  recoveryAlreadyAttempted?: boolean;
+  recoverySelectionUnavailable?: string;
   snapshotStatus?: string;
   trustDetail?: HTMLElement;
 }

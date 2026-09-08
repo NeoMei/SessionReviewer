@@ -14,6 +14,7 @@ import { renderScanJobBanner, renderStatusBanner, scanActionLabel } from "./stat
 import { renderMarkdownV4View } from "./presentation";
 import type { ScanRecordsElement } from "./render-scan-records";
 import { normalizeV4ViewState, normalizeV4ViewStates, type V4ViewState, type V4ViewStatePatch, type V4ViewStates } from "../state/v4-view-state";
+import { filterSessions, normalizeSessionBrowserState } from "../state/session-browser-state";
 
 export class ProjectEvolutionView extends ItemView {
   private disposeWatch?: () => void;
@@ -36,6 +37,8 @@ export class ProjectEvolutionView extends ItemView {
   private v4Browser?: HTMLElement & { dispose?: () => void };
   private eventPageCache = new Map<string, SessionEventPageV1>();
   private eventCacheGeneration = "";
+  private pendingEventRecovery?: { projectId: string; provider: string; sessionId: string; ordinal: number; generationId: string; sessionViewDigest: string | null };
+  private eventRecoveryEpoch = 0;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -75,6 +78,7 @@ export class ProjectEvolutionView extends ItemView {
   async onClose(): Promise<void> {
     this.closed = true;
     this.refreshEpoch += 1;
+    this.invalidateEventRecovery();
     this.stopSettlingRetry();
     this.stopScanPolling();
     this.disposeWatch?.();
@@ -103,16 +107,26 @@ export class ProjectEvolutionView extends ItemView {
     await this.refresh(projects);
   }
 
-  private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean; settlingAttempt?: number } = {}): Promise<void> {
+  private async refresh(projects: ProjectDescriptor[], options: { scanStatus?: boolean; settlingAttempt?: number; eventRecoveryEpoch?: number } = {}): Promise<void> {
+    if (options.eventRecoveryEpoch === undefined && this.pendingEventRecovery) this.invalidateEventRecovery();
     if (!this.selected || this.closed) return;
     const selected = this.selected;
     const epoch = ++this.refreshEpoch;
-    const current = () => !this.closed && epoch === this.refreshEpoch && selected === this.selected;
+    const current = () => !this.closed && epoch === this.refreshEpoch && selected === this.selected &&
+      (options.eventRecoveryEpoch === undefined || options.eventRecoveryEpoch === this.eventRecoveryEpoch);
     this.stopSettlingRetry();
     this.stopScanPolling();
     const previous = selected.format === "markdown-v4" ? this.lastMarkdownReady : this.lastReady;
     const snapshot = await this.repository!.load(selected, previous);
     if (!current()) return;
+    if (options.eventRecoveryEpoch !== undefined) {
+      if (snapshot.kind !== "markdown-v4" || snapshot.state.kind !== "public_valid") throw new Error("event recovery refresh rejected");
+      const recovery = this.pendingEventRecovery;
+      const refreshed = recovery && snapshot.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
+      if (recovery && refreshed && snapshot.state.index.generation_id === recovery.generationId && refreshed.session_view_digest === recovery.sessionViewDigest) {
+        throw new Error("event recovery binding did not change");
+      }
+    }
     const cli = await this.readCliStatus(selected);
     if (!current()) return;
     const scanStatus = selected.format === "markdown-v4" ? undefined : options.scanStatus === false ? this.scanStatus : await this.readScanStatus(selected);
@@ -176,6 +190,10 @@ export class ProjectEvolutionView extends ItemView {
             ? (request) => this.runner!.getSessionSummary(request)
             : undefined,
           eventPageCache: this.eventPageCache,
+          refreshSessionEvents: (request) => this.refreshSessionEvents(request),
+          initialSessionEventOrdinal: this.recoveryOrdinal(current),
+          recoveryAlreadyAttempted: this.pendingEventRecovery?.projectId === current.descriptor.projectId,
+          recoverySelectionUnavailable: this.recoveryUnavailable(current),
           initialState: this.currentV4State(current.descriptor.projectId),
           saveState: (viewState) => {
             this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
@@ -185,6 +203,10 @@ export class ProjectEvolutionView extends ItemView {
         }
       );
       this.v4Browser = browser;
+      if (this.pendingEventRecovery?.projectId === current.descriptor.projectId && this.recoveryOrdinal(current) !== undefined) {
+        this.pendingEventRecovery = undefined;
+        browser.prepend(element("p", { className: "sr-event-recovery-status", text: "项目索引已更新；正在按新一代索引恢复原 Session 的事件位置。", attrs: { role: "status" } }));
+      }
       this.scanRecords = browser.scanRecords;
       browser.prepend(this.projectPicker(projects));
       if (snapshot.kind === "markdown-v4-stale") browser.prepend(renderStatusBanner(snapshot.diagnostic));
@@ -405,6 +427,7 @@ export class ProjectEvolutionView extends ItemView {
       this.stopScanPolling();
       this.scanStatus = undefined;
       this.selected = next;
+      this.invalidateEventRecovery();
       this.currentState = { ...this.currentState, projectId: next.projectId };
       void this.saveState?.(this.currentState);
       if (next.format === "markdown-v4") {
@@ -480,6 +503,7 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   private saveV4Patch(projectId: string, patch: V4ViewStatePatch): void | Promise<void> {
+    if (this.pendingEventRecovery && patch.sessionBrowser !== undefined) this.invalidateEventRecovery();
     const latest = normalizeV4ViewState(this.currentV4State(projectId), projectId);
     const next = normalizeV4ViewState({ ...latest, ...patch, projectId }, projectId);
     this.v4States = { ...this.v4States, [projectId]: next };
@@ -489,6 +513,60 @@ export class ProjectEvolutionView extends ItemView {
   private resetEventCache(): void {
     this.eventPageCache.clear();
     this.eventCacheGeneration = "";
+  }
+
+  private async refreshSessionEvents(request: { provider: string; sessionId: string; ordinal: number }): Promise<void> {
+    const selected = this.selected;
+    if (!selected || this.closed) return;
+    const state = normalizeV4ViewState(this.currentV4State(selected.projectId), selected.projectId);
+    const browserState = normalizeSessionBrowserState(state.sessionBrowser);
+    const persisted = browserState.selected;
+    const currentIndex = this.lastMarkdownReady?.descriptor.projectId === selected.projectId ? this.lastMarkdownReady.state.index : undefined;
+    let currentSession = currentIndex?.sessions.find((entry) => entry.provider === request.provider && entry.session_id === request.sessionId);
+    if (persisted === null) {
+      const visible = currentIndex ? filterSessions(currentIndex.sessions, browserState)[0] : undefined;
+      if (visible?.provider !== request.provider || visible.session_id !== request.sessionId) return;
+      currentSession = visible;
+    } else if (persisted.provider !== request.provider || persisted.sessionId !== request.sessionId) return;
+    if (!currentIndex || !currentSession) return;
+    const recoveryEpoch = ++this.eventRecoveryEpoch;
+    this.pendingEventRecovery = { projectId: selected.projectId, ...request, generationId: currentIndex.generation_id, sessionViewDigest: currentSession.session_view_digest };
+    try {
+      await this.refresh(this.projects, { eventRecoveryEpoch: recoveryEpoch });
+    } catch (error) {
+      if (recoveryEpoch === this.eventRecoveryEpoch) this.pendingEventRecovery = undefined;
+      throw error;
+    }
+  }
+
+  private recoveryOrdinal(snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>): number | undefined {
+    const recovery = this.pendingEventRecovery;
+    const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
+    if (!recovery || recovery.projectId !== current.descriptor.projectId || current.state.kind !== "public_valid") return undefined;
+    const session = current.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
+    if (!session || session.indexed_event_count === 0 || session.session_view_digest === null) return undefined;
+    return Math.min(recovery.ordinal, session.indexed_event_count);
+  }
+
+  private recoveryUnavailable(snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>): string | undefined {
+    const recovery = this.pendingEventRecovery;
+    const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
+    if (!recovery || recovery.projectId !== current.descriptor.projectId || current.state.kind !== "public_valid") return undefined;
+    const session = current.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
+    if (!session) return "项目索引已更新；原 Session 已不在已验证索引中，未显示其他 Session 详情。";
+    const state = normalizeV4ViewState(this.currentV4State(current.descriptor.projectId), current.descriptor.projectId);
+    if (!filterSessions(current.state.index.sessions, normalizeSessionBrowserState(state.sessionBrowser)).includes(session)) {
+      return "项目索引已更新；原 Session 已不符合当前本地筛选，未绕过筛选显示详情。";
+    }
+    if (session.indexed_event_count === 0 || session.session_view_digest === null) {
+      return "项目索引已更新；原 Session 当前没有可读的已索引事件。";
+    }
+    return undefined;
+  }
+
+  private invalidateEventRecovery(): void {
+    this.eventRecoveryEpoch += 1;
+    this.pendingEventRecovery = undefined;
   }
 }
 

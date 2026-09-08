@@ -134,6 +134,19 @@ function eventPage(overrides: Partial<SessionEventPageV1> = {}): SessionEventPag
   };
 }
 
+function longEventPage(start: number, total = 2_438, overrides: Partial<SessionEventPageV1> = {}): SessionEventPageV1 {
+  const end = Math.min(start + 25, total);
+  return eventPage({
+    total, range_start: start, range_end: end,
+    items: Array.from({ length: end - start }, (_value, index) => ({ kind: "message", excerpt: `事件 ${start + index + 1}`, revision_id: `revision-${start + index + 1}`, sequence: start + index + 1, occurred_at: "2026-09-08T00:00:00Z" })),
+    previous_cursor: start === 0 ? null : `previous-${start}`,
+    next_cursor: end === total ? null : `next-${end}`,
+    first_cursor: "first-token", last_cursor: "last-token",
+    coverage: { seen: total, indexed: total, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 },
+    ...overrides
+  });
+}
+
 function conversationFor(request: { projectId?: string; sessionId?: string; expectedGenerationId?: string; turnUnitId?: string }, excerpt = "可见用户问题"): ConversationPageV1 {
   const sessionId = request.sessionId ?? "session-1";
   const selected = request.turnUnitId !== undefined;
@@ -234,7 +247,7 @@ describe("v4 scanned Session renderer", () => {
 
     root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
     await settle();
-    expect(root.textContent).toContain("retained page temporarily unavailable");
+    expect(root.textContent).toContain("无法读取扫描 Session");
     root.querySelector<HTMLButtonElement>('[data-action="retry-event-page"]')!.click();
     expect(loadSessionEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-token" }));
     expect(loadSessionEvents).toHaveBeenNthCalledWith(3, expect.objectContaining({ cursor: "next-token" }));
@@ -355,7 +368,7 @@ describe("v4 scanned Session renderer", () => {
 
     root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')?.click();
     await settle();
-    expect(root.textContent).toContain("第二页暂时不可用");
+    expect(root.textContent).toContain("无法读取扫描 Session");
     root.querySelector<HTMLButtonElement>('[data-action="retry-event-page"]')?.click();
     await settle();
 
@@ -363,6 +376,83 @@ describe("v4 scanned Session renderer", () => {
     expect(root.textContent).not.toContain("用户问题示例");
     expect(loadSessionEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-token" }));
     expect(loadSessionEvents).toHaveBeenNthCalledWith(3, expect.objectContaining({ cursor: "next-token" }));
+  });
+
+  it.each([1, 1_220, 2_438])("jumps to exact ordinal %i and selects it from the returned half-open range", async (ordinal) => {
+    const start = ordinal === 2_438 ? 2_413 : Math.floor((ordinal - 1) / 25) * 25;
+    const loadSessionEvents = vi.fn()
+      .mockResolvedValueOnce(longEventPage(0))
+      .mockResolvedValueOnce(longEventPage(start));
+    const longSession = sessionFixture({ indexed_event_count: 2_438, coverage: { seen: 2_438, indexed: 2_438, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([longSession])), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    const input = root.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = String(ordinal);
+    if (ordinal === 1_220) input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    else root.querySelector<HTMLButtonElement>('[data-action="jump-event-ordinal"]')!.click();
+    await settle();
+
+    expect(loadSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ provider: "codex", sessionId: "session-1", anchor: ordinal, limit: 25 }));
+    expect(loadSessionEvents.mock.lastCall?.[0]).not.toHaveProperty("cursor");
+    expect(root.querySelector(`[data-event-ordinal="${ordinal}"]`)?.getAttribute("aria-selected")).toBe("true");
+  });
+
+  it.each(["0", "2439", "1.5", "1e3", "   ", "9007199254740992"])("rejects invalid ordinal %j without replacing the readable page", async (value) => {
+    const loadSessionEvents = vi.fn().mockResolvedValue(longEventPage(0));
+    const longSession = sessionFixture({ indexed_event_count: 2_438, coverage: { seen: 2_438, indexed: 2_438, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([longSession])), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    const input = root.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = value;
+    root.querySelector<HTMLButtonElement>('[data-action="jump-event-ordinal"]')!.click();
+    await settle();
+    expect(loadSessionEvents).toHaveBeenCalledTimes(1);
+    expect(root.querySelector('[data-event-ordinal="1"]')).not.toBeNull();
+    expect(root.querySelector('[data-event-jump-error]')?.textContent).toContain("请输入 1–2,438 的整数");
+  });
+
+  it("disables ordinal jump for a zero-event Session", () => {
+    const zero = sessionFixture({ indexed_event_count: 0, session_view_digest: null, coverage: { seen: 0, indexed: 0, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([zero])), () => {}, { loadSessionEvents: vi.fn() });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    expect(root.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')?.disabled).toBe(true);
+    expect(root.querySelector<HTMLButtonElement>('[data-action="jump-event-ordinal"]')?.disabled).toBe(true);
+  });
+
+  it.each([
+    ["skipped next", "next-event-page", longEventPage(50)],
+    ["last not terminal", "last-event-page", longEventPage(2_400)],
+  ])("rejects %s navigation transition and leaves the previous valid page readable", async (_label, action, invalid) => {
+    const initial = action === "previous-event-page" ? longEventPage(25) : longEventPage(0);
+    const loadSessionEvents = vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(invalid);
+    const longSession = sessionFixture({ indexed_event_count: 2_438, coverage: { seen: 2_438, indexed: 2_438, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([longSession])), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>(`[data-action="${action}"]`)!.click();
+    await settle();
+    expect(root.querySelector(`[data-event-ordinal="${initial.range_start + 1}"]`)).not.toBeNull();
+    expect(root.querySelector('[data-event-page-error]')?.textContent).toContain("无法读取扫描 Session");
+  });
+
+  it("rejects an overlapping previous response after a valid adjacent next transition", async () => {
+    const loadSessionEvents = vi.fn()
+      .mockResolvedValueOnce(longEventPage(0))
+      .mockResolvedValueOnce(longEventPage(25))
+      .mockResolvedValueOnce(longEventPage(10));
+    const longSession = sessionFixture({ indexed_event_count: 2_438, coverage: { seen: 2_438, indexed: 2_438, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([longSession])), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle();
+    expect(root.querySelector('[data-event-ordinal="26"]')).not.toBeNull();
+    root.querySelector<HTMLButtonElement>('[data-action="previous-event-page"]')!.click();
+    await settle();
+    expect(root.querySelector('[data-event-ordinal="26"]')).not.toBeNull();
+    expect(root.querySelector('[data-event-page-error]')?.textContent).toContain("无法读取扫描 Session");
   });
 
   it("pages and searches a bounded Session list", () => {

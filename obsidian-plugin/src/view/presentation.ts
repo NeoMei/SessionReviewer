@@ -80,6 +80,10 @@ export function renderMarkdownV4View(
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
     loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
+    refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+    initialSessionEventOrdinal?: number;
+    recoveryAlreadyAttempted?: boolean;
+    recoverySelectionUnavailable?: string;
     initialState?: unknown;
     saveState?: (state: V4ViewState) => void | Promise<void>;
     saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;

@@ -6,7 +6,9 @@ import type { ScanStatus } from "../contracts/review-v3";
 import type { SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import { parseConversationPageV1 } from "../data/conversation-page";
-import { parseSessionEventPageV1, parseSessionSummaryV1 } from "../data/contracts-v4";
+import { parseSessionEventPageV1, parseSessionInspectWireError, parseSessionSummaryV1 } from "../data/contracts-v4";
+import { SessionInspectError, type SessionInspectErrorCode } from "./session-inspect-error";
+export { SessionInspectError, type SessionInspectErrorCode } from "./session-inspect-error";
 
 const PROJECT_ID = /^project-[a-z0-9][a-z0-9._-]{0,127}$/;
 const CONFLICT_ID = /^conflict-[a-z0-9][a-z0-9._-]{0,191}$/;
@@ -14,7 +16,6 @@ const SCAN_JOB_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const SCAN_GENERATION_ID = /^(?:generation|scan)-[a-z0-9][a-z0-9._-]{0,127}$/;
 const SCAN_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/;
 const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
-const SESSION_EVENTS_FAILED = "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。";
 const SESSION_SUMMARY_FAILED = "无法读取 Session 摘要；请刷新项目后重试，并确认 CLI 已更新。";
 const INSPECT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
@@ -163,12 +164,13 @@ export class CliRunner {
     try {
       const page = parseSessionEventPageV1((await this.run(args)).stdout);
       if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
-          page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest) {
+          page.generation_id !== request.expectedGenerationId || page.session_view_digest !== request.expectedSessionViewDigest ||
+          !sessionEventPageMatchesRequest(page, request)) {
         throw new Error("Session event page binding mismatch");
       }
       return page;
-    } catch {
-      throw new Error(SESSION_EVENTS_FAILED);
+    } catch (error) {
+      throw error instanceof SessionInspectError ? error : new SessionInspectError(sessionInspectErrorCode(error));
     }
   }
 
@@ -361,6 +363,24 @@ function validateSessionEventRequest(request: SessionEventRequest): void {
   if (request.cursor !== undefined && request.anchor !== undefined) throw new Error("cursor and anchor are mutually exclusive");
   if (request.cursor !== undefined && !boundedCursor(request.cursor)) throw new Error("invalid cursor");
   if (request.anchor !== undefined && (!Number.isSafeInteger(request.anchor) || request.anchor < 1)) throw new Error("invalid anchor");
+}
+
+function sessionEventPageMatchesRequest(page: SessionEventPageV1, request: SessionEventRequest): boolean {
+  const pageLength = page.range_end - page.range_start;
+  if (pageLength > request.limit || (page.range_end < page.total && pageLength !== request.limit)) return false;
+  if (request.cursor === undefined && request.anchor === undefined && page.range_start !== 0) return false;
+  if (request.anchor !== undefined && !(page.range_start < request.anchor && request.anchor <= page.range_end)) return false;
+  return true;
+}
+
+function sessionInspectErrorCode(error: unknown): SessionInspectErrorCode {
+  const stdout = (error as { stdout?: unknown } | null)?.stdout;
+  if (typeof stdout !== "string" || Buffer.byteLength(stdout, "utf8") > (1 << 20)) return "unavailable";
+  try {
+    return parseSessionInspectWireError(stdout);
+  } catch {
+    return "unavailable";
+  }
 }
 
 function validateConversationRequest(request: ConversationRequest): void {
