@@ -621,7 +621,7 @@ describe("session contracts", () => {
   ])("rejects invalid nonempty event cursor topology: %s", async (_label, total, rangeStart, rangeEnd, key, value) => {
     const page = await eventPageAt(total, rangeStart, rangeEnd);
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).not.toThrow();
-    page[key as string] = value;
+    page[key] = value;
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/cursor|topology|range/i);
   });
 
