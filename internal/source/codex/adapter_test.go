@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
@@ -183,6 +184,99 @@ func TestNewValidatesDependenciesAndDiscoveryClaimsOnlyCodex(t *testing.T) {
 	}
 	if discovery.Candidates[0].Provider != "codex" {
 		t.Fatalf("provider=%q want codex", discovery.Candidates[0].Provider)
+	}
+}
+
+func TestReadVisiblePrefixAuthenticatesProjectAndReadsOnlyFrozenPrefix(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	const sessionID = "12345678-1234-4234-8234-123456789abc"
+	path := filepath.Join(fixture.sessions, "rollout-2026-09-08T01-00-00-"+sessionID+".jsonl")
+	prefix := encodedRecord(t, "2026-09-08T01:00:00Z", "session_meta", map[string]any{"id": sessionID, "cwd": fixture.projectA}) +
+		encodedRecord(t, "2026-09-08T01:00:01Z", "response_item", map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "question"}}}) +
+		encodedRecord(t, "2026-09-08T01:00:02Z", "response_item", map[string]any{"type": "message", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "answer"}}})
+	if err := os.WriteFile(path, []byte(prefix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report := decodeBoundary(t, adapter, boundary)
+	if err := os.WriteFile(path, []byte(prefix+encodedRecord(t, "2026-09-08T01:00:03Z", "response_item", map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "future"}}})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader := adapter.(source.VisibleReader)
+	messages, coverage, err := reader.ReadVisiblePrefix(context.Background(), report.ProposedSource)
+	if err != nil || len(messages) != 2 || coverage.SourceRecords != 3 || coverage.VisibleMessages != 2 || coverage.CapturedMessages != 2 || !coverage.Complete {
+		t.Fatalf("visible frozen prefix messages=%+v coverage=%+v err=%v", messages, coverage, err)
+	}
+
+	spoofed := report.ProposedSource
+	spoofed.ProjectIDs = []string{"foreign-project"}
+	if _, _, err := reader.ReadVisiblePrefix(context.Background(), spoofed); err == nil || !strings.Contains(err.Error(), "bound") {
+		t.Fatalf("unbound project association accepted: %v", err)
+	}
+	spoofed = report.ProposedSource
+	spoofed.Provider = "claude"
+	if _, _, err := reader.ReadVisiblePrefix(context.Background(), spoofed); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatalf("provider spoof accepted: %v", err)
+	}
+}
+
+func TestReadVisiblePrefixReconcilesContextOrphanAndMalformedCoverage(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	const sessionID = "22345678-1234-4234-8234-123456789abc"
+	path := filepath.Join(fixture.sessions, "rollout-2026-09-08T02-00-00-"+sessionID+".jsonl")
+	body := encodedRecord(t, "2026-09-08T02:00:00Z", "session_meta", map[string]any{"id": sessionID, "cwd": fixture.projectA}) +
+		encodedRecord(t, "2026-09-08T02:00:01Z", "response_item", map[string]any{"type": "message", "role": "assistant", "phase": "commentary", "content": []any{map[string]any{"type": "output_text", "text": "orphan"}}}) +
+		encodedRecord(t, "2026-09-08T02:00:02Z", "response_item", map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "<environment_context>ambient</environment_context>"}}}) +
+		"{malformed\n" +
+		encodedRecord(t, "2026-09-08T02:00:04Z", "response_item", map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "question"}}})
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := fixture.adapter(t, "v1")
+	boundary, err := adapter.Freeze(context.Background(), discoverCandidate(t, adapter, sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report := decodeBoundary(t, adapter, boundary)
+	messages, coverage, err := adapter.(source.VisibleReader).ReadVisiblePrefix(context.Background(), report.ProposedSource)
+	if err != nil || len(messages) != 3 || coverage.SourceRecords != 5 || coverage.VisibleMessages != 3 || coverage.CapturedMessages != 1 || coverage.ContextMessages != 1 || coverage.OrphanMessages != 1 || coverage.MalformedRecords != 1 || coverage.Complete {
+		t.Fatalf("reconciled coverage messages=%+v coverage=%+v err=%v", messages, coverage, err)
+	}
+}
+
+func TestReadVisiblePrefixClassifiesLegacyIdentityButNeverIntegrityFailureAsUnsupported(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	adapter := fixture.adapter(t, "v1").(source.VisibleReader)
+	legacy := memory.SourceRecord{
+		SchemaVersion: memory.MemorySchemaVersion, Provider: "codex", SessionID: "legacy-session", SourceIdentity: "source-legacy",
+		StartedAt: "2026-09-08T00:00:00Z", EndedAt: "2026-09-08T00:00:01Z", Availability: memory.SourceAvailable,
+		FrozenBoundary: memory.FrozenBoundary{Location: memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: 1, ByteOffset: 1}}, SourceHash: strings.Repeat("a", 64)},
+		Usage:          accounting.SessionUsage{StartedAt: "2026-09-08T00:00:00Z", EndedAt: "2026-09-08T00:00:01Z", DurationMS: 1000, Models: []accounting.ModelUsage{}}, ProjectIDs: []string{"project-a"},
+	}
+	if _, _, err := adapter.ReadVisiblePrefix(context.Background(), legacy); !errors.Is(err, source.ErrVisibleReaderUnsupported) {
+		t.Fatalf("legacy identity capability result=%v", err)
+	}
+
+	const sessionID = "32345678-1234-4234-8234-123456789abc"
+	path := filepath.Join(fixture.sessions, "rollout-2026-09-08T03-00-00-"+sessionID+".jsonl")
+	body := encodedRecord(t, "2026-09-08T03:00:00Z", "session_meta", map[string]any{"id": sessionID, "cwd": fixture.projectA})
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	full := fixture.adapter(t, "v1")
+	boundary, err := full.Freeze(context.Background(), discoverCandidate(t, full, sessionID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, report := decodeBoundary(t, full, boundary)
+	tampered := report.ProposedSource
+	tampered.FrozenBoundary.SourceHash = strings.Repeat("f", 64)
+	if _, _, err := full.(source.VisibleReader).ReadVisiblePrefix(context.Background(), tampered); err == nil || errors.Is(err, source.ErrVisibleReaderUnsupported) || !strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatalf("integrity failure misclassified: %v", err)
 	}
 }
 

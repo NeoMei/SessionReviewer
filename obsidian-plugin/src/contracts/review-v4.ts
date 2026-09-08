@@ -552,6 +552,21 @@ export interface ConversationChainV1 {
   session_view_digest: string;
   dependency_digest: string;
   dependency_proof_v1?: ConversationDependencyProofV1;
+  materialization_coverage_v1?: {
+    source_records: number;
+    visible_messages: number;
+    captured_messages: number;
+    truncated_messages: number;
+    truncated_bodies: number;
+    context_messages: number;
+    orphan_messages: number;
+    oversized_records: number;
+    malformed_records: number;
+    complete: boolean;
+    unassigned_facts: number;
+    unsupported_facts: number;
+    source_incomplete: boolean;
+  };
   segmentation_rule_version: string;
   coverage: {
     source_messages: number;

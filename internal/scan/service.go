@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -55,6 +56,7 @@ type MemoryStore interface {
 	PutProbeState(memory.ProjectProbeState) (string, error)
 	PutProjectView(memory.ProjectView) (string, error)
 	PutSessionIndex(sessionindex.Document) (string, error)
+	PutConversationChain(conversationchain.Document) (string, error)
 	LoadPrepared() (memorystore.Prepared, memory.GenerationManifest, error)
 	LoadPublished() (string, memory.GenerationManifest, error)
 	LoadObject(memorystore.ObjectKind, string) ([]byte, error)
@@ -244,6 +246,8 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	sourceDigests := make([]string, 0, len(terminals))
 	lineageDependencies := make([]memory.SessionLineageDependency, 0, len(terminals))
 	usage := make([]memory.AssociatedUsage, 0, len(terminals))
+	conversationChains := make([]conversationchain.Document, 0, len(terminals))
+	conversationDependencies := make([]memory.ConversationChainDependency, 0, len(terminals))
 	for index := range terminals {
 		terminal := &terminals[index]
 		if err := ctx.Err(); err != nil {
@@ -275,13 +279,14 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		if err != nil {
 			return result, fmt.Errorf("digest source usage %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
 		}
-		view, _, err := options.Materialize(sessionview.Input{
+		viewInput := sessionview.Input{
 			ProjectID: options.ProjectID, Source: terminal.record,
 			SourceRecordDigest: terminal.recordDigest, UsageRecordDigest: usageDigest,
 			Observations: observations, ObservationChunkDigests: terminal.chunks,
 			TerminalState: terminal.state, Diagnostics: terminal.diagnostics,
 			Previous: previousPointer, MaterializerVersion: sessionview.MaterializerVersion,
-		})
+		}
+		view, _, err := options.Materialize(viewInput)
 		if err != nil {
 			return result, fmt.Errorf("materialize SessionView %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
 		}
@@ -295,6 +300,23 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		}
 		if !sameDigestSet(view.ActiveRevisionIDs, lineage.ActiveRevisions) {
 			return result, errors.New("SessionView and SessionLineage active revisions disagree")
+		}
+		chain, chainErr := materializeConversation(ctx, options.Adapter, options.Store, *terminal, view, observations)
+		if errors.Is(chainErr, source.ErrVisibleReaderUnsupported) {
+			viewInput.Diagnostics = append(viewInput.Diagnostics, memory.Diagnostic{Code: "visible_reader_unsupported"})
+			view, _, err = options.Materialize(viewInput)
+			if err != nil {
+				return result, fmt.Errorf("materialize unsupported visible SessionView %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+			}
+			if !sameDigestSet(view.ActiveRevisionIDs, lineage.ActiveRevisions) {
+				return result, errors.New("unsupported visible SessionView and SessionLineage active revisions disagree")
+			}
+			result.ProviderDiagnostics = appendProviderDiagnostic(result.ProviderDiagnostics, source.ProviderDiagnostic{Provider: terminal.record.Provider, Code: "visible_reader_unsupported"})
+		} else if chainErr != nil {
+			return result, fmt.Errorf("plan retained conversation %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, chainErr)
+		} else if chain != nil {
+			conversationChains = append(conversationChains, *chain)
+			conversationDependencies = append(conversationDependencies, memory.ConversationChainDependency{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, Digest: chain.Digest})
 		}
 		terminal.lineage = lineage
 		terminal.measurement = measurementForTerminal(*terminal, view)
@@ -350,7 +372,8 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		SessionViews:     append([]memory.SessionViewDependency(nil), projectView.SessionViewDependencies...),
 		SessionLineages:  lineageDependencies,
 		ProbeStateDigest: probeState.Digest, ProbeCheck: probeCheck,
-		ProjectViewDigest: projectView.Digest,
+		ProjectViewDigest:  projectView.Digest,
+		ConversationChains: conversationDependencies,
 	}
 	manifest.SessionIndexMeasurements = make([]memory.SessionIndexMeasurement, 0, len(terminals))
 	for _, terminal := range terminals {
@@ -401,6 +424,7 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 			}
 		}
 	}
+	reconcileConversationChains(previous, &manifest)
 	stabilizeManifestClock(&manifest, previous)
 	manifest.GenerationID, err = generationID(manifest)
 	if err != nil {
@@ -474,6 +498,14 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 			return result, fmt.Errorf("persist SessionView %s/%s: %w", view.Provider, view.SessionID, err)
 		}
 	}
+	for _, chain := range conversationChains {
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		if digest, err := options.Store.PutConversationChain(chain); err != nil || digest != chain.Digest {
+			return result, errors.Join(errors.New("persist retained conversation"), err)
+		}
+	}
 	for _, terminal := range terminals {
 		if err := ctx.Err(); err != nil {
 			return result, err
@@ -520,7 +552,7 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	result.GenerationID = prepared.GenerationID
 	result.ProjectViewDigest = prepared.ProjectViewDigest
 	result.Prepared = true
-	if result.IssueSessions > 0 {
+	if result.IssueSessions > 0 || len(result.ProviderDiagnostics) > 0 {
 		result.State = CompletedWithIssues
 	} else {
 		result.State = Completed
@@ -536,6 +568,15 @@ func reportProgress(options Options, progress Progress) error {
 		return fmt.Errorf("report scan extraction progress: %w", err)
 	}
 	return nil
+}
+
+func appendProviderDiagnostic(values []source.ProviderDiagnostic, value source.ProviderDiagnostic) []source.ProviderDiagnostic {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
 }
 
 func validateOptions(options Options) error {

@@ -690,6 +690,36 @@ describe("conversation chain and problem map contracts", () => {
 		}
 	});
 
+  it("keeps legacy materialization diagnostics unknown and strictly validates the optional extension", async () => {
+    const source = await pluginFixture("conversation-chain-v1.coverage.valid.json");
+    const parsed = parseConversationChainV1(source);
+    expect(parsed.materialization_coverage_v1?.source_records).toBe(4);
+    const falseAnswer = JSON.parse(source) as JsonObject;
+    ((falseAnswer.turn_units as JsonObject[])[0]).answer_state = "answered";
+    const falseAnswerPreimage = { ...falseAnswer };
+    delete falseAnswerPreimage.digest;
+    falseAnswer.digest = `sha256:${createHash("sha256").update(JSON.stringify(falseAnswerPreimage)).digest("hex")}`;
+    expect(() => parseConversationChainV1(JSON.stringify(falseAnswer))).toThrow(/incomplete/i);
+    expect(parseConversationChainV1(await pluginFixture("conversation-chain-v1.valid.json")).materialization_coverage_v1).toBeUndefined();
+    const mismatched = JSON.parse(source) as JsonObject;
+    (mismatched.materialization_coverage_v1 as JsonObject).captured_messages = 0;
+    (mismatched.materialization_coverage_v1 as JsonObject).visible_messages = 0;
+    const preimage = { ...mismatched };
+    delete preimage.digest;
+    mismatched.digest = `sha256:${createHash("sha256").update(JSON.stringify(preimage)).digest("hex")}`;
+    expect(() => parseConversationChainV1(JSON.stringify(mismatched))).toThrow(/retained document/i);
+    for (const mutate of [
+      (value: JsonObject) => { (value.materialization_coverage_v1 as JsonObject).unsupported_facts = 9007199254740992; },
+      (value: JsonObject) => { (value.materialization_coverage_v1 as JsonObject).source_incomplete = false; },
+      (value: JsonObject) => { (value.materialization_coverage_v1 as JsonObject).visible_messages = 5; },
+      (value: JsonObject) => { (value.materialization_coverage_v1 as JsonObject).raw_source = "forbidden"; }
+    ]) {
+      const value = JSON.parse(source) as JsonObject;
+      mutate(value);
+      expect(() => parseConversationChainV1(JSON.stringify(value))).toThrow();
+    }
+  });
+
   it("binds both new contracts to canonical digests that omit only their digest field", async () => {
     const chain = await fixtureObject("conversation-chain-v1.valid.json");
     chain.segmentation_rule_version = "visible-turn-v2";

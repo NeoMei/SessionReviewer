@@ -20,6 +20,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
@@ -41,25 +42,30 @@ const (
 )
 
 type fakeSourceSpec struct {
-	candidate      source.Candidate
-	boundary       source.Boundary
-	record         memory.SourceRecord
-	observations   []memory.ObservationRevision
-	report         source.DecodeReport
-	freezeErr      error
-	decodeErr      error
-	freezePanic    bool
-	decodePanic    bool
-	skipCatalog    bool
-	wait           <-chan struct{}
-	frozenExpected string
+	candidate       source.Candidate
+	boundary        source.Boundary
+	record          memory.SourceRecord
+	observations    []memory.ObservationRevision
+	report          source.DecodeReport
+	freezeErr       error
+	decodeErr       error
+	freezePanic     bool
+	decodePanic     bool
+	skipCatalog     bool
+	wait            <-chan struct{}
+	frozenExpected  string
+	visibleMessages []conversationchain.SourceMessage
+	visibleCoverage conversationchain.VisibleCoverage
+	visibleErr      error
+	afterVisible    func()
 }
 
 type fakeAdapter struct {
-	catalog     *sourcecatalog.Catalog
-	sources     map[string]*fakeSourceSpec
-	issues      []source.Issue
-	discoverErr error
+	catalog        *sourcecatalog.Catalog
+	sources        map[string]*fakeSourceSpec
+	issues         []source.Issue
+	discoverErr    error
+	visibleEnabled bool
 
 	mu              sync.Mutex
 	active          int
@@ -273,7 +279,7 @@ func newScanHarness(t *testing.T) scanHarness {
 	t.Cleanup(func() { _ = store.Close() })
 	adapter := &fakeAdapter{
 		catalog: catalog, sources: make(map[string]*fakeSourceSpec), decodeErrors: make(map[string]error),
-		candidateLeases: make(map[string]string), boundaryLeases: make(map[string]string),
+		candidateLeases: make(map[string]string), boundaryLeases: make(map[string]string), visibleEnabled: true,
 	}
 	now := time.Date(2026, 8, 31, 10, 2, 0, 0, time.UTC)
 	options := Options{
@@ -1378,6 +1384,7 @@ func TestGenerationIdentityIncludesConversationChainDependencies(t *testing.T) {
 
 func TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged(t *testing.T) {
 	harness := newScanHarness(t)
+	harness.adapter.visibleEnabled = true
 	harness.addSource(1, memory.Indexed, scanTestProject)
 	first, err := Run(context.Background(), harness.options)
 	if err != nil {
@@ -1396,6 +1403,7 @@ func TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged(t *test
 	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
 		t.Fatal(err)
 	}
+	chainObjectsBefore := scanConversationObjectNames(t, harness.options.DataRoot)
 	harness.addSource(2, memory.Indexed, scanTestProject)
 	harness.options.buildIndex = func(sessionindex.BuildInput) (sessionindex.Document, error) {
 		return sessionindex.Document{}, sessionindex.ErrCapacityExceeded
@@ -1414,6 +1422,9 @@ func TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged(t *test
 	}
 	if records, err := harness.catalog.ListCandidates(scanTestProject); err != nil || len(records) != 1 || records[0].SessionID != "session-1" {
 		t.Fatalf("capacity failure changed catalog: records=%+v err=%v", records, err)
+	}
+	if after := scanConversationObjectNames(t, harness.options.DataRoot); !reflect.DeepEqual(after, chainObjectsBefore) {
+		t.Fatalf("capacity failure persisted unreferenced chains: before=%v after=%v", chainObjectsBefore, after)
 	}
 }
 
@@ -1549,7 +1560,7 @@ func TestRunBuildsFromLastPublishedIndexAndPreservesUnavailableHistory(t *testin
 		}
 		memoryRoot := filepath.Join(harness.options.DataRoot, "projects", scanTestProject, "memory-v1")
 		retainedDigest := strings.TrimPrefix(secondManifest.RetainedSessionViews[0].Digest, "sha256:")
-		assertRetentionDependency(filepath.Join(memoryRoot, "sessions", retainedDigest+".json"), "retained SessionView authentication failed")
+		assertRetentionDependency(filepath.Join(memoryRoot, "sessions", retainedDigest+".json"), "SessionView authentication failed")
 		previousDigest := strings.TrimPrefix(secondManifest.PreviousSessionIndexDigest, "sha256:")
 		assertRetentionDependency(filepath.Join(memoryRoot, "session-indexes", previousDigest+".json"), "Session index")
 		reportAfter, err := harness.store.CleanupUnreachable(retentionTime)
@@ -1654,7 +1665,7 @@ func TestRunUnpublishedSourceBecomingUnavailableDoesNotClaimInheritedFacts(t *te
 func TestRunRealCodexMalformedPayloadReportsExactPartialCoverage(t *testing.T) {
 	harness := newScanHarness(t)
 	harness.options.Now = func() time.Time { return time.Date(2026, 8, 31, 14, 1, 0, 0, time.UTC) }
-	const sessionID = "session-malformed-payloads"
+	const sessionID = "12345678-1234-4234-8234-123456789abc"
 	records := []map[string]any{
 		{"timestamp": "2026-08-31T14:00:00Z", "type": "session_meta", "payload": map[string]any{"id": sessionID, "cwd": harness.options.Binding.CanonicalRoot}},
 		{"timestamp": "2026-08-31T14:00:01Z", "type": "turn_context", "payload": "not-an-object"},
@@ -1671,7 +1682,8 @@ func TestRunRealCodexMalformedPayloadReportsExactPartialCoverage(t *testing.T) {
 		body.Write(encoded)
 		body.WriteByte('\n')
 	}
-	if err := os.WriteFile(filepath.Join(harness.options.SessionsRoot, sessionID+".jsonl"), []byte(body.String()), 0o600); err != nil {
+	rolloutName := "rollout-2026-08-31T14-00-00-" + sessionID + ".jsonl"
+	if err := os.WriteFile(filepath.Join(harness.options.SessionsRoot, rolloutName), []byte(body.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	redactor := redact.Default()

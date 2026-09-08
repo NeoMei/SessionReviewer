@@ -20,6 +20,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/source"
 )
 
 const maxVisibleRecordBytes = 64 << 10
@@ -163,7 +164,34 @@ func ReadPublishedVisible(ctx context.Context, root string, record memory.Source
 			return nil, coverage, errors.New("source file changed")
 		}
 	}
-	return messages, coverage, nil
+	_, segmented := conversationchain.MaterializeVisible(record.Provider, record.SessionID, record.SourceIdentity, messages)
+	segmented.SourceRecords = coverage.SourceRecords
+	segmented.OversizedRecords = coverage.OversizedRecords
+	segmented.MalformedRecords = coverage.MalformedRecords
+	segmented.Complete = segmented.Complete && segmented.OversizedRecords == 0 && segmented.MalformedRecords == 0 && segmented.OrphanMessages == 0 && segmented.TruncatedBodies == 0
+	return messages, segmented, nil
+}
+
+func (a *adapter) ReadVisiblePrefix(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
+	if err := memory.ValidateSourceRecord(record); err != nil || record.Provider != providerCodex || record.Availability != memory.SourceAvailable {
+		return nil, conversationchain.VisibleCoverage{}, errors.Join(errors.New("invalid Codex visible source record"), err)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`).MatchString(record.SessionID) {
+		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
+	}
+	known := make(map[string]struct{}, len(a.bindings))
+	for _, binding := range a.bindings {
+		known[binding.ProjectID] = struct{}{}
+	}
+	if len(record.ProjectIDs) == 0 {
+		return nil, conversationchain.VisibleCoverage{}, errors.New("Codex visible source has no authenticated project association")
+	}
+	for _, projectID := range record.ProjectIDs {
+		if _, exists := known[projectID]; !exists {
+			return nil, conversationchain.VisibleCoverage{}, errors.New("Codex visible source project association is not bound to this adapter")
+		}
+	}
+	return ReadPublishedVisible(ctx, a.sessionsRoot, record)
 }
 
 func selectedVisibleSegments(ctx context.Context, directory *pathguard.Directory, sessionID string) (result []visibleSegment, retErr error) {

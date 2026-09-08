@@ -463,9 +463,9 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     const row = documentObject(source, "conversation chain");
     const chainKeys = [
       "schema_version", "minimum_reader_version", "digest", "project_id", "provider", "session_id",
-      "session_view_digest", "dependency_digest", "dependency_proof_v1", "segmentation_rule_version", "coverage", "turn_units"
+      "session_view_digest", "dependency_digest", "dependency_proof_v1", "materialization_coverage_v1", "segmentation_rule_version", "coverage", "turn_units"
     ];
-    exact(row, "$", chainKeys, chainKeys.filter((key) => key !== "dependency_proof_v1"));
+    exact(row, "$", chainKeys, chainKeys.filter((key) => key !== "dependency_proof_v1" && key !== "materialization_coverage_v1"));
     constant(row.schema_version, 1, "$.schema_version");
     version(row.minimum_reader_version, "$.minimum_reader_version");
     const claimedDigest = digest(row.digest, "$.digest");
@@ -481,6 +481,7 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
       if (proof.rule_version !== ruleVersion) throw new Error("conversation dependency proof rule binding mismatch");
       if (conversationDependencyProofDigest(proof) !== dependencyDigest) throw new Error("conversation dependency digest does not match proof");
     }
+    const materializationCoverage = row.materialization_coverage_v1 === undefined ? undefined : parseConversationMaterializationCoverage(row.materialization_coverage_v1, "$.materialization_coverage_v1");
     const coverage = object(row.coverage, "$.coverage");
     const coverageKeys = ["source_messages", "captured_messages", "turn_units", "unanswered_units", "truncated_messages"] as const;
     exact(coverage, "$.coverage", coverageKeys);
@@ -523,10 +524,17 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
         if (assistants.length !== 0) throw new Error(`${path} claims no answer but has assistant messages`);
         unanswered += 1;
       } else if (assistants.length === 0) throw new Error(`${path} claims an answer without assistant messages`);
+      if (answerState === "answered" && materializationCoverage?.source_incomplete === true) {
+        throw new Error(`${path} claims an answered state from incomplete source materialization`);
+      }
     }
     if (coverage.turn_units !== turns.length || coverage.captured_messages !== captured ||
       (coverage.source_messages as number) < captured || coverage.unanswered_units !== unanswered || coverage.truncated_messages !== truncated) {
       throw new Error("conversation chain coverage does not reconcile");
+    }
+    if (materializationCoverage !== undefined &&
+      (materializationCoverage.visible_messages !== coverage.source_messages || materializationCoverage.captured_messages !== coverage.captured_messages)) {
+      throw new Error("conversation materialization coverage does not match the retained document");
     }
     const result = row as unknown as ConversationChainV1;
 	if (canonicalConversationChainDigest(result) !== claimedDigest) {
@@ -534,6 +542,22 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     }
     return result;
   });
+}
+
+function parseConversationMaterializationCoverage(value: unknown, path: string): NonNullable<ConversationChainV1["materialization_coverage_v1"]> {
+  const coverage = object(value, path);
+  const countKeys = ["source_records", "visible_messages", "captured_messages", "truncated_messages", "truncated_bodies", "context_messages", "orphan_messages", "oversized_records", "malformed_records", "unassigned_facts", "unsupported_facts"] as const;
+  const keys = [...countKeys, "complete", "source_incomplete"];
+  exact(coverage, path, keys);
+  for (const key of countKeys) integer(coverage[key], `${path}.${key}`);
+  boolean(coverage.complete, `${path}.complete`);
+  boolean(coverage.source_incomplete, `${path}.source_incomplete`);
+  if ((coverage.source_records as number) < (coverage.visible_messages as number) + (coverage.oversized_records as number) + (coverage.malformed_records as number) ||
+      coverage.visible_messages !== (coverage.captured_messages as number) + (coverage.context_messages as number) + (coverage.orphan_messages as number) ||
+      (coverage.truncated_messages as number) > (coverage.captured_messages as number) || (coverage.truncated_bodies as number) > (coverage.captured_messages as number)) throw new Error(`${path} does not reconcile`);
+  const incomplete = coverage.complete !== true || coverage.oversized_records !== 0 || coverage.malformed_records !== 0 || coverage.orphan_messages !== 0 || coverage.truncated_bodies !== 0;
+  if (coverage.source_incomplete !== incomplete) throw new Error(`${path}.source_incomplete does not reconcile`);
+  return coverage as unknown as NonNullable<ConversationChainV1["materialization_coverage_v1"]>;
 }
 
 function parseConversationDependencyProof(value: unknown, path: string): ConversationDependencyProofV1 {
@@ -1944,6 +1968,7 @@ function canonicalConversationChainDigest(chain: ConversationChainV1): string {
     session_view_digest: chain.session_view_digest,
     dependency_digest: chain.dependency_digest,
     ...(chain.dependency_proof_v1 === undefined ? {} : { dependency_proof_v1: orderedConversationDependencyProof(chain.dependency_proof_v1) }),
+    ...(chain.materialization_coverage_v1 === undefined ? {} : { materialization_coverage_v1: chain.materialization_coverage_v1 }),
     segmentation_rule_version: chain.segmentation_rule_version,
     coverage: {
       source_messages: chain.coverage.source_messages,

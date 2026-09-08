@@ -128,6 +128,14 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 			}
 		}
 	}
+	document.MaterializationCoverageV1 = &MaterializationCoverageV1{
+		SourceRecords: input.SourceCoverage.SourceRecords, VisibleMessages: input.SourceCoverage.VisibleMessages,
+		CapturedMessages: input.SourceCoverage.CapturedMessages, TruncatedMessages: input.SourceCoverage.TruncatedMessages,
+		TruncatedBodies: input.SourceCoverage.TruncatedBodies, ContextMessages: input.SourceCoverage.ContextMessages,
+		OrphanMessages: input.SourceCoverage.OrphanMessages, OversizedRecords: input.SourceCoverage.OversizedRecords,
+		MalformedRecords: input.SourceCoverage.MalformedRecords, Complete: input.SourceCoverage.Complete,
+		UnassignedFacts: report.UnassignedFacts, UnsupportedFacts: report.UnsupportedFacts, SourceIncomplete: report.SourceIncomplete,
+	}
 	proof := retainedDependencyProof(input)
 	document.DependencyProofV1 = &proof
 	document.DependencyDigest = dependencyProofDigest(proof)
@@ -246,7 +254,7 @@ func observationSummary(revision memory.ObservationRevision) memory.ObservationS
 }
 
 func sourceCoverageIncomplete(coverage VisibleCoverage) bool {
-	return !coverage.Complete || coverage.OversizedRecords != 0 || coverage.MalformedRecords != 0 || coverage.TruncatedBodies != 0
+	return !coverage.Complete || coverage.OversizedRecords != 0 || coverage.MalformedRecords != 0 || coverage.OrphanMessages != 0 || coverage.TruncatedBodies != 0
 }
 
 func retainedWireMessage(message VisibleMessage) Message {

@@ -9,6 +9,7 @@
     "project_id": { "$ref": "#/$defs/id" }, "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
     "session_view_digest": { "$ref": "#/$defs/digest" }, "dependency_digest": { "$ref": "#/$defs/digest" },
     "dependency_proof_v1": { "$ref": "#/$defs/dependency_proof_v1" },
+    "materialization_coverage_v1": { "$ref": "#/$defs/materialization_coverage_v1" },
     "segmentation_rule_version": { "$ref": "#/$defs/id" }, "coverage": { "$ref": "#/$defs/coverage" },
     "turn_units": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/turn_unit" } }
   },
@@ -16,6 +17,7 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 }, "excerpt": { "type": "string", "maxLength": 4096 },
+    "count": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
     "dependency_record_proof_v1": {
       "type": "object", "additionalProperties": false,
       "required": ["record_ordinal", "source_hash"],
@@ -29,6 +31,16 @@
         "visible_records": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/dependency_record_proof_v1" } },
         "active_revision_ids": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/digest" } },
         "rule_version": { "$ref": "#/$defs/id" }, "redaction_version": { "$ref": "#/$defs/id" }
+      }
+    },
+    "materialization_coverage_v1": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_records", "visible_messages", "captured_messages", "truncated_messages", "truncated_bodies", "context_messages", "orphan_messages", "oversized_records", "malformed_records", "complete", "unassigned_facts", "unsupported_facts", "source_incomplete"],
+      "properties": {
+        "source_records": { "$ref": "#/$defs/count" }, "visible_messages": { "$ref": "#/$defs/count" }, "captured_messages": { "$ref": "#/$defs/count" },
+        "truncated_messages": { "$ref": "#/$defs/count" }, "truncated_bodies": { "$ref": "#/$defs/count" }, "context_messages": { "$ref": "#/$defs/count" },
+        "orphan_messages": { "$ref": "#/$defs/count" }, "oversized_records": { "$ref": "#/$defs/count" }, "malformed_records": { "$ref": "#/$defs/count" },
+        "complete": { "type": "boolean" }, "unassigned_facts": { "$ref": "#/$defs/count" }, "unsupported_facts": { "$ref": "#/$defs/count" }, "source_incomplete": { "type": "boolean" }
       }
     },
     "source_ref": {

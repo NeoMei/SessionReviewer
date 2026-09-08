@@ -32,6 +32,22 @@ func Validate(document Document) error {
 			return err
 		}
 	}
+	if document.MaterializationCoverageV1 != nil {
+		coverage := document.MaterializationCoverageV1
+		counts := []uint64{coverage.SourceRecords, coverage.VisibleMessages, coverage.CapturedMessages, coverage.TruncatedMessages, coverage.TruncatedBodies, coverage.ContextMessages, coverage.OrphanMessages, coverage.OversizedRecords, coverage.MalformedRecords, coverage.UnassignedFacts, coverage.UnsupportedFacts}
+		for _, count := range counts {
+			if count > MaxWireInteger {
+				return errors.New("conversation materialization coverage exceeds the wire integer maximum")
+			}
+		}
+		incomplete := sourceCoverageIncomplete(VisibleCoverage{Complete: coverage.Complete, OversizedRecords: coverage.OversizedRecords, MalformedRecords: coverage.MalformedRecords, OrphanMessages: coverage.OrphanMessages, TruncatedBodies: coverage.TruncatedBodies})
+		if coverage.SourceRecords < coverage.VisibleMessages+coverage.OversizedRecords+coverage.MalformedRecords || coverage.VisibleMessages != coverage.CapturedMessages+coverage.ContextMessages+coverage.OrphanMessages || coverage.TruncatedMessages > coverage.CapturedMessages || coverage.TruncatedBodies > coverage.CapturedMessages || coverage.SourceIncomplete != incomplete {
+			return errors.New("conversation materialization coverage does not reconcile")
+		}
+		if coverage.VisibleMessages != document.Coverage.SourceMessages || coverage.CapturedMessages != document.Coverage.CapturedMessages {
+			return errors.New("conversation materialization coverage does not match the retained document")
+		}
+	}
 	if document.Coverage.SourceMessages > MaxWireInteger || document.Coverage.CapturedMessages > MaxWireInteger || document.Coverage.TurnUnits > MaxWireInteger || document.Coverage.UnansweredUnits > MaxWireInteger || document.Coverage.TruncatedMessages > MaxWireInteger {
 		return errors.New("conversation chain coverage exceeds the wire integer maximum")
 	}
@@ -101,6 +117,9 @@ func Validate(document Document) error {
 		case AnswerAnswered, AnswerPartial:
 			if len(turn.AssistantMessages) == 0 {
 				return fmt.Errorf("turn unit %q claims an answer without assistant messages", turn.TurnUnitID)
+			}
+			if turn.AnswerState == AnswerAnswered && document.MaterializationCoverageV1 != nil && document.MaterializationCoverageV1.SourceIncomplete {
+				return fmt.Errorf("turn unit %q claims an answered state from incomplete source materialization", turn.TurnUnitID)
 			}
 		default:
 			return fmt.Errorf("turn unit %q has invalid answer state", turn.TurnUnitID)

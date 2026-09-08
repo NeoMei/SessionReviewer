@@ -66,6 +66,91 @@ func TestLegacyConversationChainWithoutDependencyProofPreservesFrozenBytes(t *te
 	if strings.Contains(string(rendered), "dependency_proof_v1") {
 		t.Fatal("legacy document rendered a previously absent dependency proof")
 	}
+	if strings.Contains(string(rendered), "materialization_coverage_v1") {
+		t.Fatal("legacy document rendered previously unknown materialization diagnostics")
+	}
+}
+
+func TestConversationChainMaterializationCoverageIsOptionalAndDigestBound(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := Parse(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.MaterializationCoverageV1 != nil {
+		t.Fatal("legacy conversation bytes invented known materialization diagnostics")
+	}
+	withCoverage := legacy
+	withCoverage.MaterializationCoverageV1 = &MaterializationCoverageV1{
+		SourceRecords: 4, VisibleMessages: 2, CapturedMessages: 2, MalformedRecords: 1, Complete: false,
+		UnsupportedFacts: 2, UnassignedFacts: 1, SourceIncomplete: true,
+	}
+	withCoverage.TurnUnits[0].AnswerState = AnswerPartial
+	withCoverage.Digest = CanonicalDigest(withCoverage)
+	body, err := Render(withCoverage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := Parse(body)
+	if err != nil || parsed.MaterializationCoverageV1 == nil || parsed.MaterializationCoverageV1.SourceRecords != 4 {
+		t.Fatalf("materialization coverage round trip=%+v err=%v", parsed.MaterializationCoverageV1, err)
+	}
+	tampered := withCoverage
+	changed := *withCoverage.MaterializationCoverageV1
+	changed.UnsupportedFacts = 3
+	tampered.MaterializationCoverageV1 = &changed
+	if CanonicalDigest(tampered) == withCoverage.Digest {
+		t.Fatal("materialization diagnostics were excluded from document digest")
+	}
+}
+
+func TestConversationChainMaterializationCoverageMustMatchRetainedDocument(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.coverage.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Parse(fixture)
+	if err != nil {
+		t.Fatalf("coverage fixture rejected: %v", err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*MaterializationCoverageV1)
+	}{
+		{"captured differs from retained chain", func(coverage *MaterializationCoverageV1) { coverage.CapturedMessages = 0; coverage.VisibleMessages = 0 }},
+		{"visible differs from compact source count", func(coverage *MaterializationCoverageV1) { coverage.VisibleMessages++ }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := document
+			coverage := *document.MaterializationCoverageV1
+			changed.MaterializationCoverageV1 = &coverage
+			test.edit(&coverage)
+			changed.Digest = CanonicalDigest(changed)
+			if err := Validate(changed); err == nil {
+				t.Fatalf("mismatched known diagnostics accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestConversationChainIncompleteMaterializationCannotClaimAnsweredTurn(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.coverage.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Parse(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document.TurnUnits[0].AnswerState = AnswerAnswered
+	document.Digest = CanonicalDigest(document)
+	if err := Validate(document); err == nil || !strings.Contains(err.Error(), "incomplete") {
+		t.Fatalf("incomplete source claimed answered turn: %v", err)
+	}
 }
 
 func TestConversationChainDependencyProofIsStrictlyBounded(t *testing.T) {

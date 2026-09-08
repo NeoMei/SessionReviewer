@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 )
 
@@ -127,6 +128,21 @@ func (manager *Manager) Read(ctx context.Context, ref memory.SourceRef, limit in
 		return nil, err
 	}
 	return adapter.Read(ctx, ref, limit)
+}
+
+func (manager *Manager) ReadVisiblePrefix(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
+	if err := memory.ValidateSourceRecord(record); err != nil {
+		return nil, conversationchain.VisibleCoverage{}, fmt.Errorf("invalid visible source record: %w", err)
+	}
+	adapter, err := manager.adapterFor(record.Provider)
+	if err != nil {
+		return nil, conversationchain.VisibleCoverage{}, err
+	}
+	reader, supported := adapter.(VisibleReader)
+	if !supported {
+		return nil, conversationchain.VisibleCoverage{}, &UnsupportedCapabilityError{Provider: record.Provider}
+	}
+	return reader.ReadVisiblePrefix(ctx, record)
 }
 
 func (manager *Manager) AbandonCandidate(candidate Candidate) {

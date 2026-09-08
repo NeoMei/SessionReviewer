@@ -129,6 +129,14 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	if err := validateContractSchema(chainSchema, proofChain, "$", chainSchema); err == nil {
 		t.Fatal("conversation schema accepted a zero dependency proof ordinal")
 	}
+	coverageChain := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "conversation-chain-v1.coverage.valid.json")).(map[string]any)
+	if err := validateContractSchema(chainSchema, coverageChain, "$", chainSchema); err != nil {
+		t.Fatalf("conversation schema rejected valid materialization coverage: %v", err)
+	}
+	coverageChain["materialization_coverage_v1"].(map[string]any)["raw_source"] = "forbidden"
+	if err := validateContractSchema(chainSchema, coverageChain, "$", chainSchema); err == nil {
+		t.Fatal("conversation schema accepted raw source material in coverage")
+	}
 
 	candidateSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "problem-map-candidate-v1.schema.json"))
 	candidates := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "problem-map-candidate-v1.valid.json")).(map[string]any)

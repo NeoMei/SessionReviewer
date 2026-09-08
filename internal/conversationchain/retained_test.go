@@ -121,11 +121,12 @@ func TestMaterializeRetainedIgnoresAmbientUserAndBoundsUTF8(t *testing.T) {
 		retainedMessage(RoleAssistant, "final_answer", large, testTime3, 3, 'c'),
 	}
 	view := retainedView("codex", "session-1", "source-1", nil)
-	doc, _, err := Materialize(MaterializeInput{View: view, Messages: messages, SourceCoverage: completeVisibleCoverage(3, 3), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
+	coverage := VisibleCoverage{SourceRecords: 3, VisibleMessages: 3, CapturedMessages: 2, TruncatedMessages: 1, TruncatedBodies: 1, ContextMessages: 1, Complete: false}
+	doc, _, err := Materialize(MaterializeInput{View: view, Messages: messages, SourceCoverage: coverage, RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(doc.TurnUnits) != 1 || doc.TurnUnits[0].AnswerState != AnswerAnswered || !doc.TurnUnits[0].AssistantMessages[0].Truncated || len(doc.TurnUnits[0].AssistantMessages[0].VisibleExcerpt) > 4096 {
+	if len(doc.TurnUnits) != 1 || doc.TurnUnits[0].AnswerState != AnswerPartial || !doc.TurnUnits[0].AssistantMessages[0].Truncated || len(doc.TurnUnits[0].AssistantMessages[0].VisibleExcerpt) > 4096 {
 		t.Fatalf("ambient split or multibyte bound failed: %+v", doc)
 	}
 }
@@ -211,6 +212,9 @@ func TestMaterializeRetainedReportsUnsupportedUnassignedAndIncompleteCoverage(t 
 	}
 	if report.UnassignedFacts != 1 || report.UnsupportedFacts != 3 || !report.SourceIncomplete {
 		t.Fatalf("coverage loss was hidden: %+v", report)
+	}
+	if doc.MaterializationCoverageV1 == nil || doc.MaterializationCoverageV1.MalformedRecords != 1 || doc.MaterializationCoverageV1.UnassignedFacts != 1 || doc.MaterializationCoverageV1.UnsupportedFacts != 3 || !doc.MaterializationCoverageV1.SourceIncomplete {
+		t.Fatalf("private materialization diagnostics were not retained: %+v", doc.MaterializationCoverageV1)
 	}
 	if doc.TurnUnits[0].AnswerState != AnswerPartial || len(doc.TurnUnits[0].Actions) != 0 || len(doc.TurnUnits[0].Results) != 0 {
 		t.Fatalf("incomplete or unsupported facts were misrepresented: %+v", doc.TurnUnits[0])
