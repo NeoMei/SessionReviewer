@@ -332,6 +332,36 @@ func TestMaterializeRetainedTypedFactSemanticsDoNotInferFromText(t *testing.T) {
 	}
 }
 
+func TestMaterializeRetainedAcceptsCodexGitStatusObservation(t *testing.T) {
+	rawExcerpt := "raw git stdout must not persist"
+	revision := retainedRevision("git_status", "git_observation", "observed", 2, 'b', testTime2, map[string]string{
+		"branch": "main", "status": "dirty", "git_head": strings.Repeat("a", 40), "tag": "v1.2.3", "tool_id": "call-git",
+	}, rawExcerpt)
+	view := retainedView("codex", "session-1", "source-1", []memory.ObservationRevision{revision})
+	doc, report, err := Materialize(MaterializeInput{
+		View: view, Messages: []SourceMessage{retainedMessage(RoleUser, "", "inspect git", testTime1, 1, 'a')}, Revisions: []memory.ObservationRevision{revision},
+		SourceCoverage: completeVisibleCoverage(2, 1), RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.UnsupportedFacts != 0 || len(doc.TurnUnits[0].Results) != 1 {
+		t.Fatalf("real Codex git status was not retained: report=%+v turn=%+v", report, doc.TurnUnits[0])
+	}
+	result := doc.TurnUnits[0].Results[0]
+	if result.Kind != "git_observation" || result.VerificationState != "unknown" {
+		t.Fatalf("git result semantics changed: %+v", result)
+	}
+	for _, field := range []string{"branch=main", "status=dirty", "git_head=" + strings.Repeat("a", 40), "tag=v1.2.3", "tool_id=call-git"} {
+		if !strings.Contains(result.Excerpt, field) {
+			t.Fatalf("decoder-shaped git field %q missing: %+v", field, result)
+		}
+	}
+	if strings.Contains(result.Excerpt, rawExcerpt) {
+		t.Fatalf("raw git excerpt persisted: %+v", result)
+	}
+}
+
 func retainedMessage(role Role, phase, text, occurredAt string, ordinal uint64, hashByte byte) SourceMessage {
 	return SourceMessage{Role: role, Phase: phase, Text: text, OccurredAt: occurredAt, RecordOrdinal: ordinal, RecordHash: strings.Repeat(string(hashByte), 64)}
 }

@@ -328,6 +328,8 @@ func retainedFactPolicyFor(revision memory.ObservationRevision) (retainedFactPol
 		return retainedFactPolicy{kind: "version", state: "unknown", allowedFields: []string{"version", "component"}}, true
 	case revision.Key.Kind == "branch" && (revision.Operation == "branch" || revision.Operation == "git_observation"):
 		return retainedFactPolicy{kind: revision.Operation, state: "unknown", allowedFields: []string{"branch", "git_head", "remote_hash"}}, true
+	case revision.Key.Kind == "git_status" && revision.Operation == "git_observation":
+		return retainedFactPolicy{kind: "git_observation", state: "unknown", allowedFields: []string{"branch", "status", "git_head", "tag", "tool_id"}}, true
 	default:
 		return retainedFactPolicy{}, false
 	}
