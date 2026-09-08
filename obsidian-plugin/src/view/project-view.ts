@@ -38,6 +38,7 @@ export class ProjectEvolutionView extends ItemView {
   private eventPageCache = new Map<string, SessionEventPageV1>();
   private eventCacheGeneration = "";
   private pendingEventRecovery?: { projectId: string; provider: string; sessionId: string; ordinal: number; generationId: string; sessionViewDigest: string | null };
+  private recoveredEventSelection?: { projectId: string; provider: string; sessionId: string };
   private eventRecoveryEpoch = 0;
 
   constructor(
@@ -79,6 +80,7 @@ export class ProjectEvolutionView extends ItemView {
     this.closed = true;
     this.refreshEpoch += 1;
     this.invalidateEventRecovery();
+    this.recoveredEventSelection = undefined;
     this.stopSettlingRetry();
     this.stopScanPolling();
     this.disposeWatch?.();
@@ -197,11 +199,7 @@ export class ProjectEvolutionView extends ItemView {
           initialSessionEventOrdinal: recovery?.ordinal,
           recoveryAlreadyAttempted: recovery !== undefined,
           recoverySelectionUnavailable: recovery?.unavailable,
-          initialState: this.currentV4State(current.descriptor.projectId),
-          saveState: (viewState) => {
-            this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
-            return this.saveV4State?.(viewState);
-          },
+          initialState: this.v4StateForRender(current),
           saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch)
         }
       );
@@ -209,8 +207,9 @@ export class ProjectEvolutionView extends ItemView {
       if (recovery) {
         this.pendingEventRecovery = undefined;
         if (recovery.ordinal !== undefined) {
+          this.recoveredEventSelection = { projectId: current.descriptor.projectId, ...recovery.selection };
           browser.prepend(element("p", { className: "sr-event-recovery-status", text: "项目索引已更新；正在按新一代索引恢复原 Session 的事件位置。", attrs: { role: "status" } }));
-        }
+        } else this.recoveredEventSelection = undefined;
       }
       this.scanRecords = browser.scanRecords;
       browser.prepend(this.projectPicker(projects));
@@ -433,6 +432,7 @@ export class ProjectEvolutionView extends ItemView {
       this.scanStatus = undefined;
       this.selected = next;
       this.invalidateEventRecovery();
+      this.recoveredEventSelection = undefined;
       this.currentState = { ...this.currentState, projectId: next.projectId };
       void this.saveState?.(this.currentState);
       if (next.format === "markdown-v4") {
@@ -508,7 +508,10 @@ export class ProjectEvolutionView extends ItemView {
   }
 
   private saveV4Patch(projectId: string, patch: V4ViewStatePatch): void | Promise<void> {
-    if (this.pendingEventRecovery && patch.sessionBrowser !== undefined) this.invalidateEventRecovery();
+    if (patch.sessionBrowser !== undefined) {
+      if (this.pendingEventRecovery) this.invalidateEventRecovery();
+      this.recoveredEventSelection = undefined;
+    }
     const latest = normalizeV4ViewState(this.currentV4State(projectId), projectId);
     const next = normalizeV4ViewState({ ...latest, ...patch, projectId }, projectId);
     this.v4States = { ...this.v4States, [projectId]: next };
@@ -526,12 +529,17 @@ export class ProjectEvolutionView extends ItemView {
     const state = normalizeV4ViewState(this.currentV4State(selected.projectId), selected.projectId);
     const browserState = normalizeSessionBrowserState(state.sessionBrowser);
     const persisted = browserState.selected;
+    const recovered = this.recoveredEventSelection?.projectId === selected.projectId ? this.recoveredEventSelection : undefined;
     const currentIndex = this.lastMarkdownReady?.descriptor.projectId === selected.projectId ? this.lastMarkdownReady.state.index : undefined;
     let currentSession = currentIndex?.sessions.find((entry) => entry.provider === request.provider && entry.session_id === request.sessionId);
     if (persisted === null) {
-      const visible = currentIndex ? filterSessions(currentIndex.sessions, browserState)[0] : undefined;
-      if (visible?.provider !== request.provider || visible.session_id !== request.sessionId) return;
-      currentSession = visible;
+      if (recovered) {
+        if (recovered.provider !== request.provider || recovered.sessionId !== request.sessionId) return;
+      } else {
+        const visible = currentIndex ? filterSessions(currentIndex.sessions, browserState)[0] : undefined;
+        if (visible?.provider !== request.provider || visible.session_id !== request.sessionId) return;
+        currentSession = visible;
+      }
     } else if (persisted.provider !== request.provider || persisted.sessionId !== request.sessionId) return;
     if (!currentIndex || !currentSession) return;
     const recoveryEpoch = ++this.eventRecoveryEpoch;
@@ -562,6 +570,19 @@ export class ProjectEvolutionView extends ItemView {
       return { selection, unavailable: "项目索引已更新；原 Session 当前没有可读的已索引事件。" };
     }
     return { selection, ordinal: Math.min(recovery.ordinal, session.indexed_event_count) };
+  }
+
+  private v4StateForRender(snapshot: Extract<Snapshot, { kind: "markdown-v4" }>): V4ViewState | undefined {
+    const state = normalizeV4ViewState(this.currentV4State(snapshot.descriptor.projectId), snapshot.descriptor.projectId);
+    const recovered = this.recoveredEventSelection?.projectId === snapshot.descriptor.projectId ? this.recoveredEventSelection : undefined;
+    if (!recovered || snapshot.state.kind !== "public_valid") return state;
+    const browserState = normalizeSessionBrowserState(state.sessionBrowser);
+    const session = snapshot.state.index.sessions.find((entry) => entry.provider === recovered.provider && entry.session_id === recovered.sessionId);
+    if (!session || !filterSessions(snapshot.state.index.sessions, browserState).includes(session)) {
+      this.recoveredEventSelection = undefined;
+      return state;
+    }
+    return { ...state, sessionBrowser: { ...browserState, selected: { provider: recovered.provider, sessionId: recovered.sessionId } } };
   }
 
   private invalidateEventRecovery(): void {

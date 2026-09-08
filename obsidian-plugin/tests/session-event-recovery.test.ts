@@ -107,6 +107,83 @@ describe("actual ProjectEvolutionView event recovery", () => {
     await view.onClose();
   });
 
+  it("recovers the same implicit Session again after a new first row was inserted", async () => {
+    const withNewFirst = (generation: string, digest: string) => {
+      const result = snapshot(generation, 100, digest);
+      if (result.state.kind !== "public_valid") throw new Error("expected public index");
+      result.state.index.sessions.unshift({ ...result.state.index.sessions[0], session_id: "session-new" });
+      Object.assign(result.state.index.coverage, { total: 2, complete: 2, source_available: 2, started_at_known: 2 });
+      return result;
+    };
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn()
+        .mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1))
+        .mockResolvedValueOnce(withNewFirst("generation-2", DIGEST_2))
+        .mockResolvedValueOnce(withNewFirst("generation-3", `sha256:${"4".repeat(64)}`)),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    let stale = false;
+    const getSessionEvents = vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number; cursor?: string }) => {
+      if (stale && request.cursor) {
+        stale = false;
+        return Promise.reject(new SessionInspectError("generation_mismatch"));
+      }
+      const anchored = request.cursor ? { ...request, anchor: 26 } : request;
+      return Promise.resolve({ ...page(anchored, 100), session_id: request.sessionId });
+    });
+    const saveV4State = vi.fn();
+    const initial = { "project-p": { projectId: "project-p", view: "sessions" as const, selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: null } } };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, initial, saveV4State);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen(); await settle();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click(); await settle();
+    stale = true;
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle(); await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-long");
+    stale = true;
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle(); await settle(); await settle();
+    expect(repository.load).toHaveBeenCalledTimes(3);
+    expect(getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-long", expectedGenerationId: "generation-3", anchor: 26 }));
+    expect(view.contentEl.querySelector('[data-event-ordinal="26"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(saveV4State).not.toHaveBeenCalled();
+    await view.onClose();
+  });
+
+  it("keeps host and renderer on the recovered implicit Session across an ordinary refresh", async () => {
+    const withNewFirst = () => {
+      const result = snapshot("generation-2", 100, DIGEST_2);
+      if (result.state.kind !== "public_valid") throw new Error("expected public index");
+      result.state.index.sessions.unshift({ ...result.state.index.sessions[0], session_id: "session-new" });
+      Object.assign(result.state.index.coverage, { total: 2, complete: 2, source_available: 2, started_at_known: 2 });
+      return result;
+    };
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 100, DIGEST_1)).mockResolvedValueOnce(withNewFirst()).mockResolvedValueOnce(withNewFirst()),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const getSessionEvents = vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => {
+      if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
+      return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click(); await settle();
+    const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = "50"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle(); await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-long");
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="refresh-v4-status"]')!.click();
+    await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-long");
+    expect(getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-long", expectedGenerationId: "generation-2" }));
+    await view.onClose();
+  });
+
   it("lets newer cached event navigation cancel an older pending recovery", async () => {
     const refresh = deferred<Extract<Snapshot, { kind: "markdown-v4" }>>();
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 2_438, DIGEST_1)).mockReturnValueOnce(refresh.promise), watch: vi.fn().mockReturnValue(vi.fn()) };
