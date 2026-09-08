@@ -413,7 +413,10 @@ function renderSessions(handlers: SessionHandlers): SessionRailElement {
       node.addEventListener("click", () => handlers.onSelect(session));
       list.append(node);
     }
-    if (shown.length === 0) list.append(element("p", { className: "sr-empty", text: "没有匹配的 Session。" }));
+    if (shown.length === 0) list.append(element("p", {
+      className: "sr-empty",
+      text: sessions.length === 0 ? "公开索引中没有 Session。" : "没有符合当前筛选条件的 Session。"
+    }));
     const first = button("首页", { "data-action": "first-session-page" });
     first.disabled = safePage === 0;
     first.addEventListener("click", () => handlers.onPage(0));
@@ -461,7 +464,7 @@ function renderEventArea(
 ): HTMLElement {
   const area = element("div", { className: "sr-event-area" });
   if (!session) {
-    area.append(element("p", { className: "sr-empty", text: options.recoverySelectionUnavailable ?? "公开索引中没有 Session。" }));
+    if (options.recoverySelectionUnavailable) area.append(element("p", { className: "sr-empty", text: options.recoverySelectionUnavailable }));
     return area;
   }
   area.append(renderSessionCoverage(session));
@@ -471,7 +474,7 @@ function renderEventArea(
   area.append(facts);
   facts.append(renderOrdinalJump(session.indexed_event_count, jumpValue, jumpError, handlers.onJump));
   if (options.cliUnavailable || !options.loadSessionEvents) {
-    facts.append(element("p", { className: "sr-event-unavailable", text: "无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。" }));
+    facts.append(element("p", { className: "sr-event-unavailable", text: "CLI 不可用，当前无法读取扫描记录。已保留的公开索引仍可浏览。" }));
     return area;
   }
   if (session.indexed_event_count === 0 || session.session_view_digest === null) {

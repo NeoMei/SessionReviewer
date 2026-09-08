@@ -14,6 +14,8 @@ export interface PresentedStatus {
   tone: StatusTone;
 }
 
+const CLI_RECOVERY_DOCUMENTATION = "https://github.com/NeoMei/SessionReviewer/blob/main/README.zh-CN.md#构建测试与用户级安装";
+
 const STATUSES: Record<string, PresentedStatus> = {
   accepted: { label: "已采纳", tone: "success" },
   at_risk: { label: "有风险", tone: "warning" },
@@ -120,6 +122,17 @@ export function renderMarkdownV4View(
     Object.defineProperty(root, "scanRecords", { configurable: true, get: () => shell?.scanRecords });
     (root as HTMLElement & { dispose?: () => void }).dispose = () => shell?.dispose();
   } else root.append(element("p", { className: "sr-v4-status", text: status }), trustDetails);
+  if (options.cliUnavailable) {
+    root.append(element("aside", { className: "sr-v4-cli-recovery", attrs: { role: "status" } }, [
+      element("p", { text: "CLI 未安装或当前未被发现。安装或恢复可发现的用户级 CLI 后，请重载插件。" }),
+      element("a", { text: "安装或恢复 CLI", attrs: {
+        href: CLI_RECOVERY_DOCUMENTATION,
+        target: "_blank",
+        rel: "noopener noreferrer",
+        "data-action": "recover-cli"
+      } })
+    ]));
+  }
   const actions = element("div", { className: "sr-v4-actions" });
   for (const [label, relative] of [["打开项目回顾", "项目回顾.md"], ["打开项目历史", "项目历史.md"]] as const) {
     const button = element("button", { text: label, attrs: { type: "button" } });

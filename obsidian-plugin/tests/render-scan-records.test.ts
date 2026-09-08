@@ -308,22 +308,44 @@ describe("v4 scanned Session renderer", () => {
     expect(root.textContent).not.toContain("过期摘要");
   });
 
-  it("keeps the full index usable with one summary recovery notice when CLI is missing", () => {
+  it("keeps the full index usable with one visible recovery action and no private loads when CLI is missing", async () => {
     const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
-    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), () => {}, { cliUnavailable: true, loadSessionEvents });
+    const loadSessionSummary = vi.fn().mockResolvedValue(populatedSessionSummary());
+    const loadConversation = vi.fn().mockResolvedValue(conversationFor({}));
+    const open = vi.fn();
+    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), sessionFixture({ session_id: "session-2" })])), open, {
+      cliUnavailable: true, loadSessionEvents, loadSessionSummary, loadConversation
+    });
+    document.body.append(root);
     root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
 
     expect(loadSessionEvents).not.toHaveBeenCalled();
+    expect(loadSessionSummary).not.toHaveBeenCalled();
+    expect(loadConversation).not.toHaveBeenCalled();
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
     expect(root.querySelectorAll(".sr-summary-unavailable")).toHaveLength(1);
     expect(root.textContent?.match(/无法读取 Session 摘要/g)).toHaveLength(1);
-    expect(root.textContent).toContain("无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。");
+    expect(root.textContent).toContain("CLI 不可用，当前无法读取扫描记录。已保留的公开索引仍可浏览。");
+    expect(root.textContent).not.toContain("刷新项目或更新 CLI");
     expect(root.textContent).toContain("完整 Session 清单仍可浏览");
     expect(root.textContent).not.toContain("已索引执行事实仍可阅读");
+    const recovery = [...root.querySelectorAll<HTMLAnchorElement>('[data-action="recover-cli"]')];
+    expect(recovery).toHaveLength(1);
+    expect(recovery[0].textContent).toBe("安装或恢复 CLI");
+    expect(recovery[0].href).toBe("https://github.com/NeoMei/SessionReviewer/blob/main/README.zh-CN.md#%E6%9E%84%E5%BB%BA%E6%B5%8B%E8%AF%95%E4%B8%8E%E7%94%A8%E6%88%B7%E7%BA%A7%E5%AE%89%E8%A3%85");
+    expect(recovery[0].target).toBe("_blank");
+    expect(recovery[0].rel).toContain("noopener");
+    expect(recovery[0].hasAttribute("download")).toBe(false);
+    expect(recovery[0].closest("details")).toBeNull();
+    recovery[0].focus();
+    expect(document.activeElement).toBe(recovery[0]);
+    expect(open).not.toHaveBeenCalled();
     expect(root.querySelector("[data-event-ordinal]")).toBeNull();
     root.querySelector<HTMLButtonElement>('[data-session-id="session-2"]')!.click();
     expect(loadSessionEvents).not.toHaveBeenCalled();
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
+    root.remove();
   });
 
   it("renders partial coverage and pages through literal indexed excerpts", async () => {
@@ -579,6 +601,34 @@ describe("v4 scanned Session renderer", () => {
     search.dispatchEvent(new Event("input", { bubbles: true }));
     expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
     expect(root.textContent).toContain("Session 覆盖：共 154");
+    expect(root.textContent).toContain("没有符合当前筛选条件的 Session。");
+    expect(root.textContent).not.toContain("公开索引中没有 Session。");
+    expect(root.querySelector('[data-action="clear-session-filters"]')).not.toBeNull();
+  });
+
+  it("distinguishes a valid empty index from filtered-empty results", () => {
+    const root = renderMarkdownV4View(snapshot(indexFixture([])), () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    expect(root.textContent).toContain("公开索引中没有 Session。");
+    expect(root.textContent).not.toContain("没有符合当前筛选条件的 Session。");
+    expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
+  });
+
+  it("keeps missing-index rescan guidance distinct from valid empty states", () => {
+    const ready = snapshot();
+    if (ready.state.kind !== "public_valid") throw new Error("expected public-valid fixture");
+    const withoutIndex: Extract<Snapshot, { kind: "markdown-v4" }> = {
+      ...ready,
+      state: { kind: "pending_edit", value: ready.state.value, ledger: ready.state.ledger }
+    };
+    const root = renderMarkdownV4View(withoutIndex, () => {}, { cliUnavailable: true });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+
+    expect(root.textContent).toContain("当前快照没有已验证的 Session 索引；需要重新扫描后才能建立完整清单。");
+    expect(root.textContent).not.toContain("公开索引中没有 Session。");
+    expect(root.textContent).not.toContain("没有符合当前筛选条件的 Session。");
+    expect(root.querySelector('[aria-label="扫描 Session"]')).toBeNull();
   });
 
   it("renders the current filtered range and global accepted count independently", () => {
@@ -792,7 +842,7 @@ describe("v4 scanned Session renderer", () => {
     const unavailableRoot = renderMarkdownV4View(snapshot(indexFixture([unavailable])), () => {}, { cliUnavailable: true });
     unavailableRoot.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     expect(unavailableRoot.textContent).toContain("来源不可用");
-    expect(unavailableRoot.textContent).toContain("无法读取扫描记录：CLI 不可用");
+    expect(unavailableRoot.textContent).toContain("CLI 不可用，当前无法读取扫描记录");
     expect(unavailableRoot.textContent).not.toContain("下方仅显示已保留的索引事实");
   });
 

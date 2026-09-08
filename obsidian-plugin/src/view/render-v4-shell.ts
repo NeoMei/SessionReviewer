@@ -103,6 +103,15 @@ export function renderV4Shell(
       const panel = element("section", { className: "sr-v4-sessions", attrs: { "data-v4-panel": "sessions", role: "tabpanel" } });
       if (!index) panel.append(element("p", { className: "sr-empty", text: "当前快照没有已验证的 Session 索引；需要重新扫描后才能建立完整清单。" }));
       else {
+        const privateLoaders = options.cliUnavailable ? {
+          loadSessionEvents: undefined,
+          loadConversation: undefined,
+          loadSessionSummary: undefined
+        } : {
+          loadSessionEvents: options.loadSessionEvents,
+          loadConversation: options.loadConversation,
+          loadSessionSummary: options.loadSessionSummary
+        };
         const recovery = recoveryPending ? {
           recoverySession: options.recoverySession,
           initialSessionEventOrdinal: options.initialSessionEventOrdinal,
@@ -116,6 +125,7 @@ export function renderV4Shell(
         };
         records = renderScanRecords(index, {
           ...options,
+          ...privateLoaders,
           ...recovery,
           initialState: state.sessionBrowser,
           onStateChange: (sessionBrowser) => {
