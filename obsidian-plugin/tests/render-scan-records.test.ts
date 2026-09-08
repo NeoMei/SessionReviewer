@@ -190,17 +190,75 @@ describe("v4 scanned Session renderer", () => {
   });
 
   it("loads retained authenticated facts without raw sources and never starts source-backed Q/A", async () => {
-    const retained = sessionFixture({ source_availability: "unavailable", indexed_event_count: 0 });
+    const retained = sessionFixture({
+      source_availability: "unavailable",
+      indexed_event_count: 53,
+      coverage: { seen: 58, indexed: 53, collapsed: 0, unprojected: 0, undecodable: 5, truncated: 0 }
+    });
+    const available = sessionFixture({ session_id: "session-available" });
+    const lateRetainedPage = deferred<SessionEventPageV1>();
     const loadSessionSummary = vi.fn((request: SessionSummaryRequest) => Promise.resolve(summaryFor(request)));
     const loadConversation = vi.fn();
-    const root = renderMarkdownV4View(snapshot(indexFixture([retained])), () => {}, { loadSessionSummary, loadConversation });
+    const loadSessionEvents = vi.fn()
+      .mockResolvedValueOnce(eventPage({
+        total: 53,
+        items: [{ kind: "artifact", excerpt: "retained indexed fact", revision_id: "revision-retained-1", sequence: 10, occurred_at: "2026-09-06T16:00:00Z" }]
+      }))
+      .mockRejectedValueOnce(new Error("retained page temporarily unavailable"))
+      .mockReturnValueOnce(lateRetainedPage.promise)
+      .mockResolvedValueOnce(eventPage({
+        session_id: available.session_id,
+        total: 2,
+        items: [{ kind: "message", excerpt: "available Session fact", revision_id: "revision-available-1", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }]
+      }));
+    const index = indexFixture([retained, available]);
+    const root = renderMarkdownV4View(snapshot(index), () => {}, { loadSessionSummary, loadConversation, loadSessionEvents });
     root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     await settle();
 
+    expect(loadSessionEvents).toHaveBeenCalledTimes(1);
+    expect(loadSessionEvents).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: index.project_id,
+      provider: retained.provider,
+      sessionId: retained.session_id,
+      expectedGenerationId: index.generation_id,
+      expectedSessionViewDigest: retained.session_view_digest,
+      limit: 25
+    }));
     expect(loadSessionSummary).toHaveBeenCalledTimes(1);
     expect(loadConversation).not.toHaveBeenCalled();
     expect(root.textContent).toContain("已保留关键事实");
+    expect(root.textContent).toContain("retained indexed fact");
     expect(root.textContent).toContain("该 Session 的问答来源不可用");
+    expect(root.textContent).toContain("原始来源不可用；下方仅显示已保留的索引事实。");
+
+    root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle();
+    expect(root.textContent).toContain("retained page temporarily unavailable");
+    root.querySelector<HTMLButtonElement>('[data-action="retry-event-page"]')!.click();
+    expect(loadSessionEvents).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: "next-token" }));
+    expect(loadSessionEvents).toHaveBeenNthCalledWith(3, expect.objectContaining({ cursor: "next-token" }));
+
+    root.querySelector<HTMLButtonElement>('[data-session-id="session-available"]')!.click();
+    await settle();
+    expect(root.textContent).toContain("available Session fact");
+    expect(loadConversation).toHaveBeenCalledWith(expect.objectContaining({
+      provider: available.provider,
+      sessionId: available.session_id,
+      expectedGenerationId: index.generation_id,
+      expectedSessionViewDigest: available.session_view_digest
+    }));
+
+    lateRetainedPage.resolve(eventPage({
+      total: 53,
+      range_start: 1,
+      range_end: 2,
+      items: [{ kind: "artifact", excerpt: "stale retained fact", revision_id: "revision-retained-late", sequence: 20, occurred_at: "2026-09-06T16:01:00Z" }],
+      previous_cursor: "previous-token"
+    }));
+    await settle();
+    expect(root.textContent).toContain("available Session fact");
+    expect(root.textContent).not.toContain("stale retained fact");
   });
 
   it("does not request retained summary without a SessionView digest and explains why none is shown", () => {
@@ -564,6 +622,7 @@ describe("v4 scanned Session renderer", () => {
     unavailableRoot.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
     expect(unavailableRoot.textContent).toContain("来源不可用");
     expect(unavailableRoot.textContent).toContain("无法读取扫描记录：CLI 不可用");
+    expect(unavailableRoot.textContent).not.toContain("下方仅显示已保留的索引事实");
   });
 
   it("loads visible Q/A for a zero-fact Session and keeps execution facts separate", async () => {

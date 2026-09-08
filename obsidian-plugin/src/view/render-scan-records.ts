@@ -70,7 +70,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let sessionRail: SessionRailElement;
 
   const eligible = (session: SessionIndexEntryV1 | undefined): session is SessionIndexEntryV1 =>
-    Boolean(session && session.source_availability === "available" && session.session_view_digest && session.indexed_event_count > 0);
+    Boolean(session && session.session_view_digest && session.indexed_event_count > 0);
 
   const requestFor = (session: SessionIndexEntryV1, navigation?: EventNavigation): SessionEventRequest => ({
     projectId: index.project_id,
@@ -387,9 +387,6 @@ function renderEventArea(
   area.append(conversation);
   const facts = element("section", { className: "sr-execution-facts", attrs: { "aria-label": "已索引执行事实" } }, [element("h3", { text: "已索引执行事实" })]);
   area.append(facts);
-  if (session.source_availability === "unavailable") {
-    facts.append(element("p", { className: "sr-event-unavailable", text: "来源不可用；公开覆盖信息仍可阅读。" }));
-  }
   if (options.cliUnavailable || !options.loadSessionEvents) {
     facts.append(element("p", { className: "sr-event-unavailable", text: "无法读取扫描记录：CLI 不可用。刷新项目或更新 CLI 后可重试。" }));
     return area;
@@ -409,6 +406,9 @@ function renderEventArea(
     return area;
   }
   if (!page) return area;
+  if (session.source_availability === "unavailable") {
+    facts.append(element("p", { className: "sr-event-unavailable", text: "原始来源不可用；下方仅显示已保留的索引事实。" }));
+  }
   const content = element("div", { className: "sr-event-browser" });
   const list = element("div", { className: "sr-event-list", attrs: { "aria-label": "已索引事件" } });
   for (const [index, event] of page.items.entries()) {

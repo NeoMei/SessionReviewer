@@ -24,8 +24,8 @@ import (
 )
 
 type eventFixture struct {
-	dataRoot, projectID, generationID string
-	sessionDigests                    map[string]string
+	dataRoot, projectRoot, projectID, generationID string
+	sessionDigests                                 map[string]string
 }
 
 func TestLoadSessionEventPagePaginatesAndNavigatesDeterministically(t *testing.T) {
@@ -76,6 +76,55 @@ func TestLoadSessionEventPagePaginatesAndNavigatesDeterministically(t *testing.T
 	}
 	if next.Coverage != (Coverage{Seen: 5, Indexed: 3, Undecodable: 2}) {
 		t.Fatalf("coverage=%+v", next.Coverage)
+	}
+}
+
+func TestLoadSessionEventPageReadsRetainedEventsWhenSourceUnavailableWithoutWrites(t *testing.T) {
+	fixture := buildEventFixtureCustomizedAt(t, t.TempDir(), "project-events-retained", "generation-events-retained", []string{"session-1"}, nil, func(_ string, view *memory.SessionView) {
+		view.TerminalState = memory.Missing
+		view.SourceAvailability = memory.SourceUnavailable
+	})
+	if entries, err := os.ReadDir(fixture.projectRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("raw source fixture root entries=%v err=%v", entries, err)
+	}
+	before := snapshotEventTree(t, fixture.dataRoot)
+	request := EventPageRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: "session-1", ExpectedGenerationID: fixture.generationID, Limit: 2}
+
+	first, err := LoadSessionEventPage(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Total != 3 || first.RangeStart != 0 || first.RangeEnd != 2 || len(first.Items) != 2 || first.NextCursor == nil {
+		t.Fatalf("first retained page=%+v", first)
+	}
+	if first.Items[0].RevisionID == "" || first.Items[1].RevisionID == "" || first.Items[0].RevisionID == first.Items[1].RevisionID {
+		t.Fatalf("retained revision IDs=%q,%q", first.Items[0].RevisionID, first.Items[1].RevisionID)
+	}
+	if !strings.Contains(first.Items[0].Excerpt, "[REDACTED:OPENAI_KEY]") || first.Items[1].Excerpt != "" {
+		t.Fatalf("retained excerpts=%q,%q", first.Items[0].Excerpt, first.Items[1].Excerpt)
+	}
+	wantCoverage := (Coverage{Seen: 5, Indexed: 3, Undecodable: 2})
+	if first.Coverage != wantCoverage {
+		t.Fatalf("first retained coverage=%+v want=%+v", first.Coverage, wantCoverage)
+	}
+
+	nextRequest := request
+	nextRequest.Cursor = *first.NextCursor
+	next, err := LoadSessionEventPage(context.Background(), nextRequest)
+	if err != nil || next.RangeStart != 2 || next.RangeEnd != 3 || len(next.Items) != 1 || next.Items[0].RevisionID == "" || next.Items[0].Excerpt != "focused tests passed" || next.Coverage != wantCoverage {
+		t.Fatalf("next retained page=%+v err=%v", next, err)
+	}
+
+	wrongGeneration := request
+	wrongGeneration.ExpectedGenerationID = "generation-events-wrong"
+	if _, err := LoadSessionEventPage(context.Background(), wrongGeneration); eventErrorCode(err) != CodeGenerationMismatch {
+		t.Fatalf("wrong generation code=%q err=%v", eventErrorCode(err), err)
+	}
+	if after := snapshotEventTree(t, fixture.dataRoot); !reflect.DeepEqual(before, after) {
+		t.Fatalf("retained event inspection changed private tree\nbefore=%v\nafter=%v", before, after)
+	}
+	if entries, err := os.ReadDir(fixture.projectRoot); err != nil || len(entries) != 0 {
+		t.Fatalf("retained event inspection created raw source files entries=%v err=%v", entries, err)
 	}
 }
 
@@ -474,7 +523,7 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 	if err := store.CommitPublished(generationID, proof); err != nil {
 		t.Fatal(err)
 	}
-	return eventFixture{dataRoot: dataRoot, projectID: projectID, generationID: generationID, sessionDigests: sessionDigests}
+	return eventFixture{dataRoot: dataRoot, projectRoot: projectRoot, projectID: projectID, generationID: generationID, sessionDigests: sessionDigests}
 }
 
 func fixtureObservations(t *testing.T, projectID, sessionID string) []memory.ObservationRevision {
