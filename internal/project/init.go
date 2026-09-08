@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/syncdoc"
 	"golang.org/x/text/unicode/norm"
 	"gopkg.in/yaml.v3"
@@ -32,6 +34,8 @@ const (
 	initTransactionLockTimeout = 10 * time.Second
 	initialReviewV2JournalPath = "docs/session-review/.session-reviewer/init-v2.json"
 	initialReviewV2JournalMax  = 64 << 10
+	currentSessionIndexPath    = "docs/session-review/.session-reviewer/session-index.json"
+	currentProjectionMax       = 64 << 20
 )
 
 var (
@@ -41,6 +45,8 @@ var (
 	ErrConflictingInitializationIdentity = errors.New("initialization identity conflicts with existing state")
 	ErrInitializationStateChanged        = errors.New("initialization state changed")
 )
+
+var currentProjectIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 type InitOptions struct {
 	ProjectRoot         string
@@ -87,6 +93,23 @@ type initializationRoots struct {
 	vault   *pathguard.Directory
 }
 
+type initializedReviewIdentity struct {
+	projectID string
+	exists    bool
+	current   *currentMarkdownProjection
+}
+
+type currentMarkdownProjection struct {
+	projectID string
+	files     []currentMarkdownFile
+}
+
+type currentMarkdownFile struct {
+	relative string
+	body     []byte
+	info     os.FileInfo
+}
+
 func PreviewInitialization(opts InitOptions) (InitPreview, error) {
 	paths, err := resolveInitializationPaths(opts)
 	if err != nil {
@@ -131,7 +154,13 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if err != nil {
 		return InitResult{}, err
 	}
+	preflightProjectInfo := preflightRoots.project.Info()
+	preflightVaultInfo := preflightRoots.vault.Info()
+	preflightCurrent, preflightCurrentFound, currentErr := readCurrentMarkdownProjection(preflightRoots.project.Root)
 	preflightRoots.close()
+	if currentErr != nil {
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, currentErr)
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -164,6 +193,19 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, initializationError(ErrInitializationStateChanged, err)
 	}
 	defer roots.close()
+	if !os.SameFile(preflightProjectInfo, roots.project.Info()) || !os.SameFile(preflightVaultInfo, roots.vault.Info()) {
+		return InitResult{}, initializationError(ErrInitializationStateChanged, errors.New("initialization root identity changed before locked validation"))
+	}
+	lockedCurrent, lockedCurrentFound, currentErr := readCurrentMarkdownProjection(roots.project.Root)
+	if currentErr != nil {
+		if preflightCurrentFound || lockedCurrentFound != preflightCurrentFound {
+			return InitResult{}, initializationError(ErrInitializationStateChanged, errors.New("current Markdown projection changed before locked validation"))
+		}
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, currentErr)
+	}
+	if preflightCurrentFound != lockedCurrentFound || (preflightCurrentFound && !sameCurrentMarkdownProjection(preflightCurrent, lockedCurrent)) {
+		return InitResult{}, initializationError(ErrInitializationStateChanged, errors.New("current Markdown projection changed before locked validation"))
+	}
 
 	cfg, err := config.LoadRoot(dataDir.Root, "config.toml")
 	if err != nil {
@@ -178,10 +220,11 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
 	overviewID, overviewExists := overview.projectID, overview.exists
-	v2ID, v2Exists, err := readInitializedV2Identity(paths.projectRoot, roots.project.Info(), roots.project.Root)
+	reviewIdentity, err := readInitializedReviewIdentity(paths.projectRoot, roots.project.Info(), roots.project.Root, lockedCurrent)
 	if err != nil {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, err)
 	}
+	v2ID, v2Exists := reviewIdentity.projectID, reviewIdentity.exists
 	if overviewExists && v2Exists {
 		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("project contains both legacy and v2 review state"))
 	}
@@ -208,13 +251,31 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("project is already mapped to a different vault"))
 		}
 		if !validProjectID(existing.ID) {
-			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("mapped project ID %q is invalid", existing.ID))
+			if reviewIdentity.current == nil || !validCurrentProjectID(existing.ID) {
+				return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("mapped project ID %q is invalid", existing.ID))
+			}
 		}
 		if overviewExists && overviewID != existing.ID {
 			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("project overview ID %q does not match mapped ID %q", overviewID, existing.ID))
 		}
 		if v2Exists && v2ID != existing.ID {
-			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("review v2 ID %q does not match mapped ID %q", v2ID, existing.ID))
+			label := "review v2"
+			if reviewIdentity.current != nil {
+				label = "current Markdown"
+			}
+			return InitResult{}, initializationError(ErrConflictingInitializationIdentity, fmt.Errorf("%s ID %q does not match mapped ID %q", label, v2ID, existing.ID))
+		}
+		if reviewIdentity.current != nil {
+			if existing.VaultReviewPath == "" || existing.VaultCaseMode == "" {
+				return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("current Markdown identity requires a complete existing mapping; private state recovery cannot infer Vault metadata"))
+			}
+			if err := validateExistingCurrentProjectState(dataDir.Root, existing.ID); err != nil {
+				return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.Join(errors.New("current Markdown identity requires private state recovery from the original data root"), err))
+			}
+			if err := verifyCurrentMarkdownReuse(paths, preflightProjectInfo, preflightVaultInfo, roots, reviewIdentity.current); err != nil {
+				return InitResult{}, err
+			}
+			return initializationResult(paths, existing.ID), nil
 		}
 		updated, changed, err := completeVaultMapping(opts, roots.vault.Root, existing, filepath.Base(paths.projectRoot))
 		if err != nil {
@@ -242,6 +303,9 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 			}
 		}
 		return initializationResult(paths, updated.ID), nil
+	}
+	if reviewIdentity.current != nil {
+		return InitResult{}, initializationError(ErrConflictingInitializationIdentity, errors.New("current Markdown identity requires its existing mapping and private state recovery from the original data root"))
 	}
 	if v2Exists {
 		if owner, claimed := cfg.ProjectByID(v2ID); claimed {
@@ -568,6 +632,26 @@ func projectSyncStateExists(dataRoot *os.Root, projectID string) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+func validateExistingCurrentProjectState(dataRoot *os.Root, projectID string) error {
+	if !validCurrentProjectID(projectID) {
+		return errors.New("current project ID is not a safe private-state token")
+	}
+	projectsInfo, err := dataRoot.Lstat("projects")
+	if err != nil || !projectsInfo.IsDir() || projectsInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("projects state root is unavailable, redirected, or not a directory")
+	}
+	projectsRoot, err := openStableRoot(dataRoot, "projects")
+	if err != nil {
+		return err
+	}
+	defer projectsRoot.Close()
+	projectInfo, err := projectsRoot.Lstat(projectID)
+	if err != nil || !projectInfo.IsDir() || projectInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("current project private state is unavailable, redirected, or not a directory")
+	}
+	return validateStrictPrivateDirectory(projectsRoot, projectID)
 }
 
 func ensureExactInitializationScaffold(dataRoot *os.Root, projectID string, allowExisting bool, afterComponent func(string) error) error {
@@ -953,6 +1037,14 @@ func overviewBody(projectID string, createdAt time.Time, root string) string {
 	)
 }
 
+func readInitializedReviewIdentity(projectRoot string, expectedRoot os.FileInfo, root *os.Root, current *currentMarkdownProjection) (initializedReviewIdentity, error) {
+	if current != nil {
+		return initializedReviewIdentity{projectID: current.projectID, exists: true, current: current}, nil
+	}
+	projectID, exists, err := readInitializedV2Identity(projectRoot, expectedRoot, root)
+	return initializedReviewIdentity{projectID: projectID, exists: exists}, err
+}
+
 func readInitializedV2Identity(projectRoot string, expectedRoot os.FileInfo, root *os.Root) (string, bool, error) {
 	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath}
 	found := 0
@@ -974,6 +1066,92 @@ func readInitializedV2Identity(projectRoot string, expectedRoot os.FileInfo, roo
 		return "", false, err
 	}
 	return accepted.State.Review.ProjectID, true, nil
+}
+
+func readCurrentMarkdownProjection(root *os.Root) (*currentMarkdownProjection, bool, error) {
+	paths := []string{
+		reviewv2.ReviewRelativePath,
+		reviewv2.HistoryRelativePath,
+		reviewv2.MachineLedgerRelativePath,
+		currentSessionIndexPath,
+	}
+	infos := make([]os.FileInfo, len(paths))
+	found := make([]bool, len(paths))
+	for index, relative := range paths {
+		info, err := root.Lstat(filepath.FromSlash(relative))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("current Markdown projection path %q is redirected or unavailable: %w", relative, err)
+		}
+		found[index], infos[index] = true, info
+	}
+	if !found[len(found)-1] {
+		return nil, false, nil
+	}
+	for index, present := range found {
+		if !present {
+			return nil, true, fmt.Errorf("current Markdown initialization is incomplete: required projection file %q is missing", paths[index])
+		}
+	}
+	files := make([]currentMarkdownFile, 0, len(paths))
+	for index, relative := range paths {
+		info := infos[index]
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > currentProjectionMax {
+			return nil, true, fmt.Errorf("current Markdown projection file %q is redirected, nonregular, or exceeds its byte limit", relative)
+		}
+		body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(relative), info, currentProjectionMax)
+		if err != nil {
+			return nil, true, fmt.Errorf("read current Markdown projection file %q: %w", relative, err)
+		}
+		files = append(files, currentMarkdownFile{relative: relative, body: body, info: info})
+	}
+	parsed, err := reviewv4.ParseMarkdownDraftProjection(files[0].body, files[1].body, files[2].body, files[3].body)
+	if err != nil {
+		return nil, true, fmt.Errorf("validate current Markdown projection: %w", err)
+	}
+	return &currentMarkdownProjection{projectID: parsed.Draft.Presentation.ProjectID, files: files}, true, nil
+}
+
+func sameCurrentMarkdownProjection(first, second *currentMarkdownProjection) bool {
+	if first == nil || second == nil || first.projectID != second.projectID || len(first.files) != len(second.files) {
+		return false
+	}
+	for index := range first.files {
+		if first.files[index].relative != second.files[index].relative ||
+			!sameStableEntry(first.files[index].info, second.files[index].info) ||
+			!bytes.Equal(first.files[index].body, second.files[index].body) {
+			return false
+		}
+	}
+	return true
+}
+
+func verifyCurrentMarkdownProjection(logicalProjectPath string, rootInfo os.FileInfo, root *os.Root, expected *currentMarkdownProjection) error {
+	if err := verifyLiveInitializationProject(logicalProjectPath, rootInfo); err != nil {
+		return err
+	}
+	current, found, err := readCurrentMarkdownProjection(root)
+	if err != nil || !found || !sameCurrentMarkdownProjection(expected, current) {
+		return initializationError(ErrInitializationStateChanged, errors.Join(errors.New("current Markdown projection changed during initialization"), err))
+	}
+	return nil
+}
+
+func verifyCurrentMarkdownReuse(paths initializationPaths, projectInfo, vaultInfo os.FileInfo, roots initializationRoots, expected *currentMarkdownProjection) error {
+	if err := verifyCurrentMarkdownProjection(paths.projectRoot, projectInfo, roots.project.Root, expected); err != nil {
+		return err
+	}
+	liveVault, err := pathguard.Open(paths.vaultRoot)
+	if err != nil {
+		return initializationError(ErrInitializationStateChanged, errors.New("vault root logical path is unavailable or unsafe"))
+	}
+	defer liveVault.Close()
+	if !os.SameFile(vaultInfo, roots.vault.Info()) || !os.SameFile(vaultInfo, liveVault.Info()) {
+		return initializationError(ErrInitializationStateChanged, errors.New("vault root identity changed during initialization"))
+	}
+	return nil
 }
 
 type initialReviewV2Journal struct {
@@ -1271,6 +1449,10 @@ func validProjectID(projectID string) bool {
 	}
 	_, err := hex.DecodeString(strings.TrimPrefix(projectID, prefix))
 	return err == nil
+}
+
+func validCurrentProjectID(projectID string) bool {
+	return currentProjectIDPattern.MatchString(projectID)
 }
 
 func inside(goos, parent, child string) bool {

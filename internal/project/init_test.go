@@ -2,6 +2,8 @@ package project
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -19,7 +21,539 @@ import (
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
+
+func TestCurrentMarkdownInitializeReusesAcceptedAndPendingDraftWithoutMutation(t *testing.T) {
+	for _, pending := range []bool{false, true} {
+		name := "accepted"
+		if pending {
+			name = "pending draft"
+		}
+		t.Run(name, func(t *testing.T) {
+			fixture := seedCurrentMarkdownInitialization(t, pending, true)
+			before := snapshotCurrentMarkdownInitialization(t, fixture)
+
+			result, err := Initialize(InitOptions{
+				ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data,
+				Random: errorReader{},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.ProjectID != fixture.projectID {
+				t.Fatalf("project ID=%q want=%q", result.ProjectID, fixture.projectID)
+			}
+			after := snapshotCurrentMarkdownInitialization(t, fixture)
+			if !reflect.DeepEqual(after, before) {
+				t.Fatalf("current initialization mutated public/config bytes:\nbefore=%v\nafter=%v", digestByteMap(before), digestByteMap(after))
+			}
+		})
+	}
+}
+
+func TestCurrentMarkdownInitializeRequiresExistingMappingAndPrivateState(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		withMapping bool
+		removeState bool
+	}{
+		{name: "missing mapping", withMapping: false},
+		{name: "missing private state", withMapping: true, removeState: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := seedCurrentMarkdownInitialization(t, false, test.withMapping)
+			if test.removeState {
+				if err := os.RemoveAll(filepath.Join(fixture.data, "projects", fixture.projectID)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := snapshotCurrentMarkdownPublic(t, fixture)
+			_, err := Initialize(InitOptions{ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{}})
+			if err == nil || !errors.Is(err, ErrConflictingInitializationIdentity) || !strings.Contains(err.Error(), "private state recovery") {
+				t.Fatalf("err=%v", err)
+			}
+			if after := snapshotCurrentMarkdownPublic(t, fixture); !reflect.DeepEqual(after, before) {
+				t.Fatal("refused current initialization modified public files")
+			}
+			if _, statErr := os.Stat(filepath.Join(fixture.data, "projects", fixture.projectID)); !test.withMapping && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("missing mapping constructed private scaffold: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestCurrentMarkdownInitializeUsesReadOnlyReusePath(t *testing.T) {
+	fixture := seedCurrentMarkdownInitialization(t, false, true)
+	fragmentPath := filepath.Join(fixture.data, config.ProjectFragmentsDir, fixture.projectID+".toml")
+	sentinel := errors.New("current reuse mutation callback must not run")
+	result, err := Initialize(InitOptions{
+		ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{},
+		beforeOverviewWrite: func() error { return sentinel },
+		afterOverviewWrite:  func() error { return sentinel },
+		afterReviewV2File:   func(string) error { return sentinel },
+		afterStateComponent: func(string) error { return sentinel },
+		beforeConfigWrite:   func() error { return sentinel },
+		afterConfigWrite:    func() error { return sentinel },
+	})
+	if err != nil || result.ProjectID != fixture.projectID {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if _, err := os.Stat(fragmentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("current reuse published a config fragment: %v", err)
+	}
+}
+
+func TestCurrentMarkdownInitializeRejectsUnsafePrivateStateRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ordinary symlink setup requires Windows privileges")
+	}
+	fixture := seedCurrentMarkdownInitialization(t, false, true)
+	projectState := filepath.Join(fixture.data, "projects", fixture.projectID)
+	if err := os.RemoveAll(projectState); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), projectState); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotCurrentMarkdownInitialization(t, fixture)
+	_, err := Initialize(InitOptions{ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{}})
+	if err == nil || !errors.Is(err, ErrConflictingInitializationIdentity) || !strings.Contains(err.Error(), "private state recovery") {
+		t.Fatalf("err=%v", err)
+	}
+	if after := snapshotCurrentMarkdownInitialization(t, fixture); !reflect.DeepEqual(after, before) {
+		t.Fatal("unsafe private root refusal modified public/config bytes")
+	}
+}
+
+func TestCurrentMarkdownInitializeRejectsRedirectedProjectionFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ordinary symlink setup requires Windows privileges")
+	}
+	fixture := seedCurrentMarkdownInitialization(t, false, true)
+	path := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	target := filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(fixture.vaultReviewPath, strings.TrimPrefix(reviewv2.ReviewRelativePath, "docs/session-review/"))))
+	targetBefore := mustReadProjectFixture(t, target)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{}})
+	if err == nil || !errors.Is(err, ErrConflictingInitializationIdentity) || !strings.Contains(err.Error(), "redirected") {
+		t.Fatalf("err=%v", err)
+	}
+	if after := mustReadProjectFixture(t, target); !bytes.Equal(after, targetBefore) {
+		t.Fatal("redirected projection target was modified")
+	}
+}
+
+func TestCurrentMarkdownInitializeDetectsConcurrentStateChanges(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture currentMarkdownInitializationFixture)
+	}{
+		{name: "replace index with malformed bytes", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			path := filepath.Join(fixture.project, "docs/session-review/.session-reviewer/session-index.json")
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("concurrent index"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "delete history", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			if err := os.Remove(filepath.Join(fixture.project, filepath.FromSlash(reviewv2.HistoryRelativePath))); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "edit goal", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			path := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.ReviewRelativePath))
+			document, err := reviewv4.ParseMarkdownDocument("项目回顾.md", mustReadProjectFixture(t, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := document.ReplaceFields(map[reviewv4.FieldKey]string{{Entity: "project-overview", Name: "goal"}: "concurrent valid goal"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "replace index", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			path := filepath.Join(fixture.project, "docs/session-review/.session-reviewer/session-index.json")
+			index, err := sessionindex.Parse(mustReadProjectFixture(t, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			index.GeneratedAt = "2026-09-09T00:00:00Z"
+			body, err := sessionindex.Render(index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "replace project root", mutate: replaceCurrentInitializationRoot(false)},
+		{name: "replace vault root", mutate: replaceCurrentInitializationRoot(true)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := seedCurrentMarkdownInitialization(t, false, true)
+			var changed map[string][]byte
+			_, err := Initialize(InitOptions{
+				ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{},
+				afterLock: func() error {
+					test.mutate(t, fixture)
+					if !strings.Contains(test.name, "root") {
+						changed = snapshotCurrentMarkdownPublicAllowMissing(t, fixture)
+					}
+					return nil
+				},
+			})
+			if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+				t.Fatalf("err=%v", err)
+			}
+			if changed != nil {
+				if after := snapshotCurrentMarkdownPublicAllowMissing(t, fixture); !reflect.DeepEqual(after, changed) {
+					t.Fatal("concurrent public change was overwritten")
+				}
+			}
+		})
+	}
+}
+
+func TestCurrentMarkdownInitializeDetectsConcurrentIndexCreation(t *testing.T) {
+	fixture := seedCurrentMarkdownInitialization(t, false, true)
+	path := filepath.Join(fixture.project, filepath.FromSlash(currentMarkdownInitializationRelatives[3]))
+	body := mustReadProjectFixture(t, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Initialize(InitOptions{
+		ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{},
+		afterLock: func() error { return os.WriteFile(path, body, 0o600) },
+	})
+	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
+		t.Fatalf("err=%v", err)
+	}
+	if got := mustReadProjectFixture(t, path); !bytes.Equal(got, body) {
+		t.Fatal("concurrently created index was overwritten")
+	}
+}
+
+func TestCurrentMarkdownInitializeRejectsInvalidCurrentStateWithoutFallback(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(t *testing.T, fixture currentMarkdownInitializationFixture)
+	}{
+		{name: "mapped project mismatch", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			saveCurrentInitializationMapping(t, fixture, config.ProjectMapping{ID: "project-other", Root: fixture.project, VaultRoot: fixture.vault, VaultReviewPath: fixture.vaultReviewPath, VaultCaseMode: platform.CaseSensitive})
+		}},
+		{name: "wrong vault", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			saveCurrentInitializationMapping(t, fixture, config.ProjectMapping{ID: fixture.projectID, Root: fixture.project, VaultRoot: t.TempDir(), VaultReviewPath: fixture.vaultReviewPath, VaultCaseMode: platform.CaseSensitive})
+		}},
+		{name: "incomplete mapping", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			saveCurrentInitializationMapping(t, fixture, config.ProjectMapping{ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault})
+		}},
+		{name: "missing review", mutate: removeCurrentInitializationFile(reviewv2.ReviewRelativePath)},
+		{name: "missing history", mutate: removeCurrentInitializationFile(reviewv2.HistoryRelativePath)},
+		{name: "missing ledger", mutate: removeCurrentInitializationFile(reviewv2.MachineLedgerRelativePath)},
+		{name: "missing index", mutate: removeCurrentInitializationFile(currentMarkdownInitializationRelatives[3])},
+		{name: "malformed ledger", mutate: writeCurrentInitializationFile(reviewv2.MachineLedgerRelativePath, []byte("{malformed-ledger"))},
+		{name: "invalid index binding", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			path := filepath.Join(fixture.project, filepath.FromSlash(currentMarkdownInitializationRelatives[3]))
+			index, err := sessionindex.Parse(mustReadProjectFixture(t, path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			index.GeneratedAt = "2026-09-09T00:00:00Z"
+			body, err := sessionindex.Render(index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unsupported minimum version", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			path := filepath.Join(fixture.project, filepath.FromSlash(reviewv2.MachineLedgerRelativePath))
+			ledger := mustReadProjectFixture(t, path)
+			changed := bytes.Replace(ledger, []byte(`"minimum_reader_version":"0.4.1"`), []byte(`"minimum_reader_version":"9.9.9"`), 1)
+			if bytes.Equal(changed, ledger) {
+				t.Fatal("fixture minimum version was not changed")
+			}
+			ledger = changed
+			if err := os.WriteFile(path, ledger, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "current legacy splice", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+			legacy := t.TempDir()
+			if _, err := Initialize(InitOptions{ProjectRoot: legacy, VaultRoot: t.TempDir(), DataDir: t.TempDir(), Random: bytes.NewReader(bytes.Repeat([]byte{0x33}, 8))}); err != nil {
+				t.Fatal(err)
+			}
+			for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath} {
+				body := mustReadProjectFixture(t, filepath.Join(legacy, filepath.FromSlash(relative)))
+				if err := os.WriteFile(filepath.Join(fixture.project, filepath.FromSlash(relative)), body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := seedCurrentMarkdownInitialization(t, false, true)
+			test.mutate(t, fixture)
+			before := snapshotCurrentMarkdownPublicAllowMissing(t, fixture)
+			_, err := Initialize(InitOptions{ProjectRoot: fixture.project, VaultRoot: fixture.vault, DataDir: fixture.data, Random: errorReader{}})
+			if err == nil || !errors.Is(err, ErrConflictingInitializationIdentity) {
+				t.Fatalf("err=%v", err)
+			}
+			if after := snapshotCurrentMarkdownPublicAllowMissing(t, fixture); !reflect.DeepEqual(after, before) {
+				t.Fatal("invalid current state was overwritten or repaired")
+			}
+		})
+	}
+}
+
+func saveCurrentInitializationMapping(t *testing.T, fixture currentMarkdownInitializationFixture, mapping config.ProjectMapping) {
+	t.Helper()
+	if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func removeCurrentInitializationFile(relative string) func(*testing.T, currentMarkdownInitializationFixture) {
+	return func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+		if err := os.Remove(filepath.Join(fixture.project, filepath.FromSlash(relative))); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeCurrentInitializationFile(relative string, body []byte) func(*testing.T, currentMarkdownInitializationFixture) {
+	return func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+		if err := os.WriteFile(filepath.Join(fixture.project, filepath.FromSlash(relative)), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func snapshotCurrentMarkdownPublicAllowMissing(t *testing.T, fixture currentMarkdownInitializationFixture) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	for _, relative := range currentMarkdownInitializationRelatives {
+		for _, path := range []string{
+			filepath.Join(fixture.project, filepath.FromSlash(relative)),
+			filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(fixture.vaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))),
+		} {
+			body, err := os.ReadFile(path)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			result[path] = body
+		}
+	}
+	return result
+}
+
+func replaceCurrentInitializationRoot(vault bool) func(*testing.T, currentMarkdownInitializationFixture) {
+	return func(t *testing.T, fixture currentMarkdownInitializationFixture) {
+		path := fixture.project
+		if vault {
+			path = fixture.vault
+		}
+		moved := path + "-moved"
+		if err := os.Rename(path, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type currentMarkdownInitializationFixture struct {
+	projectID, project, vault, data, vaultReviewPath string
+}
+
+var currentMarkdownInitializationRelatives = []string{
+	reviewv2.ReviewRelativePath,
+	reviewv2.HistoryRelativePath,
+	reviewv2.MachineLedgerRelativePath,
+	"docs/session-review/.session-reviewer/session-index.json",
+}
+
+func seedCurrentMarkdownInitialization(t *testing.T, pending, withMapping bool) currentMarkdownInitializationFixture {
+	t.Helper()
+	fixture := currentMarkdownInitializationFixture{
+		projectID: "project-controller-native", project: t.TempDir(), vault: t.TempDir(), data: t.TempDir(),
+		vaultReviewPath: "Projects/Current/Session Review",
+	}
+	ledger, err := reviewv4.DecodeLedger(mustReadProjectFixture(t, "../../testdata/contracts/v4/markdown/ledger.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Parse(mustReadProjectFixture(t, "../../testdata/contracts/v4/markdown/index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.ProjectID = fixture.projectID
+	ledger.DocumentProjection.PresentationBase.ProjectID = fixture.projectID
+	index.ProjectID = fixture.projectID
+	indexBody, err := sessionindex.Render(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err = sessionindex.Parse(indexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.SyncHashes.SessionIndexDigest = index.Digest
+	ledgerBody, err := reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = reviewv4.DecodeLedger(ledgerBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := reviewv4.RenderMarkdown(ledger.DocumentProjection.PresentationBase, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.ReviewSHA256 = testSHA256(pair.Review)
+	ledger.HistorySHA256 = testSHA256(pair.History)
+	ledger.SyncHashes.ReviewSHA256 = ledger.ReviewSHA256
+	ledger.SyncHashes.HistorySHA256 = ledger.HistorySHA256
+	ledgerBody, err = reviewv4.RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending {
+		document, parseErr := reviewv4.ParseMarkdownDocument("项目回顾.md", pair.Review)
+		if parseErr != nil {
+			t.Fatal(parseErr)
+		}
+		pair.Review, err = document.ReplaceFields(map[reviewv4.FieldKey]string{{Entity: "project-overview", Name: "goal"}: "human pending goal"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := reviewv4.ParseMarkdownDraftProjection(pair.Review, pair.History, ledgerBody, indexBody); err != nil {
+		t.Fatalf("invalid current fixture: %v", err)
+	}
+	files := map[string][]byte{
+		reviewv2.ReviewRelativePath: pair.Review, reviewv2.HistoryRelativePath: pair.History,
+		reviewv2.MachineLedgerRelativePath: ledgerBody, currentMarkdownInitializationRelatives[3]: indexBody,
+	}
+	for relative, body := range files {
+		for _, target := range []string{
+			filepath.Join(fixture.project, filepath.FromSlash(relative)),
+			filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(fixture.vaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))),
+		} {
+			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(target, body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if withMapping {
+		if err := config.Save(filepath.Join(fixture.data, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+			ID: fixture.projectID, Root: fixture.project, VaultRoot: fixture.vault,
+			VaultReviewPath: fixture.vaultReviewPath, VaultCaseMode: platform.CaseSensitive,
+		}}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, directory := range []string{"merge-bases", "queue", "transactions", "locks"} {
+			if err := os.MkdirAll(filepath.Join(fixture.data, "projects", fixture.projectID, directory), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(fixture.data, "projects", fixture.projectID, "locks", "sync.lock"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return fixture
+}
+
+func snapshotCurrentMarkdownInitialization(t *testing.T, fixture currentMarkdownInitializationFixture) map[string][]byte {
+	t.Helper()
+	result := snapshotCurrentMarkdownPublic(t, fixture)
+	path := filepath.Join(fixture.data, "config.toml")
+	result[path] = mustReadProjectFixture(t, path)
+	privateRoot := filepath.Join(fixture.data, "projects", fixture.projectID)
+	if err := filepath.WalkDir(privateRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		key := "private:" + path
+		switch {
+		case entry.Type()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			result[key] = []byte("symlink:" + target)
+		case entry.IsDir():
+			result[key] = []byte("dir:" + info.Mode().String())
+		default:
+			result[key] = mustReadProjectFixture(t, path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func snapshotCurrentMarkdownPublic(t *testing.T, fixture currentMarkdownInitializationFixture) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	for _, relative := range currentMarkdownInitializationRelatives {
+		for _, path := range []string{
+			filepath.Join(fixture.project, filepath.FromSlash(relative)),
+			filepath.Join(fixture.vault, filepath.FromSlash(filepath.Join(fixture.vaultReviewPath, strings.TrimPrefix(relative, "docs/session-review/")))),
+		} {
+			result[path] = mustReadProjectFixture(t, path)
+		}
+	}
+	return result
+}
+
+func mustReadProjectFixture(t *testing.T, path string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func testSHA256(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func digestByteMap(values map[string][]byte) map[string]string {
+	result := make(map[string]string, len(values))
+	for path, body := range values {
+		result[path] = testSHA256(body)
+	}
+	return result
+}
 
 func TestInitCreatesReviewV2(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()

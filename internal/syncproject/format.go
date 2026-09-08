@@ -8,7 +8,6 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
-	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
 type ProjectionFormat string
@@ -76,13 +75,9 @@ func detectFormat(ctx context.Context, options Options, diagnosticStatus bool) (
 				return "", err
 			}
 			if ledger.DocumentProjection != nil {
-				draft, err := reviewv4.ParseMarkdownDraft(reviewv4.MarkdownPair{Review: reviewBody, History: historyBody}, ledger)
+				_, err := reviewv4.ParseMarkdownDraftProjection(reviewBody, historyBody, ledgerBody, indexBody)
 				if err != nil {
 					return "", fmt.Errorf("validate Markdown projection format: %w", err)
-				}
-				index, err := sessionindex.Parse(indexBody)
-				if err != nil || index.ProjectID != draft.Presentation.ProjectID || index.GenerationID != draft.Presentation.GenerationID || index.ProjectViewDigest != draft.Presentation.ProjectViewDigest || index.Digest != ledger.SyncHashes.SessionIndexDigest {
-					return "", errors.Join(errors.New("Markdown index binding mismatch"), err)
 				}
 				return ProjectionMarkdown, nil
 			}
