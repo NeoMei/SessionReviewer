@@ -535,15 +535,13 @@ func validateMarkdownFrontmatter(mapping *yaml.Node) (string, error) {
 		}
 		values[key] = mapping.Content[index+1]
 	}
-	stringsRequired := map[string]string{
-		"document_format":        "review-markdown-v1",
-		"minimum_reader_version": "0.4.1",
-		"minimum_writer_version": "0.4.1",
+	if got, ok := markdownString(values["document_format"]); !ok || got != "review-markdown-v1" {
+		return "", io.ErrUnexpectedEOF
 	}
-	for key, want := range stringsRequired {
-		if got, ok := markdownString(values[key]); !ok || got != want {
-			return "", io.ErrUnexpectedEOF
-		}
+	reader, readerOK := markdownString(values["minimum_reader_version"])
+	writer, writerOK := markdownString(values["minimum_writer_version"])
+	if !readerOK || !writerOK || reader != writer || (reader != "0.4.1" && reader != "0.4.3") {
+		return "", io.ErrUnexpectedEOF
 	}
 	for _, key := range []string{"id", "project_id", "generation_id"} {
 		got, ok := markdownString(values[key])

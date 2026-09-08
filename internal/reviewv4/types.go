@@ -65,9 +65,10 @@ type Timeline struct {
 	ClosedLoop   ClosedLoop `json:"closed_loop" required:"true"`
 }
 type SourceTurnRef struct {
-	Provider   string `json:"provider" required:"true"`
-	SessionID  string `json:"session_id" required:"true"`
-	TurnUnitID string `json:"turn_unit_id" required:"true"`
+	Provider          string `json:"provider" required:"true"`
+	SessionID         string `json:"session_id" required:"true"`
+	TurnUnitID        string `json:"turn_unit_id" required:"true"`
+	SessionViewDigest string `json:"session_view_digest,omitempty"`
 }
 type ClosedLoopSegment struct {
 	State          string          `json:"state" required:"true"`

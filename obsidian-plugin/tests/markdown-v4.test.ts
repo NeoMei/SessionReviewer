@@ -79,6 +79,36 @@ describe("v4 human Markdown codec", () => {
     expect(result.presentation.revision).toBe(ledger.accepted_revision + 1);
   });
 
+  it("accepts 0.4.3 Markdown and preserves exact historical evidence bindings", () => {
+    const ledger = structuredClone(parseMachineLedgerV4(read("ledger.json")));
+    const base = ledger.document_projection!.presentation_base;
+    const view = `sha256:${"1".repeat(64)}`;
+    const ref = { provider: "codex", session_id: "session-s", turn_unit_id: "turn-a", session_view_digest: view };
+    ledger.minimum_reader_version = "0.4.3";
+    ledger.minimum_writer_version = "0.4.3";
+    base.minimum_reader_version = "0.4.3";
+    base.minimum_writer_version = "0.4.3";
+    base.chain_dependencies = [{
+      provider: "codex", session_id: "session-s", session_view_digest: view,
+      dependency_digest: `sha256:${"2".repeat(64)}`, turn_unit_ids: ["turn-a"]
+    }];
+    const loop = base.timeline[0].closed_loop;
+    loop.conclusion.source_turn_refs = [ref];
+    loop.source_turn_refs = [ref];
+    loop.coverage = { source_turns: 1, captured_turns: 1, truncated_turns: 0, source_unavailable_turns: 0 };
+    const capability = (source: string): string => source.replaceAll("minimum_reader_version: 0.4.1", "minimum_reader_version: 0.4.3")
+      .replaceAll("minimum_writer_version: 0.4.1", "minimum_writer_version: 0.4.3");
+    const qualified = `codex/session-s@${view}#turn-a`;
+    const history = capability(read("history.md"))
+      .replace("- 结论引用：无", `- 结论引用：${qualified}`)
+      .replace("- Coverage：source=0, captured=0, truncated=0, unavailable=0", "- Coverage：source=1, captured=1, truncated=0, unavailable=0")
+      .replace("- 全部引用：无", `- 全部引用：${qualified}`);
+
+    const result = parseMarkdownV4({ review: capability(read("review.md")), history }, ledger);
+
+    expect(result.presentation.timeline[0].closed_loop.source_turn_refs[0]?.session_view_digest).toBe(view);
+  });
+
   it("accepts composite and non-integer user YAML while rejecting nested merge keys", () => {
     const ledger = parseMachineLedgerV4(read("ledger.json"));
     const pair = { review: read("review.md"), history: read("history.md") };

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -143,6 +144,43 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	candidates["candidates"].([]any)[0].(map[string]any)["revision"] = json.Number("9007199254740992")
 	if err := validateContractSchema(candidateSchema, candidates, "$", candidateSchema); err == nil {
 		t.Fatal("candidate schema accepted a revision above the JavaScript safe maximum")
+	}
+}
+
+func TestHistoricalSourceTurnSchemaCapabilities(t *testing.T) {
+	qualified := map[string]any{
+		"provider": "codex", "session_id": "session-1", "turn_unit_id": "turn-1",
+		"session_view_digest": "sha256:" + strings.Repeat("1", 64),
+	}
+
+	reviewSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "review-presentation-v4.schema.json"))
+	review := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "review-presentation-v4.valid.json")).(map[string]any)
+	review["minimum_reader_version"], review["minimum_writer_version"] = "0.4.3", "0.4.3"
+	review["problem_map_revision"], review["problem_root_ids"] = json.Number("1"), []any{"problem-1"}
+	review["problem_nodes"] = []any{map[string]any{
+		"id": "problem-1", "question": "Why?", "primary_parent_id": nil, "related_node_ids": []any{},
+		"workflow_state": "not_started", "answer_state": "no_answer", "completion_criterion": "", "current_conclusion": "",
+		"source_turn_refs": []any{qualified}, "provenance": "human_created", "first_proposed_at": "2026-09-09T00:00:00Z",
+		"sibling_order": json.Number("0"), "confirmed_at": nil, "revision": json.Number("1"),
+	}}
+	if err := validateContractSchema(reviewSchema, review, "$", reviewSchema); err != nil {
+		t.Fatalf("review schema rejected qualified 0.4.3 reference: %v", err)
+	}
+	review["minimum_reader_version"], review["minimum_writer_version"] = "0.4.0", "0.4.0"
+	if err := validateContractSchema(reviewSchema, review, "$", reviewSchema); err == nil {
+		t.Fatal("review schema accepted qualified reference at 0.4.0")
+	}
+
+	candidateSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "problem-map-candidate-v1.schema.json"))
+	candidate := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "problem-map-candidate-v1.valid.json")).(map[string]any)
+	candidate["minimum_reader_version"] = "0.4.3"
+	candidate["candidates"].([]any)[0].(map[string]any)["source_turn_refs"] = []any{qualified}
+	if err := validateContractSchema(candidateSchema, candidate, "$", candidateSchema); err != nil {
+		t.Fatalf("candidate schema rejected qualified 0.4.3 reference: %v", err)
+	}
+	candidate["minimum_reader_version"] = "0.4.0"
+	if err := validateContractSchema(candidateSchema, candidate, "$", candidateSchema); err == nil {
+		t.Fatal("candidate schema accepted qualified reference at 0.4.0")
 	}
 }
 

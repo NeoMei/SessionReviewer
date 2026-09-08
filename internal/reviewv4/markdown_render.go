@@ -221,7 +221,8 @@ func renderReviewEntities(review *markdownBoundedWriter, p Presentation) {
 
 func writeMarkdownFrontmatter(out *markdownBoundedWriter, id, entityType string, p Presentation) {
 	out.WriteString("---\n")
-	fmt.Fprintf(out, "id: %s\nentity_type: %s\nproject_id: %s\nschema_version: 4\ndocument_format: review-markdown-v1\nrevision: %d\ngeneration_id: %s\nminimum_reader_version: 0.4.1\nminimum_writer_version: 0.4.1\n---\n", id, entityType, p.ProjectID, p.Revision, p.GenerationID)
+	capability := markdownCapability(p)
+	fmt.Fprintf(out, "id: %s\nentity_type: %s\nproject_id: %s\nschema_version: 4\ndocument_format: review-markdown-v1\nrevision: %d\ngeneration_id: %s\nminimum_reader_version: %s\nminimum_writer_version: %s\n---\n", id, entityType, p.ProjectID, p.Revision, p.GenerationID, capability, capability)
 }
 
 func writeMarkdownLabeledField(out *markdownBoundedWriter, label string, key FieldKey, value string) {
@@ -365,8 +366,16 @@ func writeSourceRefs(out *markdownBoundedWriter, first *bool, label string, refs
 	}
 	for _, ref := range refs {
 		writeEvidencePrefix(out, first)
-		fmt.Fprintf(out, "- %s：%s/%s#%s", label, ref.Provider, ref.SessionID, ref.TurnUnitID)
+		fmt.Fprintf(out, "- %s：%s/%s", label, ref.Provider, ref.SessionID)
+		if ref.SessionViewDigest != "" {
+			fmt.Fprintf(out, "@%s", ref.SessionViewDigest)
+		}
+		fmt.Fprintf(out, "#%s", ref.TurnUnitID)
 	}
+}
+
+func markdownCapability(p Presentation) string {
+	return documentProjectionCapability(p)
 }
 
 func writeEvidenceLine(out *markdownBoundedWriter, first *bool, prefix, value string) {

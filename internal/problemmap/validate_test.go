@@ -1,6 +1,7 @@
 package problemmap
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strings"
@@ -99,6 +100,66 @@ func TestProblemCandidatesRejectRevisionAboveJavaScriptSafeMaximum(t *testing.T)
 	store.Candidates[0].Revision = 1 << 53
 	if err := ValidateCandidates(store); err == nil {
 		t.Fatal("accepted candidate revision above JavaScript safe integer maximum")
+	}
+}
+
+func TestProblemCandidatesRequireQualifiedReferenceCapabilityWithoutInventingDependencyAuthority(t *testing.T) {
+	oldView := "sha256:" + strings.Repeat("2", 64)
+	newView := "sha256:" + strings.Repeat("3", 64)
+	store := frozenCandidates()
+	store.MinimumReaderVersion = "0.4.3"
+	store.Candidates[0].SourceTurnRefs = []reviewv4.SourceTurnRef{
+		{Provider: "opencode", SessionID: "session-1", TurnUnitID: "turn-1", SessionViewDigest: oldView},
+		{Provider: "opencode", SessionID: "session-1", TurnUnitID: "turn-1", SessionViewDigest: newView},
+	}
+	if err := ValidateCandidates(store); err != nil {
+		t.Fatalf("qualified multi-view candidate rejected: %v", err)
+	}
+
+	legacyFloor := store
+	legacyFloor.MinimumReaderVersion = "0.4.0"
+	if err := ValidateCandidates(legacyFloor); err == nil {
+		t.Fatal("qualified candidate used legacy reader floor")
+	}
+
+	badDigest := store
+	badDigest.Candidates = append([]Candidate(nil), store.Candidates...)
+	badDigest.Candidates[0].SourceTurnRefs = append([]reviewv4.SourceTurnRef(nil), store.Candidates[0].SourceTurnRefs...)
+	badDigest.Candidates[0].SourceTurnRefs[0].SessionViewDigest = "not-a-digest"
+	if err := ValidateCandidates(badDigest); err == nil {
+		t.Fatal("candidate accepted malformed snapshot qualifier")
+	}
+
+	future := store
+	future.MinimumReaderVersion = "0.4.4"
+	if err := ValidateCandidates(future); err == nil {
+		t.Fatal("candidate accepted unsupported future reader capability")
+	}
+}
+
+func TestProblemCandidateLegacyCanonicalBytesRemainUnqualified(t *testing.T) {
+	store := frozenCandidates()
+	rendered, err := RenderCandidates(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "session_view_digest") {
+		t.Fatalf("legacy candidate gained a snapshot qualifier: %s", rendered)
+	}
+	parsed, err := ParseCandidates(rendered)
+	if err != nil || parsed.MinimumReaderVersion != "0.4.0" {
+		t.Fatalf("legacy candidate round trip changed capability: err=%v version=%q", err, parsed.MinimumReaderVersion)
+	}
+}
+
+func TestProblemCandidateRejectsExplicitEmptySourceViewQualifier(t *testing.T) {
+	body, err := os.ReadFile("../../testdata/contracts/v4/problem-map-candidate-v1.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = bytes.Replace(body, []byte(`"turn_unit_id": "turn-1"`), []byte(`"turn_unit_id": "turn-1", "session_view_digest": ""`), 1)
+	if _, err := ParseCandidates(body); err == nil || strictjson.CodeOf(err) != "wire_shape_invalid" {
+		t.Fatalf("explicit empty candidate qualifier rejection = %v", err)
 	}
 }
 

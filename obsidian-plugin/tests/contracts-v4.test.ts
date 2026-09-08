@@ -21,7 +21,7 @@ import {
   WireRejectionError,
   type WireRejectionCode
 } from "../src/data/contracts-v4";
-import type { ConversationChainV1, ProblemNodeV4, ViewKind } from "../src/contracts/review-v4";
+import type { ConversationChainV1, ProblemNodeV4, SourceTurnRefV4, ViewKind } from "../src/contracts/review-v4";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginFixture = (name: string): Promise<string> =>
@@ -57,7 +57,7 @@ describe("public contract types preserve closed wire enums", () => {
     expectTypeOf<ProblemNodeV4["answer_state"]>().toEqualTypeOf<"no_answer" | "answered_unverified" | "execution_verified">();
     expectTypeOf<ProblemNodeV4["provenance"]>().toEqualTypeOf<"human_created" | "migrated" | "candidate_confirmed">();
     expectTypeOf<ConversationChainV1["turn_units"][number]["results"][number]["verification_state"]>().toEqualTypeOf<"unknown" | "passed" | "failed" | "partial">();
-		expectTypeOf<ConversationChainV1["dependency_proof_v1"]>().toEqualTypeOf<{
+    expectTypeOf<ConversationChainV1["dependency_proof_v1"]>().toEqualTypeOf<{
 			session_view_digest: string;
 			source_record_digest: string;
 			visible_records: Array<{ record_ordinal: number; source_hash: string }>;
@@ -65,6 +65,81 @@ describe("public contract types preserve closed wire enums", () => {
 			rule_version: string;
 			redaction_version: string;
 		} | undefined>();
+		expectTypeOf<SourceTurnRefV4["session_view_digest"]>().toEqualTypeOf<string | undefined>();
+  });
+});
+
+describe("historical source-turn bindings", () => {
+  const oldView = `sha256:${"1".repeat(64)}`;
+  const newView = `sha256:${"2".repeat(64)}`;
+
+  async function historicalReview(): Promise<JsonObject> {
+    const review = await fixtureObject("review-presentation-v4.valid.json");
+    review.minimum_reader_version = "0.4.3";
+    review.minimum_writer_version = "0.4.3";
+    review.problem_map_revision = 1;
+    review.problem_root_ids = ["problem-1"];
+    review.chain_dependencies = [
+      { provider: "codex", session_id: "session-s", session_view_digest: oldView, dependency_digest: `sha256:${"3".repeat(64)}`, turn_unit_ids: ["turn-a"] },
+      { provider: "codex", session_id: "session-s", session_view_digest: newView, dependency_digest: `sha256:${"4".repeat(64)}`, turn_unit_ids: ["turn-a"] }
+    ];
+    review.problem_nodes = [{
+      id: "problem-1", question: "Why?", primary_parent_id: null, related_node_ids: [], workflow_state: "not_started",
+      answer_state: "no_answer", completion_criterion: "", current_conclusion: "",
+      source_turn_refs: [{ provider: "codex", session_id: "session-s", turn_unit_id: "turn-a", session_view_digest: oldView }],
+      provenance: "human_created", first_proposed_at: "2026-09-09T00:00:00Z", sibling_order: 0, confirmed_at: null, revision: 1
+    }];
+    return review;
+  }
+
+  it("selects exact snapshots and rejects ambiguous shorthand or duplicate canonical aliases", async () => {
+    const review = await historicalReview();
+    const parsed = parseReviewPresentationV4(JSON.stringify(review));
+    expect(parsed.problem_nodes[0]?.source_turn_refs[0]?.session_view_digest).toBe(oldView);
+
+    const ambiguous = clone(review);
+    delete (((ambiguous.problem_nodes as JsonObject[])[0].source_turn_refs as JsonObject[])[0].session_view_digest);
+    expect(() => parseReviewPresentationV4(JSON.stringify(ambiguous))).toThrow(/ambiguous|exactly one|source turn/i);
+
+    const duplicateAlias = clone(review);
+    duplicateAlias.chain_dependencies = [(review.chain_dependencies as JsonObject[])[0]];
+    const qualified = (((duplicateAlias.problem_nodes as JsonObject[])[0].source_turn_refs as JsonObject[])[0]);
+    ((duplicateAlias.problem_nodes as JsonObject[])[0].source_turn_refs as JsonObject[]).push({ provider: "codex", session_id: "session-s", turn_unit_id: "turn-a" });
+    expect(qualified.session_view_digest).toBe(oldView);
+    expect(() => parseReviewPresentationV4(JSON.stringify(duplicateAlias))).toThrow(/duplicate|source turn/i);
+
+    const explicitEmpty = clone(review);
+    (((explicitEmpty.problem_nodes as JsonObject[])[0].source_turn_refs as JsonObject[])[0]).session_view_digest = "";
+    expect(() => parseReviewPresentationV4(JSON.stringify(explicitEmpty))).toThrow(/digest|session_view_digest/i);
+  });
+
+  it("requires conditional 0.4.3 and preserves legacy omitted-field canonical bytes", async () => {
+    const review = await historicalReview();
+    const oldFloor = clone(review);
+    oldFloor.minimum_reader_version = "0.4.0";
+    oldFloor.minimum_writer_version = "0.4.0";
+    expect(() => parseReviewPresentationV4(JSON.stringify(oldFloor))).toThrow(/version|capability|historical/i);
+
+    const future = clone(review);
+    future.minimum_reader_version = "0.4.4";
+    future.minimum_writer_version = "0.4.4";
+    expect(() => parseReviewPresentationV4(JSON.stringify(future))).toThrow(/version|enum/i);
+
+    const legacy = await fixtureObject("review-presentation-v4.valid.json");
+    expect(() => parseReviewPresentationV4(JSON.stringify(legacy))).not.toThrow();
+    expect(JSON.stringify(legacy)).not.toContain("session_view_digest");
+  });
+
+  it("gives qualified candidates a reader-only 0.4.3 floor", async () => {
+    const store = await fixtureObject("problem-map-candidate-v1.valid.json");
+    store.minimum_reader_version = "0.4.3";
+    (((store.candidates as JsonObject[])[0].source_turn_refs as JsonObject[])[0]).session_view_digest = oldView;
+		const preimage = clone(store);
+		delete preimage.digest;
+		store.digest = `sha256:${createHash("sha256").update(JSON.stringify(preimage)).digest("hex")}`;
+    expect(() => parseProblemMapCandidateV1(JSON.stringify(store))).not.toThrow();
+    store.minimum_reader_version = "0.4.0";
+    expect(() => parseProblemMapCandidateV1(JSON.stringify(store))).toThrow(/version|capability|historical/i);
   });
 });
 

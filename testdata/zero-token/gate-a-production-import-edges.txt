@@ -510,6 +510,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	bytes
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	crypto/sha256
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	encoding/hex
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	encoding/json
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	errors
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	fmt
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/reviewv4	github.com/neomei/SessionReviewer/internal/baselinehash

@@ -3,6 +3,7 @@ package reviewv4
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -13,6 +14,31 @@ import (
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
+
+// UnmarshalJSON distinguishes an omitted snapshot qualifier from an explicitly
+// empty one while keeping SourceTurnRef's public string field and legacy bytes.
+func (ref *SourceTurnRef) UnmarshalJSON(data []byte) error {
+	type sourceTurnRefWire SourceTurnRef
+	var wire sourceTurnRefWire
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, present := fields["session_view_digest"]; present {
+		var qualifier string
+		if err := json.Unmarshal(raw, &qualifier); err != nil {
+			return err
+		}
+		if qualifier == "" {
+			return errors.New("session_view_digest must be omitted or contain a digest")
+		}
+	}
+	*ref = SourceTurnRef(wire)
+	return nil
+}
 
 func DecodePresentation(data []byte) (Presentation, error) {
 	var presentation Presentation

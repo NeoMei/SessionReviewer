@@ -244,7 +244,10 @@ func validateMarkdownFrontmatterIdentity(relative string, raw []byte, base Prese
 	projectID, projectOK := markdownString(values["project_id"])
 	generationID, generationOK := markdownString(values["generation_id"])
 	revision, revisionOK := markdownInteger(values["revision"])
-	if !idOK || !entityOK || !projectOK || !generationOK || !revisionOK || id != wantID || entityType != wantEntity || projectID != base.ProjectID || generationID != base.GenerationID || revision != base.Revision {
+	reader, readerOK := markdownString(values["minimum_reader_version"])
+	writer, writerOK := markdownString(values["minimum_writer_version"])
+	wantCapability := markdownCapability(base)
+	if !idOK || !entityOK || !projectOK || !generationOK || !revisionOK || !readerOK || !writerOK || id != wantID || entityType != wantEntity || projectID != base.ProjectID || generationID != base.GenerationID || revision != base.Revision || reader != wantCapability || writer != wantCapability {
 		return &MarkdownError{Code: MarkdownStructureEditRequiresCommand, Relative: relative}
 	}
 	return nil

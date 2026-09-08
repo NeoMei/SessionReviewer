@@ -71,6 +71,10 @@ const COVERAGE_INTEGER_KEYS = new Set([
 const FACT_COUNT_INTEGER_KEYS = new Set(["file_change", "command", "verification", "error", "artifact"]);
 
 type JsonObject = Record<string, unknown>;
+type SourceTurnBindingIndex = Readonly<{
+  byTurn: ReadonlyMap<string, Readonly<{ dependency: ChainDependencyV4; count: number }>>;
+  byExact: ReadonlyMap<string, ChainDependencyV4>;
+}>;
 
 export type WireRejectionCode =
   | "wire_input_overflow"
@@ -116,8 +120,8 @@ function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
     "human_patches", "orphan_patches", "generated_baselines"
   ]);
   constant(row.schema_version, 4, "$.schema_version");
-  version(row.minimum_reader_version, "$.minimum_reader_version");
-  version(row.minimum_writer_version, "$.minimum_writer_version");
+  const readerVersion = oneOf(row.minimum_reader_version, "$.minimum_reader_version", ["0.4.0", "0.4.3"]);
+  const writerVersion = oneOf(row.minimum_writer_version, "$.minimum_writer_version", ["0.4.0", "0.4.3"]);
   const projectID = id(row.project_id, "$.project_id");
   void projectID;
   const generationID = id(row.generation_id, "$.generation_id");
@@ -181,17 +185,31 @@ function parseReviewPresentationDocument(source: string): ReviewPresentationV4 {
   assertProblemGraphCore(nodes, rootIDs);
   const dependencies = boundedArray(row.chain_dependencies, "$.chain_dependencies", 65536)
     .map((dependency, index) => parseChainDependency(dependency, `$.chain_dependencies[${index}]`));
-  const sourceTurns = new Set<string>();
-  const sessions = new Set<string>();
+  const byTurn = new Map<string, { dependency: ChainDependencyV4; count: number }>();
+  const byExact = new Map<string, ChainDependencyV4>();
+  const dependencyTuples = new Set<string>();
+  const views = new Map<string, Set<string>>();
   for (const dependency of dependencies) {
-    addUnique(sessions, identityKey(dependency.provider, dependency.session_id), "chain dependency identity");
+    addUnique(dependencyTuples, chainDependencyKey(dependency), "chain dependency identity");
+    const sessionKey = identityKey(dependency.provider, dependency.session_id);
+    const sessionViews = views.get(sessionKey) ?? new Set<string>();
+    sessionViews.add(dependency.session_view_digest);
+    views.set(sessionKey, sessionViews);
     for (const turnID of dependency.turn_unit_ids) {
-      addUnique(sourceTurns, sourceTurnKey(dependency.provider, dependency.session_id, turnID), "chain source turn");
+      const key = sourceTurnKey(dependency.provider, dependency.session_id, turnID);
+      const match = byTurn.get(key);
+      byTurn.set(key, { dependency, count: (match?.count ?? 0) + 1 });
+      byExact.set(sourceTurnExactKey(dependency.provider, dependency.session_id, turnID, dependency.session_view_digest), dependency);
     }
   }
-  for (const node of nodes) assertSourceTurns(node.source_turn_refs, sourceTurns, `problem ${node.id}`);
+  const historical = [...views.values()].some((sessionViews) => sessionViews.size > 1) ||
+    presentationSourceRefs(nodes, timeline as TimelineEntryV4[]).some((ref) => ref.session_view_digest !== undefined);
+  const wantedVersion = historical ? "0.4.3" : "0.4.0";
+  if (readerVersion !== wantedVersion || writerVersion !== wantedVersion) throw new Error(`review presentation requires capability ${wantedVersion}`);
+  const bindingIndex: SourceTurnBindingIndex = { byTurn, byExact };
+  for (const node of nodes) assertSourceTurns(node.source_turn_refs, bindingIndex, `problem ${node.id}`);
   for (const item of timeline as TimelineEntryV4[]) {
-    assertClosedLoopSourceTurns(item.closed_loop, sourceTurns, `timeline ${item.id}`);
+    assertClosedLoopSourceTurns(item.closed_loop, bindingIndex, `timeline ${item.id}`);
   }
   parsePatchArray(row.human_patches, "$.human_patches");
   parsePatchArray(row.orphan_patches, "$.orphan_patches");
@@ -213,8 +231,8 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
   ] as const;
   exact(row, "$", ledgerKeys, ledgerKeys.filter((key) => key !== "document_projection"));
   constant(row.schema_version, 4, "$.schema_version");
-  const readerVersion = oneOf(row.minimum_reader_version, "$.minimum_reader_version", ["0.4.0", "0.4.1"]);
-  const writerVersion = oneOf(row.minimum_writer_version, "$.minimum_writer_version", ["0.4.0", "0.4.1"]);
+  const readerVersion = oneOf(row.minimum_reader_version, "$.minimum_reader_version", ["0.4.0", "0.4.1", "0.4.3"]);
+  const writerVersion = oneOf(row.minimum_writer_version, "$.minimum_writer_version", ["0.4.0", "0.4.1", "0.4.3"]);
   const projectID = id(row.project_id, "$.project_id");
   const generationID = id(row.generation_id, "$.generation_id");
   const projectDigest = digest(row.project_view_digest, "$.project_view_digest");
@@ -238,15 +256,14 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
       throw new Error("legacy machine ledger requires capability 0.4.0");
     }
   } else {
-    if (readerVersion !== "0.4.1" || writerVersion !== "0.4.1") {
-      throw new Error("markdown projection requires capability 0.4.1");
-    }
-    parseDocumentProjection(row.document_projection, {
+    const projection = parseDocumentProjection(row.document_projection, {
       projectID, generationID, projectDigest, acceptedRevision,
       humanPatches: row.human_patches as HumanPatchV4[],
       orphanPatches: row.orphan_patches as HumanPatchV4[],
       generatedBaselines: row.generated_baselines as GeneratedBaselineV4[]
     });
+    const wantedVersion = presentationUsesHistoricalBindings(projection.presentation_base) ? "0.4.3" : "0.4.1";
+    if (readerVersion !== wantedVersion || writerVersion !== wantedVersion) throw new Error(`markdown projection requires capability ${wantedVersion}`);
   }
 
   const pricingRows = boundedArray(row.pricing_snapshots, "$.pricing_snapshots", 65536);
@@ -467,7 +484,7 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     ];
     exact(row, "$", chainKeys, chainKeys.filter((key) => key !== "dependency_proof_v1" && key !== "materialization_coverage_v1"));
     constant(row.schema_version, 1, "$.schema_version");
-    version(row.minimum_reader_version, "$.minimum_reader_version");
+    constant(row.minimum_reader_version, "0.4.0", "$.minimum_reader_version");
     const claimedDigest = digest(row.digest, "$.digest");
     id(row.project_id, "$.project_id");
     const provider = id(row.provider, "$.provider");
@@ -593,7 +610,7 @@ export function parseProblemMapCandidateV1(source: string): ProblemMapCandidateV
     const row = documentObject(source, "problem map candidate store");
     exact(row, "$", ["schema_version", "minimum_reader_version", "digest", "project_id", "candidates"]);
     constant(row.schema_version, 1, "$.schema_version");
-    version(row.minimum_reader_version, "$.minimum_reader_version");
+    const readerVersion = oneOf(row.minimum_reader_version, "$.minimum_reader_version", ["0.4.0", "0.4.3"]);
     const claimedDigest = digest(row.digest, "$.digest");
     const projectID = id(row.project_id, "$.project_id");
     const candidates = boundedArray(row.candidates, "$.candidates", 65536);
@@ -646,6 +663,8 @@ export function parseProblemMapCandidateV1(source: string): ProblemMapCandidateV
       text(candidate.created_at, `${path}.created_at`, 128, true);
       text(candidate.updated_at, `${path}.updated_at`, 128, true);
     }
+    const qualified = (candidates as unknown as ProblemMapCandidateV1["candidates"]).some((candidate) => candidate.source_turn_refs.some((ref) => ref.session_view_digest !== undefined));
+    if (readerVersion !== (qualified ? "0.4.3" : "0.4.0")) throw new Error(`problem map candidate store requires capability ${qualified ? "0.4.3" : "0.4.0"}`);
     const result = row as unknown as ProblemMapCandidateV1;
 	if (canonicalProblemMapCandidateDigest(result) !== claimedDigest) {
       throw new Error("problem map candidate digest mismatch");
@@ -837,10 +856,11 @@ function parseSessionReference(value: unknown, path: string): SessionReferenceV4
 
 function parseSourceTurnRef(value: unknown, path: string): SourceTurnRefV4 {
   const row = object(value, path);
-  exact(row, path, ["provider", "session_id", "turn_unit_id"]);
+  exact(row, path, ["provider", "session_id", "turn_unit_id", "session_view_digest"], ["provider", "session_id", "turn_unit_id"]);
   id(row.provider, `${path}.provider`);
   id(row.session_id, `${path}.session_id`);
   id(row.turn_unit_id, `${path}.turn_unit_id`);
+  if (row.session_view_digest !== undefined) digest(row.session_view_digest, `${path}.session_view_digest`);
   return row as unknown as SourceTurnRefV4;
 }
 
@@ -848,7 +868,7 @@ function parseSourceTurnRefs(values: readonly unknown[], path: string): SourceTu
   const seen = new Set<string>();
   return values.map((value, index) => {
     const ref = parseSourceTurnRef(value, `${path}[${index}]`);
-    addUnique(seen, sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id), "source turn reference");
+    addUnique(seen, rawSourceTurnKey(ref), "source turn reference");
     return ref;
   });
 }
@@ -861,15 +881,6 @@ function parseClosedLoop(value: unknown, path: string): ClosedLoopV4 {
   }
   parseClosedLoopConclusion(row.conclusion, `${path}.conclusion`);
   const aggregate = parseSourceTurnRefs(boundedArray(row.source_turn_refs, `${path}.source_turn_refs`, 256), `${path}.source_turn_refs`);
-  const aggregateSet = new Set(aggregate.map((ref) => sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id)));
-  for (const key of ["trigger_question", "conclusion", "execution", "verification", "impact_and_follow_up"] as const) {
-    const part = row[key] as JsonObject;
-    for (const ref of part.source_turn_refs as SourceTurnRefV4[]) {
-      if (!aggregateSet.has(sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id))) {
-        throw new Error(`${path}.${key} references a turn absent from aggregate references`);
-      }
-    }
-  }
   const coverage = object(row.coverage, `${path}.coverage`);
   const keys = ["source_turns", "captured_turns", "truncated_turns", "source_unavailable_turns"] as const;
   exact(coverage, `${path}.coverage`, keys);
@@ -990,16 +1001,19 @@ function assertProblemGraphCore(nodes: readonly ProblemNodeV4[], declaredRoots?:
   }
 }
 
-function assertSourceTurns(refs: readonly SourceTurnRefV4[], available: ReadonlySet<string>, kind: string): void {
+function assertSourceTurns(refs: readonly SourceTurnRefV4[], available: SourceTurnBindingIndex, kind: string): void {
+  const seen = new Set<string>();
   for (const ref of refs) {
-    if (!available.has(sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id))) throw new Error(`${kind} references a missing source turn`);
+    addUnique(seen, canonicalSourceTurnKey(ref, resolveSourceTurn(ref, available, kind)), "canonical source turn reference");
   }
 }
 
-function assertClosedLoopSourceTurns(loop: ClosedLoopV4, available: ReadonlySet<string>, kind: string): void {
+function assertClosedLoopSourceTurns(loop: ClosedLoopV4, available: SourceTurnBindingIndex, kind: string): void {
   assertSourceTurns(loop.source_turn_refs, available, kind);
+  const aggregate = new Set(loop.source_turn_refs.map((ref) => canonicalSourceTurnKey(ref, resolveSourceTurn(ref, available, kind))));
   for (const part of [loop.trigger_question, loop.conclusion, loop.execution, loop.verification, loop.impact_and_follow_up]) {
     assertSourceTurns(part.source_turn_refs, available, kind);
+    for (const ref of part.source_turn_refs) if (!aggregate.has(canonicalSourceTurnKey(ref, resolveSourceTurn(ref, available, kind)))) throw new Error(`${kind} segment references a binding absent from aggregate references`);
   }
 }
 
@@ -1719,6 +1733,65 @@ function sourceTurnKey(provider: string, sessionID: string, turnID: string): str
   return `${provider}\u0000${sessionID}\u0000${turnID}`;
 }
 
+function sourceTurnExactKey(provider: string, sessionID: string, turnID: string, sessionViewDigest: string): string {
+  return `${sourceTurnKey(provider, sessionID, turnID)}\u0000${sessionViewDigest}`;
+}
+
+function rawSourceTurnKey(ref: SourceTurnRefV4): string {
+  return `${sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id)}\u0000${ref.session_view_digest ?? ""}`;
+}
+
+function chainDependencyKey(dependency: ChainDependencyV4): string {
+  return `${identityKey(dependency.provider, dependency.session_id)}\u0000${dependency.session_view_digest}`;
+}
+
+function resolveSourceTurn(
+  ref: SourceTurnRefV4,
+  available: SourceTurnBindingIndex,
+  kind: string
+): ChainDependencyV4 {
+  if (ref.session_view_digest !== undefined) {
+    const match = available.byExact.get(sourceTurnExactKey(ref.provider, ref.session_id, ref.turn_unit_id, ref.session_view_digest));
+    if (match === undefined) throw new Error(`${kind} source turn must resolve exactly once`);
+    return match;
+  }
+  const match = available.byTurn.get(sourceTurnKey(ref.provider, ref.session_id, ref.turn_unit_id));
+  if (match === undefined || match.count !== 1) throw new Error(`${kind} source turn must resolve exactly once`);
+  return match.dependency;
+}
+
+function canonicalSourceTurnKey(ref: SourceTurnRefV4, dependency: ChainDependencyV4): string {
+  return `${chainDependencyKey(dependency)}\u0000${ref.turn_unit_id}`;
+}
+
+function presentationSourceRefs(
+  nodes: readonly ProblemNodeV4[],
+  timeline: readonly TimelineEntryV4[]
+): SourceTurnRefV4[] {
+  const refs = nodes.flatMap((node) => node.source_turn_refs);
+  for (const item of timeline) {
+    refs.push(...item.closed_loop.source_turn_refs);
+    refs.push(...item.closed_loop.trigger_question.source_turn_refs);
+    refs.push(...item.closed_loop.conclusion.source_turn_refs);
+    refs.push(...item.closed_loop.execution.source_turn_refs);
+    refs.push(...item.closed_loop.verification.source_turn_refs);
+    refs.push(...item.closed_loop.impact_and_follow_up.source_turn_refs);
+  }
+  return refs;
+}
+
+function presentationUsesHistoricalBindings(value: ReviewPresentationV4): boolean {
+  if (presentationSourceRefs(value.problem_nodes, value.timeline).some((ref) => ref.session_view_digest !== undefined)) return true;
+  const views = new Map<string, Set<string>>();
+  for (const dependency of value.chain_dependencies) {
+    const key = identityKey(dependency.provider, dependency.session_id);
+    const values = views.get(key) ?? new Set<string>();
+    values.add(dependency.session_view_digest);
+    views.set(key, values);
+  }
+  return [...views.values()].some((values) => values.size > 1);
+}
+
 function checkedAdd(left: number, right: number, path: string): number {
   if (left > MAX_SAFE - right) throw new Error(`${path} addition overflow`);
   return left + right;
@@ -1947,7 +2020,12 @@ function orderedClosedLoop(value: ClosedLoopV4): JsonObject {
 }
 
 function orderedSourceTurnRef(value: SourceTurnRefV4): JsonObject {
-  return { provider: value.provider, session_id: value.session_id, turn_unit_id: value.turn_unit_id };
+  return {
+    provider: value.provider,
+    session_id: value.session_id,
+    turn_unit_id: value.turn_unit_id,
+    ...(value.session_view_digest === undefined ? {} : { session_view_digest: value.session_view_digest })
+  };
 }
 
 function canonicalConversationChainDigest(chain: ConversationChainV1): string {
@@ -2022,7 +2100,12 @@ function conversationDependencyProofDigest(proof: ConversationDependencyProofV1)
 }
 
 function canonicalProblemMapCandidateDigest(store: ProblemMapCandidateV1): string {
-  const sourceTurn = (ref: SourceTurnRefV4): JsonObject => ({ provider: ref.provider, session_id: ref.session_id, turn_unit_id: ref.turn_unit_id });
+  const sourceTurn = (ref: SourceTurnRefV4): JsonObject => ({
+    provider: ref.provider,
+    session_id: ref.session_id,
+    turn_unit_id: ref.turn_unit_id,
+    ...(ref.session_view_digest === undefined ? {} : { session_view_digest: ref.session_view_digest })
+  });
   const body = {
     schema_version: store.schema_version,
     minimum_reader_version: store.minimum_reader_version,

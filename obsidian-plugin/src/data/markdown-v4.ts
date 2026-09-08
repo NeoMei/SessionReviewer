@@ -102,7 +102,9 @@ function parseDocument(source: string, document: "review" | "history", base: Rev
     : { id: `history-${base.project_id}`, entity_type: "project-history" };
   const identity: Record<string, unknown> = {
     ...want, project_id: base.project_id, schema_version: 4, document_format: "review-markdown-v1",
-    revision: base.revision, generation_id: base.generation_id, minimum_reader_version: "0.4.1", minimum_writer_version: "0.4.1"
+    revision: base.revision, generation_id: base.generation_id,
+    minimum_reader_version: base.minimum_reader_version === "0.4.3" ? "0.4.3" : "0.4.1",
+    minimum_writer_version: base.minimum_writer_version === "0.4.3" ? "0.4.3" : "0.4.1"
   };
   for (const [key, value] of Object.entries(identity)) if (frontmatter.get(key) !== value) fail("markdown_structure_edit_requires_command");
   const blocks = scanBlocks(source);
@@ -397,9 +399,9 @@ function renderPinned(p: ReviewPresentationV4): string { const values = p.decisi
 function renderRecent(p: ReviewPresentationV4): string { const shown = Math.min(5, p.timeline.length); return [`共 ${p.timeline.length} 条，显示 ${shown} 条；[查看完整历史](项目历史.md)。`, ...p.timeline.slice(-shown).map((x) => `- [里程碑](项目历史.md#milestone-${anchor(x.id)})`)].join("\n"); }
 function renderEvidence(item: ReviewPresentationV4["timeline"][number]): string {
   const lines = [`- 发生时间：${item.occurred_at}`, `- 类型：${item.kind}`];
-  const addRefs = (label: string, values: readonly { provider: string; session_id: string; turn_unit_id: string }[]): void => {
+  const addRefs = (label: string, values: readonly { provider: string; session_id: string; turn_unit_id: string; session_view_digest?: string }[]): void => {
     if (!values.length) { lines.push(`- ${label}：无`); return; }
-    for (const value of values) lines.push(`- ${label}：${value.provider}/${value.session_id}#${value.turn_unit_id}`);
+    for (const value of values) lines.push(`- ${label}：${value.provider}/${value.session_id}${value.session_view_digest === undefined ? "" : `@${value.session_view_digest}`}#${value.turn_unit_id}`);
   };
   const segment = (label: string, x: typeof item.closed_loop.trigger_question): void => { lines.push(`- ${label}状态：${x.state}`); if (x.text) lines.push(`  - 文本：${x.text.replaceAll("\n", "\n    ")}`); if (x.missing_reason) lines.push(`  - 缺失原因：${x.missing_reason}`); addRefs(`${label}引用`, x.source_turn_refs); };
   segment("触发", item.closed_loop.trigger_question); lines.push(`- 结论来源：${item.closed_loop.conclusion.kind}`); addRefs("结论引用", item.closed_loop.conclusion.source_turn_refs);

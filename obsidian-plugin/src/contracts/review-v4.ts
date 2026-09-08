@@ -48,6 +48,7 @@ export interface SourceTurnRefV4 {
   provider: string;
   session_id: string;
   turn_unit_id: string;
+  session_view_digest?: string;
 }
 
 export interface ClosedLoopSegmentV4 {
@@ -159,8 +160,8 @@ export interface GeneratedBaselineV4 {
 
 export interface ReviewPresentationV4 {
   schema_version: 4;
-  minimum_reader_version: "0.4.0";
-  minimum_writer_version: "0.4.0";
+  minimum_reader_version: "0.4.0" | "0.4.3";
+  minimum_writer_version: "0.4.0" | "0.4.3";
   project_id: string;
   generation_id: string;
   project_view_digest: string;
@@ -275,8 +276,8 @@ export interface DocumentProjectionV1 {
 
 export interface MachineLedgerV4 {
   schema_version: 4;
-  minimum_reader_version: "0.4.0" | "0.4.1";
-  minimum_writer_version: "0.4.0" | "0.4.1";
+  minimum_reader_version: "0.4.0" | "0.4.1" | "0.4.3";
+  minimum_writer_version: "0.4.0" | "0.4.1" | "0.4.3";
   project_id: string;
   generation_id: string;
   project_view_digest: string;
@@ -602,7 +603,7 @@ export interface ConversationChainV1 {
 
 export interface ProblemMapCandidateV1 {
   schema_version: 1;
-  minimum_reader_version: "0.4.0";
+  minimum_reader_version: "0.4.0" | "0.4.3";
   digest: string;
   project_id: string;
   candidates: Array<{

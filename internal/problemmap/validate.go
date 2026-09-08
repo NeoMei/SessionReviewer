@@ -21,7 +21,7 @@ func validText(value string, limit int) bool {
 }
 
 func ValidateCandidates(store CandidateStore) error {
-	if store.SchemaVersion != 1 || store.MinimumReaderVersion != "0.4.0" || !digestPattern.MatchString(store.Digest) || !validID(store.ProjectID) {
+	if store.SchemaVersion != 1 || !validCandidateCapability(store) || !digestPattern.MatchString(store.Digest) || !validID(store.ProjectID) {
 		return errors.New("invalid problem candidate store metadata")
 	}
 	if len(store.Candidates) > 65536 {
@@ -94,13 +94,26 @@ func ValidateCandidates(store CandidateStore) error {
 func validateSourceTurns(refs []reviewv4.SourceTurnRef) error {
 	seen := map[string]bool{}
 	for _, ref := range refs {
-		key := ref.Provider + "\x00" + ref.SessionID + "\x00" + ref.TurnUnitID
-		if !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.TurnUnitID) || seen[key] {
+		key := ref.Provider + "\x00" + ref.SessionID + "\x00" + ref.TurnUnitID + "\x00" + ref.SessionViewDigest
+		if !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.TurnUnitID) || (ref.SessionViewDigest != "" && !digestPattern.MatchString(ref.SessionViewDigest)) || seen[key] {
 			return errors.New("invalid or duplicate source turn reference")
 		}
 		seen[key] = true
 	}
 	return nil
+}
+
+func validCandidateCapability(store CandidateStore) bool {
+	qualified := false
+	for _, candidate := range store.Candidates {
+		for _, ref := range candidate.SourceTurnRefs {
+			qualified = qualified || ref.SessionViewDigest != ""
+		}
+	}
+	if qualified {
+		return store.MinimumReaderVersion == "0.4.3"
+	}
+	return store.MinimumReaderVersion == "0.4.0"
 }
 
 func validateTargetIDs(ids []string, excluded *string) error {

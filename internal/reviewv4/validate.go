@@ -38,7 +38,7 @@ func optionalTexts(values *[]string, maximumItems, maximumText int) bool {
 }
 
 func ValidatePresentation(p Presentation) error {
-	if p.SchemaVersion != 4 || p.MinimumReaderVersion != "0.4.0" || p.MinimumWriterVersion != "0.4.0" || !validID(p.ProjectID) || !validID(p.GenerationID) || !digestRE.MatchString(p.ProjectViewDigest) || p.Revision < 0 || int64(p.Revision) > maxWireInteger {
+	if p.SchemaVersion != 4 || !validPresentationCapability(p) || !validID(p.ProjectID) || !validID(p.GenerationID) || !digestRE.MatchString(p.ProjectViewDigest) || p.Revision < 0 || int64(p.Revision) > maxWireInteger {
 		return errors.New("invalid review presentation metadata")
 	}
 	for _, value := range []string{p.CurrentState.Goal, p.CurrentState.Stage, p.CurrentState.Status, p.CurrentState.NextAction, p.CurrentState.LastVerification} {
@@ -49,7 +49,7 @@ func ValidatePresentation(p Presentation) error {
 	if len(p.Timeline) > 65536 || len(p.Decisions) > 65536 || len(p.Risks) > 65536 || len(p.OpenLoops) > 65536 || len(p.ProblemRootIDs) > 65536 || len(p.ProblemNodes) > 65536 || len(p.ChainDependencies) > 65536 || len(p.HumanPatches) > 65536 || len(p.OrphanPatches) > 65536 || len(p.GeneratedBaselines) > 65536 {
 		return errors.New("review presentation exceeds array limit")
 	}
-	chainTurns, err := validateChainDependencies(p.ChainDependencies)
+	bindings, err := newSourceTurnBindingIndex(p.ChainDependencies)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func ValidatePresentation(p Presentation) error {
 		if err := uniqueIDs(timeline.DecisionIDs); err != nil {
 			return err
 		}
-		if err := validateClosedLoop(timeline.ClosedLoop, chainTurns); err != nil {
+		if err := validateClosedLoop(timeline.ClosedLoop, bindings); err != nil {
 			return fmt.Errorf("timeline %q closed loop: %w", timeline.ID, err)
 		}
 	}
@@ -176,7 +176,7 @@ func ValidatePresentation(p Presentation) error {
 		return err
 	}
 	for _, node := range p.ProblemNodes {
-		if err := validateSourceTurnRefs(node.SourceTurnRefs, chainTurns); err != nil {
+		if _, err := validateSourceTurnRefs(node.SourceTurnRefs, bindings); err != nil {
 			return fmt.Errorf("problem %q: %w", node.ID, err)
 		}
 	}
@@ -216,7 +216,7 @@ func ValidateConclusion(conclusion ClosedLoopConclusion) error {
 	return nil
 }
 
-func validateClosedLoop(loop ClosedLoop, chainTurns map[string]bool) error {
+func validateClosedLoop(loop ClosedLoop, bindings sourceTurnBindingIndex) error {
 	if err := validateSegment(loop.TriggerQuestion); err != nil {
 		return fmt.Errorf("trigger question: %w", err)
 	}
@@ -231,20 +231,18 @@ func validateClosedLoop(loop ClosedLoop, chainTurns map[string]bool) error {
 	if len(loop.SourceTurnRefs) > 256 || loop.Coverage.SourceTurns > uint64(maxWireInteger) || loop.Coverage.CapturedTurns > uint64(maxWireInteger) || loop.Coverage.TruncatedTurns > uint64(maxWireInteger) || loop.Coverage.SourceUnavailableTurns > uint64(maxWireInteger) || loop.Coverage.CapturedTurns != uint64(len(loop.SourceTurnRefs)) || loop.Coverage.SourceTurns < loop.Coverage.CapturedTurns || loop.Coverage.SourceUnavailableTurns > loop.Coverage.SourceTurns || loop.Coverage.TruncatedTurns > loop.Coverage.SourceTurns-loop.Coverage.SourceUnavailableTurns {
 		return errors.New("closed-loop coverage does not reconcile")
 	}
-	if err := validateSourceTurnRefs(loop.SourceTurnRefs, chainTurns); err != nil {
+	top, err := validateSourceTurnRefs(loop.SourceTurnRefs, bindings)
+	if err != nil {
 		return err
-	}
-	top := map[string]bool{}
-	for _, ref := range loop.SourceTurnRefs {
-		top[sourceTurnKey(ref)] = true
 	}
 	groups := [][]SourceTurnRef{loop.TriggerQuestion.SourceTurnRefs, loop.Conclusion.SourceTurnRefs, loop.Execution.SourceTurnRefs, loop.Verification.SourceTurnRefs, loop.ImpactAndFollowUp.SourceTurnRefs}
 	for _, refs := range groups {
-		if err := validateSourceTurnRefs(refs, chainTurns); err != nil {
+		segmentBindings, err := validateSourceTurnRefs(refs, bindings)
+		if err != nil {
 			return err
 		}
-		for _, ref := range refs {
-			if !top[sourceTurnKey(ref)] {
+		for binding := range segmentBindings {
+			if !top[binding] {
 				return errors.New("closed-loop segment references a turn absent from aggregate references")
 			}
 		}
@@ -298,44 +296,66 @@ func NeutralClosedLoop() ClosedLoop {
 	}
 }
 
-func validateChainDependencies(dependencies []ChainDependency) (map[string]bool, error) {
-	turns := map[string]bool{}
-	seen := map[string]bool{}
-	for _, dependency := range dependencies {
-		key := dependency.Provider + "\x00" + dependency.SessionID
-		if !validID(dependency.Provider) || !validID(dependency.SessionID) || !digestRE.MatchString(dependency.SessionViewDigest) || !digestRE.MatchString(dependency.DependencyDigest) || len(dependency.TurnUnitIDs) > 65536 || seen[key] {
-			return nil, errors.New("invalid or duplicate chain dependency")
-		}
-		seen[key] = true
-		local := map[string]bool{}
-		for _, turnID := range dependency.TurnUnitIDs {
-			if !validID(turnID) || local[turnID] {
-				return nil, errors.New("invalid or duplicate chain turn identity")
-			}
-			local[turnID] = true
-			turns[dependency.Provider+"\x00"+dependency.SessionID+"\x00"+turnID] = true
-		}
-	}
-	return turns, nil
-}
-
-func validateSourceTurnRefs(refs []SourceTurnRef, available map[string]bool) error {
+func validateSourceTurnRefs(refs []SourceTurnRef, bindings sourceTurnBindingIndex) (map[string]bool, error) {
 	seen := map[string]bool{}
 	for _, ref := range refs {
-		key := sourceTurnKey(ref)
-		if !validID(ref.Provider) || !validID(ref.SessionID) || !validID(ref.TurnUnitID) || seen[key] {
-			return errors.New("invalid or duplicate source turn reference")
+		if err := validateSourceTurnRefShape(ref); err != nil {
+			return nil, errors.New("invalid or duplicate source turn reference")
+		}
+		dependency, err := bindings.resolve(ref)
+		if err != nil {
+			return nil, fmt.Errorf("source turn reference is absent or ambiguous in retained chain dependencies: %w", err)
+		}
+		key := canonicalSourceTurnKey(ref, dependency)
+		if seen[key] {
+			return nil, errors.New("invalid or duplicate source turn reference")
 		}
 		seen[key] = true
-		if !available[key] {
-			return errors.New("source turn reference is absent from retained chain dependencies")
-		}
 	}
-	return nil
+	return seen, nil
 }
 
-func sourceTurnKey(ref SourceTurnRef) string {
-	return ref.Provider + "\x00" + ref.SessionID + "\x00" + ref.TurnUnitID
+func canonicalSourceTurnKey(ref SourceTurnRef, dependency ChainDependency) string {
+	return dependency.Provider + "\x00" + dependency.SessionID + "\x00" + dependency.SessionViewDigest + "\x00" + ref.TurnUnitID
+}
+
+func validPresentationCapability(p Presentation) bool {
+	version := presentationCapability(p)
+	return p.MinimumReaderVersion == version && p.MinimumWriterVersion == version
+}
+
+func presentationUsesHistoricalBindings(p Presentation) bool {
+	views := map[SessionKey]map[string]bool{}
+	for _, dependency := range p.ChainDependencies {
+		key := SessionKey{Provider: dependency.Provider, SessionID: dependency.SessionID}
+		if views[key] == nil {
+			views[key] = map[string]bool{}
+		}
+		views[key][dependency.SessionViewDigest] = true
+		if len(views[key]) > 1 {
+			return true
+		}
+	}
+	qualified := func(refs []SourceTurnRef) bool {
+		for _, ref := range refs {
+			if ref.SessionViewDigest != "" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, node := range p.ProblemNodes {
+		if qualified(node.SourceTurnRefs) {
+			return true
+		}
+	}
+	for _, timeline := range p.Timeline {
+		loop := timeline.ClosedLoop
+		if qualified(loop.SourceTurnRefs) || qualified(loop.TriggerQuestion.SourceTurnRefs) || qualified(loop.Conclusion.SourceTurnRefs) || qualified(loop.Execution.SourceTurnRefs) || qualified(loop.Verification.SourceTurnRefs) || qualified(loop.ImpactAndFollowUp.SourceTurnRefs) {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateProblemGraph(nodes []ProblemNode) error {
@@ -618,7 +638,8 @@ func validLedgerCapability(l MachineLedger) bool {
 	if l.DocumentProjection == nil {
 		return l.MinimumReaderVersion == "0.4.0" && l.MinimumWriterVersion == "0.4.0"
 	}
-	return l.MinimumReaderVersion == "0.4.1" && l.MinimumWriterVersion == "0.4.1"
+	version := documentProjectionCapability(l.DocumentProjection.PresentationBase)
+	return l.MinimumReaderVersion == version && l.MinimumWriterVersion == version
 }
 
 func validateDocumentProjection(l MachineLedger) error {
