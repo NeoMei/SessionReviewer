@@ -5,7 +5,7 @@
   "type": "object", "additionalProperties": false,
   "required": ["schema_version", "minimum_reader_version", "mode", "project_id", "provider", "session_id", "generation_id", "session_view_digest", "dependency_digest", "redaction_version", "turn_unit_id", "total", "range_start", "range_end", "first_cursor", "previous_cursor", "next_cursor", "last_cursor", "turn_units", "messages", "coverage"],
   "properties": {
-    "schema_version": {"const": 1}, "minimum_reader_version": {"const": "0.4.0"},
+    "schema_version": {"const": 1}, "minimum_reader_version": {"enum": ["0.4.0", "0.4.3"]},
     "mode": {"enum": ["turn_index", "turn_messages"]},
     "project_id": {"$ref": "#/$defs/id"}, "provider": {"$ref": "#/$defs/id"}, "session_id": {"$ref": "#/$defs/id"}, "generation_id": {"$ref": "#/$defs/id"},
     "session_view_digest": {"$ref": "#/$defs/digest"}, "dependency_digest": {"$ref": "#/$defs/digest"}, "redaction_version": {"const": "visible-redaction-v1"},

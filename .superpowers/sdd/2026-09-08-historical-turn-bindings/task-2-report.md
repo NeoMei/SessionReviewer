@@ -122,3 +122,61 @@ Reported by the controller on the frozen diff:
 
 - Historical full bodies are intentionally unavailable once the single current source-catalog record no longer matches; authenticated excerpts remain available. A historical catalog is explicitly outside Task 2.
 - Milestone projection and evolution/source-selection controls remain separate work and were not implemented here.
+
+## Fix round 1 at `7599e6b`
+
+### Implementation
+
+- Corrected the public conversation-page capability floor: omitted selection still emits `0.4.0`; any explicit `SessionViewDigest`, whether current or retained, emits `0.4.3` for both index and message pages.
+- Kept the capability change local to conversation pages. Go rendering, the JSON Schema, and the TypeScript parser accept exactly `0.4.0` and `0.4.3`; unsupported future values remain invalid. Shared summary/event identity validation was not changed.
+- Bound the runner and supplied-loader renderer to the request's exact expected floor. Selected requests reject downgraded `0.4.0` responses, while omitted requests reject unexpected selected-only `0.4.3` responses.
+- Added direct explicit-current coverage for `source_full`, the literal revised full body, the `0.4.3` floor, and index/message cursor separation from the omitted-current `0.4.0` form.
+- Added direct schema-validator coverage for both valid floors and the unsupported-future negative. Existing canonical omitted-selector fixture bytes remain unchanged.
+
+### TDD and reproduction evidence
+
+RED before the production correction:
+
+- Controller actual-CLI lifecycle probe at `7599e6b`: `historical-capability-probe.mjs` passed default `0.4.0` and selected-view identity, then failed because the explicit historical response emitted `0.4.0` instead of required `0.4.3`.
+- Controller actual-CLI explicit-current extension: failed in 2.857s after proving three messages and `source_full`; the only mismatch was the emitted `0.4.0` floor instead of `0.4.3`.
+- Controller rebuilt runner probe: the qualified `0.4.3` response failed in the standalone parser after the default positive, proving the parser still hard-coded `0.4.0`.
+- Repository schema mutation check after adding the focused regression: temporarily restoring the old schema `const` and running `go test ./internal/memory -run '^TestConversationPageSchemaAcceptsOnlyLegacyAndSnapshotQualifiedCapabilities$' -count=1` failed as expected with `conversation page schema rejected reader 0.4.3: $.minimum_reader_version: want const 0.4.0`.
+
+GREEN on the final frozen diff:
+
+- `go test ./internal/inspect ./internal/memory -run 'TestHistoricalConversationSelectionAfterAppendUsesExactRetainedSnapshot|TestConversationPageRendererAcceptsOnlyLegacyAndSnapshotQualifiedCapabilities|TestConversationPageFrozenFixtureRendersEmptyArrays|TestConversationPageSchemaAcceptsOnlyLegacyAndSnapshotQualifiedCapabilities' -count=1` passed: `internal/inspect` 3.508s, `internal/memory` 0.355s.
+- `go vet ./internal/inspect ./internal/memory` exited 0 with no output.
+- `npm test -- --run tests/conversation-page.test.ts tests/render-conversation.test.ts` passed 2 files / 64 tests in 1.63s.
+- `git diff --check` exited 0.
+
+Controller-owned final frozen verification:
+
+- Full plugin check passed: lint, types, build, 27 files / 484 tests.
+- Actual-CLI append/rescan lifecycle passed for omitted current `0.4.0`, explicit current/historical index and message `0.4.3`, literal current and retained answers, cross-mode cursor rejection, and no-write byte sentinels.
+- Rebuilt runner capability and fixed-argv probes, selected-identity stale-response race probe, and fresh actual-CLI-wire browser replay passed. Production was unchanged between those probes and the final freeze.
+
+### Files changed in fix round 1
+
+- `internal/inspect/conversation.go`
+- `internal/inspect/conversation_retained_test.go`
+- `internal/inspect/conversation_test.go`
+- `internal/memory/api_compat_test.go`
+- `schemas/conversation-page-v1.schema.json`
+- `obsidian-plugin/src/contracts/conversation-page.ts`
+- `obsidian-plugin/src/data/conversation-page.ts`
+- `obsidian-plugin/src/cli/runner.ts`
+- `obsidian-plugin/src/view/render-conversation.ts`
+- `obsidian-plugin/tests/conversation-page.test.ts`
+- `obsidian-plugin/tests/render-conversation.test.ts`
+
+### Self-review
+
+- Confirmed explicit-current and historical requests share the same selector-presence capability rule and both page modes are produced through the same `conversationPageBound` path.
+- Confirmed standalone consumers do not accept arbitrary/future versions, while request-aware consumers enforce exact request/response capability reciprocity.
+- Confirmed the existing `validateIdentity` path remains unchanged for summaries and event pages.
+- Confirmed omitted-selector canonical fixture content and default `0.4.0` behavior remain unchanged.
+- Confirmed no source, Vault, network, model, release, milestone UI, or source-catalog behavior was added.
+
+### Concerns
+
+- None introduced by this fix. The original Task 2 historical-body and future milestone-projection boundaries remain as documented above.

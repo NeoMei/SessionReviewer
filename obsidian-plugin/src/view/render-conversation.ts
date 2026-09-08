@@ -250,8 +250,10 @@ function answerExplanation(turn: VisibleTurnV1): string {
 
 function assertBoundPage(page: ConversationPageV1, identity: ConversationIdentity, mode: "turn_index" | "turn_messages", navigation?: ConversationNavigation, turnUnitId?: string, selectedTurn?: VisibleTurnV1): void {
 	const selectedViewDigest = identity.sessionViewDigest ?? identity.expectedSessionViewDigest;
+	const expectedReaderVersion = identity.sessionViewDigest === undefined ? "0.4.0" : "0.4.3";
 	if (page.project_id !== identity.projectId || page.provider !== identity.provider || page.session_id !== identity.sessionId ||
 		page.generation_id !== identity.expectedGenerationId || page.session_view_digest !== selectedViewDigest ||
+		page.minimum_reader_version !== expectedReaderVersion ||
 		(identity.sessionViewDigest !== undefined && page.evidence_session_view_digest !== undefined && page.evidence_session_view_digest !== selectedViewDigest) || page.mode !== mode ||
 		(mode === "turn_messages" && page.turn_unit_id !== turnUnitId) || (navigation === undefined && page.range_start !== 0) || page.range_end - page.range_start > PAGE_SIZE ||
 		(navigation?.direction === "first" && page.range_start !== 0) || (navigation?.direction === "last" && page.range_end !== page.total) ||

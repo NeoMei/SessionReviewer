@@ -26,6 +26,8 @@ const MaxConversationResponseBytes = 1 << 20
 const conversationPageItemsBytes = 768 << 10
 const conversationCursorReserveBytes = 32 << 10
 const conversationRedactionVersion = "visible-redaction-v1"
+const conversationLegacyReaderVersion = "0.4.0"
+const conversationSelectedReaderVersion = "0.4.3"
 
 // ConversationPage is a separate paged contract; it is not a truncated
 // conversation-chain-v1 Document or a session-event-page-v1 event page.
@@ -206,7 +208,7 @@ func hasSessionDiagnostic(view memory.SessionView, code string) bool {
 }
 
 func RenderConversationPage(page ConversationPage) ([]byte, error) {
-	if validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest) != nil || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 || page.BodyAvailability != "" && page.BodyAvailability != conversationBodySource && page.BodyAvailability != conversationBodyRetained || page.EvidenceSessionViewDigest != nil && !digestRE.MatchString(*page.EvidenceSessionViewDigest) {
+	if !validConversationIdentity(page) || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 || page.BodyAvailability != "" && page.BodyAvailability != conversationBodySource && page.BodyAvailability != conversationBodyRetained || page.EvidenceSessionViewDigest != nil && !digestRE.MatchString(*page.EvidenceSessionViewDigest) {
 		return nil, publicError(CodeInvalidArgument, "conversation page is invalid")
 	}
 	if page.Mode == "turn_index" && (uint64(len(page.TurnUnits)) != page.RangeEnd-page.RangeStart || len(page.Messages) != 0 || page.TurnUnitID != nil) || page.Mode == "turn_messages" && (uint64(len(page.Messages)) != page.RangeEnd-page.RangeStart || len(page.TurnUnits) != 1 || page.TurnUnitID == nil || page.TurnUnits[0].TurnUnitID != *page.TurnUnitID) {
@@ -282,6 +284,11 @@ func RenderConversationPage(page ConversationPage) ([]byte, error) {
 	return body, nil
 }
 
+func validConversationIdentity(page ConversationPage) bool {
+	return page.SchemaVersion == 1 && (page.MinimumReaderVersion == conversationLegacyReaderVersion || page.MinimumReaderVersion == conversationSelectedReaderVersion) &&
+		validID(page.ProjectID) && validID(page.Provider) && validID(page.SessionID) && validID(page.GenerationID) && digestRE.MatchString(page.SessionViewDigest)
+}
+
 func validateVisibleMessage(message conversationchain.VisibleMessage) error {
 	if message.Role != conversationchain.RoleUser && message.Role != conversationchain.RoleAssistant || message.Phase != nil && *message.Phase != "commentary" && *message.Phase != "final_answer" || !digestRE.MatchString(message.RevisionID) || !validID(message.SourceRef.SourceIdentity) || message.SourceRef.RecordOrdinal == 0 || message.SourceRef.RecordOrdinal > maxWireInteger || !digestRE.MatchString("sha256:"+message.SourceRef.SourceHash) || len(message.OccurredAt) > 128 || !utf8.ValidString(message.VisibleExcerpt) || len(message.VisibleExcerpt) > 4096 || message.Text != nil && (!utf8.ValidString(*message.Text) || len(*message.Text) > 64<<10) {
 		return publicError(CodeInvalidArgument, "conversation message is invalid")
@@ -306,7 +313,11 @@ func selectedSnapshotConversationPage(request ConversationRequest, selected reta
 }
 
 func conversationPageBound(request ConversationRequest, view memory.SessionView, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, evidenceView, bodyAvailability, dependency string) (ConversationPage, error) {
-	page := ConversationPage{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Mode: "turn_index", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, GenerationID: request.ExpectedGenerationID, SessionViewDigest: view.Digest, DependencyDigest: dependency, RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: coverage, BodyAvailability: bodyAvailability}
+	readerVersion := conversationLegacyReaderVersion
+	if request.SessionViewDigest != "" {
+		readerVersion = conversationSelectedReaderVersion
+	}
+	page := ConversationPage{SchemaVersion: 1, MinimumReaderVersion: readerVersion, Mode: "turn_index", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, GenerationID: request.ExpectedGenerationID, SessionViewDigest: view.Digest, DependencyDigest: dependency, RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: coverage, BodyAvailability: bodyAvailability}
 	if evidenceView != "" && evidenceView != view.Digest {
 		page.EvidenceSessionViewDigest = &evidenceView
 	}

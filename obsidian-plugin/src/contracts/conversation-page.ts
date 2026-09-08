@@ -63,7 +63,7 @@ export interface VisibleCoverageV1 {
 
 export interface ConversationPageV1 {
   schema_version: 1;
-  minimum_reader_version: "0.4.0";
+  minimum_reader_version: "0.4.0" | "0.4.3";
   mode: ConversationModeV1;
   project_id: string;
   provider: string;

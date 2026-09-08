@@ -170,7 +170,7 @@ func TestHistoricalConversationSelectionAfterAppendUsesExactRetainedSnapshot(t *
 	}
 	base.ExpectedGenerationID = runScan()
 	current, err := inspect.LoadConversationPage(context.Background(), base)
-	if err != nil || current.SessionViewDigest == oldView || current.BodyAvailability != "source_full" || len(current.TurnUnits) != 1 || current.TurnUnits[0].TurnUnitID != turnID || current.TurnUnits[0].AssistantMessageCount != 2 {
+	if err != nil || current.MinimumReaderVersion != "0.4.0" || current.SessionViewDigest == oldView || current.BodyAvailability != "source_full" || len(current.TurnUnits) != 1 || current.TurnUnits[0].TurnUnitID != turnID || current.TurnUnits[0].AssistantMessageCount != 2 {
 		t.Fatalf("default current index=%+v err=%v", current, err)
 	}
 	store, err := memorystore.Open(dataRoot, projectID)
@@ -201,21 +201,48 @@ func TestHistoricalConversationSelectionAfterAppendUsesExactRetainedSnapshot(t *
 	historical := base
 	historical.SessionViewDigest = oldView
 	historicalIndex, err := inspect.LoadConversationPage(context.Background(), historical)
-	if err != nil || historicalIndex.SessionViewDigest != oldView || historicalIndex.EvidenceSessionViewDigest != nil || historicalIndex.BodyAvailability != "retained_excerpt" || len(historicalIndex.TurnUnits) != 1 || historicalIndex.NextCursor != nil {
+	if err != nil || historicalIndex.MinimumReaderVersion != "0.4.3" || historicalIndex.SessionViewDigest != oldView || historicalIndex.EvidenceSessionViewDigest != nil || historicalIndex.BodyAvailability != "retained_excerpt" || len(historicalIndex.TurnUnits) != 1 || historicalIndex.NextCursor != nil {
 		t.Fatalf("historical index=%+v err=%v", historicalIndex, err)
+	}
+	explicitCurrent := base
+	explicitCurrent.SessionViewDigest = current.SessionViewDigest
+	explicitCurrentIndex, err := inspect.LoadConversationPage(context.Background(), explicitCurrent)
+	if err != nil || explicitCurrentIndex.MinimumReaderVersion != "0.4.3" || explicitCurrentIndex.SessionViewDigest != current.SessionViewDigest || explicitCurrentIndex.BodyAvailability != "source_full" || explicitCurrentIndex.FirstCursor == nil || current.FirstCursor == nil {
+		t.Fatalf("explicit current index=%+v err=%v", explicitCurrentIndex, err)
+	}
+	explicitCurrent.Cursor = *current.FirstCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), explicitCurrent); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("omitted-current index cursor crossed into explicit current: %v", err)
+	}
+	omittedCurrent := base
+	omittedCurrent.Cursor = *explicitCurrentIndex.FirstCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), omittedCurrent); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("explicit-current index cursor crossed into omitted current: %v", err)
 	}
 	historical.TurnUnitID, historical.Limit = turnID, 1
 	historicalDetail, err := inspect.LoadConversationPage(context.Background(), historical)
-	if err != nil || len(historicalDetail.Messages) != 1 || historicalDetail.NextCursor == nil || historicalDetail.Messages[0].Text != nil {
+	if err != nil || historicalDetail.MinimumReaderVersion != "0.4.3" || len(historicalDetail.Messages) != 1 || historicalDetail.NextCursor == nil || historicalDetail.Messages[0].Text != nil {
 		t.Fatalf("historical detail=%+v err=%v", historicalDetail, err)
 	}
 	historical.MessageCursor = *historicalDetail.NextCursor
 	historicalAnswer, err := inspect.LoadConversationPage(context.Background(), historical)
-	if err != nil || len(historicalAnswer.Messages) != 1 || historicalAnswer.Messages[0].VisibleExcerpt != "Historical answer." || historicalAnswer.Messages[0].Text != nil || historicalAnswer.Messages[0].SourceRef.RecordOrdinal != 3 {
+	if err != nil || historicalAnswer.MinimumReaderVersion != "0.4.3" || len(historicalAnswer.Messages) != 1 || historicalAnswer.Messages[0].VisibleExcerpt != "Historical answer." || historicalAnswer.Messages[0].Text != nil || historicalAnswer.Messages[0].SourceRef.RecordOrdinal != 3 {
 		t.Fatalf("historical answer crossed snapshots: page=%+v err=%v", historicalAnswer, err)
 	}
 	currentDetail := base
 	currentDetail.TurnUnitID, currentDetail.Limit = turnID, 1
+	explicitCurrentDetail := currentDetail
+	explicitCurrentDetail.SessionViewDigest = current.SessionViewDigest
+	explicitCurrentFirst, err := inspect.LoadConversationPage(context.Background(), explicitCurrentDetail)
+	if err != nil || explicitCurrentFirst.MinimumReaderVersion != "0.4.3" || explicitCurrentFirst.BodyAvailability != "source_full" || explicitCurrentFirst.NextCursor == nil {
+		t.Fatalf("explicit current detail=%+v err=%v", explicitCurrentFirst, err)
+	}
+	explicitCurrentFull := explicitCurrentDetail
+	explicitCurrentFull.Limit = 64
+	explicitCurrentAnswer, err := inspect.LoadConversationPage(context.Background(), explicitCurrentFull)
+	if err != nil || explicitCurrentAnswer.MinimumReaderVersion != "0.4.3" || len(explicitCurrentAnswer.Messages) != 3 || explicitCurrentAnswer.Messages[2].Text == nil || *explicitCurrentAnswer.Messages[2].Text != "Current revised answer." {
+		t.Fatalf("explicit current full body=%+v err=%v", explicitCurrentAnswer, err)
+	}
 	currentFull := currentDetail
 	currentFull.Limit = 64
 	currentAnswer, err := inspect.LoadConversationPage(context.Background(), currentFull)
@@ -223,9 +250,18 @@ func TestHistoricalConversationSelectionAfterAppendUsesExactRetainedSnapshot(t *
 		t.Fatalf("current answer crossed snapshots: page=%+v err=%v", currentAnswer, err)
 	}
 	currentFirst, err := inspect.LoadConversationPage(context.Background(), currentDetail)
-	if err != nil || currentFirst.NextCursor == nil {
+	if err != nil || currentFirst.MinimumReaderVersion != "0.4.0" || currentFirst.NextCursor == nil {
 		t.Fatalf("current detail=%+v err=%v", currentFirst, err)
 	}
+	explicitCurrentDetail.MessageCursor = *currentFirst.NextCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), explicitCurrentDetail); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("omitted-current message cursor crossed into explicit current: %v", err)
+	}
+	currentDetail.MessageCursor = *explicitCurrentFirst.NextCursor
+	if _, err := inspect.LoadConversationPage(context.Background(), currentDetail); retainedErrorCode(err) != "stale_cursor" {
+		t.Fatalf("explicit-current message cursor crossed into omitted current: %v", err)
+	}
+	currentDetail.MessageCursor = ""
 	historical.MessageCursor = *currentFirst.NextCursor
 	if _, err := inspect.LoadConversationPage(context.Background(), historical); retainedErrorCode(err) != "stale_cursor" {
 		t.Fatalf("current cursor crossed into historical view: %v", err)

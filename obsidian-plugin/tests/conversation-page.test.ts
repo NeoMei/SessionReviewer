@@ -39,6 +39,12 @@ describe("conversation page wire", () => {
     expect(fullBody.messages[0]?.text).toContain("完整正文");
   });
 
+  it("accepts exactly the legacy and snapshot-qualified reader capabilities", () => {
+    expect(parseConversationPageV1(JSON.stringify(conversationPage({ minimum_reader_version: "0.4.0" }))).minimum_reader_version).toBe("0.4.0");
+    expect(parseConversationPageV1(JSON.stringify(conversationPage({ minimum_reader_version: "0.4.3" }))).minimum_reader_version).toBe("0.4.3");
+    expect(() => parseConversationPageV1(JSON.stringify(conversationPage({ minimum_reader_version: "0.4.4" })))).toThrow(/version/i);
+  });
+
   it("accepts a provider-neutral retained page and binds every source reference", () => {
     const source = conversationPage({ provider: "claude", body_availability: "retained_excerpt" });
     const turns = source.turn_units as Record<string, unknown>[];
@@ -166,7 +172,7 @@ describe("conversation CLI query", () => {
   it("forwards an optional exact snapshot selector and binds the response to it", async () => {
     const historical = `sha256:${"9".repeat(64)}`;
     const execFile = vi.fn((_file: string, args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
-	  callback(null, JSON.stringify(args.includes("--turn-unit-id") ? selectedConversationPage({ session_view_digest: historical }) : conversationPage({ session_view_digest: historical })), "");
+	  callback(null, JSON.stringify(args.includes("--turn-unit-id") ? selectedConversationPage({ minimum_reader_version: "0.4.3", session_view_digest: historical }) : conversationPage({ minimum_reader_version: "0.4.3", session_view_digest: historical })), "");
     });
     const runner = new CliRunner("/bin/session-reviewer", execFile);
     const request = {
@@ -184,10 +190,14 @@ describe("conversation CLI query", () => {
 	  "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--turn-unit-id", "turn-1", "--session-view-digest", historical
 	]);
 
-    const wrong = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage()), ""));
+    const wrong = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ minimum_reader_version: "0.4.3" })), ""));
     await expect(wrong.getConversation(request)).rejects.toBeInstanceOf(ConversationQueryError);
-    const mismatchedEvidence = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ session_view_digest: historical, evidence_session_view_digest: VIEW_DIGEST })), ""));
+    const mismatchedEvidence = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ minimum_reader_version: "0.4.3", session_view_digest: historical, evidence_session_view_digest: VIEW_DIGEST })), ""));
     await expect(mismatchedEvidence.getConversation(request)).rejects.toBeInstanceOf(ConversationQueryError);
+	const downgraded = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ session_view_digest: historical })), ""));
+	await expect(downgraded.getConversation(request)).rejects.toBeInstanceOf(ConversationQueryError);
+	const selectedOnly = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(conversationPage({ minimum_reader_version: "0.4.3" })), ""));
+	await expect(selectedOnly.getConversation({ ...request, sessionViewDigest: undefined })).rejects.toBeInstanceOf(ConversationQueryError);
   });
 
   it("rejects malformed snapshot selectors before launching the process", async () => {

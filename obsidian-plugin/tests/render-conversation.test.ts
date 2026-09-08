@@ -182,8 +182,8 @@ describe("selected Session conversation", () => {
       if (selected === oldView) return stale.promise;
       const excerpt = selected === otherOldView ? "OTHER_OLD_ANSWER" : "CURRENT_ANSWER";
       return Promise.resolve(page(request.turnUnitId === undefined
-        ? conversationPage({ session_view_digest: selected, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: excerpt } }] })
-        : selectedConversationPage({ session_view_digest: selected })));
+		? conversationPage({ minimum_reader_version: request.sessionViewDigest === undefined ? "0.4.0" : "0.4.3", session_view_digest: selected, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: excerpt } }] })
+		: selectedConversationPage({ minimum_reader_version: request.sessionViewDigest === undefined ? "0.4.0" : "0.4.3", session_view_digest: selected })));
     });
     const root = renderConversation(identity, load);
     await settle();
@@ -192,7 +192,7 @@ describe("selected Session conversation", () => {
     root.updateIdentity({ ...identity, sessionViewDigest: otherOldView });
     await settle();
     await settle();
-    stale.resolve(page(conversationPage({ session_view_digest: oldView, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: "STALE_OLD_ANSWER" } }] })));
+	stale.resolve(page(conversationPage({ minimum_reader_version: "0.4.3", session_view_digest: oldView, turn_units: [{ ...(conversationPage().turn_units as Record<string, unknown>[])[0], user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: "STALE_OLD_ANSWER" } }] })));
     await settle();
 
     expect(root.textContent).toContain("OTHER_OLD_ANSWER");
@@ -200,6 +200,22 @@ describe("selected Session conversation", () => {
 	expect(load.mock.calls.filter(([request]) => request.sessionViewDigest === oldView)).toHaveLength(1);
 	expect(load.mock.calls.filter(([request]) => request.sessionViewDigest === otherOldView)).toHaveLength(2);
     expect(load.mock.calls.at(-1)?.[0]).toMatchObject({ sessionViewDigest: otherOldView, turnUnitId: "turn-1" });
+  });
+
+  it.each([
+    ["downgraded selected page", true, { session_view_digest: `sha256:${"8".repeat(64)}` }],
+    ["selected-only page for omitted request", false, { minimum_reader_version: "0.4.3" }]
+  ] as const)("rejects %s", async (_name, selected, overrides) => {
+    const selectedDigest = `sha256:${"8".repeat(64)}`;
+    const response = conversationPage({
+      total: 0, range_end: 0, first_cursor: null, last_cursor: null, turn_units: [],
+      coverage: { ...(conversationPage().coverage as Record<string, unknown>), source_records: 0, visible_messages: 0, captured_messages: 0 },
+      ...overrides
+    });
+    const root = renderConversation(selected ? { ...identity, sessionViewDigest: selectedDigest } : identity, () => Promise.resolve(page(response)));
+    await settle();
+    expect(root.textContent).toContain("绑定不一致");
+    root.dispose();
   });
 
   it("keeps an index-page request authoritative when an old turn row is clicked during loading", async () => {

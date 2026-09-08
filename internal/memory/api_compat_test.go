@@ -85,6 +85,22 @@ func TestV4ContractFixtures(t *testing.T) {
 	}
 }
 
+func TestConversationPageSchemaAcceptsOnlyLegacyAndSnapshotQualifiedCapabilities(t *testing.T) {
+	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "conversation-page-v1.schema.json"))
+	for _, readerVersion := range []string{"0.4.0", "0.4.3"} {
+		page := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "conversation-page-v1.valid.json")).(map[string]any)
+		page["minimum_reader_version"] = readerVersion
+		if err := validateContractSchema(schema, page, "$", schema); err != nil {
+			t.Fatalf("conversation page schema rejected reader %s: %v", readerVersion, err)
+		}
+	}
+	future := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "conversation-page-v1.valid.json")).(map[string]any)
+	future["minimum_reader_version"] = "0.4.4"
+	if err := validateContractSchema(schema, future, "$", schema); err == nil {
+		t.Fatal("conversation page schema accepted unsupported future capability")
+	}
+}
+
 func TestSessionEventPageSchemaRejectsEmptyCursorStrings(t *testing.T) {
 	schema := readContractJSON(t, filepath.Join("..", "..", "schemas", "session-event-page-v1.schema.json"))
 	valid := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "session-event-page-v1.valid.json"))

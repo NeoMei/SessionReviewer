@@ -215,8 +215,10 @@ export class CliRunner {
     try {
       const page = parseConversationPageV1((await this.run(args)).stdout);
 	  const selectedViewDigest = request.sessionViewDigest ?? request.expectedSessionViewDigest;
+	  const expectedReaderVersion = request.sessionViewDigest === undefined ? "0.4.0" : "0.4.3";
       if (page.project_id !== request.projectId || page.provider !== request.provider || page.session_id !== request.sessionId ||
 		  page.generation_id !== request.expectedGenerationId || page.session_view_digest !== selectedViewDigest ||
+		  page.minimum_reader_version !== expectedReaderVersion ||
 		  (request.sessionViewDigest !== undefined && page.evidence_session_view_digest !== undefined && page.evidence_session_view_digest !== selectedViewDigest) ||
           page.mode !== (request.turnUnitId === undefined ? "turn_index" : "turn_messages") ||
           page.turn_unit_id !== (request.turnUnitId ?? null) || !conversationPageMatchesRequest(page, request)) {

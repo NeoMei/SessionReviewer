@@ -617,6 +617,21 @@ func TestConversationPageFrozenFixtureRendersEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestConversationPageRendererAcceptsOnlyLegacyAndSnapshotQualifiedCapabilities(t *testing.T) {
+	page := ConversationPage{
+		SchemaVersion: 1, MinimumReaderVersion: "0.4.3", Mode: "turn_index", ProjectID: "project-p", Provider: "codex", SessionID: "session-s",
+		GenerationID: "generation-g", SessionViewDigest: "sha256:" + strings.Repeat("1", 64), DependencyDigest: "sha256:" + strings.Repeat("2", 64),
+		RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: conversationchain.VisibleCoverage{Complete: true},
+	}
+	if _, err := RenderConversationPage(page); err != nil {
+		t.Fatalf("snapshot-qualified capability rejected: %v", err)
+	}
+	page.MinimumReaderVersion = "0.4.4"
+	if _, err := RenderConversationPage(page); err == nil {
+		t.Fatal("unsupported future conversation capability accepted")
+	}
+}
+
 func TestConversationCancellationDuringMaterializationReturnsNoPartialPage(t *testing.T) {
 	f := newConversationFixture(t, visibleRecord("user", "", "q")+visibleRecord("assistant", "final_answer", "a"))
 	ctx, cancel := context.WithCancel(context.Background())

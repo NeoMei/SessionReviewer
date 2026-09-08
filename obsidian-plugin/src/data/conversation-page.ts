@@ -24,7 +24,7 @@ export function parseConversationPageV1(source: string): ConversationPageV1 {
 function parseConversationPageDocument(row: Record<string, unknown>): ConversationPageV1 {
   exact(row, ROOT_KEYS, "$", ROOT_OPTIONAL_KEYS);
   constant(row.schema_version, 1, "$.schema_version");
-  constant(row.minimum_reader_version, "0.4.0", "$.minimum_reader_version");
+  choice(row.minimum_reader_version, ["0.4.0", "0.4.3"] as const, "$.minimum_reader_version");
   const mode = choice(row.mode, ["turn_index", "turn_messages"] as const, "$.mode");
   const projectId = id(row.project_id, "$.project_id");
   void projectId;
