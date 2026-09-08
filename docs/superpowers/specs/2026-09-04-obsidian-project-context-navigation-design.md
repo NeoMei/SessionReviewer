@@ -608,6 +608,8 @@ turn_units[] {
 
 `review-presentation-v4.timeline[].closed_loop` 至少包含触发问题、结论表现类型、结论正文、执行摘要、验证摘要、项目影响、后续、`source_turn_refs[]` 和分段 coverage。`conclusion_kind` 固定为 `visible_answer_excerpt|human_confirmed|ai_candidate_confirmed|missing`；`missing` 时正文必须为空并提供类型化缺失原因。只有 `human_confirmed` 和 `ai_candidate_confirmed` 可表达不能从可见原文直接得出的语义。
 
+2026-09-09 历史引用实施补充：`source_turn_refs[]` 在原 `(provider, session_id, turn_unit_id)` 身份之外允许可选 `session_view_digest`，精确指向当前或保留的已认证链快照。同一 provider/Session 可列出多个不同视图的 chain dependency；同一 `(provider, session_id, session_view_digest)` 不得重复或对应不同 dependency digest。每个引用必须唯一解析到包含该 turn 的 dependency；省略快照坐标仅在唯一匹配时合法，不得默认选择最新回答。闭环各段与汇总引用必须解析到相同的完整绑定；同一绑定的限定/省略两种写法不能绕过重复检查。使用限定引用或同一 Session 多快照的新 presentation 及包含它的 ledger/candidate 必须声明最低读写能力 `0.4.3`（仅有 reader 字段的候选声明最低 reader）；旧数据省略新字段时保持原规范字节和能力下限，不改写旧世代。这是历史来源保持合同，不是历史浏览器或旧项目迁移。
+
 `agent-annotation-v1` 增加 `annotation_kind=decision_candidate|agreement_candidate|milestone_conclusion_candidate` 和通用的 `confirmed_entity_id|null`。里程碑结论候选必须引用目标 milestone ID、source turn dependencies 和 prompt schema version；确认时只 patch 对应 `closed_loop.conclusion` 并将 `conclusion_kind` 设为 `ai_candidate_confirmed`，不得顺带修改验证、影响、下一步或问题状态。
 
 `review-presentation-v4.problem_nodes[]` 使用 5.2 的正式节点字段。图校验必须证明：ID 唯一、父节点存在、无环、根节点集合与空父节点一致、每个相关节点存在且不自指、相关节点不超过两个、source turn refs 存在于当前或保留的 chain dependency 中、同级 `sibling_order` 唯一且稳定。
@@ -765,6 +767,7 @@ session-reviewer evolution summary-candidates list
 session-reviewer inspect conversation-chain
   --project-id <id> --provider <id> --session-id <id>
   --expected-generation-id <id>
+  [--session-view-digest <digest>]
   [--cursor <opaque> | --turn-unit-id <id> [--message-cursor <opaque>]]
   --limit <1..64> --json
 
@@ -799,6 +802,8 @@ coverage
 事件项只包含类型化字段、有限脱敏 excerpt、revision ID、sequence 和 occurred_at。CLI 不返回原始系统/开发者指令、隐藏推理、令牌、绝对路径或未脱敏工具输出。cursor 最大长度、响应最大字节数和执行超时必须进入合同测试。
 
 `conversation-chain` 默认返回问答单元索引和有限摘录；指定 `--turn-unit-id` 后按需从认证 source refs 读取该单元的可见人类/Agent 正文、动作和结果。`--message-cursor` 只用于同一问答单元的后续可见消息，绑定 project、provider、session、generation、turn unit、脱敏版本和 limit；绑定不符返回 `stale_cursor`。每条源读取仍受 64 KiB 上限和总响应上限约束，超限必须返回 coverage。即使私有源包含其他角色，该命令也只能返回 user/assistant 可见正文和受限工具摘要。
+
+2026-09-09 历史下钻实施补充：可选 `--session-view-digest` 仅选择发布 manifest 当前或保留根中、属于请求 project/provider/Session 的认证快照；不能凭任意 CAS digest 或路径读取内容。显式选择时响应 `session_view_digest` 必须等于选择值，若返回 `evidence_session_view_digest` 也必须一致；无此参数时保留当前索引视图身份，来源可用性降级使用的历史摘录以独立 `evidence_session_view_digest` 表明其真实来源。当前索引只证明 Session 成员资格，不证明历史回答内容。两种分页 cursor 均绑定所选视图和链 dependency，当前/历史之间不能复用。历史正文仍需对应历史前缀的认证 source catalog；无法读取时返回保留摘录和明确的正文不可用状态。此参数不改变未限定查询的默认行为和固定参数安全边界。
 
 2026-09-07 展示恢复补充：默认问答单元索引通过 `--cursor` 分页，该参数不得用于已选择单元的消息页；消息页继续使用 `--message-cursor`。分页响应使用独立页合同，不把整份 `conversation-chain-v1` 冒充为一页。索引摘录保持 4,096 字节上限，展开消息提供 64 KiB 单条认证读取范围内的可见正文；按响应字节预算减少每页消息数量时仍须提供后续 cursor。环境信息、推荐插件列表和浏览器环境等可确定识别的纯上下文 user 包装不产生问题节点；混合包装保留实际用户请求，不任意删除用户自己的 XML 或引用文本。恢复查询可从已发布 SessionView 绑定的认证源前缀按需确定性构建，不要求将会话正文扩充进机器事实观察库，也不得混入尚未扫描的追加内容。
 
