@@ -8,6 +8,7 @@
     "schema_version": { "const": 1 }, "minimum_reader_version": { "const": "0.4.0" }, "digest": { "$ref": "#/$defs/digest" },
     "project_id": { "$ref": "#/$defs/id" }, "provider": { "$ref": "#/$defs/id" }, "session_id": { "$ref": "#/$defs/id" },
     "session_view_digest": { "$ref": "#/$defs/digest" }, "dependency_digest": { "$ref": "#/$defs/digest" },
+    "dependency_proof_v1": { "$ref": "#/$defs/dependency_proof_v1" },
     "segmentation_rule_version": { "$ref": "#/$defs/id" }, "coverage": { "$ref": "#/$defs/coverage" },
     "turn_units": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/turn_unit" } }
   },
@@ -15,6 +16,21 @@
     "id": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$" },
     "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "timestamp": { "type": "string", "minLength": 1, "maxLength": 128 }, "excerpt": { "type": "string", "maxLength": 4096 },
+    "dependency_record_proof_v1": {
+      "type": "object", "additionalProperties": false,
+      "required": ["record_ordinal", "source_hash"],
+      "properties": { "record_ordinal": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "source_hash": { "$ref": "#/$defs/sha256" } }
+    },
+    "dependency_proof_v1": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_view_digest", "source_record_digest", "visible_records", "active_revision_ids", "rule_version", "redaction_version"],
+      "properties": {
+        "session_view_digest": { "$ref": "#/$defs/digest" }, "source_record_digest": { "$ref": "#/$defs/digest" },
+        "visible_records": { "type": "array", "maxItems": 100000, "items": { "$ref": "#/$defs/dependency_record_proof_v1" } },
+        "active_revision_ids": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/digest" } },
+        "rule_version": { "$ref": "#/$defs/id" }, "redaction_version": { "$ref": "#/$defs/id" }
+      }
+    },
     "source_ref": {
       "type": "object", "additionalProperties": false,
       "required": ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"],

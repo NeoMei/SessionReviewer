@@ -106,3 +106,73 @@ func TestValidateRetainedEvidenceRejectsFailedFactRelabeledPassedAfterCanonicalR
 		t.Fatal("active failed fact authenticated a retained passed result")
 	}
 }
+
+func TestValidateRetainedEvidenceAuthenticatesDependencyProof(t *testing.T) {
+	verification := retainedRevision("verification", "verification", "passed", 3, 'e', testTime1, map[string]string{"passed": "1", "failed": "0"}, "")
+	view := retainedView("codex", "session-1", "source-1", []memory.ObservationRevision{verification})
+	document, _, err := Materialize(MaterializeInput{
+		View: view,
+		Messages: []SourceMessage{
+			retainedMessage(RoleUser, "", "run tests", testTime1, 2, 'c'),
+			retainedMessage(RoleAssistant, "final_answer", "passed", testTime2, 4, 'a'),
+		},
+		Revisions: []memory.ObservationRevision{verification}, SourceCoverage: completeVisibleCoverage(4, 2),
+		RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutations := []struct {
+		name string
+		edit func(*Document)
+	}{
+		{"missing proof", func(doc *Document) { doc.DependencyProofV1 = nil }},
+		{"arbitrary dependency digest", func(doc *Document) { doc.DependencyDigest = "sha256:" + strings.Repeat("f", 64) }},
+		{"view", func(doc *Document) { doc.DependencyProofV1.SessionViewDigest = "sha256:" + strings.Repeat("f", 64) }},
+		{"source record", func(doc *Document) { doc.DependencyProofV1.SourceRecordDigest = "sha256:" + strings.Repeat("f", 64) }},
+		{"active revisions", func(doc *Document) { doc.DependencyProofV1.ActiveRevisionIDs = []string{} }},
+		{"rule", func(doc *Document) { doc.DependencyProofV1.RuleVersion = "visible-turn-v2" }},
+		{"visible message missing from proof", func(doc *Document) { doc.DependencyProofV1.VisibleRecords = doc.DependencyProofV1.VisibleRecords[1:] }},
+		{"visible message hash mismatch", func(doc *Document) { doc.DependencyProofV1.VisibleRecords[0].SourceHash = strings.Repeat("f", 64) }},
+		{"visible message source identity mismatch", func(doc *Document) { doc.TurnUnits[0].UserMessage.SourceRef.SourceIdentity = "foreign" }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			changed := cloneDocumentWithProof(document)
+			test.edit(&changed)
+			if test.name != "arbitrary dependency digest" && changed.DependencyProofV1 != nil {
+				changed.DependencyDigest = dependencyProofDigest(*changed.DependencyProofV1)
+			}
+			changed.Digest = CanonicalDigest(changed)
+			body, renderErr := Render(changed)
+			if test.name == "arbitrary dependency digest" {
+				if renderErr == nil {
+					t.Fatal("arbitrary dependency digest remained structurally valid")
+				}
+				return
+			}
+			if renderErr != nil {
+				t.Fatalf("forged document was not structurally valid: %v", renderErr)
+			}
+			forged, parseErr := Parse(body)
+			if parseErr != nil {
+				t.Fatalf("forged document was not canonical: %v", parseErr)
+			}
+			if err := ValidateRetainedEvidence(forged, view, []memory.ObservationRevision{verification}); err == nil {
+				t.Fatal("inconsistent dependency proof authenticated")
+			}
+		})
+	}
+}
+
+func cloneDocumentWithProof(document Document) Document {
+	changed := document
+	changed.TurnUnits = append([]TurnUnit(nil), document.TurnUnits...)
+	if document.DependencyProofV1 != nil {
+		proof := *document.DependencyProofV1
+		proof.VisibleRecords = append([]DependencyRecordProofV1(nil), proof.VisibleRecords...)
+		proof.ActiveRevisionIDs = append([]string(nil), proof.ActiveRevisionIDs...)
+		changed.DependencyProofV1 = &proof
+	}
+	return changed
+}

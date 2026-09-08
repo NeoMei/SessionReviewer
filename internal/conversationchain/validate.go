@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"unicode/utf8"
+
+	"github.com/neomei/SessionReviewer/internal/memory"
 )
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]*$`)
@@ -24,6 +26,11 @@ func Validate(document Document) error {
 	}
 	if len(document.TurnUnits) > 65536 {
 		return errors.New("conversation chain exceeds turn limit")
+	}
+	if document.DependencyProofV1 != nil {
+		if err := validateDependencyProof(document, *document.DependencyProofV1); err != nil {
+			return err
+		}
 	}
 	if document.Coverage.SourceMessages > MaxWireInteger || document.Coverage.CapturedMessages > MaxWireInteger || document.Coverage.TurnUnits > MaxWireInteger || document.Coverage.UnansweredUnits > MaxWireInteger || document.Coverage.TruncatedMessages > MaxWireInteger {
 		return errors.New("conversation chain coverage exceeds the wire integer maximum")
@@ -103,6 +110,43 @@ func Validate(document Document) error {
 		return errors.New("conversation chain coverage does not reconcile")
 	}
 	return nil
+}
+
+func validateDependencyProof(document Document, proof DependencyProofV1) error {
+	if !digestPattern.MatchString(proof.SessionViewDigest) || !digestPattern.MatchString(proof.SourceRecordDigest) || !validID(proof.RuleVersion) || !validID(proof.RedactionVersion) {
+		return errors.New("invalid conversation dependency proof metadata")
+	}
+	if len(proof.VisibleRecords) > 100000 {
+		return errors.New("conversation dependency proof exceeds visible-record limit")
+	}
+	var previous uint64
+	for index, record := range proof.VisibleRecords {
+		if record.RecordOrdinal == 0 || record.RecordOrdinal > MaxWireInteger || !shaPattern.MatchString(record.SourceHash) || (index > 0 && record.RecordOrdinal <= previous) {
+			return errors.New("conversation dependency proof has invalid visible records")
+		}
+		previous = record.RecordOrdinal
+	}
+	if len(proof.ActiveRevisionIDs) > 65536 {
+		return errors.New("conversation dependency proof exceeds active-revision limit")
+	}
+	for index, revisionID := range proof.ActiveRevisionIDs {
+		if !digestPattern.MatchString(revisionID) || (index > 0 && proof.ActiveRevisionIDs[index-1] >= revisionID) {
+			return errors.New("conversation dependency proof has invalid active revisions")
+		}
+	}
+	want, err := memory.Digest(proof)
+	if err != nil || document.DependencyDigest != want {
+		return errors.Join(errors.New("conversation dependency digest does not match proof"), err)
+	}
+	return nil
+}
+
+func dependencyProofDigest(proof DependencyProofV1) string {
+	digest, err := memory.Digest(proof)
+	if err != nil {
+		return ""
+	}
+	return digest
 }
 
 func validateMessage(document Document, message Message, expected Role) error {

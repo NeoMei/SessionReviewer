@@ -104,6 +104,14 @@ func TestExpandedV4SchemasEnforceRevisionAndSafeIntegerBoundaries(t *testing.T) 
 	if err := validateContractSchema(chainSchema, chain, "$", chainSchema); err == nil {
 		t.Fatal("conversation schema accepted an integer above the JavaScript safe maximum")
 	}
+	proofChain := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "conversation-chain-v1.proof.valid.json")).(map[string]any)
+	if err := validateContractSchema(chainSchema, proofChain, "$", chainSchema); err != nil {
+		t.Fatalf("conversation schema rejected valid dependency proof: %v", err)
+	}
+	proofChain["dependency_proof_v1"].(map[string]any)["visible_records"].([]any)[0].(map[string]any)["record_ordinal"] = json.Number("0")
+	if err := validateContractSchema(chainSchema, proofChain, "$", chainSchema); err == nil {
+		t.Fatal("conversation schema accepted a zero dependency proof ordinal")
+	}
 
 	candidateSchema := readContractJSON(t, filepath.Join("..", "..", "schemas", "problem-map-candidate-v1.schema.json"))
 	candidates := readContractJSON(t, filepath.Join("..", "..", "testdata", "contracts", "v4", "problem-map-candidate-v1.valid.json")).(map[string]any)

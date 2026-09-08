@@ -2,6 +2,7 @@ package conversationchain
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +18,21 @@ func TestParseFrozenConversationChainFixtures(t *testing.T) {
 	if _, err := Parse(valid); err != nil {
 		t.Fatalf("valid fixture rejected: %v", err)
 	}
+	proofFixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.proof.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proofDocument, err := Parse(proofFixture)
+	if err != nil {
+		var raw Document
+		if decodeErr := json.Unmarshal(proofFixture, &raw); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		t.Fatalf("valid proof fixture rejected: %v (proof digest %s)", err, dependencyProofDigest(*raw.DependencyProofV1))
+	}
+	if proofDocument.DependencyProofV1 == nil || dependencyProofDigest(*proofDocument.DependencyProofV1) != proofDocument.DependencyDigest {
+		t.Fatal("valid proof fixture lost its dependency preimage")
+	}
 	invalid, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.invalid.json")
 	if err != nil {
 		t.Fatal(err)
@@ -26,6 +42,107 @@ func TestParseFrozenConversationChainFixtures(t *testing.T) {
 	} else if got := strictjson.CodeOf(err); got != "wire_contract_invalid" {
 		t.Fatalf("rejection code = %q, want wire_contract_invalid: %v", got, err)
 	}
+}
+
+func TestLegacyConversationChainWithoutDependencyProofPreservesFrozenBytes(t *testing.T) {
+	fixture, err := os.ReadFile("../../testdata/contracts/v4/conversation-chain-v1.valid.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := Parse(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.DependencyProofV1 != nil {
+		t.Fatal("legacy fixture unexpectedly acquired a dependency proof")
+	}
+	if got := CanonicalDigest(document); got != "sha256:6b047065af598dc399c64ef25f7fad0979665cfbe1976877225fc3e85bbf04a0" {
+		t.Fatalf("optional dependency proof changed legacy canonical digest: %s", got)
+	}
+	rendered, err := Render(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rendered), "dependency_proof_v1") {
+		t.Fatal("legacy document rendered a previously absent dependency proof")
+	}
+}
+
+func TestConversationChainDependencyProofIsStrictlyBounded(t *testing.T) {
+	document := frozenChain()
+	document.DependencyProofV1 = &DependencyProofV1{
+		SessionViewDigest:  document.SessionViewDigest,
+		SourceRecordDigest: "sha256:" + strings.Repeat("4", 64),
+		VisibleRecords:     []DependencyRecordProofV1{{RecordOrdinal: 7, SourceHash: strings.Repeat("3", 64)}},
+		ActiveRevisionIDs:  []string{}, RuleVersion: document.SegmentationRuleVersion, RedactionVersion: "redaction-v1",
+	}
+	document.DependencyDigest = dependencyProofDigest(*document.DependencyProofV1)
+	if _, err := Render(document); err != nil {
+		t.Fatalf("valid proof rejected: %v", err)
+	}
+	tests := []struct {
+		name string
+		edit func(*DependencyProofV1)
+	}{
+		{"zero visible ordinal", func(proof *DependencyProofV1) { proof.VisibleRecords[0].RecordOrdinal = 0 }},
+		{"unsafe visible ordinal", func(proof *DependencyProofV1) { proof.VisibleRecords[0].RecordOrdinal = MaxWireInteger + 1 }},
+		{"duplicate visible ordinal", func(proof *DependencyProofV1) {
+			proof.VisibleRecords = append(proof.VisibleRecords, proof.VisibleRecords[0])
+		}},
+		{"unordered visible ordinal", func(proof *DependencyProofV1) {
+			proof.VisibleRecords = append([]DependencyRecordProofV1{{RecordOrdinal: 8, SourceHash: strings.Repeat("5", 64)}}, proof.VisibleRecords...)
+		}},
+		{"malformed visible hash", func(proof *DependencyProofV1) { proof.VisibleRecords[0].SourceHash = "bad" }},
+		{"duplicate active revision", func(proof *DependencyProofV1) {
+			proof.ActiveRevisionIDs = []string{"sha256:" + strings.Repeat("6", 64), "sha256:" + strings.Repeat("6", 64)}
+		}},
+		{"unordered active revisions", func(proof *DependencyProofV1) {
+			proof.ActiveRevisionIDs = []string{"sha256:" + strings.Repeat("7", 64), "sha256:" + strings.Repeat("6", 64)}
+		}},
+		{"malformed version", func(proof *DependencyProofV1) { proof.RedactionVersion = "bad version" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			changed := document
+			proof := *document.DependencyProofV1
+			proof.VisibleRecords = append([]DependencyRecordProofV1(nil), document.DependencyProofV1.VisibleRecords...)
+			proof.ActiveRevisionIDs = append([]string(nil), document.DependencyProofV1.ActiveRevisionIDs...)
+			changed.DependencyProofV1 = &proof
+			test.edit(&proof)
+			changed.DependencyDigest = dependencyProofDigest(proof)
+			if _, err := Render(changed); err == nil {
+				t.Fatal("invalid dependency proof accepted")
+			}
+		})
+	}
+
+	t.Run("visible record ceiling", func(t *testing.T) {
+		changed := document
+		proof := *document.DependencyProofV1
+		proof.VisibleRecords = make([]DependencyRecordProofV1, 100001)
+		for index := range proof.VisibleRecords {
+			proof.VisibleRecords[index] = DependencyRecordProofV1{RecordOrdinal: uint64(index + 1), SourceHash: strings.Repeat("3", 64)}
+		}
+		changed.DependencyProofV1 = &proof
+		changed.DependencyDigest = dependencyProofDigest(proof)
+		if err := Validate(changed); err == nil {
+			t.Fatal("dependency proof exceeded visible-record ceiling")
+		}
+	})
+
+	t.Run("active revision ceiling", func(t *testing.T) {
+		changed := document
+		proof := *document.DependencyProofV1
+		proof.ActiveRevisionIDs = make([]string, 65537)
+		for index := range proof.ActiveRevisionIDs {
+			proof.ActiveRevisionIDs[index] = fmt.Sprintf("sha256:%064x", index)
+		}
+		changed.DependencyProofV1 = &proof
+		changed.DependencyDigest = dependencyProofDigest(proof)
+		if err := Validate(changed); err == nil {
+			t.Fatal("dependency proof exceeded active-revision ceiling")
+		}
+	})
 }
 
 func TestRenderConversationChainNormalizesCollectionsAndBindsDigest(t *testing.T) {

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1, "minimum_reader_version": "0.4.0", "digest": "sha256:b9f3746b4971cfcc954a49804f2c33bb293350265b73d55f1a71d56a71fd0df7",
+  "project_id": "project-p", "provider": "claude", "session_id": "same-native-id",
+  "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "dependency_digest": "sha256:99464982d2068f0495062bffa83a2ccd3799d8bf9e798605e1e8836da2cc97c1",
+  "dependency_proof_v1": {
+    "session_view_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "source_record_digest": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "visible_records": [
+      { "record_ordinal": 1, "source_hash": "3333333333333333333333333333333333333333333333333333333333333333" },
+      { "record_ordinal": 2, "source_hash": "4444444444444444444444444444444444444444444444444444444444444444" }
+    ],
+    "active_revision_ids": [], "rule_version": "visible-turn-v1", "redaction_version": "redaction-v1"
+  },
+  "segmentation_rule_version": "visible-turn-v1",
+  "coverage": { "source_messages": 2, "captured_messages": 2, "turn_units": 1, "unanswered_units": 0, "truncated_messages": 0 },
+  "turn_units": [{
+    "turn_unit_id": "turn-1", "ordinal": 1, "started_at": "2026-09-04T00:00:00Z", "ended_at": "2026-09-04T00:00:02Z",
+    "user_message": {
+      "role": "user", "revision_id": "revision-user-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 1, "source_hash": "3333333333333333333333333333333333333333333333333333333333333333" },
+      "occurred_at": "2026-09-04T00:00:00Z", "visible_excerpt": "How should this problem be handled?", "truncated": false
+    },
+    "assistant_messages": [{
+      "role": "assistant", "revision_id": "revision-assistant-1",
+      "source_ref": { "provider": "claude", "session_id": "same-native-id", "source_identity": "source-1", "record_ordinal": 2, "source_hash": "4444444444444444444444444444444444444444444444444444444444444444" },
+      "occurred_at": "2026-09-04T00:00:01Z", "visible_excerpt": "Use a deterministic contract.", "truncated": false
+    }],
+    "actions": [], "results": [], "answer_state": "answered"
+  }]
+}

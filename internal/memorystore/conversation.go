@@ -2,10 +2,10 @@ package memorystore
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
+	"github.com/neomei/SessionReviewer/internal/memory"
 )
 
 // PutConversationChain stores one canonical, immutable conversation-chain
@@ -29,14 +29,12 @@ func (s *Store) PutConversationChain(value conversationchain.Document) (string, 
 	if err != nil {
 		return "", errors.Join(errors.New("conversation chain SessionView is unavailable"), err)
 	}
-	var view struct {
-		ProjectID string `json:"project_id"`
-		Provider  string `json:"provider"`
-		SessionID string `json:"session_id"`
-		Digest    string `json:"digest"`
-	}
-	if err := json.Unmarshal(viewBody, &view); err != nil || view.ProjectID != parsed.ProjectID || view.Provider != parsed.Provider || view.SessionID != parsed.SessionID || view.Digest != parsed.SessionViewDigest {
+	var view memory.SessionView
+	if err := decodeCanonicalJSON(viewBody, &view); err != nil || view.ProjectID != parsed.ProjectID || view.Provider != parsed.Provider || view.SessionID != parsed.SessionID || view.Digest != parsed.SessionViewDigest {
 		return "", errors.Join(errors.New("conversation chain SessionView identity mismatch"), err)
+	}
+	if err := conversationchain.ValidateDependencyProof(parsed, view); err != nil {
+		return "", errors.Join(errors.New("conversation chain dependency proof authentication failed"), err)
 	}
 	if err := s.putImmutable(ObjectConversationChain, parsed.Digest, body); err != nil {
 		return "", err

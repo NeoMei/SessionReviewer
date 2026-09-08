@@ -436,7 +436,13 @@ func TestRetentionKeepsCurrentAndHistoricalConversationChainClosure(t *testing.T
 	}
 
 	unreachable := historical
-	unreachable.DependencyDigest = prefixedDigest("unreachable-chain")
+	proof := *unreachable.DependencyProofV1
+	proof.RedactionVersion = "redaction-v2"
+	unreachable.DependencyProofV1 = &proof
+	unreachable.DependencyDigest, err = memory.Digest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
 	unreachable.Digest = conversationchain.CanonicalDigest(unreachable)
 	if _, err := store.PutConversationChain(unreachable); err != nil {
 		t.Fatal(err)

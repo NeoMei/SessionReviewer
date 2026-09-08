@@ -48,17 +48,18 @@ func Render(document Document) ([]byte, error) {
 
 func CanonicalDigest(document Document) string {
 	body := struct {
-		SchemaVersion           int        `json:"schema_version"`
-		MinimumReaderVersion    string     `json:"minimum_reader_version"`
-		ProjectID               string     `json:"project_id"`
-		Provider                string     `json:"provider"`
-		SessionID               string     `json:"session_id"`
-		SessionViewDigest       string     `json:"session_view_digest"`
-		DependencyDigest        string     `json:"dependency_digest"`
-		SegmentationRuleVersion string     `json:"segmentation_rule_version"`
-		Coverage                Coverage   `json:"coverage"`
-		TurnUnits               []TurnUnit `json:"turn_units"`
-	}{document.SchemaVersion, document.MinimumReaderVersion, document.ProjectID, document.Provider, document.SessionID, document.SessionViewDigest, document.DependencyDigest, document.SegmentationRuleVersion, document.Coverage, document.TurnUnits}
+		SchemaVersion           int                `json:"schema_version"`
+		MinimumReaderVersion    string             `json:"minimum_reader_version"`
+		ProjectID               string             `json:"project_id"`
+		Provider                string             `json:"provider"`
+		SessionID               string             `json:"session_id"`
+		SessionViewDigest       string             `json:"session_view_digest"`
+		DependencyDigest        string             `json:"dependency_digest"`
+		DependencyProofV1       *DependencyProofV1 `json:"dependency_proof_v1,omitempty"`
+		SegmentationRuleVersion string             `json:"segmentation_rule_version"`
+		Coverage                Coverage           `json:"coverage"`
+		TurnUnits               []TurnUnit         `json:"turn_units"`
+	}{document.SchemaVersion, document.MinimumReaderVersion, document.ProjectID, document.Provider, document.SessionID, document.SessionViewDigest, document.DependencyDigest, document.DependencyProofV1, document.SegmentationRuleVersion, document.Coverage, document.TurnUnits}
 	encoded, err := strictjson.Encode(body)
 	if err != nil {
 		return ""
@@ -68,6 +69,14 @@ func CanonicalDigest(document Document) string {
 }
 
 func normalize(document *Document) {
+	if document.DependencyProofV1 != nil {
+		if document.DependencyProofV1.VisibleRecords == nil {
+			document.DependencyProofV1.VisibleRecords = []DependencyRecordProofV1{}
+		}
+		if document.DependencyProofV1.ActiveRevisionIDs == nil {
+			document.DependencyProofV1.ActiveRevisionIDs = []string{}
+		}
+	}
 	if document.TurnUnits == nil {
 		document.TurnUnits = []TurnUnit{}
 	}

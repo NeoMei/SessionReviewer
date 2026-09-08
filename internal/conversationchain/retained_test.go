@@ -40,6 +40,19 @@ func TestMaterializeRetainedBuildsCausalTurnsAndTypedEvidence(t *testing.T) {
 	if doc.TurnUnits[0].Actions[0].RevisionID != started.RevisionID || doc.TurnUnits[0].Results[0].RevisionID != finished.RevisionID || doc.TurnUnits[0].Results[1].RevisionID != verified.RevisionID {
 		t.Fatalf("typed evidence lost source order or exact identity: %+v", doc.TurnUnits[0])
 	}
+	if doc.DependencyProofV1 == nil {
+		t.Fatal("materializer omitted dependency proof")
+	}
+	proof := doc.DependencyProofV1
+	if proof.SessionViewDigest != view.Digest || proof.SourceRecordDigest != view.SourceRecordDigest || proof.RuleVersion != "visible-turn-v1" || proof.RedactionVersion != "redaction-v1" {
+		t.Fatalf("dependency proof lost authenticated identity: %+v", proof)
+	}
+	if len(proof.VisibleRecords) != len(messages) || proof.VisibleRecords[0].RecordOrdinal != 1 || proof.VisibleRecords[0].SourceHash != strings.Repeat("a", 64) {
+		t.Fatalf("dependency proof lost complete ordered visible identity: %+v", proof.VisibleRecords)
+	}
+	if got := dependencyProofDigest(*proof); got != doc.DependencyDigest {
+		t.Fatalf("dependency digest %q does not bind proof %q", doc.DependencyDigest, got)
+	}
 	if got := doc.TurnUnits[0].Actions[0].SourceRef; got.RecordOrdinal != 3 || got.SourceHash != strings.Repeat("c", 64) || got.SourceIdentity != view.SourceIdentity {
 		t.Fatalf("typed evidence source reference changed: %+v", got)
 	}
@@ -53,7 +66,7 @@ func TestMaterializeRetainedBuildsCausalTurnsAndTypedEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(body, []byte(`"text":`)) {
+	if bytes.Contains(body, []byte(`"text":`)) || bytes.Contains(body, []byte(`"path":`)) || bytes.Contains(body, []byte(`"raw_record":`)) {
 		t.Fatal("full visible-body property persisted")
 	}
 	if bytes.Contains(body, []byte("/Users/neomei/private/project")) || bytes.Contains(body, []byte(secret)) || len(doc.TurnUnits[0].Results[0].Excerpt) > retainedEvidenceBytes {

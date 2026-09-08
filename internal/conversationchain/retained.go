@@ -29,20 +29,6 @@ type MaterializeReport struct {
 	SourceIncomplete bool
 }
 
-type retainedRecordIdentity struct {
-	RecordOrdinal uint64 `json:"record_ordinal"`
-	SourceHash    string `json:"source_hash"`
-}
-
-type retainedDependencyIdentity struct {
-	SessionViewDigest  string                   `json:"session_view_digest"`
-	SourceRecordDigest string                   `json:"source_record_digest"`
-	VisibleRecords     []retainedRecordIdentity `json:"visible_records"`
-	ActiveRevisionIDs  []string                 `json:"active_revision_ids"`
-	RuleVersion        string                   `json:"rule_version"`
-	RedactionVersion   string                   `json:"redaction_version"`
-}
-
 // Materialize builds the bounded retained conversation chain from an
 // authenticated SessionView, visible source messages, and its exact active
 // observation revisions. Source ordinals, not wall clocks, define causality.
@@ -142,11 +128,12 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 			}
 		}
 	}
-	dependency, err := retainedDependencyDigest(input)
-	if err != nil {
-		return Document{}, report, fmt.Errorf("digest retained conversation dependencies: %w", err)
+	proof := retainedDependencyProof(input)
+	document.DependencyProofV1 = &proof
+	document.DependencyDigest = dependencyProofDigest(proof)
+	if document.DependencyDigest == "" {
+		return Document{}, report, errors.New("digest retained conversation dependencies")
 	}
-	document.DependencyDigest = dependency
 	body, err := Render(document)
 	if err != nil {
 		return Document{}, report, fmt.Errorf("render retained conversation: %w", err)
@@ -360,15 +347,15 @@ func retainedFactExcerpt(revision memory.ObservationRevision, policy retainedFac
 	return excerpt
 }
 
-func retainedDependencyDigest(input MaterializeInput) (string, error) {
-	records := make([]retainedRecordIdentity, 0, len(input.Messages))
+func retainedDependencyProof(input MaterializeInput) DependencyProofV1 {
+	records := make([]DependencyRecordProofV1, 0, len(input.Messages))
 	for _, message := range input.Messages {
-		records = append(records, retainedRecordIdentity{RecordOrdinal: message.RecordOrdinal, SourceHash: message.RecordHash})
+		records = append(records, DependencyRecordProofV1{RecordOrdinal: message.RecordOrdinal, SourceHash: message.RecordHash})
 	}
 	active := append([]string(nil), input.View.ActiveRevisionIDs...)
 	sort.Strings(active)
-	return memory.Digest(retainedDependencyIdentity{
+	return DependencyProofV1{
 		SessionViewDigest: input.View.Digest, SourceRecordDigest: input.View.SourceRecordDigest,
 		VisibleRecords: records, ActiveRevisionIDs: active, RuleVersion: input.RuleVersion, RedactionVersion: input.RedactionVersion,
-	})
+	}
 }

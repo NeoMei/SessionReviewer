@@ -70,16 +70,36 @@ type Coverage struct {
 	TruncatedMessages uint64 `json:"truncated_messages" required:"true"`
 }
 
+// DependencyRecordProofV1 retains only the source coordinate identity that
+// participated in materialization. It never carries source bodies or paths.
+type DependencyRecordProofV1 struct {
+	RecordOrdinal uint64 `json:"record_ordinal" required:"true"`
+	SourceHash    string `json:"source_hash" required:"true"`
+}
+
+// DependencyProofV1 is the bounded preimage of Document.DependencyDigest.
+// The pointer on Document remains optional so historical standalone codec
+// fixtures retain their exact canonical bytes.
+type DependencyProofV1 struct {
+	SessionViewDigest  string                    `json:"session_view_digest" required:"true"`
+	SourceRecordDigest string                    `json:"source_record_digest" required:"true"`
+	VisibleRecords     []DependencyRecordProofV1 `json:"visible_records" required:"true"`
+	ActiveRevisionIDs  []string                  `json:"active_revision_ids" required:"true"`
+	RuleVersion        string                    `json:"rule_version" required:"true"`
+	RedactionVersion   string                    `json:"redaction_version" required:"true"`
+}
+
 type Document struct {
-	SchemaVersion           int        `json:"schema_version" required:"true"`
-	MinimumReaderVersion    string     `json:"minimum_reader_version" required:"true"`
-	Digest                  string     `json:"digest" required:"true"`
-	ProjectID               string     `json:"project_id" required:"true"`
-	Provider                string     `json:"provider" required:"true"`
-	SessionID               string     `json:"session_id" required:"true"`
-	SessionViewDigest       string     `json:"session_view_digest" required:"true"`
-	DependencyDigest        string     `json:"dependency_digest" required:"true"`
-	SegmentationRuleVersion string     `json:"segmentation_rule_version" required:"true"`
-	Coverage                Coverage   `json:"coverage" required:"true"`
-	TurnUnits               []TurnUnit `json:"turn_units" required:"true"`
+	SchemaVersion           int                `json:"schema_version" required:"true"`
+	MinimumReaderVersion    string             `json:"minimum_reader_version" required:"true"`
+	Digest                  string             `json:"digest" required:"true"`
+	ProjectID               string             `json:"project_id" required:"true"`
+	Provider                string             `json:"provider" required:"true"`
+	SessionID               string             `json:"session_id" required:"true"`
+	SessionViewDigest       string             `json:"session_view_digest" required:"true"`
+	DependencyDigest        string             `json:"dependency_digest" required:"true"`
+	DependencyProofV1       *DependencyProofV1 `json:"dependency_proof_v1,omitempty"`
+	SegmentationRuleVersion string             `json:"segmentation_rule_version" required:"true"`
+	Coverage                Coverage           `json:"coverage" required:"true"`
+	TurnUnits               []TurnUnit         `json:"turn_units" required:"true"`
 }

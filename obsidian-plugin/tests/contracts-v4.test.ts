@@ -57,6 +57,14 @@ describe("public contract types preserve closed wire enums", () => {
     expectTypeOf<ProblemNodeV4["answer_state"]>().toEqualTypeOf<"no_answer" | "answered_unverified" | "execution_verified">();
     expectTypeOf<ProblemNodeV4["provenance"]>().toEqualTypeOf<"human_created" | "migrated" | "candidate_confirmed">();
     expectTypeOf<ConversationChainV1["turn_units"][number]["results"][number]["verification_state"]>().toEqualTypeOf<"unknown" | "passed" | "failed" | "partial">();
+		expectTypeOf<ConversationChainV1["dependency_proof_v1"]>().toEqualTypeOf<{
+			session_view_digest: string;
+			source_record_digest: string;
+			visible_records: Array<{ record_ordinal: number; source_hash: string }>;
+			active_revision_ids: string[];
+			rule_version: string;
+			redaction_version: string;
+		} | undefined>();
   });
 });
 
@@ -548,6 +556,30 @@ describe("conversation chain and problem map contracts", () => {
     turn.actions[0].raw_tool_output = { secret: true };
     expect(codeOf(captureRejection(() => parseConversationChainV1(JSON.stringify(chain))))).toBe("wire_shape_invalid");
   });
+
+	it("accepts legacy omitted proof bytes and strictly validates present dependency proofs", async () => {
+		const legacy = await pluginFixture("conversation-chain-v1.valid.json");
+		expect(parseConversationChainV1(legacy).dependency_proof_v1).toBeUndefined();
+		const source = await pluginFixture("conversation-chain-v1.proof.valid.json");
+		const parsed = parseConversationChainV1(source);
+		expect(parsed.dependency_proof_v1?.visible_records).toHaveLength(2);
+		await expect(readFile(resolve(here, "fixtures/v4/conversation-chain-v1.proof.valid.json")))
+			.resolves.toEqual(await sharedFixture("conversation-chain-v1.proof.valid.json"));
+
+		const mutations: Array<[string, (value: JsonObject) => void, RegExp]> = [
+			["arbitrary digest", (value) => { value.dependency_digest = `sha256:${"f".repeat(64)}`; }, /dependency.*proof|proof.*digest/i],
+			["view binding", (value) => { (value.dependency_proof_v1 as JsonObject).session_view_digest = `sha256:${"f".repeat(64)}`; }, /view.*proof|proof.*view/i],
+			["rule binding", (value) => { (value.dependency_proof_v1 as JsonObject).rule_version = "visible-turn-v2"; }, /rule.*proof|proof.*rule/i],
+			["visible ref binding", (value) => { (((value.turn_units as JsonObject[])[0].user_message as JsonObject).source_ref as JsonObject).source_hash = "f".repeat(64); }, /message.*proof|proof.*message/i],
+			["zero ordinal", (value) => { ((value.dependency_proof_v1 as JsonObject).visible_records as JsonObject[])[0].record_ordinal = 0; }, /positive|ordinal/i],
+			["unordered ordinal", (value) => { ((value.dependency_proof_v1 as JsonObject).visible_records as JsonObject[]).reverse(); }, /order|ordinal/i],
+		];
+		for (const [name, mutate, pattern] of mutations) {
+			const value = JSON.parse(source) as JsonObject;
+			mutate(value);
+			expect(() => parseConversationChainV1(JSON.stringify(value)), name).toThrow(pattern);
+		}
+	});
 
   it("binds both new contracts to canonical digests that omit only their digest field", async () => {
     const chain = await fixtureObject("conversation-chain-v1.valid.json");

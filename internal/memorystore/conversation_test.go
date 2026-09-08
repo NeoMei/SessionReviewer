@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 func TestPutConversationChainIsCanonicalImmutableCAS(t *testing.T) {
@@ -60,6 +62,31 @@ func TestPutConversationChainIsCanonicalImmutableCAS(t *testing.T) {
 				t.Fatalf("foreign %s accepted: %v", name, err)
 			}
 		})
+	}
+}
+
+func TestPutConversationChainRequiresAuthenticatedDependencyProof(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-chain-proof-put")
+	chain := materializedConversationChain(t, fixture.session, fixture.observation)
+
+	missing := cloneConversationChainWithProof(chain)
+	missing.DependencyProofV1 = nil
+	missing.Digest = conversationchain.CanonicalDigest(missing)
+	if _, err := store.PutConversationChain(missing); err == nil || !strings.Contains(err.Error(), "dependency proof") {
+		t.Fatalf("missing dependency proof accepted: %v", err)
+	}
+
+	arbitrary := cloneConversationChainWithProof(chain)
+	arbitrary.DependencyDigest = prefixedDigest("arbitrary-dependency")
+	arbitrary.Digest = conversationchain.CanonicalDigest(arbitrary)
+	if _, err := store.PutConversationChain(arbitrary); err == nil || !strings.Contains(err.Error(), "dependency") {
+		t.Fatalf("arbitrary dependency digest accepted: %v", err)
 	}
 }
 
@@ -148,7 +175,13 @@ func TestOpenReadOnlyLoadsConversationChainButCannotCreateOne(t *testing.T) {
 		t.Fatalf("read-only chain load: %v", err)
 	}
 	newChain := chain
-	newChain.DependencyDigest = prefixedDigest("new-chain")
+	proof := *newChain.DependencyProofV1
+	proof.RedactionVersion = "redaction-v2"
+	newChain.DependencyProofV1 = &proof
+	newChain.DependencyDigest, err = memory.Digest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
 	newChain.Digest = conversationchain.CanonicalDigest(newChain)
 	if _, err := readOnly.PutConversationChain(newChain); err == nil || !strings.Contains(err.Error(), "read-only") {
 		t.Fatalf("read-only store created chain: %v", err)
@@ -280,6 +313,91 @@ func TestCurrentAndHistoricalSemanticForgeryFailsPrepareAndReload(t *testing.T) 
 	}
 }
 
+func TestCurrentAndHistoricalDependencyProofForgeryFailsPrepareAndReload(t *testing.T) {
+	mutations := []struct {
+		name string
+		edit func(*conversationchain.Document)
+	}{
+		{"missing-proof", func(chain *conversationchain.Document) { chain.DependencyProofV1 = nil }},
+		{"arbitrary-dependency-digest", func(chain *conversationchain.Document) {
+			chain.DependencyDigest = prefixedDigest("arbitrary-dependency")
+		}},
+		{"mismatched-view", func(chain *conversationchain.Document) {
+			chain.DependencyProofV1.SessionViewDigest = prefixedDigest("foreign-view")
+		}},
+		{"mismatched-source", func(chain *conversationchain.Document) {
+			chain.DependencyProofV1.SourceRecordDigest = prefixedDigest("foreign-source")
+		}},
+		{"mismatched-active", func(chain *conversationchain.Document) { chain.DependencyProofV1.ActiveRevisionIDs = []string{} }},
+		{"mismatched-rule", func(chain *conversationchain.Document) { chain.DependencyProofV1.RuleVersion = "visible-turn-v2" }},
+		{"missing-visible-ref", func(chain *conversationchain.Document) {
+			chain.DependencyProofV1.VisibleRecords = chain.DependencyProofV1.VisibleRecords[1:]
+		}},
+		{"mismatched-visible-ref", func(chain *conversationchain.Document) {
+			chain.DependencyProofV1.VisibleRecords[0].SourceHash = strings.Repeat("f", 64)
+		}},
+		{"malformed-visible-ref", func(chain *conversationchain.Document) { chain.DependencyProofV1.VisibleRecords[0].RecordOrdinal = 0 }},
+	}
+	for _, historical := range []bool{false, true} {
+		for _, reload := range []bool{false, true} {
+			for _, mutation := range mutations {
+				name := "current-prepare-" + mutation.name
+				if historical {
+					name = "historical-prepare-" + mutation.name
+				}
+				if reload {
+					name = strings.Replace(name, "-prepare-", "-reload-", 1)
+				}
+				t.Run(name, func(t *testing.T) {
+					dataRoot := t.TempDir()
+					store, err := Open(dataRoot, testProjectID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer store.Close()
+					fixture := buildStoredFixture(t, store, "generation-chain-proof-"+name)
+					view, revision := fixture.session, fixture.observation
+					if historical {
+						view, revision = putHistoricalSessionView(t, store, fixture.session)
+					}
+					chain := materializedConversationChain(t, view, revision)
+					chain = cloneConversationChainWithProof(chain)
+					mutation.edit(&chain)
+					if mutation.name != "missing-proof" && mutation.name != "arbitrary-dependency-digest" {
+						chain.DependencyDigest, err = memory.Digest(*chain.DependencyProofV1)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					chain.Digest = conversationchain.CanonicalDigest(chain)
+					body, err := strictjson.Encode(chain)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(conversationChainPath(dataRoot, chain.Digest), body, 0o600); err != nil {
+						t.Fatal(err)
+					}
+					dependency := memory.ConversationChainDependency{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, Digest: chain.Digest}
+					if historical {
+						fixture.manifest.RetainedConversationChains = []memory.ConversationChainDependency{dependency}
+					} else {
+						fixture.manifest.ConversationChains = []memory.ConversationChainDependency{dependency}
+					}
+					if reload {
+						writePreparedGraphWithoutReconciliation(t, dataRoot, store, fixture.manifest)
+						_, _, err = store.LoadPrepared()
+					} else {
+						_, err = store.PrepareGeneration(fixture.manifest)
+					}
+					if err == nil {
+						t.Fatalf("canonical dependency forgery crossed %s", name)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestPrepareGenerationRejectsMissingConversationChain(t *testing.T) {
 	dataRoot := t.TempDir()
 	store, err := Open(dataRoot, testProjectID)
@@ -296,11 +414,22 @@ func TestPrepareGenerationRejectsMissingConversationChain(t *testing.T) {
 
 func emptyConversationChain(t *testing.T, view memory.SessionView) conversationchain.Document {
 	t.Helper()
+	active := append([]string(nil), view.ActiveRevisionIDs...)
+	sort.Strings(active)
+	proof := conversationchain.DependencyProofV1{
+		SessionViewDigest: view.Digest, SourceRecordDigest: view.SourceRecordDigest,
+		VisibleRecords: []conversationchain.DependencyRecordProofV1{}, ActiveRevisionIDs: active,
+		RuleVersion: "visible-turn-v1", RedactionVersion: "redaction-v1",
+	}
+	dependency, err := memory.Digest(proof)
+	if err != nil {
+		t.Fatal(err)
+	}
 	value := conversationchain.Document{
 		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Digest: "sha256:" + strings.Repeat("0", 64),
 		ProjectID: view.ProjectID, Provider: view.Provider, SessionID: view.SessionID,
-		SessionViewDigest: view.Digest, DependencyDigest: prefixedDigest("chain-dependency"), SegmentationRuleVersion: "visible-turn-v1",
-		Coverage: conversationchain.Coverage{}, TurnUnits: []conversationchain.TurnUnit{},
+		SessionViewDigest: view.Digest, DependencyDigest: dependency, DependencyProofV1: &proof,
+		SegmentationRuleVersion: "visible-turn-v1", Coverage: conversationchain.Coverage{}, TurnUnits: []conversationchain.TurnUnit{},
 	}
 	body, err := conversationchain.Render(value)
 	if err != nil {
@@ -363,4 +492,31 @@ func putHistoricalSessionView(t *testing.T, store *Store, base memory.SessionVie
 
 func conversationChainPath(dataRoot, digest string) string {
 	return filepath.Join(dataRoot, "projects", testProjectID, "memory-v1", "conversation-chains", digestLeaf(digest, ".json"))
+}
+
+func cloneConversationChainWithProof(chain conversationchain.Document) conversationchain.Document {
+	changed := chain
+	changed.TurnUnits = append([]conversationchain.TurnUnit(nil), chain.TurnUnits...)
+	if chain.DependencyProofV1 != nil {
+		proof := *chain.DependencyProofV1
+		proof.VisibleRecords = append([]conversationchain.DependencyRecordProofV1(nil), proof.VisibleRecords...)
+		proof.ActiveRevisionIDs = append([]string(nil), proof.ActiveRevisionIDs...)
+		changed.DependencyProofV1 = &proof
+	}
+	return changed
+}
+
+func writePreparedGraphWithoutReconciliation(t *testing.T, dataRoot string, store *Store, manifest memory.GenerationManifest) {
+	t.Helper()
+	artifacts, err := store.prepareArtifacts(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dataRoot, "projects", testProjectID, "memory-v1")
+	if err := os.WriteFile(filepath.Join(root, "generations", manifest.GenerationID+".json"), artifacts.manifestBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "manifest.json"), artifacts.pointerBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }

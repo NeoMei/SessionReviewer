@@ -3,6 +3,7 @@ package conversationchain
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/neomei/SessionReviewer/internal/memory"
 )
@@ -11,14 +12,8 @@ import (
 // deterministic retained projection of every typed fact in document against
 // one immutable SessionView and its complete active revision set.
 func ValidateRetainedEvidence(document Document, view memory.SessionView, revisions []memory.ObservationRevision) error {
-	if err := Validate(document); err != nil {
-		return fmt.Errorf("invalid conversation chain: %w", err)
-	}
-	if err := memory.ValidateSessionView(view); err != nil {
-		return fmt.Errorf("invalid SessionView: %w", err)
-	}
-	if document.ProjectID != view.ProjectID || document.Provider != view.Provider || document.SessionID != view.SessionID || document.SessionViewDigest != view.Digest {
-		return errors.New("conversation chain identity does not match SessionView")
+	if err := ValidateDependencyProof(document, view); err != nil {
+		return fmt.Errorf("conversation chain dependency proof: %w", err)
 	}
 
 	active := make(map[string]memory.ObservationRevision, len(revisions))
@@ -94,6 +89,61 @@ func ValidateRetainedEvidence(document Document, view memory.SessionView, revisi
 			previousResult = result.SourceRef.RecordOrdinal
 			if err := validateRetainedResult(result, view, active, start, end, seenEvidence); err != nil {
 				return fmt.Errorf("turn %d result: %w", turnIndex, err)
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateDependencyProof binds the document's content-free dependency
+// preimage to one authenticated SessionView and every retained message.
+func ValidateDependencyProof(document Document, view memory.SessionView) error {
+	if err := Validate(document); err != nil {
+		return fmt.Errorf("invalid conversation chain: %w", err)
+	}
+	if err := memory.ValidateSessionView(view); err != nil {
+		return fmt.Errorf("invalid SessionView: %w", err)
+	}
+	if document.ProjectID != view.ProjectID || document.Provider != view.Provider || document.SessionID != view.SessionID || document.SessionViewDigest != view.Digest {
+		return errors.New("conversation chain identity does not match SessionView")
+	}
+	proof := document.DependencyProofV1
+	if proof == nil {
+		return errors.New("dependency proof is required")
+	}
+	if proof.SessionViewDigest != document.SessionViewDigest || proof.SessionViewDigest != view.Digest {
+		return errors.New("SessionView digest does not match authenticated view")
+	}
+	if proof.SourceRecordDigest != view.SourceRecordDigest {
+		return errors.New("source-record digest does not match authenticated view")
+	}
+	if proof.RuleVersion != document.SegmentationRuleVersion {
+		return errors.New("rule version does not match conversation chain")
+	}
+	active := append([]string(nil), view.ActiveRevisionIDs...)
+	sort.Strings(active)
+	if len(active) != len(proof.ActiveRevisionIDs) {
+		return errors.New("active revisions do not match authenticated view")
+	}
+	for index := range active {
+		if active[index] != proof.ActiveRevisionIDs[index] {
+			return errors.New("active revisions do not match authenticated view")
+		}
+	}
+	records := make(map[uint64]string, len(proof.VisibleRecords))
+	for _, record := range proof.VisibleRecords {
+		records[record.RecordOrdinal] = record.SourceHash
+	}
+	match := func(message Message) bool {
+		return message.SourceRef.SourceIdentity == view.SourceIdentity && records[message.SourceRef.RecordOrdinal] == message.SourceRef.SourceHash
+	}
+	for _, turn := range document.TurnUnits {
+		if !match(turn.UserMessage) {
+			return errors.New("user message is absent from dependency proof")
+		}
+		for _, message := range turn.AssistantMessages {
+			if !match(message) {
+				return errors.New("assistant message is absent from dependency proof")
 			}
 		}
 	}

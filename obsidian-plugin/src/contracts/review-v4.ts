@@ -530,6 +530,18 @@ export interface ConversationMessageV1 {
   truncated: boolean;
 }
 
+export interface ConversationDependencyProofV1 {
+  session_view_digest: string;
+  source_record_digest: string;
+  visible_records: Array<{
+    record_ordinal: number;
+    source_hash: string;
+  }>;
+  active_revision_ids: string[];
+  rule_version: string;
+  redaction_version: string;
+}
+
 export interface ConversationChainV1 {
   schema_version: 1;
   minimum_reader_version: "0.4.0";
@@ -539,6 +551,7 @@ export interface ConversationChainV1 {
   session_id: string;
   session_view_digest: string;
   dependency_digest: string;
+  dependency_proof_v1?: ConversationDependencyProofV1;
   segmentation_rule_version: string;
   coverage: {
     source_messages: number;

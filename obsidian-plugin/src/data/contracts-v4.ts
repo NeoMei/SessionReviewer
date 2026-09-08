@@ -9,6 +9,7 @@ import type {
   ChainDependencyV4,
   ClosedLoopV4,
   ConversationChainV1,
+  ConversationDependencyProofV1,
   ConversationMessageV1,
   ConversationSourceRefV1,
   CoverageV1,
@@ -447,19 +448,26 @@ export function parseSessionEventPageV1(source: string): SessionEventPageV1 {
 export function parseConversationChainV1(source: string): ConversationChainV1 {
   return atWireBoundary(() => {
     const row = documentObject(source, "conversation chain");
-    exact(row, "$", [
+    const chainKeys = [
       "schema_version", "minimum_reader_version", "digest", "project_id", "provider", "session_id",
-      "session_view_digest", "dependency_digest", "segmentation_rule_version", "coverage", "turn_units"
-    ]);
+      "session_view_digest", "dependency_digest", "dependency_proof_v1", "segmentation_rule_version", "coverage", "turn_units"
+    ];
+    exact(row, "$", chainKeys, chainKeys.filter((key) => key !== "dependency_proof_v1"));
     constant(row.schema_version, 1, "$.schema_version");
     version(row.minimum_reader_version, "$.minimum_reader_version");
     const claimedDigest = digest(row.digest, "$.digest");
     id(row.project_id, "$.project_id");
     const provider = id(row.provider, "$.provider");
     const sessionID = id(row.session_id, "$.session_id");
-    digest(row.session_view_digest, "$.session_view_digest");
-    digest(row.dependency_digest, "$.dependency_digest");
-    id(row.segmentation_rule_version, "$.segmentation_rule_version");
+    const sessionViewDigest = digest(row.session_view_digest, "$.session_view_digest");
+    const dependencyDigest = digest(row.dependency_digest, "$.dependency_digest");
+    const ruleVersion = id(row.segmentation_rule_version, "$.segmentation_rule_version");
+    const proof = row.dependency_proof_v1 === undefined ? undefined : parseConversationDependencyProof(row.dependency_proof_v1, "$.dependency_proof_v1");
+    if (proof !== undefined) {
+      if (proof.session_view_digest !== sessionViewDigest) throw new Error("conversation dependency proof view binding mismatch");
+      if (proof.rule_version !== ruleVersion) throw new Error("conversation dependency proof rule binding mismatch");
+      if (conversationDependencyProofDigest(proof) !== dependencyDigest) throw new Error("conversation dependency digest does not match proof");
+    }
     const coverage = object(row.coverage, "$.coverage");
     const coverageKeys = ["source_messages", "captured_messages", "turn_units", "unanswered_units", "truncated_messages"] as const;
     exact(coverage, "$.coverage", coverageKeys);
@@ -469,6 +477,7 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     let captured = 0;
     let unanswered = 0;
     let truncated = 0;
+    const proofRecords = proof === undefined ? undefined : new Map(proof.visible_records.map((record) => [record.record_ordinal, record.source_hash]));
     for (let index = 0; index < turns.length; index += 1) {
       const path = `$.turn_units[${index}]`;
       const turn = object(turns[index], path);
@@ -478,11 +487,17 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
       text(turn.started_at, `${path}.started_at`, 128, true);
       nullableText(turn.ended_at, `${path}.ended_at`, 128);
       const user = parseConversationMessage(turn.user_message, `${path}.user_message`, "user", provider, sessionID);
+      if (proofRecords !== undefined && proofRecords.get(user.source_ref.record_ordinal) !== user.source_ref.source_hash) {
+        throw new Error(`${path}.user_message is absent from dependency proof`);
+      }
       captured += 1;
       truncated += user.truncated ? 1 : 0;
       const assistants = boundedArray(turn.assistant_messages, `${path}.assistant_messages`, 65536);
       for (let item = 0; item < assistants.length; item += 1) {
         const message = parseConversationMessage(assistants[item], `${path}.assistant_messages[${item}]`, "assistant", provider, sessionID);
+        if (proofRecords !== undefined && proofRecords.get(message.source_ref.record_ordinal) !== message.source_ref.source_hash) {
+          throw new Error(`${path}.assistant_messages[${item}] is absent from dependency proof`);
+        }
         captured += 1;
         truncated += message.truncated ? 1 : 0;
       }
@@ -506,6 +521,34 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     }
     return result;
   });
+}
+
+function parseConversationDependencyProof(value: unknown, path: string): ConversationDependencyProofV1 {
+  const proof = object(value, path);
+  exact(proof, path, ["session_view_digest", "source_record_digest", "visible_records", "active_revision_ids", "rule_version", "redaction_version"]);
+  digest(proof.session_view_digest, `${path}.session_view_digest`);
+  digest(proof.source_record_digest, `${path}.source_record_digest`);
+  const records = boundedArray(proof.visible_records, `${path}.visible_records`, 100000);
+  let previous = 0;
+  for (let index = 0; index < records.length; index += 1) {
+    const recordPath = `${path}.visible_records[${index}]`;
+    const record = object(records[index], recordPath);
+    exact(record, recordPath, ["record_ordinal", "source_hash"]);
+    const ordinal = positiveInteger(record.record_ordinal, `${recordPath}.record_ordinal`);
+    sha256(record.source_hash, `${recordPath}.source_hash`);
+    if (index > 0 && ordinal <= previous) throw new Error(`${path}.visible_records are not in strict ordinal order`);
+    previous = ordinal;
+  }
+  const active = boundedArray(proof.active_revision_ids, `${path}.active_revision_ids`, 65536);
+  let previousRevision = "";
+  for (let index = 0; index < active.length; index += 1) {
+    const revision = digest(active[index], `${path}.active_revision_ids[${index}]`);
+    if (index > 0 && compareGoStrings(previousRevision, revision) >= 0) throw new Error(`${path}.active_revision_ids are not in strict order`);
+    previousRevision = revision;
+  }
+  id(proof.rule_version, `${path}.rule_version`);
+  id(proof.redaction_version, `${path}.redaction_version`);
+  return proof as unknown as ConversationDependencyProofV1;
 }
 
 export function parseProblemMapCandidateV1(source: string): ProblemMapCandidateV1 {
@@ -1868,6 +1911,7 @@ function canonicalConversationChainDigest(chain: ConversationChainV1): string {
     session_id: chain.session_id,
     session_view_digest: chain.session_view_digest,
     dependency_digest: chain.dependency_digest,
+    ...(chain.dependency_proof_v1 === undefined ? {} : { dependency_proof_v1: orderedConversationDependencyProof(chain.dependency_proof_v1) }),
     segmentation_rule_version: chain.segmentation_rule_version,
     coverage: {
       source_messages: chain.coverage.source_messages,
@@ -1895,6 +1939,29 @@ function canonicalConversationChainDigest(chain: ConversationChainV1): string {
     }))
   };
   return `sha256:${sha256Text(goJSON(body))}`;
+}
+
+function orderedConversationDependencyProof(proof: ConversationDependencyProofV1): JsonObject {
+  return {
+    session_view_digest: proof.session_view_digest,
+    source_record_digest: proof.source_record_digest,
+    visible_records: proof.visible_records.map((record) => ({ record_ordinal: record.record_ordinal, source_hash: record.source_hash })),
+    active_revision_ids: proof.active_revision_ids,
+    rule_version: proof.rule_version,
+    redaction_version: proof.redaction_version
+  };
+}
+
+function conversationDependencyProofDigest(proof: ConversationDependencyProofV1): string {
+  const canonical = {
+    active_revision_ids: proof.active_revision_ids,
+    redaction_version: proof.redaction_version,
+    rule_version: proof.rule_version,
+    session_view_digest: proof.session_view_digest,
+    source_record_digest: proof.source_record_digest,
+    visible_records: proof.visible_records.map((record) => ({ record_ordinal: record.record_ordinal, source_hash: record.source_hash }))
+  };
+  return `sha256:${sha256Text(goJSON(canonical))}`;
 }
 
 function canonicalProblemMapCandidateDigest(store: ProblemMapCandidateV1): string {
