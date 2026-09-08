@@ -105,14 +105,43 @@ func TestValidateSummaryRejectsInvalidItemsRulesAndSort(t *testing.T) {
 		t.Fatal("accepted invalid rule dependency digest")
 	}
 	s = minimumSummary()
-	s.PhaseBoundaries = Block{Total: 2, Shown: 2, Items: []Entry{{OccurredAt: "z", Sequence: 2, RevisionID: "revision-2", SourceRevisionIDs: []string{}}, {OccurredAt: "a", Sequence: 1, RevisionID: "revision-1", SourceRevisionIDs: []string{}}}, Coverage: Coverage{Seen: 2, Indexed: 2}}
-	if err := ValidateSummary(s); err == nil {
-		t.Fatal("accepted unstable summary item order")
-	}
-	s = minimumSummary()
 	s.PhaseBoundaries = Block{Total: 1, Shown: 1, Items: []Entry{{OccurredAt: "a", Sequence: 1, RevisionID: "revision-1", SourceRevisionIDs: []string{"source-1", "source-1"}}}, Coverage: Coverage{Seen: 1, Indexed: 1}}
 	if err := ValidateSummary(s); err == nil {
 		t.Fatal("accepted duplicate source revision IDs")
+	}
+}
+
+func TestValidateSummaryRejectsNonCanonicalOrderAfterValidEntryChecks(t *testing.T) {
+	ordered := Block{
+		Total: 2, Shown: 2, Coverage: Coverage{Seen: 2, Indexed: 2},
+		Items: []Entry{
+			{OccurredAt: "a", Sequence: 1, RevisionID: "revision-1", Text: "first", SourceRevisionIDs: []string{"source-1"}},
+			{OccurredAt: "z", Sequence: 2, RevisionID: "revision-2", Text: "second", SourceRevisionIDs: []string{"source-2"}},
+		},
+	}
+	for _, test := range []struct {
+		name      string
+		blockName string
+		wantError string
+	}{
+		{name: "normal block", blockName: "phase_boundaries", wantError: "summary items are not in canonical order"},
+		{name: "error block", blockName: "errors", wantError: "error items are not in canonical order"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			valid := minimumSummary()
+			setSummaryTestBlock(&valid, test.blockName, ordered)
+			if err := ValidateSummary(valid); err != nil {
+				t.Fatalf("ordered positive control rejected before order check: %v", err)
+			}
+
+			reversed := ordered
+			reversed.Items = []Entry{ordered.Items[1], ordered.Items[0]}
+			invalid := minimumSummary()
+			setSummaryTestBlock(&invalid, test.blockName, reversed)
+			if err := ValidateSummary(invalid); err == nil || err.Error() != test.wantError {
+				t.Fatalf("non-canonical order error=%v, want %q", err, test.wantError)
+			}
+		})
 	}
 }
 

@@ -33,3 +33,9 @@ Status: implemented and locally verified on `codex/spec-ui-restoration` from bas
 ## Boundary
 
 This task does not implement or certify milestone/source/provider workflows, migration, release, installation, production, or native-client acceptance. The unrelated `docs/verification/2026-09-08-release-execution.md` working-tree edit is not included.
+
+## Round 1 review correction
+
+- Independent review found the old canonical-order negative case used empty `source_revision_ids`, so entry validation rejected it before the intended sort check.
+- The test-only correction gives both entries valid nonempty sources, proves the ordered positive control is accepted, then reverses them and requires the exact canonical-order error for both a normal block and the error block.
+- Focused command: `go test ./internal/inspect -run 'TestValidateSummary(RejectsInvalidItemsRulesAndSort|RejectsNonCanonicalOrderAfterValidEntryChecks)$' -count=1` passed.
