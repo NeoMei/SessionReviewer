@@ -22,6 +22,8 @@
 
 **Files:** Modify `internal/source/codex/decode.go`; create focused `internal/source/codex/command_classification_test.go`. A small same-package classification helper file is allowed if needed to keep responsibilities clear. Existing wire schemas remain unchanged.
 
+Reviewed integration scope extension: modify only `assertGateMalformedContinuation` in `test/zerotoken/gate_a_test.go` to follow the corrected conservative semantics. Its actual fixture records `go test ./internal/example && touch PROJECT-SCRIPT-MUST-NOT-RUN`; assert exact matching generic command start/finish and authoritative successful outcome, and explicitly reject specialized verification for that compound invocation. Keep the malicious-command canary, zero-process checks, malformed-source continuation, usage, diagnostic and permission checks intact. Do not regenerate import/capability baselines or weaken any no-execution guard.
+
 **Interfaces:** Existing `classifyCommand(command string) commandClass` feeds `pending.verificationComponent`, `verificationOperation` and `gitOperation`; `addToolOutput` generates typed observations only when those classifications are present. Preserve this interface and generic completion path.
 
 - [ ] Diagnose and RED: build an actual decoder fixture for `go test ./... || true` with authoritative shell exit0. Assert a generic successful `command_finished` remains but no `verification` observation is emitted. Contrast direct `go test ./...` exit0/1, which remains passed/failed. Confirm the current failure before editing production code.
@@ -46,3 +48,5 @@ for _, fact := range revisions {
 Static hypothesis: `strings.Fields` currently matches the leading executable/subcommand without validating shell structure; `addToolOutput` then attributes the entire exec invocation's exit code to that subcommand. The hypothesis is not accepted as reproduced until the decoder fixture fails.
 
 Ruling: Unsupported shell grammar retains generic command evidence but receives no specialized verification — captured aggregate exit status cannot prove a child outcome — cost if wrong is conservative missing qualification, not false completed milestones.
+
+Ruling: Correct the existing Gate A malformed-continuation expectation in this task — the old assertion requires a specialized verification for a compound command and contradicts the accepted conservative decoder boundary — cost if wrong is reduced semantic qualification; explicit generic evidence and zero-execution assertions remain required. This is a focused contract correction, not approval to regenerate capability baselines.
