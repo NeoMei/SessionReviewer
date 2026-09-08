@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,6 +62,26 @@ func scanConversationObjectNames(t *testing.T, dataRoot string) []string {
 		names = append(names, entry.Name())
 	}
 	return names
+}
+
+func scanStoredObjects(t *testing.T, dataRoot string) map[string]string {
+	t.Helper()
+	root := filepath.Join(dataRoot, "projects", scanTestProject, "memory-v1")
+	result := make(map[string]string)
+	for _, directory := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "conversation-chains", "generations"} {
+		entries, err := os.ReadDir(filepath.Join(root, directory))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			body, err := os.ReadFile(filepath.Join(root, directory, entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			result[filepath.Join(directory, entry.Name())] = string(body)
+		}
+	}
+	return result
 }
 
 func TestScanConversationPersistsCanonicalPrivateChainBeforePreparation(t *testing.T) {
@@ -358,5 +379,62 @@ func TestScanConversationCancellationBeforePreparedAdvanceKeepsPriorPointer(t *t
 	after := scanConversationObjectNames(t, harness.options.DataRoot)
 	if len(after) != len(before)+1 {
 		t.Fatalf("expected one immutable orphan before cancelled advance: before=%v after=%v", before, after)
+	}
+}
+
+func TestScanConversationCumulativeByteBudgetLeavesPublishedStateAndObjectsUnchanged(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.adapter.visibleEnabled = true
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preparedBefore, manifestBefore, err := harness.store.LoadPrepared()
+	if err != nil || len(manifestBefore.ConversationChains) != 1 {
+		t.Fatalf("baseline prepared=%+v chains=%+v err=%v", preparedBefore, manifestBefore.ConversationChains, err)
+	}
+	firstBody, err := harness.store.LoadObject(memorystore.ObjectConversationChain, manifestBefore.ConversationChains[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: scanTestProject, GenerationID: first.GenerationID,
+		ManifestDigest: preparedBefore.ManifestDigest, ProjectViewDigest: preparedBefore.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64),
+		SessionIndexSHA256: strings.TrimPrefix(manifestBefore.SessionIndexDigest, "sha256:"), JournalVerified: true,
+	}
+	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
+		t.Fatal(err)
+	}
+	objectsBefore := scanStoredObjects(t, harness.options.DataRoot)
+	catalogBefore, err := harness.catalog.ListCandidates(scanTestProject)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	harness.addSource(2, memory.Indexed, scanTestProject)
+	harness.options.conversationChainBudgetBytes = int64(len(firstBody))
+	result, err := Run(context.Background(), harness.options)
+	if !errors.Is(err, ErrConversationChainBudget) || result.Prepared || result.State != Failed {
+		t.Fatalf("conversation budget result=%+v err=%v", result, err)
+	}
+	if !strings.Contains(err.Error(), "used "+strconv.Itoa(len(firstBody))) {
+		t.Fatalf("overflow occurred before the first document consumed the exact boundary: %v", err)
+	}
+	preparedAfter, manifestAfter, err := harness.store.LoadPrepared()
+	if err != nil || preparedAfter != preparedBefore || !reflect.DeepEqual(manifestAfter, manifestBefore) {
+		t.Fatalf("conversation budget changed prepared state: before=%+v/%+v after=%+v/%+v err=%v", preparedBefore, manifestBefore, preparedAfter, manifestAfter, err)
+	}
+	publishedAfter, publishedManifest, err := harness.store.LoadPublished()
+	if err != nil || publishedAfter != first.GenerationID || !reflect.DeepEqual(publishedManifest, manifestBefore) {
+		t.Fatalf("conversation budget changed published state: generation=%q manifest=%+v err=%v", publishedAfter, publishedManifest, err)
+	}
+	catalogAfter, err := harness.catalog.ListCandidates(scanTestProject)
+	if err != nil || !reflect.DeepEqual(catalogAfter, catalogBefore) {
+		t.Fatalf("conversation budget changed catalog: before=%+v after=%+v err=%v", catalogBefore, catalogAfter, err)
+	}
+	if objectsAfter := scanStoredObjects(t, harness.options.DataRoot); !reflect.DeepEqual(objectsAfter, objectsBefore) {
+		t.Fatalf("conversation budget changed CAS objects: before=%v after=%v", objectsBefore, objectsAfter)
 	}
 }

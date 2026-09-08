@@ -35,13 +35,15 @@ import (
 )
 
 const (
-	resultSchemaVersion = 1
-	maxScanSources      = 65536
-	maxSourceRevisions  = 65536
-	scanLockPoll        = 20 * time.Millisecond
+	resultSchemaVersion             = 1
+	maxScanSources                  = 65536
+	maxSourceRevisions              = 65536
+	maxConversationChainBytes int64 = 64 << 20
+	scanLockPoll                    = 20 * time.Millisecond
 )
 
 var ErrObservationBudget = errors.New("project observation budget exceeded")
+var ErrConversationChainBudget = errors.New("project conversation chain budget exceeded")
 
 var scanIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
@@ -65,23 +67,24 @@ type MemoryStore interface {
 }
 
 type Options struct {
-	ProjectID        string
-	Binding          projectidentity.Binding
-	SessionsRoot     string
-	DataRoot         string
-	Adapter          source.Adapter
-	Adapters         []source.NamedAdapter
-	Catalog          *sourcecatalog.Catalog
-	Store            MemoryStore
-	Workers          int
-	Now              func() time.Time
-	Materialize      MaterializeFunc
-	Probe            ProbeFunc
-	ProbeOptions     projectprobe.Options
-	Reduce           ReduceFunc
-	ProgressObserver func(Progress) error
-	spoolObserver    func(observationSpoolStats)
-	buildIndex       func(sessionindex.BuildInput) (sessionindex.Document, error)
+	ProjectID                    string
+	Binding                      projectidentity.Binding
+	SessionsRoot                 string
+	DataRoot                     string
+	Adapter                      source.Adapter
+	Adapters                     []source.NamedAdapter
+	Catalog                      *sourcecatalog.Catalog
+	Store                        MemoryStore
+	Workers                      int
+	Now                          func() time.Time
+	Materialize                  MaterializeFunc
+	Probe                        ProbeFunc
+	ProbeOptions                 projectprobe.Options
+	Reduce                       ReduceFunc
+	ProgressObserver             func(Progress) error
+	spoolObserver                func(observationSpoolStats)
+	buildIndex                   func(sessionindex.BuildInput) (sessionindex.Document, error)
+	conversationChainBudgetBytes int64
 }
 
 type frozenTask struct {
@@ -248,6 +251,11 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	usage := make([]memory.AssociatedUsage, 0, len(terminals))
 	conversationChains := make([]conversationchain.Document, 0, len(terminals))
 	conversationDependencies := make([]memory.ConversationChainDependency, 0, len(terminals))
+	conversationChainBudget := maxConversationChainBytes
+	if options.conversationChainBudgetBytes > 0 && options.conversationChainBudgetBytes < conversationChainBudget {
+		conversationChainBudget = options.conversationChainBudgetBytes
+	}
+	var conversationChainBytes int64
 	for index := range terminals {
 		terminal := &terminals[index]
 		if err := ctx.Err(); err != nil {
@@ -315,6 +323,14 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 		} else if chainErr != nil {
 			return result, fmt.Errorf("plan retained conversation %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, chainErr)
 		} else if chain != nil {
+			body, err := conversationchain.Render(*chain)
+			if err != nil {
+				return result, fmt.Errorf("render retained conversation %s/%s: %w", terminal.record.Provider, terminal.record.SessionID, err)
+			}
+			if int64(len(body)) > conversationChainBudget-conversationChainBytes {
+				return result, fmt.Errorf("%w: used %d bytes, next %d bytes, limit %d bytes", ErrConversationChainBudget, conversationChainBytes, len(body), conversationChainBudget)
+			}
+			conversationChainBytes += int64(len(body))
 			conversationChains = append(conversationChains, *chain)
 			conversationDependencies = append(conversationDependencies, memory.ConversationChainDependency{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, Digest: chain.Digest})
 		}

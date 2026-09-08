@@ -107,3 +107,22 @@
   - Command: `go test -overlay /tmp/session-reviewer-scan-chain-qa.6VBnCG/codex-binding-overlay.json ./internal/source/codex -run '^TestControllerLegacyVisibleProjectBinding$' -count=1 -v`
   - Exit 0: controller legacy project-binding probe passed.
 - Fix files: `internal/source/codex/visible.go`, `internal/source/codex/adapter_test.go`, and this report. No Task 2, schema, scan lifecycle, Vault, main, remote, or release changes.
+
+## Fix round 2 — bound aggregate retained-chain staging
+
+- Independent review confirmed that the per-document/source limits and manifest root-count bound did not limit the total memory retained by scan's project-wide `[]conversationchain.Document` before persistence.
+- Added typed `ErrConversationChainBudget` and a 64 MiB production aggregate staging ceiling. Each successfully materialized chain is canonically rendered before it enters the slice, so accounting covers the actual stored metadata, dependency proof, coverage diagnostics, and bounded excerpts. Exact-boundary documents are accepted; the next document is rejected if its bytes exceed the remaining aggregate budget. Chains are never truncated and existing historical roots are not purged or charged to this per-scan staging limit.
+- Added a private test-only lowering seam that accepts only positive values below 64 MiB; zero, negative, or larger values retain the production ceiling. No CLI/config/public API or new spool/dependency was added.
+- RED repository control:
+  - Command: `go test ./internal/scan -run '^TestScanConversationCumulativeByteBudgetLeavesPublishedStateAndObjectsUnchanged$' -count=1 -v`
+  - Build failed as expected on the wished-for private seam and typed `ErrConversationChainBudget`; neither existed before implementation.
+- GREEN exact-boundary/cumulative-overflow control:
+  - Command: `go test ./internal/scan -run '^TestScanConversationCumulativeByteBudgetLeavesPublishedStateAndObjectsUnchanged$' -count=1 -v`
+  - Exit 0: 1/1 passed (0.976s after the final byte-snapshot refinement). The real Run fixture publishes a baseline, sets the aggregate budget to that first chain's exact canonical byte length, proves the first document consumed the exact boundary, then adds a second individually valid source and receives the typed overflow. Prepared and published manifests, source catalog, and the names plus bytes of all observation/view/lineage/probe/index/chain/generation CAS objects remain unchanged.
+- GREEN lifecycle regression matrix:
+  - Command: `go test ./internal/scan -run '^(TestScanConversationCumulativeByteBudgetLeavesPublishedStateAndObjectsUnchanged|TestScanConversationPersistsCanonicalPrivateChainBeforePreparation|TestScanConversationLifecycleRetainsHistoryAndRestoresCurrentRoot|TestScanConversationCancellationAfterMaterializationPersistsNoChainOrPointer|TestScanConversationCancellationBeforePreparedAdvanceKeepsPriorPointer|TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged|TestRunLaterClockIdenticalScanReusesGenerationAndIndexBytes)$' -count=1 -v`
+  - Exit 0: 7/7 passed (5.918s), covering normal persistence, immutable history/restoration, both cancellation boundaries, idempotency, index capacity rollback, and the new aggregate capacity rollback.
+- GREEN relevant full regression:
+  - `go test ./internal/scan -count=1`: exit 0 (`ok .../internal/scan 146.246s`).
+  - `go vet ./internal/scan`: exit 0, no output.
+- Fix files: `internal/scan/service.go`, `internal/scan/conversation_test.go`, and this report only. No Task 2, source adapter, schema/plugin, Vault, main, remote, or release changes.
