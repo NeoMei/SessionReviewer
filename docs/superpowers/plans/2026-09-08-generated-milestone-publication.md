@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing reviewv4 Markdown registry, presentation render, memory CAS, contextupdate and publication locks. No dependencies.
 
-**Spec:** `docs/superpowers/specs/2026-09-04-obsidian-project-context-navigation-design.md` §§4.1,9,10,17.3/4; `2026-09-05-v4-human-markdown-codec.md`; qualified projector and historical binding plans.
+**Spec:** `docs/superpowers/specs/2026-09-04-obsidian-project-context-navigation-design.md` §§4.1,9,10,17.3/4; `docs/superpowers/specs/2026-09-05-v4-human-markdown-codec-design.md` §§3/4/6/7/8/10/12. Qualified projector and historical binding plans are implementation dependencies, not replacements for the accepted specs.
 
 ## Global Constraints
 
