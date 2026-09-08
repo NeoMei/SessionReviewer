@@ -16,11 +16,18 @@ Final convergence protocol: after all functional tasks, run at least two compreh
 - [ ] Reproduce and correct aggregate-shell/no-execution command verification attribution before qualifying milestones (`2026-09-08-command-verification-attribution.md`); retain generic command outcomes.
 - [x] Before mixed-provider chain/search integration, remove obsolete Codex-only restrictions from generic memory contracts with unchanged hash/location/identity safeguards (`2026-09-08-provider-neutral-memory-contracts.md`). Reviewed at01218cb+cf81296; this does not activate an adapter.
 - [ ] Current-contract Claude/OpenCode adapter registration, authenticated source reads and provider parity (port reusable legacy Claude parser, not its obsolete architecture).
+- [ ] Provider parity includes Go/JSON/TypeScript conversation-page validation, runner and UI drilldown: remove the current frontend Codex literal only with mixed-provider and source-unavailable fixtures plus native verification.
 - [ ] Authenticate current and historical answer snapshots in public source refs and fixed-argv drilldown (`2026-09-08-historical-turn-bindings.md`); no relabeling a historical answer as the current view.
 - [ ] Qualified milestone projection, five-part closure and authenticated answer/source/problem drilldown; preserve human changes.
 - [ ] Problem candidate rules/private CAS store, child/sibling/merge/move/reorder commands, confirmed tree and pending drawer.
+- [ ] Human problem lifecycle: edit question/conclusion/completion criterion/workflow state in the authoritative Markdown, sync and rescan without overwrite; explicit resolved-to-reopened creates a new revision without falsely changing answer state.
+- [ ] Explicit Agent-requested placement must have a bounded CLI/job/status/cancel contract and UI entry, not only an uncalled service method; repeated dependency identity must reuse the existing run.
 - [ ] Decisions/agreements create/edit, private optional candidates, explicit extract/status/cancel/confirm/ignore/restore; shared conclusion-candidate pipeline. Tests use controlled proposal adapters; no paid model call for routine checks.
+- [ ] Candidate-to-publication crash/retry reconciliation for decision, milestone conclusion and problem graph: deterministic operation/entity binding, accepted-publication proof before private finalization, no duplicate entity or double-applied merge/reorder after restart.
 - [ ] Authenticated branch/file/error Session search runtime, bounded paging and actual plugin integration.
+- [ ] Session/UI integration must fix no-filter-match copy separately from truly empty index and provide exactly one actionable CLI installation/configuration recovery entry.
+- [ ] Long event pages expose an ordinal/page jump through the existing bounded CLI anchor contract, with first/middle/last and stale-generation tests; four navigation buttons alone do not meet this requirement.
+- [ ] Real original-Session navigation must preserve provider/session/turn identity, use an authenticated provider-supported destination, handle unavailable providers, and pass native keyboard interaction; opening a Vault Markdown note is not equivalent.
 - [ ] ModelPriceWatch validated24h cache/exact routing/historical snapshots/supplement runtime and full usage UI.
 - [ ] Real candidate Obsidian Vault install: actual scanned sources, all five tabs, keyboard/state/project-switch/source-unavailable/no-CLI paths, human edit→rescan preservation and zero-Agent instrumentation.
 - [ ] Full Go/plugin/race/reproducible-package gates, independent whole-branch review, no unadjudicated spec gaps.
@@ -31,6 +38,8 @@ Final convergence protocol: after all functional tasks, run at least two compreh
 Ruling: New approval authorizes GitHub integration/release after all gates, superseding earlier no-publish boundaries only at the final release step — user explicitly requested it — cost if wrong is premature release, prevented by gating.
 
 Ruling: Adapt obsolete plan filenames/interfaces to current v4 contracts; do not recreate already accepted features or downgrade contracts — avoids repeating prior spec drift — cost if wrong is local rework caught by per-task review.
+
+Ruling: Mark migration-only task steps N/A by explicit user override, including conversation closure plan Task5 and pricing plan Task8 migration-only acceptance; analogous old-project migration checkboxes do not reauthorize migration. New cross-platform expansion is likewise N/A. Existing compatibility/safety tests and configured GitHub CI remain active — user explicitly accepted rescanning instead — cost if wrong is narrower new-work acceptance, not deletion of existing safeguards.
 
 Ruling: Recover direct tool metadata before semantic closure. Arbitrary JavaScript wrappers are not safely interpretable; unsupported dynamic forms retain explicit partial coverage rather than guessed execution evidence — protects verification truth — cost if wrong is incomplete coverage, reported and tested.
 
