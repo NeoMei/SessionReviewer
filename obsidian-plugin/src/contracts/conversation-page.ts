@@ -27,6 +27,24 @@ export interface VisibleTurnV1 {
   user_message: VisibleMessageV1;
   answer_state: ConversationAnswerStateV1;
   assistant_message_count: number;
+	 action_count?: number;
+	 result_count?: number;
+}
+
+export interface ConversationActionV1 {
+	revision_id: string;
+	source_ref: VisibleMessageV1["source_ref"];
+	kind: string;
+	tool_name: string | null;
+	excerpt: string;
+}
+
+export interface ConversationResultV1 {
+	revision_id: string;
+	source_ref: VisibleMessageV1["source_ref"];
+	kind: string;
+	verification_state: "unknown" | "passed" | "failed" | "partial";
+	excerpt: string;
 }
 
 export interface VisibleCoverageV1 {
@@ -40,6 +58,7 @@ export interface VisibleCoverageV1 {
   oversized_records: number;
   malformed_records: number;
   complete: boolean;
+	diagnostics_available?: boolean;
 }
 
 export interface ConversationPageV1 {
@@ -64,4 +83,11 @@ export interface ConversationPageV1 {
   turn_units: VisibleTurnV1[];
   messages: VisibleMessageV1[];
   coverage: VisibleCoverageV1;
+	evidence_session_view_digest?: string;
+	body_availability?: "source_full" | "retained_excerpt";
+	actions?: ConversationActionV1[];
+	results?: ConversationResultV1[];
+	action_total?: number;
+	result_total?: number;
+	evidence_truncated?: boolean;
 }

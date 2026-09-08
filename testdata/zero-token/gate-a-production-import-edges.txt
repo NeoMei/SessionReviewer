@@ -607,6 +607,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/conversationchain
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/memory
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/pathguard
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/platform
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/projectidentity
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/redact
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	EDGE	github.com/neomei/SessionReviewer/internal/source/codex	github.com/neomei/SessionReviewer/internal/session

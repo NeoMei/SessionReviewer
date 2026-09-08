@@ -202,7 +202,7 @@ describe("v4 scanned Session renderer", () => {
     expect(root.textContent).toContain("已保留关键事实");
   });
 
-  it("loads retained authenticated facts without raw sources and never starts source-backed Q/A", async () => {
+  it("loads retained authenticated facts and queries retained Q/A without raw sources", async () => {
     const retained = sessionFixture({
       source_availability: "unavailable",
       indexed_event_count: 53,
@@ -211,7 +211,7 @@ describe("v4 scanned Session renderer", () => {
     const available = sessionFixture({ session_id: "session-available" });
     const lateRetainedPage = deferred<SessionEventPageV1>();
     const loadSessionSummary = vi.fn((request: SessionSummaryRequest) => Promise.resolve(summaryFor(request)));
-    const loadConversation = vi.fn();
+    const loadConversation = vi.fn((request: ConversationRequest) => Promise.resolve(conversationFor(request)));
     const loadSessionEvents = vi.fn()
       .mockResolvedValueOnce(eventPage({
         total: 53,
@@ -240,10 +240,10 @@ describe("v4 scanned Session renderer", () => {
       limit: 25
     }));
     expect(loadSessionSummary).toHaveBeenCalledTimes(1);
-    expect(loadConversation).not.toHaveBeenCalled();
+	expect(loadConversation).toHaveBeenCalledWith(expect.objectContaining({ sessionId: retained.session_id }));
     expect(root.textContent).toContain("已保留关键事实");
     expect(root.textContent).toContain("retained indexed fact");
-    expect(root.textContent).toContain("该 Session 的问答来源不可用");
+	expect(root.querySelector('[aria-label="问答记录"]')).not.toBeNull();
     expect(root.textContent).toContain("原始来源不可用；下方仅显示已保留的索引事实。");
 
     root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();

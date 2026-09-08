@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
@@ -21,32 +23,40 @@ type ConversationRequest struct {
 
 const MaxConversationResponseBytes = 1 << 20
 const conversationPageItemsBytes = 768 << 10
+const conversationCursorReserveBytes = 32 << 10
 const conversationRedactionVersion = "visible-redaction-v1"
 
 // ConversationPage is a separate paged contract; it is not a truncated
 // conversation-chain-v1 Document or a session-event-page-v1 event page.
 type ConversationPage struct {
-	SchemaVersion        int                                `json:"schema_version"`
-	MinimumReaderVersion string                             `json:"minimum_reader_version"`
-	Mode                 string                             `json:"mode"`
-	ProjectID            string                             `json:"project_id"`
-	Provider             string                             `json:"provider"`
-	SessionID            string                             `json:"session_id"`
-	GenerationID         string                             `json:"generation_id"`
-	SessionViewDigest    string                             `json:"session_view_digest"`
-	DependencyDigest     string                             `json:"dependency_digest"`
-	RedactionVersion     string                             `json:"redaction_version"`
-	TurnUnitID           *string                            `json:"turn_unit_id"`
-	Total                uint64                             `json:"total"`
-	RangeStart           uint64                             `json:"range_start"`
-	RangeEnd             uint64                             `json:"range_end"`
-	FirstCursor          *string                            `json:"first_cursor"`
-	PreviousCursor       *string                            `json:"previous_cursor"`
-	NextCursor           *string                            `json:"next_cursor"`
-	LastCursor           *string                            `json:"last_cursor"`
-	TurnUnits            []conversationchain.VisibleTurn    `json:"turn_units"`
-	Messages             []conversationchain.VisibleMessage `json:"messages"`
-	Coverage             conversationchain.VisibleCoverage  `json:"coverage"`
+	SchemaVersion             int                                `json:"schema_version"`
+	MinimumReaderVersion      string                             `json:"minimum_reader_version"`
+	Mode                      string                             `json:"mode"`
+	ProjectID                 string                             `json:"project_id"`
+	Provider                  string                             `json:"provider"`
+	SessionID                 string                             `json:"session_id"`
+	GenerationID              string                             `json:"generation_id"`
+	SessionViewDigest         string                             `json:"session_view_digest"`
+	DependencyDigest          string                             `json:"dependency_digest"`
+	RedactionVersion          string                             `json:"redaction_version"`
+	TurnUnitID                *string                            `json:"turn_unit_id"`
+	Total                     uint64                             `json:"total"`
+	RangeStart                uint64                             `json:"range_start"`
+	RangeEnd                  uint64                             `json:"range_end"`
+	FirstCursor               *string                            `json:"first_cursor"`
+	PreviousCursor            *string                            `json:"previous_cursor"`
+	NextCursor                *string                            `json:"next_cursor"`
+	LastCursor                *string                            `json:"last_cursor"`
+	TurnUnits                 []conversationchain.VisibleTurn    `json:"turn_units"`
+	Messages                  []conversationchain.VisibleMessage `json:"messages"`
+	Coverage                  conversationchain.VisibleCoverage  `json:"coverage"`
+	EvidenceSessionViewDigest *string                            `json:"evidence_session_view_digest,omitempty"`
+	BodyAvailability          string                             `json:"body_availability,omitempty"`
+	Actions                   []conversationchain.Action         `json:"actions,omitempty"`
+	Results                   []conversationchain.Result         `json:"results,omitempty"`
+	ActionTotal               uint64                             `json:"action_total,omitempty"`
+	ResultTotal               uint64                             `json:"result_total,omitempty"`
+	EvidenceTruncated         bool                               `json:"evidence_truncated,omitempty"`
 }
 
 func LoadConversationPage(ctx context.Context, request ConversationRequest) (ConversationPage, error) {
@@ -59,9 +69,10 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		return ConversationPage{}, publicError("unsupported_provider", "visible conversation is unsupported for this provider")
 	}
 	var page ConversationPage
-	_, err := inspectPublishedSession(ctx, EventPageRequest{DataRoot: request.DataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, Limit: request.Limit}, func(view memory.SessionView) error {
+	_, err := inspectPublishedSession(ctx, EventPageRequest{DataRoot: request.DataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, Limit: request.Limit}, nil, func(authenticated authenticatedSession) error {
+		view := authenticated.view
 		record, err := sourcecatalog.ReadAuthenticated(ctx, request.DataRoot, request.Provider, request.SessionID, view.SourceRecordDigest)
-		if err != nil || record.SourceIdentity != view.SourceIdentity || record.Availability != memory.SourceAvailable {
+		if err != nil || record.SourceIdentity != view.SourceIdentity {
 			return publicError("source_unavailable", "authenticated source prefix is unavailable")
 		}
 		associated := false
@@ -73,30 +84,67 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		if !associated {
 			return publicError("source_unavailable", "source project association is unavailable")
 		}
-		root, err := codex.SessionsRoot()
-		if err != nil {
-			return publicError("source_unavailable", "authenticated source prefix is unavailable")
-		}
-		source, sourceCoverage, err := codex.ReadPublishedVisible(ctx, root, record)
-		if context.Cause(ctx) != nil {
-			return publicError(CodeInvalidArgument, "inspection timed out")
-		}
-		if err != nil {
-			return publicError("source_unavailable", "authenticated source prefix is unavailable")
-		}
-		redactor := redact.Default()
-		for i := range source {
-			if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
-				return publicError(CodeInvalidArgument, "inspection timed out")
+		retained, retainedErr := selectRetainedConversation(ctx, authenticated, record)
+		if retainedErr != nil {
+			var contractErr *Error
+			if errors.As(retainedErr, &contractErr) {
+				return retainedErr
 			}
-			source[i].Text = redactAbsolutePaths(redactor.Text(source[i].Text).Text)
+			return publicError(CodeInvalidArgument, "published retained conversation is unavailable or corrupt")
 		}
-		turns, coverage := conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, source)
-		coverage.SourceRecords = sourceCoverage.SourceRecords
-		coverage.OversizedRecords = sourceCoverage.OversizedRecords
-		coverage.MalformedRecords = sourceCoverage.MalformedRecords
-		coverage.Complete = coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0
-		page, err = conversationPage(request, view, record, turns, coverage)
+		var turns []conversationchain.VisibleTurn
+		var coverage conversationchain.VisibleCoverage
+		bodyAvailability := ""
+		evidenceView := view.Digest
+		sourceLoaded := false
+		if record.Availability == memory.SourceAvailable {
+			resolved, resolveErr := platform.ResolveSessionsRoot("", platform.CurrentEnv())
+			if resolveErr == nil {
+				source, sourceCoverage, readErr := codex.ReadPublishedVisible(ctx, resolved.Path, record)
+				if context.Cause(ctx) != nil {
+					return publicError(CodeInvalidArgument, "inspection timed out")
+				}
+				if readErr == nil {
+					sourceLoaded = true
+					redactor := redact.Default()
+					for i := range source {
+						if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
+							return publicError(CodeInvalidArgument, "inspection timed out")
+						}
+						source[i].Text = redactAbsolutePaths(redactor.Text(source[i].Text).Text)
+					}
+					turns, coverage = conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, source)
+					coverage.SourceRecords = sourceCoverage.SourceRecords
+					coverage.OversizedRecords = sourceCoverage.OversizedRecords
+					coverage.MalformedRecords = sourceCoverage.MalformedRecords
+					coverage.Complete = coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0
+					conversationchain.ApplyVisibleCoverage(turns, coverage)
+					bodyAvailability = conversationBodySource
+				}
+			}
+		}
+		if !sourceLoaded && retained != nil {
+			turns, coverage, err = retainedVisibleConversation(*retained)
+			if err != nil {
+				return publicError(CodeInvalidArgument, "published retained conversation is unavailable or corrupt")
+			}
+			bodyAvailability = conversationBodyRetained
+			evidenceView = retained.view.Digest
+		} else if sourceLoaded && retained != nil {
+			if err := mergeRetainedEvidence(turns, retained.document); err != nil {
+				return publicError(CodeInvalidArgument, "published retained conversation does not match source")
+			}
+		}
+		if !sourceLoaded && retained == nil {
+			if hasSessionDiagnostic(view, "visible_reader_unsupported") {
+				return publicError("visible_reader_unsupported", "authenticated visible conversation reader is unavailable")
+			}
+			if record.Availability != memory.SourceAvailable {
+				return publicError("retained_evidence_unavailable", "retained conversation evidence is unavailable")
+			}
+			return publicError("source_unavailable", "authenticated source prefix is unavailable")
+		}
+		page, err = conversationPage(request, view, record, turns, coverage, evidenceView, bodyAvailability)
 		return err
 	})
 	if err != nil {
@@ -105,17 +153,40 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 	return page, nil
 }
 
+func hasSessionDiagnostic(view memory.SessionView, code string) bool {
+	for _, diagnostic := range view.Diagnostics {
+		if diagnostic.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 func RenderConversationPage(page ConversationPage) ([]byte, error) {
-	if validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest) != nil || page.Provider != "codex" || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 {
+	if validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest) != nil || page.Provider != "codex" || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 || page.BodyAvailability != "" && page.BodyAvailability != conversationBodySource && page.BodyAvailability != conversationBodyRetained || page.EvidenceSessionViewDigest != nil && !digestRE.MatchString(*page.EvidenceSessionViewDigest) {
 		return nil, publicError(CodeInvalidArgument, "conversation page is invalid")
 	}
 	if page.Mode == "turn_index" && (uint64(len(page.TurnUnits)) != page.RangeEnd-page.RangeStart || len(page.Messages) != 0 || page.TurnUnitID != nil) || page.Mode == "turn_messages" && (uint64(len(page.Messages)) != page.RangeEnd-page.RangeStart || len(page.TurnUnits) != 1 || page.TurnUnitID == nil || page.TurnUnits[0].TurnUnitID != *page.TurnUnitID) {
 		return nil, publicError(CodeInvalidArgument, "conversation page range is inconsistent")
 	}
+	if page.BodyAvailability == conversationBodyRetained {
+		for _, message := range page.Messages {
+			if message.Text != nil || message.TextTruncated || message.Phase != nil {
+				return nil, publicError(CodeInvalidArgument, "retained conversation body state is invalid")
+			}
+		}
+	}
 	for _, cursor := range []*string{page.FirstCursor, page.PreviousCursor, page.NextCursor, page.LastCursor} {
-		if cursor != nil && (len(*cursor) > 4096 || !utf8.ValidString(*cursor)) {
+		if cursor != nil && (*cursor == "" || len(*cursor) > 4096 || !utf8.ValidString(*cursor)) {
 			return nil, publicError(CodeInvalidArgument, "conversation cursor is invalid")
 		}
+	}
+	if page.Total == 0 {
+		if page.RangeStart != 0 || page.RangeEnd != 0 || page.FirstCursor != nil || page.PreviousCursor != nil || page.NextCursor != nil || page.LastCursor != nil {
+			return nil, publicError(CodeInvalidArgument, "empty conversation page has invalid cursors")
+		}
+	} else if page.FirstCursor == nil || page.LastCursor == nil || (page.RangeStart > 0) != (page.PreviousCursor != nil) || (page.RangeEnd < page.Total) != (page.NextCursor != nil) {
+		return nil, publicError(CodeInvalidArgument, "conversation page cursor topology is invalid")
 	}
 	coverage := page.Coverage
 	for _, count := range []uint64{coverage.SourceRecords, coverage.VisibleMessages, coverage.CapturedMessages, coverage.TruncatedMessages, coverage.TruncatedBodies, coverage.ContextMessages, coverage.OrphanMessages, coverage.OversizedRecords, coverage.MalformedRecords} {
@@ -123,11 +194,11 @@ func RenderConversationPage(page ConversationPage) ([]byte, error) {
 			return nil, publicError(CodeInvalidArgument, "conversation coverage is invalid")
 		}
 	}
-	if coverage.CapturedMessages+coverage.ContextMessages+coverage.OrphanMessages != coverage.VisibleMessages || coverage.TruncatedMessages > coverage.CapturedMessages || coverage.TruncatedBodies > coverage.TruncatedMessages || coverage.VisibleMessages+coverage.OversizedRecords+coverage.MalformedRecords > coverage.SourceRecords || coverage.Complete != (coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0) {
+	if coverage.CapturedMessages+coverage.ContextMessages+coverage.OrphanMessages != coverage.VisibleMessages || coverage.TruncatedMessages > coverage.CapturedMessages || coverage.TruncatedBodies > coverage.CapturedMessages || coverage.VisibleMessages+coverage.OversizedRecords+coverage.MalformedRecords > coverage.SourceRecords || coverage.DiagnosticsAvailable != nil && !*coverage.DiagnosticsAvailable && coverage.Complete || (coverage.DiagnosticsAvailable == nil || *coverage.DiagnosticsAvailable) && coverage.Complete != (coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0) {
 		return nil, publicError(CodeInvalidArgument, "conversation coverage is inconsistent")
 	}
 	for _, turn := range page.TurnUnits {
-		if !validID(turn.TurnUnitID) || turn.Ordinal == 0 || turn.Ordinal > maxWireInteger || len(turn.StartedAt) > 128 || turn.EndedAt != nil && len(*turn.EndedAt) > 128 || turn.UserMessage.Role != conversationchain.RoleUser || turn.UserMessage.Text != nil || turn.AnswerState != conversationchain.AnswerNone && turn.AnswerState != conversationchain.AnswerPartial && turn.AnswerState != conversationchain.AnswerAnswered {
+		if !validID(turn.TurnUnitID) || turn.Ordinal == 0 || turn.Ordinal > maxWireInteger || turn.ActionCount > maxWireInteger || turn.ResultCount > maxWireInteger || len(turn.StartedAt) > 128 || turn.EndedAt != nil && len(*turn.EndedAt) > 128 || turn.UserMessage.Role != conversationchain.RoleUser || turn.UserMessage.Text != nil || turn.AnswerState != conversationchain.AnswerNone && turn.AnswerState != conversationchain.AnswerPartial && turn.AnswerState != conversationchain.AnswerAnswered {
 			return nil, publicError(CodeInvalidArgument, "conversation turn is invalid")
 		}
 		if err := validateVisibleMessage(turn.UserMessage); err != nil {
@@ -141,8 +212,20 @@ func RenderConversationPage(page ConversationPage) ([]byte, error) {
 		if err := validateVisibleMessage(message); err != nil {
 			return nil, err
 		}
-		if message.Text == nil || message.SourceRef.Provider != page.Provider || message.SourceRef.SessionID != page.SessionID {
+		if page.BodyAvailability != conversationBodyRetained && message.Text == nil || message.SourceRef.Provider != page.Provider || message.SourceRef.SessionID != page.SessionID {
 			return nil, publicError(CodeInvalidArgument, "conversation source reference is invalid")
+		}
+	}
+	if page.Mode == "turn_index" && (len(page.Actions) != 0 || len(page.Results) != 0 || page.ActionTotal != 0 || page.ResultTotal != 0 || page.EvidenceTruncated) {
+		return nil, publicError(CodeInvalidArgument, "conversation index page contains selected evidence")
+	}
+	if page.Mode == "turn_messages" {
+		turn := page.TurnUnits[0]
+		if page.ActionTotal != turn.ActionCount || page.ResultTotal != turn.ResultCount || uint64(len(page.Actions)) > page.ActionTotal || uint64(len(page.Results)) > page.ResultTotal || page.EvidenceTruncated != (uint64(len(page.Actions)) < page.ActionTotal || uint64(len(page.Results)) < page.ResultTotal) {
+			return nil, publicError(CodeInvalidArgument, "conversation evidence coverage is inconsistent")
+		}
+		if err := validateConversationEvidenceItems(page.Actions, page.Results, page.Provider, page.SessionID, turn.UserMessage.SourceRef.SourceIdentity); err != nil {
+			return nil, err
 		}
 	}
 	body, err := json.Marshal(page)
@@ -162,12 +245,15 @@ func validateVisibleMessage(message conversationchain.VisibleMessage) error {
 	return nil
 }
 
-func conversationPage(request ConversationRequest, view memory.SessionView, source memory.SourceRecord, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage) (ConversationPage, error) {
-	dependency, err := memory.Digest([]string{view.Digest, view.SourceRecordDigest, source.FrozenBoundary.SourceHash, "visible-turn-v1", conversationRedactionVersion})
+func conversationPage(request ConversationRequest, view memory.SessionView, source memory.SourceRecord, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, evidenceView, bodyAvailability string) (ConversationPage, error) {
+	dependency, err := memory.Digest([]string{view.Digest, evidenceView, view.SourceRecordDigest, source.FrozenBoundary.SourceHash, bodyAvailability, "visible-turn-v1", conversationRedactionVersion})
 	if err != nil {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation dependencies are invalid")
 	}
-	page := ConversationPage{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Mode: "turn_index", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, GenerationID: request.ExpectedGenerationID, SessionViewDigest: view.Digest, DependencyDigest: dependency, RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: coverage}
+	page := ConversationPage{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Mode: "turn_index", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, GenerationID: request.ExpectedGenerationID, SessionViewDigest: view.Digest, DependencyDigest: dependency, RedactionVersion: conversationRedactionVersion, TurnUnits: []conversationchain.VisibleTurn{}, Messages: []conversationchain.VisibleMessage{}, Coverage: coverage, BodyAvailability: bodyAvailability}
+	if evidenceView != "" && evidenceView != view.Digest {
+		page.EvidenceSessionViewDigest = &evidenceView
+	}
 	var sizes []int
 	var messages []conversationchain.VisibleMessage
 	if request.TurnUnitID != "" {
@@ -179,6 +265,11 @@ func conversationPage(request ConversationRequest, view memory.SessionView, sour
 			if turn.TurnUnitID == request.TurnUnitID {
 				page.TurnUnits = append(page.TurnUnits, turn)
 				messages = turn.Messages
+				page.ActionTotal = uint64(len(turn.Actions))
+				page.ResultTotal = uint64(len(turn.Results))
+				page.Actions = append([]conversationchain.Action(nil), turn.Actions[:min(len(turn.Actions), conversationEvidenceMax)]...)
+				page.Results = append([]conversationchain.Result(nil), turn.Results[:min(len(turn.Results), conversationEvidenceMax)]...)
+				page.EvidenceTruncated = len(page.Actions) != len(turn.Actions) || len(page.Results) != len(turn.Results)
 				found = true
 				break
 			}
@@ -186,6 +277,13 @@ func conversationPage(request ConversationRequest, view memory.SessionView, sour
 		if !found {
 			return ConversationPage{}, publicError(CodeInvalidArgument, "selected conversation turn is unavailable")
 		}
+	}
+	baseline, err := json.Marshal(page)
+	if err != nil || len(baseline)+conversationCursorReserveBytes >= MaxConversationResponseBytes {
+		return ConversationPage{}, publicError("response_too_large", "conversation evidence exceeds its byte limit")
+	}
+	itemBudget := min(conversationPageItemsBytes, MaxConversationResponseBytes-len(baseline)-conversationCursorReserveBytes)
+	if page.Mode == "turn_messages" {
 		for _, message := range messages {
 			body, _ := json.Marshal(message)
 			sizes = append(sizes, len(body)+1)
@@ -200,10 +298,10 @@ func conversationPage(request ConversationRequest, view memory.SessionView, sour
 	starts := []uint64{0}
 	count, bytes := 0, 0
 	for i, size := range sizes {
-		if size > conversationPageItemsBytes {
+		if size > itemBudget {
 			return ConversationPage{}, publicError("response_too_large", "conversation item exceeds its byte limit")
 		}
-		if count > 0 && (count == request.Limit || bytes+size > conversationPageItemsBytes) {
+		if count > 0 && (count == request.Limit || bytes+size > itemBudget) {
 			starts = append(starts, uint64(i))
 			count = 0
 			bytes = 0

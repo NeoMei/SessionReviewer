@@ -14,7 +14,12 @@
     "first_cursor": {"$ref": "#/$defs/cursor"}, "previous_cursor": {"$ref": "#/$defs/cursor"}, "next_cursor": {"$ref": "#/$defs/cursor"}, "last_cursor": {"$ref": "#/$defs/cursor"},
     "turn_units": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/turn"}},
     "messages": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/message"}},
-    "coverage": {"$ref": "#/$defs/coverage"}
+    "coverage": {"$ref": "#/$defs/coverage"},
+    "evidence_session_view_digest": {"$ref": "#/$defs/digest"},
+    "body_availability": {"enum": ["source_full", "retained_excerpt"]},
+    "actions": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/action"}},
+    "results": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"$ref": "#/$defs/result"}},
+    "action_total": {"$ref": "#/$defs/count"}, "result_total": {"$ref": "#/$defs/count"}, "evidence_truncated": {"type": "boolean"}
   },
   "allOf": [
     {"if": {"properties": {"mode": {"const": "turn_index"}}}, "then": {"properties": {"turn_unit_id": {"type": "null"}, "messages": {"maxItems": 0}}}},
@@ -24,7 +29,7 @@
     "id": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "count": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
-    "cursor": {"type": ["string", "null"], "maxLength": 4096},
+    "cursor": {"type": ["string", "null"], "minLength": 1, "maxLength": 4096},
     "timestamp": {"type": "string", "maxLength": 128},
     "source_ref": {
       "type": "object", "additionalProperties": false,
@@ -46,12 +51,20 @@
     "turn": {
       "type": "object", "additionalProperties": false,
       "required": ["turn_unit_id", "ordinal", "started_at", "ended_at", "user_message", "answer_state", "assistant_message_count"],
-      "properties": {"turn_unit_id": {"$ref": "#/$defs/id"}, "ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "started_at": {"$ref": "#/$defs/timestamp"}, "ended_at": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]}, "user_message": {"$ref": "#/$defs/message"}, "answer_state": {"enum": ["no_answer", "partial", "answered"]}, "assistant_message_count": {"$ref": "#/$defs/count"}}
+      "properties": {"turn_unit_id": {"$ref": "#/$defs/id"}, "ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "started_at": {"$ref": "#/$defs/timestamp"}, "ended_at": {"anyOf": [{"$ref": "#/$defs/timestamp"}, {"type": "null"}]}, "user_message": {"$ref": "#/$defs/message"}, "answer_state": {"enum": ["no_answer", "partial", "answered"]}, "assistant_message_count": {"$ref": "#/$defs/count"}, "action_count": {"$ref": "#/$defs/count"}, "result_count": {"$ref": "#/$defs/count"}}
+    },
+    "action": {
+      "type": "object", "additionalProperties": false, "required": ["revision_id", "source_ref", "kind", "tool_name", "excerpt"],
+      "properties": {"revision_id": {"$ref": "#/$defs/digest"}, "source_ref": {"$ref": "#/$defs/source_ref"}, "kind": {"$ref": "#/$defs/id"}, "tool_name": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]}, "excerpt": {"type": "string", "maxLength": 4096}}
+    },
+    "result": {
+      "type": "object", "additionalProperties": false, "required": ["revision_id", "source_ref", "kind", "verification_state", "excerpt"],
+      "properties": {"revision_id": {"$ref": "#/$defs/digest"}, "source_ref": {"$ref": "#/$defs/source_ref"}, "kind": {"$ref": "#/$defs/id"}, "verification_state": {"enum": ["unknown", "passed", "failed", "partial"]}, "excerpt": {"type": "string", "maxLength": 4096}}
     },
     "coverage": {
       "type": "object", "additionalProperties": false,
       "required": ["source_records", "visible_messages", "captured_messages", "truncated_messages", "truncated_bodies", "context_messages", "orphan_messages", "oversized_records", "malformed_records", "complete"],
-      "properties": {"source_records": {"$ref": "#/$defs/count"}, "visible_messages": {"$ref": "#/$defs/count"}, "captured_messages": {"$ref": "#/$defs/count"}, "truncated_messages": {"$ref": "#/$defs/count"}, "truncated_bodies": {"$ref": "#/$defs/count"}, "context_messages": {"$ref": "#/$defs/count"}, "orphan_messages": {"$ref": "#/$defs/count"}, "oversized_records": {"$ref": "#/$defs/count"}, "malformed_records": {"$ref": "#/$defs/count"}, "complete": {"type": "boolean", "description": "False when oversized/malformed records or orphan assistant messages prevent complete grouping; oversized records have unknown roles and must not be labeled missing answers."}}
+      "properties": {"source_records": {"$ref": "#/$defs/count"}, "visible_messages": {"$ref": "#/$defs/count"}, "captured_messages": {"$ref": "#/$defs/count"}, "truncated_messages": {"$ref": "#/$defs/count"}, "truncated_bodies": {"$ref": "#/$defs/count"}, "context_messages": {"$ref": "#/$defs/count"}, "orphan_messages": {"$ref": "#/$defs/count"}, "oversized_records": {"$ref": "#/$defs/count"}, "malformed_records": {"$ref": "#/$defs/count"}, "complete": {"type": "boolean", "description": "False when oversized/malformed records or orphan assistant messages prevent complete grouping; oversized records have unknown roles and must not be labeled missing answers."}, "diagnostics_available": {"type": "boolean"}}
     }
   }
 }

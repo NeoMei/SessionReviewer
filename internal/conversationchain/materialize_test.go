@@ -46,3 +46,42 @@ func TestMaterializeVisibleIDsRemainStableAfterAppendAndBindRevisionHash(t *test
 		t.Fatal("source revision hash ignored")
 	}
 }
+
+func TestMaterializeVisibleClassifiesAnswersConservatively(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []SourceMessage
+		want     AnswerState
+	}{
+		{"normal final", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "final_answer", Text: "done", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}}, AnswerAnswered},
+		{"commentary only", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "commentary", Text: "working", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}}, AnswerPartial},
+		{"empty final", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "final_answer", Text: "", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}}, AnswerPartial},
+		{"final then interrupted commentary", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "final_answer", Text: "done", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}, {Role: RoleAssistant, Phase: "commentary", Text: "more", OccurredAt: testTime3, RecordOrdinal: 3, RecordHash: strings.Repeat("c", 64)}}, AnswerPartial},
+		{"commentary then unphased", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "commentary", Text: "working", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}, {Role: RoleAssistant, Text: "interrupted", OccurredAt: testTime3, RecordOrdinal: 3, RecordHash: strings.Repeat("c", 64)}}, AnswerPartial},
+		{"final commentary then unphased", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}, {Role: RoleAssistant, Phase: "final_answer", Text: "done", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)}, {Role: RoleAssistant, Phase: "commentary", Text: "more", OccurredAt: testTime3, RecordOrdinal: 3, RecordHash: strings.Repeat("c", 64)}, {Role: RoleAssistant, Text: "interrupted", OccurredAt: testTime3, RecordOrdinal: 4, RecordHash: strings.Repeat("d", 64)}}, AnswerPartial},
+		{"unanswered", []SourceMessage{{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}}, AnswerNone},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			turns, _ := MaterializeVisible("codex", "session-1", "source-1", test.messages)
+			if len(turns) != 1 || turns[0].AnswerState != test.want {
+				t.Fatalf("answer state=%+v want %s", turns, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyVisibleCoverageDowngradesAnsweredTurnWhenSourceHasGaps(t *testing.T) {
+	messages := []SourceMessage{
+		{Role: RoleUser, Text: "q", OccurredAt: testTime1, RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)},
+		{Role: RoleAssistant, Phase: "final_answer", Text: "done", OccurredAt: testTime2, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)},
+	}
+	turns, _ := MaterializeVisible("codex", "session-1", "source-1", messages)
+	if turns[0].AnswerState != AnswerAnswered {
+		t.Fatalf("complete source control=%+v", turns)
+	}
+	ApplyVisibleCoverage(turns, VisibleCoverage{SourceRecords: 3, VisibleMessages: 2, CapturedMessages: 2, MalformedRecords: 1, Complete: false})
+	if turns[0].AnswerState != AnswerPartial {
+		t.Fatalf("source gap erased by later coverage assignment: %+v", turns)
+	}
+}

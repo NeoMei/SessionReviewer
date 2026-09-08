@@ -80,7 +80,7 @@ export interface ConversationRequest {
   messageCursor?: string;
 }
 
-export type ConversationErrorCode = "source_unavailable" | "generation_mismatch" | "stale_cursor" | "unsupported_provider" | "conversation_failed";
+export type ConversationErrorCode = "source_unavailable" | "retained_evidence_unavailable" | "retained_evidence_ambiguous" | "visible_reader_unsupported" | "generation_mismatch" | "stale_cursor" | "unsupported_provider" | "conversation_failed";
 
 export class ConversationQueryError extends Error {
   constructor(readonly code: ConversationErrorCode, message: string) {
@@ -417,7 +417,7 @@ function conversationErrorCode(error: unknown): ConversationErrorCode {
     try {
       const parsed = JSON.parse(stdout) as { error?: { code?: unknown } };
       const code = parsed?.error?.code;
-      if (code === "source_unavailable" || code === "generation_mismatch" || code === "stale_cursor" || code === "unsupported_provider") return code;
+      if (code === "source_unavailable" || code === "retained_evidence_unavailable" || code === "retained_evidence_ambiguous" || code === "visible_reader_unsupported" || code === "generation_mismatch" || code === "stale_cursor" || code === "unsupported_provider") return code;
     } catch { /* The generic bounded error below is intentional. */ }
   }
   return "conversation_failed";
@@ -426,6 +426,9 @@ function conversationErrorCode(error: unknown): ConversationErrorCode {
 function conversationErrorMessage(code: ConversationErrorCode): string {
   return {
     source_unavailable: "问答来源暂不可用；现有执行事实仍可阅读。",
+    retained_evidence_unavailable: "未找到与当前 Session 一致的保留问答证据。",
+    retained_evidence_ambiguous: "找到多份无法自动区分的保留问答证据。",
+    visible_reader_unsupported: "当前来源的问答读取器不可用；这不表示 Session 没有 Agent 回答。",
     generation_mismatch: "项目已更新；请刷新后重新读取问答。",
     stale_cursor: "问答分页已失效；请从首页重新读取。",
     unsupported_provider: "当前来源暂不支持问答读取。",

@@ -57,22 +57,10 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 			UserMessage: retainedWireMessage(visible.UserMessage), AssistantMessages: []Message{}, Actions: []Action{}, Results: []Result{},
 			AnswerState: AnswerNone,
 		}
-		lastPhase := ""
 		for _, message := range visible.Messages[1:] {
 			turn.AssistantMessages = append(turn.AssistantMessages, retainedWireMessage(message))
-			if message.Phase != nil {
-				lastPhase = *message.Phase
-			}
 		}
-		lastHasText := len(turn.AssistantMessages) != 0 && strings.TrimSpace(turn.AssistantMessages[len(turn.AssistantMessages)-1].VisibleExcerpt) != ""
-		switch {
-		case len(turn.AssistantMessages) == 0:
-			turn.AnswerState = AnswerNone
-		case (lastPhase == "" || lastPhase == "final_answer") && lastHasText && !report.SourceIncomplete:
-			turn.AnswerState = AnswerAnswered
-		default:
-			turn.AnswerState = AnswerPartial
-		}
+		turn.AnswerState = classifyAnswerState(visible.Messages[1:], !report.SourceIncomplete)
 		document.TurnUnits = append(document.TurnUnits, turn)
 	}
 

@@ -39,6 +39,22 @@ describe("conversation page wire", () => {
     expect(fullBody.messages[0]?.text).toContain("完整正文");
   });
 
+	it("accepts retained excerpts with a separate evidence view and bounded evidence coverage", () => {
+		const retained = selectedConversationPage({
+			body_availability: "retained_excerpt",
+			evidence_session_view_digest: `sha256:${"8".repeat(64)}`,
+			turn_units: [turn({ action_count: 1, result_count: 0 })],
+			messages: [message("user", { text: null }), message("assistant", { phase: null, text: null })],
+			actions: [{ revision_id: `sha256:${"9".repeat(64)}`, source_ref: (message("assistant").source_ref), kind: "command_started", tool_name: null, excerpt: "command_signature=test" }],
+			action_total: 1,
+			result_total: 0,
+			evidence_truncated: false
+		});
+		const parsed = parseConversationPageV1(JSON.stringify(retained));
+		expect(parsed.messages.every((item) => item.text === null && item.phase === null)).toBe(true);
+		expect(parsed.actions).toHaveLength(1);
+	});
+
   it("accepts the production Go-rendered index after user redaction expands past the body limit", () => {
     const directory = mkdtempSync(resolve(tmpdir(), "session-reviewer-conversation-wire-"));
     const output = resolve(directory, "conversation-page.json");
@@ -73,6 +89,14 @@ describe("conversation page wire", () => {
     ["selected user truncation mismatch", () => selectedConversationPage({ messages: [message("user", { truncated: true, text: "如何恢复可见问答？" }), message("assistant", { text: "完整最终回答" })], coverage: coverage({ truncated_messages: 1 }) })],
     ["malformed timestamp", () => conversationPage({ turn_units: [turn({ started_at: "today" })] })],
     ["false complete coverage", () => conversationPage({ coverage: coverage({ oversized_records: 1 }) })]
+	,["hidden next cursor", () => conversationPage({ total: 2, next_cursor: null })]
+	,["missing boundary cursors", () => conversationPage({ first_cursor: null, last_cursor: null })]
+	,["empty boundary cursor", () => conversationPage({ first_cursor: "" })]
+	,["unexpected previous cursor", () => conversationPage({ previous_cursor: "previous" })]
+	,["mismatched action source identity", () => selectedConversationPage({ turn_units: [turn({ action_count: 1 })], actions: [{ revision_id: `sha256:${"9".repeat(64)}`, source_ref: { ...(message("assistant").source_ref as Record<string, unknown>), source_identity: "other-source" }, kind: "command_started", tool_name: null, excerpt: "run" }], action_total: 1, evidence_truncated: false })]
+	,["invalid action source ordinal", () => selectedConversationPage({ turn_units: [turn({ action_count: 1 })], actions: [{ revision_id: `sha256:${"9".repeat(64)}`, source_ref: { ...(message("assistant").source_ref as Record<string, unknown>), record_ordinal: 0 }, kind: "command_started", tool_name: null, excerpt: "run" }], action_total: 1, evidence_truncated: false })]
+	,["invalid result outcome", () => selectedConversationPage({ turn_units: [turn({ result_count: 1 })], results: [{ revision_id: `sha256:${"9".repeat(64)}`, source_ref: message("assistant").source_ref, kind: "command_result", verification_state: "invented", excerpt: "done" }], result_total: 1, evidence_truncated: false })]
+	,["duplicate evidence revision", () => selectedConversationPage({ turn_units: [turn({ action_count: 2 })], actions: [0, 1].map(() => ({ revision_id: `sha256:${"9".repeat(64)}`, source_ref: message("assistant").source_ref, kind: "command_started", tool_name: null, excerpt: "run" })), action_total: 2, evidence_truncated: false })]
   ])("rejects %s", (_label, make) => {
     expect(() => parseConversationPageV1(JSON.stringify(make()))).toThrow();
   });
@@ -184,6 +208,9 @@ describe("conversation CLI query", () => {
 
   it.each([
     ["source_unavailable", "问答来源暂不可用"],
+	["retained_evidence_unavailable", "未找到"],
+	["retained_evidence_ambiguous", "多份"],
+	["visible_reader_unsupported", "读取器不可用"],
     ["generation_mismatch", "项目已更新"],
     ["stale_cursor", "分页已失效"],
     ["unsupported_provider", "暂不支持问答读取"]

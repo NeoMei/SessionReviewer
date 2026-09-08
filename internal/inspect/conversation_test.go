@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
@@ -31,6 +33,10 @@ func visibleRecord(role, phase, text string) string {
 }
 
 func newConversationFixture(t *testing.T, segments ...string) conversationFixture {
+	return newConversationFixtureWithView(t, nil, segments...)
+}
+
+func newConversationFixtureWithView(t *testing.T, mutateView func(*memory.SessionView), segments ...string) conversationFixture {
 	t.Helper()
 	data := t.TempDir()
 	home := t.TempDir()
@@ -74,8 +80,23 @@ func newConversationFixture(t *testing.T, segments ...string) conversationFixtur
 	fixture := buildEventFixtureCustomizedAt(t, data, "project-conversation", "generation-conversation", []string{conversationSession}, nil, func(_ string, view *memory.SessionView) {
 		view.SourceRecordDigest = digest
 		view.UsageRecordDigest = digest
+		if mutateView != nil {
+			mutateView(view)
+		}
 	})
 	return conversationFixture{request: ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "codex", SessionID: conversationSession, ExpectedGenerationID: fixture.generationID, Limit: 1}, paths: paths, record: record}
+}
+
+func TestConversationExposesAuthenticatedUnsupportedVisibleReaderDiagnostic(t *testing.T) {
+	f := newConversationFixtureWithView(t, func(view *memory.SessionView) {
+		view.Diagnostics = append(view.Diagnostics, memory.Diagnostic{Code: "visible_reader_unsupported"})
+	}, visibleRecord("user", "", "question"))
+	if err := os.Remove(f.paths[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConversationPage(context.Background(), f.request); eventErrorCode(err) != "visible_reader_unsupported" {
+		t.Fatalf("unsupported visible reader was not distinguished: %v", err)
+	}
 }
 
 type wireConversationMessage struct {
@@ -343,6 +364,154 @@ func TestConversationFullBodyPagesAdaptToResponseBudgetWithoutLosingMessages(t *
 	}
 }
 
+func TestConversationRetainedEvidenceIsBoundedWithoutHidingTheTurn(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "question")+visibleRecord("assistant", "final_answer", "answer"))
+	messages := []conversationchain.SourceMessage{
+		{Role: conversationchain.RoleUser, Text: "question", OccurredAt: "2026-09-07T00:00:01Z", RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)},
+		{Role: conversationchain.RoleAssistant, Phase: "final_answer", Text: "answer", OccurredAt: "2026-09-07T00:00:02Z", RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)},
+	}
+	turns, coverage := conversationchain.MaterializeVisible("codex", conversationSession, f.record.SourceIdentity, messages)
+	coverage.SourceRecords = coverage.VisibleMessages
+	for index := 0; index < conversationEvidenceMax+7; index++ {
+		revision := sha256.Sum256([]byte("evidence-" + strconv.Itoa(index)))
+		turns[0].Actions = append(turns[0].Actions, conversationchain.Action{RevisionID: "sha256:" + hex.EncodeToString(revision[:]), SourceRef: conversationchain.SourceRef{Provider: "codex", SessionID: conversationSession, SourceIdentity: f.record.SourceIdentity, RecordOrdinal: 2, SourceHash: strings.Repeat("b", 64)}, Kind: "command_started", Excerpt: "command_signature=test"})
+	}
+	turns[0].ActionCount = uint64(len(turns[0].Actions))
+	view := memory.SessionView{Digest: "sha256:" + strings.Repeat("d", 64), SourceRecordDigest: "sha256:" + strings.Repeat("e", 64)}
+	request := f.request
+	request.TurnUnitID = turns[0].TurnUnitID
+	request.Limit = 64
+	page, err := conversationPage(request, view, f.record, turns, coverage, view.Digest, conversationBodySource)
+	if err != nil || len(page.Messages) != 2 || len(page.Actions) != conversationEvidenceMax || page.ActionTotal != conversationEvidenceMax+7 || !page.EvidenceTruncated {
+		t.Fatalf("bounded evidence page=%+v err=%v", page, err)
+	}
+}
+
+func TestConversationEvidenceBudgetStillPagesEveryVisibleMessage(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "question"))
+	messages := []conversationchain.SourceMessage{{Role: conversationchain.RoleUser, Text: "question", OccurredAt: "2026-09-07T00:00:01Z", RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)}}
+	for index := 0; index < 20; index++ {
+		messages = append(messages, conversationchain.SourceMessage{Role: conversationchain.RoleAssistant, Phase: "commentary", Text: strings.Repeat("界", 15000), OccurredAt: "2026-09-07T00:00:02Z", RecordOrdinal: uint64(index + 2), RecordHash: strings.Repeat("b", 64)})
+	}
+	turns, coverage := conversationchain.MaterializeVisible("codex", conversationSession, f.record.SourceIdentity, messages)
+	coverage.SourceRecords = coverage.VisibleMessages
+	ref := conversationchain.SourceRef{Provider: "codex", SessionID: conversationSession, SourceIdentity: f.record.SourceIdentity, RecordOrdinal: 2, SourceHash: strings.Repeat("b", 64)}
+	for index := 0; index < conversationEvidenceMax; index++ {
+		actionRevision := sha256.Sum256([]byte("large-action-" + strconv.Itoa(index)))
+		resultRevision := sha256.Sum256([]byte("large-result-" + strconv.Itoa(index)))
+		turns[0].Actions = append(turns[0].Actions, conversationchain.Action{RevisionID: "sha256:" + hex.EncodeToString(actionRevision[:]), SourceRef: ref, Kind: "command_started", Excerpt: strings.Repeat("a", 4096)})
+		turns[0].Results = append(turns[0].Results, conversationchain.Result{RevisionID: "sha256:" + hex.EncodeToString(resultRevision[:]), SourceRef: ref, Kind: "command_result", VerificationState: "unknown", Excerpt: strings.Repeat("r", 4096)})
+	}
+	turns[0].ActionCount = uint64(len(turns[0].Actions))
+	turns[0].ResultCount = uint64(len(turns[0].Results))
+	view := memory.SessionView{Digest: "sha256:" + strings.Repeat("d", 64), SourceRecordDigest: "sha256:" + strings.Repeat("e", 64)}
+	request := f.request
+	request.TurnUnitID = turns[0].TurnUnitID
+	request.Limit = 64
+	captured, pages := 0, 0
+	for {
+		page, err := conversationPage(request, view, f.record, turns, coverage, view.Digest, conversationBodySource)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := RenderConversationPage(page)
+		if err != nil || len(body) > MaxConversationResponseBytes || len(page.Messages) == 0 {
+			t.Fatalf("page=%d bytes=%d messages=%d err=%v", pages, len(body), len(page.Messages), err)
+		}
+		captured += len(page.Messages)
+		pages++
+		if page.NextCursor == nil {
+			break
+		}
+		request.MessageCursor = *page.NextCursor
+	}
+	if captured != len(messages) || pages < 2 {
+		t.Fatalf("captured=%d want=%d pages=%d", captured, len(messages), pages)
+	}
+}
+
+func TestRetainedConversationCompatibilityRequiresExactFrozenEvidence(t *testing.T) {
+	current := memory.SessionView{Provider: "codex", SessionID: conversationSession, SourceIdentity: "source-1", ActiveRevisionIDs: []string{"revision-1", "revision-2"}}
+	compatible := memory.SessionView{Provider: current.Provider, SessionID: current.SessionID, SourceIdentity: current.SourceIdentity, SourceRecordDigest: "sha256:" + strings.Repeat("a", 64), ActiveRevisionIDs: append([]string(nil), current.ActiveRevisionIDs...)}
+	for _, test := range []struct {
+		name string
+		edit func(*memory.SessionView)
+		want bool
+	}{
+		{"exact", func(*memory.SessionView) {}, true},
+		{"provider", func(view *memory.SessionView) { view.Provider = "claude" }, false},
+		{"session", func(view *memory.SessionView) { view.SessionID = "another" }, false},
+		{"source replacement", func(view *memory.SessionView) { view.SourceIdentity = "source-2" }, false},
+		{"changed source record or usage", func(view *memory.SessionView) { view.SourceRecordDigest = "sha256:" + strings.Repeat("b", 64) }, false},
+		{"differing active revisions", func(view *memory.SessionView) { view.ActiveRevisionIDs = []string{"revision-1"} }, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := compatible
+			test.edit(&candidate)
+			if got := retainedViewCompatible(current, candidate, compatible.SourceRecordDigest); got != test.want {
+				t.Fatalf("compatible=%v want %v", got, test.want)
+			}
+		})
+	}
+	var selected *retainedConversation
+	first := retainedConversation{view: compatible}
+	if err := retainUniqueCandidate(&selected, first); err != nil || selected == nil {
+		t.Fatalf("first earlier snapshot: selected=%+v err=%v", selected, err)
+	}
+	if err := retainUniqueCandidate(&selected, retainedConversation{view: compatible}); eventErrorCode(err) != "retained_evidence_ambiguous" {
+		t.Fatalf("two matching earlier snapshots were not ambiguous: %v", err)
+	}
+}
+
+func TestConversationRendererRejectsInvalidRetainedEvidence(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "question")+visibleRecord("assistant", "final_answer", "answer"))
+	index, err := LoadConversationPage(context.Background(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := f.request
+	request.TurnUnitID = index.TurnUnits[0].TurnUnitID
+	page, err := LoadConversationPage(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := conversationchain.Action{RevisionID: "sha256:" + strings.Repeat("c", 64), SourceRef: conversationchain.SourceRef{Provider: "codex", SessionID: conversationSession, SourceIdentity: f.record.SourceIdentity, RecordOrdinal: 2, SourceHash: strings.Repeat("b", 64)}, Kind: "command_started", Excerpt: "command_signature=test"}
+	for _, test := range []struct {
+		name string
+		edit func(*ConversationPage)
+	}{
+		{"source identity", func(page *ConversationPage) { page.Actions[0].SourceRef.SourceIdentity = "other" }},
+		{"record ordinal", func(page *ConversationPage) { page.Actions[0].SourceRef.RecordOrdinal = 0 }},
+		{"source hash", func(page *ConversationPage) { page.Actions[0].SourceRef.SourceHash = "bad" }},
+		{"invalid utf8", func(page *ConversationPage) { page.Actions[0].Excerpt = string([]byte{0xff}) }},
+		{"duplicate revision", func(page *ConversationPage) {
+			page.Actions = append(page.Actions, page.Actions[0])
+			page.ActionTotal++
+			page.TurnUnits[0].ActionCount++
+		}},
+		{"result outcome", func(page *ConversationPage) {
+			page.Actions = nil
+			page.ActionTotal = 0
+			page.TurnUnits[0].ActionCount = 0
+			page.Results = []conversationchain.Result{{RevisionID: valid.RevisionID, SourceRef: valid.SourceRef, Kind: "command_result", VerificationState: "invented", Excerpt: "result"}}
+			page.ResultTotal = 1
+			page.TurnUnits[0].ResultCount = 1
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := page
+			invalid.TurnUnits = append([]conversationchain.VisibleTurn(nil), page.TurnUnits...)
+			invalid.Actions = []conversationchain.Action{valid}
+			invalid.ActionTotal = 1
+			invalid.TurnUnits[0].ActionCount = 1
+			test.edit(&invalid)
+			if _, err := RenderConversationPage(invalid); err == nil {
+				t.Fatal("invalid retained evidence accepted")
+			}
+		})
+	}
+}
+
 func TestConversationRendererRejectsForgedPageShape(t *testing.T) {
 	f := newConversationFixture(t, visibleRecord("user", "", "question"))
 	page, err := LoadConversationPage(context.Background(), f.request)
@@ -353,6 +522,31 @@ func TestConversationRendererRejectsForgedPageShape(t *testing.T) {
 	page.RangeEnd = 50
 	if _, err := RenderConversationPage(page); err == nil {
 		t.Fatal("renderer accepted range count inconsistent with items")
+	}
+}
+
+func TestConversationRendererRejectsInvalidCursorTopology(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "first")+visibleRecord("user", "", "second"))
+	page, err := LoadConversationPage(context.Background(), f.request)
+	if err != nil || page.NextCursor == nil {
+		t.Fatalf("positive control page=%+v err=%v", page, err)
+	}
+	for _, test := range []struct {
+		name string
+		edit func(*ConversationPage)
+	}{
+		{"hidden next", func(value *ConversationPage) { value.NextCursor = nil }},
+		{"missing boundaries", func(value *ConversationPage) { value.FirstCursor, value.LastCursor = nil, nil }},
+		{"empty boundary", func(value *ConversationPage) { empty := ""; value.FirstCursor = &empty }},
+		{"unexpected previous", func(value *ConversationPage) { value.PreviousCursor = value.FirstCursor }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invalid := page
+			test.edit(&invalid)
+			if _, err := RenderConversationPage(invalid); err == nil {
+				t.Fatalf("accepted invalid cursor topology: %+v", invalid)
+			}
+		})
 	}
 }
 

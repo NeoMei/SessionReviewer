@@ -121,7 +121,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   };
 
   const conversationFor = (session: SessionIndexEntryV1 | undefined): HTMLElement => {
-    const available = Boolean(session && session.source_availability === "available" && session.session_view_digest && options.loadConversation);
+	const available = Boolean(session && session.session_view_digest && options.loadConversation && !options.cliUnavailable);
     if (!available || !session || !session.session_view_digest || !options.loadConversation) {
       conversation?.dispose();
       conversation = undefined;

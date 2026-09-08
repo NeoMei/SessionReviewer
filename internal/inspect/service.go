@@ -73,6 +73,8 @@ type eventCursor struct {
 
 type authenticatedSession struct {
 	generationID string
+	manifest     memory.GenerationManifest
+	store        *memorystore.Store
 	view         memory.SessionView
 	revisions    []memory.ObservationRevision
 	entry        sessionindex.Entry
@@ -206,7 +208,7 @@ func inspectPublishedSession(ctx context.Context, request EventPageRequest, read
 		if read != nil {
 			err = read(view)
 		} else {
-			err = authenticatedRead[0](authenticatedSession{generationID: publishedID, view: view, revisions: revisions, entry: entry, project: project})
+			err = authenticatedRead[0](authenticatedSession{generationID: publishedID, manifest: manifest, store: store, view: view, revisions: revisions, entry: entry, project: project})
 		}
 		if err != nil {
 			return SessionEventPage{}, err

@@ -10,7 +10,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,6 +19,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/source"
 )
 
@@ -356,13 +356,6 @@ func decodeVisibleRecord(raw []byte) (conversationchain.SourceMessage, bool, boo
 
 // SessionsRoot follows the same environment precedence as the Codex adapter.
 func SessionsRoot() (string, error) {
-	home := os.Getenv("CODEX_HOME")
-	if home == "" {
-		user, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		home = filepath.Join(user, ".codex")
-	}
-	return filepath.Join(home, "sessions"), nil
+	root, err := platform.ResolveSessionsRoot("", platform.CurrentEnv())
+	return root.Path, err
 }

@@ -4,6 +4,14 @@ import { button, element } from "./dom";
 
 const PAGE_SIZE = 20;
 
+type ConversationNavigation = {
+  cursor: string;
+  direction: "first" | "previous" | "next" | "last";
+  sourceStart: number;
+  sourceEnd: number;
+  sourcePage: ConversationPageV1;
+};
+
 export type ConversationIdentity = Omit<ConversationRequest, "limit" | "turnUnitId" | "cursor" | "messageCursor">;
 export type ConversationLoader = (request: ConversationRequest) => Promise<ConversationPageV1>;
 export type ConversationElement = HTMLElement & {
@@ -28,19 +36,22 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
   const current = (requestEpoch: number, identityKey: string): boolean =>
     !disposed && requestEpoch === epoch && identityKey === key(identity);
 
-  const loadIndex = async (cursor?: string): Promise<void> => {
+  const loadIndex = async (navigation?: ConversationNavigation): Promise<void> => {
     const requestEpoch = ++epoch;
     const identityKey = key(identity);
     loadingIndex = true;
     loadingMessages = false;
     error = "";
-    retry = () => { void loadIndex(cursor); };
-    messagePage = undefined;
-    selectedTurn = undefined;
+    retry = () => { void loadIndex(navigation); };
+    if (navigation === undefined) {
+      messagePage = undefined;
+      selectedTurn = undefined;
+    }
     draw();
     try {
-      const page = await load({ ...base(), limit: PAGE_SIZE, ...(cursor === undefined ? {} : { cursor }) });
+      const page = await load({ ...base(), limit: PAGE_SIZE, ...(navigation === undefined ? {} : { cursor: navigation.cursor }) });
       if (!current(requestEpoch, identityKey)) return;
+	  assertBoundPage(page, identity, "turn_index", navigation);
       indexPage = page;
       loadingIndex = false;
       retry = undefined;
@@ -49,30 +60,30 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
       if (selectedTurn) void loadMessages(selectedTurn);
     } catch (reason) {
       if (!current(requestEpoch, identityKey)) return;
-      indexPage = undefined;
       loadingIndex = false;
       error = safeMessage(reason);
       draw();
     }
   };
 
-  const loadMessages = async (turn: VisibleTurnV1, messageCursor?: string): Promise<void> => {
+  const loadMessages = async (turn: VisibleTurnV1, navigation?: ConversationNavigation): Promise<void> => {
     const requestEpoch = ++epoch;
     const identityKey = key(identity);
     selectedTurn = turn;
-    messagePage = undefined;
+    if (navigation === undefined) messagePage = undefined;
     loadingMessages = true;
     error = "";
-    retry = () => { void loadMessages(turn, messageCursor); };
+    retry = () => { void loadMessages(turn, navigation); };
     draw();
     try {
       const page = await load({
         ...base(),
         limit: PAGE_SIZE,
         turnUnitId: turn.turn_unit_id,
-        ...(messageCursor === undefined ? {} : { messageCursor })
+        ...(navigation === undefined ? {} : { messageCursor: navigation.cursor })
       });
       if (!current(requestEpoch, identityKey) || selectedTurn?.turn_unit_id !== turn.turn_unit_id) return;
+	  assertBoundPage(page, identity, "turn_messages", navigation, turn.turn_unit_id, turn);
       messagePage = page;
       loadingMessages = false;
       retry = undefined;
@@ -102,7 +113,7 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
     }
     if (indexPage) {
       nodes.push(renderCoverage(indexPage));
-      nodes.push(renderNavigation(indexPage, "turn", (cursor) => { void loadIndex(cursor); }));
+      nodes.push(renderNavigation(indexPage, "turn", (navigation) => { void loadIndex(navigation); }));
       const browser = element("div", { className: "sr-conversation-browser" });
       const list = element("div", { className: "sr-turn-list", attrs: { "aria-label": "用户问题" } });
       for (const turn of indexPage.turn_units) {
@@ -155,6 +166,8 @@ function renderCoverage(page: ConversationPageV1): HTMLElement {
   const section = element("div", { className: "sr-conversation-coverage" }, [
     element("p", { text: "可见消息 " + coverage.visible_messages.toLocaleString("en-US") + " · 已读取 " + coverage.captured_messages.toLocaleString("en-US") + " · 上下文包装 " + coverage.context_messages.toLocaleString("en-US") })
   ]);
+	if (page.body_availability === "retained_excerpt") section.append(element("p", { className: "sr-coverage-warning", text: "原始消息正文当前不可用；下方显示扫描时保留的认证摘录，并非完整正文。" }));
+	if (coverage.diagnostics_available === false) section.append(element("p", { className: "sr-coverage-warning", text: "历史保留记录未包含完整来源覆盖诊断；未知不等于零或完整。" }));
   if (!coverage.complete) section.append(element("p", { className: "sr-coverage-warning", text: "问答分组覆盖不完整，不应据此断定没有其他可见内容。" }));
   if (coverage.oversized_records > 0) {
     section.append(element("p", { className: "sr-coverage-warning", text: coverage.oversized_records.toLocaleString("en-US") + " 条超限源记录被省略；其角色未知，不表示缺少同数量的 Agent 回答。" }));
@@ -168,7 +181,7 @@ function renderDetail(
   turn: VisibleTurnV1 | undefined,
   page: ConversationPageV1 | undefined,
   loading: boolean,
-  navigate: (turn: VisibleTurnV1, cursor: string) => void
+  navigate: (turn: VisibleTurnV1, navigation: ConversationNavigation) => void
 ): HTMLElement {
   const detail = element("section", { className: "sr-conversation-detail", attrs: { "aria-label": "问答详情" } });
   if (!turn) {
@@ -184,6 +197,9 @@ function renderDetail(
   detail.append(renderNavigation(page, "message", (cursor) => navigate(turn, cursor)));
   const messages = element("div", { className: "sr-message-list" });
   for (const message of page.messages) messages.append(renderMessage(message));
+	if ((page.action_total ?? 0) > 0 || (page.result_total ?? 0) > 0) {
+		messages.append(element("p", { className: "sr-retained-evidence", text: `已认证执行证据：操作 ${(page.actions ?? []).length}/${page.action_total ?? 0}，结果 ${(page.results ?? []).length}/${page.result_total ?? 0}${page.evidence_truncated ? "；其余请在已索引执行事实中查看。" : "。"}` }));
+	}
   if (page.messages.length === 0) messages.append(element("p", { className: "sr-empty", text: "当前分页没有可见消息。" }));
   detail.append(messages);
   return detail;
@@ -193,24 +209,25 @@ function renderMessage(message: VisibleMessageV1): HTMLElement {
   const article = element("article", { className: "sr-message sr-message-" + message.role });
   article.append(element("strong", { className: "sr-message-label", text: messageLabel(message) }));
   if (message.truncated && !message.text_truncated) article.append(element("p", { className: "sr-truncation", text: "列表预览曾截断；下方为已读取正文。" }));
-  article.append(element("pre", { className: "sr-message-body", text: message.text ?? message.visible_excerpt }));
+	article.append(element("pre", { className: "sr-message-body", text: message.text ?? message.visible_excerpt }));
+	if (message.text === null) article.append(element("p", { className: "sr-truncation", text: "仅保留认证摘录；完整正文不可用。" }));
   if (message.text_truncated) article.append(element("p", { className: "sr-truncation", text: "正文已截断；超出单条消息读取上限的部分未显示。" }));
   return article;
 }
 
-function renderNavigation(page: ConversationPageV1, kind: "turn" | "message", load: (cursor: string) => void): HTMLElement {
+function renderNavigation(page: ConversationPageV1, kind: "turn" | "message", load: (navigation: ConversationNavigation) => void): HTMLElement {
   const navigation = element("div", { className: "sr-conversation-navigation" });
   const definitions = [
-    ["首页", "first-" + kind + "-page", page.first_cursor],
-    ["上一页", "previous-" + kind + "-page", page.previous_cursor],
-    ["下一页", "next-" + kind + "-page", page.next_cursor],
-    ["末页", "last-" + kind + "-page", page.last_cursor]
+    ["首页", "first-" + kind + "-page", page.first_cursor, "first"],
+    ["上一页", "previous-" + kind + "-page", page.previous_cursor, "previous"],
+    ["下一页", "next-" + kind + "-page", page.next_cursor, "next"],
+    ["末页", "last-" + kind + "-page", page.last_cursor, "last"]
   ] as const;
-  for (const [label, action, cursor] of definitions) {
+  for (const [label, action, cursor, direction] of definitions) {
     const control = button(label, { "data-action": action });
     const alreadyThere = (action.startsWith("first-") && page.range_start === 0) || (action.startsWith("last-") && page.range_end === page.total);
     control.disabled = cursor === null || alreadyThere;
-    control.addEventListener("click", () => { if (cursor !== null) load(cursor); });
+    control.addEventListener("click", () => { if (cursor !== null) load({ cursor, direction, sourceStart: page.range_start, sourceEnd: page.range_end, sourcePage: page }); });
     navigation.append(control);
   }
   navigation.append(element("span", { text: page.total === 0 ? "0 / 0" : (page.range_start + 1) + "–" + page.range_end + " / " + page.total }));
@@ -218,15 +235,52 @@ function renderNavigation(page: ConversationPageV1, kind: "turn" | "message", lo
 }
 
 function answerLabel(turn: VisibleTurnV1): string {
-  return { no_answer: "尚无 Agent 回答", partial: "仅有过程说明", answered: "已回答（不代表已验证）" }[turn.answer_state];
+  return { no_answer: "尚无 Agent 回答", partial: "回答不完整", answered: "已回答（不代表已验证）" }[turn.answer_state];
 }
 
 function answerExplanation(turn: VisibleTurnV1): string {
   return {
     no_answer: "尚无 Agent 回答。",
-    partial: "仅有过程说明，尚无最终回答；不表示问题已解决。",
+	partial: "已捕获的 Agent 回答不完整；可能包含过程说明、截断或中断的最终回答，不表示问题已解决。",
     answered: "已记录 Agent 回答；不代表执行已验证或问题已解决。"
   }[turn.answer_state];
+}
+
+function assertBoundPage(page: ConversationPageV1, identity: ConversationIdentity, mode: "turn_index" | "turn_messages", navigation?: ConversationNavigation, turnUnitId?: string, selectedTurn?: VisibleTurnV1): void {
+	if (page.project_id !== identity.projectId || page.provider !== identity.provider || page.session_id !== identity.sessionId ||
+		page.generation_id !== identity.expectedGenerationId || page.session_view_digest !== identity.expectedSessionViewDigest || page.mode !== mode ||
+		(mode === "turn_messages" && page.turn_unit_id !== turnUnitId) || (navigation === undefined && page.range_start !== 0) || page.range_end - page.range_start > PAGE_SIZE ||
+		(navigation?.direction === "first" && page.range_start !== 0) || (navigation?.direction === "last" && page.range_end !== page.total) ||
+		(navigation?.direction === "next" && page.range_start !== navigation.sourceEnd) || (navigation?.direction === "previous" && page.range_end !== navigation.sourceStart) ||
+		(navigation !== undefined && !samePageDependency(page, navigation.sourcePage)) ||
+		(selectedTurn !== undefined && (page.turn_units.length !== 1 || !sameTurnIdentity(page.turn_units[0], selectedTurn)))) {
+		throw new Error("问答响应与当前 Session 绑定不一致。");
+	}
+}
+
+function samePageDependency(left: ConversationPageV1, right: ConversationPageV1): boolean {
+  return left.dependency_digest === right.dependency_digest && left.total === right.total && left.body_availability === right.body_availability &&
+    left.evidence_session_view_digest === right.evidence_session_view_digest && sameCoverage(left.coverage, right.coverage);
+}
+
+function sameCoverage(left: ConversationPageV1["coverage"], right: ConversationPageV1["coverage"]): boolean {
+  return left.source_records === right.source_records && left.visible_messages === right.visible_messages && left.captured_messages === right.captured_messages &&
+    left.truncated_messages === right.truncated_messages && left.truncated_bodies === right.truncated_bodies && left.context_messages === right.context_messages &&
+    left.orphan_messages === right.orphan_messages && left.oversized_records === right.oversized_records && left.malformed_records === right.malformed_records &&
+    left.complete === right.complete && left.diagnostics_available === right.diagnostics_available;
+}
+
+function sameTurnIdentity(left: VisibleTurnV1, right: VisibleTurnV1): boolean {
+  return left.turn_unit_id === right.turn_unit_id && left.ordinal === right.ordinal && left.started_at === right.started_at &&
+    left.ended_at === right.ended_at && left.answer_state === right.answer_state && left.assistant_message_count === right.assistant_message_count &&
+    left.action_count === right.action_count && left.result_count === right.result_count && sameMessageIdentity(left.user_message, right.user_message);
+}
+
+function sameMessageIdentity(left: VisibleMessageV1, right: VisibleMessageV1): boolean {
+  return left.role === right.role && left.phase === right.phase && left.revision_id === right.revision_id && left.occurred_at === right.occurred_at &&
+    left.visible_excerpt === right.visible_excerpt && left.truncated === right.truncated && left.source_ref.provider === right.source_ref.provider &&
+    left.source_ref.session_id === right.source_ref.session_id && left.source_ref.source_identity === right.source_ref.source_identity &&
+    left.source_ref.record_ordinal === right.source_ref.record_ordinal && left.source_ref.source_hash === right.source_ref.source_hash;
 }
 
 function messageLabel(message: VisibleMessageV1): string {

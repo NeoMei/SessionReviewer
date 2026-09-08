@@ -57,7 +57,7 @@ describe("selected Session conversation", () => {
     expect(root.matches('[aria-label="问答记录"]')).toBe(true);
     expect(root.textContent).toContain("用户问题");
     expect(root.textContent).toContain("已回答（不代表已验证）");
-    expect(root.textContent).toContain("仅有过程说明");
+    expect(root.textContent).toContain("回答不完整");
     expect(root.textContent).toContain("尚无 Agent 回答");
     expect(root.textContent).toContain("2 条超限源记录被省略");
 
@@ -72,23 +72,30 @@ describe("selected Session conversation", () => {
   });
 
   it("retries the same failed index page and provides first/middle/last controls for turns and messages", async () => {
-    const middle = page(conversationPage({ previous_cursor: "previous-index", next_cursor: "next-index", range_start: 20, range_end: 21, total: 60 }));
-    const selectedMiddle = page(selectedConversationPage({ previous_cursor: "previous-message", next_cursor: "next-message", range_start: 20, range_end: 22, total: 60 }));
+	const first = page(conversationPage({ next_cursor: "next-index", total: 60 }));
+	const middle = page(conversationPage({ previous_cursor: "previous-index", next_cursor: "next-index-2", range_start: 1, range_end: 2, total: 60 }));
+	const selectedMiddle = page(selectedConversationPage({ next_cursor: "next-message", range_end: 2, total: 60 }));
     const load = vi.fn()
       .mockRejectedValueOnce(new Error("问答暂不可用"))
-      .mockResolvedValueOnce(middle)
-      .mockResolvedValueOnce(selectedMiddle)
+	  .mockResolvedValueOnce(first)
+	  .mockResolvedValueOnce(page(selectedConversationPage()))
+	  .mockResolvedValueOnce(middle)
+	  .mockResolvedValueOnce(selectedMiddle)
       .mockResolvedValue(page(conversationPage()));
     const root = renderConversation(identity, load);
     await settle();
     expect(root.textContent).toContain("问答暂不可用");
     root.querySelector<HTMLButtonElement>('[data-action="retry-conversation-page"]')?.click();
     await settle();
-    expect(root.textContent).toContain("21–21 / 60");
+	await settle();
+	root.querySelector<HTMLButtonElement>('[data-action="next-turn-page"]')?.click();
+	await settle();
+	await settle();
+	expect(root.textContent).toContain("2–2 / 60");
     for (const action of ["first-turn-page", "previous-turn-page", "next-turn-page", "last-turn-page"]) {
       expect(root.querySelector(`[data-action="${action}"]`)).not.toBeNull();
     }
-    expect(root.textContent).toContain("21–22 / 60");
+	expect(root.textContent).toContain("1–2 / 60");
     for (const action of ["first-message-page", "previous-message-page", "next-message-page", "last-message-page"]) {
       expect(root.querySelector(`[data-action="${action}"]`)).not.toBeNull();
     }
@@ -161,5 +168,57 @@ describe("selected Session conversation", () => {
 
     expect(root.textContent).toContain("第二页问题");
     expect(root.textContent).not.toContain("正在读取问答记录");
+  });
+
+	it("rejects supplied pages with another identity or mode before following their turns", async () => {
+		for (const response of [conversationPage({ session_id: "session-other" }), selectedConversationPage()]) {
+			const load = vi.fn().mockResolvedValue(page(response));
+			const root = renderConversation(identity, load);
+			await settle();
+			expect(root.textContent).toContain("绑定不一致");
+			expect(load).toHaveBeenCalledTimes(1);
+			root.dispose();
+		}
+	});
+
+	it("labels retained excerpts as unavailable full bodies", async () => {
+		const retainedIndex = page(conversationPage({ body_availability: "retained_excerpt" }));
+		const retainedDetail = page(selectedConversationPage({
+			body_availability: "retained_excerpt",
+			messages: (selectedConversationPage().messages as Record<string, unknown>[]).map((item) => ({ ...item, phase: null, text: null }))
+		}));
+		const root = renderConversation(identity, (request) => Promise.resolve(request.turnUnitId ? retainedDetail : retainedIndex));
+		await settle();
+		await settle();
+		expect(root.textContent).toContain("认证摘录");
+		expect(root.textContent).toContain("完整正文不可用");
+	});
+
+  it("rejects skipped and dependency-changed supplied pages while preserving the last authenticated page", async () => {
+    const first = page(conversationPage({ total: 3, range_end: 1, next_cursor: "second" }));
+    const skippedTurn = { ...(conversationPage().turn_units as Record<string, unknown>[])[0], turn_unit_id: "turn-3", ordinal: 3,
+      user_message: { ...((conversationPage().turn_units as Record<string, unknown>[])[0].user_message as Record<string, unknown>), visible_excerpt: "SKIPPED_SECOND_PAGE" } };
+    const skipped = page(conversationPage({ total: 3, range_start: 2, range_end: 3, previous_cursor: "second", turn_units: [skippedTurn] }));
+    const changed = page(conversationPage({ total: 3, range_start: 1, range_end: 2, previous_cursor: "first", next_cursor: "third",
+      dependency_digest: `sha256:${"9".repeat(64)}`, turn_units: [{ ...skippedTurn, turn_unit_id: "turn-2", ordinal: 2 }] }));
+    for (const response of [skipped, changed]) {
+      const load = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(page(selectedConversationPage())).mockResolvedValueOnce(response);
+      const root = renderConversation(identity, load);
+      await settle();
+      await settle();
+      root.querySelector<HTMLButtonElement>('[data-action="next-turn-page"]')!.click();
+      await settle();
+      expect(root.textContent).toContain("绑定不一致");
+      expect(root.textContent).not.toContain("SKIPPED_SECOND_PAGE");
+      root.dispose();
+    }
+  });
+
+  it("rejects a selected response whose turn summary differs from the selected index row", async () => {
+    const altered = page(selectedConversationPage({ turn_units: [{ ...(selectedConversationPage().turn_units as Record<string, unknown>[])[0], answer_state: "partial" }] }));
+    const root = renderConversation(identity, (request) => Promise.resolve(request.turnUnitId ? altered : page(conversationPage())));
+    await settle();
+    await settle();
+    expect(root.textContent).toContain("绑定不一致");
   });
 });

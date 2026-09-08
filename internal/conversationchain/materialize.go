@@ -37,21 +37,35 @@ type VisibleTurn struct {
 	UserMessage           VisibleMessage `json:"user_message"`
 	AnswerState           AnswerState    `json:"answer_state"`
 	AssistantMessageCount uint64         `json:"assistant_message_count"`
+	ActionCount           uint64         `json:"action_count,omitempty"`
+	ResultCount           uint64         `json:"result_count,omitempty"`
+	Actions               []Action       `json:"-"`
+	Results               []Result       `json:"-"`
 	// Messages stay private to materialization and are paged separately.
 	Messages []VisibleMessage `json:"-"`
 }
 
 type VisibleCoverage struct {
-	SourceRecords     uint64 `json:"source_records"`
-	VisibleMessages   uint64 `json:"visible_messages"`
-	CapturedMessages  uint64 `json:"captured_messages"`
-	TruncatedMessages uint64 `json:"truncated_messages"`
-	TruncatedBodies   uint64 `json:"truncated_bodies"`
-	ContextMessages   uint64 `json:"context_messages"`
-	OrphanMessages    uint64 `json:"orphan_messages"`
-	OversizedRecords  uint64 `json:"oversized_records"`
-	MalformedRecords  uint64 `json:"malformed_records"`
-	Complete          bool   `json:"complete"`
+	SourceRecords        uint64 `json:"source_records"`
+	VisibleMessages      uint64 `json:"visible_messages"`
+	CapturedMessages     uint64 `json:"captured_messages"`
+	TruncatedMessages    uint64 `json:"truncated_messages"`
+	TruncatedBodies      uint64 `json:"truncated_bodies"`
+	ContextMessages      uint64 `json:"context_messages"`
+	OrphanMessages       uint64 `json:"orphan_messages"`
+	OversizedRecords     uint64 `json:"oversized_records"`
+	MalformedRecords     uint64 `json:"malformed_records"`
+	Complete             bool   `json:"complete"`
+	DiagnosticsAvailable *bool  `json:"diagnostics_available,omitempty"`
+}
+
+// ApplyVisibleCoverage reclassifies answers after the source reader's complete
+// coverage is known. Gaps must never be erased by an earlier message-only pass.
+func ApplyVisibleCoverage(turns []VisibleTurn, coverage VisibleCoverage) {
+	complete := !sourceCoverageIncomplete(coverage)
+	for index := range turns {
+		turns[index].AnswerState = classifyAnswerState(turns[index].Messages[1:], complete)
+	}
 }
 
 // VisibleUserText removes only known leading ambient envelopes. Arbitrary XML,
@@ -163,14 +177,28 @@ func MaterializeVisible(provider, sessionID, sourceIdentity string, messages []S
 			turn := &turns[len(turns)-1]
 			turn.Messages = append(turn.Messages, message)
 			turn.AssistantMessageCount++
-			if source.Phase == "final_answer" || source.Phase == "" {
-				turn.AnswerState = AnswerAnswered
-			} else if turn.AnswerState == AnswerNone {
-				turn.AnswerState = AnswerPartial
-			}
+			turn.AnswerState = classifyAnswerState(turn.Messages[1:], coverage.Complete)
 		}
 	}
 	return turns, coverage
+}
+
+func classifyAnswerState(messages []VisibleMessage, sourceComplete bool) AnswerState {
+	if len(messages) == 0 {
+		return AnswerNone
+	}
+	last := messages[len(messages)-1]
+	phase := ""
+	for index := len(messages) - 1; index >= 0; index-- {
+		if messages[index].Phase != nil {
+			phase = *messages[index].Phase
+			break
+		}
+	}
+	if sourceComplete && (phase == "" || phase == "final_answer") && strings.TrimSpace(last.VisibleExcerpt) != "" {
+		return AnswerAnswered
+	}
+	return AnswerPartial
 }
 
 func boundedVisibleText(value string, limit int) (string, bool) {
