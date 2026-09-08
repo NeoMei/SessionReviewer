@@ -638,6 +638,8 @@ updated_at
 
 备选节点和相关节点各不超过两个。`analysis_mode=deterministic` 时 `agent_run_id` 必须为 `null`；`agent_requested` 必须引用一个受限 Agent run。相同排序 dependency digests、规则版本和问题规范化文本产生同一候选身份，重复整理不得重复调用 Agent。
 
+候选合同的 `dependency_digests[]` 本身不包含完整链映射，因此其解析只验证来源引用语法、原始精确元组不重复及所需能力版本，不能据此认证或选择历史快照。限定来源在正式 presentation 中须按上述链 dependency 唯一解析；候选确认服务也必须在发布前完成此认证与别名重复检查。候选解析成功不代表其证据已经接受，不为省略的来源坐标猜测最新视图。
+
 ### 17.4 文件所有权与发布
 
 | 产物 | 权威写入方 | Project | Vault | 人工可编辑 | 发布事务 |

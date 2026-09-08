@@ -19,6 +19,8 @@
 - Maximum65536 dependency entries and256 refs per entity/segment remain; no union document with a fabricated digest.
 - Zero Agent starts; no network, raw source persistence, real-Vault mutation or release within these tasks.
 
+Candidate authority clarification2026-09-09: `problem-map-candidate-v1` has opaque dependency digests, not a full ChainDependency map. Its codec validates optional snapshot syntax, exact raw reference tuple uniqueness, conditional reader0.4.3 and canonical preservation only; it cannot resolve aliases or authenticate evidence. Presentation validates unique canonical bindings against its full dependencies. The later confirmation service must resolve candidate refs against authenticated dependencies before publishing; this task must not invent a new candidate evidence map or treat successful candidate parsing as acceptance.
+
 ### Task 1: Add exact snapshot-qualified source references across shared contracts
 
 **Files:** Modify `internal/reviewv4/types.go`, `validate.go`, `codec.go`, `document_projection.go`, `markdown_draft.go`, `markdown_render.go` and focused tests; `internal/problemmap/validate.go` and codec tests; `schemas/review-presentation-v4.schema.json`, `machine-ledger-v4.schema.json`, `problem-map-candidate-v1.schema.json`; `obsidian-plugin/src/contracts/review-v4.ts`, `src/data/contracts-v4.ts` and shared fixture/canonical tests. Create `internal/reviewv4/source_turn_binding.go`, `source_turn_binding_test.go`. Update only specific version-capability consumers that otherwise reject supported0.4.3 data; preserve older floors and their tests.
