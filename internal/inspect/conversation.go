@@ -10,6 +10,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/redact"
+	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 	"unicode/utf8"
@@ -63,11 +64,6 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 	if request.Limit < 1 || request.Limit > 64 || request.Cursor != "" && request.TurnUnitID != "" || request.MessageCursor != "" && request.TurnUnitID == "" || len(request.Cursor) > 8192 || len(request.MessageCursor) > 8192 || len(request.TurnUnitID) > 256 {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation request is invalid")
 	}
-	// Private schema v1 currently admits Codex only. Report the capability
-	// boundary without opening any store or source for other providers.
-	if request.Provider != "codex" {
-		return ConversationPage{}, publicError("unsupported_provider", "visible conversation is unsupported for this provider")
-	}
 	var page ConversationPage
 	_, err := inspectPublishedSession(ctx, EventPageRequest{DataRoot: request.DataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, Limit: request.Limit}, nil, func(authenticated authenticatedSession) error {
 		view := authenticated.view
@@ -98,26 +94,25 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		evidenceView := view.Digest
 		sourceLoaded := false
 		if record.Availability == memory.SourceAvailable {
-			resolved, resolveErr := platform.ResolveSessionsRoot("", platform.CurrentEnv())
-			if resolveErr == nil {
-				source, sourceCoverage, readErr := codex.ReadPublishedVisible(ctx, resolved.Path, record)
+			visible, sourceCoverage, readErr := readPublishedVisible(ctx, record)
+			if !errors.Is(readErr, source.ErrVisibleReaderUnsupported) {
 				if context.Cause(ctx) != nil {
 					return publicError(CodeInvalidArgument, "inspection timed out")
 				}
 				if readErr == nil {
 					sourceLoaded = true
 					redactor := redact.Default()
-					for i := range source {
+					for i := range visible {
 						if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
 							return publicError(CodeInvalidArgument, "inspection timed out")
 						}
-						source[i].Text = redactAbsolutePaths(redactor.Text(source[i].Text).Text)
+						visible[i].Text = redactAbsolutePaths(redactor.Text(visible[i].Text).Text)
 					}
-					turns, coverage = conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, source)
+					turns, coverage = conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, visible)
 					coverage.SourceRecords = sourceCoverage.SourceRecords
 					coverage.OversizedRecords = sourceCoverage.OversizedRecords
 					coverage.MalformedRecords = sourceCoverage.MalformedRecords
-					coverage.Complete = coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0
+					coverage.Complete = sourceCoverage.Complete && coverage.TruncatedBodies == 0 && coverage.OrphanMessages == 0
 					conversationchain.ApplyVisibleCoverage(turns, coverage)
 					bodyAvailability = conversationBodySource
 				}
@@ -153,6 +148,17 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 	return page, nil
 }
 
+func readPublishedVisible(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
+	if record.Provider != "codex" {
+		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
+	}
+	resolved, err := platform.ResolveSessionsRoot("", platform.CurrentEnv())
+	if err != nil {
+		return nil, conversationchain.VisibleCoverage{}, err
+	}
+	return codex.ReadPublishedVisible(ctx, resolved.Path, record)
+}
+
 func hasSessionDiagnostic(view memory.SessionView, code string) bool {
 	for _, diagnostic := range view.Diagnostics {
 		if diagnostic.Code == code {
@@ -163,7 +169,7 @@ func hasSessionDiagnostic(view memory.SessionView, code string) bool {
 }
 
 func RenderConversationPage(page ConversationPage) ([]byte, error) {
-	if validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest) != nil || page.Provider != "codex" || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 || page.BodyAvailability != "" && page.BodyAvailability != conversationBodySource && page.BodyAvailability != conversationBodyRetained || page.EvidenceSessionViewDigest != nil && !digestRE.MatchString(*page.EvidenceSessionViewDigest) {
+	if validateIdentity(page.SchemaVersion, page.MinimumReaderVersion, page.ProjectID, page.Provider, page.SessionID, page.GenerationID, page.SessionViewDigest) != nil || !digestRE.MatchString(page.DependencyDigest) || page.RedactionVersion != conversationRedactionVersion || page.Total > maxWireInteger || page.Mode != "turn_index" && page.Mode != "turn_messages" || page.RangeStart > page.RangeEnd || page.RangeEnd > page.Total || len(page.TurnUnits) > 64 || len(page.Messages) > 64 || page.BodyAvailability != "" && page.BodyAvailability != conversationBodySource && page.BodyAvailability != conversationBodyRetained || page.EvidenceSessionViewDigest != nil && !digestRE.MatchString(*page.EvidenceSessionViewDigest) {
 		return nil, publicError(CodeInvalidArgument, "conversation page is invalid")
 	}
 	if page.Mode == "turn_index" && (uint64(len(page.TurnUnits)) != page.RangeEnd-page.RangeStart || len(page.Messages) != 0 || page.TurnUnitID != nil) || page.Mode == "turn_messages" && (uint64(len(page.Messages)) != page.RangeEnd-page.RangeStart || len(page.TurnUnits) != 1 || page.TurnUnitID == nil || page.TurnUnits[0].TurnUnitID != *page.TurnUnitID) {
@@ -194,7 +200,8 @@ func RenderConversationPage(page ConversationPage) ([]byte, error) {
 			return nil, publicError(CodeInvalidArgument, "conversation coverage is invalid")
 		}
 	}
-	if coverage.CapturedMessages+coverage.ContextMessages+coverage.OrphanMessages != coverage.VisibleMessages || coverage.TruncatedMessages > coverage.CapturedMessages || coverage.TruncatedBodies > coverage.CapturedMessages || coverage.VisibleMessages+coverage.OversizedRecords+coverage.MalformedRecords > coverage.SourceRecords || coverage.DiagnosticsAvailable != nil && !*coverage.DiagnosticsAvailable && coverage.Complete || (coverage.DiagnosticsAvailable == nil || *coverage.DiagnosticsAvailable) && coverage.Complete != (coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0) {
+	diagnosticsKnown := coverage.DiagnosticsAvailable == nil || *coverage.DiagnosticsAvailable
+	if diagnosticsKnown && coverage.CapturedMessages+coverage.ContextMessages+coverage.OrphanMessages != coverage.VisibleMessages || !diagnosticsKnown && coverage.CapturedMessages > coverage.VisibleMessages || coverage.TruncatedMessages > coverage.CapturedMessages || coverage.TruncatedBodies > coverage.CapturedMessages || coverage.VisibleMessages+coverage.OversizedRecords+coverage.MalformedRecords > coverage.SourceRecords || !diagnosticsKnown && coverage.Complete || diagnosticsKnown && coverage.Complete != (coverage.OversizedRecords == 0 && coverage.MalformedRecords == 0 && coverage.OrphanMessages == 0 && coverage.TruncatedBodies == 0) {
 		return nil, publicError(CodeInvalidArgument, "conversation coverage is inconsistent")
 	}
 	for _, turn := range page.TurnUnits {

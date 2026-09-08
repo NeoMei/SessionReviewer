@@ -6,7 +6,7 @@ export interface VisibleMessageV1 {
   phase: "commentary" | "final_answer" | null;
   revision_id: string;
   source_ref: {
-    provider: "codex";
+    provider: string;
     session_id: string;
     source_identity: string;
     record_ordinal: number;
@@ -66,7 +66,7 @@ export interface ConversationPageV1 {
   minimum_reader_version: "0.4.0";
   mode: ConversationModeV1;
   project_id: string;
-  provider: "codex";
+  provider: string;
   session_id: string;
   generation_id: string;
   session_view_digest: string;

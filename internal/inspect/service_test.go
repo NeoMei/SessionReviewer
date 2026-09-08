@@ -16,16 +16,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/projectidentity"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 )
 
 type eventFixture struct {
 	dataRoot, projectRoot, projectID, generationID string
 	sessionDigests                                 map[string]string
+}
+
+type eventFixtureIdentity struct {
+	provider, sessionID string
 }
 
 func TestLoadSessionEventPagePaginatesAndNavigatesDeterministically(t *testing.T) {
@@ -410,6 +417,14 @@ func buildEventFixtureAt(t *testing.T, dataRoot, projectID, generationID string,
 }
 
 func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generationID string, sessionIDs []string, mutateObservations func([]memory.ObservationRevision), mutateView func(string, *memory.SessionView)) eventFixture {
+	identities := make([]eventFixtureIdentity, len(sessionIDs))
+	for index, sessionID := range sessionIDs {
+		identities[index] = eventFixtureIdentity{provider: "codex", sessionID: sessionID}
+	}
+	return buildEventFixtureIdentitiesAt(t, dataRoot, projectID, generationID, identities, mutateObservations, mutateView, nil)
+}
+
+func buildEventFixtureIdentitiesAt(t *testing.T, dataRoot, projectID, generationID string, identities []eventFixtureIdentity, mutateObservations func([]memory.ObservationRevision), mutateView func(string, *memory.SessionView), buildConversation func(memory.SessionView, []memory.ObservationRevision) *conversationchain.Document) eventFixture {
 	t.Helper()
 	projectRoot := t.TempDir()
 	legacy := config.ProjectMapping{ID: projectID, Root: projectRoot}
@@ -442,14 +457,16 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 		t.Fatal(err)
 	}
 
-	views := make(map[sessionindex.SessionKey]*memory.SessionView, len(sessionIDs))
-	dependencies := make([]memory.SessionViewDependency, 0, len(sessionIDs))
-	lineages := make([]memory.SessionLineageDependency, 0, len(sessionIDs))
-	sourceDigests := make([]string, 0, len(sessionIDs))
-	measurements := make([]memory.SessionIndexMeasurement, 0, len(sessionIDs))
-	sessionDigests := make(map[string]string, len(sessionIDs))
-	for _, sessionID := range sessionIDs {
-		observations := fixtureObservations(t, projectID, sessionID)
+	views := make(map[sessionindex.SessionKey]*memory.SessionView, len(identities))
+	dependencies := make([]memory.SessionViewDependency, 0, len(identities))
+	lineages := make([]memory.SessionLineageDependency, 0, len(identities))
+	chains := make([]memory.ConversationChainDependency, 0, len(identities))
+	sourceDigests := make([]string, 0, len(identities))
+	measurements := make([]memory.SessionIndexMeasurement, 0, len(identities))
+	sessionDigests := make(map[string]string, len(identities))
+	for _, identity := range identities {
+		provider, sessionID := identity.provider, identity.sessionID
+		observations := fixtureObservationsForProvider(t, projectID, provider, sessionID)
 		if mutateObservations != nil {
 			mutateObservations(observations)
 		}
@@ -469,10 +486,26 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 			}
 			lineageActive[keyDigest] = observation.RevisionID
 		}
-		sourceDigest := testDigest(projectID + "-" + sessionID + "-source")
-		view := memory.SessionView{SchemaVersion: 1, ProjectID: projectID, Provider: "codex", SessionID: sessionID, SourceIdentity: "source-" + sessionID, SourceRecordDigest: sourceDigest, UsageRecordDigest: sourceDigest, StartedAt: "2026-09-07T00:00:00Z", EndedAt: "2026-09-07T00:00:03Z", TerminalState: memory.Indexed, SourceAvailability: memory.SourceAvailable, ActiveRevisionIDs: active, ObservationSummaries: summaries, ObservationChunkDigests: []string{chunkDigest}, DependencyDigest: testDigest(projectID + "-" + sessionID + "-dependency"), MaterializerVersion: "v1"}
+		sourceIdentity := fixtureSourceIdentity(provider, sessionID)
+		sourceDigest := testDigest(projectID + "-" + provider + "-" + sessionID + "-source")
+		view := memory.SessionView{SchemaVersion: 1, ProjectID: projectID, Provider: provider, SessionID: sessionID, SourceIdentity: sourceIdentity, SourceRecordDigest: sourceDigest, UsageRecordDigest: sourceDigest, StartedAt: "2026-09-07T00:00:00Z", EndedAt: "2026-09-07T00:00:03Z", TerminalState: memory.Indexed, SourceAvailability: memory.SourceAvailable, ActiveRevisionIDs: active, ObservationSummaries: summaries, ObservationChunkDigests: []string{chunkDigest}, DependencyDigest: testDigest(projectID + "-" + provider + "-" + sessionID + "-dependency"), MaterializerVersion: "v1"}
 		if mutateView != nil {
 			mutateView(sessionID, &view)
+		}
+		if buildConversation != nil {
+			record := memory.SourceRecord{SchemaVersion: 1, Provider: provider, SessionID: sessionID, SourceIdentity: sourceIdentity, StartedAt: view.StartedAt, EndedAt: view.EndedAt, FrozenBoundary: memory.FrozenBoundary{Location: memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: 5, ByteOffset: 500}}, SourceHash: strings.Repeat("d", 64)}, Availability: memory.SourceAvailable, Usage: accounting.SessionUsage{StartedAt: view.StartedAt, EndedAt: view.EndedAt, DurationMS: 3000, Models: []accounting.ModelUsage{}}, ProjectIDs: []string{projectID}}
+			catalog, err := sourcecatalog.Open(dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sourceDigest, err = catalog.UpsertSource(record)
+			closeErr := catalog.Close()
+			if err != nil || closeErr != nil {
+				t.Fatalf("store provider-neutral source: digest=%q err=%v close=%v", sourceDigest, err, closeErr)
+			}
+			view.SourceRecordDigest = sourceDigest
+			view.UsageRecordDigest = sourceDigest
+			view.SourceAvailability = memory.SourceAvailable
 		}
 		view.Digest, err = memory.SessionViewDigest(view)
 		if err != nil {
@@ -481,7 +514,7 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 		if _, err := store.PutSessionView(view); err != nil {
 			t.Fatal(err)
 		}
-		lineage := memory.SessionLineage{SchemaVersion: 1, ProjectID: projectID, Provider: "codex", SessionID: sessionID, SourceIdentity: view.SourceIdentity, ActiveRevisions: lineageActive, SupersededRevisions: map[string]string{}, WithdrawnRevisions: map[string]string{}}
+		lineage := memory.SessionLineage{SchemaVersion: 1, ProjectID: projectID, Provider: provider, SessionID: sessionID, SourceIdentity: view.SourceIdentity, ActiveRevisions: lineageActive, SupersededRevisions: map[string]string{}, WithdrawnRevisions: map[string]string{}}
 		lineage.Digest, err = memory.SessionLineageDigest(lineage)
 		if err != nil {
 			t.Fatal(err)
@@ -489,16 +522,25 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 		if _, err := store.PutSessionLineage(lineage); err != nil {
 			t.Fatal(err)
 		}
-		key := sessionindex.SessionKey{Provider: "codex", SessionID: sessionID}
+		key := sessionindex.SessionKey{Provider: provider, SessionID: sessionID}
 		viewCopy := view
 		views[key] = &viewCopy
-		dependencies = append(dependencies, memory.SessionViewDependency{Provider: "codex", SessionID: sessionID, Digest: view.Digest})
-		lineages = append(lineages, memory.SessionLineageDependency{Provider: "codex", SessionID: sessionID, Digest: lineage.Digest})
+		dependencies = append(dependencies, memory.SessionViewDependency{Provider: provider, SessionID: sessionID, Digest: view.Digest})
+		lineages = append(lineages, memory.SessionLineageDependency{Provider: provider, SessionID: sessionID, Digest: lineage.Digest})
 		sourceDigests = append(sourceDigests, view.SourceRecordDigest)
-		measurements = append(measurements, memory.SessionIndexMeasurement{Provider: "codex", SessionID: sessionID, RecordCount: eventUint64(5), Seen: 5, Indexed: 3, Undecodable: 2})
+		measurements = append(measurements, memory.SessionIndexMeasurement{Provider: provider, SessionID: sessionID, RecordCount: eventUint64(5), Seen: 5, Indexed: 3, Undecodable: 2})
+		if buildConversation != nil {
+			chain := buildConversation(view, observations)
+			if chain != nil {
+				if _, err := store.PutConversationChain(*chain); err != nil {
+					t.Fatal(err)
+				}
+				chains = append(chains, memory.ConversationChainDependency{Provider: provider, SessionID: sessionID, SessionViewDigest: view.Digest, Digest: chain.Digest})
+			}
+		}
 		sessionDigests[sessionID] = view.Digest
 	}
-	project := memory.ProjectView{SchemaVersion: 1, ProjectID: projectID, Generation: 1, StartedAt: "2026-09-07T00:00:00Z", EndedAt: "2026-09-07T00:00:03Z", SourceSessions: len(sessionIDs), TerminalCounts: memory.TerminalCounts{Indexed: len(sessionIDs)}, SessionViewDependencies: dependencies, ObservationRevisionIDs: []string{}, ProbeStateDigest: probe.Digest, LiveState: memory.StateSnapshot{Branch: "main", Head: probe.Head}, WitnessedState: []memory.DerivedRecord{}, DerivedRecords: []memory.DerivedRecord{}, AggregationCoverage: memory.ProjectAggregationCoverage{ObservationSummariesSeen: len(sessionIDs) * 3, EventReferences: memory.AggregationChannelCoverage{Seen: len(sessionIDs) * 3, Dropped: len(sessionIDs) * 3, Truncated: true}, SelectedEvidenceRevisions: memory.AggregationChannelCoverage{}}, AssociatedUsage: []memory.AssociatedUsage{}, DependencyDigest: testDigest(projectID + "-project-dependency"), ReducerVersion: "v1"}
+	project := memory.ProjectView{SchemaVersion: 1, ProjectID: projectID, Generation: 1, StartedAt: "2026-09-07T00:00:00Z", EndedAt: "2026-09-07T00:00:03Z", SourceSessions: len(identities), TerminalCounts: memory.TerminalCounts{Indexed: len(identities)}, SessionViewDependencies: dependencies, ObservationRevisionIDs: []string{}, ProbeStateDigest: probe.Digest, LiveState: memory.StateSnapshot{Branch: "main", Head: probe.Head}, WitnessedState: []memory.DerivedRecord{}, DerivedRecords: []memory.DerivedRecord{}, AggregationCoverage: memory.ProjectAggregationCoverage{ObservationSummariesSeen: len(identities) * 3, EventReferences: memory.AggregationChannelCoverage{Seen: len(identities) * 3, Dropped: len(identities) * 3, Truncated: true}, SelectedEvidenceRevisions: memory.AggregationChannelCoverage{}}, AssociatedUsage: []memory.AssociatedUsage{}, DependencyDigest: testDigest(projectID + "-project-dependency"), ReducerVersion: "v1"}
 	project.Digest, err = memory.ProjectViewDigest(project)
 	if err != nil {
 		t.Fatal(err)
@@ -506,7 +548,7 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 	if _, err := store.PutProjectView(project); err != nil {
 		t.Fatal(err)
 	}
-	manifest := memory.GenerationManifest{SchemaVersion: 1, GenerationID: generationID, ProjectID: projectID, CreatedAt: "2026-09-07T00:00:04Z", SourceRecordDigests: sourceDigests, SessionViews: dependencies, SessionLineages: lineages, ProbeStateDigest: probe.Digest, ProbeCheck: memory.ProbeCheck{SchemaVersion: 1, CheckedAt: "2026-09-07T00:00:04Z", StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}}, ProjectViewDigest: project.Digest, SessionIndexMeasurements: measurements}
+	manifest := memory.GenerationManifest{SchemaVersion: 1, GenerationID: generationID, ProjectID: projectID, CreatedAt: "2026-09-07T00:00:04Z", SourceRecordDigests: sourceDigests, SessionViews: dependencies, SessionLineages: lineages, ProbeStateDigest: probe.Digest, ProbeCheck: memory.ProbeCheck{SchemaVersion: 1, CheckedAt: "2026-09-07T00:00:04Z", StateDigest: probe.Digest, Available: true, Diagnostics: []memory.Diagnostic{}}, ProjectViewDigest: project.Digest, SessionIndexMeasurements: measurements, ConversationChains: chains}
 	index, err := sessionindex.Build(sessionindex.BuildInput{ProjectView: project, Manifest: manifest, SessionViews: views, GeneratedAt: time.Date(2026, 9, 7, 0, 0, 4, 0, time.UTC)})
 	if err != nil {
 		t.Fatal(err)
@@ -527,6 +569,10 @@ func buildEventFixtureCustomizedAt(t *testing.T, dataRoot, projectID, generation
 }
 
 func fixtureObservations(t *testing.T, projectID, sessionID string) []memory.ObservationRevision {
+	return fixtureObservationsForProvider(t, projectID, "codex", sessionID)
+}
+
+func fixtureObservationsForProvider(t *testing.T, projectID, provider, sessionID string) []memory.ObservationRevision {
 	t.Helper()
 	inputs := []struct{ kind, subject, operation, outcome, excerpt string }{
 		{"request", "request-1", "user_request", "", "open /Users/private/repo/secret.txt token sk-abcdefghijklmnopqrstuvwxyz1234567890 " + strings.Repeat("界", 200)},
@@ -536,7 +582,8 @@ func fixtureObservations(t *testing.T, projectID, sessionID string) []memory.Obs
 	result := make([]memory.ObservationRevision, len(inputs))
 	for index, input := range inputs {
 		sequence := index + 1
-		value := memory.ObservationRevision{SchemaVersion: 1, Key: memory.ObservationKey{Provider: "codex", SessionID: sessionID, SourceIdentity: "source-" + sessionID, Sequence: sequence, ProjectID: projectID, Kind: input.kind, Subject: input.subject}, Ref: memory.SourceRef{Provider: "codex", SessionID: sessionID, SourceIdentity: "source-" + sessionID, Location: memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: sequence, ByteOffset: int64(sequence * 100)}}, SourceHash: strings.Repeat(string(rune('a'+index)), 64)}, Timestamp: "2026-09-07T00:00:0" + string(rune('1'+index)) + "Z", Operation: input.operation, Outcome: input.outcome, Excerpt: input.excerpt, AdapterID: "codex-jsonl", AdapterVersion: "v1"}
+		sourceIdentity := fixtureSourceIdentity(provider, sessionID)
+		value := memory.ObservationRevision{SchemaVersion: 1, Key: memory.ObservationKey{Provider: provider, SessionID: sessionID, SourceIdentity: sourceIdentity, Sequence: sequence, ProjectID: projectID, Kind: input.kind, Subject: input.subject}, Ref: memory.SourceRef{Provider: provider, SessionID: sessionID, SourceIdentity: sourceIdentity, Location: memory.SourceLocation{Kind: memory.SourceLocationJSONL, JSONL: &memory.JSONLSourceLocation{Line: sequence, ByteOffset: int64(sequence * 100)}}, SourceHash: strings.Repeat(string(rune('a'+index)), 64)}, Timestamp: "2026-09-07T00:00:0" + string(rune('1'+index)) + "Z", Operation: input.operation, Outcome: input.outcome, Excerpt: input.excerpt, AdapterID: provider + "-jsonl", AdapterVersion: "v1"}
 		value.RevisionID = memory.ObservationRevisionID(value)
 		if err := memory.ValidateObservationRevision(value); err != nil {
 			t.Fatal(err)
@@ -544,6 +591,46 @@ func fixtureObservations(t *testing.T, projectID, sessionID string) []memory.Obs
 		result[index] = value
 	}
 	return result
+}
+
+func fixtureSourceIdentity(provider, sessionID string) string {
+	if provider == "codex" {
+		return "source-" + sessionID
+	}
+	return "source-" + provider + "-" + sessionID
+}
+
+func TestRetainedConversationPublishedSameNativeIDAcrossProviders(t *testing.T) {
+	const nativeID = "99999999-9999-4999-8999-999999999999"
+	t.Setenv("SESSION_REVIEWER_SESSIONS_ROOT", t.TempDir())
+	fixture := buildEventFixtureIdentitiesAt(t, t.TempDir(), "project-retained-providers", "generation-retained-providers", []eventFixtureIdentity{{provider: "codex", sessionID: nativeID}, {provider: "claude", sessionID: nativeID}}, nil, nil, func(view memory.SessionView, revisions []memory.ObservationRevision) *conversationchain.Document {
+		document, _, err := conversationchain.Materialize(conversationchain.MaterializeInput{
+			View: view,
+			Messages: []conversationchain.SourceMessage{
+				{Role: conversationchain.RoleUser, Text: "question from " + view.Provider, OccurredAt: "2026-09-07T00:00:01Z", RecordHash: strings.Repeat("a", 64), RecordOrdinal: 1},
+				{Role: conversationchain.RoleAssistant, Phase: "final_answer", Text: "answer from " + view.Provider, OccurredAt: "2026-09-07T00:00:02Z", RecordHash: strings.Repeat("b", 64), RecordOrdinal: 2},
+			},
+			Revisions:      revisions,
+			SourceCoverage: conversationchain.VisibleCoverage{SourceRecords: 5, VisibleMessages: 2, CapturedMessages: 2, Complete: true},
+			RuleVersion:    "visible-turn-v1", RedactionVersion: "redaction-v1",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return &document
+	})
+	for _, provider := range []string{"codex", "claude"} {
+		request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: provider, SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 20}
+		page, err := LoadConversationPage(context.Background(), request)
+		if err != nil || page.Provider != provider || page.SessionID != nativeID || page.BodyAvailability != "retained_excerpt" || len(page.TurnUnits) != 1 || page.TurnUnits[0].UserMessage.SourceRef.Provider != provider {
+			t.Fatalf("provider %s retained page=%+v err=%v", provider, page, err)
+		}
+		request.TurnUnitID = page.TurnUnits[0].TurnUnitID
+		detail, err := LoadConversationPage(context.Background(), request)
+		if err != nil || len(detail.Messages) != 2 || detail.Messages[1].VisibleExcerpt != "answer from "+provider || detail.Messages[1].Text != nil || detail.Messages[1].SourceRef.Provider != provider {
+			t.Fatalf("provider %s retained detail=%+v err=%v", provider, detail, err)
+		}
+	}
 }
 
 func testDigest(value string) string {

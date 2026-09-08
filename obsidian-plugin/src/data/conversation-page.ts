@@ -28,7 +28,7 @@ function parseConversationPageDocument(row: Record<string, unknown>): Conversati
   const mode = choice(row.mode, ["turn_index", "turn_messages"] as const, "$.mode");
   const projectId = id(row.project_id, "$.project_id");
   void projectId;
-  constant(row.provider, "codex", "$.provider");
+  const provider = id(row.provider, "$.provider");
   const sessionId = id(row.session_id, "$.session_id");
   id(row.generation_id, "$.generation_id");
   digest(row.session_view_digest, "$.session_view_digest");
@@ -42,11 +42,11 @@ function parseConversationPageDocument(row: Record<string, unknown>): Conversati
   const rangeEnd = count(row.range_end, "$.range_end");
   if (rangeStart > rangeEnd || rangeEnd > total) throw new Error("conversation page range does not reconcile");
   for (const key of ["first_cursor", "previous_cursor", "next_cursor", "last_cursor"] as const) cursor(row[key], `$.${key}`);
-  const turns = array(row.turn_units, "$.turn_units", 64).map((item, index) => parseTurn(item, `$.turn_units[${index}]`, sessionId, mode));
-  const messages = array(row.messages, "$.messages", 64).map((item, index) => parseMessage(item, `$.messages[${index}]`, sessionId, mode === "turn_messages"));
+  const turns = array(row.turn_units, "$.turn_units", 64).map((item, index) => parseTurn(item, `$.turn_units[${index}]`, provider, sessionId, mode));
+  const messages = array(row.messages, "$.messages", 64).map((item, index) => parseMessage(item, `$.messages[${index}]`, provider, sessionId, mode === "turn_messages"));
   parseCoverage(row.coverage, "$.coverage");
-	const actions = row.actions === undefined ? [] : array(row.actions, "$.actions", 64).map((item, index) => parseAction(item, `$.actions[${index}]`, sessionId));
-	const results = row.results === undefined ? [] : array(row.results, "$.results", 64).map((item, index) => parseResult(item, `$.results[${index}]`, sessionId));
+	const actions = row.actions === undefined ? [] : array(row.actions, "$.actions", 64).map((item, index) => parseAction(item, `$.actions[${index}]`, provider, sessionId));
+	const results = row.results === undefined ? [] : array(row.results, "$.results", 64).map((item, index) => parseResult(item, `$.results[${index}]`, provider, sessionId));
 	const actionTotal = row.action_total === undefined ? 0 : count(row.action_total, "$.action_total");
 	const resultTotal = row.result_total === undefined ? 0 : count(row.result_total, "$.result_total");
 	const evidenceTruncated = row.evidence_truncated === undefined ? false : bool(row.evidence_truncated, "$.evidence_truncated");
@@ -107,14 +107,14 @@ function sameVisibleMetadata(message: VisibleMessageV1, preview: VisibleMessageV
     message.source_ref.record_ordinal === preview.source_ref.record_ordinal && message.source_ref.source_hash === preview.source_ref.source_hash;
 }
 
-function parseTurn(value: unknown, path: string, sessionId: string, mode: "turn_index" | "turn_messages"): VisibleTurnV1 {
+function parseTurn(value: unknown, path: string, provider: string, sessionId: string, mode: "turn_index" | "turn_messages"): VisibleTurnV1 {
   const row = object(value, path);
   exact(row, TURN_KEYS, path, TURN_OPTIONAL_KEYS);
   id(row.turn_unit_id, `${path}.turn_unit_id`);
   positive(row.ordinal, `${path}.ordinal`);
   timestamp(row.started_at, `${path}.started_at`);
   if (row.ended_at !== null) timestamp(row.ended_at, `${path}.ended_at`);
-  const user = parseMessage(row.user_message, `${path}.user_message`, sessionId, false);
+  const user = parseMessage(row.user_message, `${path}.user_message`, provider, sessionId, false);
   if (user.role !== "user" || user.phase !== null || user.text !== null || user.text_truncated) throw new Error(`${path}.user_message must be a preview-only user message`);
   const answerState = choice(row.answer_state, ["no_answer", "partial", "answered"] as const, `${path}.answer_state`);
   const assistantCount = count(row.assistant_message_count, `${path}.assistant_message_count`);
@@ -125,7 +125,7 @@ function parseTurn(value: unknown, path: string, sessionId: string, mode: "turn_
   return row as unknown as VisibleTurnV1;
 }
 
-function parseMessage(value: unknown, path: string, sessionId: string, selected: boolean): VisibleMessageV1 {
+function parseMessage(value: unknown, path: string, provider: string, sessionId: string, selected: boolean): VisibleMessageV1 {
   const row = object(value, path);
   exact(row, MESSAGE_KEYS, path);
   const role = choice(row.role, ["user", "assistant"] as const, `${path}.role`);
@@ -134,7 +134,7 @@ function parseMessage(value: unknown, path: string, sessionId: string, selected:
   digest(row.revision_id, `${path}.revision_id`);
   const source = object(row.source_ref, `${path}.source_ref`);
 	void source;
-	parseSourceRef(row.source_ref, `${path}.source_ref`, sessionId);
+	parseSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionId);
   timestamp(row.occurred_at, `${path}.occurred_at`);
   text(row.visible_excerpt, `${path}.visible_excerpt`, 4096);
   bool(row.truncated, `${path}.truncated`);
@@ -159,9 +159,9 @@ function parseCoverage(value: unknown, path: string): VisibleCoverageV1 {
   const malformed = count(row.malformed_records, `${path}.malformed_records`);
   const complete = bool(row.complete, `${path}.complete`);
 	const diagnosticsAvailable = row.diagnostics_available === undefined ? undefined : bool(row.diagnostics_available, `${path}.diagnostics_available`);
-  if (captured + (row.context_messages as number) + orphan !== visible || truncated > captured || truncatedBodies > captured ||
+  if ((diagnosticsAvailable !== false ? captured + (row.context_messages as number) + orphan !== visible : captured > visible) || truncated > captured || truncatedBodies > captured ||
       visible + oversized + malformed > sourceRecords) throw new Error(`${path} counters do not reconcile`);
-	if (diagnosticsAvailable === false ? complete : complete !== (orphan === 0 && oversized === 0 && malformed === 0)) throw new Error(`${path}.complete is inconsistent`);
+	if (diagnosticsAvailable === false ? complete : complete !== (orphan === 0 && oversized === 0 && malformed === 0 && truncatedBodies === 0)) throw new Error(`${path}.complete is inconsistent`);
   return row as unknown as VisibleCoverageV1;
 }
 
@@ -169,30 +169,30 @@ function object(value: unknown, path: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${path} must be an object`);
   return value as Record<string, unknown>;
 }
-function parseAction(value: unknown, path: string, sessionId: string): ConversationActionV1 {
+function parseAction(value: unknown, path: string, provider: string, sessionId: string): ConversationActionV1 {
 	const row = object(value, path);
 	exact(row, ["revision_id", "source_ref", "kind", "tool_name", "excerpt"] as const, path);
 	digest(row.revision_id, `${path}.revision_id`);
-	parseSourceRef(row.source_ref, `${path}.source_ref`, sessionId);
+	parseSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionId);
 	id(row.kind, `${path}.kind`);
 	if (row.tool_name !== null) id(row.tool_name, `${path}.tool_name`);
 	text(row.excerpt, `${path}.excerpt`, 4096);
 	return row as unknown as ConversationActionV1;
 }
-function parseResult(value: unknown, path: string, sessionId: string): ConversationResultV1 {
+function parseResult(value: unknown, path: string, provider: string, sessionId: string): ConversationResultV1 {
 	const row = object(value, path);
 	exact(row, ["revision_id", "source_ref", "kind", "verification_state", "excerpt"] as const, path);
 	digest(row.revision_id, `${path}.revision_id`);
-	parseSourceRef(row.source_ref, `${path}.source_ref`, sessionId);
+	parseSourceRef(row.source_ref, `${path}.source_ref`, provider, sessionId);
 	id(row.kind, `${path}.kind`);
 	choice(row.verification_state, ["unknown", "passed", "failed", "partial"] as const, `${path}.verification_state`);
 	text(row.excerpt, `${path}.excerpt`, 4096);
 	return row as unknown as ConversationResultV1;
 }
-function parseSourceRef(value: unknown, path: string, sessionId: string): void {
+function parseSourceRef(value: unknown, path: string, provider: string, sessionId: string): void {
 	const source = object(value, path);
 	exact(source, SOURCE_KEYS, path);
-	constant(source.provider, "codex", `${path}.provider`);
+	if (id(source.provider, `${path}.provider`) !== provider) throw new Error(`${path} crosses provider`);
 	if (id(source.session_id, `${path}.session_id`) !== sessionId) throw new Error(`${path} crosses Session`);
 	id(source.source_identity, `${path}.source_identity`);
 	positive(source.record_ordinal, `${path}.record_ordinal`);

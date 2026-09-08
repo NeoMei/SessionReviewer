@@ -204,6 +204,29 @@ func TestConversationRedactionExpansionKeepsBodyTruncationOffTurnPreview(t *test
 	if selected.Coverage.TruncatedBodies != 1 {
 		t.Fatalf("truncated body coverage=%d want 1: %s", selected.Coverage.TruncatedBodies, selectedWire)
 	}
+	if selected.Coverage.Complete || selected.TurnUnits[0].AnswerState != "no_answer" {
+		t.Fatalf("truncated body claimed complete coverage or changed unanswered state: %s", selectedWire)
+	}
+}
+
+func TestConversationSourceBackedAnswerStatesAreConservative(t *testing.T) {
+	for _, test := range []struct {
+		name, records, want string
+	}{
+		{"empty final", visibleRecord("user", "", "question") + visibleRecord("assistant", "final_answer", ""), "partial"},
+		{"final then commentary", visibleRecord("user", "", "question") + visibleRecord("assistant", "final_answer", "answer") + visibleRecord("assistant", "commentary", "interrupted"), "partial"},
+		{"commentary only", visibleRecord("user", "", "question") + visibleRecord("assistant", "commentary", "working"), "partial"},
+		{"unanswered", visibleRecord("user", "", "question"), "no_answer"},
+		{"normal final", visibleRecord("user", "", "question") + visibleRecord("assistant", "final_answer", "answer"), "answered"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newConversationFixture(t, test.records)
+			page, body := readConversation(t, fixture.request)
+			if len(page.TurnUnits) != 1 || page.TurnUnits[0].AnswerState != test.want {
+				t.Fatalf("answer state=%s want %s: %s", page.TurnUnits[0].AnswerState, test.want, body)
+			}
+		})
+	}
 }
 
 // TestConversationEmitsProductionExpansionWireForFrontend is also invoked by
@@ -610,11 +633,34 @@ func TestConversationCancellationDuringMaterializationReturnsNoPartialPage(t *te
 	}
 }
 
-func TestConversationUnsupportedProviderHasTypedDiagnostic(t *testing.T) {
-	f := buildEventFixture(t, "conversation-claude", "generation-claude", "s")
-	_, err := LoadConversationPage(context.Background(), ConversationRequest{DataRoot: f.dataRoot, ProjectID: f.projectID, Provider: "claude", SessionID: "s", ExpectedGenerationID: f.generationID, Limit: 2})
-	if eventErrorCode(err) != "unsupported_provider" {
-		t.Fatalf("err=%v", err)
+func TestConversationRendererAcceptsProviderNeutralRetainedPage(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "question")+visibleRecord("assistant", "final_answer", "answer"))
+	page, err := LoadConversationPage(context.Background(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page.Provider = "claude"
+	for index := range page.TurnUnits {
+		page.TurnUnits[index].UserMessage.SourceRef.Provider = "claude"
+	}
+	if _, err := RenderConversationPage(page); err != nil {
+		t.Fatalf("provider-neutral retained page rejected: %v", err)
+	}
+}
+
+func TestConversationRendererPreservesUnknownLegacyCoverage(t *testing.T) {
+	f := newConversationFixture(t, visibleRecord("user", "", "question")+visibleRecord("assistant", "final_answer", "answer"))
+	page, err := LoadConversationPage(context.Background(), f.request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := false
+	page.Coverage.DiagnosticsAvailable = &unknown
+	page.Coverage.SourceRecords++
+	page.Coverage.VisibleMessages++
+	page.Coverage.Complete = false
+	if _, err := RenderConversationPage(page); err != nil {
+		t.Fatalf("unknown legacy counters were treated as fabricated zeroes: %v", err)
 	}
 }
 

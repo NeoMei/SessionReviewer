@@ -34,9 +34,30 @@ describe("conversation page wire", () => {
         message("user", { visible_excerpt: "被截断的问题预览", truncated: true, text: "被截断的问题预览后的完整正文", text_truncated: true }),
         message("assistant", { text: "完整最终回答\n第二行" })
       ],
-      coverage: coverage({ truncated_messages: 1, truncated_bodies: 1 })
+      coverage: coverage({ truncated_messages: 1, truncated_bodies: 1, complete: false })
     })));
     expect(fullBody.messages[0]?.text).toContain("完整正文");
+  });
+
+  it("accepts a provider-neutral retained page and binds every source reference", () => {
+    const source = conversationPage({ provider: "claude", body_availability: "retained_excerpt" });
+    const turns = source.turn_units as Record<string, unknown>[];
+    const user = turns[0]?.user_message as Record<string, unknown>;
+    user.source_ref = { ...(user.source_ref as Record<string, unknown>), provider: "claude" };
+    const parsed = parseConversationPageV1(JSON.stringify(source));
+    expect(parsed.provider).toBe("claude");
+
+    const crossed = structuredClone(source);
+    const crossedUser = (crossed.turn_units as Record<string, unknown>[])[0]?.user_message as Record<string, unknown>;
+    crossedUser.source_ref = { ...(crossedUser.source_ref as Record<string, unknown>), provider: "codex" };
+    expect(() => parseConversationPageV1(JSON.stringify(crossed))).toThrow(/provider|source/i);
+  });
+
+  it("preserves unknown legacy coverage without inventing context or orphan counts", () => {
+    const legacy = conversationPage({
+      coverage: coverage({ source_records: 3, visible_messages: 3, captured_messages: 2, diagnostics_available: false, complete: false })
+    });
+    expect(parseConversationPageV1(JSON.stringify(legacy)).coverage.diagnostics_available).toBe(false);
   });
 
 	it("accepts retained excerpts with a separate evidence view and bounded evidence coverage", () => {
@@ -140,6 +161,19 @@ describe("conversation CLI query", () => {
       "--expected-generation-id", "generation-1", "--limit", "20", "--json", "--turn-unit-id", "turn-1"
     ]);
     expect(execFile.mock.calls[0]?.[2]).toEqual(expect.objectContaining({ shell: false, timeout: 10_000, maxBuffer: 1 << 20 }));
+  });
+
+  it("keeps the fixed argv provider-neutral for retained conversation reads", async () => {
+    const response = conversationPage({ provider: "claude", body_availability: "retained_excerpt" });
+    const user = ((response.turn_units as Record<string, unknown>[])[0]?.user_message as Record<string, unknown>);
+    user.source_ref = { ...(user.source_ref as Record<string, unknown>), provider: "claude" };
+    const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify(response), ""));
+    const runner = new CliRunner("/bin/session-reviewer", execFile);
+    await expect(runner.getConversation({
+      projectId: "project-p", provider: "claude", sessionId: "session-1", expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: VIEW_DIGEST, limit: 20
+    })).resolves.toMatchObject({ provider: "claude", body_availability: "retained_excerpt" });
+    expect(execFile.mock.calls[0]?.[1]).toContain("claude");
   });
 
   it("rejects response binding mismatches and invalid cursor modes", async () => {

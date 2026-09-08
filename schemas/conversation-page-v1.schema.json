@@ -7,7 +7,7 @@
   "properties": {
     "schema_version": {"const": 1}, "minimum_reader_version": {"const": "0.4.0"},
     "mode": {"enum": ["turn_index", "turn_messages"]},
-    "project_id": {"$ref": "#/$defs/id"}, "provider": {"const": "codex"}, "session_id": {"$ref": "#/$defs/id"}, "generation_id": {"$ref": "#/$defs/id"},
+    "project_id": {"$ref": "#/$defs/id"}, "provider": {"$ref": "#/$defs/id"}, "session_id": {"$ref": "#/$defs/id"}, "generation_id": {"$ref": "#/$defs/id"},
     "session_view_digest": {"$ref": "#/$defs/digest"}, "dependency_digest": {"$ref": "#/$defs/digest"}, "redaction_version": {"const": "visible-redaction-v1"},
     "turn_unit_id": {"anyOf": [{"$ref": "#/$defs/id"}, {"type": "null"}]},
     "total": {"$ref": "#/$defs/count"}, "range_start": {"$ref": "#/$defs/count"}, "range_end": {"$ref": "#/$defs/count"},
@@ -34,7 +34,7 @@
     "source_ref": {
       "type": "object", "additionalProperties": false,
       "required": ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"],
-      "properties": {"provider": {"const": "codex"}, "session_id": {"$ref": "#/$defs/id"}, "source_identity": {"$ref": "#/$defs/id"}, "record_ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+      "properties": {"provider": {"$ref": "#/$defs/id"}, "session_id": {"$ref": "#/$defs/id"}, "source_identity": {"$ref": "#/$defs/id"}, "record_ordinal": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}, "source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
     },
     "message": {
       "type": "object", "additionalProperties": false,
@@ -64,7 +64,7 @@
     "coverage": {
       "type": "object", "additionalProperties": false,
       "required": ["source_records", "visible_messages", "captured_messages", "truncated_messages", "truncated_bodies", "context_messages", "orphan_messages", "oversized_records", "malformed_records", "complete"],
-      "properties": {"source_records": {"$ref": "#/$defs/count"}, "visible_messages": {"$ref": "#/$defs/count"}, "captured_messages": {"$ref": "#/$defs/count"}, "truncated_messages": {"$ref": "#/$defs/count"}, "truncated_bodies": {"$ref": "#/$defs/count"}, "context_messages": {"$ref": "#/$defs/count"}, "orphan_messages": {"$ref": "#/$defs/count"}, "oversized_records": {"$ref": "#/$defs/count"}, "malformed_records": {"$ref": "#/$defs/count"}, "complete": {"type": "boolean", "description": "False when oversized/malformed records or orphan assistant messages prevent complete grouping; oversized records have unknown roles and must not be labeled missing answers."}, "diagnostics_available": {"type": "boolean"}}
+      "properties": {"source_records": {"$ref": "#/$defs/count"}, "visible_messages": {"$ref": "#/$defs/count"}, "captured_messages": {"$ref": "#/$defs/count"}, "truncated_messages": {"$ref": "#/$defs/count"}, "truncated_bodies": {"$ref": "#/$defs/count"}, "context_messages": {"$ref": "#/$defs/count"}, "orphan_messages": {"$ref": "#/$defs/count"}, "oversized_records": {"$ref": "#/$defs/count"}, "malformed_records": {"$ref": "#/$defs/count"}, "complete": {"type": "boolean", "description": "False when oversized/malformed records, orphan assistant messages, or truncated bodies prevent complete grouping; oversized records have unknown roles and must not be labeled missing answers."}, "diagnostics_available": {"type": "boolean", "description": "False means context/orphan and other detailed legacy counters are unknown rather than zero."}}
     }
   }
 }

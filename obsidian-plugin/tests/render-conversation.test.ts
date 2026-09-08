@@ -27,6 +27,55 @@ const identity = {
 };
 
 describe("selected Session conversation", () => {
+  it("renders an authenticated provider-neutral retained conversation", async () => {
+    const provider = "claude";
+    const response = (selected: boolean) => selected ? selectedConversationPage({ provider, body_availability: "retained_excerpt" }) : conversationPage({ provider, body_availability: "retained_excerpt" });
+    const bind = (value: Record<string, unknown>) => {
+      for (const turn of value.turn_units as Record<string, unknown>[]) {
+        const user = turn.user_message as Record<string, unknown>;
+        user.source_ref = { ...(user.source_ref as Record<string, unknown>), provider };
+      }
+      for (const message of value.messages as Record<string, unknown>[]) {
+        message.source_ref = { ...(message.source_ref as Record<string, unknown>), provider };
+        message.phase = null;
+        message.text = null;
+      }
+      return page(value);
+    };
+    const root = renderConversation({ ...identity, provider }, (request) => Promise.resolve(bind(response(request.turnUnitId !== undefined))));
+    await settle();
+    await settle();
+    expect(root.textContent).toContain("如何恢复可见问答？");
+    expect(root.textContent).toContain("仅保留认证摘录");
+  });
+
+  it("never claims a retained-only truncated excerpt has a loaded full body", async () => {
+    const retained = selectedConversationPage({
+      body_availability: "retained_excerpt",
+      messages: [
+        { ...(selectedConversationPage().messages as Record<string, unknown>[])[0], phase: null, text: null },
+        { ...(selectedConversationPage().messages as Record<string, unknown>[])[1], phase: null, text: null, truncated: true }
+      ],
+      coverage: { ...(selectedConversationPage().coverage as Record<string, unknown>), truncated_messages: 1, diagnostics_available: true }
+    });
+    const root = renderConversation(identity, (request) => Promise.resolve(page(request.turnUnitId ? retained : conversationPage())));
+    await settle();
+    await settle();
+    expect(root.textContent).toContain("仅保留认证摘录；完整正文不可用。");
+    expect(root.textContent).not.toContain("下方为已读取正文");
+  });
+
+  it("does not render legacy unknown coverage counters as zero", async () => {
+    const legacy = conversationPage({
+      body_availability: "retained_excerpt",
+      coverage: { ...(conversationPage().coverage as Record<string, unknown>), source_records: 3, visible_messages: 3, captured_messages: 2, diagnostics_available: false, complete: false }
+    });
+    const root = renderConversation(identity, () => Promise.resolve(page(legacy)));
+    await settle();
+    expect(root.textContent).toContain("上下文包装 未知");
+    expect(root.textContent).not.toContain("上下文包装 0");
+  });
+
   it("renders loading, user/Agent labels, safe full bodies, phases, truncation and honest coverage", async () => {
     const index = page(conversationPage({
       turn_units: [

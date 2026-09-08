@@ -163,8 +163,10 @@ function key(identity: ConversationIdentity): string {
 
 function renderCoverage(page: ConversationPageV1): HTMLElement {
   const coverage = page.coverage;
+	const capturedLabel = page.body_availability === "retained_excerpt" ? "保留摘录" : "已读取";
+	const context = coverage.diagnostics_available === false ? "未知" : coverage.context_messages.toLocaleString("en-US");
   const section = element("div", { className: "sr-conversation-coverage" }, [
-    element("p", { text: "可见消息 " + coverage.visible_messages.toLocaleString("en-US") + " · 已读取 " + coverage.captured_messages.toLocaleString("en-US") + " · 上下文包装 " + coverage.context_messages.toLocaleString("en-US") })
+    element("p", { text: "可见消息 " + coverage.visible_messages.toLocaleString("en-US") + " · " + capturedLabel + " " + coverage.captured_messages.toLocaleString("en-US") + " · 上下文包装 " + context })
   ]);
 	if (page.body_availability === "retained_excerpt") section.append(element("p", { className: "sr-coverage-warning", text: "原始消息正文当前不可用；下方显示扫描时保留的认证摘录，并非完整正文。" }));
 	if (coverage.diagnostics_available === false) section.append(element("p", { className: "sr-coverage-warning", text: "历史保留记录未包含完整来源覆盖诊断；未知不等于零或完整。" }));
@@ -208,7 +210,7 @@ function renderDetail(
 function renderMessage(message: VisibleMessageV1): HTMLElement {
   const article = element("article", { className: "sr-message sr-message-" + message.role });
   article.append(element("strong", { className: "sr-message-label", text: messageLabel(message) }));
-  if (message.truncated && !message.text_truncated) article.append(element("p", { className: "sr-truncation", text: "列表预览曾截断；下方为已读取正文。" }));
+	if (message.truncated && message.text !== null && !message.text_truncated) article.append(element("p", { className: "sr-truncation", text: "列表预览曾截断；下方为已读取正文。" }));
 	article.append(element("pre", { className: "sr-message-body", text: message.text ?? message.visible_excerpt }));
 	if (message.text === null) article.append(element("p", { className: "sr-truncation", text: "仅保留认证摘录；完整正文不可用。" }));
   if (message.text_truncated) article.append(element("p", { className: "sr-truncation", text: "正文已截断；超出单条消息读取上限的部分未显示。" }));

@@ -348,7 +348,7 @@ func decodeVisibleRecord(raw []byte) (conversationchain.SourceMessage, bool, boo
 		}
 	}
 	value := strings.Join(text, "\n")
-	if strings.TrimSpace(value) == "" {
+	if strings.TrimSpace(value) == "" && (item.Role != conversationchain.RoleAssistant || item.Phase == "") {
 		return conversationchain.SourceMessage{}, false, false
 	}
 	return conversationchain.SourceMessage{Role: item.Role, Phase: item.Phase, Text: value, OccurredAt: env.Timestamp}, true, false
