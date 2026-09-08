@@ -610,6 +610,8 @@ turn_units[] {
 
 2026-09-09 历史引用实施补充：`source_turn_refs[]` 在原 `(provider, session_id, turn_unit_id)` 身份之外允许可选 `session_view_digest`，精确指向当前或保留的已认证链快照。同一 provider/Session 可列出多个不同视图的 chain dependency；同一 `(provider, session_id, session_view_digest)` 不得重复或对应不同 dependency digest。每个引用必须唯一解析到包含该 turn 的 dependency；省略快照坐标仅在唯一匹配时合法，不得默认选择最新回答。闭环各段与汇总引用必须解析到相同的完整绑定；同一绑定的限定/省略两种写法不能绕过重复检查。使用限定引用或同一 Session 多快照的新 presentation 及包含它的 ledger/candidate 必须声明最低读写能力 `0.4.3`（仅有 reader 字段的候选声明最低 reader）；旧数据省略新字段时保持原规范字节和能力下限，不改写旧世代。这是历史来源保持合同，不是历史浏览器或旧项目迁移。
 
+历史能力校验边界（2026-09-09）：完整接受条件仍由 Go 与 TypeScript 同时执行上述精确规则。标准 JSON Schema 2020-12 的 `uniqueItems` 比较完整条目，不提供按任意 `(provider, session_id)` 跨条目分组及视图比较的能力；因此 Schema 通过仅证明结构层有效，不是发布、读取或候选确认授权。Schema 必须执行可表达的必要条件：版本配对、旧版本禁止限定引用、外层与内层声明一致，以及 `0.4.3` 在没有任何限定引用时至少包含两个 dependency。跨条目的同 Session 多视图判断、不同 Session 的旧格式禁止无故升级、唯一来源解析仍须运行时执行，不得省略。共同夹具要分别标注结构层与完整接受层预期，覆盖同 Session 多视图、多个不同 Session、零/单 dependency 和嵌套 ledger；不得为追求表面一致而拒绝有效旧数据或引入非标准 Schema 关键字。参考：[JSON Schema 2020-12 validation](https://json-schema.org/draft/2020-12/json-schema-validation)。此补充明确校验职责，不改变数据格式、精确能力下限或来源认证要求。
+
 `agent-annotation-v1` 增加 `annotation_kind=decision_candidate|agreement_candidate|milestone_conclusion_candidate` 和通用的 `confirmed_entity_id|null`。里程碑结论候选必须引用目标 milestone ID、source turn dependencies 和 prompt schema version；确认时只 patch 对应 `closed_loop.conclusion` 并将 `conclusion_kind` 设为 `ai_candidate_confirmed`，不得顺带修改验证、影响、下一步或问题状态。
 
 `review-presentation-v4.problem_nodes[]` 使用 5.2 的正式节点字段。图校验必须证明：ID 唯一、父节点存在、无环、根节点集合与空父节点一致、每个相关节点存在且不自指、相关节点不超过两个、source turn refs 存在于当前或保留的 chain dependency 中、同级 `sibling_order` 唯一且稳定。
