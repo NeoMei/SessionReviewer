@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/project"
@@ -398,6 +400,125 @@ func TestRetentionTraversesManifestWithIndependentlyPermutedLineages(t *testing.
 	// SessionView, SessionLineage, and observation chunk are reachable.
 	if report.ReachableObjects != 9 || report.ReachableBytes <= 0 || report.CleanupCandidates != 0 {
 		t.Fatalf("retention report=%+v want nine reachable immutable objects and no cleanup candidate", report)
+	}
+}
+
+func TestRetentionKeepsCurrentAndHistoricalConversationChainClosure(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-retention-chains")
+	current := materializedConversationChain(t, fixture.session, fixture.observation)
+	if _, err := store.PutConversationChain(current); err != nil {
+		t.Fatal(err)
+	}
+	historicalView, historicalRevision := putHistoricalSessionView(t, store, fixture.session)
+	historical := materializedConversationChain(t, historicalView, historicalRevision)
+	if _, err := store.PutConversationChain(historical); err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.ConversationChains = []memory.ConversationChainDependency{{Provider: current.Provider, SessionID: current.SessionID, SessionViewDigest: current.SessionViewDigest, Digest: current.Digest}}
+	fixture.manifest.RetainedConversationChains = []memory.ConversationChainDependency{{Provider: historical.Provider, SessionID: historical.SessionID, SessionViewDigest: historical.SessionViewDigest, Digest: historical.Digest}}
+	if _, err := store.PrepareGeneration(fixture.manifest); err != nil {
+		t.Fatal(err)
+	}
+	report, err := store.ReportRetention(retentionNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Generation, ProjectView, ProbeState, current SessionView, historical
+	// SessionView, SessionLineage, two exact chunks, and two chains.
+	if report.ReachableObjects != 10 || report.RetainedUnreachableObjects != 0 {
+		t.Fatalf("conversation-chain closure omitted: %+v", report)
+	}
+
+	unreachable := historical
+	unreachable.DependencyDigest = prefixedDigest("unreachable-chain")
+	unreachable.Digest = conversationchain.CanonicalDigest(unreachable)
+	if _, err := store.PutConversationChain(unreachable); err != nil {
+		t.Fatal(err)
+	}
+	report, err = store.ReportRetention(retentionNow)
+	if err != nil || report.RetainedUnreachableObjects != 1 {
+		t.Fatalf("unreachable chain accounting: report=%+v err=%v", report, err)
+	}
+}
+
+func TestRetentionAbortsWhenRootedConversationChainDisappears(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	fixture := buildStoredFixture(t, store, "generation-retention-missing-chain")
+	chain := emptyConversationChain(t, fixture.session)
+	if _, err := store.PutConversationChain(chain); err != nil {
+		t.Fatal(err)
+	}
+	fixture.manifest.ConversationChains = []memory.ConversationChainDependency{{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, Digest: chain.Digest}}
+	if _, err := store.PrepareGeneration(fixture.manifest); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(conversationChainPath(dataRoot, chain.Digest)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReportRetention(retentionNow); err == nil || !strings.Contains(err.Error(), "conversation chain") {
+		t.Fatalf("missing rooted chain did not abort retention: %v", err)
+	}
+}
+
+func TestConversationChainRetentionHonorsExternalPinAndCancellationWithoutMutation(t *testing.T) {
+	dataRoot := t.TempDir()
+	store, err := Open(dataRoot, testProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	first := buildStoredFixture(t, store, "generation-chain-pinned")
+	chain := materializedConversationChain(t, first.session, first.observation)
+	if _, err := store.PutConversationChain(chain); err != nil {
+		t.Fatal(err)
+	}
+	first.manifest.ConversationChains = []memory.ConversationChainDependency{{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, Digest: chain.Digest}}
+	prepared, err := store.PrepareGeneration(first.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := buildStoredFixture(t, store, "generation-chain-current")
+	if _, err := store.AdvancePrepared(prepared, second.manifest); err != nil {
+		t.Fatal(err)
+	}
+	withoutPin, err := store.CleanupUnreachable(retentionNow)
+	if err != nil || withoutPin.RetainedUnreachableObjects == 0 {
+		t.Fatalf("unrooted chain not reported: report=%+v err=%v", withoutPin, err)
+	}
+	if _, err := os.Stat(conversationChainPath(dataRoot, chain.Digest)); err != nil {
+		t.Fatalf("immutable chain removed outside an authorized CAS policy: %v", err)
+	}
+	withPin, err := store.ReportRetention(retentionNow, first.manifest.GenerationID)
+	if err != nil || withPin.ReachableObjects <= withoutPin.ReachableObjects {
+		t.Fatalf("external pin did not root chain closure: without=%+v with=%+v err=%v", withoutPin, withPin, err)
+	}
+
+	before := snapshotPrivateTree(t, retentionMemoryRoot(dataRoot))
+	cause := errors.New("cancel chain enumeration")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	retentionObjectReadCheckpoint = func(kind ObjectKind, _ string) {
+		if kind == ObjectConversationChain {
+			cancel(cause)
+		}
+	}
+	t.Cleanup(func() { retentionObjectReadCheckpoint = nil })
+	if _, err := store.ReportRetentionContext(ctx, retentionNow, first.manifest.GenerationID); !errors.Is(err, cause) {
+		t.Fatalf("chain enumeration cancellation=%v", err)
+	}
+	retentionObjectReadCheckpoint = nil
+	if after := snapshotPrivateTree(t, retentionMemoryRoot(dataRoot)); !reflect.DeepEqual(before, after) {
+		t.Fatal("cancelled chain retention changed files or pointers")
 	}
 }
 

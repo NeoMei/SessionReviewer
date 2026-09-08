@@ -1343,6 +1343,39 @@ func TestGenerationIdentityIncludesPreviousIndexButExcludesCurrentIndexDigest(t 
 	}
 }
 
+func TestGenerationIdentityIncludesConversationChainDependencies(t *testing.T) {
+	first := memory.GenerationManifest{ProjectID: scanTestProject}
+	firstID, err := generationID(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.ConversationChains = []memory.ConversationChainDependency{{
+		Provider: "codex", SessionID: "session-1",
+		SessionViewDigest: "sha256:" + strings.Repeat("1", 64),
+		Digest:            "sha256:" + strings.Repeat("2", 64),
+	}}
+	secondID, err := generationID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID == secondID {
+		t.Fatal("conversation chain dependency was excluded from generation identity")
+	}
+	second.RetainedConversationChains = []memory.ConversationChainDependency{{
+		Provider: "codex", SessionID: "session-1",
+		SessionViewDigest: "sha256:" + strings.Repeat("3", 64),
+		Digest:            "sha256:" + strings.Repeat("4", 64),
+	}}
+	thirdID, err := generationID(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondID == thirdID {
+		t.Fatal("retained conversation chain dependency was excluded from generation identity")
+	}
+}
+
 func TestRunSessionIndexCapacityFailureLeavesCatalogAndPointersUnchanged(t *testing.T) {
 	harness := newScanHarness(t)
 	harness.addSource(1, memory.Indexed, scanTestProject)

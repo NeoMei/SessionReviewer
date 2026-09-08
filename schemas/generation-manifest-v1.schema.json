@@ -31,6 +31,14 @@
       "type": "array", "maxItems": 65536, "uniqueItems": true,
       "items": { "$ref": "#/$defs/session_dependency" }
     },
+    "conversation_chains": {
+      "type": "array", "maxItems": 65536, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/conversation_chain_dependency" }
+    },
+    "retained_conversation_chains": {
+      "type": "array", "maxItems": 65536, "uniqueItems": true,
+      "items": { "$ref": "#/$defs/conversation_chain_dependency" }
+    },
     "session_index_measurements": {
       "type": "array", "maxItems": 65536, "uniqueItems": true,
       "items": { "$ref": "#/$defs/session_index_measurement" }
@@ -61,6 +69,17 @@
       "properties": {
         "provider": { "$ref": "#/$defs/safe_id" },
         "session_id": { "$ref": "#/$defs/safe_id" },
+        "digest": { "$ref": "#/$defs/digest" }
+      }
+    },
+    "conversation_chain_dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "session_id", "session_view_digest", "digest"],
+      "properties": {
+        "provider": { "$ref": "#/$defs/safe_id" },
+        "session_id": { "$ref": "#/$defs/safe_id" },
+        "session_view_digest": { "$ref": "#/$defs/digest" },
         "digest": { "$ref": "#/$defs/digest" }
       }
     },

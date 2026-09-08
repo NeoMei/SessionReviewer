@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
@@ -64,12 +65,13 @@ var (
 type ObjectKind string
 
 const (
-	ObjectObservationChunk ObjectKind = "observations"
-	ObjectSessionView      ObjectKind = "sessions"
-	ObjectSessionLineage   ObjectKind = "session-lineages"
-	ObjectProbeState       ObjectKind = "project-probes"
-	ObjectProjectView      ObjectKind = "project-views"
-	ObjectSessionIndex     ObjectKind = "session-indexes"
+	ObjectObservationChunk  ObjectKind = "observations"
+	ObjectSessionView       ObjectKind = "sessions"
+	ObjectSessionLineage    ObjectKind = "session-lineages"
+	ObjectProbeState        ObjectKind = "project-probes"
+	ObjectProjectView       ObjectKind = "project-views"
+	ObjectSessionIndex      ObjectKind = "session-indexes"
+	ObjectConversationChain ObjectKind = "conversation-chains"
 )
 
 // Prepared is the durable pointer to one fully verified private generation.
@@ -143,7 +145,7 @@ func openStore(dataRoot, projectID string, create bool) (*Store, error) {
 		filepath.ToSlash(filepath.Join("projects", projectID)),
 		projectBase,
 	}
-	for _, child := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "generations", "diagnostics", "staging", "locks"} {
+	for _, child := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "conversation-chains", "generations", "diagnostics", "staging", "locks"} {
 		directories = append(directories, projectBase+"/"+child)
 	}
 	for _, relative := range directories {
@@ -154,7 +156,7 @@ func openStore(dataRoot, projectID string, create bool) (*Store, error) {
 			continue
 		}
 		info, err := data.Root.Lstat(relative)
-		if errors.Is(err, os.ErrNotExist) && relative == projectBase+"/session-indexes" {
+		if errors.Is(err, os.ErrNotExist) && (relative == projectBase+"/session-indexes" || relative == projectBase+"/conversation-chains") {
 			// Session indexes were introduced after the original v2/v3/v4 store
 			// layout. A read-only migration preview may inspect that layout, and
 			// loadGeneration will still reject a manifest that actually references
@@ -885,6 +887,7 @@ type decodedStoredObject struct {
 	probe        memory.ProjectProbeState
 	project      memory.ProjectView
 	index        sessionindex.Document
+	conversation conversationchain.Document
 }
 
 func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, digest string, body []byte, projectID string) (decodedStoredObject, error) {
@@ -983,6 +986,12 @@ func decodeValidatedObjectBytesContext(ctx context.Context, kind ObjectKind, dig
 			return decodedStoredObject{}, errors.Join(errors.New("invalid stored Session index"), err)
 		}
 		return decodedStoredObject{index: value}, nil
+	case ObjectConversationChain:
+		value, err := decodeConversationChain(body, digest, projectID)
+		if err != nil {
+			return decodedStoredObject{}, errors.Join(errors.New("invalid stored conversation chain"), err)
+		}
+		return decodedStoredObject{conversation: value}, nil
 	default:
 		return decodedStoredObject{}, errors.New("unknown immutable object kind")
 	}
@@ -1145,6 +1154,7 @@ func (s *Store) reconcileGenerationGraphContext(ctx context.Context, value memor
 type generationGraphObjects interface {
 	observationChunk(context.Context, string) ([]memory.ObservationRevision, error)
 	sessionView(context.Context, memory.SessionViewDependency) (memory.SessionView, error)
+	conversationChain(context.Context, string) (conversationchain.Document, error)
 	sessionLineage(context.Context, memory.SessionLineageDependency) (memory.SessionLineage, error)
 	probeState(context.Context, string) (memory.ProjectProbeState, error)
 	projectView(context.Context, string) (memory.ProjectView, error)
@@ -1178,6 +1188,14 @@ func (objects storedGenerationGraphObjects) sessionView(ctx context.Context, dep
 		return memory.SessionView{}, errors.Join(errors.New("SessionView dependency identity mismatch"), err)
 	}
 	return view, nil
+}
+
+func (objects storedGenerationGraphObjects) conversationChain(ctx context.Context, digest string) (conversationchain.Document, error) {
+	body, err := objects.store.loadObjectUnlockedContext(ctx, ObjectConversationChain, digest)
+	if err != nil {
+		return conversationchain.Document{}, fmt.Errorf("verify conversation chain %s: %w", digest, err)
+	}
+	return decodeConversationChain(body, digest, objects.store.projectID)
 }
 
 func (objects storedGenerationGraphObjects) sessionLineage(ctx context.Context, dependency memory.SessionLineageDependency) (memory.SessionLineage, error) {
@@ -1255,6 +1273,8 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 	}
 	lineageBySession := make(map[string]memory.SessionLineageDependency, len(value.SessionLineages))
 	currentViews := make(map[sessionindex.SessionKey]*memory.SessionView, len(value.SessionViews))
+	viewsByDigest := make(map[string]memory.SessionView, len(value.SessionViews)+len(value.RetainedConversationChains))
+	chunksByDigest := make(map[string][]memory.ObservationRevision)
 	for _, dependency := range value.SessionLineages {
 		if err := context.Cause(ctx); err != nil {
 			return err
@@ -1275,6 +1295,7 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		}
 		viewCopy := view
 		currentViews[sessionindex.SessionKey{Provider: view.Provider, SessionID: view.SessionID}] = &viewCopy
+		viewsByDigest[view.Digest] = view
 		if used, exists := sourceRecords[view.SourceRecordDigest]; !exists || used {
 			return errors.New("SessionView source record does not resolve uniquely through manifest")
 		}
@@ -1319,9 +1340,13 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 				return errors.New("SessionView repeats an observation chunk")
 			}
 			seenChunks[chunkDigest] = struct{}{}
-			records, err := objects.observationChunk(ctx, chunkDigest)
-			if err != nil {
-				return err
+			records, loaded := chunksByDigest[chunkDigest]
+			if !loaded {
+				records, err = objects.observationChunk(ctx, chunkDigest)
+				if err != nil {
+					return err
+				}
+				chunksByDigest[chunkDigest] = records
 			}
 			for _, record := range records {
 				if err := context.Cause(ctx); err != nil {
@@ -1387,6 +1412,9 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 	}
 	if len(evidenceRemaining) != 0 {
 		return errors.New("ProjectView selected observation evidence does not resolve through active Session lineages")
+	}
+	if err := authenticateConversationChains(ctx, value, objects, viewsByDigest, chunksByDigest); err != nil {
+		return err
 	}
 
 	probe, err := objects.probeState(ctx, value.ProbeStateDigest)
@@ -1471,6 +1499,66 @@ func reconcileGenerationGraphObjectsContext(ctx context.Context, value memory.Ge
 		})
 		if buildErr != nil || expectedIndex.Digest != index.Digest {
 			return errors.Join(errors.New("Session index measurement or retained facts mismatch"), buildErr)
+		}
+	}
+	return nil
+}
+
+func authenticateConversationChains(ctx context.Context, manifest memory.GenerationManifest, objects generationGraphObjects, views map[string]memory.SessionView, chunks map[string][]memory.ObservationRevision) error {
+	dependencies := append(append([]memory.ConversationChainDependency(nil), manifest.ConversationChains...), manifest.RetainedConversationChains...)
+	for _, dependency := range dependencies {
+		if err := context.Cause(ctx); err != nil {
+			return err
+		}
+		chain, err := objects.conversationChain(ctx, dependency.Digest)
+		if err != nil {
+			return err
+		}
+		if chain.ProjectID != manifest.ProjectID || chain.Provider != dependency.Provider || chain.SessionID != dependency.SessionID || chain.SessionViewDigest != dependency.SessionViewDigest || chain.Digest != dependency.Digest {
+			return errors.New("conversation chain dependency identity mismatch")
+		}
+		view, loaded := views[dependency.SessionViewDigest]
+		if !loaded {
+			view, err = objects.sessionView(ctx, memory.SessionViewDependency{Provider: dependency.Provider, SessionID: dependency.SessionID, Digest: dependency.SessionViewDigest})
+			if err != nil {
+				return errors.Join(errors.New("conversation chain SessionView authentication failed"), err)
+			}
+			views[view.Digest] = view
+		}
+		active := make(map[string]struct{}, len(view.ActiveRevisionIDs))
+		for _, revisionID := range view.ActiveRevisionIDs {
+			active[revisionID] = struct{}{}
+		}
+		revisions := make([]memory.ObservationRevision, 0, len(active))
+		seenChunks := make(map[string]struct{}, len(view.ObservationChunkDigests))
+		for _, chunkDigest := range view.ObservationChunkDigests {
+			if _, duplicate := seenChunks[chunkDigest]; duplicate {
+				return errors.New("conversation chain SessionView repeats an observation chunk")
+			}
+			seenChunks[chunkDigest] = struct{}{}
+			records, loaded := chunks[chunkDigest]
+			if !loaded {
+				records, err = objects.observationChunk(ctx, chunkDigest)
+				if err != nil {
+					return errors.Join(errors.New("conversation chain observation authentication failed"), err)
+				}
+				chunks[chunkDigest] = records
+			}
+			for _, revision := range records {
+				if revision.Key.ProjectID != view.ProjectID || revision.Key.Provider != view.Provider || revision.Key.SessionID != view.SessionID || revision.Key.SourceIdentity != view.SourceIdentity {
+					return errors.New("conversation chain SessionView chunk belongs to another identity")
+				}
+				if _, selected := active[revision.RevisionID]; selected {
+					revisions = append(revisions, revision)
+					delete(active, revision.RevisionID)
+				}
+			}
+		}
+		if len(active) != 0 {
+			return errors.New("conversation chain active revision is absent from SessionView chunks")
+		}
+		if err := conversationchain.ValidateRetainedEvidence(chain, view, revisions); err != nil {
+			return fmt.Errorf("authenticate conversation chain retained evidence: %w", err)
 		}
 	}
 	return nil
@@ -1642,6 +1730,10 @@ func validateObjectBytes(kind ObjectKind, digest string, body []byte, projectID 
 		value, err := sessionindex.Parse(body)
 		if err != nil || value.Digest != digest || value.ProjectID != projectID {
 			return errors.Join(errors.New("invalid stored Session index"), err)
+		}
+	case ObjectConversationChain:
+		if _, err := decodeConversationChain(body, digest, projectID); err != nil {
+			return errors.Join(errors.New("invalid stored conversation chain"), err)
 		}
 	default:
 		return errors.New("unknown immutable object kind")
@@ -2072,6 +2164,8 @@ func objectLocation(kind ObjectKind, digest string) (string, string, error) {
 		return "project-views", ".json", nil
 	case ObjectSessionIndex:
 		return "session-indexes", ".json", nil
+	case ObjectConversationChain:
+		return "conversation-chains", ".json", nil
 	default:
 		return "", "", errors.New("unknown immutable object kind")
 	}

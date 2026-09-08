@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -236,7 +237,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 	}
 	allowedDirectories := map[string]bool{
 		"observations": true, "sessions": true, "session-lineages": true, "project-probes": true,
-		"project-views": true, "session-indexes": true, "generations": true, "diagnostics": true,
+		"project-views": true, "session-indexes": true, "conversation-chains": true, "generations": true, "diagnostics": true,
 		"staging": true, "locks": true, "cache": true,
 	}
 	rootFacts := make([]retentionFile, 0, len(rootEntries)+16)
@@ -299,7 +300,7 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 		preparedPointerFound = true
 		rootFacts = append(rootFacts, file)
 	}
-	for _, required := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "generations", "diagnostics", "staging", "locks"} {
+	for _, required := range []string{"observations", "sessions", "session-lineages", "project-probes", "project-views", "session-indexes", "conversation-chains", "generations", "diagnostics", "staging", "locks"} {
 		if _, found := rootDirectories[required]; !found {
 			return retentionSnapshot{}, fmt.Errorf("required memory namespace %q is missing", required)
 		}
@@ -457,6 +458,23 @@ func (s *Store) captureRetentionSnapshot(ctx context.Context, now time.Time, pin
 				file, exists := objects.files[relative]
 				if !exists || file.digest != chunkDigest {
 					return retentionSnapshot{}, fmt.Errorf("generation %q references a missing Session observation chunk", generationID)
+				}
+				reachablePaths[relative], reachableDigests[chunkDigest] = file, struct{}{}
+			}
+		}
+		for _, dependency := range append(append([]memory.ConversationChainDependency(nil), manifest.ConversationChains...), manifest.RetainedConversationChains...) {
+			view := objects.sessions[dependency.SessionViewDigest]
+			viewRelative := filepath.ToSlash(filepath.Join("sessions", digestLeafName(dependency.SessionViewDigest, ".json")))
+			viewFile, exists := objects.files[viewRelative]
+			if !exists || view.Digest != dependency.SessionViewDigest || viewFile.digest != dependency.SessionViewDigest {
+				return retentionSnapshot{}, fmt.Errorf("generation %q references a missing conversation chain SessionView", generationID)
+			}
+			reachablePaths[viewRelative], reachableDigests[dependency.SessionViewDigest] = viewFile, struct{}{}
+			for _, chunkDigest := range view.ObservationChunkDigests {
+				relative := filepath.ToSlash(filepath.Join("observations", digestLeafName(chunkDigest, ".jsonl")))
+				file, exists := objects.files[relative]
+				if !exists || file.digest != chunkDigest {
+					return retentionSnapshot{}, fmt.Errorf("generation %q references a missing conversation chain observation chunk", generationID)
 				}
 				reachablePaths[relative], reachableDigests[chunkDigest] = file, struct{}{}
 			}
@@ -800,7 +818,7 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 	if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
 		return nil, err
 	}
-	references := make([]manifestObjectReference, 0, len(manifest.SessionViews)+len(manifest.RetainedSessionViews)+len(manifest.SessionLineages)+3)
+	references := make([]manifestObjectReference, 0, len(manifest.SessionViews)+len(manifest.RetainedSessionViews)+len(manifest.SessionLineages)+len(manifest.ConversationChains)+len(manifest.RetainedConversationChains)+3)
 	for index, dependency := range manifest.SessionViews {
 		if index%256 == 0 {
 			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
@@ -825,6 +843,14 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 		}
 		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("sessions", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
 	}
+	for index, dependency := range append(append([]memory.ConversationChainDependency(nil), manifest.ConversationChains...), manifest.RetainedConversationChains...) {
+		if index%256 == 0 {
+			if err := retentionLargeLoopContextCause(ctx, "manifest_reference_construction"); err != nil {
+				return nil, err
+			}
+		}
+		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("conversation-chains", digestLeafName(dependency.Digest, ".json"))), digest: dependency.Digest})
+	}
 	if manifest.SessionIndexDigest != "" {
 		references = append(references, manifestObjectReference{relative: filepath.ToSlash(filepath.Join("session-indexes", digestLeafName(manifest.SessionIndexDigest, ".json"))), digest: manifest.SessionIndexDigest})
 	}
@@ -846,13 +872,25 @@ func manifestObjectReferencesContext(ctx context.Context, manifest memory.Genera
 // follows references through these maps: shared objects are never reopened,
 // re-decoded, or re-hashed for prepared roots, external pins, or lineage.
 type retentionObjectSnapshot struct {
-	files        map[string]retentionFile
-	observations map[string][]memory.ObservationRevision
-	sessions     map[string]memory.SessionView
-	lineages     map[string]memory.SessionLineage
-	probes       map[string]memory.ProjectProbeState
-	projects     map[string]memory.ProjectView
-	indexes      map[string]sessionindex.Document
+	files         map[string]retentionFile
+	observations  map[string][]memory.ObservationRevision
+	sessions      map[string]memory.SessionView
+	lineages      map[string]memory.SessionLineage
+	probes        map[string]memory.ProjectProbeState
+	projects      map[string]memory.ProjectView
+	indexes       map[string]sessionindex.Document
+	conversations map[string]conversationchain.Document
+}
+
+func (objects *retentionObjectSnapshot) conversationChain(ctx context.Context, digest string) (conversationchain.Document, error) {
+	if err := retentionContextCause(ctx); err != nil {
+		return conversationchain.Document{}, err
+	}
+	value, exists := objects.conversations[digest]
+	if !exists {
+		return conversationchain.Document{}, fmt.Errorf("verify conversation chain %s: %w", digest, os.ErrNotExist)
+	}
+	return value, nil
 }
 
 func (objects *retentionObjectSnapshot) observationChunk(ctx context.Context, digest string) ([]memory.ObservationRevision, error) {
@@ -932,6 +970,7 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 		files: make(map[string]retentionFile), observations: make(map[string][]memory.ObservationRevision),
 		sessions: make(map[string]memory.SessionView), lineages: make(map[string]memory.SessionLineage), probes: make(map[string]memory.ProjectProbeState),
 		projects: make(map[string]memory.ProjectView), indexes: make(map[string]sessionindex.Document),
+		conversations: make(map[string]conversationchain.Document),
 	}
 	collections := []struct {
 		kind   ObjectKind
@@ -944,6 +983,7 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 		{ObjectProbeState, "project-probes", ".json"},
 		{ObjectProjectView, "project-views", ".json"},
 		{ObjectSessionIndex, "session-indexes", ".json"},
+		{ObjectConversationChain, "conversation-chains", ".json"},
 	}
 	for _, collection := range collections {
 		if err := retentionCheckpoint(ctx); err != nil {
@@ -1000,6 +1040,8 @@ func (s *Store) enumerateRetentionObjects(ctx context.Context) (*retentionObject
 				objects.projects[digest] = decoded.project
 			case ObjectSessionIndex:
 				objects.indexes[digest] = decoded.index
+			case ObjectConversationChain:
+				objects.conversations[digest] = decoded.conversation
 			}
 		}
 		if err := directory.Close(); err != nil {

@@ -353,11 +353,13 @@ type GenerationManifest struct {
 	// The optional index extension preserves byte compatibility with legacy v1
 	// manifests. SessionIndexDigest is excluded only from generation identity to
 	// break the generation/index self-reference; every other field participates.
-	RetainedSessionViews       []SessionViewDependency   `json:"retained_session_views,omitempty"`
-	SessionIndexMeasurements   []SessionIndexMeasurement `json:"session_index_measurements,omitempty"`
-	PreviousSessionIndexDigest string                    `json:"previous_session_index_digest,omitempty"`
-	RetainedSessionFactsDigest string                    `json:"retained_session_facts_digest,omitempty"`
-	SessionIndexDigest         string                    `json:"session_index_digest,omitempty"`
+	RetainedSessionViews       []SessionViewDependency       `json:"retained_session_views,omitempty"`
+	SessionIndexMeasurements   []SessionIndexMeasurement     `json:"session_index_measurements,omitempty"`
+	PreviousSessionIndexDigest string                        `json:"previous_session_index_digest,omitempty"`
+	RetainedSessionFactsDigest string                        `json:"retained_session_facts_digest,omitempty"`
+	SessionIndexDigest         string                        `json:"session_index_digest,omitempty"`
+	ConversationChains         []ConversationChainDependency `json:"conversation_chains,omitempty"`
+	RetainedConversationChains []ConversationChainDependency `json:"retained_conversation_chains,omitempty"`
 	// Deprecated Gate A draft fields are retained in the Go API so callers
 	// still compile, but v1 validation rejects non-empty project-wide lineage.
 	ObservationChunkDigests []string          `json:"observation_chunk_digests,omitempty"`
@@ -951,6 +953,9 @@ func ValidateGenerationManifestContext(ctx context.Context, value GenerationMani
 	}
 	if len(value.RetainedSessionViews) != 0 && value.PreviousSessionIndexDigest == "" {
 		return errors.New("retained SessionViews require previous Session index digest")
+	}
+	if err := validateConversationChainDependencies(value, checkpoints...); err != nil {
+		return err
 	}
 	if err := validateLineageDependencies(value.SessionLineages, value.SessionViews, checkpoints...); err != nil {
 		return err

@@ -36,7 +36,7 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 			SourceIdentity: "source-1",
 			Sequence:       1,
 			ProjectID:      testProjectID,
-			Kind:           "test",
+			Kind:           "verification",
 			Subject:        "go test",
 		},
 		Ref: memory.SourceRef{
@@ -50,7 +50,7 @@ func buildStoredFixture(t *testing.T, store *Store, generationID string) storedF
 			SourceHash: hexDigest("source"),
 		},
 		Timestamp:      testEndedAt,
-		Operation:      "run",
+		Operation:      "verification",
 		Object:         "focused tests",
 		Outcome:        "passed",
 		Fields:         map[string]string{"passed": "1", "failed": "0"},
