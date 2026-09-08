@@ -93,12 +93,15 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		bodyAvailability := ""
 		evidenceView := view.Digest
 		sourceLoaded := false
+		visibleReaderUnsupported := false
 		if record.Availability == memory.SourceAvailable {
 			visible, sourceCoverage, readErr := readPublishedVisible(ctx, record)
-			if !errors.Is(readErr, source.ErrVisibleReaderUnsupported) {
-				if context.Cause(ctx) != nil {
-					return publicError(CodeInvalidArgument, "inspection timed out")
-				}
+			if context.Cause(ctx) != nil {
+				return publicError(CodeInvalidArgument, "inspection timed out")
+			}
+			if errors.Is(readErr, source.ErrVisibleReaderUnsupported) {
+				visibleReaderUnsupported = true
+			} else {
 				if readErr == nil {
 					sourceLoaded = true
 					redactor := redact.Default()
@@ -131,7 +134,7 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 			}
 		}
 		if !sourceLoaded && retained == nil {
-			if hasSessionDiagnostic(view, "visible_reader_unsupported") {
+			if visibleReaderUnsupported || hasSessionDiagnostic(view, "visible_reader_unsupported") {
 				return publicError("visible_reader_unsupported", "authenticated visible conversation reader is unavailable")
 			}
 			if record.Availability != memory.SourceAvailable {

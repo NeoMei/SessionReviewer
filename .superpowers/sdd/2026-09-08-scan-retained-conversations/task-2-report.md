@@ -67,3 +67,66 @@ GREEN focused evidence:
 - The dependency edge `internal/source/codex -> internal/platform` is deliberate and narrow: `codex.SessionsRoot` now delegates to the existing common `platform.ResolveSessionsRoot(platform.CurrentEnv())`, matching scan/query configured-root precedence without adding an Agent/process boundary or changing the fixed public request/CLI argv.
 - Re-read the Task 2 brief after recovery and reviewed the complete diff for scope, authentication, historical/current binding, retained phase omission, diagnostic unknown semantics, payload budgets, cursor adjacency/identity, fixed request shape, source-root precedence, and no-CLI behavior. No additional implementation edit was necessary after the frozen gate.
 - Exact staging/commit and independent task review remain; native candidate acceptance, provider adapters, initializer repair, and the separate lock-test liveness repair are intentionally outside this implementation.
+
+## Fix round 1 (review findings 1-6)
+
+All six review findings are addressed in the bounded query/wire/renderer surface. This round keeps provider-specific source readers Codex-only while making authenticated retained selection provider-neutral; preserves empty assistant final attempts; treats legacy diagnostic counters as unknown; makes body truncation conservatively incomplete; adds persisted graph tamper/ambiguity controls; and prevents the retained-only renderer from claiming a full body was read.
+
+### RED evidence
+
+- Controller actual CLI empty-final publication: `go test -overlay /tmp/session-reviewer-scan-chain-qa.6VBnCG/new-project-cli-overlay.json ./internal/cli -run '^TestControllerPublishedEmptyFinalAnswer$' -count=1` exited 1 because `empty final answer state=no_answer, want partial` (1.636s). The controller later extended this unchanged probe through source removal and rescan.
+- Controller actual CLI redaction expansion: `TestControllerPublishedRedactionExpansionCoverage` exited 1 because `truncatedBodies>0` was emitted with `complete=true` (2.320s).
+- Controller actual Go publication -> strict TypeScript -> renderer probe `/tmp/session-reviewer-scan-chain-qa.6VBnCG/controller-retained-copy.mjs` exited 1 with `{claimsFull:true,retainedMessages:19}` for retained messages whose `text` was null.
+- New persisted successor tests initially reached their intended authentication boundary but exposed fixture defects: legacy returned `retained Session facts binding mismatch`; ambiguity returned `invalid generation manifest: retained SessionView duplicates current dependency`. The successor helper was corrected to pass the authenticated previous index and keep historical views reachable through chain proof rather than falsely listing them as current/retained Session identities.
+- New mixed-provider fixture first failed before publication with `invalid source usage: invalid session usage duration`, then with `SessionView terminal state and source availability disagree`; fixture usage duration and availability were made internally consistent without changing production behavior.
+
+### GREEN evidence
+
+- Controller independently reported the combined real CLI `EmptyFinalAnswer` (including removal/rescan retained attempt), `RedactionExpansionCoverage`, and `RetainedConversationLifecycle` probes passing in 7.141s.
+- Controller rebuilt the actual retained renderer fixture and reported `claimsFull:false` with 19 retained messages; actual four-state published Chrome checks also passed at 1200px and 390px, including source/removal/rescan/restore, no-CLI zero calls, Enter behavior, no overflow, and no console errors.
+- `go test ./internal/inspect -run 'TestRetainedConversation(LegacyCoverageRemainsQueryableAsUnknown|TwoCompatiblePublishedRootsAreAmbiguous)$' -count=1 -v` passed both authenticated successor fixtures (5.787s). These use a private-store `CommitPublished` test proof, not real four-file publication.
+- `TestRetainedConversationPublishedGraphTamperingFailsClosed` passed its positive control plus independent chain-document, evidence-view identity, selected active-revision object, and manifest-dependency tampering cases. The encompassing run took 13.798s; only the two then-unfixed successor fixtures failed in that run, and both later passed as recorded above.
+- `go test ./internal/inspect -run 'TestRetainedConversationPublishedSameNativeIDAcrossProviders$' -count=1 -v` passed Codex and Claude with the same native Session ID through actual private-store publication/query, with the configured Codex source root pinned to an empty temporary directory (1.448s). This is a generic retained boundary test, not Claude source-full support.
+- `go test ./internal/inspect -count=1` passed (49.385s).
+- `go test ./internal/inspect ./internal/cli -run 'RetainedConversation|ConversationCursor|ConversationReadOnly' -count=1` passed (`internal/inspect` 99.453s; CLI 0.785s with no matching named tests).
+- `npm test -- --run tests/conversation-page.test.ts tests/render-conversation.test.ts tests/render-scan-records.test.ts` passed 3 files / 109 tests (7.05s).
+- `npm run lint && npm run build` passed ESLint, TypeScript typecheck, and production esbuild.
+- `git diff --check` exited 0.
+
+### Frozen-gate concern
+
+- One fresh `npm run check` was not clean even though all 27 files / 472 tests passed: Vitest reported an unhandled rejection after `tests/session-event-recovery.test.ts`, `TypeError: Cannot read properties of undefined (reading 'kind')` at `src/view/project-view.ts:138` in `ProjectEvolutionView.refresh`. This file and failure are outside Task 2; no unrelated edit or silent retry was made. The Task 2 focused tests, lint, typecheck, and production build are green. Controller owns diagnosis of that asynchronous test race and the final full-Go frozen gate.
+
+### Fix-round files
+
+- Production: `internal/inspect/conversation.go`, `internal/source/codex/visible.go`, conversation-page Go/TypeScript/schema validators, and `obsidian-plugin/src/view/render-conversation.ts`.
+- Tests: `internal/inspect/conversation_test.go`, `conversation_retained_test.go`, `service_test.go`, and the conversation parser/renderer tests. The generalized inspect fixture preserves all former Codex-only callers and adds only provider identities plus an optional retained-chain hook for the persisted mixed-provider case.
+
+## Fix round 2
+
+The round-2 review found one remaining classification gap from finding 1 plus its still-missing cross-provider cursor regression. An available non-Codex source with neither a reader nor retained chain swallowed the typed unsupported capability and returned `source_unavailable`.
+
+### RED
+
+- Added an authenticated private-store publication with an available Claude source, no retained chain, and no persisted `visible_reader_unsupported` diagnostic.
+- `go test ./internal/inspect -run 'TestConversationAvailableProviderWithoutReaderOrRetainedChainIsUnsupported|TestRetainedConversationPublishedSameNativeIDAcrossProviders' -count=1 -v` exited 1: `TestConversationAvailableProviderWithoutReaderOrRetainedChainIsUnsupported` received `authenticated source prefix is unavailable` instead of `visible_reader_unsupported`.
+- The same run proved the new same-native-ID cursor coverage already worked: `TestRetainedConversationPublishedSameNativeIDAcrossProviders` passed after separating its index limit from selected-message pagination.
+
+### Fix
+
+- `LoadConversationPage` now remembers `ErrVisibleReaderUnsupported`, checks cancellation immediately after the optional reader call, and returns the typed public `visible_reader_unsupported` result only after no authenticated retained evidence was selected.
+- Authenticated retained evidence remains preferred; corrupt retained graphs still fail closed; no non-Codex source reader or Codex-path fallback was added.
+- The persisted mixed-provider fixture now creates two turns per provider. Each provider's real cursor succeeds in its own namespace, while submitting either cursor to the other provider with the same native Session ID returns `stale_cursor`.
+
+### GREEN
+
+- Focused provider tests: both passed (`ok internal/inspect 1.947s`).
+- `go test ./internal/inspect -count=1`: passed (47.422s).
+- `go vet ./internal/inspect ./internal/source/codex`: exited 0.
+- `git diff --check`: exited 0.
+- Controller-owned full Go suite is intentionally pending on the new frozen commit; the prior full suite on `d76c9e9` passed but predates this round-2 correction.
+
+### Final scope and concerns
+
+- Round 2 changes only the Go conversation classification, persisted inspect regressions, and this accumulated report.
+- Provider-specific Claude/OpenCode source-full readers remain outside scope; only provider-neutral authenticated retained reads and typed absence of a reader are claimed.

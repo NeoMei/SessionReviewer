@@ -600,6 +600,17 @@ func fixtureSourceIdentity(provider, sessionID string) string {
 	return "source-" + provider + "-" + sessionID
 }
 
+func TestConversationAvailableProviderWithoutReaderOrRetainedChainIsUnsupported(t *testing.T) {
+	const nativeID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	fixture := buildEventFixtureIdentitiesAt(t, t.TempDir(), "project-conversation-unsupported", "generation-conversation-unsupported", []eventFixtureIdentity{{provider: "claude", sessionID: nativeID}}, nil, nil, func(memory.SessionView, []memory.ObservationRevision) *conversationchain.Document {
+		return nil
+	})
+	request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "claude", SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 20}
+	if _, err := LoadConversationPage(context.Background(), request); eventErrorCode(err) != "visible_reader_unsupported" {
+		t.Fatalf("available provider without reader/retained chain error=%v", err)
+	}
+}
+
 func TestRetainedConversationPublishedSameNativeIDAcrossProviders(t *testing.T) {
 	const nativeID = "99999999-9999-4999-8999-999999999999"
 	t.Setenv("SESSION_REVIEWER_SESSIONS_ROOT", t.TempDir())
@@ -609,9 +620,11 @@ func TestRetainedConversationPublishedSameNativeIDAcrossProviders(t *testing.T) 
 			Messages: []conversationchain.SourceMessage{
 				{Role: conversationchain.RoleUser, Text: "question from " + view.Provider, OccurredAt: "2026-09-07T00:00:01Z", RecordHash: strings.Repeat("a", 64), RecordOrdinal: 1},
 				{Role: conversationchain.RoleAssistant, Phase: "final_answer", Text: "answer from " + view.Provider, OccurredAt: "2026-09-07T00:00:02Z", RecordHash: strings.Repeat("b", 64), RecordOrdinal: 2},
+				{Role: conversationchain.RoleUser, Text: "second question from " + view.Provider, OccurredAt: "2026-09-07T00:00:03Z", RecordHash: strings.Repeat("c", 64), RecordOrdinal: 3},
+				{Role: conversationchain.RoleAssistant, Phase: "final_answer", Text: "second answer from " + view.Provider, OccurredAt: "2026-09-07T00:00:04Z", RecordHash: strings.Repeat("d", 64), RecordOrdinal: 4},
 			},
 			Revisions:      revisions,
-			SourceCoverage: conversationchain.VisibleCoverage{SourceRecords: 5, VisibleMessages: 2, CapturedMessages: 2, Complete: true},
+			SourceCoverage: conversationchain.VisibleCoverage{SourceRecords: 5, VisibleMessages: 4, CapturedMessages: 4, Complete: true},
 			RuleVersion:    "visible-turn-v1", RedactionVersion: "redaction-v1",
 		})
 		if err != nil {
@@ -619,16 +632,31 @@ func TestRetainedConversationPublishedSameNativeIDAcrossProviders(t *testing.T) 
 		}
 		return &document
 	})
+	cursors := make(map[string]string, 2)
 	for _, provider := range []string{"codex", "claude"} {
-		request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: provider, SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 20}
+		request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: provider, SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 1}
 		page, err := LoadConversationPage(context.Background(), request)
-		if err != nil || page.Provider != provider || page.SessionID != nativeID || page.BodyAvailability != "retained_excerpt" || len(page.TurnUnits) != 1 || page.TurnUnits[0].UserMessage.SourceRef.Provider != provider {
+		if err != nil || page.Provider != provider || page.SessionID != nativeID || page.BodyAvailability != "retained_excerpt" || len(page.TurnUnits) != 1 || page.TurnUnits[0].UserMessage.SourceRef.Provider != provider || page.NextCursor == nil {
 			t.Fatalf("provider %s retained page=%+v err=%v", provider, page, err)
 		}
+		cursors[provider] = *page.NextCursor
+		request.Cursor = cursors[provider]
+		next, err := LoadConversationPage(context.Background(), request)
+		if err != nil || next.Provider != provider || next.RangeStart != 1 || len(next.TurnUnits) != 1 {
+			t.Fatalf("provider %s own cursor page=%+v err=%v", provider, next, err)
+		}
+		request.Cursor = ""
+		request.Limit = 20
 		request.TurnUnitID = page.TurnUnits[0].TurnUnitID
 		detail, err := LoadConversationPage(context.Background(), request)
 		if err != nil || len(detail.Messages) != 2 || detail.Messages[1].VisibleExcerpt != "answer from "+provider || detail.Messages[1].Text != nil || detail.Messages[1].SourceRef.Provider != provider {
 			t.Fatalf("provider %s retained detail=%+v err=%v", provider, detail, err)
+		}
+	}
+	for provider, other := range map[string]string{"codex": "claude", "claude": "codex"} {
+		request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: provider, SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 1, Cursor: cursors[other]}
+		if _, err := LoadConversationPage(context.Background(), request); eventErrorCode(err) != CodeStaleCursor {
+			t.Fatalf("provider %s accepted %s cursor: %v", provider, other, err)
 		}
 	}
 }
