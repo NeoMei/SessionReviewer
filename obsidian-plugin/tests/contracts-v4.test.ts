@@ -526,10 +526,21 @@ describe("session contracts", () => {
   it.each([
     ["empty first cursor", { first_cursor: "" }],
     ["empty last cursor", { last_cursor: "" }],
-    ["hidden previous page", { range_start: 1, range_end: 1, items: [], previous_cursor: null }],
-    ["hidden next page", { total: 2, range_end: 1, next_cursor: null }]
+    ["hidden previous page", {
+      range_start: 1, range_end: 2,
+      items: [{ kind: "message", excerpt: "safe", revision_id: "revision-2", sequence: 2, occurred_at: "2026-09-07T00:00:00Z" }],
+      previous_cursor: null, next_cursor: null
+    }],
+    ["hidden next page", { next_cursor: null }]
   ])("rejects invalid nonempty event cursor topology: %s", async (_label, patch) => {
     const page = await fixtureObject("session-event-page-v1.valid.json");
+    Object.assign(page, {
+      total: 2, range_start: 0, range_end: 1,
+      items: [{ kind: "message", excerpt: "safe", revision_id: "revision-1", sequence: 1, occurred_at: "2026-09-07T00:00:00Z" }],
+      previous_cursor: null, next_cursor: "next", first_cursor: "first", last_cursor: "last",
+      coverage: { seen: 2, indexed: 2, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
+    });
+    expect(() => parseSessionEventPageV1(JSON.stringify(page))).not.toThrow();
     Object.assign(page, patch);
     expect(() => parseSessionEventPageV1(JSON.stringify(page))).toThrow(/cursor|topology|range/i);
   });

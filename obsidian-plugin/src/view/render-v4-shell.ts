@@ -4,6 +4,7 @@ import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, Session
 import type { ProjectDescriptor } from "../data/repository";
 import type { V4Tab, V4ViewState, V4ViewStatePatch } from "../state/v4-view-state";
 import { normalizeV4ViewState } from "../state/v4-view-state";
+import { normalizeSessionBrowserState } from "../state/session-browser-state";
 import { button, element } from "./dom";
 import { presentStatus, summarizeRisk } from "./presentation";
 import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
@@ -22,6 +23,8 @@ export interface RenderV4ShellOptions {
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   eventPageCache?: Map<string, SessionEventPageV1>;
   refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+  cancelSessionEventRecovery?: () => void;
+  recoverySession?: { provider: string; sessionId: string };
   initialSessionEventOrdinal?: number;
   recoveryAlreadyAttempted?: boolean;
   recoverySelectionUnavailable?: string;
@@ -49,6 +52,7 @@ export function renderV4Shell(
   if (state.selectedProblemId !== null && !presentation.problem_nodes.some((item) => item.id === state.selectedProblemId)) state.selectedProblemId = null;
   let records: ScanRecordsElement | undefined;
   let disposed = false;
+  let recoveryPending = options.recoverySession !== undefined;
   const evolutionUi: V4EvolutionUiState = { fullHistory: false, page: 0 };
 
   const persist = (patch: V4ViewStatePatch): void => {
@@ -99,14 +103,30 @@ export function renderV4Shell(
       const panel = element("section", { className: "sr-v4-sessions", attrs: { "data-v4-panel": "sessions", role: "tabpanel" } });
       if (!index) panel.append(element("p", { className: "sr-empty", text: "当前快照没有已验证的 Session 索引；需要重新扫描后才能建立完整清单。" }));
       else {
+        const recovery = recoveryPending ? {
+          recoverySession: options.recoverySession,
+          initialSessionEventOrdinal: options.initialSessionEventOrdinal,
+          recoveryAlreadyAttempted: options.recoveryAlreadyAttempted,
+          recoverySelectionUnavailable: options.recoverySelectionUnavailable
+        } : {
+          recoverySession: undefined,
+          initialSessionEventOrdinal: undefined,
+          recoveryAlreadyAttempted: undefined,
+          recoverySelectionUnavailable: undefined
+        };
         records = renderScanRecords(index, {
           ...options,
+          ...recovery,
           initialState: state.sessionBrowser,
           onStateChange: (sessionBrowser) => {
             state = { ...state, sessionBrowser };
             persist({ sessionBrowser });
           }
         });
+        if (recoveryPending && options.recoverySession && !options.recoverySelectionUnavailable) {
+          state = { ...state, sessionBrowser: { ...normalizeSessionBrowserState(state.sessionBrowser), selected: options.recoverySession } };
+        }
+        recoveryPending = false;
         root.scanRecords = records;
         panel.append(records);
       }

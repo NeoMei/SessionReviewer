@@ -81,6 +81,8 @@ export function renderMarkdownV4View(
     loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
     refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+    cancelSessionEventRecovery?: () => void;
+    recoverySession?: { provider: string; sessionId: string };
     initialSessionEventOrdinal?: number;
     recoveryAlreadyAttempted?: boolean;
     recoverySelectionUnavailable?: string;

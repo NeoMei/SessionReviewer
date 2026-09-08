@@ -170,6 +170,7 @@ export class ProjectEvolutionView extends ItemView {
     this.contentEl.replaceChildren();
     if (snapshot.kind === "markdown-v4" || snapshot.kind === "markdown-v4-stale") {
       const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
+      const recovery = this.eventRecoveryFor(current);
       const generation = current.state.kind === "public_valid" ? `${current.descriptor.projectId}\0${current.state.index.generation_id}` : "";
       if (generation !== this.eventCacheGeneration) {
         this.eventPageCache.clear();
@@ -191,9 +192,11 @@ export class ProjectEvolutionView extends ItemView {
             : undefined,
           eventPageCache: this.eventPageCache,
           refreshSessionEvents: (request) => this.refreshSessionEvents(request),
-          initialSessionEventOrdinal: this.recoveryOrdinal(current),
-          recoveryAlreadyAttempted: this.pendingEventRecovery?.projectId === current.descriptor.projectId,
-          recoverySelectionUnavailable: this.recoveryUnavailable(current),
+          cancelSessionEventRecovery: () => this.invalidateEventRecovery(),
+          recoverySession: recovery?.selection,
+          initialSessionEventOrdinal: recovery?.ordinal,
+          recoveryAlreadyAttempted: recovery !== undefined,
+          recoverySelectionUnavailable: recovery?.unavailable,
           initialState: this.currentV4State(current.descriptor.projectId),
           saveState: (viewState) => {
             this.v4States = { ...this.v4States, [viewState.projectId]: viewState };
@@ -203,9 +206,11 @@ export class ProjectEvolutionView extends ItemView {
         }
       );
       this.v4Browser = browser;
-      if (this.pendingEventRecovery?.projectId === current.descriptor.projectId && this.recoveryOrdinal(current) !== undefined) {
+      if (recovery) {
         this.pendingEventRecovery = undefined;
-        browser.prepend(element("p", { className: "sr-event-recovery-status", text: "项目索引已更新；正在按新一代索引恢复原 Session 的事件位置。", attrs: { role: "status" } }));
+        if (recovery.ordinal !== undefined) {
+          browser.prepend(element("p", { className: "sr-event-recovery-status", text: "项目索引已更新；正在按新一代索引恢复原 Session 的事件位置。", attrs: { role: "status" } }));
+        }
       }
       this.scanRecords = browser.scanRecords;
       browser.prepend(this.projectPicker(projects));
@@ -539,29 +544,24 @@ export class ProjectEvolutionView extends ItemView {
     }
   }
 
-  private recoveryOrdinal(snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>): number | undefined {
+  private eventRecoveryFor(snapshot: Extract<Snapshot, { kind: "markdown-v4" }>): {
+    selection: { provider: string; sessionId: string };
+    ordinal?: number;
+    unavailable?: string;
+  } | undefined {
     const recovery = this.pendingEventRecovery;
-    const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
-    if (!recovery || recovery.projectId !== current.descriptor.projectId || current.state.kind !== "public_valid") return undefined;
-    const session = current.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
-    if (!session || session.indexed_event_count === 0 || session.session_view_digest === null) return undefined;
-    return Math.min(recovery.ordinal, session.indexed_event_count);
-  }
-
-  private recoveryUnavailable(snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>): string | undefined {
-    const recovery = this.pendingEventRecovery;
-    const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;
-    if (!recovery || recovery.projectId !== current.descriptor.projectId || current.state.kind !== "public_valid") return undefined;
-    const session = current.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
-    if (!session) return "项目索引已更新；原 Session 已不在已验证索引中，未显示其他 Session 详情。";
-    const state = normalizeV4ViewState(this.currentV4State(current.descriptor.projectId), current.descriptor.projectId);
-    if (!filterSessions(current.state.index.sessions, normalizeSessionBrowserState(state.sessionBrowser)).includes(session)) {
-      return "项目索引已更新；原 Session 已不符合当前本地筛选，未绕过筛选显示详情。";
+    if (!recovery || recovery.projectId !== snapshot.descriptor.projectId || snapshot.state.kind !== "public_valid") return undefined;
+    const selection = { provider: recovery.provider, sessionId: recovery.sessionId };
+    const session = snapshot.state.index.sessions.find((entry) => entry.provider === recovery.provider && entry.session_id === recovery.sessionId);
+    if (!session) return { selection, unavailable: "项目索引已更新；原 Session 已不在已验证索引中，未显示其他 Session 详情。" };
+    const state = normalizeV4ViewState(this.currentV4State(snapshot.descriptor.projectId), snapshot.descriptor.projectId);
+    if (!filterSessions(snapshot.state.index.sessions, normalizeSessionBrowserState(state.sessionBrowser)).includes(session)) {
+      return { selection, unavailable: "项目索引已更新；原 Session 已不符合当前本地筛选，未绕过筛选显示详情。" };
     }
     if (session.indexed_event_count === 0 || session.session_view_digest === null) {
-      return "项目索引已更新；原 Session 当前没有可读的已索引事件。";
+      return { selection, unavailable: "项目索引已更新；原 Session 当前没有可读的已索引事件。" };
     }
-    return undefined;
+    return { selection, ordinal: Math.min(recovery.ordinal, session.indexed_event_count) };
   }
 
   private invalidateEventRecovery(): void {

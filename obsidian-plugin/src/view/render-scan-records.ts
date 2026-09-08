@@ -26,6 +26,8 @@ export interface ScanRecordsOptions {
   initialState?: unknown;
   onStateChange?: (state: SessionBrowserState) => void;
   refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
+  cancelSessionEventRecovery?: () => void;
+  recoverySession?: { provider: string; sessionId: string };
   initialSessionEventOrdinal?: number;
   recoveryAlreadyAttempted?: boolean;
   recoverySelectionUnavailable?: string;
@@ -52,17 +54,21 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   const root = element("section", { className: "sr-scan-records", attrs: { "aria-label": "扫描记录" } }) as ScanRecordsElement;
   let state = normalizeSessionBrowserState(options.initialState);
   let filtered = filterSessions(index.sessions, state);
-  let selected = findSelected(index.sessions, state.selected);
+  let selected = findSelected(index.sessions, options.recoverySession ?? state.selected);
   let filterError = "";
-  if (selected && filtered.includes(selected)) state.page = Math.floor(filtered.indexOf(selected) / SESSION_PAGE_SIZE);
+  if (options.recoverySession && (options.recoverySelectionUnavailable || !selected || !filtered.includes(selected))) {
+    selected = undefined;
+    state.selected = null;
+    state.page = 0;
+  }
+  else if (selected && filtered.includes(selected)) {
+    state.page = Math.floor(filtered.indexOf(selected) / SESSION_PAGE_SIZE);
+    state.selected = sessionSelection(selected);
+  }
   else {
     state.page = 0;
     selected = filtered[0];
     state.selected = selected ? sessionSelection(selected) : null;
-  }
-  if (options.recoverySelectionUnavailable) {
-    selected = undefined;
-    state.selected = null;
   }
   let eventPage: SessionEventPageV1 | undefined;
   let selectedEvent = 0;
@@ -105,7 +111,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     if (page.project_id !== index.project_id || page.provider !== session.provider || page.session_id !== session.session_id ||
       page.generation_id !== index.generation_id || page.session_view_digest !== session.session_view_digest ||
       page.total !== session.indexed_event_count || page.items.length !== page.range_end - page.range_start ||
-      page.items.length > EVENT_PAGE_SIZE) return false;
+      page.items.length > EVENT_PAGE_SIZE || !sameCoverage(page.coverage, session.coverage)) return false;
     if (!navigation || navigation.direction === "first") return page.range_start === 0;
     if (navigation.direction === "last") return page.range_end === page.total;
     if (navigation.direction === "next") return page.range_start === navigation.sourceEnd;
@@ -237,6 +243,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       return;
     }
     recoveryAvailable = true;
+    options.cancelSessionEventRecovery?.();
     void load({ anchor: Number(value), direction: "anchor" });
   };
 
@@ -266,8 +273,8 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       root.ownerDocument.activeElement.getAttribute("aria-label") === "跳转到事件序号";
     sessionRail.update(index.sessions, filtered, selected, state, filterError);
     const nextEventArea = renderEventArea(selected, summaryFor(selected), conversationFor(selected), eventPage, selectedEvent, loading, loadError, jumpValue, jumpError, retryNavigation, options, {
-      onEvent: (value) => { selectedEvent = value; recoveryAvailable = true; draw(); },
-      onLoad: (navigation) => { recoveryAvailable = true; void load(navigation); },
+      onEvent: (value) => { selectedEvent = value; recoveryAvailable = true; options.cancelSessionEventRecovery?.(); draw(); },
+      onLoad: (navigation) => { recoveryAvailable = true; options.cancelSessionEventRecovery?.(); void load(navigation); },
       onJump: jump
     });
     if (eventArea) eventArea.replaceWith(nextEventArea);
@@ -558,6 +565,11 @@ function selectedEventFor(page: SessionEventPageV1, anchor?: number): number {
 
 function eventBindingIdentity(index: SessionIndexV1, session: SessionIndexEntryV1 | undefined): string {
   return session ? `${index.project_id}\0${session.provider}\0${session.session_id}\0${index.generation_id}\0${session.session_view_digest ?? ""}` : "";
+}
+
+function sameCoverage(left: SessionEventPageV1["coverage"], right: SessionIndexEntryV1["coverage"]): boolean {
+  return left.seen === right.seen && left.indexed === right.indexed && left.collapsed === right.collapsed &&
+    left.unprojected === right.unprojected && left.undecodable === right.undecodable && left.truncated === right.truncated;
 }
 
 function renderSessionCoverage(session: SessionIndexEntryV1): HTMLElement {

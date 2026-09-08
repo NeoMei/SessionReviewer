@@ -27,6 +27,21 @@ function eventPageFixture(overrides: Record<string, unknown> = {}): Record<strin
   };
 }
 
+function rangedEventPage(total: number, start: number, end: number): Record<string, unknown> {
+  return eventPageFixture({
+    total,
+    range_start: start,
+    range_end: end,
+    items: Array.from({ length: end - start }, (_, index) => ({
+      kind: "message", excerpt: "safe", revision_id: `revision-${start + index + 1}`,
+      sequence: start + index + 1, occurred_at: "2026-09-07T00:00:00Z"
+    })),
+    previous_cursor: start === 0 ? null : "previous",
+    next_cursor: end === total ? null : "next",
+    coverage: { seen: total, indexed: total, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 }
+  });
+}
+
 describe("CLI runner", () => {
   it("runs inspect session-summary with exact fixed argv and the frozen five-second bound", async () => {
     const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, SESSION_SUMMARY_SOURCE, ""));
@@ -171,11 +186,19 @@ describe("CLI runner", () => {
     })).rejects.toMatchObject({ code: "unavailable", message: "无法读取扫描 Session；请刷新项目后重试，并确认 CLI 已更新。" });
   });
 
+  it("accepts an otherwise valid bounded event page before checking binding regressions", async () => {
+    const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(rangedEventPage(50, 0, 25)), ""));
+    await expect(runner.getSessionEvents({
+      projectId: "project-0123456789abcdef", provider: "codex", sessionId: "session-1",
+      expectedGenerationId: "generation-1", expectedSessionViewDigest: DIGEST_A, limit: 25
+    })).resolves.toMatchObject({ total: 50, range_start: 0, range_end: 25 });
+  });
+
   it.each([
-    ["first response away from origin", {}, eventPageFixture({ total: 50, range_start: 25, range_end: 50, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 26}`, sequence: index + 26, occurred_at: "2026-09-07T00:00:00Z" })), previous_cursor: "previous", next_cursor: null })],
-    ["more items than requested", {}, eventPageFixture({ total: 100, range_end: 100, items: Array.from({ length: 100 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })) })],
-    ["nonterminal page without next cursor", {}, eventPageFixture({ total: 50, range_end: 25, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })), next_cursor: null })],
-    ["anchor outside returned range", { anchor: 40 }, eventPageFixture({ total: 50, range_end: 25, items: Array.from({ length: 25 }, (_, index) => ({ kind: "message", excerpt: "safe", revision_id: `revision-${index + 1}`, sequence: index + 1, occurred_at: "2026-09-07T00:00:00Z" })), next_cursor: "next" })]
+    ["first response away from origin", {}, rangedEventPage(50, 25, 50)],
+    ["more items than requested", {}, rangedEventPage(100, 0, 100)],
+    ["nonterminal page without next cursor", {}, { ...rangedEventPage(50, 0, 25), next_cursor: null }],
+    ["anchor outside returned range", { anchor: 40 }, rangedEventPage(50, 0, 25)]
   ])("rejects successful event-page binding regression: %s", async (_label, navigation, payload) => {
     const runner = new CliRunner("/bin/session-reviewer", (_file, _args, _options, callback) => callback(null, JSON.stringify(payload), ""));
     await expect(runner.getSessionEvents({

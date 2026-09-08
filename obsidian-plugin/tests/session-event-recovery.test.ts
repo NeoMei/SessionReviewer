@@ -81,6 +81,61 @@ describe("actual ProjectEvolutionView event recovery", () => {
     await view.onClose();
   });
 
+  it("keeps the implicit original Session when refresh inserts a new first row", async () => {
+    const first = snapshot("generation-1", 100, DIGEST_1);
+    const second = snapshot("generation-2", 100, DIGEST_2);
+    if (second.state.kind !== "public_valid") throw new Error("expected public index");
+    second.state.index.sessions.unshift({ ...second.state.index.sessions[0], session_id: "session-new" });
+    second.state.index.coverage.total = 2;
+    second.state.index.coverage.complete = 2;
+    second.state.index.coverage.source_available = 2;
+    second.state.index.coverage.started_at_known = 2;
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second), watch: vi.fn().mockReturnValue(vi.fn()) };
+    const getSessionEvents = vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number }) => {
+      if (request.expectedGenerationId === "generation-1" && request.anchor === 50) return Promise.reject(new SessionInspectError("generation_mismatch"));
+      return Promise.resolve({ ...page(request, 100), session_id: request.sessionId });
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen();
+    view.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click(); await settle();
+    const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+    input.value = "50"; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle(); await settle(); await settle();
+    expect(view.contentEl.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-long");
+    expect(getSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-long", expectedGenerationId: "generation-2", anchor: 50 }));
+    await view.onClose();
+  });
+
+  it("lets newer cached event navigation cancel an older pending recovery", async () => {
+    const refresh = deferred<Extract<Snapshot, { kind: "markdown-v4" }>>();
+    const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValueOnce(snapshot("generation-1", 2_438, DIGEST_1)).mockReturnValueOnce(refresh.promise), watch: vi.fn().mockReturnValue(vi.fn()) };
+    const getSessionEvents = vi.fn((request: { expectedGenerationId: string; expectedSessionViewDigest: string; anchor?: number; cursor?: string }) => {
+      if (request.cursor === "next") return Promise.reject(new SessionInspectError("stale_cursor"));
+      return Promise.resolve(page(request, 2_438));
+    });
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue({}), getSessionEvents } as unknown as CliRunner, undefined, undefined, { "project-p": { projectId: "project-p", view: "sessions", selectedMilestoneId: null, selectedProblemId: null, sessionBrowser: { query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null, unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-long" } } } });
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    await view.onOpen(); await settle();
+    const jump = async (ordinal: string) => {
+      const input = view.contentEl.querySelector<HTMLInputElement>('[aria-label="跳转到事件序号"]')!;
+      input.value = ordinal; input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await settle();
+    };
+    await jump("1220");
+    await jump("26");
+    view.contentEl.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle();
+    await jump("1220");
+    expect(view.contentEl.querySelector('[data-event-ordinal="1220"]')?.getAttribute("aria-selected")).toBe("true");
+    refresh.resolve(snapshot("generation-2", 2_438, DIGEST_2));
+    await settle(); await settle();
+    expect(view.contentEl.querySelector('[data-event-ordinal="1220"]')?.getAttribute("aria-selected")).toBe("true");
+    expect(getSessionEvents.mock.calls.some(([request]) => request.expectedGenerationId === "generation-2")).toBe(false);
+    expect(view.contentEl.querySelector('.sr-event-recovery-status')).toBeNull();
+    await view.onClose();
+  });
+
   it("shows an explicit unavailable state instead of another detail when refresh removes the Session", async () => {
     const removed = snapshot("generation-2", 0, DIGEST_2);
     if (removed.state.kind !== "public_valid") throw new Error("expected public index");

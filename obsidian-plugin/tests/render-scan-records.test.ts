@@ -215,6 +215,7 @@ describe("v4 scanned Session renderer", () => {
     const loadSessionEvents = vi.fn()
       .mockResolvedValueOnce(eventPage({
         total: 53,
+        coverage: retained.coverage,
         items: [{ kind: "artifact", excerpt: "retained indexed fact", revision_id: "revision-retained-1", sequence: 10, occurred_at: "2026-09-06T16:00:00Z" }]
       }))
       .mockRejectedValueOnce(new Error("retained page temporarily unavailable"))
@@ -264,6 +265,7 @@ describe("v4 scanned Session renderer", () => {
 
     lateRetainedPage.resolve(eventPage({
       total: 53,
+      coverage: retained.coverage,
       range_start: 1,
       range_end: 2,
       items: [{ kind: "artifact", excerpt: "stale retained fact", revision_id: "revision-retained-late", sequence: 20, occurred_at: "2026-09-06T16:01:00Z" }],
@@ -453,6 +455,76 @@ describe("v4 scanned Session renderer", () => {
     await settle();
     expect(root.querySelector('[data-event-ordinal="26"]')).not.toBeNull();
     expect(root.querySelector('[data-event-page-error]')?.textContent).toContain("无法读取扫描 Session");
+  });
+
+  it("rejects changed authenticated coverage and keeps the previous event page readable", async () => {
+    const changed = longEventPage(25, 2_438, {
+      coverage: { seen: 2_439, indexed: 2_438, collapsed: 0, unprojected: 1, undecodable: 0, truncated: 0 }
+    });
+    const loadSessionEvents = vi.fn().mockResolvedValueOnce(longEventPage(0)).mockResolvedValueOnce(changed);
+    const longSession = sessionFixture({ indexed_event_count: 2_438, coverage: { seen: 2_438, indexed: 2_438, collapsed: 0, unprojected: 0, undecodable: 0, truncated: 0 } });
+    const root = renderMarkdownV4View(snapshot(indexFixture([longSession])), () => {}, { loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-action="next-event-page"]')!.click();
+    await settle();
+    expect(root.querySelector('[data-event-ordinal="1"]')).not.toBeNull();
+    expect(root.querySelector('[data-event-ordinal="26"]')).toBeNull();
+    expect(root.querySelector('[data-event-page-error]')).not.toBeNull();
+  });
+
+  it("evicts a cached page with changed coverage before display", async () => {
+    const session = sessionFixture();
+    const identity = `project-p\0codex\0session-1\0generation-1\0${VIEW_DIGEST}\0anchor:first`;
+    const cache = new Map([[identity, eventPage({ coverage: { seen: 4_768, indexed: 2, collapsed: 0, unprojected: 1, undecodable: 4_765, truncated: 0 } })]]);
+    const loadSessionEvents = vi.fn().mockResolvedValue(eventPage());
+    const root = renderMarkdownV4View(snapshot(indexFixture([session])), () => {}, { eventPageCache: cache, loadSessionEvents });
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    expect(loadSessionEvents).toHaveBeenCalledTimes(1);
+    expect(root.textContent).toContain("用户问题示例");
+    expect(cache.get(identity)?.coverage).toEqual(session.coverage);
+  });
+
+  it("consumes recovery navigation once and never replays it for a later selected Session", async () => {
+    const second = sessionFixture({ session_id: "session-2" });
+    const loadSessionEvents = vi.fn((request: { sessionId: string; anchor?: number }) => Promise.resolve(eventPage({ session_id: request.sessionId })));
+    const initial = normalizeV4ViewState({ projectId: "project-p", view: "sessions", sessionBrowser: {
+      query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null,
+      unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-1" }
+    } }, "project-p");
+    const root = renderMarkdownV4View(snapshot(indexFixture([sessionFixture(), second])), () => {}, {
+      initialState: initial, loadSessionEvents, recoverySession: { provider: "codex", sessionId: "session-1" },
+      initialSessionEventOrdinal: 2, recoveryAlreadyAttempted: true
+    });
+    await settle();
+    expect(loadSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-1", anchor: 2 }));
+    root.querySelector<HTMLButtonElement>('[data-session-id="session-2"]')!.click();
+    await settle();
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="evolution"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    await settle();
+    expect(loadSessionEvents).toHaveBeenLastCalledWith(expect.objectContaining({ sessionId: "session-2" }));
+    expect(loadSessionEvents.mock.lastCall?.[0]).not.toHaveProperty("anchor");
+  });
+
+  it("consumes unavailable recovery once and does not clear a later valid selection", () => {
+    const second = sessionFixture({ session_id: "session-2" });
+    const initial = normalizeV4ViewState({ projectId: "project-p", view: "sessions", sessionBrowser: {
+      query: "", provider: null, processingState: null, sourceAvailability: null, dateFrom: null, dateTo: null,
+      unknownDateOnly: false, page: 0, selected: { provider: "codex", sessionId: "session-1" }
+    } }, "project-p");
+    const root = renderMarkdownV4View(snapshot(indexFixture([second])), () => {}, {
+      initialState: initial, cliUnavailable: true, recoverySession: { provider: "codex", sessionId: "session-1" },
+      recoveryAlreadyAttempted: true, recoverySelectionUnavailable: "原 Session 已移除"
+    });
+    expect(root.textContent).toContain("原 Session 已移除");
+    expect(root.querySelector('[aria-label="Session 覆盖"]')).toBeNull();
+    root.querySelector<HTMLButtonElement>('[data-session-id="session-2"]')!.click();
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-2");
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="evolution"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-v4-tab="sessions"]')!.click();
+    expect(root.querySelector('[aria-label="Session 覆盖"] h3')?.textContent).toBe("codex / session-2");
   });
 
   it("pages and searches a bounded Session list", () => {
