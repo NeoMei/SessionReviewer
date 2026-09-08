@@ -9,10 +9,61 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+const projectLockHelperDeadline = 5 * time.Second
+
+type projectLockHelperEvent struct {
+	line string
+	err  error
+	done bool
+}
+
+type boundedProjectLockHelperOutput struct {
+	mu    sync.Mutex
+	limit int
+	data  []byte
+}
+
+func (output *boundedProjectLockHelperOutput) Write(data []byte) (int, error) {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	remaining := output.limit - len(output.data)
+	if remaining > len(data) {
+		remaining = len(data)
+	}
+	if remaining > 0 {
+		output.data = append(output.data, data[:remaining]...)
+	}
+	return len(data), nil
+}
+
+func (output *boundedProjectLockHelperOutput) String() string {
+	output.mu.Lock()
+	defer output.mu.Unlock()
+	return string(output.data)
+}
+
+func requireProjectLockHelperLine(t *testing.T, events <-chan projectLockHelperEvent, stderr *boundedProjectLockHelperOutput, want, stage string) {
+	t.Helper()
+	timer := time.NewTimer(projectLockHelperDeadline)
+	defer timer.Stop()
+	select {
+	case event := <-events:
+		if event.done {
+			t.Fatalf("%s: helper stdout closed: %v; stderr=%q", stage, event.err, stderr.String())
+		}
+		if event.line != want {
+			t.Fatalf("%s: helper output=%q, want %q; stderr=%q", stage, event.line, want, stderr.String())
+		}
+	case <-timer.C:
+		t.Fatalf("%s: helper output timed out; stderr=%q", stage, stderr.String())
+	}
+}
 
 func TestProjectLockSerializesProcessesAndSurvivesOwnerCrash(t *testing.T) {
 	directory := t.TempDir()
@@ -21,47 +72,71 @@ func TestProjectLockSerializesProcessesAndSurvivesOwnerCrash(t *testing.T) {
 		"SESSION_REVIEWER_PROJECT_LOCK_HELPER=hold",
 		"SESSION_REVIEWER_PROJECT_LOCK_DIR="+directory,
 	)
+	control, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	stderr := &boundedProjectLockHelperOutput{limit: 8 << 10}
+	command.Stderr = stderr
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
+	readerStop := make(chan struct{})
+	readerExited := make(chan struct{})
+	events := make(chan projectLockHelperEvent)
+	go func() {
+		defer close(readerExited)
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			select {
+			case events <- projectLockHelperEvent{line: scanner.Text()}:
+			case <-readerStop:
+				return
+			}
+		}
+		select {
+		case events <- projectLockHelperEvent{err: scanner.Err(), done: true}:
+		case <-readerStop:
+		}
+	}()
 	stopped := false
 	defer func() {
+		close(readerStop)
 		if !stopped {
 			_ = command.Process.Kill()
 			_ = command.Wait()
 		}
+		<-readerExited
 	}()
 
-	ready := make(chan error, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdout)
-		if scanner.Scan() && scanner.Text() == "READY" {
-			ready <- nil
-			return
-		}
-		ready <- fmt.Errorf("helper readiness: %q: %w", scanner.Text(), scanner.Err())
-	}()
-	select {
-	case err := <-ready:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("helper did not acquire project lock")
+	requireProjectLockHelperLine(t, events, stderr, "READY", "helper readiness")
+	if _, err := fmt.Fprintln(control, "PING"); err != nil {
+		t.Fatal(err)
 	}
+	requireProjectLockHelperLine(t, events, stderr, "ALIVE", "helper liveness after readiness")
 
 	root, err := os.OpenRoot(directory)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer root.Close()
-	if _, err := AcquireProjectLock(root, "sync.lock", 0); !errors.Is(err, ErrProjectLocked) {
+	contender, err := AcquireProjectLock(root, "sync.lock", 0)
+	if contender != nil {
+		releaseErr := contender.Release()
+		t.Fatalf("unexpectedly acquired held lock: error=%v release error=%v", err, releaseErr)
+	}
+	if !errors.Is(err, ErrProjectLocked) {
 		t.Fatalf("held lock error=%v", err)
 	}
+	if _, err := fmt.Fprintln(control, "PING"); err != nil {
+		t.Fatal(err)
+	}
+	requireProjectLockHelperLine(t, events, stderr, "ALIVE", "helper liveness while lock held")
 	if err := command.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +179,17 @@ func TestProjectLockSubprocessHelper(t *testing.T) {
 	}
 	defer lock.Release()
 	fmt.Println("READY")
-	select {}
+	control := bufio.NewScanner(os.Stdin)
+	for control.Scan() {
+		if control.Text() != "PING" {
+			t.Fatal("invalid lock helper control message")
+		}
+		fmt.Println("ALIVE")
+	}
+	if err := control.Err(); err != nil {
+		t.Fatal(err)
+	}
+	t.Fatal("lock helper control pipe closed before termination")
 }
 
 func TestProjectLockRejectsInvalidOrRedirectedFiles(t *testing.T) {
