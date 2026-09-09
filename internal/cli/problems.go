@@ -14,6 +14,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/candidatepublication"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/problemmap"
 	"github.com/neomei/SessionReviewer/internal/publication"
@@ -89,6 +90,9 @@ func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if request.Command == "candidates" {
 		dataRoot := resolveDataDir(request.DataDir)
+		if err := reconcileProblemPublications(context.Background(), dataRoot, request.ProjectID); err != nil {
+			return writeProblemError(stdout, err)
+		}
 		state, loadErr := loadProblemState(request.ProjectID, request.DataDir)
 		if loadErr != nil {
 			return writeProblemError(stdout, loadErr)
@@ -165,6 +169,9 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 	if err := publication.RecoverMarkdownLocked(ctx, pubOpts, owner); err != nil {
 		return problemResult{}, err
 	}
+	if err := reconcileProblemPublicationsLocked(dataRoot, request.ProjectID); err != nil {
+		return problemResult{}, err
+	}
 	read, err := syncproject.ReadMarkdownForScan(ctx, syncproject.Options{ProjectID: request.ProjectID, CWD: mapping.Root, DataDir: dataRoot, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI}, owner)
 	if err != nil {
 		return problemResult{}, err
@@ -178,6 +185,8 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 	}
 	graph := problemmap.Graph{ProjectID: p.ProjectID, Revision: p.ProblemMapRevision, Nodes: p.ProblemNodes}
 	var candidate *problemmap.Candidate
+	var candidateDigest string
+	var publicationIntent *candidatepublication.Intent
 	var preview *problemmap.MovePreview
 	if request.Command == "create" {
 		store, openErr := problemmap.OpenStore(dataRoot, request.ProjectID)
@@ -206,6 +215,7 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 		if value.Revision != request.ExpectedCandidateRevision {
 			return problemResult{}, problemmap.ErrCandidateRevisionConflict
 		}
+		candidateDigest = problemCandidatePublicationDigest(value)
 		switch request.Action {
 		case "apply_root", "apply_child", "apply_sibling", "merge":
 			action := map[string]problemmap.ApplyAction{"apply_root": problemmap.ApplyRoot, "apply_child": problemmap.ApplyChild, "apply_sibling": problemmap.ApplySibling, "merge": problemmap.ApplyMerge}[request.Action]
@@ -267,17 +277,90 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 	if err != nil {
 		return problemResult{}, err
 	}
+	if candidate != nil {
+		fingerprint, err := publication.ExpectedMarkdownResultFingerprint(plan, mapping, read.ProjectExpected[presentation.SessionIndexRelativePath])
+		if err != nil {
+			return problemResult{}, err
+		}
+		entityID, err := problemPublicationEntityID(read.Pending.Presentation.ProblemNodes, graph.Nodes, request.Action, request.TargetProblemID)
+		if err != nil {
+			return problemResult{}, err
+		}
+		intent, err := candidatepublication.NewIntent(candidatepublication.IntentInput{
+			ProjectID: request.ProjectID, Namespace: problemPublicationNamespace, CandidateID: candidate.CandidateID,
+			ExpectedCandidateRevision: request.ExpectedCandidateRevision, CandidateDigest: candidateDigest,
+			Action: request.Action, EntityID: entityID, ResultFingerprint: fingerprint,
+			TerminalStatus: string(candidate.Status), PreparedAt: time.Now(),
+		})
+		if err != nil {
+			return problemResult{}, err
+		}
+		intents, err := candidatepublication.OpenStore(dataRoot, request.ProjectID, problemPublicationNamespace)
+		if err != nil {
+			return problemResult{}, err
+		}
+		prepared, err := intents.Prepare(intent)
+		if err != nil {
+			return problemResult{}, err
+		}
+		publicationIntent = &prepared
+	}
+	if problemBeforeMarkdownPublication != nil {
+		if err := problemBeforeMarkdownPublication(); err != nil {
+			return problemResult{}, err
+		}
+	}
 	edit := syncproject.MarkdownSyncPlan{Plan: plan, Index: read.ProjectExpected[presentation.SessionIndexRelativePath], ExpectedGenerationID: read.ExpectedGenerationID, ExpectedIndexDigest: read.ExpectedIndexDigest, VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest}
 	if _, err := publication.PublishMarkdownEditLocked(ctx, pubOpts, edit, owner); err != nil {
 		return problemResult{}, err
 	}
-	if candidate != nil {
-		store, _ := problemmap.OpenStore(dataRoot, request.ProjectID)
-		if err := store.CompareAndSwap(*candidate, request.ExpectedCandidateRevision); err != nil {
+	if publicationIntent != nil {
+		if problemAfterAcceptedPublication != nil {
+			if err := problemAfterAcceptedPublication(); err != nil {
+				return problemResult{}, err
+			}
+		}
+		if err := reconcileProblemPublicationsLocked(dataRoot, request.ProjectID); err != nil {
 			return problemResult{}, err
 		}
+		store, err := problemmap.OpenStore(dataRoot, request.ProjectID)
+		if err != nil {
+			return problemResult{}, err
+		}
+		updated, err := store.Get(candidate.CandidateID)
+		if err != nil {
+			return problemResult{}, err
+		}
+		candidate = &updated
 	}
 	return problemResult{SchemaVersion: 1, ProjectID: p.ProjectID, ProblemMapRevision: p.ProblemMapRevision, ReviewSHA256: problemBareSHA(plan.Files[0].Desired), Problems: p.ProblemNodes, Candidate: candidate, MovePreview: preview}, nil
+}
+
+func problemPublicationEntityID(before, after []reviewv4.ProblemNode, action, targetID string) (string, error) {
+	if action == "merge" {
+		if targetID == "" {
+			return "", errors.New("problem merge publication target is missing")
+		}
+		return targetID, nil
+	}
+	prior := make(map[string]bool, len(before))
+	for _, node := range before {
+		prior[node.ID] = true
+	}
+	created := ""
+	for _, node := range after {
+		if prior[node.ID] {
+			continue
+		}
+		if created != "" {
+			return "", errors.New("problem candidate publication created multiple nodes")
+		}
+		created = node.ID
+	}
+	if created == "" {
+		return "", errors.New("problem candidate publication created no node")
+	}
+	return created, nil
 }
 
 func problemRootIDs(nodes []reviewv4.ProblemNode) []string {

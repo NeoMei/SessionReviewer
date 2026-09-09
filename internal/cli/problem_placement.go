@@ -61,6 +61,9 @@ func runProblemPlacement(request ProblemRequest) (problemmap.PlacementStatus, er
 		}
 		return store.Status(request.JobID)
 	}
+	if err := reconcileProblemPublications(context.Background(), dataRoot, request.ProjectID); err != nil {
+		return problemmap.PlacementStatus{}, err
+	}
 	state, err := loadProblemState(request.ProjectID, request.DataDir)
 	if err != nil {
 		return problemmap.PlacementStatus{}, err
