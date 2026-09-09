@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -582,6 +583,31 @@ func TestCandidateStoreRejectsNamespaceReplacementAfterOpen(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(annotationPath, "head.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement namespace was mutated: %v", err)
+	}
+}
+
+func TestCandidateStoreRejectsOversizedCanonicalRecordBeforePublishingHead(t *testing.T) {
+	dataRoot := privateStoreTempDir(t)
+	store, err := OpenStore(dataRoot, "project-p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	record := candidateStoreFixture("project-p")
+	template := record.Annotations[0]
+	template.Text = strings.Repeat("x", 4096)
+	record.Annotations = make([]Annotation, 16_000)
+	for index := range record.Annotations {
+		candidate := template
+		candidate.ID = fmt.Sprintf("candidate-%05d", index)
+		record.Annotations[index] = candidate
+	}
+	if _, err := store.CompareAndSwap(context.Background(), 0, "", record); err == nil {
+		t.Fatal("oversized canonical record was published")
+	}
+	headPath := filepath.Join(dataRoot, "projects", "project-p", "annotations", "head.json")
+	if _, err := os.Lstat(headPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("oversized record changed head: %v", err)
 	}
 }
 

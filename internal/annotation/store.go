@@ -231,6 +231,9 @@ func (store *FileStore) CompareAndSwap(ctx context.Context, expectedRevision uin
 	if err != nil {
 		return StoredState{}, err
 	}
+	if int64(len(body)) > annotationRecordMaxBytes {
+		return StoredState{}, errors.New("annotation record exceeds store limit")
+	}
 	canonicalNext, err := Parse(body)
 	if err != nil {
 		return StoredState{}, err
