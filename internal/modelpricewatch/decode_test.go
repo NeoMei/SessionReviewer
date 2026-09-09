@@ -36,6 +36,7 @@ func TestDecodeModelsRejectsStructuralAndValueCorruption(t *testing.T) {
 		{"count mismatch", strings.Replace(string(base), `"count":1`, `"count":2`, 1), "count"},
 		{"duplicate id", strings.Replace(string(base), `"data":[`, `"data":[`+strings.TrimSuffix(strings.TrimPrefix(string(base), `{"count":1,"updated":"2026-09-06","data":[`), `}`)+`,`, 1), "invalid"},
 		{"negative price", strings.Replace(string(base), `"input_per_mtok":1.25`, `"input_per_mtok":-1`, 1), "price"},
+		{"missing required nullable price", strings.Replace(string(base), `"cached_input_per_mtok":null,`, ``, 1), "required"},
 		{"bad url", strings.Replace(string(base), `https://example.test/pricing`, `http://example.test/pricing`, 1), "URL"},
 		{"trailing json", string(base) + ` {}`, "trailing"},
 	}
@@ -94,5 +95,17 @@ func TestDecodeHistoryAcceptsFullAndMinimalEntriesAndRejectsMalformedNestedField
 		if _, err := DecodeHistory(strings.NewReader(mutate), DefaultBodyLimit); err == nil {
 			t.Fatalf("accepted malformed history: %s", mutate)
 		}
+	}
+}
+
+func TestDecodeHistoryAcceptsObservedOptionalNullMetadata(t *testing.T) {
+	body, err := os.ReadFile("testdata/history-min.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = []byte(strings.Replace(string(body), `"evidence_url":"https://example.test/evidence"`, `"evidence_url":null`, 1))
+	body = []byte(strings.Replace(string(body), `"captured_at":"2026-09-06T12:00:00Z"`, `"captured_at":null`, 1))
+	if _, err := DecodeHistory(strings.NewReader(string(body)), DefaultBodyLimit); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -12,8 +12,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/neomei/SessionReviewer/internal/project"
 )
 
 const refreshInterval = 24 * time.Hour
@@ -77,16 +75,11 @@ func (c *Cache) LoadOrRefresh(ctx context.Context, now time.Time) (set CatalogSe
 		return CatalogSet{}, Freshness{}, errors.New("cache is not initialized")
 	}
 	now = now.UTC()
-	root, err := os.OpenRoot(c.root)
+	lock, err := acquireCacheLock(ctx, filepath.Join(c.root, "refresh.lock"), 10*time.Second)
 	if err != nil {
 		return CatalogSet{}, Freshness{}, err
 	}
-	defer root.Close()
-	lock, err := project.AcquireProjectLock(root, "refresh.lock", 10*time.Second)
-	if err != nil {
-		return CatalogSet{}, Freshness{}, err
-	}
-	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
+	defer func() { retErr = errors.Join(retErr, lock.release()) }()
 	current, currentErr := c.loadCurrent()
 	attempt, _ := c.loadAttempt()
 	if currentErr == nil {

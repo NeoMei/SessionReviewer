@@ -8,12 +8,11 @@ import (
 	"io"
 	"math"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/neomei/SessionReviewer/internal/strictjson"
 )
 
 const maxCollection = 100000
@@ -105,8 +104,8 @@ func readCompleteBounded(reader io.Reader, limit int64) ([]byte, error) {
 }
 
 func decodeStrict(body []byte, dst any) error {
-	// strictjson's contract limit is smaller than this public catalog's 128 MiB
-	// ceiling, so duplicate-key scanning is repeated locally before strict decode.
+	// This adapter has a 128 MiB boundary, twice the private contract codec's
+	// limit, so it owns duplicate-key and exact-field decoding at this boundary.
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.UseNumber()
 	if err := scanJSON(dec); err != nil {
@@ -119,14 +118,80 @@ func decodeStrict(body []byte, dst any) error {
 		}
 		return fmt.Errorf("trailing JSON: %w", err)
 	}
-	if len(body) <= strictjson.MaxBytes {
-		return strictjson.Decode(body, dst)
-	}
 	dec = json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	dec.UseNumber()
 	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("decode catalog shape: %w", err)
+	}
+	var raw any
+	rawDecoder := json.NewDecoder(bytes.NewReader(body))
+	rawDecoder.UseNumber()
+	if err := rawDecoder.Decode(&raw); err != nil {
+		return err
+	}
+	return requireJSONFields(raw, reflect.TypeOf(dst).Elem(), "$")
+}
+
+func requireJSONFields(raw any, typ reflect.Type, path string) error {
+	for typ.Kind() == reflect.Pointer {
+		if raw == nil {
+			return nil
+		}
+		typ = typ.Elem()
+	}
+	switch typ.Kind() {
+	case reflect.Struct:
+		object, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be object", path)
+		}
+		for i := 0; i < typ.NumField(); i++ {
+			field := typ.Field(i)
+			if field.PkgPath != "" {
+				continue
+			}
+			name := strings.Split(field.Tag.Get("json"), ",")[0]
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = field.Name
+			}
+			value, exists := object[name]
+			if field.Tag.Get("required") == "true" && !exists {
+				return fmt.Errorf("%s.%s is required", path, name)
+			}
+			if exists && value != nil {
+				if err := requireJSONFields(value, field.Type, path+"."+name); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		values, ok := raw.([]any)
+		if !ok {
+			return fmt.Errorf("%s must be array", path)
+		}
+		for i, value := range values {
+			if value != nil {
+				if err := requireJSONFields(value, typ.Elem(), fmt.Sprintf("%s[%d]", path, i)); err != nil {
+					return err
+				}
+			}
+		}
+	case reflect.Map:
+		values, ok := raw.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%s must be object", path)
+		}
+		for key, value := range values {
+			if value != nil {
+				if err := requireJSONFields(value, typ.Elem(), path+"."+key); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }
