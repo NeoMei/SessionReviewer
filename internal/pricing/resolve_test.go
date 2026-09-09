@@ -155,6 +155,21 @@ func TestServiceResolveUnknownRouteDoesNotFailOnUnreviewedQuantities(t *testing.
 	}
 }
 
+func TestServiceResolveUnknownProviderAndRouteStaysPending(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	request := resolutionFixture(now)
+	request.Provider = "claude"
+	request.Route = BillingRoute{}
+	service, err := NewService(nil, nil, map[string]UsageAdapter{"codex": CodexUsageAdapter{}}, fixedClock{now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.Resolve(context.Background(), request)
+	if err != nil || got.Status != PricePending || got.BillingHost != "unknown" || got.BilledModelID != request.Usage.Model {
+		t.Fatalf("got=%#v err=%v", got, err)
+	}
+}
+
 func resolutionFixture(at time.Time) ResolutionRequest {
 	return ResolutionRequest{ProjectID: "project-p", Provider: "codex", SessionID: "session-s", UsageRecordDigest: "sha256:" + strings.Repeat("a", 64), Route: BillingRoute{Host: "api.example.test", ModelID: "model-exact", Mode: "api"}, Usage: accounting.ModelUsage{Model: "model-exact", TokenUsage: accounting.TokenUsage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 30, ReasoningOutputTokens: 10, TotalTokens: 130}}, PricedAt: at}
 }

@@ -62,12 +62,12 @@ func (s *Service) Resolve(ctx context.Context, request ResolutionRequest) (Snaps
 		return Snapshot{}, err
 	}
 	adapter := s.adapters[request.Provider]
-	if adapter == nil {
-		return unresolvedFrom(request, s.clock.Now(), nil, nil, "usage_adapter_unavailable")
-	}
 	if !validRoute(request.Route) {
 		request.Route = unresolvedRoute(request.Route, request.Usage.Model)
 		return unresolvedFrom(request, s.clock.Now(), adapter, nil, "observed_billing_route_missing")
+	}
+	if adapter == nil {
+		return unresolvedFrom(request, s.clock.Now(), nil, nil, "usage_adapter_unavailable")
 	}
 	if s.loader == nil {
 		return unresolvedFrom(request, s.clock.Now(), adapter, nil, "catalog_unavailable")
