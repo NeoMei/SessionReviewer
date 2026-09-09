@@ -1,3 +1,5 @@
+import { parseProblemPlacementJob, type ProblemPlacementJob } from "./problem-placement";
+import { validateDecisionJob, type DecisionExtractionJob, type DecisionAgentConfiguration } from "./decision-jobs";
 import { parseDecisionCandidates } from "../data/contracts-v4";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionCandidateAction } from "../view/decision-candidates";
@@ -171,6 +173,60 @@ export class CliRunner {
   async getScanStatus(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
     return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]), projectId);
+  }
+
+  async startProblemPlacement(projectId: string, candidate: Pick<ProblemCandidate, "candidate_id" | "revision">, mapRevision: number, generationId: string): Promise<ProblemPlacementJob> {
+    validateProject(projectId);
+    return parseProblemPlacementJob(parseJson((await this.run(["problems", "placement", "request", "--project-id", projectId, "--candidate-id", candidate.candidate_id, "--expected-candidate-revision", String(candidate.revision), "--expected-problem-map-revision", String(mapRevision), "--expected-generation-id", generationId, "--json"])).stdout), projectId, candidate.candidate_id);
+  }
+
+  async latestProblemPlacement(projectId: string, candidateId: string): Promise<ProblemPlacementJob | undefined> {
+    validateProject(projectId);
+    const value = parseJson((await this.run(["problems", "placement", "status", "--project-id", projectId, "--candidate-id", candidateId, "--json"])).stdout);
+    return value === null ? undefined : parseProblemPlacementJob(value, projectId, candidateId);
+  }
+
+  async getProblemPlacement(projectId: string, jobId: string): Promise<ProblemPlacementJob> {
+    validateProject(projectId);
+    const job = parseProblemPlacementJob(parseJson((await this.run(["problems", "placement", "status", "--project-id", projectId, "--job-id", jobId, "--json"])).stdout), projectId);
+    if (job.job_id !== jobId) throw new Error("placement job mismatch");
+    return job;
+  }
+
+  async cancelProblemPlacement(projectId: string, jobId: string, revision: number): Promise<ProblemPlacementJob> {
+    validateProject(projectId);
+    const job = parseProblemPlacementJob(parseJson((await this.run(["problems", "placement", "cancel", "--project-id", projectId, "--job-id", jobId, "--expected-revision", String(revision), "--json"])).stdout), projectId);
+    if (job.job_id !== jobId) throw new Error("placement job mismatch");
+    return job;
+  }
+
+  async startDecisionExtraction(projectId: string, generationId: string): Promise<DecisionExtractionJob> {
+    validateProject(projectId);
+    const job = validateDecisionJob(parseJson((await this.run(["decisions", "extract", "--project-id", projectId, "--expected-generation-id", generationId, "--json"])).stdout), projectId);
+    return job;
+  }
+
+  async getDecisionExtraction(projectId: string, jobId?: string): Promise<DecisionExtractionJob | undefined> {
+    validateProject(projectId);
+    const value = parseJson((await this.run(["decisions", "extract", "status", jobId ? "--job-id" : "--project-id", jobId ?? projectId, "--json"])).stdout);
+    if (!jobId && value === null) return undefined;
+    return validateDecisionJob(value, projectId, jobId);
+  }
+
+  async cancelDecisionExtraction(projectId: string, jobId: string, revision: number): Promise<DecisionExtractionJob> {
+    validateProject(projectId);
+    return validateDecisionJob(parseJson((await this.run(["decisions", "extract", "cancel", "--job-id", jobId, "--expected-revision", String(revision), "--json"])).stdout), projectId, jobId);
+  }
+
+  async decisionAgentConfiguration(executable?: string): Promise<DecisionAgentConfiguration> {
+    const args = executable === undefined ? ["review", "agent", "status", "--json"] : ["review", "agent", "configure", "--executable", executable, "--json"];
+    let value: unknown;
+    try { value = parseJson((await this.run(args)).stdout); }
+    catch (error) { const stdout = (error as { stdout?: unknown }).stdout; if (typeof stdout !== "string") throw new Error("无法读取或验证 Agent 配置。"); value = parseJson(stdout); }
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid Agent configuration");
+    const row = value as Record<string, unknown>;
+    if (row.schema_version !== 1 || row.kind !== "codex" || typeof row.compatible !== "boolean" || Object.keys(row).some(key => !["schema_version", "kind", "compatible", "version", "executable", "error_code"].includes(key)) || ["version", "executable", "error_code"].some(key => row[key] !== undefined && typeof row[key] !== "string")) throw new Error("invalid Agent configuration");
+    return value as DecisionAgentConfiguration;
   }
 
   async listDecisionCandidates(projectId: string): Promise<AgentAnnotationEntryV1[]> {
@@ -476,6 +532,18 @@ export class CliRunner {
 }
 
 function allowedArgs(args: readonly string[]): boolean {
+  if (args[0] === "problems" && args[1] === "placement" && args[3] === "--project-id" && PROJECT_ID.test(args[4] ?? "")) {
+    if (args[2] === "request") return args.length === 14 && args[5] === "--candidate-id" && INSPECT_ID.test(args[6]) && args[7] === "--expected-candidate-revision" && validPositive(args[8]) && args[9] === "--expected-problem-map-revision" && validNonnegative(args[10]) && args[11] === "--expected-generation-id" && SCAN_GENERATION_ID.test(args[12]) && args[13] === "--json";
+    if (args[2] === "status" && args[5] === "--candidate-id" && INSPECT_ID.test(args[6] ?? "") && args.length === 8 && args[7] === "--json") return true;
+    if (args[5] !== "--job-id" || !INSPECT_ID.test(args[6] ?? "")) return false;
+    return args[2] === "status" && args.length === 8 && args[7] === "--json" || args[2] === "cancel" && args.length === 10 && args[7] === "--expected-revision" && validPositive(args[8]) && args[9] === "--json";
+  }
+  if (args[0] === "review" && args[1] === "agent") return args.length === 4 && args[2] === "status" && args[3] === "--json" || args.length === 6 && args[2] === "configure" && args[3] === "--executable" && absoluteExecutable(args[4]) && args[5] === "--json";
+  if (args[0] === "decisions" && args[1] === "extract") {
+    if (args.length === 7 && args[2] === "--project-id" && PROJECT_ID.test(args[3]) && args[4] === "--expected-generation-id" && SCAN_GENERATION_ID.test(args[5]) && args[6] === "--json") return true;
+    if (args.length === 6 && args[2] === "status" && args[5] === "--json") return args[3] === "--job-id" && INSPECT_ID.test(args[4]) || args[3] === "--project-id" && PROJECT_ID.test(args[4]);
+    return args.length === 8 && args[2] === "cancel" && args[3] === "--job-id" && INSPECT_ID.test(args[4]) && args[5] === "--expected-revision" && validPositive(args[6]) && args[7] === "--json";
+  }
   if (args.length === 6 && args[0] === "decisions" && args[1] === "candidates" && args[2] === "list" && args[3] === "--project-id" && PROJECT_ID.test(args[4]) && args[5] === "--json") return true;
   if (args.length === 14 && args[0] === "decisions" && args[1] === "candidate" && args[2] === "transition" && args[3] === "--project-id" && PROJECT_ID.test(args[4]) && args[5] === "--candidate-id" && INSPECT_ID.test(args[6]) && args[7] === "--expected-revision" && validPositive(args[8]) && args[9] === "--action" && ["confirm", "ignore", "not_decision", "restore"].includes(args[10]) && args[11] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[12]) && args[13] === "--json") return true;
   if (args[0] === "decisions" && ["create", "edit"].includes(args[1]) && args[2] === "--project-id" && PROJECT_ID.test(args[3]) && args[4] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[5])) {

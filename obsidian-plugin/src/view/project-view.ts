@@ -227,6 +227,15 @@ export class ProjectEvolutionView extends ItemView {
           recoverySelectionUnavailable: recovery?.unavailable,
           initialState: this.v4StateForRender(current),
           saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch),
+          decisionExtraction: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.startDecisionExtraction === "function" ? {
+            currentGenerationId:activeProblemState.ledger.generation_id,
+            start:()=>this.runner!.startDecisionExtraction(current.descriptor.projectId, activeProblemState.ledger.generation_id),
+            status:async(id)=>{const job=await this.runner!.getDecisionExtraction(current.descriptor.projectId,id);if(!job)throw new Error("任务不存在");return job;},
+            latest:()=>this.runner!.getDecisionExtraction(current.descriptor.projectId),
+            cancel:(id,revision)=>this.runner!.cancelDecisionExtraction(current.descriptor.projectId,id,revision),
+            configuration:(executable)=>this.runner!.decisionAgentConfiguration(executable)
+          }:undefined,
+          decisionExtracted:()=>{void this.refresh(this.projects);},
           decisionCandidates: this.decisionCandidates,
           transitionDecision: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" ? async (candidate, action, input) => {
             await this.runner!.transitionDecisionCandidate(current.descriptor.projectId, activeProblemState.ledger.review_sha256, candidate, action, input);
@@ -241,6 +250,13 @@ export class ProjectEvolutionView extends ItemView {
             supplement: async (input) => { await this.runner!.supplementPricing(input, activeProblemState.ledgerSHA256!); await this.refresh(this.projects); },
             acceptCatalog: async (input) => { await this.runner!.acceptCatalogPricing(input, activeProblemState.ledgerSHA256!); await this.refresh(this.projects); }
           } : undefined,
+          agentPlacement: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.startProblemPlacement === "function" ? {
+            start:(candidate)=>this.runner!.startProblemPlacement(current.descriptor.projectId,candidate,activeProblemState.value.presentation.problem_map_revision,activeProblemState.ledger.generation_id),
+            latest:(candidate)=>this.runner!.latestProblemPlacement(current.descriptor.projectId,candidate.candidate_id),
+            status:(id)=>this.runner!.getProblemPlacement(current.descriptor.projectId,id),
+            cancel:(id,revision)=>this.runner!.cancelProblemPlacement(current.descriptor.projectId,id,revision)
+          }:undefined,
+          agentPlacementCompleted:()=>{void this.refresh(this.projects);},
           problemCandidates: this.problemCandidates,
           problemUnavailableReason: this.problemUnavailableReason,
           createProblem: this.runner && activeProblemState ? async (question) => {

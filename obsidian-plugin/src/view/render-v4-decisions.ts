@@ -1,3 +1,5 @@
+import type { DecisionExtractionActions } from "../cli/decision-jobs";
+import { renderDecisionExtraction } from "./decision-extraction";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import { renderDecisionCandidates, type DecisionTransition } from "./decision-candidates";
 import type { DecisionStatus, ReviewPresentationV4 } from "../contracts/review-v4";
@@ -5,8 +7,8 @@ import { button, element } from "./dom";
 import { decisionForm, type DecisionSave } from "./decision-form";
 import { presentDateTime } from "./presentation";
 
-export function renderV4Decisions(presentation: ReviewPresentationV4, openReview: () => void, actions: { save?: DecisionSave; candidates?: AgentAnnotationEntryV1[]; transition?: DecisionTransition } = {}): HTMLElement {
-  const section = element("section", { className: "sr-v4-decisions", attrs: { "data-v4-panel": "decisions", role: "tabpanel" } });
+export function renderV4Decisions(presentation: ReviewPresentationV4, openReview: () => void, actions: { save?: DecisionSave; candidates?: AgentAnnotationEntryV1[]; transition?: DecisionTransition; extraction?: DecisionExtractionActions; extracted?:()=>void } = {}): HTMLElement & {dispose:()=>void} {
+  const section = element("section", { className: "sr-v4-decisions", attrs: { "data-v4-panel": "decisions", role: "tabpanel" } }) as HTMLElement & {dispose:()=>void};
   const editor = element("div");
   const edit = (prior?: ReviewPresentationV4["decisions"][number]): void => {
     if (!actions.save || editor.childElementCount) return;
@@ -46,6 +48,9 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
   native.addEventListener("click", openReview);
   section.append(toolbar, editor, cards);
   if (actions.candidates) section.append(renderDecisionCandidates(actions.candidates, presentation.decisions, actions.transition));
+  const extraction=actions.extraction ? renderDecisionExtraction(actions.extraction, actions.extracted ?? (()=>{})) : undefined;
+  if(extraction)section.append(extraction);
+  section.dispose=()=>{extraction?.dispose();section.replaceChildren();};
   section.append(native);
   draw(["active"]);
   return section;

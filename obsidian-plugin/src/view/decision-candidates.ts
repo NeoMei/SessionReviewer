@@ -22,7 +22,7 @@ export function renderDecisionCandidates(candidates:AgentAnnotationEntryV1[],dec
    control.disabled=true;void transition(candidate,key).then(()=>{feedback.textContent="状态已保存，正在重新读取。";}).catch(()=>{feedback.textContent="保存结果未确认；请刷新后检查。";control.disabled=false;});
   });card.append(control);};
   if(candidate.status==="pending"){action("confirm","确认并编辑");action("ignore","忽略");action("not_decision","这不是决策");}
-  if(candidate.status==="ignored"||candidate.status==="not_decision")action("restore","恢复待确认");
+  if(candidate.status==="ignored")action("restore","恢复待确认");
   card.append(editor,feedback);(candidate.status==="pending"?root:history).append(card);
  }if(history.childElementCount>1)root.append(history);return root;
 }

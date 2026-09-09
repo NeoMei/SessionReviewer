@@ -1,3 +1,4 @@
+import type { DecisionExtractionActions } from "../cli/decision-jobs";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionTransition } from "./decision-candidates";
 import type { DecisionSave } from "./decision-form";
@@ -85,6 +86,10 @@ export function renderMarkdownV4View(
   options: {
     loadSessionSearch?: SessionSearchLoader;
     pricingActions?: PricingActions;
+    agentPlacement?: ProblemActions["agentPlacement"];
+  agentPlacementCompleted?:()=>void;
+  decisionExtraction?: DecisionExtractionActions;
+    decisionExtracted?:()=>void;
     saveDecision?: DecisionSave;
     decisionCandidates?: AgentAnnotationEntryV1[];
     transitionDecision?: DecisionTransition;

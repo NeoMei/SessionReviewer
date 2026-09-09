@@ -64,7 +64,21 @@ export function renderV4Evolution(
     if (redrawDetail) {
       answer?.dispose();
       answer = renderV4Answer(presentation, selected, options.index, options.cliUnavailable ? undefined : options.loadConversation);
-      detailHost.replaceChildren(renderMilestone(selected, answer));
+      const detail = renderMilestone(selected, answer);
+      const refs = selected.closed_loop.source_turn_refs;
+      const related = presentation.problem_nodes.filter(problem => problem.source_turn_refs.some(candidate => refs.some(ref =>
+        ref.provider === candidate.provider && ref.session_id === candidate.session_id && ref.turn_unit_id === candidate.turn_unit_id &&
+        ref.session_view_digest === candidate.session_view_digest
+      )));
+      const navigation = element("nav", { attrs: { "aria-label": "关联问题" } });
+      for (const problem of related) {
+        const control = button(`查看关联问题：${problem.question}`, { "data-action": "open-related-problem" });
+        control.addEventListener("click", () => update({ view: "problems", selectedProblemId: problem.id }));
+        navigation.append(control);
+      }
+      if (related.length === 0) navigation.append(element("p", { text: "尚无绑定同一问答来源的问题。" }));
+      detail.append(navigation);
+      detailHost.replaceChildren(detail);
     }
   };
   section.append(rail, detailHost);

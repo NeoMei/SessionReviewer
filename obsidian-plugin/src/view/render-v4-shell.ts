@@ -1,3 +1,4 @@
+import type { DecisionExtractionActions } from "../cli/decision-jobs";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionTransition } from "./decision-candidates";
 import type { DecisionSave } from "./decision-form";
@@ -29,6 +30,10 @@ export interface RenderV4ShellOptions {
     saveDecision?: DecisionSave;
     decisionCandidates?: AgentAnnotationEntryV1[];
     transitionDecision?: DecisionTransition;
+  agentPlacement?: ProblemActions["agentPlacement"];
+  agentPlacementCompleted?:()=>void;
+  decisionExtraction?: DecisionExtractionActions;
+  decisionExtracted?:()=>void;
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
@@ -73,6 +78,7 @@ export function renderV4Shell(
   let records: ScanRecordsElement | undefined;
   let evolution: V4EvolutionElement | undefined;
   let problems: V4ProblemsElement | undefined;
+  let decisions: ReturnType<typeof renderV4Decisions> | undefined;
   let disposed = false;
   let recoveryPending = options.recoverySession !== undefined;
   const evolutionUi: V4EvolutionUiState = { fullHistory: false, page: 0 };
@@ -112,17 +118,19 @@ export function renderV4Shell(
   const draw = (): void => {
     if (disposed) return;
     disposeProblems();
+    decisions?.dispose(); decisions=undefined;
     const tablist = renderTabs(state.view, (view, focus) => update({ view }, focus));
     const panel = renderPanel();
     root.replaceChildren(renderHeader(descriptor, presentation, index, open, options), tablist, panel);
   };
   const renderPanel = (): HTMLElement => {
     if (state.view === "problems") return problems = renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`), {
+      agentPlacement:options.cliUnavailable ? undefined : options.agentPlacement, agentPlacementCompleted:options.agentPlacementCompleted,
       candidates: options.problemCandidates, unavailableReason: options.problemUnavailableReason, createProblem: options.createProblem,
       transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
       loadConversation: options.cliUnavailable ? undefined : options.loadConversation
     });
-    if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision, candidates: options.decisionCandidates, transition: options.cliUnavailable ? undefined : options.transitionDecision});
+    if (state.view === "decisions") return decisions = renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision, candidates: options.decisionCandidates, transition: options.cliUnavailable ? undefined : options.transitionDecision, extraction:options.cliUnavailable ? undefined : options.decisionExtraction,extracted:options.decisionExtracted});
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);
       return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)), options.cliUnavailable ? {} : options.pricingActions);
@@ -195,6 +203,7 @@ export function renderV4Shell(
     disposeRecords();
     disposeEvolution();
     disposeProblems();
+    decisions?.dispose(); decisions=undefined;
     root.replaceChildren();
   };
   draw();

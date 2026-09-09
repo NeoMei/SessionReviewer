@@ -584,3 +584,12 @@ it("wires private search and catalog actions through the five-tab shell without 
  expect(searches+catalogs).toBe(0);click(root,"sessions");root.querySelector<HTMLInputElement>('[aria-label="搜索分支、文件或错误"]')!.value="missing";root.querySelector<HTMLButtonElement>('[data-action="private-session-search"]')!.click();await settle();expect(searches).toBe(1);
  click(root,"usage");const query=root.querySelector<HTMLButtonElement>('[data-action="query-catalog"]');expect(query).not.toBeNull();query!.click();await settle();expect(catalogs).toBe(1);expect(root.textContent).toContain("价格目录暂不可用");root.dispose?.();root.remove();
 });
+
+it("navigates from a milestone only to questions with the exact referenced provider, turn and snapshot",()=>{
+ const snapshot=v4SnapshotFixture();if(snapshot.state.kind!=="public_valid")throw new Error("fixture invalid");const p=snapshot.state.value.presentation;
+ const ref={provider:"codex",session_id:"session-one",turn_unit_id:"turn-one",session_view_digest:"sha256:"+"a".repeat(64)};
+ p.timeline=[{...p.timeline[0],id:"milestone-linked",closed_loop:{...p.timeline[0].closed_loop,source_turn_refs:[ref]}}];
+ const base=p.problem_nodes[0];p.problem_nodes=[{...base,id:"problem-linked",question:"准确关联问题",primary_parent_id:null,source_turn_refs:[ref]},{...base,id:"problem-wrong",question:"其他来源同名 Session",primary_parent_id:null,source_turn_refs:[{...ref,provider:"claude"}]}];p.problem_root_ids=["problem-linked","problem-wrong"];
+ const root=renderMarkdownV4View(snapshot,()=>{});document.body.append(root);
+ const links=root.querySelectorAll<HTMLButtonElement>('[data-action="open-related-problem"]');expect(links).toHaveLength(1);expect(links[0].textContent).toContain("准确关联问题");links[0].click();expect(root.querySelector('[data-v4-tab="problems"]')?.getAttribute("aria-selected")).toBe("true");expect(root.querySelector('[aria-label="问题证据与问答来源"]')?.textContent).toContain("准确关联问题");root.dispose?.();root.remove();
+});

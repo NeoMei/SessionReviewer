@@ -49,3 +49,10 @@ it("lists empty private candidates and sends confirm payload with both preimages
  expect(typeof runner.listDecisionCandidates).toBe("function");await expect(runner.listDecisionCandidates("project-p")).resolves.toEqual([]);
  await runner.transitionDecisionCandidate("project-p","a".repeat(64),{id:"candidate-one",revision:2},"ignore");expect(body).toBe("");expect(argv).toContain("--expected-revision");expect(argv).toContain("2");expect(argv).toContain("--expected-review-sha256");
 });
+
+it("only offers restore for ignored candidates, keeping not-decision terminal",async()=>{
+ const {renderDecisionCandidates}=await import("../src/view/decision-candidates");
+ const base={id:"candidate-one",project_id:"project-p",annotation_kind:"decision_candidate" as const,text:"{}",generation_id:"generation-1",schema_version:1 as const,analysis_profile:"v1",agent_run_id:"run-1",dependencies:[],revision:2,created_at:"2026-09-01T00:00:00Z",confirmed_entity_id:null};
+ const root=renderDecisionCandidates([{...base,status:"not_decision"},{...base,id:"candidate-two",status:"ignored"}],[],async()=>{});
+ expect(root.querySelectorAll('[data-action="restore-decision-candidate"]')).toHaveLength(1);
+});
