@@ -1,6 +1,7 @@
 package problemmap
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -9,7 +10,9 @@ import (
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
 
-const DeterministicRuleVersion = "problem-placement-v1"
+const DeterministicRuleVersion = "problem-placement-v2"
+
+var shortControlReply = regexp.MustCompile(`^(?:[0-9]+|[一二三四五六七八九十]|(?:好的)?继续|确认|同意|符合|可以|允许|发布|补吧|好|好的|是|否|不|开始|重试)$`)
 
 // ChainInput is an authenticated current conversation chain and its immutable
 // object digest. It contains only the retained visible conversation projection.
@@ -83,7 +86,7 @@ func DiscoverCandidates(projectID string, chains []ChainInput, graph []reviewv4.
 		for _, turn := range doc.TurnUnits {
 			question := turn.UserMessage.VisibleExcerpt
 			ref := reviewv4.SourceTurnRef{Provider: doc.Provider, SessionID: doc.SessionID, TurnUnitID: turn.TurnUnitID, SessionViewDigest: doc.SessionViewDigest}
-			if question == "" || formalRefs[sourceKey(ref)] {
+			if !candidateEligible(question) || formalRefs[sourceKey(ref)] {
 				continue
 			}
 			candidate := RecommendPlacement(PlacementInput{ProjectID: projectID, Question: question, SourceTurns: []reviewv4.SourceTurnRef{ref}, Graph: graph, Dependencies: deps, Now: now})
@@ -101,6 +104,20 @@ func DiscoverCandidates(projectID string, chains []ChainInput, graph []reviewv4.
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CandidateID < result[j].CandidateID })
 	return result
+}
+
+func candidateEligible(question string) bool {
+	normalized := normalizeQuestion(question)
+	if normalized == "" || shortControlReply.MatchString(normalized) {
+		return false
+	}
+	trimmed := strings.TrimSpace(question)
+	for _, tag := range []string{"turn_aborted", "subagent_notification", "app-context", "environment_context", "recommended_plugins"} {
+		if strings.HasPrefix(trimmed, "<"+tag+">") && strings.HasSuffix(trimmed, "</"+tag+">") {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeQuestion(value string) string {

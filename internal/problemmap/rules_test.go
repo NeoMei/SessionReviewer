@@ -45,6 +45,35 @@ func TestRecommendPlacementUsesOnlyExactSignals(t *testing.T) {
 	}
 }
 
+func TestDiscoverCandidatesRejectsPureHostWrappersAndShortControlReplies(t *testing.T) {
+	digest := "sha256:" + ruleHex("a")
+	view := "sha256:" + ruleHex("b")
+	questions := []string{
+		"<turn_aborted>\nThe user interrupted the previous turn intentionally. Any active tool executions were cancelled.\n</turn_aborted>",
+		"<subagent_notification>{\"agent_id\":\"x\",\"status\":\"completed\"}</subagent_notification>",
+		"确认", "符合", "可以", "1", "二", "好的继续", "继续", "允许", "发布", "补吧",
+		"确认，2 和 3 交换一下位置", "是，但也要考虑尽量用无 token 消耗的模式实现必要的整理步骤", "github 已经发布了吗？为什么本地还是 0.3.5",
+	}
+	turns := make([]conversationchain.TurnUnit, len(questions))
+	for index, question := range questions {
+		turns[index] = conversationchain.TurnUnit{TurnUnitID: "turn-" + string(rune('a'+index)), UserMessage: conversationchain.Message{VisibleExcerpt: question}}
+	}
+	chain := ChainInput{Digest: digest, Document: conversationchain.Document{ProjectID: "project-a", Provider: "codex", SessionID: "session-a", SessionViewDigest: view, Digest: digest, TurnUnits: turns}}
+	got := DiscoverCandidates("project-a", []ChainInput{chain}, nil, time.Date(2026, 9, 9, 1, 2, 3, 0, time.UTC))
+	if len(got) != 3 {
+		t.Fatalf("eligible candidates=%d values=%+v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, candidate := range got {
+		seen[candidate.Question] = true
+	}
+	for _, wanted := range questions[len(questions)-3:] {
+		if !seen[wanted] {
+			t.Fatalf("substantive mixed request was removed: %q", wanted)
+		}
+	}
+}
+
 func ruleHex(value string) string {
 	out := ""
 	for len(out) < 64 {
