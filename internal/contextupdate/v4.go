@@ -19,6 +19,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/pricing"
+	"github.com/neomei/SessionReviewer/internal/problemmap"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/publicationstate"
@@ -332,7 +333,11 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 		if err != nil {
 			return publication.Result{}, err
 		}
-		return publication.PublishMarkdownScan(ctx, pubOpts, syncproject.MarkdownSyncPlan{Plan: plan, Index: indexBody, ExpectedGenerationID: in.PreparedGeneration, ExpectedIndexDigest: in.Index.Digest, VaultExpected: vaultExpected})
+		result, err := publication.PublishMarkdownScan(ctx, pubOpts, syncproject.MarkdownSyncPlan{Plan: plan, Index: indexBody, ExpectedGenerationID: in.PreparedGeneration, ExpectedIndexDigest: in.Index.Digest, VaultExpected: vaultExpected})
+		if err == nil {
+			err = problemmap.ReconcileManifestCandidates(ctx, in.DataRoot, in.ProjectID, in.Store, in.Manifest, p.ProblemNodes, in.Now())
+		}
+		return result, err
 	}
 
 	owner, err := publicationlock.Acquire(in.DataRoot, in.ProjectID, 10*time.Second)
@@ -368,6 +373,9 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	if result, unchanged, err := unchangedV4ScanPublication(ctx, in, read, update, ledger, owner); err != nil {
 		return publication.Result{}, err
 	} else if unchanged {
+		if err := problemmap.ReconcileManifestCandidates(ctx, in.DataRoot, in.ProjectID, in.Store, in.Manifest, read.OldAccepted.Review.ProblemNodes, in.Now()); err != nil {
+			return publication.Result{}, err
+		}
 		return result, nil
 	}
 	next, err := reviewv4.RebaseMarkdownMilestones(read.OldAccepted.Ledger, read.Pending.Documents, update)
@@ -391,7 +399,11 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 		ExpectedIndexDigest: in.Index.Digest, VaultExpected: read.VaultExpected,
 		ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest,
 	}
-	return publication.PublishMarkdownScanLocked(ctx, pubOpts, scanPlan, owner)
+	result, err := publication.PublishMarkdownScanLocked(ctx, pubOpts, scanPlan, owner)
+	if err == nil {
+		err = problemmap.ReconcileManifestCandidates(ctx, in.DataRoot, in.ProjectID, in.Store, in.Manifest, next.ProblemNodes, in.Now())
+	}
+	return result, err
 }
 
 func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syncproject.MarkdownScanRead, update reviewv4.ScanMilestoneUpdate, nextLedger reviewv4.MachineLedger, owner *publicationlock.Owner) (publication.Result, bool, error) {

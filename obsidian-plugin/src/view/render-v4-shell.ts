@@ -1,3 +1,4 @@
+import type { DecisionSave } from "./decision-form";
 import type { PricingActions } from "../cli/pricing";
 import type { SessionSearchLoader } from "../cli/session-search";
 import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
@@ -13,7 +14,7 @@ import { presentStatus, summarizeRisk } from "./presentation";
 import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
 import { renderV4Decisions } from "./render-v4-decisions";
 import { renderV4Evolution, type V4EvolutionElement, type V4EvolutionUiState } from "./render-v4-evolution";
-import { renderV4Problems } from "./render-v4-problems";
+import { renderV4Problems, type V4ProblemsElement } from "./render-v4-problems";
 import { renderV4Usage } from "./render-v4-usage";
 import { defaultV4MilestoneId } from "./v4-milestone-order";
 
@@ -23,6 +24,7 @@ export interface RenderV4ShellOptions {
   saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;
   loadSessionSearch?: SessionSearchLoader;
     pricingActions?: PricingActions;
+    saveDecision?: DecisionSave;
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
@@ -66,6 +68,7 @@ export function renderV4Shell(
   if (state.selectedProblemId !== null && !presentation.problem_nodes.some((item) => item.id === state.selectedProblemId)) state.selectedProblemId = null;
   let records: ScanRecordsElement | undefined;
   let evolution: V4EvolutionElement | undefined;
+  let problems: V4ProblemsElement | undefined;
   let disposed = false;
   let recoveryPending = options.recoverySession !== undefined;
   const evolutionUi: V4EvolutionUiState = { fullHistory: false, page: 0 };
@@ -104,17 +107,18 @@ export function renderV4Shell(
   };
   const draw = (): void => {
     if (disposed) return;
+    disposeProblems();
     const tablist = renderTabs(state.view, (view, focus) => update({ view }, focus));
     const panel = renderPanel();
     root.replaceChildren(renderHeader(descriptor, presentation, index, open, options), tablist, panel);
   };
   const renderPanel = (): HTMLElement => {
-    if (state.view === "problems") return renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`), {
+    if (state.view === "problems") return problems = renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`), {
       candidates: options.problemCandidates, unavailableReason: options.problemUnavailableReason, createProblem: options.createProblem,
       transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
       loadConversation: options.cliUnavailable ? undefined : options.loadConversation
     });
-    if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`));
+    if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision});
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);
       return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)), options.cliUnavailable ? {} : options.pricingActions);
@@ -181,10 +185,12 @@ export function renderV4Shell(
     evolution?.dispose();
     evolution = undefined;
   };
+  const disposeProblems = (): void => { problems?.dispose(); problems = undefined; };
   root.dispose = () => {
     disposed = true;
     disposeRecords();
     disposeEvolution();
+    disposeProblems();
     root.replaceChildren();
   };
   draw();

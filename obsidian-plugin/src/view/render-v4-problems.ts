@@ -17,8 +17,12 @@ export interface ProblemActions {
   announce?: (message: string) => void;
 }
 
-export function renderV4Problems(presentation: ReviewPresentationV4, state: V4ViewState, update: (patch: Partial<V4ViewState>) => void, openReview: () => void, actions: ProblemActions = {}): HTMLElement {
-  const section = element("section", { className: "sr-v4-problems", attrs: { "data-v4-panel": "problems", role: "tabpanel" } });
+export type V4ProblemsElement = HTMLElement & { dispose: () => void };
+
+export function renderV4Problems(presentation: ReviewPresentationV4, state: V4ViewState, update: (patch: Partial<V4ViewState>) => void, openReview: () => void, actions: ProblemActions = {}): V4ProblemsElement {
+  const section = element("section", { className: "sr-v4-problems", attrs: { "data-v4-panel": "problems", role: "tabpanel" } }) as V4ProblemsElement;
+  const viewers: ConversationElement[] = [];
+  section.dispose = () => { for (const viewer of viewers) viewer.dispose(); viewers.length = 0; section.replaceChildren(); };
   const live = element("p", { className: "sr-sr-only", attrs: { "aria-live": "polite" } });
   const run = async (operation: (() => Promise<void>) | undefined, success: string): Promise<void> => {
     if (!operation) return;
@@ -27,12 +31,7 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   };
   if (presentation.problem_nodes.length === 0) {
     section.append(element("p", { className: "sr-empty", text: "尚无已确认的正式问题。未归类候选不会自动进入问题树。" }));
-    if (actions.createProblem) {
-      const input = element("textarea", { attrs: { "data-v4-new-problem": "", "aria-label": "新问题原文", maxlength: "4096" } });
-      const create = button("创建待确认问题", { "data-action": "create-problem-candidate" });
-      create.addEventListener("click", () => { if (input.value.length > 0) void run(() => actions.createProblem!(input.value), "问题已加入待确认列表。") });
-      section.append(element("div", { className: "sr-v4-problem-create" }, [input, create]));
-    }
+    if (actions.createProblem) section.append(renderProblemCreate(actions.createProblem, run));
     section.append(renderCandidates(actions.candidates ?? [], undefined, actions, run), nativeAction(openReview), live);
     return section;
   }
@@ -55,17 +54,31 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   const detail = element("aside", { className: "sr-v4-problem-detail", attrs: { "aria-label": "问题证据与问答来源" } }, [
     element("span", { className: "sr-detail-kicker", text: workflowLabel(selected.workflow_state) }), element("h2", { text: selected.question }),
     definition("完成标准", selected.completion_criterion || "未填写"), definition("当前结论", selected.current_conclusion || "未填写"), definition("回答状态", answerLabel(selected.answer_state)),
-    renderSources(selected, presentation, actions), renderEdit(selected, actions, run), renderMove(selected, presentation.problem_nodes, nodes, actions, run), renderReorder(selected, presentation.problem_nodes, actions, run), renderStateAction(selected, actions, run), nativeAction(openReview)
+    renderSources(selected, presentation, actions, (viewer) => viewers.push(viewer)), renderEdit(selected, actions, run), renderMove(selected, presentation.problem_nodes, nodes, actions, run), renderReorder(selected, presentation.problem_nodes, actions, run), renderStateAction(selected, actions, run), nativeAction(openReview)
   ]);
-  section.append(rail, context, detail, renderCandidates(actions.candidates ?? [], selected, actions, run), live);
+  section.append(rail, context, detail);
+  if (actions.createProblem) section.append(renderProblemCreate(actions.createProblem, run));
+  section.append(renderCandidates(actions.candidates ?? [], selected, actions, run), live);
   return section;
 }
 
 function renderCandidates(candidates: ProblemCandidateV1[], selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
   const pending = candidates.filter((item) => item.status === "pending" || item.status === "kept_pending");
+  const history = candidates.filter((item) => item.status !== "pending" && item.status !== "kept_pending");
   const drawer = element("section", { className: "sr-v4-problem-candidates", attrs: { "aria-label": "待归类问题" } }, [element("h3", { text: `待归类问题 ${pending.length}` })]);
   if (actions.unavailableReason) drawer.append(element("p", { className: "sr-empty", text: actions.unavailableReason }));
-  for (const candidate of candidates) {
+  for (const candidate of pending) drawer.append(renderCandidate(candidate, selected, actions, run));
+  if (pending.length === 0 && !actions.unavailableReason) drawer.append(element("p", { className: "sr-empty", text: "当前没有待归类候选。普通扫描使用零 Token 确定性规则。" }));
+  if (history.length > 0) {
+    const archived = element("details", { className: "sr-v4-problem-candidate-history" });
+    archived.append(element("summary", { text: `历史候选 ${history.length}` }));
+    for (const candidate of history) archived.append(renderCandidate(candidate, selected, actions, run));
+    drawer.append(archived);
+  }
+  return drawer;
+}
+
+function renderCandidate(candidate: ProblemCandidateV1, selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
     const card = element("article", { className: "sr-v4-problem-candidate", attrs: { "data-problem-candidate-id": candidate.candidate_id } }, [
       element("strong", { text: candidate.question }), element("span", { text: `建议：${relationLabel(candidate.recommended_relation)} · 置信度：${confidenceLabel(candidate.confidence)}` })
     ]);
@@ -79,10 +92,14 @@ function renderCandidates(candidates: ProblemCandidateV1[], selected: ProblemNod
     } else if (candidate.status === "dismissed" || candidate.status === "stale") {
       const restore = button("恢复候选", { "data-action": "restore-candidate" }); restore.addEventListener("click", () => void run(actions.transitionCandidate ? () => actions.transitionCandidate!(candidate, "restore") : undefined, "候选已恢复。")); card.append(restore);
     }
-    drawer.append(card);
-  }
-  if (candidates.length === 0 && !actions.unavailableReason) drawer.append(element("p", { className: "sr-empty", text: "当前没有待归类候选。普通扫描使用零 Token 确定性规则。" }));
-  return drawer;
+    return card;
+}
+
+function renderProblemCreate(createProblem: (question: string) => Promise<void>, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
+  const input = element("textarea", { attrs: { "data-v4-new-problem": "", "aria-label": "新问题原文", maxlength: "4096" } });
+  const create = button("创建待确认问题", { "data-action": "create-problem-candidate" });
+  create.addEventListener("click", () => { if (input.value.length > 0) void run(() => createProblem(input.value), "问题已加入待确认列表。") });
+  return element("div", { className: "sr-v4-problem-create" }, [input, create]);
 }
 
 function confirmingAction(label: string, confirmation: string, key: string, confirm: () => void): HTMLElement { const wrapper = element("span", { className: "sr-confirming-action" }); const start = button(label, { "data-action": key }); start.addEventListener("click", () => { const yes = button(confirmation, { "data-action": `confirm-${key}` }); yes.addEventListener("click", confirm); wrapper.replaceChildren(yes) }); wrapper.append(start); return wrapper; }
@@ -119,7 +136,7 @@ function renderReorder(node: ProblemNodeV4, all: ProblemNodeV4[], actions: Probl
 function descendantIDs(id: string, all: ProblemNodeV4[]): string[] { const result: string[] = []; const visit = (parent: string): void => { for (const node of all.filter((item) => item.primary_parent_id === parent)) { result.push(node.id); visit(node.id); } }; visit(id); return result; }
 function renderStateAction(node: ProblemNodeV4, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement { const action = node.workflow_state === "resolved" ? "reopen" as const : "resolve" as const; return confirmingAction(action === "resolve" ? "标记为已解决" : "重新打开", action === "resolve" ? "确认：标记为已解决" : "确认：重新打开", `${action}-problem`, () => void run(actions.setProblemState ? () => actions.setProblemState!(node, action) : undefined, action === "resolve" ? "问题已标记为解决。" : "问题已重新打开。")); }
 function ancestorPath(selected: ProblemNodeV4, nodes: Map<string, ProblemNodeV4>): ProblemNodeV4[] { const path = [selected]; const seen = new Set([selected.id]); let parentId = selected.primary_parent_id; while (parentId !== null) { const parent = nodes.get(parentId); if (!parent || seen.has(parent.id)) break; seen.add(parent.id); path.unshift(parent); parentId = parent.primary_parent_id; } return path; }
-function renderSources(node: ProblemNodeV4, presentation: ReviewPresentationV4, actions: ProblemActions): HTMLElement {
+function renderSources(node: ProblemNodeV4, presentation: ReviewPresentationV4, actions: ProblemActions, retain: (viewer: ConversationElement) => void): HTMLElement {
   const sources = element("div", { className: "sr-v4-problem-sources" }, [element("strong", { text: "关联问答来源" })]); let viewer: ConversationElement | undefined;
   const body = element("div", { className: "sr-v4-problem-source-answer" });
   if (node.source_turn_refs.length === 0) sources.append(element("p", { className: "sr-empty", text: "当前正式节点没有已绑定的可见问答来源。" }));
@@ -128,7 +145,7 @@ function renderSources(node: ProblemNodeV4, presentation: ReviewPresentationV4, 
     open.disabled = !actions.loadConversation || !ref.session_view_digest;
     open.addEventListener("click", () => {
       if (!actions.loadConversation || !ref.session_view_digest) return;
-      viewer?.dispose(); viewer = renderConversation({ projectId: presentation.project_id, provider: ref.provider, sessionId: ref.session_id, expectedGenerationId: presentation.generation_id, expectedSessionViewDigest: ref.session_view_digest, sessionViewDigest: ref.session_view_digest }, actions.loadConversation, { turnUnitId: ref.turn_unit_id });
+      viewer?.dispose(); viewer = renderConversation({ projectId: presentation.project_id, provider: ref.provider, sessionId: ref.session_id, expectedGenerationId: presentation.generation_id, expectedSessionViewDigest: ref.session_view_digest, sessionViewDigest: ref.session_view_digest }, actions.loadConversation, { turnUnitId: ref.turn_unit_id }); retain(viewer);
       body.replaceChildren(viewer);
     }); sources.append(open);
   }

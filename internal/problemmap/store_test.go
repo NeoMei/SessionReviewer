@@ -44,6 +44,32 @@ func TestAnalysisIdentityNormalizesQuestionAndDependencies(t *testing.T) {
 	}
 }
 
+func TestReconcileDeterministicPreservesHumanChoicesAndStalesMissingDependencies(t *testing.T) {
+	root := t.TempDir()
+	store, err := OpenStore(root, "project-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 9, 1, 2, 3, 0, time.UTC)
+	first := completeCandidate("placement-rule")
+	first.Status = CandidateKeptPending
+	if err := store.CompareAndSwap(first, 0); err != nil {
+		t.Fatal(err)
+	}
+	human := NewHumanCandidate("project-a", "  保留原文？  ", now)
+	if err := store.CompareAndSwap(human, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcileDeterministic(nil, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	stale, _ := store.Get(first.CandidateID)
+	keptHuman, _ := store.Get(human.CandidateID)
+	if stale.Status != CandidateStale || stale.Revision != 2 || keptHuman.Question != human.Question || keptHuman.Status != CandidatePending || keptHuman.Revision != 1 {
+		t.Fatalf("stale=%+v human=%+v", stale, keptHuman)
+	}
+}
+
 func completeCandidate(id string) Candidate {
 	now := time.Date(2026, 9, 9, 1, 2, 3, 0, time.UTC).Format(time.RFC3339)
 	return Candidate{CandidateID: id, ProjectID: "project-a", Question: "How?", SourceTurnRefs: []reviewv4.SourceTurnRef{{Provider: "codex", SessionID: "s1", TurnUnitID: "t1"}}, RecommendedRelation: RelationKeepPending, RecommendedTargetID: nil, AlternateTargetIDs: []string{}, RelatedNodeIDs: []string{}, Grounds: []Ground{{RuleID: "no-signal", RuleVersion: "rules-v1", MatchedFactRefs: []string{}, Explanation: "没有可复核的层级信号，继续待归类。"}}, Confidence: ConfidenceLow, Status: CandidatePending, DependencyDigests: []string{"sha256:" + repeatHex("a")}, AnalysisMode: AnalysisDeterministic, AgentRunID: nil, Revision: 1, CreatedAt: now, UpdatedAt: now}

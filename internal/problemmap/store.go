@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -123,6 +124,72 @@ func (s *Store) CompareAndSwap(candidate Candidate, expectedRevision int) error 
 		return err
 	}
 	return atomicfile.Write(s.path, body, 0o600)
+}
+
+// ReconcileDeterministic atomically refreshes dependency-bound rule output.
+// Human entries, Agent results, and user status choices are retained.
+func (s *Store) ReconcileDeterministic(discovered []Candidate, now time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	store, err := s.load()
+	if err != nil {
+		return err
+	}
+	stamp := now.UTC().Round(0).Format(time.RFC3339Nano)
+	current := make(map[string]Candidate, len(discovered))
+	for _, candidate := range discovered {
+		current[candidate.CandidateID] = candidate
+	}
+	for index := range store.Candidates {
+		prior := store.Candidates[index]
+		if prior.AnalysisMode != AnalysisDeterministic || (len(prior.Grounds) == 1 && prior.Grounds[0].RuleID == "human-created") {
+			continue
+		}
+		fresh, exists := current[prior.CandidateID]
+		if !exists {
+			if prior.Status == CandidatePending || prior.Status == CandidateKeptPending {
+				prior.Status, prior.Revision, prior.UpdatedAt = CandidateStale, prior.Revision+1, stamp
+				store.Candidates[index] = prior
+			}
+			continue
+		}
+		delete(current, prior.CandidateID)
+		fresh.CreatedAt, fresh.Status = prior.CreatedAt, prior.Status
+		if prior.Status == CandidateStale {
+			fresh.Status = CandidatePending
+		}
+		fresh.Revision, fresh.UpdatedAt = prior.Revision, prior.UpdatedAt
+		if !candidateEquivalent(prior, fresh) {
+			fresh.Revision, fresh.UpdatedAt = prior.Revision+1, stamp
+			store.Candidates[index] = fresh
+		}
+	}
+	for _, candidate := range current {
+		store.Candidates = append(store.Candidates, candidate)
+	}
+	sort.Slice(store.Candidates, func(i, j int) bool { return store.Candidates[i].CandidateID < store.Candidates[j].CandidateID })
+	store.MinimumReaderVersion = "0.4.0"
+	for _, candidate := range store.Candidates {
+		for _, ref := range candidate.SourceTurnRefs {
+			if ref.SessionViewDigest != "" {
+				store.MinimumReaderVersion = "0.4.3"
+			}
+		}
+	}
+	body, err := RenderCandidates(store)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	return atomicfile.Write(s.path, body, 0o600)
+}
+
+func candidateEquivalent(left, right Candidate) bool {
+	left.Revision, right.Revision = 0, 0
+	left.UpdatedAt, right.UpdatedAt = "", ""
+	return reflect.DeepEqual(left, right)
 }
 
 func AnalysisIdentity(projectID, question, ruleVersion string, dependencies []string) string {

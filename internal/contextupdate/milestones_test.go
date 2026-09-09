@@ -17,6 +17,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/contextupdate"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/problemmap"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
@@ -89,6 +90,22 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	if _, err := contextupdate.Run(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
+	candidateStore, err := problemmap.OpenStore(dataRoot, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCandidates, err := candidateStore.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstCandidates) != 2 {
+		t.Fatalf("ordinary scan candidates=%+v", firstCandidates)
+	}
+	for _, candidate := range firstCandidates {
+		if candidate.AnalysisMode != problemmap.AnalysisDeterministic || candidate.AgentRunID != nil || candidate.Status != problemmap.CandidatePending || len(candidate.SourceTurnRefs) != 1 || candidate.SourceTurnRefs[0].SessionViewDigest == "" {
+			t.Fatalf("ordinary scan did not create exact zero-token private candidate: %+v", candidate)
+		}
+	}
 	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath}
 	type publicFile struct{ side, root, relative string }
 	publicFiles := make([]publicFile, 0, len(paths)*2)
@@ -113,6 +130,9 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	if len(accepted.Review.Timeline) != 1 || accepted.Review.Timeline[0].ClosedLoop.Conclusion.Text != "Original bounded Agent conclusion." || len(accepted.Review.GeneratedBaselines) != 4 {
 		t.Fatalf("qualified scan milestone was not seeded with exact baselines: timeline=%+v baselines=%+v", accepted.Review.Timeline, accepted.Review.GeneratedBaselines)
 	}
+	if len(accepted.Review.ProblemNodes) != 0 {
+		t.Fatalf("ordinary scan promoted private candidates into the public graph: %+v", accepted.Review.ProblemNodes)
+	}
 	if len(accepted.Ledger.PricingSnapshots) == 0 || accepted.Ledger.Accounting.TotalCostUSD != nil {
 		t.Fatal("real scan must publish pending per-model pricing without inventing costs")
 	}
@@ -131,6 +151,13 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	}
 	if _, err := contextupdate.Run(context.Background(), opts); err != nil {
 		t.Fatal(err)
+	}
+	secondCandidates, err := candidateStore.List("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(firstCandidates, secondCandidates) {
+		t.Fatalf("identical scan changed private candidates: before=%+v after=%+v", firstCandidates, secondCandidates)
 	}
 	for _, file := range publicFiles {
 		after, err := os.ReadFile(filepath.Join(file.root, filepath.FromSlash(file.relative)))

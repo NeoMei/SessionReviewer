@@ -7,6 +7,7 @@ import { ProjectEvolutionView } from "../src/view/project-view";
 import { defaultViewState } from "../src/view/render-shell";
 import { normalizeV4ViewState, type V4ViewState } from "../src/state/v4-view-state";
 import { v4SnapshotFixture } from "./fixtures/v4-shell";
+import { selectedConversationPage, visibleMessage, visibleTurn } from "./fixtures/conversation";
 
 const labels = ["项目演进", "问题脉络", "决策与约定", "全部 Sessions", "用量"];
 
@@ -336,24 +337,70 @@ describe("v4 five-tab shell", () => {
 	expect(pending.querySelector('[data-v4-problem-id]')).toBeNull();
   });
 
+  it("keeps manual creation available on a non-empty graph and folds applied candidates into history", async () => {
+	const snapshot = v4SnapshotFixture();
+	if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+	const createProblem = vi.fn().mockResolvedValue(undefined);
+	const applied = {
+		candidate_id: "candidate-applied", project_id: snapshot.descriptor.projectId, question: "已确认问题？", source_turn_refs: [],
+		recommended_relation: "keep_pending" as const, recommended_target_id: null, alternate_target_ids: [], related_node_ids: [],
+		grounds: [{ rule_id: "human-created", rule_version: "v1", matched_fact_refs: [], explanation: "由用户明确创建。" }],
+		confidence: "low" as const, status: "applied" as const, dependency_digests: [], analysis_mode: "deterministic" as const,
+		agent_run_id: null, revision: 2, created_at: "2026-09-09T00:00:00Z", updated_at: "2026-09-09T00:01:00Z"
+	};
+	const root = renderMarkdownV4View(snapshot, vi.fn(), { createProblem, problemCandidates: [applied] });
+	click(root, "problems");
+	const input = root.querySelector<HTMLTextAreaElement>('[data-v4-new-problem]')!;
+	input.value = "  新的子问题？  ";
+	root.querySelector<HTMLButtonElement>('[data-action="create-problem-candidate"]')!.click();
+	await settle();
+	expect(createProblem).toHaveBeenCalledWith("  新的子问题？  ");
+	const pending = root.querySelector<HTMLElement>('[aria-label="待归类问题"]')!;
+	expect(pending.querySelector("h3")?.textContent).toBe("待归类问题 0");
+	expect(pending.querySelectorAll(":scope > article")).toHaveLength(0);
+	expect(pending.querySelector("details")?.textContent).toContain("已确认问题？");
+  });
+
   it("opens an exact problem source and requires explicit resolve confirmation", async () => {
 	const snapshot = v4SnapshotFixture();
 	if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
 	const node = snapshot.state.value.presentation.problem_nodes[0];
 	const view = `sha256:${"7".repeat(64)}`;
 	node.source_turn_refs = [{ provider: "codex", session_id: "session-source", turn_unit_id: "turn-source", session_view_digest: view }];
-	const loadConversation = vi.fn().mockResolvedValue({});
+	const sourceRef = (role: "user" | "assistant", ordinal: number) => ({ provider: "codex", session_id: "session-source", source_identity: "source-1", record_ordinal: ordinal, source_hash: "3".repeat(64) });
+	const page = selectedConversationPage({ minimum_reader_version: "0.4.3", project_id: snapshot.descriptor.projectId, session_id: "session-source", generation_id: snapshot.state.value.presentation.generation_id, session_view_digest: view, turn_unit_id: "turn-source",
+		turn_units: [visibleTurn({ turn_unit_id: "turn-source", user_message: visibleMessage("user", { source_ref: sourceRef("user", 1), visible_excerpt: "来源问题？", text: null }) })],
+		messages: [visibleMessage("user", { source_ref: sourceRef("user", 1), visible_excerpt: "来源问题？", text: "来源问题？" }), visibleMessage("assistant", { source_ref: sourceRef("assistant", 2), visible_excerpt: "来源回答。", text: "来源回答。" })] });
+	const loadConversation = vi.fn().mockResolvedValue(page);
 	const setProblemState = vi.fn().mockResolvedValue(undefined);
 	const root = renderMarkdownV4View(snapshot, vi.fn(), { loadConversation, setProblemState });
 	click(root, "problems");
 	root.querySelector<HTMLButtonElement>('[data-action="open-problem-source"]')!.click();
 	await settle();
 	expect(loadConversation).toHaveBeenCalledWith(expect.objectContaining({ projectId: snapshot.descriptor.projectId, provider: "codex", sessionId: "session-source", turnUnitId: "turn-source", expectedSessionViewDigest: view, sessionViewDigest: view }));
+	expect(root.querySelector('.sr-v4-problem-source-answer')?.textContent).toContain("来源回答。");
 	root.querySelector<HTMLButtonElement>('[data-action="resolve-problem"]')!.click();
 	expect(setProblemState).not.toHaveBeenCalled();
 	root.querySelector<HTMLButtonElement>('[data-action="confirm-resolve-problem"]')!.click();
 	await settle();
 	expect(setProblemState).toHaveBeenCalledWith(node, "resolve");
+  });
+
+  it("disposes a pending problem-source viewer when leaving the tab", async () => {
+	const snapshot = v4SnapshotFixture(); if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture"); const node = snapshot.state.value.presentation.problem_nodes[0]; const view = `sha256:${"7".repeat(64)}`;
+	node.source_turn_refs = [{ provider: "codex", session_id: "session-source", turn_unit_id: "turn-source", session_view_digest: view }];
+	let resolve!: (value: never) => void; const loadConversation = vi.fn(() => new Promise<never>((done) => { resolve = done; }));
+	const root = renderMarkdownV4View(snapshot, vi.fn(), { loadConversation }); click(root, "problems"); root.querySelector<HTMLButtonElement>('[data-action="open-problem-source"]')!.click(); click(root, "decisions");
+	resolve({} as never); await settle(); expect(root.querySelector('.sr-v4-problem-source-answer')).toBeNull();
+  });
+
+  it("disposes a pending problem-source viewer when selecting another problem", async () => {
+	const snapshot = v4SnapshotFixture(); if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture"); const node = snapshot.state.value.presentation.problem_nodes[0]; const view = `sha256:${"7".repeat(64)}`;
+	node.source_turn_refs = [{ provider: "codex", session_id: "session-source", turn_unit_id: "turn-source", session_view_digest: view }];
+	const second = structuredClone(node); second.id = "problem:second"; second.question = "另一个问题？"; second.source_turn_refs = []; second.sibling_order = 1; snapshot.state.value.presentation.problem_nodes.push(second); snapshot.state.value.presentation.problem_root_ids.push(second.id);
+	let resolve!: (value: never) => void; const loadConversation = vi.fn(() => new Promise<never>((done) => { resolve = done; }));
+	const root = renderMarkdownV4View(snapshot, vi.fn(), { loadConversation }); click(root, "problems"); root.querySelector<HTMLButtonElement>('[data-action="open-problem-source"]')!.click(); root.querySelector<HTMLButtonElement>('[data-v4-problem-id="problem:second"]')!.click();
+	resolve({} as never); await settle(); expect(root.querySelector('.sr-v4-problem-source-answer')?.textContent).toBe(""); expect(root.textContent).toContain("另一个问题？");
   });
 
   it("edits, previews subtree movement, and submits complete sibling order", async () => {
