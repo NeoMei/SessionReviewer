@@ -36,6 +36,22 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
         element("h3", { text: decision.title }),
         field("理由", decision.rationale), field("影响范围", decision.impact), field("重新评估条件", decision.reevaluate_when)
       ]);
+      const statuses: Record<DecisionStatus, string> = { active: "生效中", superseded: "已替代", archived: "已归档", legacy_unmapped: "旧状态待核对" };
+      const sources = { human_created: "人工创建", migrated: "旧版迁移", ai_candidate_confirmed: "AI 候选经人工确认" };
+      card.append(element("p", { text: `状态：${statuses[decision.status]} · 来源：${sources[decision.provenance]}` }));
+      const titles = new Map(presentation.decisions.map(value => [value.id, value.title]));
+      if (decision.supersedes.length) card.append(element("p", { text: `替代：${decision.supersedes.map(id => titles.get(id) ?? id).join("；")}` }));
+      const successors = presentation.decisions.filter(value => value.supersedes.includes(decision.id));
+      if (successors.length) card.append(element("p", { text: `已被替代：${successors.map(value => value.title).join("；")}` }));
+      if (decision.session_refs.length) {
+        const references = element("details", {}, [element("summary", { text: `关联 Sessions · ${decision.session_refs.length}` })]);
+        for (const ref of decision.session_refs) references.append(element("p", { text: `${ref.provider} / ${ref.session_id}` }));
+        card.append(references);
+      }
+      if (decision.milestone_ids.length) {
+        const milestones = new Map(presentation.timeline.map(value => [value.id, value.title]));
+        card.append(element("p", { text: `关联里程碑：${decision.milestone_ids.map(id => milestones.get(id) ?? id).join("；")}` }));
+      }
       if (actions.save && (decision.status === "active" || decision.status === "archived")) {
         const control = button("编辑", {"data-action":"edit-decision"}); control.addEventListener("click", () => edit(decision)); card.append(control);
       }

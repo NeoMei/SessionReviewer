@@ -56,3 +56,18 @@ it("only offers restore for ignored candidates, keeping not-decision terminal",a
  const root=renderDecisionCandidates([{...base,status:"not_decision"},{...base,id:"candidate-two",status:"ignored"}],[],async()=>{});
  expect(root.querySelectorAll('[data-action="restore-decision-candidate"]')).toHaveLength(1);
 });
+
+it("shows decision status, provenance, source sessions and replacement history",()=>{
+ const p=fixture();
+ const base={kind:"decision" as const,occurred_at:"2026-09-09T00:00:00Z",rationale:"依据",impact:"范围",reevaluate_when:"条件",legacy_status_text:null,milestone_ids:[],session_refs:[{provider:"claude",session_id:"session-one",turn_unit_ids:["turn-one"]}],pinned:false,revision:1};
+ p.decisions=[{...base,id:"old",title:"旧方案",status:"superseded",supersedes:[],provenance:"human_created"},{...base,id:"new",title:"新方案",status:"active",supersedes:["old"],provenance:"ai_candidate_confirmed"}];
+ const root=renderV4Decisions(p,()=>{});
+ expect(root.textContent).toContain("来源：AI 候选经人工确认");
+ expect(root.textContent).toContain("替代：旧方案");
+ expect(root.textContent).toContain("claude / session-one");
+ Array.from(root.querySelectorAll("button")).find(e=>e.textContent==="已替代 / 已归档")!.click();
+ expect(root.textContent).toContain("状态：已替代");
+ expect(root.textContent).toContain("已被替代：新方案");
+ expect(root.textContent).toContain("来源：人工创建");
+ root.dispose();
+});
