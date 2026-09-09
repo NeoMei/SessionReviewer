@@ -81,3 +81,32 @@ Exit 1 with all three intended behavioral failures. The amended command then pas
 - No authenticated typed rollback source/retained-chain shape exists. `thread_rolled_back` is conversation bookkeeping, not project rollback proof. This projector therefore cannot implement typed rollback qualification without a separately reviewed producer plus retained-policy contract; it deliberately does not infer rollback from command text or prose.
 - Current Codex production decoding emits the supported verification shape but does not emit commit/release/deployment/version typed facts. Those pure/retained categories are covered by repository synthetic contracts, not claimed as current real-provider coverage. Producer coverage remains a separate mandatory gate.
 - This task does not close S02/S03 and proves no scan/publication/rebase/UI/Vault/release behavior.
+
+## Review fix round 1
+
+Independent review of `6749246` found that `milestoneVerificationPassed` ignored an explicitly present `passed` field. Consequently, `Outcome=passed`, `exit_code=0`, `failed=false` incorrectly qualified when `passed` was `false`, zero, malformed, or noncanonical; a turn independently qualified by a commit also rendered that contradictory verification as passed.
+
+### TDD RED
+
+Command:
+
+`go test ./internal/presentation -run 'TestProjectMilestonesQualifiesOnlyClosedMachineEvidence|TestClosureEvidenceDoesNotRenderContradictoryVerificationAsPassed' -count=1`
+
+Exit 1. The false, zero, malformed (`many`), and noncanonical (`01`) cases each reported `fact counts=1/0 want=0/0`; the commit-qualified false case rendered `verification (passed): ... passed=false`. This reproduced the reviewer finding with repository-owned fixtures.
+
+### Fix and GREEN
+
+- Added a closed positive-evidence parser: when `passed` is present, only exact `true` or a canonical unsigned decimal count greater than zero is accepted. An absent `passed` field remains compatible with the prior typed outcome/exit/failure contract.
+- The same predicate feeds closure display, so explicit-invalid `passed` values render `conflict`, never `passed`, when another typed fact independently qualifies the turn.
+- Added positives for exact `true`, canonical count `12`, and absent-field compatibility, plus negatives for `false`, `0`, `many`, and `01`.
+
+Verification after the fix:
+
+- Targeted command above — PASS, 0.406s.
+- `go test ./internal/presentation -run 'Milestone|ClosureEvidence' -count=1` — PASS, 13.015s including capacity.
+- `go test ./internal/presentation ./internal/conversationchain ./internal/reviewv4 -count=1` — PASS: 13.794s, 0.545s, 2.078s.
+- `go vet ./internal/presentation ./internal/conversationchain ./internal/reviewv4` — PASS.
+- Scoped `git diff --check` — PASS.
+- Per controller scope, unchanged full Go and plugin suites were not rerun; final whole-branch gates remain mandatory.
+
+Self-review: the change is confined to the existing verification predicate and its two covering test files. No retained, scan, publication, wire/schema, UI, producer, or capability baseline changed. Existing rollback and provider-production concerns above remain unchanged.

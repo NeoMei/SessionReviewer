@@ -245,7 +245,18 @@ func milestoneVerificationPassed(revision memory.ObservationRevision) bool {
 	if value, present := revision.Fields["failed"]; present && value != "0" && value != "false" {
 		return false
 	}
+	if value, present := revision.Fields["passed"]; present && !milestonePositivePassedValue(value) {
+		return false
+	}
 	return true
+}
+
+func milestonePositivePassedValue(value string) bool {
+	if value == "true" {
+		return true
+	}
+	count, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && count > 0 && strconv.FormatUint(count, 10) == value
 }
 
 func projectMilestoneTurn(input MilestoneInput, session MilestoneSessionInput, revisionsByID map[string]memory.ObservationRevision, turnIndex int, facts []qualifiedMilestoneFact) (reviewv4.Timeline, error) {

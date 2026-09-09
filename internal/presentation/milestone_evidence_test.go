@@ -88,20 +88,30 @@ func TestClosureEvidenceUsesTypedMissingReasonsAndZeroText(t *testing.T) {
 }
 
 func TestClosureEvidenceDoesNotRenderContradictoryVerificationAsPassed(t *testing.T) {
-	input := milestoneProjectInput(t, milestoneFixtureSpec{messages: milestoneMessages("commit after checks", "committed"), facts: []milestoneFactSpec{
-		{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"status": "test", "exit_code": "1", "passed": "true", "failed": "true"}},
-		{kind: "commit", operation: "commit_created", outcome: "observed", line: 2, timestamp: milestoneTime3, fields: map[string]string{"git_head": strings.Repeat("a", 40)}},
-	}})
-	got, err := ProjectMilestones(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.Timeline) != 1 || got.Timeline[0].Kind != "machine_commit" {
-		t.Fatalf("independent commit qualification missing: %+v", got)
-	}
-	verification := got.Timeline[0].ClosedLoop.Verification
-	if verification.State != "present" || !strings.Contains(verification.Text, "verification (conflict)") || strings.Contains(verification.Text, "verification (passed)") {
-		t.Fatalf("contradictory verification was presented as passed: %+v", verification)
+	for _, test := range []struct {
+		name   string
+		fields map[string]string
+	}{
+		{name: "exit and failure contradiction", fields: map[string]string{"status": "test", "exit_code": "1", "passed": "true", "failed": "true"}},
+		{name: "explicit passed false", fields: map[string]string{"status": "test", "exit_code": "0", "passed": "false", "failed": "false"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := milestoneProjectInput(t, milestoneFixtureSpec{messages: milestoneMessages("commit after checks", "committed"), facts: []milestoneFactSpec{
+				{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: test.fields},
+				{kind: "commit", operation: "commit_created", outcome: "observed", line: 2, timestamp: milestoneTime3, fields: map[string]string{"git_head": strings.Repeat("a", 40)}},
+			}})
+			got, err := ProjectMilestones(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Timeline) != 1 || got.Timeline[0].Kind != "machine_commit" {
+				t.Fatalf("independent commit qualification missing: %+v", got)
+			}
+			verification := got.Timeline[0].ClosedLoop.Verification
+			if verification.State != "present" || !strings.Contains(verification.Text, "verification (conflict)") || strings.Contains(verification.Text, "verification (passed)") {
+				t.Fatalf("contradictory verification was presented as passed: %+v", verification)
+			}
+		})
 	}
 }
 
