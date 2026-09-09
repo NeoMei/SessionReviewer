@@ -8,6 +8,7 @@ import { renderMarkdownV4View } from "../src/view/presentation";
 import { ProjectEvolutionView } from "../src/view/project-view";
 import { defaultViewState } from "../src/view/render-shell";
 import { populatedSessionSummary } from "./fixtures/session-summary";
+import { syncStatusFixture } from "./fixtures/sync-status";
 import { normalizeV4ViewState, type V4ViewState, type V4ViewStatePatch } from "../src/state/v4-view-state";
 
 const VIEW_DIGEST = `sha256:${"1".repeat(64)}`;
@@ -104,6 +105,10 @@ function projectSnapshot(projectId: string, name: string, excerptDigest = VIEW_D
     ...snapshot(index),
     descriptor: { projectId, root: `Projects/${name}`, name, format: "markdown-v4" }
   };
+}
+
+function readyStatus(projectId: string): Record<string, unknown> {
+  return syncStatusFixture(projectId);
 }
 
 function deferred<T>() {
@@ -905,6 +910,27 @@ describe("v4 scanned Session renderer", () => {
 });
 
 describe("v4 project and event lifecycle", () => {
+  it("does not reload a steady valid CLI status", async () => {
+    vi.useFakeTimers();
+    const project = { projectId: "project-p", root: "Projects/SessionReviewer", name: "SessionReviewer", format: "markdown-v4" as const };
+    const repository = {
+      discover: vi.fn().mockResolvedValue([project]),
+      load: vi.fn().mockResolvedValue(projectSnapshot(project.projectId, project.name)),
+      watch: vi.fn().mockReturnValue(vi.fn())
+    };
+    const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, { status: vi.fn().mockResolvedValue(readyStatus(project.projectId)) } as unknown as CliRunner);
+    Object.assign(view, { app: { workspace: { openLinkText: vi.fn() } } });
+    try {
+      await view.onOpen();
+      expect(view.contentEl.querySelectorAll('[role="tab"]')).toHaveLength(5);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(repository.load).toHaveBeenCalledTimes(1);
+    } finally {
+      await view.onClose();
+      vi.useRealTimers();
+    }
+  });
+
   it("does not call any private loader when the actual host reports CLI unavailable", async () => {
     const project = { projectId: "project-p", root: "Projects/SessionReviewer", name: "SessionReviewer", format: "markdown-v4" as const };
     const repository = { discover: vi.fn().mockResolvedValue([project]), load: vi.fn().mockResolvedValue(projectSnapshot(project.projectId, "SessionReviewer")), watch: vi.fn().mockReturnValue(vi.fn()) };
@@ -1036,7 +1062,7 @@ describe("v4 project and event lifecycle", () => {
       watch: vi.fn().mockReturnValue(vi.fn())
     };
     const runner = {
-      status: vi.fn().mockResolvedValue({}),
+      status: vi.fn().mockResolvedValue(readyStatus(project.projectId)),
       getSessionEvents: vi.fn().mockImplementation((request: { expectedGenerationId: string }) => Promise.resolve(eventPage({ generation_id: request.expectedGenerationId, session_id: "session-sessionreviewer" })))
     };
     const view = new ProjectEvolutionView(new WorkspaceLeaf(), repository as never, undefined, runner as unknown as CliRunner);
@@ -1079,7 +1105,7 @@ describe("v4 project and event lifecycle", () => {
       watch: vi.fn().mockReturnValue(vi.fn())
     };
     const runner = {
-      status: vi.fn().mockResolvedValue({}),
+      status: vi.fn().mockResolvedValue(readyStatus(project.projectId)),
       getSessionEvents: vi.fn((request: { sessionId: string; expectedGenerationId: string; expectedSessionViewDigest: string }) => Promise.resolve(eventPage({
         session_id: request.sessionId, generation_id: request.expectedGenerationId, session_view_digest: request.expectedSessionViewDigest
       }))),
