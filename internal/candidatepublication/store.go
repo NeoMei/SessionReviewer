@@ -99,6 +99,10 @@ func NewIntent(input IntentInput) (Intent, error) {
 	return intent, nil
 }
 
+// OpenStore opens one domain-specific intent document. The in-process mutex
+// prevents local races; callers must additionally hold the project's
+// publication lock across Prepare, public publication, private candidate CAS,
+// and Transition so separate processes preserve that ordering.
 func OpenStore(dataRoot, projectID, namespace string) (*Store, error) {
 	if !filepath.IsAbs(dataRoot) || filepath.Clean(dataRoot) != dataRoot || !idPattern.MatchString(projectID) || !idPattern.MatchString(namespace) {
 		return nil, errors.New("candidate publication store requires a clean absolute data root and valid identity")
@@ -275,7 +279,7 @@ func validateDocument(value document, projectID, namespace string) error {
 }
 
 func validateIntent(intent Intent) error {
-	if intent.SchemaVersion != 1 || !idPattern.MatchString(intent.OperationID) || !idPattern.MatchString(intent.ProjectID) || !idPattern.MatchString(intent.Namespace) || !idPattern.MatchString(intent.CandidateID) || intent.ExpectedCandidateRevision < 1 || !digestPattern.MatchString(intent.CandidateDigest) || !idPattern.MatchString(intent.Action) || !idPattern.MatchString(intent.EntityID) || !digestPattern.MatchString(intent.ResultFingerprint) || !idPattern.MatchString(intent.TerminalStatus) || intent.Revision < 1 || intent.Revision > 1<<53-1 {
+	if intent.SchemaVersion != 1 || !idPattern.MatchString(intent.OperationID) || !idPattern.MatchString(intent.ProjectID) || !idPattern.MatchString(intent.Namespace) || !idPattern.MatchString(intent.CandidateID) || intent.ExpectedCandidateRevision < 1 || intent.ExpectedCandidateRevision > 1<<53-1 || !digestPattern.MatchString(intent.CandidateDigest) || !idPattern.MatchString(intent.Action) || !idPattern.MatchString(intent.EntityID) || !digestPattern.MatchString(intent.ResultFingerprint) || !idPattern.MatchString(intent.TerminalStatus) || intent.Revision < 1 || intent.Revision > 1<<53-1 {
 		return errors.New("candidate publication intent identity is invalid")
 	}
 	if intent.State != StatePrepared && intent.State != StateCompleted && intent.State != StateAborted {
@@ -306,7 +310,8 @@ func operationID(intent Intent) string {
 		EntityID                  string `json:"entity_id"`
 		ResultFingerprint         string `json:"result_fingerprint"`
 		TerminalStatus            string `json:"terminal_status"`
-	}{intent.ProjectID, intent.Namespace, intent.CandidateID, intent.ExpectedCandidateRevision, intent.CandidateDigest, intent.Action, intent.EntityID, intent.ResultFingerprint, intent.TerminalStatus}
+		PreparedAt                string `json:"prepared_at"`
+	}{intent.ProjectID, intent.Namespace, intent.CandidateID, intent.ExpectedCandidateRevision, intent.CandidateDigest, intent.Action, intent.EntityID, intent.ResultFingerprint, intent.TerminalStatus, intent.PreparedAt}
 	body, err := strictjson.Encode(identity)
 	if err != nil {
 		return ""

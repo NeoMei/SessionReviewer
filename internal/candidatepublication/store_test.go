@@ -98,3 +98,43 @@ func TestIntentStoreRejectsConflictingIdentityAndUnsafeRoots(t *testing.T) {
 		t.Fatal("relative data root accepted")
 	}
 }
+
+func TestAbortedIntentDoesNotBlockFreshRetry(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := OpenStore(root, "project-p", "problems")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 9, 17, 0, 0, 0, time.UTC)
+	input := IntentInput{
+		ProjectID: "project-p", Namespace: "problems", CandidateID: "candidate-1", ExpectedCandidateRevision: 1,
+		CandidateDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Action:          "apply_root", EntityID: "problem-1",
+		ResultFingerprint: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		TerminalStatus:    "applied", PreparedAt: at,
+	}
+	first, err := NewIntent(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Prepare(first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Transition(first.OperationID, first.Revision, StateAborted, at.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	input.PreparedAt = at.Add(2 * time.Second)
+	retry, err := NewIntent(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.OperationID == first.OperationID {
+		t.Fatal("fresh retry reused the aborted operation ID")
+	}
+	if _, err := store.Prepare(retry); err != nil {
+		t.Fatalf("fresh retry prepare err=%v", err)
+	}
+}
