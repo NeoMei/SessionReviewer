@@ -12,7 +12,7 @@ import (
 )
 
 func TestCandidateStorePersistsCASLifecycleAndPreservesOtherKinds(t *testing.T) {
-	dataRoot := t.TempDir()
+	dataRoot := privateDecisionTempDir(t)
 	store, err := OpenStore(dataRoot, "project-p")
 	if err != nil {
 		t.Fatal(err)
@@ -44,14 +44,14 @@ func TestCandidateStorePersistsCASLifecycleAndPreservesOtherKinds(t *testing.T) 
 	if loaded.Annotations[1].Text != beforeMilestone.Text || loaded.Annotations[1].Revision != beforeMilestone.Revision || loaded.Annotations[1].Status != beforeMilestone.Status {
 		t.Fatalf("unrelated milestone candidate changed: before=%+v after=%+v", beforeMilestone, loaded.Annotations[1])
 	}
-	info, err := os.Stat(filepath.Join(dataRoot, "projects", "project-p", "agent-annotations.json"))
+	info, err := os.Stat(filepath.Join(dataRoot, "projects", "project-p", "annotations", "head.json"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("private store mode=%v err=%v", info.Mode(), err)
 	}
 }
 
 func TestCandidateStoreFiltersDecisionKindsAndRejectsStaleRevision(t *testing.T) {
-	store, err := OpenStore(t.TempDir(), "project-p")
+	store, err := OpenStore(privateDecisionTempDir(t), "project-p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,13 +76,20 @@ func TestCandidateStoreNotDecisionAndRestoreStateTable(t *testing.T) {
 	}{{annotation.CandidatePending, "not_decision", annotation.CandidateNotDecision, true}, {annotation.CandidatePending, "restore", "", false}, {annotation.CandidateIgnored, "restore", annotation.CandidatePending, true}, {annotation.CandidateIgnored, "not_decision", "", false}, {annotation.CandidateNotDecision, "restore", "", false}, {annotation.CandidateStale, "restore", "", false}}
 	for _, test := range tests {
 		t.Run(string(test.start)+"_"+test.action, func(t *testing.T) {
-			store, _ := OpenStore(t.TempDir(), "project-p")
+			store, _ := OpenStore(privateDecisionTempDir(t), "project-p")
 			record := candidateStoreRecord("project-p")
-			record.Annotations[0].Status = test.start
 			if err := store.ReplaceAbsent(record); err != nil {
 				t.Fatal(err)
 			}
-			got, err := store.Transition("candidate-1", 1, test.action, "", time.Now())
+			revision := 1
+			if test.start != annotation.CandidatePending {
+				seedAction := map[annotation.CandidateStatus]string{annotation.CandidateIgnored: "ignore", annotation.CandidateNotDecision: "not_decision", annotation.CandidateStale: "stale"}[test.start]
+				if _, err := store.Transition("candidate-1", revision, seedAction, "", time.Now()); err != nil {
+					t.Fatal(err)
+				}
+				revision++
+			}
+			got, err := store.Transition("candidate-1", revision, test.action, "", time.Now())
 			if test.ok && (err != nil || got.Status != test.want) {
 				t.Fatalf("got=%+v err=%v", got, err)
 			}
@@ -94,7 +101,7 @@ func TestCandidateStoreNotDecisionAndRestoreStateTable(t *testing.T) {
 }
 
 func TestCandidateStoreCommitsCompletedExtractionAndWatermarkAtomically(t *testing.T) {
-	store, err := OpenStore(t.TempDir(), "project-p")
+	store, err := OpenStore(privateDecisionTempDir(t), "project-p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +134,15 @@ func candidateStoreRecord(projectID string) annotation.StoreRecord {
 	digest := "sha256:" + strings.Repeat("1", 64)
 	return annotation.StoreRecord{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: projectID, Annotations: []annotation.Annotation{
 		{ID: "candidate-1", ProjectID: projectID, AnnotationKind: "decision_candidate", EntityID: &entity, Field: &field, Status: annotation.CandidatePending, Text: `{"schema_version":1,"kind":"decision","occurred_at":"2026-09-09","title":"Candidate","rationale":"Reason","impact":"Impact","status":"active","reevaluate_when":"Later","supersedes":[],"milestone_ids":[],"session_refs":[],"pinned":false}`, GenerationID: "generation-1", SchemaVersion: 1, AnalysisProfile: "decision-extract-v1", AgentRunID: "run-1", Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-1", Digest: digest}}, Revision: 1, CreatedAt: "2026-09-09T00:00:00Z"},
-		{ID: "summary-1", ProjectID: projectID, AnnotationKind: "milestone_conclusion_candidate", Status: annotation.CandidatePending, Text: "Keep me exact", GenerationID: "generation-1", SchemaVersion: 1, AnalysisProfile: "summary-v1", AgentRunID: "run-1", Dependencies: []annotation.Dependency{{Kind: "source_turn", RevisionID: "turn-1", Digest: digest}}, Revision: 7, CreatedAt: "2026-09-09T00:00:00Z", TargetMilestoneID: &milestone, PromptSchemaVersion: &prompt},
+		{ID: "summary-1", ProjectID: projectID, AnnotationKind: "milestone_conclusion_candidate", Status: annotation.CandidatePending, Text: "Keep me exact", GenerationID: "generation-1", SchemaVersion: 1, AnalysisProfile: "summary-v1", AgentRunID: "run-1", Dependencies: []annotation.Dependency{{Kind: "source_turn", RevisionID: "turn-1", Digest: digest}}, Revision: 1, CreatedAt: "2026-09-09T00:00:00Z", TargetMilestoneID: &milestone, PromptSchemaVersion: &prompt},
 	}, ExtractionRuns: []annotation.Run{{RunID: "run-1", ProjectID: projectID, Status: "completed", ExtractorVersion: "decision-extract-v1", PromptSchemaVersion: "decision-candidate-v1", DependencyDigests: []string{digest}, CreatedAt: "2026-09-09T00:00:00Z", UpdatedAt: "2026-09-09T00:00:01Z"}}}
+}
+
+func privateDecisionTempDir(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

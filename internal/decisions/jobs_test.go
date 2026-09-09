@@ -11,7 +11,7 @@ import (
 )
 
 func TestExtractionJobStoreUsesRevisionCASAndStableIdentity(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	digest := "sha256:" + strings.Repeat("1", 64)
 	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
 	job := ExtractionJob{SchemaVersion: 1, JobID: ExtractionIdentity("project-p", []string{digest}), ProjectID: "project-p", GenerationID: "generation-1", State: ExtractionQueued, Revision: 1, DependencyDigests: []string{digest}, CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano)}
@@ -40,7 +40,7 @@ func TestExtractionJobStoreUsesRevisionCASAndStableIdentity(t *testing.T) {
 }
 
 func TestExtractionJobStartIsIdempotentForSameNewDependencies(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	digest := "sha256:" + strings.Repeat("1", 64)
 	launches := 0
 	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
@@ -58,7 +58,7 @@ func TestExtractionJobStartIsIdempotentForSameNewDependencies(t *testing.T) {
 func TestExtractionJobStartRetriesFailedAndCancelledAttempts(t *testing.T) {
 	for _, terminal := range []ExtractionState{ExtractionFailed, ExtractionCancelled} {
 		t.Run(string(terminal), func(t *testing.T) {
-			root := t.TempDir()
+			root := privateDecisionTempDir(t)
 			digest := "sha256:" + strings.Repeat("1", 64)
 			now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
 			store, err := OpenExtractionJobStore(root)
@@ -88,7 +88,7 @@ func TestExtractionJobStartRetriesFailedAndCancelledAttempts(t *testing.T) {
 }
 
 func TestExtractionJobStartWithNoNewDependenciesCompletesWithoutLaunch(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	launches := 0
 	job, err := StartExtraction(StartExtractionOptions{
 		DataRoot:             root,
@@ -110,7 +110,7 @@ func TestExtractionJobStartWithNoNewDependenciesCompletesWithoutLaunch(t *testin
 }
 
 func TestExtractionJobCompletionSerializesCandidateCommitAgainstCancel(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
 	job := runningExtractionJob(t, root, now)
 	store, err := OpenExtractionJobStore(root)
@@ -155,7 +155,7 @@ func TestExtractionJobCompletionSerializesCandidateCommitAgainstCancel(t *testin
 }
 
 func TestExtractionJobCancelPreventsCandidateCommit(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
 	job := runningExtractionJob(t, root, now)
 	store, err := OpenExtractionJobStore(root)
@@ -177,7 +177,7 @@ func TestExtractionJobCancelPreventsCandidateCommit(t *testing.T) {
 }
 
 func TestExtractionJobCompletionCommitsCandidateStoreWithoutNestedLock(t *testing.T) {
-	root := t.TempDir()
+	root := privateDecisionTempDir(t)
 	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
 	job := runningExtractionJob(t, root, now)
 	jobStore, err := OpenExtractionJobStore(root)
@@ -201,6 +201,77 @@ func TestExtractionJobCompletionCommitsCandidateStoreWithoutNestedLock(t *testin
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("candidate commit deadlocked under extraction job lock")
+	}
+}
+
+func TestExtractionJobReconcilesCommittedCandidatesAfterProjectionWriteFailure(t *testing.T) {
+	root := privateDecisionTempDir(t)
+	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
+	job := runningExtractionJob(t, root, now)
+	jobStore, err := OpenExtractionJobStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateStore, err := OpenStore(root, job.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := annotation.Run{RunID: job.JobID, ProjectID: job.ProjectID, Status: "completed", ExtractorVersion: ExtractorVersion, PromptSchemaVersion: PromptSchemaVersion, DependencyDigests: append([]string{}, job.DependencyDigests...), CreatedAt: job.CreatedAt, UpdatedAt: now.Add(time.Second).Format(time.RFC3339Nano)}
+	jobStore.writeHook = func(next ExtractionJob) error {
+		if next.State == ExtractionCompleted {
+			return errors.New("injected job projection failure")
+		}
+		return nil
+	}
+	if _, err := jobStore.CompleteExtraction(job.JobID, job.Revision, candidateStore, run, []annotation.Annotation{}, now.Add(time.Second)); !errors.Is(err, ErrExtractionJobProjectionPending) {
+		t.Fatalf("complete err=%v", err)
+	}
+	committed, err := candidateStore.Load()
+	if err != nil || len(committed.ExtractionRuns) != 1 || !SuccessfulExtractionDependencies(committed)[job.DependencyDigests[0]] {
+		t.Fatalf("candidate commit=%+v err=%v", committed, err)
+	}
+	restarted, err := OpenExtractionJobStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := restarted.LoadReconciled(job.JobID, now.Add(2*time.Second))
+	if err != nil || reconciled.State != ExtractionCompleted || reconciled.Revision != job.Revision+1 || reconciled.CandidateCount != 0 {
+		t.Fatalf("reconciled=%+v err=%v", reconciled, err)
+	}
+}
+
+func TestExtractionJobCancelReconcilesCommittedCandidateAuthority(t *testing.T) {
+	root := privateDecisionTempDir(t)
+	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
+	job := runningExtractionJob(t, root, now)
+	jobStore, _ := OpenExtractionJobStore(root)
+	candidateStore, _ := OpenStore(root, job.ProjectID)
+	run := annotation.Run{RunID: job.JobID, ProjectID: job.ProjectID, Status: "completed", ExtractorVersion: ExtractorVersion, PromptSchemaVersion: PromptSchemaVersion, DependencyDigests: append([]string{}, job.DependencyDigests...), CreatedAt: job.CreatedAt, UpdatedAt: now.Add(time.Second).Format(time.RFC3339Nano)}
+	if err := candidateStore.CommitExtraction(run, []annotation.Annotation{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobStore.Cancel(job.JobID, job.Revision, now.Add(2*time.Second)); !errors.Is(err, ErrExtractionJobRevisionConflict) {
+		t.Fatalf("cancel after candidate authority err=%v", err)
+	}
+	loaded, err := jobStore.Load(job.JobID)
+	if err != nil || loaded.State != ExtractionCompleted || loaded.Revision != job.Revision+1 {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+}
+
+func TestExtractionCandidateWriteFailureDoesNotAdvanceWatermark(t *testing.T) {
+	root := privateDecisionTempDir(t)
+	now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
+	job := runningExtractionJob(t, root, now)
+	jobStore, _ := OpenExtractionJobStore(root)
+	candidateStore, _ := OpenStore(root, job.ProjectID)
+	run := annotation.Run{RunID: job.JobID, ProjectID: job.ProjectID, Status: "failed", ExtractorVersion: ExtractorVersion, PromptSchemaVersion: PromptSchemaVersion, DependencyDigests: append([]string{}, job.DependencyDigests...), CreatedAt: job.CreatedAt, UpdatedAt: now.Add(time.Second).Format(time.RFC3339Nano)}
+	if _, err := jobStore.CompleteExtraction(job.JobID, job.Revision, candidateStore, run, []annotation.Annotation{}, now.Add(time.Second)); err == nil {
+		t.Fatal("invalid candidate commit succeeded")
+	}
+	record, err := candidateStore.Load()
+	if err != nil || len(record.ExtractionRuns) != 0 || len(SuccessfulExtractionDependencies(record)) != 0 {
+		t.Fatalf("failed commit advanced watermark: record=%+v err=%v", record, err)
 	}
 }
 

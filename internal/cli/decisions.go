@@ -133,9 +133,9 @@ func runDecisionExtraction(request DecisionRequest, stdout, stderr io.Writer) in
 	if request.Subcommand == "status" {
 		var job any
 		if request.JobID != "" {
-			job, err = store.Load(request.JobID)
+			job, err = store.LoadReconciled(request.JobID, time.Now())
 		} else {
-			job, err = store.Latest(request.ProjectID)
+			job, err = store.LatestReconciled(request.ProjectID, time.Now())
 		}
 		if err != nil {
 			return writeDecisionError(stdout, err)
@@ -238,19 +238,15 @@ func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID strin
 	}
 	defer memoryStore.Close()
 	generationID, manifest, err := memoryStore.LoadPublishedContext(ctx)
-	if err != nil || generationID != job.GenerationID {
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "source_unavailable")
+	}
+	dependencies, err := currentDecisionExtractionDependencies(job, manifest)
+	if err != nil {
 		return failDecisionWorker(jobStore, job, "generation_changed")
 	}
-	requested := map[string]bool{}
-	for _, digest := range job.DependencyDigests {
-		requested[digest] = true
-	}
-	dependencies := make([]memory.ConversationChainDependency, 0, len(requested))
 	chains := map[string]conversationchain.Document{}
-	for _, dependency := range manifest.ConversationChains {
-		if !requested[dependency.SessionViewDigest] {
-			continue
-		}
+	for _, dependency := range dependencies {
 		body, loadErr := memoryStore.LoadObjectContext(ctx, memorystore.ObjectConversationChain, dependency.Digest)
 		if loadErr != nil {
 			return failDecisionWorker(jobStore, job, "source_unavailable")
@@ -259,11 +255,7 @@ func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID strin
 		if parseErr != nil {
 			return failDecisionWorker(jobStore, job, "source_invalid")
 		}
-		dependencies = append(dependencies, dependency)
 		chains[dependency.SessionViewDigest] = chain
-	}
-	if len(dependencies) != len(requested) {
-		return failDecisionWorker(jobStore, job, "generation_changed")
 	}
 	batches, schema, err := decisions.BuildExtractionBatches(projectID, dependencies, chains)
 	if err != nil {
@@ -322,10 +314,31 @@ func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID strin
 	if errors.Is(err, decisions.ErrExtractionJobRevisionConflict) {
 		return errors.New("decision extraction was cancelled before candidate commit")
 	}
+	if errors.Is(err, decisions.ErrExtractionJobProjectionPending) {
+		return nil
+	}
 	if err != nil {
 		return failDecisionWorker(jobStore, job, "store_failed")
 	}
 	return nil
+}
+
+func currentDecisionExtractionDependencies(job decisions.ExtractionJob, manifest memory.GenerationManifest) ([]memory.ConversationChainDependency, error) {
+	requested := map[string]bool{}
+	for _, digest := range job.DependencyDigests {
+		requested[digest] = true
+	}
+	result := make([]memory.ConversationChainDependency, 0, len(requested))
+	for _, dependency := range manifest.ConversationChains {
+		if requested[dependency.SessionViewDigest] {
+			result = append(result, dependency)
+			delete(requested, dependency.SessionViewDigest)
+		}
+	}
+	if len(requested) != 0 {
+		return nil, errors.New("decision extraction dependency changed")
+	}
+	return result, nil
 }
 
 func mergeDecisionCandidateEvidence(left, right annotation.Annotation) (annotation.Annotation, error) {

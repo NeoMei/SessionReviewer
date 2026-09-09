@@ -123,6 +123,20 @@ func TestNewDecisionExtractionDigestsPagesDeterministicallyWithoutAdvancingUnpro
 	}
 }
 
+func TestCurrentDecisionExtractionDependenciesAllowNewGenerationWithSameViews(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	job := decisions.ExtractionJob{GenerationID: "generation-before-rescan", DependencyDigests: []string{digest}}
+	manifest := memory.GenerationManifest{GenerationID: "generation-after-rescan", ConversationChains: []memory.ConversationChainDependency{{Provider: "codex", SessionID: "session-1", SessionViewDigest: digest, Digest: "sha256:" + strings.Repeat("2", 64)}}}
+	dependencies, err := currentDecisionExtractionDependencies(job, manifest)
+	if err != nil || len(dependencies) != 1 || dependencies[0].SessionViewDigest != digest {
+		t.Fatalf("dependencies=%+v err=%v", dependencies, err)
+	}
+	job.DependencyDigests[0] = "sha256:" + strings.Repeat("3", 64)
+	if _, err := currentDecisionExtractionDependencies(job, manifest); err == nil {
+		t.Fatal("changed SessionView dependency was accepted")
+	}
+}
+
 func TestDecisionsEditRejectsStaleReviewAndEntityRevisions(t *testing.T) {
 	fixture := newCLIAuthenticatedMarkdownFixture(t)
 	review := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)

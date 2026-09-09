@@ -189,7 +189,7 @@ func TestExtractionBatchesCombineIntoOneCommittedWatermark(t *testing.T) {
 	for _, candidate := range byID {
 		candidates = append(candidates, candidate)
 	}
-	store, err := OpenStore(t.TempDir(), "project-p")
+	store, err := OpenStore(privateDecisionTempDir(t), "project-p")
 	if err != nil {
 		t.Fatal(err)
 	}

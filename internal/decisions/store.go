@@ -1,17 +1,16 @@
 package decisions
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
-	"runtime"
 	"sort"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
-	"github.com/neomei/SessionReviewer/internal/atomicfile"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
 
@@ -24,33 +23,29 @@ var (
 type Store struct {
 	dataRoot  string
 	projectID string
-	path      string
 }
 
 func OpenStore(dataRoot, projectID string) (*Store, error) {
 	if !filepath.IsAbs(dataRoot) || filepath.Clean(dataRoot) != dataRoot || !storeIDPattern.MatchString(projectID) {
 		return nil, errors.New("decision store requires an absolute data root and valid project ID")
 	}
-	return &Store{dataRoot: dataRoot, projectID: projectID, path: filepath.Join(dataRoot, "projects", projectID, "agent-annotations.json")}, nil
+	return &Store{dataRoot: dataRoot, projectID: projectID}, nil
 }
 
 func (s *Store) Load() (annotation.StoreRecord, error) {
-	body, err := os.ReadFile(s.path)
-	if errors.Is(err, os.ErrNotExist) {
+	store, err := annotation.OpenStoreReadOnly(s.dataRoot, s.projectID)
+	if err != nil {
+		return annotation.StoreRecord{}, err
+	}
+	defer store.Close()
+	state, err := store.Load(context.Background())
+	if errors.Is(err, annotation.ErrStoreNotFound) {
 		return emptyStoreRecord(s.projectID), nil
 	}
 	if err != nil {
 		return annotation.StoreRecord{}, err
 	}
-	info, err := os.Lstat(s.path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		return annotation.StoreRecord{}, errors.New("decision candidate store is not a private regular file")
-	}
-	record, err := annotation.Parse(body)
-	if err != nil || record.ProjectID != s.projectID {
-		return annotation.StoreRecord{}, errors.Join(errors.New("decision candidate store is invalid"), err)
-	}
-	return record, nil
+	return state.Record, nil
 }
 
 func (s *Store) ReplaceAbsent(record annotation.StoreRecord) error {
@@ -100,6 +95,29 @@ func (s *Store) CommitExtraction(run annotation.Run, candidates []annotation.Ann
 	return s.mutate(func(record *annotation.StoreRecord, _ bool) error {
 		return applyExtraction(record, s.projectID, run, candidates)
 	})
+}
+
+func (s *Store) completedExtraction(job ExtractionJob) (int, bool, error) {
+	record, err := s.Load()
+	if err != nil {
+		return 0, false, err
+	}
+	for _, run := range record.ExtractionRuns {
+		if run.RunID != job.JobID {
+			continue
+		}
+		if run.ProjectID != job.ProjectID || run.Status != "completed" || run.ExtractorVersion != ExtractorVersion || run.PromptSchemaVersion != PromptSchemaVersion || !reflect.DeepEqual(run.DependencyDigests, job.DependencyDigests) {
+			return 0, false, ErrCandidateRevisionConflict
+		}
+		count := 0
+		for _, candidate := range record.Annotations {
+			if candidate.AgentRunID == run.RunID {
+				count++
+			}
+		}
+		return count, true, nil
+	}
+	return 0, false, nil
 }
 
 func applyExtraction(record *annotation.StoreRecord, projectID string, run annotation.Run, candidates []annotation.Annotation) error {
@@ -220,50 +238,40 @@ func (s *Store) Transition(id string, expectedRevision int, action, confirmedEnt
 }
 
 func (s *Store) mutate(change func(*annotation.StoreRecord, bool) error) (retErr error) {
-	return withDecisionControlLock(s.dataRoot, func() error { return s.mutateUnlocked(change) })
+	return s.mutateUnlocked(change)
 }
 
 func (s *Store) mutateUnlocked(change func(*annotation.StoreRecord, bool) error) error {
-	projectDir := filepath.Dir(s.path)
-	if err := os.MkdirAll(projectDir, 0o700); err != nil {
-		return err
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(projectDir, 0o700); err != nil {
-			return err
-		}
-	}
-	_, statErr := os.Lstat(s.path)
-	existed := statErr == nil
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return statErr
-	}
-	record, err := s.Load()
+	store, err := annotation.OpenStore(s.dataRoot, s.projectID)
 	if err != nil {
 		return err
 	}
+	defer store.Close()
+	state, loadErr := store.Load(context.Background())
+	existed := loadErr == nil
+	if errors.Is(loadErr, annotation.ErrStoreNotFound) {
+		state = annotation.StoredState{Record: emptyStoreRecord(s.projectID)}
+	} else if loadErr != nil {
+		return loadErr
+	}
+	record := cloneStoreRecord(state.Record)
 	if err := change(&record, existed); err != nil {
 		return err
 	}
 	if err := validateStoredSemantics(record, s.projectID); err != nil {
 		return err
 	}
-	body, err := annotation.Render(record)
-	if err != nil {
-		return err
+	_, err = store.CompareAndSwap(context.Background(), state.Revision, state.Digest, record)
+	if errors.Is(err, annotation.ErrCandidateRevisionConflict) {
+		return ErrCandidateRevisionConflict
 	}
-	return atomicfile.Write(s.path, body, 0o600)
+	return err
 }
 
 func withDecisionControlLock(dataRoot string, operation func() error) (retErr error) {
 	lockDir := filepath.Join(dataRoot, "decision-extraction-jobs")
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		return err
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(lockDir, 0o700); err != nil {
-			return err
-		}
 	}
 	root, err := os.OpenRoot(dataRoot)
 	if err != nil {

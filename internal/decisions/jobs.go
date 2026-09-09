@@ -25,8 +25,9 @@ const (
 )
 
 var (
-	ErrExtractionJobRevisionConflict = errors.New("extraction job revision conflict")
-	extractionID                     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	ErrExtractionJobRevisionConflict  = errors.New("extraction job revision conflict")
+	ErrExtractionJobProjectionPending = errors.New("extraction candidate commit awaits job projection")
+	extractionID                      = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 )
 
 type ExtractionJob struct {
@@ -45,8 +46,9 @@ type ExtractionJob struct {
 }
 
 type ExtractionJobStore struct {
-	dataRoot string
-	root     string
+	dataRoot  string
+	root      string
+	writeHook func(ExtractionJob) error
 }
 
 func OpenExtractionJobStore(dataRoot string) (*ExtractionJobStore, error) {
@@ -108,6 +110,19 @@ func (s *ExtractionJobStore) Load(jobID string) (ExtractionJob, error) {
 	return job, nil
 }
 
+func (s *ExtractionJobStore) LoadReconciled(jobID string, now time.Time) (ExtractionJob, error) {
+	var result ExtractionJob
+	err := s.withLock(func() error {
+		job, err := s.Load(jobID)
+		if err != nil {
+			return err
+		}
+		result, err = s.reconcileCompletionUnlocked(job, now)
+		return err
+	})
+	return result, err
+}
+
 func (s *ExtractionJobStore) Latest(projectID string) (*ExtractionJob, error) {
 	if !extractionID.MatchString(projectID) {
 		return nil, errors.New("invalid extraction project ID")
@@ -131,6 +146,15 @@ func (s *ExtractionJobStore) Latest(projectID string) (*ExtractionJob, error) {
 		}
 	}
 	return latest, nil
+}
+
+func (s *ExtractionJobStore) LatestReconciled(projectID string, now time.Time) (*ExtractionJob, error) {
+	latest, err := s.Latest(projectID)
+	if err != nil || latest == nil {
+		return latest, err
+	}
+	job, err := s.LoadReconciled(latest.JobID, now)
+	return &job, err
 }
 
 func (s *ExtractionJobStore) CompareAndSwap(job ExtractionJob, expectedRevision int) error {
@@ -178,6 +202,10 @@ func (s *ExtractionJobStore) Cancel(jobID string, expectedRevision int, now time
 	err := s.withLock(func() error {
 		var err error
 		current, err = s.Load(jobID)
+		if err != nil {
+			return err
+		}
+		current, err = s.reconcileCompletionUnlocked(current, now)
 		if err != nil {
 			return err
 		}
@@ -247,9 +275,38 @@ func (s *ExtractionJobStore) CompleteExtraction(jobID string, expectedRevision i
 			return err
 		}
 		current.State, current.PID, current.CandidateCount, current.Revision, current.UpdatedAt = ExtractionCompleted, 0, len(candidates), current.Revision+1, now.UTC().Format(time.RFC3339Nano)
-		return s.compareAndSwapUnlocked(current, expectedRevision)
+		if err := s.compareAndSwapUnlocked(current, expectedRevision); err != nil {
+			count, committed, verifyErr := candidateStore.completedExtraction(current)
+			if verifyErr == nil && committed && count == len(candidates) {
+				return ErrExtractionJobProjectionPending
+			}
+			return errors.Join(err, verifyErr)
+		}
+		return nil
 	})
 	return current, err
+}
+
+func (s *ExtractionJobStore) reconcileCompletionUnlocked(job ExtractionJob, now time.Time) (ExtractionJob, error) {
+	if job.State == ExtractionCompleted {
+		return job, nil
+	}
+	candidateStore, err := OpenStore(s.dataRoot, job.ProjectID)
+	if err != nil {
+		return ExtractionJob{}, err
+	}
+	count, committed, err := candidateStore.completedExtraction(job)
+	if err != nil || !committed {
+		return job, err
+	}
+	prior := job.Revision
+	job.State, job.PID, job.CandidateCount, job.ErrorCode = ExtractionCompleted, 0, count, ""
+	job.Revision++
+	job.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+	if err := s.compareAndSwapUnlocked(job, prior); err != nil {
+		return ExtractionJob{}, err
+	}
+	return job, nil
 }
 
 func (s *ExtractionJobStore) AuthorizeWorker(jobID string, pid, expectedRevision int, now time.Time) (ExtractionJob, error) {
@@ -272,6 +329,11 @@ func (s *ExtractionJobStore) AuthorizeWorker(jobID string, pid, expectedRevision
 
 func (s *ExtractionJobStore) path(id string) string { return filepath.Join(s.root, id+".json") }
 func (s *ExtractionJobStore) write(job ExtractionJob) error {
+	if s.writeHook != nil {
+		if err := s.writeHook(job); err != nil {
+			return err
+		}
+	}
 	body, err := strictjson.Encode(job)
 	if err != nil {
 		return err
@@ -302,7 +364,7 @@ func StartExtraction(options StartExtractionOptions) (ExtractionJob, error) {
 	}
 	id := ExtractionIdentity(options.ProjectID, options.NewDependencyDigests)
 	var job ExtractionJob
-	if existing, loadErr := store.Load(id); loadErr == nil {
+	if existing, loadErr := store.LoadReconciled(id, now()); loadErr == nil {
 		if existing.State != ExtractionFailed && existing.State != ExtractionCancelled {
 			return existing, nil
 		}
