@@ -114,3 +114,26 @@ The no-op path returns the old accepted generation and exact bytes only when the
 - The no-op verifier consumes the existing `MarkdownSyncPlan` rather than adding another preimage type. It narrows that interface by requiring exactly the four canonical files and binds the supplied index bytes to the canonical index file, parsed project/generation/view/digest, accepted receipt index guard, and live bytes. `ProjectViewDigest` remains an exact equality gate; changed Git facts still publish normally.
 - No capability baseline was relaxed: the new process assertion derives current records with the existing cross-platform visitor and fails on additions. No model/network/provider capability, public configuration seam, production adapter registration, pricing path, Vault outside the temporary fixtures, release, merge, or push was added.
 - Concern boundary unchanged: native Claude/OpenCode discovery/acceptance and full-product release acceptance remain separate controller tasks.
+
+## Review fix round 2 (2026-09-09)
+
+### Finding closed
+
+- `VerifyMarkdownScanNoOpLocked` now binds all four caller-supplied no-op files to the already validated accepted receipt. Review, history, and ledger hashes and exact Project/Vault destination paths must match `receipt.Destinations`; the index bytes and exact Project/Vault index paths must match `receipt.IndexGuard`. A receipt from an ordinary four-file scan has eight destinations; a receipt from an accepted human edit has six destinations plus the separately guarded unchanged index. No verification write was added.
+
+### TDD / regression evidence
+
+- RED with the production guard restored to `9d30cc0`: `go test ./internal/publication -run TestMarkdownScanNoOpRejectsLiveBytesDetachedFromAcceptedReceipt -count=1 -v` -> FAIL, `4.896s`; matching arbitrary live/caller bytes detached from the accepted receipt were accepted for review, history, ledger, and index.
+- RED for authenticated receipt metadata tampering with the production guard restored to `9d30cc0`: `go test ./internal/publication -run TestMarkdownScanNoOpBindsAcceptedDestinationHashesAndMapping -count=1 -v` -> FAIL, `10.336s`; re-signed destination hash/path, index-guard hash/path, and a fully populated foreign configured Vault mapping were all accepted.
+- GREEN focused regression: `go test ./internal/publication -run 'TestMarkdownScanNoOp(RejectsLiveBytesDetachedFromAcceptedReceipt|AcceptsHumanEditReceiptWithGuardedIndex|BindsAcceptedDestinationHashesAndMapping)$' -count=1` -> PASS, `15.139s`.
+- GREEN affected suites: `go test ./internal/publication ./internal/contextupdate -count=1` -> PASS: publication `150.504s`, contextupdate `24.559s`.
+- GREEN focused race: `go test -race ./internal/publication -run 'TestMarkdownScanNoOp(RejectsLiveBytesDetachedFromAcceptedReceipt|AcceptsHumanEditReceiptWithGuardedIndex|BindsAcceptedDestinationHashesAndMapping|IsReadOnlyAndHonorsCancellationAndOwnership|ReturnsCancellationThatArrivesDuringFinalRead)$' -count=1` -> PASS, `17.930s`.
+- GREEN static checks: `go vet ./internal/publication ./internal/contextupdate` -> exit 0/no output; scoped `git diff --check` -> exit 0/no output.
+- Controller independent evidence, not substituted for owned tests: original detached-live-bytes overlay GREEN `3.355s`; real human-edit six-destination receipt plus guarded-index no-op GREEN `2.360s`; actual CLI lifecycle GREEN `8.553s`.
+
+### Files and self-review
+
+- Production/test: `internal/publication/markdown.go`, `internal/publication/markdown_test.go`; report: this file.
+- The helper consumes only the receipt's established destination and index-guard metadata; it adds no root-identity schema, mapping read, caller bypass, or write. Receipt validation/revision authentication remains authoritative before this coherence check.
+- Owned positives cover both valid receipt layouts and return all eight live verified files. Negatives alter both caller and live files where required, or install a complete foreign Vault tree, so rejection is specifically due to accepted hash/path binding rather than a missing-file shortcut. Failed checks preserve all live public bytes.
+- No broader production capability, provider registration, plugin change, model/network action, release, merge, or push was added.

@@ -501,6 +501,169 @@ func TestMarkdownScanNoOpRejectsIncompleteOrMismatchedIdentity(t *testing.T) {
 	}
 }
 
+func TestMarkdownScanNoOpRejectsLiveBytesDetachedFromAcceptedReceipt(t *testing.T) {
+	for mutationIndex, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath} {
+		t.Run(filepath.Base(relative), func(t *testing.T) {
+			env := setupMarkdownPublication(t, fmt.Sprintf("project-markdown-noop-detached-%d", mutationIndex))
+			scan := currentMarkdownNoOpPlanForTest(t, env)
+			changed := append(bytes.Clone(scan.Plan.Files[0].Desired), []byte("\ndetached-live-bytes\n")...)
+			for index := range scan.Plan.Files {
+				if scan.Plan.Files[index].Relative != relative {
+					continue
+				}
+				if relative == sessionIndexRelativePath {
+					changed = append(bytes.Clone(scan.Plan.Files[index].Desired), ' ')
+					scan.Index = bytes.Clone(changed)
+				}
+				scan.Plan.Files[index].Expected = bytes.Clone(changed)
+				scan.Plan.Files[index].Desired = bytes.Clone(changed)
+				scan.VaultExpected[relative] = bytes.Clone(changed)
+				if err := os.WriteFile(filepath.Join(env.projectRoot, filepath.FromSlash(relative)), changed, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, relative))), changed, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, verifyErr := VerifyMarkdownScanNoOpLocked(t.Context(), env.publishOptions(), scan, owner)
+			if releaseErr := owner.Release(); releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			if verifyErr == nil {
+				t.Fatal("caller detached matching live bytes from accepted receipt")
+			}
+		})
+	}
+}
+
+func TestMarkdownScanNoOpAcceptsHumanEditReceiptWithGuardedIndex(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-noop-human-receipt")
+	accepted := loadMarkdownProjectionForTest(t, env)
+	projectReview := filepath.Join(env.projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	edited := replaceMarkdownFieldForTest(t, readTestFile(t, projectReview), "project-overview", "goal", accepted.Review.CurrentState.Goal, "accepted human goal")
+	if err := os.WriteFile(projectReview, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	edit := captureMarkdownPlanForTest(t, env)
+	owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PublishMarkdownEditLocked(t.Context(), env.publishOptions(), edit, owner); err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	receipt := loadAcceptedReceiptForTest(t, env)
+	if len(receipt.Destinations) != 6 {
+		t.Fatalf("human edit receipt destinations = %d, want 6 plus guarded index", len(receipt.Destinations))
+	}
+
+	scan := currentMarkdownNoOpPlanForTest(t, env)
+	owner, err = publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, verifyErr := VerifyMarkdownScanNoOpLocked(t.Context(), env.publishOptions(), scan, owner)
+	if releaseErr := owner.Release(); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	if verifyErr != nil || len(result.ProjectFiles) != 4 || len(result.VaultFiles) != 4 {
+		t.Fatalf("human edit receipt no-op result=%+v err=%v", result, verifyErr)
+	}
+}
+
+func TestMarkdownScanNoOpBindsAcceptedDestinationHashesAndMapping(t *testing.T) {
+	tests := []struct {
+		name       string
+		mutate     func(*Intent)
+		mutateOpts func(*Options)
+	}{
+		{name: "destination hash", mutate: func(intent *Intent) {
+			intent.Destinations[0].DesiredSHA256 = strings.Repeat("f", 64)
+		}},
+		{name: "destination mapping", mutate: func(intent *Intent) {
+			intent.Destinations[0].Relative = "docs/session-review/.session-reviewer/foreign-ledger.json"
+		}},
+		{name: "index guard hashes", mutate: func(intent *Intent) {
+			intent.IndexGuard.ProjectSHA256 = strings.Repeat("f", 64)
+			intent.IndexGuard.VaultSHA256 = strings.Repeat("f", 64)
+		}},
+		{name: "index guard mapping", mutate: func(intent *Intent) {
+			intent.IndexGuard.VaultRelative = "foreign/session-index.json"
+		}},
+		{name: "configured Vault mapping", mutateOpts: func(opts *Options) {
+			opts.Mapping.VaultReviewPath = "Foreign Review"
+		}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			env := setupMarkdownPublication(t, fmt.Sprintf("project-markdown-noop-receipt-binding-%d", index))
+			scan := currentMarkdownNoOpPlanForTest(t, env)
+			opts := env.publishOptions()
+			if test.mutate != nil {
+				journal, err := OpenJournal(env.dataRoot, env.projectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				intent, err := journal.Load()
+				if err != nil {
+					_ = journal.Close()
+					t.Fatal(err)
+				}
+				intent.Stage, intent.Outcome = StageBaseCommitted, ""
+				test.mutate(&intent)
+				sort.Slice(intent.Destinations, func(i, j int) bool {
+					if intent.Destinations[i].Side != intent.Destinations[j].Side {
+						return intent.Destinations[i].Side < intent.Destinations[j].Side
+					}
+					return intent.Destinations[i].Relative < intent.Destinations[j].Relative
+				})
+				intent.RevisionID = MarkdownRevisionID(intent)
+				receipt, err := publicationstate.WriteAccepted(journal.dir.Root, intent)
+				closeErr := journal.Close()
+				if err != nil || closeErr != nil {
+					t.Fatal(errors.Join(err, closeErr))
+				}
+				scan.ExpectedReceiptRevision = receipt.RevisionID
+			}
+			if test.mutateOpts != nil {
+				test.mutateOpts(&opts)
+				for _, file := range scan.Plan.Files {
+					foreignRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, file.Relative)
+					if err := os.MkdirAll(filepath.Dir(filepath.Join(env.vaultRoot, filepath.FromSlash(foreignRelative))), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(env.vaultRoot, filepath.FromSlash(foreignRelative)), file.Desired, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			before := captureMarkdownPublicBytesForTest(t, env)
+			owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, verifyErr := VerifyMarkdownScanNoOpLocked(t.Context(), opts, scan, owner)
+			if releaseErr := owner.Release(); releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			if verifyErr == nil {
+				t.Fatal("detached accepted destination or mapping was accepted")
+			}
+			if after := captureMarkdownPublicBytesForTest(t, env); !reflect.DeepEqual(after, before) {
+				t.Fatal("receipt binding rejection changed public bytes")
+			}
+		})
+	}
+}
+
 func TestMarkdownScanNoOpIsReadOnlyAndHonorsCancellationAndOwnership(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-final-noop-boundaries")
 	scan := currentMarkdownNoOpPlanForTest(t, env)

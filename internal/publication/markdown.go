@@ -125,6 +125,9 @@ func VerifyMarkdownScanNoOpLocked(ctx context.Context, opts Options, scan syncpr
 		if err != nil || receipt.RevisionID != scan.ExpectedReceiptRevision || receipt.BaseDigest != scan.ExpectedBaseDigest || receipt.GenerationID != scan.ExpectedGenerationID || receipt.ProjectID != opts.ProjectID || receipt.ProjectViewDigest != scan.Plan.ProjectViewDigest || receipt.IndexGuard == nil || receipt.IndexGuard.Digest != scan.ExpectedIndexDigest || receipt.IndexGuard.GenerationID != scan.ExpectedGenerationID {
 			return errors.Join(errors.New("accepted Markdown receipt changed before no-op confirmation"), err)
 		}
+		if err := verifyMarkdownNoOpReceipt(receipt, opts.Mapping.VaultReviewPath, scan); err != nil {
+			return err
+		}
 		baseStore, closeBase, err := markdownBaseStore(opts)
 		if err != nil {
 			return err
@@ -177,6 +180,39 @@ func VerifyMarkdownScanNoOpLocked(ctx context.Context, opts Options, scan syncpr
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func verifyMarkdownNoOpReceipt(receipt AcceptedMarkdownReceipt, vaultReviewPath string, scan syncproject.MarkdownSyncPlan) error {
+	if len(receipt.Destinations) != 6 && len(receipt.Destinations) != 8 {
+		return errors.New("accepted Markdown receipt has incomplete no-op destinations")
+	}
+	includeIndexDestinations := len(receipt.Destinations) == 8
+	expected := make(map[string]string, len(receipt.Destinations))
+	for _, file := range scan.Plan.Files {
+		if file.Relative == sessionIndexRelativePath && !includeIndexDestinations {
+			continue
+		}
+		digest := sha256Hex(file.Desired)
+		expected["project\x00"+file.Relative] = digest
+		expected["vault\x00"+vaultRelativePath(vaultReviewPath, file.Relative)] = digest
+	}
+	for _, destination := range receipt.Destinations {
+		key := destination.Side + "\x00" + destination.Relative
+		digest, exists := expected[key]
+		if !exists || destination.DesiredSHA256 != digest {
+			return errors.New("accepted Markdown receipt destination differs from no-op bytes or mapping")
+		}
+		delete(expected, key)
+	}
+	if len(expected) != 0 {
+		return errors.New("accepted Markdown receipt omits a no-op destination")
+	}
+	indexHash := sha256Hex(scan.Index)
+	wantVaultIndex := vaultRelativePath(vaultReviewPath, sessionIndexRelativePath)
+	if receipt.IndexGuard == nil || receipt.IndexGuard.Relative != sessionIndexRelativePath || receipt.IndexGuard.VaultRelative != wantVaultIndex || receipt.IndexGuard.ProjectSHA256 != indexHash || receipt.IndexGuard.VaultSHA256 != indexHash {
+		return errors.New("accepted Markdown receipt index guard differs from no-op bytes or mapping")
+	}
+	return nil
 }
 
 // PublishMarkdownScan acquires publication ownership for an initial four-file
