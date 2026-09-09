@@ -210,8 +210,14 @@ func TestSnapshotGrowthBudgetIncludesCapturedSourceBuffers(t *testing.T) {
 	if len(main) != 4096 {
 		t.Fatalf("unexpected fixture base size %d", len(main))
 	}
-	if _, err := reconstructSQLite(context.Background(), main, wal, (512<<20)-8191); err == nil {
-		t.Fatal("growth allocation ignored still-live captured source buffers")
+	for _, limit := range []int64{maxSnapshotBytes, 3072 << 20} {
+		if _, err := reconstructSQLite(context.Background(), main, wal, limit-8191, limit); err == nil {
+			t.Fatal("growth allocation ignored still-live captured source buffers")
+		}
+		result, err := reconstructSQLite(context.Background(), main, wal, limit-8192, limit)
+		if err != nil || len(result) != 8192 {
+			t.Fatalf("exact configured growth budget rejected: length=%d err=%v", len(result), err)
+		}
 	}
 }
 

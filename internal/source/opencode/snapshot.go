@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/pathguard"
@@ -22,6 +23,20 @@ const (
 	maxSnapshotBytes int64 = 512 << 20
 	snapshotTimeout        = 10 * time.Second
 )
+
+// The default stays conservative. Large local stores require an explicit budget;
+// the aggregate bound includes captured WAL and any expanded database image.
+func snapshotByteLimit() (int64, error) {
+	value := os.Getenv("SESSION_REVIEWER_OPENCODE_SNAPSHOT_MIB")
+	if value == "" {
+		return maxSnapshotBytes, nil
+	}
+	mib, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || mib < 1 || mib > 4096 || mib<<20 > uint64(^uint(0)>>1) {
+		return 0, errors.New("SESSION_REVIEWER_OPENCODE_SNAPSHOT_MIB must be an integer from 1 to 4096 supported by this platform")
+	}
+	return int64(mib) << 20, nil
+}
 
 // withSnapshot never gives SQLite a source filesystem path. It reconstructs a
 // bounded database in RAM and registers only those immutable bytes with a
@@ -47,7 +62,11 @@ func withSnapshot(ctx context.Context, path string, use func(*sql.DB) error) err
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return errors.New("SQLite source path must be absolute and clean")
 	}
-	content, err := captureSQLite(ctx, path)
+	limit, err := snapshotByteLimit()
+	if err != nil {
+		return err
+	}
+	content, err := captureSQLite(ctx, path, limit)
 	if err != nil {
 		return fmt.Errorf("capture SQLite snapshot: %w", err)
 	}
@@ -86,7 +105,7 @@ type capturedSQLiteFile struct {
 	content []byte
 }
 
-func captureSQLite(ctx context.Context, path string) ([]byte, error) {
+func captureSQLite(ctx context.Context, path string, limit int64) ([]byte, error) {
 	dir, err := pathguard.Open(filepath.Dir(path))
 	if err != nil {
 		return nil, err
@@ -116,7 +135,7 @@ func captureSQLite(ctx context.Context, path string) ([]byte, error) {
 			return nil, err
 		}
 		files = append(files, capturedSQLiteFile{name: name, file: file, info: info})
-		if info.Size() < 0 || info.Size() > maxSnapshotBytes-total {
+		if info.Size() < 0 || info.Size() > limit-total {
 			return nil, errors.New("SQLite snapshot exceeds aggregate byte limit")
 		}
 		total += info.Size()
@@ -161,7 +180,7 @@ func captureSQLite(ctx context.Context, path string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return reconstructSQLite(ctx, files[0].content, files[1].content, total)
+	return reconstructSQLite(ctx, files[0].content, files[1].content, total, limit)
 }
 
 func verifySQLiteFiles(ctx context.Context, dir *pathguard.Directory, files []capturedSQLiteFile) error {
@@ -227,7 +246,7 @@ func sqlitePageSize(main []byte) (int, error) {
 // SQLite reuses WAL files without truncating different-salt stale frames, so
 // those suffixes after a valid commit are ignored. Same-salt checksum corruption
 // fails closed. A partial frame cannot commit.
-func reconstructSQLite(ctx context.Context, main, wal []byte, aggregate int64) ([]byte, error) {
+func reconstructSQLite(ctx context.Context, main, wal []byte, aggregate, limit int64) ([]byte, error) {
 	pageSize, err := sqlitePageSize(main)
 	if err != nil {
 		return nil, err
@@ -270,11 +289,11 @@ func reconstructSQLite(ctx context.Context, main, wal []byte, aggregate int64) (
 			return nil, errors.New("SQLite WAL frame checksum mismatch")
 		}
 		page := be.Uint32(frame[:4])
-		if page == 0 || uint64(page)*uint64(pageSize) > uint64(maxSnapshotBytes) {
+		if page == 0 || uint64(page)*uint64(pageSize) > uint64(limit) {
 			return nil, errors.New("SQLite WAL page exceeds snapshot limit")
 		}
 		if commitPages := be.Uint32(frame[4:8]); commitPages != 0 {
-			if uint64(commitPages)*uint64(pageSize) > uint64(maxSnapshotBytes) {
+			if uint64(commitPages)*uint64(pageSize) > uint64(limit) {
 				return nil, errors.New("SQLite WAL commit exceeds snapshot limit")
 			}
 			lastCommit, pages = offset+frameSize, commitPages
@@ -290,7 +309,7 @@ func reconstructSQLite(ctx context.Context, main, wal []byte, aggregate int64) (
 	if size > int64(len(main)) {
 		peakBytes += size
 	}
-	if peakBytes > maxSnapshotBytes {
+	if peakBytes > limit {
 		return nil, errors.New("reconstructed SQLite snapshot exceeds aggregate byte limit")
 	}
 	if size > int64(len(main)) {
