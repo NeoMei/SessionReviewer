@@ -1,9 +1,11 @@
-import type { LedgerAccountingV4, PricingSnapshotV1, PricingSupplementV1 } from "../contracts/review-v4";
+import type { PricingActions } from "../cli/pricing";
+import { pricingCatalogForm } from "./pricing-catalog-form";
+import type { LedgerAccountingV4, PricingSnapshotV1 } from "../contracts/review-v4";
 import { pricingSupplementForm } from "./pricing-supplement-form";
 import { element } from "./dom";
 import { presentDateTime } from "./presentation";
 
-export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSnapshotV1[], actions: { supplement?: (input: PricingSupplementV1) => Promise<unknown> } = {}): HTMLElement {
+export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSnapshotV1[], actions: PricingActions = {}): HTMLElement {
   const section = element("section", { className: "sr-v4-usage", attrs: { "data-v4-panel": "usage", role: "tabpanel" } }, [
     element("div", { className: "sr-v4-usage-total" }, [metric("总 Token", accounting.total_tokens.toLocaleString("en-US")), metric("总费用", money(accounting.total_cost_usd)), metric("总时长", duration(accounting.total_duration_ms))])
   ]);
@@ -16,6 +18,7 @@ export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSn
     if (modelPrices.length === 0) card.append(element("p", { className: "sr-empty", text: "定价待定；不会用 Session 数量推测 Token 或成本。" }));
     for (const price of modelPrices) {
       card.append(renderPrice(price));
+      if (actions.catalog && actions.acceptCatalog) card.append(pricingCatalogForm(price, actions));
       if (actions.supplement) card.append(pricingSupplementForm(price, actions.supplement));
     }
     section.append(card);

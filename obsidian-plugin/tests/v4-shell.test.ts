@@ -528,3 +528,12 @@ describe("v4 project state and lifecycle", () => {
     await view.onClose();
   });
 });
+
+it("wires private search and catalog actions through the five-tab shell without eager I/O",async()=>{
+ const snapshot=v4SnapshotFixture();if(snapshot.state.kind!=="public_valid")throw new Error("fixture invalid");
+ let searches=0;let catalogs=0;
+ const price=snapshot.state.ledger.pricing_snapshots[0];snapshot.state.ledger.accounting.models=[{model:price.billed_model_id,total_tokens:15,total_cost_usd:null}];snapshot.state.ledger.current_pricing_snapshot_ids=[price.snapshot_id];
+ const root=renderMarkdownV4View(snapshot,()=>{}, {loadSessionSearch:async request=>{searches++;return {schema_version:1,project_id:request.projectId,generation_id:request.expectedGenerationId,total:0,items:[],previous_cursor:null,next_cursor:null};},pricingActions:{catalog:async()=>{catalogs++;throw new Error("offline");},acceptCatalog:async()=>{}}});document.body.append(root);
+ expect(searches+catalogs).toBe(0);click(root,"sessions");root.querySelector<HTMLInputElement>('[aria-label="搜索分支、文件或错误"]')!.value="missing";root.querySelector<HTMLButtonElement>('[data-action="private-session-search"]')!.click();await settle();expect(searches).toBe(1);
+ click(root,"usage");const query=root.querySelector<HTMLButtonElement>('[data-action="query-catalog"]');expect(query).not.toBeNull();query!.click();await settle();expect(catalogs).toBe(1);expect(root.textContent).toContain("价格目录暂不可用");root.dispose?.();root.remove();
+});

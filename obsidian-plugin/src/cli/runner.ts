@@ -1,3 +1,7 @@
+import { validateCatalog, validatePricingResult, type PricingCatalog, type PricingCatalogSelection } from "./pricing";
+import type { PricingSnapshotV1, PricingSupplementV1 } from "../contracts/review-v4";
+import { parsePricingSnapshotV1, parsePricingSupplementV1 } from "../data/contracts-v4";
+import { validateSearchPage, type SessionSearchRequest, type SessionSearchPage } from "./session-search";
 import { execFile as nodeExecFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -162,6 +166,38 @@ export class CliRunner {
   async getScanStatus(projectId: string): Promise<ScanStatus> {
     validateProject(projectId);
     return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]), projectId);
+  }
+
+  async getPricingCatalog(): Promise<PricingCatalog> {
+    try { return validateCatalog(parseJson((await this.run(["pricing", "catalog", "list", "--json"], 35_000)).stdout)); }
+    catch { throw new Error("无法读取价格目录；可稍后重试或人工补充价格。"); }
+  }
+
+  async supplementPricing(input: PricingSupplementV1, expectedLedgerSHA256: string): Promise<PricingSnapshotV1> {
+    parsePricingSupplementV1(JSON.stringify(input));
+    return this.publishPrice(["pricing", "supplement"], input, expectedLedgerSHA256);
+  }
+
+  async acceptCatalogPricing(input: PricingCatalogSelection, expectedLedgerSHA256: string): Promise<PricingSnapshotV1> {
+    if (input.schema_version !== 1 || input.minimum_reader_version !== "0.4.0" || !INSPECT_ID.test(input.modelpricewatch_listing_id) || !input.billing_host.trim() || !input.billing_mode.trim()) throw new Error("invalid catalog selection");
+    return this.publishPrice(["pricing", "catalog", "accept"], input, expectedLedgerSHA256);
+  }
+
+  private async publishPrice(prefix: string[], input: PricingSupplementV1 | PricingCatalogSelection, expectedLedgerSHA256: string): Promise<PricingSnapshotV1> {
+    validateProject(input.project_id);
+    if (!INSPECT_ID.test(input.provider) || !INSPECT_ID.test(input.session_id) || !DIGEST.test(input.usage_record_digest) || !/^[0-9a-f]{64}$/.test(expectedLedgerSHA256)) throw new Error("invalid pricing identity");
+    const args = [...prefix, "--project-id", input.project_id, "--provider", input.provider, "--session-id", input.session_id, "--usage-record-digest", input.usage_record_digest, "--expected-ledger-sha256", expectedLedgerSHA256, "--json"];
+    try { const result = parsePricingSnapshotV1((await this.runWithInput(args, JSON.stringify(input), 35_000)).stdout); validatePricingResult(result, input); return result; }
+    catch { throw new Error("价格未保存；请刷新账本后重试。"); }
+  }
+
+  async getSessionSearch(request: SessionSearchRequest): Promise<SessionSearchPage> {
+    validateProject(request.projectId);
+    if (!INSPECT_ID.test(request.expectedGenerationId) || !["branch", "file", "error"].includes(request.queryKind) || typeof request.query !== "string" || !request.query.trim() || Buffer.byteLength(request.query, "utf8") > 256 || [...request.query].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127) || !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100 || (request.cursor !== undefined && !boundedCursor(request.cursor))) throw new Error("invalid search request");
+    const args = ["inspect", "session-search", "--project-id", request.projectId, "--expected-generation-id", request.expectedGenerationId, "--query-kind", request.queryKind, "--query", request.query, "--limit", String(request.limit), "--json"];
+    if (request.cursor !== undefined) args.push("--cursor", request.cursor);
+    try { const page = parseJson((await this.run(args)).stdout) as SessionSearchPage; validateSearchPage(page, request); return page; }
+    catch { throw new Error("无法搜索 Session；请刷新项目并确认 CLI 已更新。"); }
   }
 
   async getSessionEvents(request: SessionEventRequest): Promise<SessionEventPageV1> {
@@ -374,8 +410,8 @@ export class CliRunner {
 	const validNode = (value: unknown): value is ProblemNodeV4 => {
 		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 		const node = value as Record<string, unknown>;
-		return ENTITY_ID.test(String(node.id ?? "")) && typeof node.question === "string" && node.question.length > 0 && node.question.length <= 4096 &&
-			(node.primary_parent_id === null || ENTITY_ID.test(String(node.primary_parent_id ?? ""))) && Array.isArray(node.related_node_ids) && node.related_node_ids.length <= 2 && (node.related_node_ids as unknown[]).every((id) => ENTITY_ID.test(String(id))) &&
+		return matchesString(ENTITY_ID, node.id ?? "") && typeof node.question === "string" && node.question.length > 0 && node.question.length <= 4096 &&
+			(node.primary_parent_id === null || matchesString(ENTITY_ID, node.primary_parent_id ?? "")) && Array.isArray(node.related_node_ids) && node.related_node_ids.length <= 2 && (node.related_node_ids as unknown[]).every((id) => matchesString(ENTITY_ID, id)) &&
 			["not_started", "in_progress", "paused", "resolved"].includes(String(node.workflow_state)) && ["no_answer", "answered_unverified", "execution_verified"].includes(String(node.answer_state)) &&
 			typeof node.completion_criterion === "string" && typeof node.current_conclusion === "string" && Array.isArray(node.source_turn_refs) && node.source_turn_refs.every(validProblemSourceRef) &&
 			Number.isSafeInteger(node.sibling_order) && Number(node.sibling_order) >= 0 && Number.isSafeInteger(node.revision) && Number(node.revision) >= 1;
@@ -409,6 +445,13 @@ export class CliRunner {
 }
 
 function allowedArgs(args: readonly string[]): boolean {
+  if (args.join("\0") === "pricing\0catalog\0list\0--json") return true;
+  if (args[0] === "pricing") {
+    const offset = args[1] === "supplement" ? 2 : args[1] === "catalog" && args[2] === "accept" ? 3 : 0;
+    const rest = args.slice(offset);
+    return offset > 0 && rest.length === 11 && rest[0] === "--project-id" && PROJECT_ID.test(rest[1]) && rest[2] === "--provider" && INSPECT_ID.test(rest[3]) && rest[4] === "--session-id" && INSPECT_ID.test(rest[5]) && rest[6] === "--usage-record-digest" && DIGEST.test(rest[7]) && rest[8] === "--expected-ledger-sha256" && /^[0-9a-f]{64}$/.test(rest[9]) && rest[10] === "--json";
+  }
+  if ((args.length === 13 || args.length === 15) && args[0] === "inspect" && args[1] === "session-search" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--expected-generation-id" && INSPECT_ID.test(args[5] ?? "") && args[6] === "--query-kind" && ["branch", "file", "error"].includes(args[7]) && args[8] === "--query" && Boolean(args[9]) && args[10] === "--limit" && /^(?:[1-9][0-9]?|100)$/.test(args[11]) && args[12] === "--json") return args.length === 13 || (args[13] === "--cursor" && boundedCursor(args[14]));
   if (args.length === 2 && args[0] === "version" && args[1] === "--json") return true;
   if (args.length === 5 && args[0] === "sync" && args[1] === "status" && args[2] === "--json" && args[3] === "--project-id") return PROJECT_ID.test(args[4] ?? "");
   if (args.length === 4 && args[0] === "sync" && args[1] === "--dry-run" && args[2] === "--project-id") return PROJECT_ID.test(args[3] ?? "");
@@ -459,17 +502,17 @@ function validateProblemCAS(request: ProblemCAS): void { validateProject(request
 function validateProblemNodeIdentity(problem: ProblemNodeV4): void { if (!ENTITY_ID.test(problem.id) || !Number.isSafeInteger(problem.revision) || problem.revision < 1) throw new Error("invalid problem node"); }
 function validNonnegative(value: string | undefined): boolean { return Boolean(value && /^(?:0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value))); }
 function validPositive(value: string | undefined): boolean { return Boolean(value && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value))); }
-function validProblemSourceRef(value: unknown): boolean { if (typeof value !== "object" || value === null || Array.isArray(value)) return false; const ref = value as Record<string, unknown>; return INSPECT_ID.test(String(ref.provider ?? "")) && INSPECT_ID.test(String(ref.session_id ?? "")) && INSPECT_ID.test(String(ref.turn_unit_id ?? "")) && (ref.session_view_digest === undefined || DIGEST.test(String(ref.session_view_digest))); }
+function validProblemSourceRef(value: unknown): boolean { if (typeof value !== "object" || value === null || Array.isArray(value)) return false; const ref = value as Record<string, unknown>; return matchesString(INSPECT_ID, ref.provider ?? "") && matchesString(INSPECT_ID, ref.session_id ?? "") && matchesString(INSPECT_ID, ref.turn_unit_id ?? "") && (ref.session_view_digest === undefined || matchesString(DIGEST, ref.session_view_digest)); }
 function validCandidate(value: unknown, projectId: string): value is ProblemCandidate {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const candidate = value as Record<string, unknown>;
-	const stringIDs = (item: unknown, max: number): item is string[] => Array.isArray(item) && item.length <= max && item.every((id) => ENTITY_ID.test(String(id)));
-	const grounds = Array.isArray(candidate.grounds) && candidate.grounds.length <= 256 && candidate.grounds.every((ground) => typeof ground === "object" && ground !== null && !Array.isArray(ground) && INSPECT_ID.test(String((ground as Record<string, unknown>).rule_id ?? "")) && INSPECT_ID.test(String((ground as Record<string, unknown>).rule_version ?? "")) && stringIDs((ground as Record<string, unknown>).matched_fact_refs, 256) && typeof (ground as Record<string, unknown>).explanation === "string");
+	const stringIDs = (item: unknown, max: number): item is string[] => Array.isArray(item) && item.length <= max && item.every((id) => matchesString(ENTITY_ID, id));
+	const grounds = Array.isArray(candidate.grounds) && candidate.grounds.length <= 256 && candidate.grounds.every((ground) => typeof ground === "object" && ground !== null && !Array.isArray(ground) && matchesString(INSPECT_ID, (ground as Record<string, unknown>).rule_id ?? "") && matchesString(INSPECT_ID, (ground as Record<string, unknown>).rule_version ?? "") && stringIDs((ground as Record<string, unknown>).matched_fact_refs, 256) && typeof (ground as Record<string, unknown>).explanation === "string");
 	const refs = Array.isArray(candidate.source_turn_refs) && candidate.source_turn_refs.length <= 256 && candidate.source_turn_refs.every(validProblemSourceRef);
-	const dependencies = Array.isArray(candidate.dependency_digests) && candidate.dependency_digests.length <= 256 && candidate.dependency_digests.every((digest) => DIGEST.test(String(digest)));
-	return candidate.project_id === projectId && ENTITY_ID.test(String(candidate.candidate_id ?? "")) && typeof candidate.question === "string" && candidate.question.length > 0 && candidate.question.length <= 4096 && refs &&
-		["child", "sibling", "merge", "keep_pending"].includes(String(candidate.recommended_relation)) && (candidate.recommended_target_id === null || ENTITY_ID.test(String(candidate.recommended_target_id))) && stringIDs(candidate.alternate_target_ids, 2) && stringIDs(candidate.related_node_ids, 2) && grounds &&
-		["high", "medium", "low"].includes(String(candidate.confidence)) && ["pending", "applied", "merged", "kept_pending", "stale", "dismissed"].includes(String(candidate.status)) && dependencies && ["deterministic", "agent_requested"].includes(String(candidate.analysis_mode)) && (candidate.agent_run_id === null || INSPECT_ID.test(String(candidate.agent_run_id))) && Number.isSafeInteger(candidate.revision) && Number(candidate.revision) >= 1 && typeof candidate.created_at === "string" && typeof candidate.updated_at === "string";
+	const dependencies = Array.isArray(candidate.dependency_digests) && candidate.dependency_digests.length <= 256 && candidate.dependency_digests.every((digest) => matchesString(DIGEST, digest));
+	return candidate.project_id === projectId && matchesString(ENTITY_ID, candidate.candidate_id ?? "") && typeof candidate.question === "string" && candidate.question.length > 0 && candidate.question.length <= 4096 && refs &&
+		["child", "sibling", "merge", "keep_pending"].includes(String(candidate.recommended_relation)) && (candidate.recommended_target_id === null || matchesString(ENTITY_ID, candidate.recommended_target_id)) && stringIDs(candidate.alternate_target_ids, 2) && stringIDs(candidate.related_node_ids, 2) && grounds &&
+		["high", "medium", "low"].includes(String(candidate.confidence)) && ["pending", "applied", "merged", "kept_pending", "stale", "dismissed"].includes(String(candidate.status)) && dependencies && ["deterministic", "agent_requested"].includes(String(candidate.analysis_mode)) && (candidate.agent_run_id === null || matchesString(INSPECT_ID, candidate.agent_run_id)) && Number.isSafeInteger(candidate.revision) && Number(candidate.revision) >= 1 && typeof candidate.created_at === "string" && typeof candidate.updated_at === "string";
 }
 
 function validateSessionSummaryRequest(request: SessionSummaryRequest): void {
@@ -678,3 +721,5 @@ function scanOptionalIdentity(value: unknown, pattern: RegExp): string | undefin
   if (value === undefined) return undefined;
   return typeof value === "string" && pattern.test(value) ? value : null;
 }
+
+function matchesString(pattern: RegExp, value: unknown): value is string { return typeof value === "string" && pattern.test(value); }

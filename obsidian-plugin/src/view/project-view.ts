@@ -206,6 +206,9 @@ export class ProjectEvolutionView extends ItemView {
           loadSessionSummary: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getSessionSummary === "function"
             ? (request) => this.runner!.getSessionSummary(request)
             : undefined,
+          loadSessionSearch: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getSessionSearch === "function"
+            ? (request) => this.runner!.getSessionSearch(request)
+            : undefined,
           eventPageCache: this.eventPageCache,
           refreshSessionEvents: (request) => this.refreshSessionEvents(request),
           cancelSessionEventRecovery: () => this.invalidateEventRecovery(),
@@ -215,6 +218,11 @@ export class ProjectEvolutionView extends ItemView {
           recoverySelectionUnavailable: recovery?.unavailable,
           initialState: this.v4StateForRender(current),
           saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch),
+          pricingActions: this.runner && activeProblemState?.ledgerSHA256 && this.cliDiagnostic?.code !== "cli_unavailable" ? {
+            catalog: () => this.runner!.getPricingCatalog(),
+            supplement: async (input) => { await this.runner!.supplementPricing(input, activeProblemState.ledgerSHA256!); await this.refresh(this.projects); },
+            acceptCatalog: async (input) => { await this.runner!.acceptCatalogPricing(input, activeProblemState.ledgerSHA256!); await this.refresh(this.projects); }
+          } : undefined,
           problemCandidates: this.problemCandidates,
           problemUnavailableReason: this.problemUnavailableReason,
           createProblem: this.runner && activeProblemState ? async (question) => {

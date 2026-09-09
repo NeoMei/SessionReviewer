@@ -1,3 +1,5 @@
+import type { PricingActions } from "../cli/pricing";
+import type { SessionSearchLoader } from "../cli/session-search";
 import type { Snapshot } from "../data/repository";
 import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
@@ -78,6 +80,8 @@ export function renderMarkdownV4View(
   snapshot: Extract<Snapshot, { kind: "markdown-v4" | "markdown-v4-stale" }>,
   open: (path: string) => void,
   options: {
+    loadSessionSearch?: SessionSearchLoader;
+    pricingActions?: PricingActions;
     cliUnavailable?: boolean;
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;

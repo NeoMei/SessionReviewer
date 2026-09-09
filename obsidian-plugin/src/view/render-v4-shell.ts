@@ -1,3 +1,5 @@
+import type { PricingActions } from "../cli/pricing";
+import type { SessionSearchLoader } from "../cli/session-search";
 import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexV1, SessionSummaryV1 } from "../contracts/review-v4";
@@ -19,6 +21,8 @@ export interface RenderV4ShellOptions {
   initialState?: unknown;
   saveState?: (state: V4ViewState) => void | Promise<void>;
   saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;
+  loadSessionSearch?: SessionSearchLoader;
+    pricingActions?: PricingActions;
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
@@ -108,25 +112,24 @@ export function renderV4Shell(
     if (state.view === "problems") return renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`), {
       candidates: options.problemCandidates, unavailableReason: options.problemUnavailableReason, createProblem: options.createProblem,
       transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
-      openTurn: options.loadConversation ? async (ref) => {
-        if (!ref.session_view_digest) throw new Error("来源缺少已认证的 Session 快照，无法精确读取。");
-        await options.loadConversation!({ projectId: descriptor.projectId, provider: ref.provider, sessionId: ref.session_id, expectedGenerationId: presentation.generation_id, expectedSessionViewDigest: ref.session_view_digest, sessionViewDigest: ref.session_view_digest, turnUnitId: ref.turn_unit_id, limit: 64 });
-      } : undefined
+      loadConversation: options.cliUnavailable ? undefined : options.loadConversation
     });
     if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`));
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);
-      return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)));
+      return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)), options.cliUnavailable ? {} : options.pricingActions);
     }
     if (state.view === "sessions") {
       const panel = element("section", { className: "sr-v4-sessions", attrs: { "data-v4-panel": "sessions", role: "tabpanel" } });
       if (!index) panel.append(element("p", { className: "sr-empty", text: "当前快照没有已验证的 Session 索引；需要重新扫描后才能建立完整清单。" }));
       else {
         const privateLoaders = options.cliUnavailable ? {
+          loadSessionSearch: undefined,
           loadSessionEvents: undefined,
           loadConversation: undefined,
           loadSessionSummary: undefined
         } : {
+          loadSessionSearch: options.loadSessionSearch,
           loadSessionEvents: options.loadSessionEvents,
           loadConversation: options.loadConversation,
           loadSessionSummary: options.loadSessionSummary

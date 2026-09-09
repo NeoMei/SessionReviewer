@@ -1,6 +1,7 @@
-import type { ProblemMapCandidateV1, ProblemNodeV4, ReviewPresentationV4, SourceTurnRefV4 } from "../contracts/review-v4";
+import type { ProblemMapCandidateV1, ProblemNodeV4, ReviewPresentationV4 } from "../contracts/review-v4";
 import type { V4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
+import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
 
 export type ProblemCandidateV1 = ProblemMapCandidateV1["candidates"][number];
 export interface ProblemActions {
@@ -12,7 +13,7 @@ export interface ProblemActions {
   editProblem?: (problem: ProblemNodeV4, fields: { question: string; currentConclusion: string; completionCriterion: string }) => Promise<void>;
   moveProblem?: (problem: ProblemNodeV4, newParentId: string) => Promise<void>;
   reorderProblems?: (parentId: string, orderedChildIds: string[]) => Promise<void>;
-  openTurn?: (ref: SourceTurnRefV4) => Promise<void>;
+  loadConversation?: ConversationLoader;
   announce?: (message: string) => void;
 }
 
@@ -54,7 +55,7 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   const detail = element("aside", { className: "sr-v4-problem-detail", attrs: { "aria-label": "问题证据与问答来源" } }, [
     element("span", { className: "sr-detail-kicker", text: workflowLabel(selected.workflow_state) }), element("h2", { text: selected.question }),
     definition("完成标准", selected.completion_criterion || "未填写"), definition("当前结论", selected.current_conclusion || "未填写"), definition("回答状态", answerLabel(selected.answer_state)),
-    renderSources(selected, actions, run), renderEdit(selected, actions, run), renderMove(selected, presentation.problem_nodes, nodes, actions, run), renderReorder(selected, presentation.problem_nodes, actions, run), renderStateAction(selected, actions, run), nativeAction(openReview)
+    renderSources(selected, presentation, actions), renderEdit(selected, actions, run), renderMove(selected, presentation.problem_nodes, nodes, actions, run), renderReorder(selected, presentation.problem_nodes, actions, run), renderStateAction(selected, actions, run), nativeAction(openReview)
   ]);
   section.append(rail, context, detail, renderCandidates(actions.candidates ?? [], selected, actions, run), live);
   return section;
@@ -118,7 +119,21 @@ function renderReorder(node: ProblemNodeV4, all: ProblemNodeV4[], actions: Probl
 function descendantIDs(id: string, all: ProblemNodeV4[]): string[] { const result: string[] = []; const visit = (parent: string): void => { for (const node of all.filter((item) => item.primary_parent_id === parent)) { result.push(node.id); visit(node.id); } }; visit(id); return result; }
 function renderStateAction(node: ProblemNodeV4, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement { const action = node.workflow_state === "resolved" ? "reopen" as const : "resolve" as const; return confirmingAction(action === "resolve" ? "标记为已解决" : "重新打开", action === "resolve" ? "确认：标记为已解决" : "确认：重新打开", `${action}-problem`, () => void run(actions.setProblemState ? () => actions.setProblemState!(node, action) : undefined, action === "resolve" ? "问题已标记为解决。" : "问题已重新打开。")); }
 function ancestorPath(selected: ProblemNodeV4, nodes: Map<string, ProblemNodeV4>): ProblemNodeV4[] { const path = [selected]; const seen = new Set([selected.id]); let parentId = selected.primary_parent_id; while (parentId !== null) { const parent = nodes.get(parentId); if (!parent || seen.has(parent.id)) break; seen.add(parent.id); path.unshift(parent); parentId = parent.primary_parent_id; } return path; }
-function renderSources(node: ProblemNodeV4, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement { const sources = element("div", { className: "sr-v4-problem-sources" }, [element("strong", { text: "关联问答来源" })]); if (node.source_turn_refs.length === 0) sources.append(element("p", { className: "sr-empty", text: "当前正式节点没有已绑定的可见问答来源。" })); for (const ref of node.source_turn_refs) { const open = button(`${ref.provider} / ${ref.session_id} # ${ref.turn_unit_id}`, { "data-action": "open-problem-source" }); open.addEventListener("click", () => void run(actions.openTurn ? () => actions.openTurn!(ref) : undefined, "已读取来源问答。")); sources.append(open); } return sources; }
+function renderSources(node: ProblemNodeV4, presentation: ReviewPresentationV4, actions: ProblemActions): HTMLElement {
+  const sources = element("div", { className: "sr-v4-problem-sources" }, [element("strong", { text: "关联问答来源" })]); let viewer: ConversationElement | undefined;
+  const body = element("div", { className: "sr-v4-problem-source-answer" });
+  if (node.source_turn_refs.length === 0) sources.append(element("p", { className: "sr-empty", text: "当前正式节点没有已绑定的可见问答来源。" }));
+  for (const ref of node.source_turn_refs) {
+    const open = button(`${ref.provider} / ${ref.session_id} # ${ref.turn_unit_id}`, { "data-action": "open-problem-source" });
+    open.disabled = !actions.loadConversation || !ref.session_view_digest;
+    open.addEventListener("click", () => {
+      if (!actions.loadConversation || !ref.session_view_digest) return;
+      viewer?.dispose(); viewer = renderConversation({ projectId: presentation.project_id, provider: ref.provider, sessionId: ref.session_id, expectedGenerationId: presentation.generation_id, expectedSessionViewDigest: ref.session_view_digest, sessionViewDigest: ref.session_view_digest }, actions.loadConversation, { turnUnitId: ref.turn_unit_id });
+      body.replaceChildren(viewer);
+    }); sources.append(open);
+  }
+  sources.append(body); return sources;
+}
 function appendNode(id: string, depth: number, map: Map<string, ProblemNodeV4>, all: ProblemNodeV4[], selected: ProblemNodeV4, update: (patch: Partial<V4ViewState>) => void, parent: HTMLElement, seen: Set<string>): void { const node = map.get(id); if (!node || seen.has(id)) return; seen.add(id); const item = button(node.question, { role: "treeitem", "data-v4-problem-id": node.id, "aria-selected": String(node.id === selected.id), "aria-level": String(depth + 1) }); item.style.setProperty("--sr-problem-depth", String(depth)); item.addEventListener("click", () => update({ selectedProblemId: node.id })); parent.append(item); for (const child of all.filter((candidate) => candidate.primary_parent_id === node.id).sort(problemOrder)) appendNode(child.id, depth + 1, map, all, selected, update, parent, seen); }
 function problemOrder(left: ProblemNodeV4, right: ProblemNodeV4): number { return left.sibling_order - right.sibling_order || left.id.localeCompare(right.id); }
 function definition(label: string, value: string): HTMLElement { return element("div", { className: "sr-definition" }, [element("strong", { text: label }), element("p", { text: value })]); }
