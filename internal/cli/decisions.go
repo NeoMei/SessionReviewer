@@ -559,15 +559,15 @@ func validateDecisionCandidateFresh(index sessionindex.Document, candidate annot
 
 func decisionCandidateEvidenceResults(ctx context.Context, dataRoot, projectID string, candidates []annotation.Annotation) []decisionCandidateEvidence {
 	result := make([]decisionCandidateEvidence, 0, len(candidates))
-	chains, err := loadDecisionCandidateChains(ctx, dataRoot, projectID, candidates)
+	chains, loadErr := loadDecisionCandidateChains(ctx, dataRoot, projectID, candidates)
 	for _, candidate := range candidates {
 		entry := decisionCandidateEvidence{CandidateID: candidate.ID, EvidenceRefs: []decisions.ExtractionEvidenceRef{}}
-		if err == nil {
-			entry.EvidenceRefs, err = resolveDecisionCandidateEvidence(candidate, chains)
-		}
-		if err != nil {
+		if loadErr != nil {
 			entry.ErrorCode = "candidate_stale"
-			err = nil
+		} else if evidence, err := resolveDecisionCandidateEvidence(candidate, chains); err != nil {
+			entry.ErrorCode = "candidate_stale"
+		} else {
+			entry.EvidenceRefs = evidence
 		}
 		result = append(result, entry)
 	}

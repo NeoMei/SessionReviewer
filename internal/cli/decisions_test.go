@@ -107,6 +107,52 @@ func TestResolveDecisionCandidateEvidenceReturnsExactAuthenticatedCoordinates(t 
 	}
 }
 
+func TestDecisionCandidatesListEncodesEmptyEvidenceArrayForStaleCandidate(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	store, err := decisions.OpenStore(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 9, 3, 30, 0, 0, time.UTC)
+	digest := "sha256:" + strings.Repeat("9", 64)
+	run := annotation.Run{
+		RunID: "decision-extract-stale", ProjectID: fixture.projectID, Status: "completed",
+		ExtractorVersion: decisions.ExtractorVersion, PromptSchemaVersion: decisions.PromptSchemaVersion,
+		DependencyDigests: []string{digest}, CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Add(time.Second).Format(time.RFC3339Nano),
+	}
+	entity, field := "decision-stale", "decision"
+	candidate := annotation.Annotation{
+		ID: "candidate-stale", ProjectID: fixture.projectID, AnnotationKind: "decision_candidate", EntityID: &entity, Field: &field,
+		Status: annotation.CandidatePending, Text: `{}`, GenerationID: "generation-before-rescan", SchemaVersion: 1,
+		AnalysisProfile: decisions.ExtractorVersion, AgentRunID: run.RunID,
+		Dependencies: []annotation.Dependency{
+			{Kind: "session_view", RevisionID: "view-" + strings.Repeat("9", 16), Digest: digest},
+			{Kind: "source_turn", RevisionID: "revision-stale", Digest: digest},
+		},
+		Revision: 1, CreatedAt: now.Format(time.RFC3339Nano),
+	}
+	if err := store.CommitExtraction(run, []annotation.Annotation{candidate}); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if code := runDecisions([]string{"candidates", "list", "--project-id", fixture.projectID, "--data-dir", fixture.data, "--json"}, strings.NewReader(""), &output, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("candidate list code=%d output=%s", code, output.String())
+	}
+	var response struct {
+		CandidateEvidence []struct {
+			EvidenceRefs json.RawMessage `json:"evidence_refs"`
+			ErrorCode    string          `json:"error_code"`
+		} `json:"candidate_evidence"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.CandidateEvidence) != 1 || string(response.CandidateEvidence[0].EvidenceRefs) != "[]" || response.CandidateEvidence[0].ErrorCode != "candidate_stale" {
+		t.Fatalf("candidate_evidence=%s", output.String())
+	}
+}
+
 func TestNewDecisionExtractionDigestsPagesDeterministicallyWithoutAdvancingUnprocessedViews(t *testing.T) {
 	manifest := memory.GenerationManifest{ConversationChains: make([]memory.ConversationChainDependency, decisions.MaxExtractionDependencies+2)}
 	for index := range manifest.ConversationChains {
