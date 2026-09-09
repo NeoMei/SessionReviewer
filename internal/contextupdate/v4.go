@@ -287,6 +287,7 @@ func recoverActiveMarkdownBeforeScan(ctx context.Context, dataRoot, projectID st
 }
 
 type v4PublishInput struct {
+	PricingRequests    []pricing.ResolutionRequest
 	ProjectID          string
 	DataRoot           string
 	Mapping            config.ProjectMapping
@@ -313,6 +314,11 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 		p, ledger, err := mapV4Scan(v4MapInput{Index: in.Index, Accounting: in.Accounting, Milestones: in.Milestones})
 		if err != nil {
 			return publication.Result{}, err
+		}
+		if in.PricingRequests != nil {
+			if err := applyScanPricing(ctx, &ledger, in.PricingRequests, in.Now()); err != nil {
+				return publication.Result{}, err
+			}
 		}
 		plan, err := presentation.RenderV4(presentation.V4RenderInput{Presentation: p, Ledger: ledger, Index: in.Index, ExpectedFiles: map[string][]byte{}})
 		if err != nil {
@@ -352,6 +358,11 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	_, ledger, err := mapV4Scan(v4MapInput{Accepted: pendingAccepted, Index: in.Index, Accounting: in.Accounting})
 	if err != nil {
 		return publication.Result{}, err
+	}
+	if in.PricingRequests != nil {
+		if err := applyScanPricing(ctx, &ledger, in.PricingRequests, in.Now()); err != nil {
+			return publication.Result{}, err
+		}
 	}
 	update := scanMilestoneUpdate(in.Index, in.Milestones)
 	if result, unchanged, err := unchangedV4ScanPublication(ctx, in, read, update, ledger, owner); err != nil {

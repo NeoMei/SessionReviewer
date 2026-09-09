@@ -218,6 +218,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load projection accounting: %w", err)
 	}
+	pricingRequests, err := scanPricingRequests(opts.ProjectID, indexDocument, sessionReports)
+	if err != nil {
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load pricing usage: %w", err)
+	}
 	projectedMilestones, err := loadScanMilestones(ctx, store, manifest)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load scan milestones: %w", err)
@@ -237,7 +241,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 		}
-		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, AfterDestination: opts.afterDestination})
+		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, PricingRequests: pricingRequests, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, AfterDestination: opts.afterDestination})
 		if err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 		}
@@ -249,7 +253,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 			}
-			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, Existing: true, AfterDestination: opts.afterDestination})
+			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, PricingRequests: pricingRequests, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, Existing: true, AfterDestination: opts.afterDestination})
 			if err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 			}

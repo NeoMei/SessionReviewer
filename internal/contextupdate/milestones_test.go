@@ -112,6 +112,9 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	if len(accepted.Review.Timeline) != 1 || accepted.Review.Timeline[0].ClosedLoop.Conclusion.Text != "Original bounded Agent conclusion." || len(accepted.Review.GeneratedBaselines) != 4 {
 		t.Fatalf("qualified scan milestone was not seeded with exact baselines: timeline=%+v baselines=%+v", accepted.Review.Timeline, accepted.Review.GeneratedBaselines)
 	}
+	if len(accepted.Ledger.PricingSnapshots) == 0 || accepted.Ledger.Accounting.TotalCostUSD != nil {
+		t.Fatal("real scan must publish pending per-model pricing without inventing costs")
+	}
 	firstMilestone := accepted.Review.Timeline[0]
 	if firstMilestone.Title != "已记录验证通过" || !strings.Contains(firstMilestone.Summary, "验证记录（通过）") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "命令执行已开始") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "命令类型：") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "退出码：0") || !strings.Contains(firstMilestone.ClosedLoop.Verification.Text, "验证记录（通过）") {
 		t.Fatalf("ordinary scan milestone is not readable: %+v", firstMilestone)
