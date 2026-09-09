@@ -165,6 +165,9 @@ func runDecisionExtraction(request DecisionRequest, stdout, stderr io.Writer) in
 	if err != nil {
 		return writeDecisionError(stdout, err)
 	}
+	if err := store.ReconcileProject(request.ProjectID, time.Now()); err != nil {
+		return writeDecisionError(stdout, err)
+	}
 	record, err := candidateStore.Load()
 	if err != nil {
 		return writeDecisionError(stdout, err)

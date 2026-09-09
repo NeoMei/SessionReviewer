@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
@@ -120,6 +123,62 @@ func TestNewDecisionExtractionDigestsPagesDeterministicallyWithoutAdvancingUnpro
 	second := newDecisionExtractionDigests(manifest, watermark)
 	if len(second) != 2 || second[0] != fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies) || second[1] != fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies+1) {
 		t.Fatalf("second page=%v", second)
+	}
+}
+
+func TestDecisionExtractionStartReconcilesPriorCandidateCommitBeforeWatermarkPaging(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	executable := filepath.Join(fixture.data, "configured-codex")
+	if err := os.WriteFile(executable, []byte("controlled fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := decisions.MeasureAgentConfiguration("codex", "fixture", executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decisions.SaveAgentConfiguration(fixture.data, configuration); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 9, 9, 3, 0, 0, 0, time.UTC)
+	digest := "sha256:" + strings.Repeat("9", 64)
+	jobStore, err := decisions.OpenExtractionJobStore(fixture.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := decisions.ExtractionJob{
+		SchemaVersion: 1, JobID: decisions.ExtractionIdentity(fixture.projectID, []string{digest}), ProjectID: fixture.projectID,
+		GenerationID: "generation-markdown-cli", State: decisions.ExtractionQueued, Revision: 1, DependencyDigests: []string{digest},
+		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano),
+	}
+	if err := jobStore.Create(job); err != nil {
+		t.Fatal(err)
+	}
+	job, err = jobStore.AuthorizeWorker(job.JobID, 999999, job.Revision, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateStore, err := decisions.OpenStore(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := annotation.Run{
+		RunID: job.JobID, ProjectID: fixture.projectID, Status: "completed", ExtractorVersion: decisions.ExtractorVersion,
+		PromptSchemaVersion: decisions.PromptSchemaVersion, DependencyDigests: []string{digest},
+		CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Add(time.Second).Format(time.RFC3339Nano),
+	}
+	if err := candidateStore.CommitExtraction(run, []annotation.Annotation{}); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	code := runDecisions([]string{"extract", "--project-id", fixture.projectID, "--expected-generation-id", "generation-markdown-cli", "--data-dir", fixture.data, "--json"}, strings.NewReader(""), &output, &bytes.Buffer{})
+	if code != 0 {
+		t.Fatalf("extract start code=%d output=%s", code, output.String())
+	}
+	reconciled, err := jobStore.Load(job.JobID)
+	if err != nil || reconciled.State != decisions.ExtractionCompleted || reconciled.Revision != job.Revision+1 {
+		t.Fatalf("prior projection was not reconciled before start: job=%+v err=%v", reconciled, err)
 	}
 }
 

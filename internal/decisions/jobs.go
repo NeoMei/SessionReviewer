@@ -157,6 +157,36 @@ func (s *ExtractionJobStore) LatestReconciled(projectID string, now time.Time) (
 	return &job, err
 }
 
+// ReconcileProject converges every job projection for one project against the
+// immutable candidate run before a caller derives the next extraction page.
+func (s *ExtractionJobStore) ReconcileProject(projectID string, now time.Time) error {
+	if !extractionID.MatchString(projectID) {
+		return errors.New("invalid extraction project ID")
+	}
+	return s.withLock(func() error {
+		entries, err := os.ReadDir(s.root)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			job, err := s.Load(strings.TrimSuffix(entry.Name(), ".json"))
+			if err != nil {
+				return err
+			}
+			if job.ProjectID != projectID {
+				continue
+			}
+			if _, err := s.reconcileCompletionUnlocked(job, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 func (s *ExtractionJobStore) CompareAndSwap(job ExtractionJob, expectedRevision int) error {
 	return s.withLock(func() error { return s.compareAndSwapUnlocked(job, expectedRevision) })
 }
