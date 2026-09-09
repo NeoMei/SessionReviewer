@@ -1,3 +1,4 @@
+import { validateSearchPage, type SessionSearchLoader, type SessionSearchRequest } from "../cli/session-search";
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../contracts/review-v4";
 import type { SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
 import { SessionInspectError } from "../cli/session-inspect-error";
@@ -18,6 +19,7 @@ const EVENT_PAGE_SIZE = 25;
 const EMPTY_EXCERPT = "（该索引事件没有可用摘录）";
 
 export interface ScanRecordsOptions {
+  loadSessionSearch?: SessionSearchLoader;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: ConversationLoader;
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
@@ -56,6 +58,9 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let filtered = filterSessions(index.sessions, state);
   let selected = findSelected(index.sessions, options.recoverySession ?? state.selected);
   let filterError = "";
+  let privateMatches: Set<string> | undefined;
+  let searchEpoch = 0;
+  const applyPrivate = (rows: SessionIndexEntryV1[]) => privateMatches ? rows.filter((row) => privateMatches!.has(`${row.provider}\0${row.session_id}`)) : rows;
   if (options.recoverySession && (options.recoverySelectionUnavailable || !selected || !filtered.includes(selected))) {
     selected = undefined;
     state.selected = null;
@@ -286,6 +291,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   root.dispose = () => {
     disposed = true;
     requestEpoch += 1;
+    searchEpoch += 1;
     conversation?.dispose();
     conversation = undefined;
     conversationIdentity = "";
@@ -320,7 +326,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       return;
     }
     filterError = "";
-    const nextFiltered = filterSessions(index.sessions, next);
+    const nextFiltered = applyPrivate(filterSessions(index.sessions, next));
     let selectionChanged = false;
     if (selected && nextFiltered.includes(selected)) {
       next.page = Math.floor(nextFiltered.indexOf(selected) / SESSION_PAGE_SIZE);
@@ -353,7 +359,54 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     onSelect: selectSession
   });
   browser.append(sessionRail);
-  root.append(heading, browser);
+  const privateSearch = element("form", { className: "sr-private-search", attrs: { "aria-label": "搜索 Session 执行事实" } });
+  const searchKind = element("select", { attrs: { "aria-label": "搜索事实类型" } });
+  for (const [value, label] of [["branch", "分支"], ["file", "文件"], ["error", "错误特征"]]) searchKind.append(element("option", { text: label, attrs: { value } }));
+  const searchInput = element("input", { attrs: { type: "search", "aria-label": "搜索分支、文件或错误", maxlength: "256" } });
+  const searchSubmit = button("搜索私有记录", { type: "submit", "data-action": "private-session-search" });
+  const searchClear = button("清除私有搜索", { "data-action": "clear-private-search" });
+  const searchStatus = element("p", { attrs: { role: "status", "aria-live": "polite" } });
+  const enabled = Boolean(options.loadSessionSearch && !options.cliUnavailable);
+  searchSubmit.disabled = searchInput.disabled = searchKind.disabled = !enabled;
+  if (!enabled) searchStatus.textContent = "CLI 不可用，分支、文件与错误搜索已停用；仍可使用日期、来源和状态筛选。";
+  searchClear.addEventListener("click", () => {
+    searchEpoch++; privateMatches = undefined; searchInput.value = ""; searchSubmit.disabled = !enabled;
+    searchStatus.textContent = enabled ? "" : "CLI 不可用，私有搜索已停用。";
+    applyFilter({});
+  });
+  privateSearch.addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!enabled || searchSubmit.disabled || !options.loadSessionSearch) return;
+    const query = searchInput.value;
+    if (!query.trim() || new TextEncoder().encode(query).length > 256) { searchStatus.textContent = "请输入最多 256 个 UTF-8 字节的搜索内容。"; return; }
+    const epoch = ++searchEpoch;
+    const queryKind = searchKind.value as SessionSearchRequest["queryKind"];
+    searchSubmit.disabled = true; searchStatus.textContent = "正在搜索已发布的执行事实…";
+    void (async () => {
+      const matches = new Set<string>(); const cursors = new Set<string>(); let cursor: string | undefined; let total: number | undefined;
+      do {
+        const request: SessionSearchRequest = { projectId: index.project_id, expectedGenerationId: index.generation_id, queryKind, query, limit: 100, ...(cursor ? { cursor } : {}) };
+        const page = await options.loadSessionSearch!(request);
+        if (disposed || epoch !== searchEpoch) return;
+        validateSearchPage(page, request);
+        if (total !== undefined && total !== page.total) throw new Error("search total changed");
+        total = page.total;
+        if (total > index.sessions.length) throw new Error("search exceeds index");
+        for (const item of page.items) {
+          const identity = `${item.provider}\0${item.session_id}`;
+          if (matches.has(identity) || !index.sessions.some((entry) => entry.provider === item.provider && entry.session_id === item.session_id)) throw new Error("search identity mismatch");
+          matches.add(identity);
+        }
+        cursor = page.next_cursor ?? undefined;
+        if (cursor) { if (cursors.has(cursor) || matches.size >= total) throw new Error("search cursor loop"); cursors.add(cursor); }
+      } while (cursor);
+      if (matches.size !== total) throw new Error("search coverage mismatch");
+      privateMatches = matches; applyFilter({});
+      searchStatus.textContent = `已找到 ${total} 个 Session；可继续使用日期、来源和状态筛选。`;
+    })().catch(() => { if (!disposed && epoch === searchEpoch) searchStatus.textContent = "搜索失败或索引已变化；请刷新项目后重试。"; }).finally(() => { if (!disposed && epoch === searchEpoch) searchSubmit.disabled = !enabled; });
+  });
+  privateSearch.append(searchKind, searchInput, searchSubmit, searchClear, searchStatus);
+  root.append(heading, privateSearch, browser);
   draw();
   void load(options.initialSessionEventOrdinal === undefined ? undefined : { anchor: options.initialSessionEventOrdinal, direction: "anchor" });
   return root;

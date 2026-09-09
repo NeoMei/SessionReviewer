@@ -19,6 +19,8 @@ Usage:
   session-reviewer inspect session-events --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
     --limit 1..100 [--data-dir PATH] --json
+  session-reviewer inspect session-search --project-id ID --expected-generation-id ID
+    --query-kind branch|file|error --query TEXT [--cursor TOKEN] --limit 1..100 [--data-dir PATH] --json
   session-reviewer inspect conversation-chain --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--session-view-digest DIGEST]
     [--cursor TOKEN | --turn-unit-id ID [--message-cursor TOKEN]]
@@ -44,7 +46,7 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		writeInspectError(stdout, err)
 		return 2
 	}
-	if request.Command != "session-summary" && request.Command != "session-events" && request.Command != "conversation-chain" {
+	if request.Command != "session-summary" && request.Command != "session-events" && request.Command != "conversation-chain" && request.Command != "session-search" {
 		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "inspect subcommand is not implemented"})
 		return 2
 	}
@@ -68,6 +70,12 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		err = loadErr
 		if err == nil {
 			body, err = inspectapi.RenderSummary(summary)
+		}
+	} else if request.Command == "session-search" {
+		page, loadErr := inspectapi.LoadSessionSearch(ctx, inspectapi.SearchRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, ExpectedGenerationID: request.ExpectedGenerationID, QueryKind: request.QueryKind, Query: request.Query, Cursor: request.Cursor, Limit: request.Limit})
+		err = loadErr
+		if err == nil {
+			body, err = json.Marshal(page)
 		}
 	} else if request.Command == "conversation-chain" {
 		page, loadErr := inspectapi.LoadConversationPage(ctx, inspectapi.ConversationRequest{DataRoot: dataRoot, ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, ExpectedGenerationID: request.ExpectedGenerationID, SessionViewDigest: request.SessionViewDigest, TurnUnitID: request.TurnUnitID, Cursor: request.Cursor, MessageCursor: request.MessageCursor, Limit: request.Limit})

@@ -708,7 +708,7 @@ describe("v4 scanned Session renderer", () => {
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
     to.value = "2026-09-07";
     to.dispatchEvent(new Event("change", { bubbles: true }));
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("日期范围无效");
+    expect(root.querySelector(".sr-session-filter-error")?.textContent).toContain("日期范围无效");
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(1);
 
     root.querySelector<HTMLButtonElement>('[data-action="clear-session-filters"]')!.click();
@@ -779,7 +779,7 @@ describe("v4 scanned Session renderer", () => {
     search.value = "🙂".repeat(65);
     search.dispatchEvent(new Event("input", { bubbles: true }));
     expect(root.querySelectorAll("[data-session-id]")).toHaveLength(2);
-    expect(root.querySelector('[role="status"]')?.textContent).toContain("256 个 UTF-8 字节");
+    expect(root.querySelector(".sr-session-filter-error")?.textContent).toContain("256 个 UTF-8 字节");
     expect(saveStatePatch).toHaveBeenCalledTimes(callsBefore);
   });
 
