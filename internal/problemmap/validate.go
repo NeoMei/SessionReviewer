@@ -33,7 +33,8 @@ func ValidateCandidates(store CandidateStore) error {
 			return fmt.Errorf("invalid or duplicate problem candidate %d", index)
 		}
 		seen[candidate.CandidateID] = true
-		if len(candidate.SourceTurnRefs) == 0 && (candidate.AnalysisMode != AnalysisDeterministic || len(candidate.DependencyDigests) != 0 || len(candidate.Grounds) != 1 || candidate.Grounds[0].RuleID != "human-created") {
+		isHumanEntry := len(candidate.DependencyDigests) == 0 && candidate.CandidateID == AnalysisIdentity(candidate.ProjectID, candidate.Question, "human-created-v1", nil)
+		if len(candidate.SourceTurnRefs) == 0 && !isHumanEntry {
 			return fmt.Errorf("candidate %q without source turns must be an explicit human-created entry", candidate.CandidateID)
 		}
 		if err := validateSourceTurns(candidate.SourceTurnRefs); err != nil {

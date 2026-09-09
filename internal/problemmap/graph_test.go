@@ -84,6 +84,18 @@ func TestGraphRejectsCycleForeignAndIncompleteReorderBeforeMutation(t *testing.T
 	}
 }
 
+func TestMergeWithoutSourcesKeepsRequiredEmptyArray(t *testing.T) {
+	graph := Graph{ProjectID: "project-a", Revision: 1, Nodes: []reviewv4.ProblemNode{graphProblemNode("problem-a", nil, 0)}}
+	candidate := Candidate{CandidateID: "candidate-empty", ProjectID: "project-a", Question: "Keep exact human question?", SourceTurnRefs: []reviewv4.SourceTurnRef{}, Status: CandidatePending, Revision: 1}
+	merged, err := ApplyCandidate(graph, candidate, ApplyMerge, "problem-a", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if merged.Node("problem-a").SourceTurnRefs == nil {
+		t.Fatal("required source_turn_refs became null")
+	}
+}
+
 func TestEditHumanFieldsAndWorkflowStateRequireExactNodeRevision(t *testing.T) {
 	graph := Graph{ProjectID: "project-a", Revision: 1, Nodes: []reviewv4.ProblemNode{graphProblemNode("problem-a", nil, 0)}}
 	next, err := EditHumanFields(graph, "problem-a", 1, HumanFields{Question: "保留原始标点？", CurrentConclusion: "结论原文", CompletionCriterion: "完成标准原文"})

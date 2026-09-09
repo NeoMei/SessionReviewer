@@ -310,7 +310,7 @@ func normalizeSiblingOrders(nodes []reviewv4.ProblemNode, parent *string) {
 	}
 }
 func mergeSourceTurns(left, right []reviewv4.SourceTurnRef) []reviewv4.SourceTurnRef {
-	result := append([]reviewv4.SourceTurnRef(nil), left...)
+	result := append([]reviewv4.SourceTurnRef{}, left...)
 	seen := map[string]bool{}
 	for _, ref := range result {
 		seen[ref.Provider+"\x00"+ref.SessionID+"\x00"+ref.TurnUnitID+"\x00"+ref.SessionViewDigest] = true

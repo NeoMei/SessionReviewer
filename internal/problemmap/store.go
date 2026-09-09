@@ -142,7 +142,17 @@ func (s *Store) ReconcileDeterministic(discovered []Candidate, now time.Time) er
 	}
 	for index := range store.Candidates {
 		prior := store.Candidates[index]
-		if prior.AnalysisMode != AnalysisDeterministic || (len(prior.Grounds) == 1 && prior.Grounds[0].RuleID == "human-created") {
+		isHumanEntry := len(prior.SourceTurnRefs) == 0 && len(prior.DependencyDigests) == 0 && prior.CandidateID == AnalysisIdentity(prior.ProjectID, prior.Question, "human-created-v1", nil)
+		if isHumanEntry {
+			continue
+		}
+		if prior.AnalysisMode == AnalysisAgentRequested {
+			if _, exists := current[prior.CandidateID]; exists {
+				delete(current, prior.CandidateID)
+			} else if prior.Status == CandidatePending || prior.Status == CandidateKeptPending {
+				prior.Status, prior.Revision, prior.UpdatedAt = CandidateStale, prior.Revision+1, stamp
+				store.Candidates[index] = prior
+			}
 			continue
 		}
 		fresh, exists := current[prior.CandidateID]

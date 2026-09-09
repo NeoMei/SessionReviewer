@@ -47,6 +47,9 @@ type problemResult struct {
 }
 
 func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) > 2 && args[0] == "placement" && args[1] == "worker" {
+		return runPrivateProblemPlacementWorker(args[1:])
+	}
 	if len(args) == 1 && isHelpToken(args[0]) {
 		fmt.Fprint(stdout, problemsHelp)
 		return 0
@@ -75,7 +78,14 @@ func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return writeProblemError(stdout, err)
 	}
 	if request.Command == "placement" {
-		return writeProblemError(stdout, ContractError{Code: "agent_unconfigured", Message: "Agent placement is not configured; configure a proposal-only Agent before requesting token use"})
+		status, placementErr := runProblemPlacement(request)
+		if request.Subcommand == "status" && request.CandidateID != "" && errors.Is(placementErr, os.ErrNotExist) {
+			return writeProblemJSON(stdout, stderr, nil)
+		}
+		if placementErr != nil {
+			return writeProblemError(stdout, placementErr)
+		}
+		return writeProblemJSON(stdout, stderr, status)
 	}
 	if request.Command == "candidates" {
 		dataRoot := resolveDataDir(request.DataDir)
