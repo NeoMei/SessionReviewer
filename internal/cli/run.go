@@ -38,6 +38,7 @@ Commands:
   inspect               Read published Session events (JSON only)
   decisions             Manage confirmed decisions and private candidates
   pricing               Refresh public price catalogs or supplement a price
+  sessions              Open an authenticated Session in its native CLI
   version               Print the version
 
 Options:
@@ -128,6 +129,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runProblems(args[1:], os.Stdin, stdout, stderr)
 	case "decisions":
 		return runDecisions(args[1:], os.Stdin, stdout, stderr)
+	case "sessions":
+		return runSessions(args[1:], stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		fmt.Fprint(stderr, rootHelp)

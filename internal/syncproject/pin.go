@@ -160,6 +160,20 @@ func (pin *MappingPin) Recheck(options Options) error {
 	return pin.verify(options)
 }
 
+// AuthenticatedProjectRoot exposes the minimum restart-stable Project
+// identity needed by a native Session launcher. The caller must still invoke
+// Recheck immediately before entering or executing in this directory.
+func (pin *MappingPin) AuthenticatedProjectRoot() (string, pathguard.IdentityToken, error) {
+	if pin == nil || pin.project == nil {
+		return "", pathguard.IdentityToken{}, errors.New("sync mapping pin is unavailable")
+	}
+	identity, err := pin.project.PhysicalIdentity()
+	if err != nil {
+		return "", pathguard.IdentityToken{}, err
+	}
+	return pin.project.Path, identity, nil
+}
+
 // AuthenticateBinding proves this one captured mapping resolves to the root
 // handles the worker already authenticated for its lease lifetime.
 func (pin *MappingPin) AuthenticateBinding(projectID string, project, vault, data os.FileInfo) error {
