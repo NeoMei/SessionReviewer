@@ -123,6 +123,58 @@ func TestMarkdownMilestoneUpdateRejectsUnauthenticatedInputsAndHumanCollision(t 
 	}
 }
 
+func TestMarkdownMilestoneUpdateRejectsGeneratedConfirmationAuthority(t *testing.T) {
+	for _, conclusionKind := range []ConclusionKind{ConclusionHumanConfirmed, ConclusionAICandidateConfirmed} {
+		conclusionKind := conclusionKind
+		t.Run("new/"+string(conclusionKind), func(t *testing.T) {
+			ledger, pair := milestoneUpdateLedger(t, nil)
+			forged := generatedMilestone("machine:forged", "generation-2", "2", "title", "summary")
+			forged.ClosedLoop.Conclusion.Kind = conclusionKind
+			forged.ClosedLoop.Conclusion.Text = "scan-forged confirmation"
+			update := milestoneUpdate("generation-2", "2", forged)
+
+			if got, err := RebaseMarkdownMilestones(ledger, pair, update); err == nil || !reflect.DeepEqual(got, Presentation{}) {
+				t.Fatalf("generated confirmation returned a presentation: kind=%s err=%v", conclusionKind, err)
+			}
+			if got, err := RenderMarkdownMilestoneUpdate(ledger.DocumentProjection.PresentationBase, ledger, pair, update); err == nil || len(got.Review) != 0 || len(got.History) != 0 {
+				t.Fatalf("generated confirmation returned Markdown: kind=%s err=%v", conclusionKind, err)
+			}
+		})
+
+		t.Run("existing/"+string(conclusionKind), func(t *testing.T) {
+			initial := milestoneUpdate("generation-2", "2", generatedMilestone("machine:owned", "generation-2", "2", "old title", "old summary"))
+			ledger, pair := milestoneUpdateLedger(t, &initial)
+			ledger, pair = acceptMilestoneEdits(t, ledger, pair, map[FieldKey]string{{Entity: "milestone:machine:owned", Name: "conclusion"}: "accepted confirmation"})
+			if conclusionKind == ConclusionAICandidateConfirmed {
+				presentation := clonePresentation(ledger.DocumentProjection.PresentationBase)
+				presentation.Timeline[1].ClosedLoop.Conclusion.Kind = ConclusionAICandidateConfirmed
+				ledger = acceptMilestonePresentation(t, ledger, pair, presentation)
+				pair = mustRenderedAcceptedPair(t, ledger)
+				ledger = bindMarkdownPair(t, ledger, pair)
+			}
+			accepted := cloneConclusion(ledger.DocumentProjection.PresentationBase.Timeline[1].ClosedLoop.Conclusion)
+			if accepted.Kind != conclusionKind || accepted.Text != "accepted confirmation" {
+				t.Fatalf("test fixture lacks accepted confirmation: %+v", accepted)
+			}
+
+			forged := generatedMilestone("machine:owned", "generation-3", "3", "new title", "new summary")
+			forged.ClosedLoop.Conclusion.Kind = conclusionKind
+			forged.ClosedLoop.Conclusion.Text = "scan-forged replacement"
+			update := milestoneUpdate("generation-3", "3", forged)
+
+			if got, err := RebaseMarkdownMilestones(ledger, pair, update); err == nil || !reflect.DeepEqual(got, Presentation{}) {
+				t.Fatalf("generated replacement confirmation returned a presentation: kind=%s err=%v", conclusionKind, err)
+			}
+			if got, err := RenderMarkdownMilestoneUpdate(ledger.DocumentProjection.PresentationBase, ledger, pair, update); err == nil || len(got.Review) != 0 || len(got.History) != 0 {
+				t.Fatalf("generated replacement confirmation returned Markdown: kind=%s err=%v", conclusionKind, err)
+			}
+			if current := ledger.DocumentProjection.PresentationBase.Timeline[1].ClosedLoop.Conclusion; !reflect.DeepEqual(current, accepted) {
+				t.Fatalf("rejected generated replacement mutated accepted confirmation: before=%+v after=%+v", accepted, current)
+			}
+		})
+	}
+}
+
 func TestMarkdownMilestoneUpdateRebasesAcceptedAndPendingGeneratedFieldEdits(t *testing.T) {
 	initial := milestoneUpdate("generation-2", "2", generatedMilestone("machine:owned", "generation-2", "2", "old title", "old summary"))
 	ledger, pair := milestoneUpdateLedger(t, &initial)

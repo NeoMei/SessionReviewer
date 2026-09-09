@@ -197,7 +197,7 @@ func validateScanMilestoneUpdate(update ScanMilestoneUpdate) (Presentation, erro
 	capability := presentationCapability(p)
 	p.MinimumReaderVersion, p.MinimumWriterVersion = capability, capability
 	for _, item := range p.Timeline {
-		if !isGeneratedMilestoneKind(item.Kind) || len(item.DecisionIDs) != 0 {
+		if !isGeneratedMilestoneKind(item.Kind) || len(item.DecisionIDs) != 0 || item.ClosedLoop.Conclusion.Kind != ConclusionVisibleAnswerExcerpt && item.ClosedLoop.Conclusion.Kind != ConclusionMissing {
 			return Presentation{}, errors.New("scan milestone is not a supported machine event")
 		}
 	}

@@ -121,3 +121,61 @@ Exit 0, no output. Log: `/tmp/session-reviewer-task1-final-vet.log`.
 Re-read the Task 1 brief/context and final production diff after the last change. Confirmed the no-delta identity guard remains; the delta path derives and compares the complete expected presentation; dependency union/alias/index behavior is bounded; error paths return zero presentation or empty Markdown/plan before write construction; and no out-of-scope production file changed.
 
 No known Task 1 correctness concern remains. This proves only the authenticated pure rebase/render seam. Real scan wiring, private-manifest authorization, atomic Task 2 publication, and final product acceptance remain downstream/controller-owned.
+
+## Fix round 1 — reject generated confirmation authority
+
+Independent review found that the scan-update validator admitted generated conclusions with `human_confirmed` or `ai_candidate_confirmed`. `ValidatePresentation` permits those values for accepted human presentation state, so relying on it at the narrower generated-input boundary allowed a scan to invent confirmed semantic authority.
+
+The fix adds an explicit generated-input restriction: a scan milestone conclusion may be only `visible_answer_excerpt` or `missing`. Existing accepted human/AI-confirmed conclusions are still retained by the unchanged authenticated ownership/human-field rebase path.
+
+Repository RED:
+
+```text
+go test ./internal/reviewv4 -run '^TestMarkdownMilestoneUpdateRejectsGeneratedConfirmationAuthority$' -count=1 -v
+```
+
+All four required subtests failed with `err=<nil>` before the fix:
+
+```text
+new/human_confirmed
+existing/human_confirmed
+new/ai_candidate_confirmed
+existing/ai_candidate_confirmed
+```
+
+Each negative covers both `RebaseMarkdownMilestones` zero-presentation behavior and `RenderMarkdownMilestoneUpdate` zero-byte behavior. Existing cases begin with a real accepted human/AI-confirmed conclusion and also assert that the rejected update does not mutate its exact kind/text/references.
+
+Focused GREEN:
+
+```text
+go test ./internal/reviewv4 ./internal/presentation -run 'MarkdownMilestone|GeneratedMilestone' -count=1 -v
+```
+
+Exit 0: all 13 Task 1 reviewv4 tests and both RenderV4 tests passed (`reviewv4 0.473s`, `presentation 0.682s`). The four new subtests passed. Log: `/tmp/session-reviewer-task1-fix1-focused.log`.
+
+Affected-package GREEN:
+
+```text
+go test ./internal/reviewv4 ./internal/presentation -count=1
+```
+
+Exit 0: `internal/reviewv4 1.345s`, `internal/presentation 13.107s`. Log: `/tmp/session-reviewer-task1-fix1-packages.log`.
+
+Vet and diff:
+
+```text
+go vet ./internal/reviewv4 ./internal/presentation
+git diff --check
+```
+
+Both exited 0 with no output. Vet log: `/tmp/session-reviewer-task1-fix1-vet.log`.
+
+Controller-owned external RED-to-GREEN replay on the frozen fix:
+
+```text
+go test -overlay /tmp/session-reviewer-scan-chain-qa.6VBnCG/milestone-rebase-controller-overlay.json ./internal/reviewv4 -run '^TestControllerGeneratedMilestone' -count=1
+```
+
+Exit 0 in 0.523s. This includes the original forged-confirmation negative, plus the existing pending-edit/CRLF/tamper and retained human historical-answer/no-op positives.
+
+Fix-round files are limited to `internal/reviewv4/markdown_milestone_update.go`, `internal/reviewv4/markdown_milestone_update_test.go`, and this report. No inventory, Task 2, publication, or UI file changed.
