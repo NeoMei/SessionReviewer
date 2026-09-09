@@ -2,6 +2,7 @@ import type { ReviewPresentationV4, TimelineEntryV4 } from "../contracts/review-
 import type { V4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
 import { presentDateTime } from "./presentation";
+import { defaultV4MilestoneId, orderV4Milestones } from "./v4-milestone-order";
 
 export interface V4EvolutionUiState {
   fullHistory: boolean;
@@ -20,12 +21,14 @@ export function renderV4Evolution(
     section.append(element("p", { className: "sr-empty", text: "尚无已接受的项目里程碑。扫描事实不会被伪装成项目演进。" }), openButton("查看原生项目历史", openHistory));
     return section;
   }
-  let selected = presentation.timeline.find((item) => item.id === state.selectedMilestoneId) ?? presentation.timeline.at(-1)!;
+  const defaultMilestoneId = defaultV4MilestoneId(presentation.timeline);
+  let selected = presentation.timeline.find((item) => item.id === state.selectedMilestoneId) ??
+    presentation.timeline.find((item) => item.id === defaultMilestoneId) ?? presentation.timeline[0];
   const pageSize = 8;
   const rail = element("aside", { className: "sr-v4-timeline-rail" });
   const detailHost = element("div", { className: "sr-v4-milestone-host" });
   const draw = (): void => {
-    const ordered = [...presentation.timeline].sort((left, right) => left.occurred_at.localeCompare(right.occurred_at) || left.id.localeCompare(right.id));
+    const ordered = orderV4Milestones(presentation.timeline);
     const recent = ordered.slice(-5).reverse();
     const pageCount = Math.max(1, Math.ceil(ordered.length / pageSize));
     const safePage = Math.min(ui.page, pageCount - 1);
@@ -65,32 +68,78 @@ function historyNavigation(page: number, pageCount: number, go: (page: number) =
 
 function renderMilestone(milestone: TimelineEntryV4): HTMLElement {
   const detail = element("article", { className: "sr-v4-milestone-detail" }, [
-    element("span", { className: "sr-detail-kicker", text: "已接受里程碑" }),
+    element("span", { className: "sr-detail-kicker", text: milestoneKindLabel(milestone.kind) }),
     element("h2", { text: milestone.title }),
     element("p", { text: milestone.summary })
   ]);
   const definitions = [
-    { label: "触发问题", machineLabel: "触发", segment: milestone.closed_loop.trigger_question },
-    { label: "Agent 结论", machineLabel: "结论", segment: { ...milestone.closed_loop.conclusion, state: milestone.closed_loop.conclusion.kind } },
-    { label: "执行与变更", machineLabel: "执行", segment: milestone.closed_loop.execution },
-    { label: "结果与验证", machineLabel: "验证", segment: milestone.closed_loop.verification },
-    { label: "对项目的影响与后续", machineLabel: "影响/后续", segment: milestone.closed_loop.impact_and_follow_up }
+    { key: "trigger_question", label: "触发问题", machineLabel: "触发", rawStatus: milestone.closed_loop.trigger_question.state, status: segmentStateLabel(milestone.closed_loop.trigger_question.state), segment: milestone.closed_loop.trigger_question },
+    { key: "conclusion", label: "Agent 结论", machineLabel: "结论", rawStatus: milestone.closed_loop.conclusion.kind, status: conclusionKindLabel(milestone.closed_loop.conclusion.kind), segment: milestone.closed_loop.conclusion },
+    { key: "execution", label: "执行与变更", machineLabel: "执行", rawStatus: milestone.closed_loop.execution.state, status: segmentStateLabel(milestone.closed_loop.execution.state), segment: milestone.closed_loop.execution },
+    { key: "verification", label: "结果与验证", machineLabel: "验证", rawStatus: milestone.closed_loop.verification.state, status: segmentStateLabel(milestone.closed_loop.verification.state), segment: milestone.closed_loop.verification },
+    { key: "impact_and_follow_up", label: "对项目的影响与后续", machineLabel: "影响/后续", rawStatus: milestone.closed_loop.impact_and_follow_up.state, status: segmentStateLabel(milestone.closed_loop.impact_and_follow_up.state), segment: milestone.closed_loop.impact_and_follow_up }
   ];
   const list = element("dl", { className: "sr-v4-closed-loop" });
-  for (const { label, machineLabel, segment } of definitions) {
-    const value = element("dd", { text: segment.text.trim() || missingLabel(segment.missing_reason) });
+  for (const { key, label, machineLabel, rawStatus, status, segment } of definitions) {
+    const value = element("dd");
+    value.append(element("span", { className: "sr-v4-segment-status", text: status }));
+    value.append(element("p", { className: "sr-v4-segment-text", text: segment.text || missingLabel(segment.missing_reason) }));
     const provenance = element("details", { className: "sr-v4-segment-provenance" }, [
       element("summary", { text: "状态与来源" }),
-      element("p", { text: `${machineLabel}状态：${segment.state}` })
+      element("p", { text: `${machineLabel}状态：${status}` }),
+      element("p", { text: `${machineLabel}状态：${rawStatus}` })
     ]);
     if (segment.text.trim()) provenance.append(element("p", { text: `${machineLabel}文本：${segment.text}` }));
-    if (segment.missing_reason) provenance.append(element("p", { text: `${machineLabel}缺失原因：${segment.missing_reason}` }));
-    for (const ref of segment.source_turn_refs) provenance.append(element("p", { text: `${machineLabel}引用：${ref.provider}/${ref.session_id}#${ref.turn_unit_id}` }));
+    if (segment.missing_reason) provenance.append(
+      element("p", { text: `${machineLabel}缺失原因：${missingLabel(segment.missing_reason)}` }),
+      element("p", { text: `${machineLabel}缺失原因：${segment.missing_reason}` })
+    );
+    for (const ref of segment.source_turn_refs) {
+      provenance.append(element("p", { text: `${machineLabel}引用：${ref.provider}/${ref.session_id}#${ref.turn_unit_id}` }));
+      if (ref.session_view_digest !== undefined) provenance.append(element("p", { text: `快照视图：${ref.session_view_digest}` }));
+    }
     value.append(provenance);
-    list.append(element("div", { className: "sr-definition" }, [element("dt", { text: label }), value]));
+    list.append(element("div", { className: "sr-definition", attrs: { "data-v4-segment": key } }, [element("dt", { text: label }), value]));
   }
-  detail.append(list);
+  detail.append(renderClosureCoverage(milestone), list);
   return detail;
+}
+
+function renderClosureCoverage(milestone: TimelineEntryV4): HTMLElement {
+  const coverage = milestone.closed_loop.coverage;
+  const disclosure = element("div", { className: "sr-v4-closure-coverage" }, [
+    element("p", { text: `闭环覆盖：来源 ${coverage.source_turns} · 已捕获 ${coverage.captured_turns} · 截断 ${coverage.truncated_turns} · 来源不可用 ${coverage.source_unavailable_turns}` })
+  ]);
+  const warnings: string[] = [];
+  if (coverage.source_turns !== coverage.captured_turns) warnings.push("部分捕获");
+  if (coverage.truncated_turns > 0) warnings.push("回答可能不完整");
+  if (coverage.source_unavailable_turns > 0) warnings.push("来源不可用");
+  if (warnings.length > 0) disclosure.append(element("p", { className: "sr-v4-closure-warnings", text: warnings.join(" · ") }));
+  return disclosure;
+}
+
+function milestoneKindLabel(kind: string): string {
+  return ({
+    milestone: "已接受里程碑",
+    machine_verification: "机器验证",
+    machine_commit: "提交记录",
+    machine_release: "发布记录",
+    machine_deployment: "部署记录",
+    machine_version: "版本记录"
+  } as Record<string, string>)[kind] ?? "其他里程碑";
+}
+
+function conclusionKindLabel(kind: string): string {
+  return ({
+    visible_answer_excerpt: "原回答摘录",
+    human_confirmed: "人工确认",
+    ai_candidate_confirmed: "AI 整理 · 已确认",
+    missing: "未捕获 Agent 回答"
+  } as Record<string, string>)[kind] ?? "未捕获 Agent 回答";
+}
+
+function segmentStateLabel(state: string): string {
+  return ({ present: "已捕获", partial: "部分捕获", missing: "缺少证据" } as Record<string, string>)[state] ?? "缺少证据";
 }
 
 function missingLabel(reason: string | null): string {

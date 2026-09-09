@@ -12,6 +12,7 @@ import { renderV4Decisions } from "./render-v4-decisions";
 import { renderV4Evolution, type V4EvolutionUiState } from "./render-v4-evolution";
 import { renderV4Problems } from "./render-v4-problems";
 import { renderV4Usage } from "./render-v4-usage";
+import { defaultV4MilestoneId } from "./v4-milestone-order";
 
 export interface RenderV4ShellOptions {
   initialState?: unknown;
@@ -75,7 +76,7 @@ export function renderV4Shell(
     }
     state = next;
     const persisted: V4ViewStatePatch = { ...patch };
-    if (state.view === "evolution" && state.selectedMilestoneId === null) state.selectedMilestoneId = presentation.timeline.at(-1)?.id ?? null;
+    if (state.view === "evolution" && state.selectedMilestoneId === null) state.selectedMilestoneId = defaultV4MilestoneId(presentation.timeline);
     if (state.view === "problems" && state.selectedProblemId === null) state.selectedProblemId = presentation.problem_root_ids[0] ?? presentation.problem_nodes[0]?.id ?? null;
     if (state.selectedMilestoneId !== requestedMilestoneId) persisted.selectedMilestoneId = state.selectedMilestoneId;
     if (state.selectedProblemId !== requestedProblemId) persisted.selectedProblemId = state.selectedProblemId;

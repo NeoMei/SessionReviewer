@@ -157,6 +157,44 @@ describe("v4 five-tab shell", () => {
     root.remove();
   });
 
+  it("uses the same latest actual milestone on first render and after leaving and re-entering evolution", () => {
+    const snapshot = v4SnapshotFixture();
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+    const seed = snapshot.state.value.presentation.timeline[0];
+    snapshot.state.value.presentation.timeline = [
+      { ...structuredClone(seed), id: "later-utc", occurred_at: "2026-09-08T01:00:00Z", title: "Later actual instant" },
+      { ...structuredClone(seed), id: "earlier-offset", occurred_at: "2026-09-08T08:00:00+08:00", title: "Earlier actual instant" }
+    ];
+    const saveStatePatch = vi.fn();
+    const root = renderMarkdownV4View(snapshot, vi.fn(), { saveStatePatch });
+
+    expect(root.querySelector(".sr-v4-milestone-detail h2")?.textContent).toBe("Later actual instant");
+    click(root, "usage");
+    click(root, "evolution");
+    expect(root.querySelector(".sr-v4-milestone-detail h2")?.textContent).toBe("Later actual instant");
+    expect(saveStatePatch).toHaveBeenLastCalledWith(expect.objectContaining({ selectedMilestoneId: "later-utc" }));
+  });
+
+  it("preserves an explicitly selected older milestone across history mode changes and unrelated tabs", () => {
+    const snapshot = v4SnapshotFixture();
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+    const seed = snapshot.state.value.presentation.timeline[0];
+    snapshot.state.value.presentation.timeline = [
+      { ...structuredClone(seed), id: "older", occurred_at: "2026-09-07T00:00:00Z", title: "Explicit older" },
+      { ...structuredClone(seed), id: "newer", occurred_at: "2026-09-08T00:00:00Z", title: "Default newer" }
+    ];
+    const initialState = { projectId: snapshot.descriptor.projectId, view: "evolution", selectedMilestoneId: "older", selectedProblemId: null };
+    const root = renderMarkdownV4View(snapshot, vi.fn(), { initialState });
+
+    expect(root.querySelector(".sr-v4-milestone-detail h2")?.textContent).toBe("Explicit older");
+    root.querySelector<HTMLButtonElement>('[data-v4-history-mode="full"]')!.click();
+    root.querySelector<HTMLButtonElement>('[data-v4-history-mode="recent"]')!.click();
+    click(root, "decisions");
+    click(root, "evolution");
+    expect(root.querySelector(".sr-v4-milestone-detail h2")?.textContent).toBe("Explicit older");
+    expect(root.querySelector('[data-v4-milestone-id="older"]')?.getAttribute("aria-selected")).toBe("true");
+  });
+
   it("selects a deep formal problem while keeping tree, path, direct children and evidence columns", () => {
     const snapshot = v4SnapshotFixture();
     if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
