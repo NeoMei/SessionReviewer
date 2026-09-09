@@ -1,7 +1,9 @@
-import type { ReviewPresentationV4, TimelineEntryV4 } from "../contracts/review-v4";
+import type { ReviewPresentationV4, SessionIndexV1, TimelineEntryV4 } from "../contracts/review-v4";
 import type { V4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
 import { presentDateTime } from "./presentation";
+import { renderV4Answer, type V4AnswerElement } from "./render-v4-answer";
+import type { ConversationLoader } from "./render-conversation";
 import { defaultV4MilestoneId, orderV4Milestones } from "./v4-milestone-order";
 
 export interface V4EvolutionUiState {
@@ -9,16 +11,28 @@ export interface V4EvolutionUiState {
   page: number;
 }
 
+export interface V4EvolutionOptions {
+  index?: SessionIndexV1;
+  loadConversation?: ConversationLoader;
+  cliUnavailable?: boolean;
+}
+
+export type V4EvolutionElement = HTMLElement & { dispose: () => void };
+
 export function renderV4Evolution(
   presentation: ReviewPresentationV4,
   state: V4ViewState,
   update: (patch: Partial<V4ViewState>) => void,
   openHistory: () => void,
-  ui: V4EvolutionUiState = { fullHistory: false, page: 0 }
-): HTMLElement {
-  const section = element("section", { className: "sr-v4-evolution", attrs: { "data-v4-panel": "evolution", role: "tabpanel" } });
+  ui: V4EvolutionUiState = { fullHistory: false, page: 0 },
+  options: V4EvolutionOptions = {}
+): V4EvolutionElement {
+  const section = element("section", { className: "sr-v4-evolution", attrs: { "data-v4-panel": "evolution", role: "tabpanel" } }) as V4EvolutionElement;
+  let answer: V4AnswerElement | undefined;
+  let disposed = false;
   if (presentation.timeline.length === 0) {
     section.append(element("p", { className: "sr-empty", text: "尚无已接受的项目里程碑。扫描事实不会被伪装成项目演进。" }), openButton("查看原生项目历史", openHistory));
+    section.dispose = () => { disposed = true; section.replaceChildren(); };
     return section;
   }
   const defaultMilestoneId = defaultV4MilestoneId(presentation.timeline);
@@ -27,7 +41,8 @@ export function renderV4Evolution(
   const pageSize = 8;
   const rail = element("aside", { className: "sr-v4-timeline-rail" });
   const detailHost = element("div", { className: "sr-v4-milestone-host" });
-  const draw = (): void => {
+  const draw = (redrawDetail = true): void => {
+    if (disposed) return;
     const ordered = orderV4Milestones(presentation.timeline);
     const recent = ordered.slice(-5).reverse();
     const pageCount = Math.max(1, Math.ceil(ordered.length / pageSize));
@@ -36,7 +51,7 @@ export function renderV4Evolution(
     const shown = ui.fullHistory ? ordered.slice(safePage * pageSize, (safePage + 1) * pageSize) : recent;
     const header = element("div", { className: "sr-rail-header" }, [element("h2", { text: "项目演进" }), element("span", { text: `共 ${presentation.timeline.length.toLocaleString("en-US")} 条` })]);
     const mode = button(ui.fullHistory ? "返回近期" : "查看全部", { "data-v4-history-mode": ui.fullHistory ? "recent" : "full" });
-    mode.addEventListener("click", () => { ui.fullHistory = !ui.fullHistory; ui.page = 0; draw(); });
+    mode.addEventListener("click", () => { ui.fullHistory = !ui.fullHistory; ui.page = 0; draw(false); });
     rail.replaceChildren(header, mode);
     for (const milestone of shown) {
       const node = button("", { "data-v4-milestone-id": milestone.id, "aria-selected": String(milestone.id === selected.id) });
@@ -44,11 +59,22 @@ export function renderV4Evolution(
       node.addEventListener("click", () => { selected = milestone; update({ selectedMilestoneId: milestone.id }); });
       rail.append(node);
     }
-    if (ui.fullHistory) rail.append(historyNavigation(safePage, pageCount, (next) => { ui.page = next; draw(); }));
+    if (ui.fullHistory) rail.append(historyNavigation(safePage, pageCount, (next) => { ui.page = next; draw(false); }));
     rail.append(openButton("查看原生项目历史", openHistory));
-    detailHost.replaceChildren(renderMilestone(selected));
+    if (redrawDetail) {
+      answer?.dispose();
+      answer = renderV4Answer(presentation, selected, options.index, options.cliUnavailable ? undefined : options.loadConversation);
+      detailHost.replaceChildren(renderMilestone(selected, answer));
+    }
   };
   section.append(rail, detailHost);
+  section.dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    answer?.dispose();
+    answer = undefined;
+    section.replaceChildren();
+  };
   draw();
   return section;
 }
@@ -66,7 +92,7 @@ function historyNavigation(page: number, pageCount: number, go: (page: number) =
   return nav;
 }
 
-function renderMilestone(milestone: TimelineEntryV4): HTMLElement {
+function renderMilestone(milestone: TimelineEntryV4, answer: V4AnswerElement): HTMLElement {
   const detail = element("article", { className: "sr-v4-milestone-detail" }, [
     element("span", { className: "sr-detail-kicker", text: milestoneKindLabel(milestone.kind) }),
     element("h2", { text: milestone.title }),
@@ -99,6 +125,7 @@ function renderMilestone(milestone: TimelineEntryV4): HTMLElement {
       if (ref.session_view_digest !== undefined) provenance.append(element("p", { text: `快照视图：${ref.session_view_digest}` }));
     }
     value.append(provenance);
+    if (key === "conclusion") value.append(answer);
     list.append(element("div", { className: "sr-definition", attrs: { "data-v4-segment": key } }, [element("dt", { text: label }), value]));
   }
   detail.append(renderClosureCoverage(milestone), list);

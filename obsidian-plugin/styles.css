@@ -254,6 +254,12 @@
 .sr-v4-segment-provenance { color: var(--sr-muted); font-size: 11px; max-width: 100%; overflow-wrap: anywhere; }
 .sr-v4-segment-provenance summary { cursor: pointer; font-weight: 700; }
 .sr-v4-segment-provenance p { margin: 4px 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+.sr-v4-answer { border-top: 1px solid var(--sr-border); margin-top: 10px; padding-top: 10px; white-space: normal; }
+.sr-v4-answer-source, .sr-v4-answer-source-label, .sr-v4-answer-unavailable { color: var(--sr-muted); display: block; font-size: 11px; margin: 0 0 7px; overflow-wrap: anywhere; }
+.sr-v4-answer-source-label select { display: block; margin-top: 5px; max-width: 100%; width: 100%; }
+.sr-v4-answer-unavailable { color: var(--text-error); margin-top: 7px; }
+.sr-v4-answer-body { margin-top: 10px; min-width: 0; }
+.sr-v4-answer-body .sr-conversation { border: 1px solid var(--sr-border); border-radius: 10px; margin: 0; padding: 12px; }
 .sr-v4-problems { display: grid; grid-template-columns: minmax(220px, 275px) minmax(300px, 1fr) minmax(250px, 330px); }
 .sr-v4-problem-tree, .sr-v4-problem-context, .sr-v4-problem-detail { min-width: 0; }
 .sr-v4-problem-tree { background: var(--background-secondary); border-right: 1px solid var(--sr-border); display: flex; flex-direction: column; gap: 4px; padding: 12px; }

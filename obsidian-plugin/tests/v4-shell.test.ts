@@ -52,6 +52,94 @@ describe("v4 five-tab shell", () => {
     expect(scan).toHaveBeenCalledTimes(1);
   });
 
+  it("loads one snapshot-qualified milestone answer only after keyboard activation", () => {
+    const snapshot = v4SnapshotFixture();
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+    const presentation = snapshot.state.value.presentation;
+    const milestone = presentation.timeline[0];
+    const view = `sha256:${"2".repeat(64)}`;
+    milestone.closed_loop.conclusion.source_turn_refs = [{ provider: "claude", session_id: "session-1", turn_unit_id: "turn-accepted", session_view_digest: view }];
+    presentation.chain_dependencies = [{ provider: "claude", session_id: "session-1", session_view_digest: view, dependency_digest: `sha256:${"3".repeat(64)}`, turn_unit_ids: ["turn-accepted"] }];
+    const loadConversation = vi.fn(() => new Promise<never>(() => {}));
+    const root = renderMarkdownV4View(snapshot, vi.fn(), { loadConversation });
+
+    expect(loadConversation).not.toHaveBeenCalled();
+    click(root, "usage");
+    click(root, "evolution");
+    expect(loadConversation).not.toHaveBeenCalled();
+    const expand = root.querySelector<HTMLButtonElement>('[data-action="expand-milestone-answer"]')!;
+    expand.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+
+    expect(loadConversation).toHaveBeenCalledTimes(1);
+    expect(loadConversation).toHaveBeenCalledWith({
+      projectId: "project-p",
+      provider: "claude",
+      sessionId: "session-1",
+      expectedGenerationId: "generation-1",
+      expectedSessionViewDigest: view,
+      sessionViewDigest: view,
+      limit: 20,
+      turnUnitId: "turn-accepted"
+    });
+    expect(root.querySelector('[data-action="expand-milestone-answer"]')?.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("never mounts the answer reader without CLI or a bound index", () => {
+    const setup = (withIndex: boolean, cliUnavailable: boolean) => {
+      const snapshot = v4SnapshotFixture();
+      if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+      const presentation = snapshot.state.value.presentation;
+      presentation.timeline[0].closed_loop.conclusion.source_turn_refs = [{ provider: "claude", session_id: "session-1", turn_unit_id: "turn-accepted", session_view_digest: `sha256:${"2".repeat(64)}` }];
+      presentation.chain_dependencies = [{ provider: "claude", session_id: "session-1", session_view_digest: `sha256:${"2".repeat(64)}`, dependency_digest: `sha256:${"3".repeat(64)}`, turn_unit_ids: ["turn-accepted"] }];
+      if (!withIndex) delete (snapshot.state as unknown as { index?: unknown }).index;
+      const loadConversation = vi.fn(() => new Promise<never>(() => {}));
+      return { root: renderMarkdownV4View(snapshot, vi.fn(), { loadConversation, cliUnavailable }), loadConversation };
+    };
+
+    for (const value of [setup(true, true), setup(false, false)]) {
+      click(value.root, "usage");
+      click(value.root, "evolution");
+      const action = value.root.querySelector<HTMLButtonElement>('[data-action="expand-milestone-answer"]')!;
+      expect(action.disabled).toBe(true);
+      action.click();
+      expect(value.loadConversation).not.toHaveBeenCalled();
+    }
+  });
+
+  it("preserves expanded answers across rail-only redraws and disposes them on milestone, tab and shell replacement boundaries", () => {
+    const snapshot = v4SnapshotFixture();
+    if (snapshot.state.kind !== "public_valid") throw new Error("expected fixture");
+    const presentation = snapshot.state.value.presentation;
+    const seed = presentation.timeline[0];
+    const view = `sha256:${"2".repeat(64)}`;
+    presentation.chain_dependencies = [{ provider: "claude", session_id: "session-1", session_view_digest: view, dependency_digest: `sha256:${"3".repeat(64)}`, turn_unit_ids: ["turn-accepted"] }];
+    presentation.timeline = ["older", "newer"].map((id, index) => {
+      const item = structuredClone(seed);
+      item.id = id;
+      item.title = id;
+      item.occurred_at = `2026-09-0${index + 1}T00:00:00Z`;
+      item.closed_loop.conclusion.source_turn_refs = [{ provider: "claude", session_id: "session-1", turn_unit_id: "turn-accepted", session_view_digest: view }];
+      return item;
+    });
+    const loadConversation = vi.fn(() => new Promise<never>(() => {}));
+    const root = renderMarkdownV4View(snapshot, vi.fn(), { loadConversation });
+    const expand = () => root.querySelector<HTMLButtonElement>('[data-action="expand-milestone-answer"]')!.click();
+
+    expand();
+    root.querySelector<HTMLButtonElement>('[data-v4-milestone-id="older"]')!.click();
+    expect(root.querySelector(".sr-conversation")).toBeNull();
+    expand();
+    root.querySelector<HTMLButtonElement>('[data-v4-history-mode="full"]')!.click();
+    expect(root.querySelector(".sr-conversation")).not.toBeNull();
+    click(root, "usage");
+    expect(root.querySelector(".sr-conversation")).toBeNull();
+    click(root, "evolution");
+    expand();
+    root.dispose?.();
+    expect(root.querySelector(".sr-conversation")).toBeNull();
+    expect(loadConversation).toHaveBeenCalledTimes(3);
+  });
+
   it("shows one compact trust disclosure with visible snapshot and scan-coverage status", () => {
     const root = renderMarkdownV4View(v4SnapshotFixture(), vi.fn());
 

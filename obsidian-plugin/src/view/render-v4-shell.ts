@@ -9,7 +9,7 @@ import { button, element } from "./dom";
 import { presentStatus, summarizeRisk } from "./presentation";
 import { renderScanRecords, type ScanRecordsElement } from "./render-scan-records";
 import { renderV4Decisions } from "./render-v4-decisions";
-import { renderV4Evolution, type V4EvolutionUiState } from "./render-v4-evolution";
+import { renderV4Evolution, type V4EvolutionElement, type V4EvolutionUiState } from "./render-v4-evolution";
 import { renderV4Problems } from "./render-v4-problems";
 import { renderV4Usage } from "./render-v4-usage";
 import { defaultV4MilestoneId } from "./v4-milestone-order";
@@ -52,6 +52,7 @@ export function renderV4Shell(
   if (state.selectedMilestoneId !== null && !presentation.timeline.some((item) => item.id === state.selectedMilestoneId)) state.selectedMilestoneId = null;
   if (state.selectedProblemId !== null && !presentation.problem_nodes.some((item) => item.id === state.selectedProblemId)) state.selectedProblemId = null;
   let records: ScanRecordsElement | undefined;
+  let evolution: V4EvolutionElement | undefined;
   let disposed = false;
   let recoveryPending = options.recoverySession !== undefined;
   const evolutionUi: V4EvolutionUiState = { fullHistory: false, page: 0 };
@@ -81,6 +82,7 @@ export function renderV4Shell(
     if (state.selectedMilestoneId !== requestedMilestoneId) persisted.selectedMilestoneId = state.selectedMilestoneId;
     if (state.selectedProblemId !== requestedProblemId) persisted.selectedProblemId = state.selectedProblemId;
     if (previous === "sessions" && state.view !== "sessions") disposeRecords();
+    if (previous === "evolution" && state.view !== "evolution") disposeEvolution();
     draw();
     persist(persisted);
     if (focus) root.querySelector<HTMLButtonElement>(`[data-v4-tab="${state.view}"]`)?.focus();
@@ -143,16 +145,27 @@ export function renderV4Shell(
       }
       return panel;
     }
-    return renderV4Evolution(presentation, state, update, () => open(`${descriptor.root}/项目历史.md`), evolutionUi);
+    disposeEvolution();
+    evolution = renderV4Evolution(presentation, state, update, () => open(`${descriptor.root}/项目历史.md`), evolutionUi, {
+      index,
+      loadConversation: options.cliUnavailable ? undefined : options.loadConversation,
+      cliUnavailable: options.cliUnavailable
+    });
+    return evolution;
   };
   const disposeRecords = (): void => {
     records?.dispose();
     records = undefined;
     root.scanRecords = undefined;
   };
+  const disposeEvolution = (): void => {
+    evolution?.dispose();
+    evolution = undefined;
+  };
   root.dispose = () => {
     disposed = true;
     disposeRecords();
+    disposeEvolution();
     root.replaceChildren();
   };
   draw();
