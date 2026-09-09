@@ -70,6 +70,7 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	answer := message("assistant", "Original bounded Agent conclusion.")
 	answer["phase"] = "final_answer"
 	add("2026-09-08T00:00:04Z", "response_item", answer)
+	add("2026-09-08T00:00:05Z", "event_msg", map[string]any{"type": "token_count", "info": map[string]any{"last_token_usage": map[string]any{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}})
 	if err := os.WriteFile(filepath.Join(sessionsRoot, "rollout-2026-09-08T00-00-00-"+sessionID+".jsonl"), source.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
