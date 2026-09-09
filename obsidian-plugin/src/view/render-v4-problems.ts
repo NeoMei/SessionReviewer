@@ -2,6 +2,8 @@ import type { ProblemMapCandidateV1, ProblemNodeV4, ReviewPresentationV4 } from 
 import type { V4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
 import { renderConversation, type ConversationElement, type ConversationLoader } from "./render-conversation";
+import { renderProblemPlacement, type ProblemPlacementElement } from "./problem-placement";
+import type { ProblemPlacementActions } from "../cli/problem-placement";
 
 export type ProblemCandidateV1 = ProblemMapCandidateV1["candidates"][number];
 export interface ProblemActions {
@@ -13,6 +15,8 @@ export interface ProblemActions {
   editProblem?: (problem: ProblemNodeV4, fields: { question: string; currentConclusion: string; completionCriterion: string }) => Promise<void>;
   moveProblem?: (problem: ProblemNodeV4, newParentId: string) => Promise<void>;
   reorderProblems?: (parentId: string, orderedChildIds: string[]) => Promise<void>;
+  agentPlacement?: ProblemPlacementActions;
+  agentPlacementCompleted?: () => void;
   loadConversation?: ConversationLoader;
   announce?: (message: string) => void;
 }
@@ -21,7 +25,7 @@ export type V4ProblemsElement = HTMLElement & { dispose: () => void };
 
 export function renderV4Problems(presentation: ReviewPresentationV4, state: V4ViewState, update: (patch: Partial<V4ViewState>) => void, openReview: () => void, actions: ProblemActions = {}): V4ProblemsElement {
   const section = element("section", { className: "sr-v4-problems", attrs: { "data-v4-panel": "problems", role: "tabpanel" } }) as V4ProblemsElement;
-  const viewers: ConversationElement[] = [];
+  const viewers: Array<ConversationElement | ProblemPlacementElement> = [];
   section.dispose = () => { for (const viewer of viewers) viewer.dispose(); viewers.length = 0; section.replaceChildren(); };
   const live = element("p", { className: "sr-sr-only", attrs: { "aria-live": "polite" } });
   const run = async (operation: (() => Promise<void>) | undefined, success: string): Promise<void> => {
@@ -32,7 +36,7 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   if (presentation.problem_nodes.length === 0) {
     section.append(element("p", { className: "sr-empty", text: "尚无已确认的正式问题。未归类候选不会自动进入问题树。" }));
     if (actions.createProblem) section.append(renderProblemCreate(actions.createProblem, run));
-    section.append(renderCandidates(actions.candidates ?? [], undefined, actions, run), nativeAction(openReview), live);
+    section.append(renderCandidates(actions.candidates ?? [], undefined, actions, run, (viewer) => viewers.push(viewer)), nativeAction(openReview), live);
     return section;
   }
   const nodes = new Map(presentation.problem_nodes.map((node) => [node.id, node]));
@@ -58,27 +62,27 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   ]);
   section.append(rail, context, detail);
   if (actions.createProblem) section.append(renderProblemCreate(actions.createProblem, run));
-  section.append(renderCandidates(actions.candidates ?? [], selected, actions, run), live);
+  section.append(renderCandidates(actions.candidates ?? [], selected, actions, run, (viewer) => viewers.push(viewer)), live);
   return section;
 }
 
-function renderCandidates(candidates: ProblemCandidateV1[], selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
+function renderCandidates(candidates: ProblemCandidateV1[], selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>, retain: (viewer: ProblemPlacementElement) => void): HTMLElement {
   const pending = candidates.filter((item) => item.status === "pending" || item.status === "kept_pending");
   const history = candidates.filter((item) => item.status !== "pending" && item.status !== "kept_pending");
   const drawer = element("section", { className: "sr-v4-problem-candidates", attrs: { "aria-label": "待归类问题" } }, [element("h3", { text: `待归类问题 ${pending.length}` })]);
   if (actions.unavailableReason) drawer.append(element("p", { className: "sr-empty", text: actions.unavailableReason }));
-  for (const candidate of pending) drawer.append(renderCandidate(candidate, selected, actions, run));
+  for (const candidate of pending) drawer.append(renderCandidate(candidate, selected, actions, run, retain));
   if (pending.length === 0 && !actions.unavailableReason) drawer.append(element("p", { className: "sr-empty", text: "当前没有待归类候选。普通扫描使用零 Token 确定性规则。" }));
   if (history.length > 0) {
     const archived = element("details", { className: "sr-v4-problem-candidate-history" });
     archived.append(element("summary", { text: `历史候选 ${history.length}` }));
-    for (const candidate of history) archived.append(renderCandidate(candidate, selected, actions, run));
+    for (const candidate of history) archived.append(renderCandidate(candidate, selected, actions, run, retain));
     drawer.append(archived);
   }
   return drawer;
 }
 
-function renderCandidate(candidate: ProblemCandidateV1, selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
+function renderCandidate(candidate: ProblemCandidateV1, selected: ProblemNodeV4 | undefined, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>, retain: (viewer: ProblemPlacementElement) => void): HTMLElement {
     const card = element("article", { className: "sr-v4-problem-candidate", attrs: { "data-problem-candidate-id": candidate.candidate_id } }, [
       element("strong", { text: candidate.question }), element("span", { text: `建议：${relationLabel(candidate.recommended_relation)} · 置信度：${confidenceLabel(candidate.confidence)}` })
     ]);
@@ -89,6 +93,10 @@ function renderCandidate(candidate: ProblemCandidateV1, selected: ProblemNodeV4 
       const keep = button("继续待归类", { "data-action": "keep-pending" }); keep.addEventListener("click", () => void run(actions.transitionCandidate ? () => actions.transitionCandidate!(candidate, "keep_pending") : undefined, "候选继续待归类。"));
       const dismiss = button("忽略", { "data-action": "dismiss-candidate" }); dismiss.addEventListener("click", () => void run(actions.transitionCandidate ? () => actions.transitionCandidate!(candidate, "dismiss") : undefined, "候选已忽略。"));
       card.append(keep, dismiss);
+      if (actions.agentPlacement) {
+        const placement = renderProblemPlacement(candidate, actions.agentPlacement, () => actions.agentPlacementCompleted?.());
+        retain(placement); card.append(placement);
+      }
     } else if (candidate.status === "dismissed" || candidate.status === "stale") {
       const restore = button("恢复候选", { "data-action": "restore-candidate" }); restore.addEventListener("click", () => void run(actions.transitionCandidate ? () => actions.transitionCandidate!(candidate, "restore") : undefined, "候选已恢复。")); card.append(restore);
     }
