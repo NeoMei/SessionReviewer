@@ -3,6 +3,7 @@ package scan
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
 )
 
@@ -273,6 +275,86 @@ func TestReconcileConversationChainsReplacesSameSessionViewRuleSuccessorWithoutA
 	}
 	if previous.manifest.ConversationChains[0] != legacy {
 		t.Fatal("reconciliation mutated the immutable prior generation reference")
+	}
+}
+
+func TestScanConversationSegmentationUpgradeRetainsHistoricalViewAndChainAndThenStabilizes(t *testing.T) {
+	harness := newScanHarness(t)
+	harness.adapter.visibleEnabled = true
+	harness.addSource(1, memory.Indexed, scanTestProject)
+	legacyMaterializer := sessionview.MaterializerVersion + "-" + conversationchain.NotificationSegmentationRuleVersion
+	harness.options.Materialize = func(input sessionview.Input) (memory.SessionView, bool, error) {
+		input.MaterializerVersion = legacyMaterializer
+		return sessionview.Materialize(input)
+	}
+
+	first, err := Run(context.Background(), harness.options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, firstManifest, err := harness.store.LoadPrepared()
+	if err != nil || len(firstManifest.SessionViews) != 1 || len(firstManifest.ConversationChains) != 1 {
+		t.Fatalf("legacy baseline manifest=%+v err=%v", firstManifest, err)
+	}
+	firstView, firstRoot := firstManifest.SessionViews[0], firstManifest.ConversationChains[0]
+	firstBody, err := harness.store.LoadObject(memorystore.ObjectConversationChain, firstRoot.Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstChain, err := conversationchain.Parse(firstBody)
+	if err != nil || firstChain.SegmentationRuleVersion != conversationchain.NotificationSegmentationRuleVersion {
+		t.Fatalf("legacy chain version=%q err=%v", firstChain.SegmentationRuleVersion, err)
+	}
+	proof := memory.PublicationProof{
+		Version: 4, ProjectID: scanTestProject, GenerationID: first.GenerationID,
+		ManifestDigest: prepared.ManifestDigest, ProjectViewDigest: prepared.ProjectViewDigest,
+		ReviewSHA256: strings.Repeat("1", 64), HistorySHA256: strings.Repeat("2", 64), LedgerSHA256: strings.Repeat("3", 64),
+		SessionIndexSHA256: strings.TrimPrefix(firstManifest.SessionIndexDigest, "sha256:"), JournalVerified: true,
+	}
+	if err := harness.store.CommitPublished(first.GenerationID, proof); err != nil {
+		t.Fatal(err)
+	}
+
+	harness.options.Materialize = sessionview.Materialize
+	second, err := Run(context.Background(), harness.options)
+	if err != nil || second.GenerationID == first.GenerationID {
+		t.Fatalf("segmentation upgrade result=%+v err=%v", second, err)
+	}
+	_, secondManifest, err := harness.store.LoadPrepared()
+	if err != nil || len(secondManifest.SessionViews) != 1 || len(secondManifest.ConversationChains) != 1 || !scanHasConversationRoot(secondManifest.RetainedConversationChains, firstRoot) {
+		t.Fatalf("upgrade did not retain historical roots: current=%+v/%+v retained=%+v/%+v err=%v", secondManifest.SessionViews, secondManifest.ConversationChains, secondManifest.RetainedSessionViews, secondManifest.RetainedConversationChains, err)
+	}
+	secondViewBody, err := harness.store.LoadObject(memorystore.ObjectSessionView, secondManifest.SessionViews[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondView memory.SessionView
+	if err := json.Unmarshal(secondViewBody, &secondView); err != nil {
+		t.Fatal(err)
+	}
+	if secondManifest.SessionViews[0].Digest == firstView.Digest || secondManifest.ConversationChains[0].SessionViewDigest == firstRoot.SessionViewDigest || secondView.MaterializerVersion != scanSessionViewMaterializerVersion {
+		t.Fatalf("segmentation upgrade reused historical view: before=%+v after=%+v", firstView, secondManifest.SessionViews[0])
+	}
+	secondBody, err := harness.store.LoadObject(memorystore.ObjectConversationChain, secondManifest.ConversationChains[0].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondChain, err := conversationchain.Parse(secondBody)
+	if err != nil || secondChain.SegmentationRuleVersion != conversationchain.CurrentSegmentationRuleVersion {
+		t.Fatalf("current chain version=%q err=%v", secondChain.SegmentationRuleVersion, err)
+	}
+	retainedBody, err := harness.store.LoadObject(memorystore.ObjectConversationChain, firstRoot.Digest)
+	if err != nil || !bytes.Equal(retainedBody, firstBody) {
+		t.Fatalf("historical chain bytes changed: err=%v", err)
+	}
+
+	repeat, err := Run(context.Background(), harness.options)
+	if err != nil || repeat.GenerationID != second.GenerationID {
+		t.Fatalf("post-upgrade repeat result=%+v err=%v", repeat, err)
+	}
+	_, repeatManifest, err := harness.store.LoadPrepared()
+	if err != nil || !reflect.DeepEqual(repeatManifest.ConversationChains, secondManifest.ConversationChains) || !reflect.DeepEqual(repeatManifest.RetainedConversationChains, secondManifest.RetainedConversationChains) {
+		t.Fatalf("post-upgrade repeat drifted: before=%+v after=%+v err=%v", secondManifest, repeatManifest, err)
 	}
 }
 

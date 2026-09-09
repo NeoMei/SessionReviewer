@@ -93,7 +93,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		MaterializerVersion      string   `json:"materializer_version"`
 	}{
 		ActiveRevisionIDs: activeRevisionIDs, SourceAvailabilityDigest: availabilityDigest,
-		UsageRecordDigest: usageRecordDigest, MaterializerVersion: MaterializerVersion,
+		UsageRecordDigest: usageRecordDigest, MaterializerVersion: input.MaterializerVersion,
 	})
 	if err != nil {
 		return memory.SessionView{}, false, fmt.Errorf("digest SessionView dependencies: %w", err)
@@ -117,7 +117,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 		DerivedRecords:          derivedRecords,
 		Diagnostics:             diagnostics,
 		DependencyDigest:        dependencyDigest,
-		MaterializerVersion:     MaterializerVersion,
+		MaterializerVersion:     input.MaterializerVersion,
 	}
 	view.Digest, err = memory.SessionViewDigest(view)
 	if err != nil {
@@ -133,7 +133,7 @@ func Materialize(input Input) (memory.SessionView, bool, error) {
 }
 
 func validateInput(input Input) error {
-	if input.MaterializerVersion != MaterializerVersion {
+	if !supportedMaterializerVersion(input.MaterializerVersion) {
 		return fmt.Errorf("unsupported materializer version %q", input.MaterializerVersion)
 	}
 	if err := memory.ValidateSourceRecord(input.Source); err != nil {
@@ -192,6 +192,28 @@ func validateInput(input Input) error {
 		}
 	}
 	return nil
+}
+
+func supportedMaterializerVersion(value string) bool {
+	if value == MaterializerVersion {
+		return true
+	}
+	suffix, found := strings.CutPrefix(value, MaterializerVersion+"-")
+	if !found || suffix == "" || len(value) > 128 {
+		return false
+	}
+	for _, char := range suffix {
+		if char < 'a' || char > 'z' {
+			if char < '0' || char > '9' {
+				switch char {
+				case '.', '_', '-':
+				default:
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 func deduplicateRevisions(values []memory.ObservationRevision) []memory.ObservationRevision {

@@ -292,7 +292,7 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 			SourceRecordDigest: terminal.recordDigest, UsageRecordDigest: usageDigest,
 			Observations: observations, ObservationChunkDigests: terminal.chunks,
 			TerminalState: terminal.state, Diagnostics: terminal.diagnostics,
-			Previous: previousPointer, MaterializerVersion: sessionview.MaterializerVersion,
+			Previous: previousPointer, MaterializerVersion: scanSessionViewMaterializerVersion,
 		}
 		view, _, err := options.Materialize(viewInput)
 		if err != nil {

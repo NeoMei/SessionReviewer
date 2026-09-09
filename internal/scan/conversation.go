@@ -6,16 +6,19 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
 )
 
 const (
-	conversationRuleVersion      = conversationchain.CurrentSegmentationRuleVersion
-	conversationRedactionVersion = "redaction-v1"
+	conversationRuleVersion            = conversationchain.CurrentSegmentationRuleVersion
+	conversationRedactionVersion       = "redaction-v1"
+	scanSessionViewMaterializerVersion = sessionview.MaterializerVersion + "-" + conversationRuleVersion
 )
 
 func materializeConversation(ctx context.Context, adapter source.Adapter, store MemoryStore, terminal terminalSource, view memory.SessionView, current []memory.ObservationRevision) (*conversationchain.Document, error) {
@@ -34,9 +37,13 @@ func materializeConversation(ctx context.Context, adapter source.Adapter, store 
 	if err != nil {
 		return nil, err
 	}
+	ruleVersion, err := conversationRuleVersionForSessionView(view.MaterializerVersion)
+	if err != nil {
+		return nil, err
+	}
 	document, _, err := conversationchain.Materialize(conversationchain.MaterializeInput{
 		View: view, Messages: messages, Revisions: revisions, SourceCoverage: coverage,
-		RuleVersion: conversationRuleVersion, RedactionVersion: conversationRedactionVersion,
+		RuleVersion: ruleVersion, RedactionVersion: conversationRedactionVersion,
 	})
 	// Drop full source bodies before the next Session is processed.
 	for index := range messages {
@@ -46,6 +53,19 @@ func materializeConversation(ctx context.Context, adapter source.Adapter, store 
 		return nil, fmt.Errorf("materialize retained conversation: %w", err)
 	}
 	return &document, nil
+}
+
+func conversationRuleVersionForSessionView(materializerVersion string) (string, error) {
+	ruleVersion, found := strings.CutPrefix(materializerVersion, sessionview.MaterializerVersion+"-")
+	if !found {
+		return "", errors.New("SessionView materializer version is not bound to conversation segmentation")
+	}
+	switch ruleVersion {
+	case conversationchain.LegacySegmentationRuleVersion, conversationchain.NotificationSegmentationRuleVersion, conversationchain.CurrentSegmentationRuleVersion:
+		return ruleVersion, nil
+	default:
+		return "", errors.New("SessionView materializer version binds unsupported conversation segmentation")
+	}
 }
 
 func activeConversationRevisions(ctx context.Context, store MemoryStore, view memory.SessionView, current []memory.ObservationRevision) ([]memory.ObservationRevision, error) {
