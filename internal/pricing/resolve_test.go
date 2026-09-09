@@ -218,6 +218,30 @@ func TestServiceResolveReviewedListingUsesExactHumanConfirmedBinding(t *testing.
 	if _, err := service.ResolveReviewedListing(context.Background(), request, ""); err == nil {
 		t.Fatal("accepted empty reviewed listing ID")
 	}
+	prior := got
+	prior.Status = PricePending
+	prior.SourceKind = "unresolved"
+	prior.SourceURL = nil
+	prior.ModelPriceWatchListingID = nil
+	prior.Rates = Rates{}
+	prior.LineCostsUSD = LineCosts{}
+	prior.MissingBillingDimensions = allDimensions()
+	prior.KnownSubtotalUSD = 0
+	prior.TotalCostUSD = nil
+	prior.PricingComplete = false
+	prior.AuditReason = "observed_billing_route_missing"
+	prior.SnapshotID = "pricing-prior"
+	request.Prior = &prior
+	got, err = service.ResolveReviewedListing(context.Background(), request, "provider-model")
+	if err != nil || got.SupersedesSnapshotID == nil || *got.SupersedesSnapshotID != prior.SnapshotID {
+		t.Fatalf("reviewed catalog resolution did not bind predecessor: %#v err=%v", got, err)
+	}
+	mismatch := prior
+	mismatch.BilledModelID = "different-model"
+	request.Prior = &mismatch
+	if _, err := service.ResolveReviewedListing(context.Background(), request, "provider-model"); err == nil {
+		t.Fatal("accepted reviewed catalog predecessor for another model")
+	}
 }
 
 func TestGeneratedSnapshotIDIgnoresOnlyLifecycleStatus(t *testing.T) {

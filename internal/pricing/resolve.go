@@ -236,6 +236,14 @@ func validateRequestCore(r ResolutionRequest) error {
 	if err := validateRequestIdentity(r); err != nil {
 		return err
 	}
+	if r.Prior != nil {
+		if err := ValidateSnapshot(*r.Prior); err != nil {
+			return fmt.Errorf("invalid prior pricing snapshot: %w", err)
+		}
+		if r.Prior.Status == PriceSuperseded || r.Prior.ProjectID != r.ProjectID || r.Prior.Provider != r.Provider || r.Prior.SessionID != r.SessionID || r.Prior.UsageRecordDigest != r.UsageRecordDigest || r.Prior.BilledModelID != r.Route.ModelID {
+			return errors.New("prior pricing snapshot identity does not match request")
+		}
+	}
 	return accounting.ValidateTokenUsage(r.Usage.TokenUsage)
 }
 func validateRequestIdentity(r ResolutionRequest) error {
@@ -266,7 +274,12 @@ func unresolvedRoute(route BillingRoute, usageModel string) BillingRoute {
 	return route
 }
 func baseSnapshot(r ResolutionRequest, created time.Time, b BillableQuantities) Snapshot {
-	return Snapshot{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: r.ProjectID, Provider: r.Provider, SessionID: r.SessionID, UsageRecordDigest: r.UsageRecordDigest, BillingHost: r.Route.Host, BilledModelID: r.Route.ModelID, BillingMode: r.Route.Mode, BillingRuleVersion: b.RuleVersion, Region: r.Route.Region, PricedAt: r.PricedAt.Format(time.RFC3339), CreatedAt: created.UTC().Format(time.RFC3339), BillableQuantities: b.Quantities, MissingBillingDimensions: []string{}, AuditReason: "unresolved"}
+	snapshot := Snapshot{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: r.ProjectID, Provider: r.Provider, SessionID: r.SessionID, UsageRecordDigest: r.UsageRecordDigest, BillingHost: r.Route.Host, BilledModelID: r.Route.ModelID, BillingMode: r.Route.Mode, BillingRuleVersion: b.RuleVersion, Region: r.Route.Region, PricedAt: r.PricedAt.Format(time.RFC3339), CreatedAt: created.UTC().Format(time.RFC3339), BillableQuantities: b.Quantities, MissingBillingDimensions: []string{}, AuditReason: "unresolved"}
+	if r.Prior != nil {
+		predecessor := r.Prior.SnapshotID
+		snapshot.SupersedesSnapshotID = &predecessor
+	}
+	return snapshot
 }
 func unresolvedFrom(r ResolutionRequest, created time.Time, adapter UsageAdapter, _ *modelpricewatch.CatalogSet, reason string) (Snapshot, error) {
 	b := BillableQuantities{RuleVersion: "unresolved-v1"}
