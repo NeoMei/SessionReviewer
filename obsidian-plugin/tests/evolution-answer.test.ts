@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { SessionLaunchTarget } from "../src/cli/session-launch";
 import type { ConversationRequest } from "../src/cli/runner";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
 import type { ReviewPresentationV4, SessionIndexV1, SourceTurnRefV4, TimelineEntryV4 } from "../src/contracts/review-v4";
@@ -213,4 +214,18 @@ describe("v4 milestone exact answer", () => {
     expect(root.textContent).toBe("");
     expect(load).toHaveBeenCalledTimes(3);
   });
+});
+
+it("launches the current authenticated Session while reading its historical answer", async () => {
+  const { presentation, milestone, index } = qualified([{ provider: "claude", session_id: "session-1", turn_unit_id: "turn-historical", session_view_digest: HISTORICAL_VIEW }]);
+  const load = vi.fn((request: ConversationRequest) => Promise.resolve(pageFor(request)));
+  const open = vi.fn(async (target: SessionLaunchTarget) => ({...target, schema_version: 1 as const, state: "launch_requested" as const}));
+  const root = renderV4Answer(presentation, milestone, index, load, {open, verify: vi.fn()});
+  root.querySelector<HTMLButtonElement>('[data-action="expand-milestone-answer"]')!.click();
+  root.querySelector<HTMLButtonElement>('[data-action="prepare-session-open"]')!.click();
+  root.querySelector<HTMLButtonElement>('[data-action="confirm-session-open"]')!.click();
+  await settle();
+  expect(load).toHaveBeenCalledWith(expect.objectContaining({sessionViewDigest: HISTORICAL_VIEW, turnUnitId: "turn-historical"}));
+  expect(open).toHaveBeenCalledWith(expect.objectContaining({provider: "claude", session_id: "session-1", session_view_digest: CURRENT_VIEW}));
+  root.dispose();
 });

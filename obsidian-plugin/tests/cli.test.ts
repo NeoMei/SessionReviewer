@@ -280,7 +280,7 @@ describe("CLI runner", () => {
   });
   it("uses execFile without shell and rejects non-allowlisted arguments", async () => {
     const execFile = vi.fn((_file, _args, _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify(syncStatusFixture()), ""));
-    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+    const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
     await runner.status("project-0123456789abcdef");
     expect(execFile).toHaveBeenCalledWith(
       "/usr/local/bin/session-reviewer",
@@ -293,10 +293,10 @@ describe("CLI runner", () => {
   });
 
   it("verifies semantic version and review schema", async () => {
-    const execFile = vi.fn((_file, args: string[], _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+    const execFile = vi.fn((_file, args: readonly string[], _options, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
 		callback(null, args[0] === "version" ? '{"version":"0.3.2","review_schema_version":3}' : "{}", "");
     });
-    const runner = new CliRunner("C:\\Tools\\session-reviewer.exe", execFile as never);
+    const runner = new CliRunner("C:\\Tools\\session-reviewer.exe", execFile);
     await expect(runner.verifyExecutable()).resolves.toEqual({ version: "0.3.2", reviewSchemaVersion: 3 });
   });
 
@@ -363,7 +363,7 @@ describe("CLI runner", () => {
 		expect(options.shell).toBe(false);
 		return child;
 	});
-	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
 	await expect(runner.createProblem({ projectId: response.project_id, expectedProblemMapRevision: 0, expectedReviewSHA256: response.review_sha256, question: "保留原文？" })).resolves.toMatchObject({ project_id: response.project_id });
 	expect(JSON.parse(stdin)).toEqual({ schema_version: 1, question: "保留原文？" });
 	expect(execFile.mock.calls[0][1]).toEqual(["problems", "create", "--project-id", response.project_id, "--expected-problem-map-revision", "0", "--expected-review-sha256", response.review_sha256, "--json"]);
@@ -380,7 +380,7 @@ describe("CLI runner", () => {
 		if (_args[1] === "move") queueMicrotask(() => callback(null, JSON.stringify(response), ""));
 		expect(options.shell).toBe(false); return child;
 	});
-	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile);
 	const problem = { id: "problem:alpha", revision: 4 } as never;
 	const cas = { projectId: response.project_id, expectedProblemMapRevision: 2, expectedReviewSHA256: "1".repeat(64) };
 	await runner.editProblem({ ...cas, problem, question: "用户原文？", currentConclusion: "结论", completionCriterion: "完成" });

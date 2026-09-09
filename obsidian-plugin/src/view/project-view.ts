@@ -1,3 +1,4 @@
+import type { DecisionCandidateEvidence } from "../cli/decision-evidence";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
@@ -42,6 +43,7 @@ export class ProjectEvolutionView extends ItemView {
   private recoveredEventSelection?: { projectId: string; provider: string; sessionId: string };
   private eventRecoveryEpoch = 0;
   private decisionCandidates: AgentAnnotationEntryV1[] = [];
+  private decisionEvidence: DecisionCandidateEvidence[] = [];
   private decisionCandidatesError?: string;
   private problemCandidates: ProblemCandidate[] = [];
   private problemUnavailableReason?: string;
@@ -148,9 +150,10 @@ export class ProjectEvolutionView extends ItemView {
       }
     }
     this.decisionCandidates = [];
+    this.decisionEvidence = [];
     this.decisionCandidatesError = undefined;
     if (selected.format === "markdown-v4" && this.runner && cli.diagnostic?.code !== "cli_unavailable" && typeof this.runner.listDecisionCandidates === "function") {
-      try { const candidates = await this.runner.listDecisionCandidates(selected.projectId); if (!current()) return; this.decisionCandidates = candidates; }
+      try { const page = typeof this.runner.listDecisionCandidatePage === "function" ? await this.runner.listDecisionCandidatePage(selected.projectId) : { candidates: await this.runner.listDecisionCandidates(selected.projectId), evidence: [] }; if (!current()) return; this.decisionCandidates = page.candidates; this.decisionEvidence = page.evidence; }
       catch { if (!current()) return; this.decisionCandidatesError = "决策候选读取失败；请刷新项目重试。"; }
     }
     const scanStatus = selected.format === "markdown-v4" ? undefined : options.scanStatus === false ? this.scanStatus : await this.readScanStatus(selected);
@@ -218,6 +221,7 @@ export class ProjectEvolutionView extends ItemView {
           loadSessionSearch: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.getSessionSearch === "function"
             ? (request) => this.runner!.getSessionSearch(request)
             : undefined,
+          sessionLaunch: this.runner && this.cliDiagnostic?.code !== "cli_unavailable" && typeof this.runner.openNativeSession === "function" ? { open: target => this.runner!.openNativeSession(target), verify: (provider, executable) => this.runner!.verifySessionLauncher(provider, executable) } : undefined,
           eventPageCache: this.eventPageCache,
           refreshSessionEvents: (request) => this.refreshSessionEvents(request),
           cancelSessionEventRecovery: () => this.invalidateEventRecovery(),
@@ -237,6 +241,7 @@ export class ProjectEvolutionView extends ItemView {
           }:undefined,
           decisionExtracted:()=>{void this.refresh(this.projects);},
           decisionCandidates: this.decisionCandidates,
+          decisionEvidence: this.decisionEvidence,
           transitionDecision: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" ? async (candidate, action, input) => {
             await this.runner!.transitionDecisionCandidate(current.descriptor.projectId, activeProblemState.ledger.review_sha256, candidate, action, input);
             await this.refresh(this.projects);

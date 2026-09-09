@@ -1,3 +1,4 @@
+import type { SessionLaunchActions } from "../cli/session-launch";
 import type { ReviewPresentationV4, SessionIndexV1, TimelineEntryV4 } from "../contracts/review-v4";
 import type { V4ViewState } from "../state/v4-view-state";
 import { button, element } from "./dom";
@@ -13,6 +14,7 @@ export interface V4EvolutionUiState {
 
 export interface V4EvolutionOptions {
   index?: SessionIndexV1;
+  sessionLaunch?: SessionLaunchActions;
   loadConversation?: ConversationLoader;
   cliUnavailable?: boolean;
 }
@@ -63,7 +65,7 @@ export function renderV4Evolution(
     rail.append(openButton("查看原生项目历史", openHistory));
     if (redrawDetail) {
       answer?.dispose();
-      answer = renderV4Answer(presentation, selected, options.index, options.cliUnavailable ? undefined : options.loadConversation);
+      answer = renderV4Answer(presentation, selected, options.index, options.cliUnavailable ? undefined : options.loadConversation, options.cliUnavailable ? undefined : options.sessionLaunch);
       const detail = renderMilestone(selected, answer);
       const refs = selected.closed_loop.source_turn_refs;
       const related = presentation.problem_nodes.filter(problem => problem.source_turn_refs.some(candidate => refs.some(ref =>

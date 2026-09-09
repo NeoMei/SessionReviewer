@@ -1,6 +1,8 @@
+import { parseSessionLaunchResponse, parseSessionLauncherConfiguration, type SessionLaunchTarget, type SessionLaunchResponse, type SessionLaunchProvider, type SessionLauncherConfiguration } from "./session-launch";
+import type { DecisionCandidatePage } from "./decision-evidence";
 import { parseProblemPlacementJob, type ProblemPlacementJob } from "./problem-placement";
 import { validateDecisionJob, type DecisionExtractionJob, type DecisionAgentConfiguration } from "./decision-jobs";
-import { parseDecisionCandidates } from "../data/contracts-v4";
+import { parseDecisionCandidates, parseDecisionCandidatePage } from "../data/contracts-v4";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionCandidateAction } from "../view/decision-candidates";
 import type { DecisionInput } from "../view/decision-form";
@@ -229,6 +231,12 @@ export class CliRunner {
     return value as DecisionAgentConfiguration;
   }
 
+  async listDecisionCandidatePage(projectId: string): Promise<DecisionCandidatePage> {
+    validateProject(projectId);
+    try { return parseDecisionCandidatePage((await this.run(["decisions", "candidates", "list", "--project-id", projectId, "--json"])).stdout, projectId); }
+    catch { throw new Error("无法读取决策候选与证据；请刷新项目重试。"); }
+  }
+
   async listDecisionCandidates(projectId: string): Promise<AgentAnnotationEntryV1[]> {
     validateProject(projectId);
     try { return parseDecisionCandidates((await this.run(["decisions", "candidates", "list", "--project-id", projectId, "--json"])).stdout, projectId); }
@@ -253,6 +261,18 @@ export class CliRunner {
       const result = parseJson((await this.runWithInput(args, JSON.stringify(input), 30_000)).stdout) as Record<string, unknown>;
       if (!result || result.schema_version !== 1 || result.project_id !== projectId || typeof result.review_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(result.review_sha256) || Object.keys(result).some(key => !["schema_version", "project_id", "review_sha256", "decisions"].includes(key))) throw new Error("decision result mismatch");
     } catch { throw new Error("保存结果未确认；请刷新项目检查。"); }
+  }
+
+  async openNativeSession(target: SessionLaunchTarget): Promise<SessionLaunchResponse> {
+    validateProject(target.project_id);
+    if (!["codex", "claude", "opencode"].includes(target.provider) || !INSPECT_ID.test(target.session_id) || !INSPECT_ID.test(target.generation_id) || !DIGEST.test(target.session_view_digest)) throw new Error("invalid Session launch target");
+    const args = ["sessions", "open", "--project-id", target.project_id, "--provider", target.provider, "--session-id", target.session_id, "--expected-generation-id", target.generation_id, "--expected-session-view-digest", target.session_view_digest, "--json"];
+    return parseSessionLaunchResponse(parseJson((await this.run(args, 15_000)).stdout), target);
+  }
+
+  async verifySessionLauncher(provider: SessionLaunchProvider, executable: string): Promise<SessionLauncherConfiguration> {
+    if (!["codex", "claude", "opencode"].includes(provider) || !executable.startsWith("/") || executable.includes("\0")) throw new Error("invalid Session launcher");
+    return parseSessionLauncherConfiguration(parseJson((await this.run(["sessions", "launcher", "verify", "--provider", provider, "--executable", executable, "--json"], 15_000)).stdout), provider);
   }
 
   async getPricingCatalog(): Promise<PricingCatalog> {
@@ -532,6 +552,8 @@ export class CliRunner {
 }
 
 function allowedArgs(args: readonly string[]): boolean {
+  if (args[0] === "sessions" && args[1] === "open") return args.length === 13 && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && ["codex", "claude", "opencode"].includes(args[5] ?? "") && args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") && args[10] === "--expected-session-view-digest" && DIGEST.test(args[11] ?? "") && args[12] === "--json";
+  if (args[0] === "sessions" && args[1] === "launcher") return args.length === 8 && args[2] === "verify" && args[3] === "--provider" && ["codex", "claude", "opencode"].includes(args[4] ?? "") && args[5] === "--executable" && absoluteExecutable(args[6]) && args[7] === "--json";
   if (args[0] === "problems" && args[1] === "placement" && args[3] === "--project-id" && PROJECT_ID.test(args[4] ?? "")) {
     if (args[2] === "request") return args.length === 14 && args[5] === "--candidate-id" && INSPECT_ID.test(args[6]) && args[7] === "--expected-candidate-revision" && validPositive(args[8]) && args[9] === "--expected-problem-map-revision" && validNonnegative(args[10]) && args[11] === "--expected-generation-id" && SCAN_GENERATION_ID.test(args[12]) && args[13] === "--json";
     if (args[2] === "status" && args[5] === "--candidate-id" && INSPECT_ID.test(args[6] ?? "") && args.length === 8 && args[7] === "--json") return true;

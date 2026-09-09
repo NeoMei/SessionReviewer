@@ -1,11 +1,16 @@
+import type { DecisionCandidateEvidence } from "../cli/decision-evidence";
+import type { ConversationLoader } from "./render-conversation";
+import { renderDecisionEvidence, type DecisionEvidenceElement } from "./decision-evidence";
 import type { AgentAnnotationEntryV1, DecisionV4 } from "../contracts/review-v4";
 import { parseStrictWireDocument } from "../data/contracts-v4";
 import { decisionForm, type DecisionInput } from "./decision-form";
 import { button, element } from "./dom";
 export type DecisionCandidateAction="confirm"|"ignore"|"not_decision"|"restore";
 export type DecisionTransition=(candidate:AgentAnnotationEntryV1,action:DecisionCandidateAction,input?:DecisionInput)=>Promise<unknown>;
-export function renderDecisionCandidates(candidates:AgentAnnotationEntryV1[],decisions:DecisionV4[],transition?:DecisionTransition):HTMLElement {
- const root=element("section",{attrs:{"aria-label":"决策候选"}},[element("h3",{text:"待确认建议"}),element("p",{text:"建议不会自动成为项目决策；确认前可修改内容。"})]);
+export function renderDecisionCandidates(candidates:AgentAnnotationEntryV1[],decisions:DecisionV4[],transition?:DecisionTransition, sources?: {projectId:string;generationId:string;evidence:DecisionCandidateEvidence[];loadConversation?:ConversationLoader}):HTMLElement & {dispose:()=>void} {
+ const viewers:DecisionEvidenceElement[]=[];
+ const root=element("section",{attrs:{"aria-label":"决策候选"}},[element("h3",{text:"待确认建议"}),element("p",{text:"建议不会自动成为项目决策；确认前可修改内容。"})]) as HTMLElement & {dispose:()=>void};
+ root.dispose=()=>{for(const viewer of viewers)viewer.dispose();root.replaceChildren();};
  const pending=candidates.filter(c=>c.status==="pending");const history=element("details",{},[element("summary",{text:`历史候选 · ${candidates.length-pending.length}`})]);
  if(!pending.length)root.append(element("p",{text:"暂无待确认建议。"}));
  for(const candidate of candidates){
@@ -15,8 +20,11 @@ export function renderDecisionCandidates(candidates:AgentAnnotationEntryV1[],dec
   });}catch{input=undefined;}
   const labels={pending:"待确认",confirmed:"已确认",ignored:"已忽略",not_decision:"非决策",stale:"来源已变化"};
   const card=element("article",{className:"sr-card"},[element("strong",{text:input?.title??"候选内容无法读取"}),element("p",{text:labels[candidate.status]}),element("p",{text:input?.rationale??"请重新提取建议。"})]);
+  const evidence=sources?.evidence.find(entry=>entry.candidate_id===candidate.id);
+  if(sources){const viewer=renderDecisionEvidence(sources.projectId,sources.generationId,evidence,sources.loadConversation);viewers.push(viewer);card.append(viewer);}
+  const evidenceAvailable=!sources||!!evidence&&!evidence.error_code&&evidence.evidence_refs.length>0;
   const feedback=element("p",{attrs:{role:"status"}});const editor=element("div");
-  const action=(key:DecisionCandidateAction,label:string)=>{const control=button(label,{"data-action":`${key}-decision-candidate`});control.disabled=!transition||(key==="confirm"&&!input);control.addEventListener("click",()=>{
+  const action=(key:DecisionCandidateAction,label:string)=>{const control=button(label,{"data-action":`${key}-decision-candidate`});control.disabled=!transition||(key==="confirm"&&(!input||!evidenceAvailable));control.addEventListener("click",()=>{
    if(!transition||control.disabled)return;
    if(key==="confirm"&&input){if(editor.childElementCount)return;const draft:DecisionV4={...input,id:candidate.entity_id??candidate.id,status:input.status,legacy_status_text:null,provenance:"ai_candidate_confirmed",revision:1};editor.append(decisionForm(decisions,body=>transition(candidate,"confirm",body),()=>editor.replaceChildren(),draft));return;}
    control.disabled=true;void transition(candidate,key).then(()=>{feedback.textContent="状态已保存，正在重新读取。";}).catch(()=>{feedback.textContent="保存结果未确认；请刷新后检查。";control.disabled=false;});

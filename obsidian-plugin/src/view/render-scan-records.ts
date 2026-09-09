@@ -1,3 +1,6 @@
+import { renderSessionLaunch, type SessionLaunchElement } from "./session-launch";
+import type { SessionLaunchProvider } from "../cli/session-launch";
+import type { SessionLaunchActions } from "../cli/session-launch";
 import { validateSearchPage, type SessionSearchLoader, type SessionSearchRequest } from "../cli/session-search";
 import type { SessionEventPageV1, SessionIndexEntryV1, SessionIndexV1 } from "../contracts/review-v4";
 import type { SessionEventRequest, SessionSummaryRequest } from "../cli/runner";
@@ -21,6 +24,7 @@ const EMPTY_EXCERPT = "（该索引事件没有可用摘录）";
 export interface ScanRecordsOptions {
   loadSessionSearch?: SessionSearchLoader;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
+  sessionLaunch?: SessionLaunchActions;
   loadConversation?: ConversationLoader;
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   cliUnavailable?: boolean;
@@ -75,6 +79,8 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     selected = filtered[0];
     state.selected = selected ? sessionSelection(selected) : null;
   }
+  let sessionLauncher: SessionLaunchElement | undefined;
+  let launchIdentity = "";
   let eventPage: SessionEventPageV1 | undefined;
   let selectedEvent = 0;
   let loading = false;
@@ -282,6 +288,12 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
       onLoad: (navigation) => { recoveryAvailable = true; options.cancelSessionEventRecovery?.(); void load(navigation); },
       onJump: jump
     });
+    const nextLaunchIdentity = selected?.session_view_digest && selected.source_availability === "available" && ["codex", "claude", "opencode"].includes(selected.provider) && options.sessionLaunch && !options.cliUnavailable ? `${selected.provider}\0${selected.session_id}\0${selected.session_view_digest}` : "";
+    if (nextLaunchIdentity !== launchIdentity) {
+      sessionLauncher?.dispose(); sessionLauncher = undefined; launchIdentity = nextLaunchIdentity;
+      if (nextLaunchIdentity && selected?.session_view_digest && options.sessionLaunch) sessionLauncher = renderSessionLaunch({ project_id: index.project_id, provider: selected.provider as SessionLaunchProvider, session_id: selected.session_id, generation_id: index.generation_id, session_view_digest: selected.session_view_digest }, options.sessionLaunch, () => {});
+    }
+    if (sessionLauncher) nextEventArea.prepend(sessionLauncher);
     if (eventArea) eventArea.replaceWith(nextEventArea);
     else browser.append(nextEventArea);
     eventArea = nextEventArea;
@@ -292,6 +304,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
     disposed = true;
     requestEpoch += 1;
     searchEpoch += 1;
+    sessionLauncher?.dispose(); sessionLauncher = undefined;
     conversation?.dispose();
     conversation = undefined;
     conversationIdentity = "";

@@ -1,3 +1,4 @@
+import type { DecisionCandidatePage, DecisionCandidateEvidence } from "../cli/decision-evidence";
 import { sha256Text } from "./hash";
 import type {
   AgentAnnotationEntryV1,
@@ -747,19 +748,47 @@ function parseAgentAnnotationDocument(source: string): AgentAnnotationV1 {
 }
 
 export function parseDecisionCandidates(source: string, projectID: string): AgentAnnotationEntryV1[] {
+  return parseDecisionCandidatePage(source, projectID).candidates;
+}
+
+export function parseDecisionCandidatePage(source: string, projectID: string): DecisionCandidatePage {
   return atWireBoundary(() => {
     const row = documentObject(source, "decision candidate list");
-    exact(row, "$", ["schema_version", "project_id", "candidates"], ["schema_version", "project_id"]);
+    exact(row, "$", ["schema_version", "project_id", "candidates", "candidate_evidence"], ["schema_version", "project_id"]);
     constant(row.schema_version, 1, "$.schema_version");
     if (row.project_id !== projectID) throw new Error("decision candidate project mismatch");
     const items = row.candidates === undefined ? [] : boundedArray(row.candidates, "$.candidates", 65536);
     const seen = new Set<string>();
-    return items.map((item, index) => {
+    const candidates = items.map((item, index) => {
       const candidate = parseAnnotation(item, `$.candidates[${index}]`, projectID);
       addUnique(seen, candidate.id, "decision candidate");
       if (!["decision_candidate", "agreement_candidate"].includes(candidate.annotation_kind)) throw new Error("unexpected candidate kind");
       return candidate;
     });
+    const evidenceIDs = new Set<string>();
+    const evidence = (row.candidate_evidence === undefined ? [] : boundedArray(row.candidate_evidence, "$.candidate_evidence", 65536)).map((item, index) => {
+      const path = `$.candidate_evidence[${index}]`;
+      const value = object(item, path);
+      exact(value, path, ["candidate_id", "evidence_refs", "error_code"]);
+      const candidateID = id(value.candidate_id, `${path}.candidate_id`);
+      addUnique(evidenceIDs, candidateID, "candidate evidence");
+      const candidate = candidates.find(entry => entry.id === candidateID);
+      if (!candidate || typeof value.error_code !== "string" || !["", "candidate_stale"].includes(value.error_code)) throw new Error("candidate evidence identity mismatch");
+      const refs = boundedArray(value.evidence_refs, `${path}.evidence_refs`, 256);
+      const seenRefs = new Set<string>();
+      for (const entry of refs) {
+        const ref = object(entry, path);
+        exact(ref, path, ["provider", "session_id", "session_view_digest", "turn_unit_id", "revision_id"]);
+        for (const key of ["provider", "session_id", "turn_unit_id"]) id(ref[key], `${path}.${key}`);
+        digest(ref.session_view_digest, `${path}.session_view_digest`);
+        digest(ref.revision_id, `${path}.revision_id`);
+        addUnique(seenRefs, [ref.provider, ref.session_id, ref.session_view_digest, ref.turn_unit_id, ref.revision_id].join("\0"), "evidence ref");
+        if (!candidate.dependencies.some(dep => dep.kind === "source_turn" && dep.digest === ref.session_view_digest && dep.revision_id === ref.revision_id) || !candidate.dependencies.some(dep => dep.kind === "session_view" && dep.digest === ref.session_view_digest)) throw new Error("evidence lacks candidate dependency");
+      }
+      if (value.error_code === "candidate_stale" && refs.length) throw new Error("stale evidence must not contain references");
+      return value as unknown as DecisionCandidateEvidence;
+    });
+    return { candidates, evidence };
   });
 }
 

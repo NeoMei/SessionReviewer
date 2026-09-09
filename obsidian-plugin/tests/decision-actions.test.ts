@@ -38,7 +38,7 @@ it("keeps a decision candidate private until a confirmation form is submitted",a
  const p=fixture();let action:unknown;
  const input={schema_version:1 as const,kind:"decision" as const,occurred_at:"2026-09-01T00:00:00Z",title:"候选建议",rationale:"依据",impact:"范围",reevaluate_when:"条件",status:"active" as const,supersedes:[],milestone_ids:[],session_refs:[],pinned:false};
  const candidate={id:"candidate-one",project_id:p.project_id,annotation_kind:"decision_candidate" as const,status:"pending" as const,text:JSON.stringify(input),generation_id:p.generation_id,schema_version:1 as const,analysis_profile:"v1",agent_run_id:"run-1",dependencies:[],revision:1,created_at:"2026-09-01T00:00:00Z",confirmed_entity_id:null};
- const root=renderV4Decisions(p,()=>{},{candidates:[candidate],transition:async(c,a,body)=>{action={c,a,body};}});document.body.append(root);
+ const root=renderV4Decisions(p,()=>{},{candidates:[candidate],evidence:[{candidate_id:candidate.id,error_code:"",evidence_refs:[{provider:"codex",session_id:"session-one",session_view_digest:`sha256:${"1".repeat(64)}`,turn_unit_id:"turn-one",revision_id:`sha256:${"2".repeat(64)}`}]}],transition:async(c,a,body)=>{action={c,a,body};}});document.body.append(root);
  const confirm=root.querySelector<HTMLButtonElement>('[data-action="confirm-decision-candidate"]');expect(confirm).not.toBeNull();confirm!.click();expect(action).toBeUndefined();
  const form=root.querySelector<HTMLFormElement>("form")!;form.querySelector<HTMLInputElement>('[name="title"]')!.value="人确认后的结论";form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await tick();expect(action).toMatchObject({a:"confirm",body:{title:"人确认后的结论"}});root.remove();
 });

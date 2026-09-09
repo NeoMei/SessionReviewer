@@ -1,3 +1,5 @@
+import type { SessionLaunchActions } from "../cli/session-launch";
+import type { DecisionCandidateEvidence } from "../cli/decision-evidence";
 import type { DecisionExtractionActions } from "../cli/decision-jobs";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionTransition } from "./decision-candidates";
@@ -92,10 +94,12 @@ export function renderMarkdownV4View(
     decisionExtracted?:()=>void;
     saveDecision?: DecisionSave;
     decisionCandidates?: AgentAnnotationEntryV1[];
+    decisionEvidence?: DecisionCandidateEvidence[];
     transitionDecision?: DecisionTransition;
     cliUnavailable?: boolean;
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
+  sessionLaunch?: SessionLaunchActions;
     loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
     eventPageCache?: Map<string, SessionEventPageV1>;
     refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;

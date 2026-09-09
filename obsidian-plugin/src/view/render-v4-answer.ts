@@ -1,3 +1,5 @@
+import type { SessionLaunchActions, SessionLaunchProvider } from "../cli/session-launch";
+import { renderSessionLaunch, type SessionLaunchElement } from "./session-launch";
 import type { ReviewPresentationV4, SessionIndexV1, SourceTurnRefV4, TimelineEntryV4 } from "../contracts/review-v4";
 import { button, element } from "./dom";
 import { renderConversation, type ConversationElement, type ConversationIdentity, type ConversationLoader } from "./render-conversation";
@@ -16,12 +18,15 @@ export function renderV4Answer(
   presentation: ReviewPresentationV4,
   milestone: TimelineEntryV4,
   index: SessionIndexV1 | undefined,
-  load: ConversationLoader | undefined
+  load: ConversationLoader | undefined,
+  launch?: SessionLaunchActions
 ): V4AnswerElement {
   const root = element("div", { className: "sr-v4-answer" }) as unknown as V4AnswerElement;
   const bodyId = `sr-v4-answer-body-${++answerSequence}`;
   const body = element("div", { className: "sr-v4-answer-body", attrs: { id: bodyId } });
   const choices = answerChoices(presentation, milestone.closed_loop.conclusion.source_turn_refs);
+  let launcher: SessionLaunchElement | undefined;
+  let launcherIdentity = "";
   let selected = 0;
   let viewer: ConversationElement | undefined;
   let expanded = false;
@@ -90,6 +95,15 @@ export function renderV4Answer(
       activate();
     });
     nodes.push(control);
+    const choice = choices[selected];
+    const entries = index?.sessions.filter(value => value.provider === choice?.ref.provider && value.session_id === choice?.ref.session_id) ?? [];
+    const entry = entries.length === 1 ? entries[0] : undefined;
+    const identity = launch && choice && entry?.source_availability === "available" && entry.session_view_digest && ["codex", "claude", "opencode"].includes(choice.ref.provider) ? `${choice.ref.provider}\0${choice.ref.session_id}\0${entry.session_view_digest}` : "";
+    if (identity !== launcherIdentity) {
+      launcher?.dispose(); launcher = undefined; launcherIdentity = identity;
+      if (identity && launch && entry?.session_view_digest) launcher = renderSessionLaunch({ project_id: presentation.project_id, provider: choice.ref.provider as SessionLaunchProvider, session_id: choice.ref.session_id, generation_id: presentation.generation_id, session_view_digest: entry.session_view_digest }, launch, () => {});
+    }
+    if (launcher) nodes.push(launcher);
     if (reason !== undefined) nodes.push(element("p", { className: "sr-v4-answer-unavailable", text: reason }));
     root.replaceChildren(...nodes, body);
     if (viewer) body.replaceChildren(viewer);
@@ -99,6 +113,7 @@ export function renderV4Answer(
     if (disposed) return;
     disposed = true;
     collapse();
+    launcher?.dispose();
     root.replaceChildren();
   };
   draw();

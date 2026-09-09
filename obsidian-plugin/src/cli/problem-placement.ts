@@ -31,7 +31,7 @@ export function parseProblemPlacementJob(value: unknown, projectId: string, cand
     throw new Error("invalid problem placement job");
   }
   const active = row.state === "queued" || row.state === "running";
-  if (row.can_cancel !== active || (row.state === "completed") !== ((row.result_candidate_revision as number) > 0)) throw new Error("inconsistent problem placement job");
+  if (row.can_cancel !== active || (row.state === "completed") !== (row.result_candidate_revision > 0)) throw new Error("inconsistent problem placement job");
   return row as unknown as ProblemPlacementJob;
 }
 

@@ -1,3 +1,5 @@
+import type { SessionLaunchActions } from "../cli/session-launch";
+import type { DecisionCandidateEvidence } from "../cli/decision-evidence";
 import type { DecisionExtractionActions } from "../cli/decision-jobs";
 import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import type { DecisionTransition } from "./decision-candidates";
@@ -29,6 +31,7 @@ export interface RenderV4ShellOptions {
     pricingActions?: PricingActions;
     saveDecision?: DecisionSave;
     decisionCandidates?: AgentAnnotationEntryV1[];
+    decisionEvidence?: DecisionCandidateEvidence[];
     transitionDecision?: DecisionTransition;
   agentPlacement?: ProblemActions["agentPlacement"];
   agentPlacementCompleted?:()=>void;
@@ -37,6 +40,7 @@ export interface RenderV4ShellOptions {
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
+  sessionLaunch?: SessionLaunchActions;
   loadSessionSummary?: (request: SessionSummaryRequest) => Promise<SessionSummaryV1>;
   eventPageCache?: Map<string, SessionEventPageV1>;
   refreshSessionEvents?: (request: { provider: string; sessionId: string; ordinal: number }) => Promise<void>;
@@ -130,7 +134,7 @@ export function renderV4Shell(
       transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
       loadConversation: options.cliUnavailable ? undefined : options.loadConversation
     });
-    if (state.view === "decisions") return decisions = renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision, candidates: options.decisionCandidates, transition: options.cliUnavailable ? undefined : options.transitionDecision, extraction:options.cliUnavailable ? undefined : options.decisionExtraction,extracted:options.decisionExtracted});
+    if (state.view === "decisions") return decisions = renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision, candidates: options.decisionCandidates, evidence: options.decisionEvidence, loadConversation: options.cliUnavailable ? undefined : options.loadConversation, transition: options.cliUnavailable ? undefined : options.transitionDecision, extraction:options.cliUnavailable ? undefined : options.decisionExtraction,extracted:options.decisionExtracted});
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);
       return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)), options.cliUnavailable ? {} : options.pricingActions);
@@ -183,6 +187,7 @@ export function renderV4Shell(
     disposeEvolution();
     evolution = renderV4Evolution(presentation, state, update, () => open(`${descriptor.root}/项目历史.md`), evolutionUi, {
       index,
+      sessionLaunch: options.cliUnavailable ? undefined : options.sessionLaunch,
       loadConversation: options.cliUnavailable ? undefined : options.loadConversation,
       cliUnavailable: options.cliUnavailable
     });

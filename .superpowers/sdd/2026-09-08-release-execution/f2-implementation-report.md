@@ -65,3 +65,39 @@ Controller native acceptance on the real `f1-native/green-5` project confirmed r
 ## Integration boundary
 
 The F2 modules expose `ProblemPlacementActions` with `start(candidate)`, `status(jobId)`, `cancel(jobId, revision)`, and optional `latest(candidate)`. `renderV4Problems` accepts this as `actions.agentPlacement` plus `agentPlacementCompleted` for host refresh. The controller owns the final `CliRunner`, presentation, project-view, and shell wiring because those files also contain concurrent F3/F4/F5 work.
+
+## F5 supplement: open the original Session
+
+Commit `b07fdda` implements the approved native Session launch boundary. The independent modules are `internal/sessionlaunch`, `internal/cli/session_contracts.go`, `internal/cli/sessions.go`, `internal/inspect/session_identity.go`, `obsidian-plugin/src/cli/session-launch.ts`, and `obsidian-plugin/src/view/session-launch.ts`. The controller owns the runner and project-view integration.
+
+The public lifecycle is:
+
+```text
+sessions launcher verify --provider codex|claude|opencode --executable ABS [--data-dir ABS] --json
+sessions open --project-id ID --provider ID --session-id ID --expected-generation-id ID --expected-session-view-digest DIGEST [--data-dir ABS] --json
+```
+
+Verification runs only the selected executable's fixed `--version` route, records its physical identity and SHA-256 in a private 0600 configuration, and detects replacement. Open authenticates the exact current published generation and Session-view digest, pins the physical configured Project root, and writes a two-minute one-use envelope under the macOS user cache. The Terminal bootstrap contains only the absolute SessionReviewer executable and random token. It contains no Project ID, Session ID, source identity, Project root, or provider executable. The worker atomically claims the token, rechecks SessionReviewer and provider executable identity/SHA, reauthenticates the published Session and Project mapping, requires an interactive TTY, changes directory through the authenticated Project directory descriptor, removes inherited Session source variables, and executes one fixed provider route:
+
+```text
+codex resume SESSION_ID
+claude --resume SESSION_ID
+opencode PROJECT_ROOT --session SESSION_ID
+```
+
+The UI requires a prepare click followed by a separate confirm click and states that opening does not send a message. The response state is `launch_requested`: it means macOS accepted the Terminal request, not that the provider resumed successfully. Windows returns explicit unsupported behavior and has a compile gate; no portable Windows terminal integration is claimed.
+
+Focused verification passed:
+
+```text
+go test ./internal/sessionlaunch ./internal/inspect ./internal/syncproject ./internal/cli -run 'Session|Launcher|MappingPin|RunSessions|RunSessionWorker' -count=1
+go vet ./internal/sessionlaunch ./internal/inspect ./internal/syncproject ./internal/cli
+GOOS=windows GOARCH=amd64 go test -c ./internal/sessionlaunch
+GOOS=windows GOARCH=amd64 go test -c ./internal/cli
+npx vitest run tests/session-launch.test.ts tests/session-launch-integration.test.ts tests/evolution-answer.test.ts
+npx tsc --noEmit --skipLibCheck
+```
+
+The related TypeScript run completed 19/19 tests. It verifies strict reply identity, fixed shell-free argv, disposal of late UI results, all-Sessions integration, and historical-answer behavior: the Q&A reader keeps its historical view digest while native launch authenticates the same Session against its unique current index digest.
+
+Controller native acceptance used a dedicated content-free Session fixture and fake provider through the production Obsidian UI and production CLI build. `f5-launch-native/terminal-proof.json` records the exact `resume` argument, exact controlled Project working directory, `stdin_is_tty=true`, and absent `CODEX_THREAD_ID`/source-root values. This proves the UI-to-real-Terminal transport without opening any historical user Session or invoking a model. A real Codex/Claude/OpenCode client resume remains a separate release acceptance gate.
