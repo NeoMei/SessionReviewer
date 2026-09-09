@@ -746,6 +746,23 @@ function parseAgentAnnotationDocument(source: string): AgentAnnotationV1 {
   return row as unknown as AgentAnnotationV1;
 }
 
+export function parseDecisionCandidates(source: string, projectID: string): AgentAnnotationEntryV1[] {
+  return atWireBoundary(() => {
+    const row = documentObject(source, "decision candidate list");
+    exact(row, "$", ["schema_version", "project_id", "candidates"], ["schema_version", "project_id"]);
+    constant(row.schema_version, 1, "$.schema_version");
+    if (row.project_id !== projectID) throw new Error("decision candidate project mismatch");
+    const items = row.candidates === undefined ? [] : boundedArray(row.candidates, "$.candidates", 65536);
+    const seen = new Set<string>();
+    return items.map((item, index) => {
+      const candidate = parseAnnotation(item, `$.candidates[${index}]`, projectID);
+      addUnique(seen, candidate.id, "decision candidate");
+      if (!["decision_candidate", "agreement_candidate"].includes(candidate.annotation_kind)) throw new Error("unexpected candidate kind");
+      return candidate;
+    });
+  });
+}
+
 export function parseCandidateListV1(source: string): CandidateListV1 {
   return parseAgentAnnotationV1(source);
 }
@@ -1498,7 +1515,7 @@ function validatePricingSnapshot(value: unknown, path: string): PricingSnapshotV
   if (!nearlyEqual(knownSubtotal, calculatedSubtotal)) throw new Error("known subtotal does not equal known line costs");
   if (pricingComplete) {
     for (const dimension of PRICE_DIMENSIONS) {
-      if (rates[dimension] === null || costs[dimension] === null) {
+      if (quantities[dimension] > 0 && (rates[dimension] === null || costs[dimension] === null)) {
         throw new Error("complete pricing contains an unknown amount");
       }
     }

@@ -1,3 +1,5 @@
+import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
+import type { DecisionTransition } from "./decision-candidates";
 import type { DecisionSave } from "./decision-form";
 import type { PricingActions } from "../cli/pricing";
 import type { SessionSearchLoader } from "../cli/session-search";
@@ -25,6 +27,8 @@ export interface RenderV4ShellOptions {
   loadSessionSearch?: SessionSearchLoader;
     pricingActions?: PricingActions;
     saveDecision?: DecisionSave;
+    decisionCandidates?: AgentAnnotationEntryV1[];
+    transitionDecision?: DecisionTransition;
   cliUnavailable?: boolean;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;
@@ -118,7 +122,7 @@ export function renderV4Shell(
       transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
       loadConversation: options.cliUnavailable ? undefined : options.loadConversation
     });
-    if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision});
+    if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`), {save: options.cliUnavailable ? undefined : options.saveDecision, candidates: options.decisionCandidates, transition: options.cliUnavailable ? undefined : options.transitionDecision});
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);
       return renderV4Usage(ledger.accounting, ledger.pricing_snapshots.filter((price) => currentPrices.has(price.snapshot_id)), options.cliUnavailable ? {} : options.pricingActions);

@@ -30,6 +30,6 @@ export function decisionForm(decisions: DecisionV4[], save: DecisionSave, close:
   if(status.value==="archived"&&targets.length){feedback.textContent="归档记录不能替代其他决策，请取消替代选择。";return;}
   const input:DecisionInput={schema_version:1,kind:kind.value as DecisionInput["kind"],occurred_at:value("occurred_at"),title:value("title"),rationale:value("rationale"),impact:value("impact"),reevaluate_when:value("reevaluate_when"),status:status.value as DecisionInput["status"],pinned:pinned.checked,supersedes:targets,milestone_ids:[...(prior?.milestone_ids??[])],session_refs:structuredClone(prior?.session_refs??[])};
   submit.disabled=true;cancel.disabled=true;feedback.textContent="正在保存…";
-  void save(input,prior?{id:prior.id,revision:prior.revision}:undefined).then(()=>{feedback.textContent="已保存，正在重新读取。";}).catch(()=>{feedback.textContent="未保存；请刷新后核对最新内容，输入已保留。";submit.disabled=false;cancel.disabled=false;});
+  void save(input,prior?{id:prior.id,revision:prior.revision}:undefined).then(()=>{feedback.textContent="已保存，正在重新读取。";}).catch(()=>{feedback.textContent="保存结果未确认；请刷新后核对最新内容，输入已保留。";submit.disabled=false;cancel.disabled=false;});
  });return form;
 }

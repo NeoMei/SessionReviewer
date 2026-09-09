@@ -1,9 +1,11 @@
+import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
+import { renderDecisionCandidates, type DecisionTransition } from "./decision-candidates";
 import type { DecisionStatus, ReviewPresentationV4 } from "../contracts/review-v4";
 import { button, element } from "./dom";
 import { decisionForm, type DecisionSave } from "./decision-form";
 import { presentDateTime } from "./presentation";
 
-export function renderV4Decisions(presentation: ReviewPresentationV4, openReview: () => void, actions: { save?: DecisionSave } = {}): HTMLElement {
+export function renderV4Decisions(presentation: ReviewPresentationV4, openReview: () => void, actions: { save?: DecisionSave; candidates?: AgentAnnotationEntryV1[]; transition?: DecisionTransition } = {}): HTMLElement {
   const section = element("section", { className: "sr-v4-decisions", attrs: { "data-v4-panel": "decisions", role: "tabpanel" } });
   const editor = element("div");
   const edit = (prior?: ReviewPresentationV4["decisions"][number]): void => {
@@ -42,7 +44,9 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
   historic.addEventListener("click", () => { active.setAttribute("aria-pressed", "false"); historic.setAttribute("aria-pressed", "true"); draw(["superseded", "archived", "legacy_unmapped"]); });
   const native = button("在原生 Markdown 中新增或编辑", { "data-v4-open": "review" });
   native.addEventListener("click", openReview);
-  section.append(toolbar, editor, cards, native);
+  section.append(toolbar, editor, cards);
+  if (actions.candidates) section.append(renderDecisionCandidates(actions.candidates, presentation.decisions, actions.transition));
+  section.append(native);
   draw(["active"]);
   return section;
 }

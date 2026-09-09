@@ -15,7 +15,7 @@ it("creates only after explicit submission and preserves human input on failed p
  form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await tick();
  expect(inputs).toHaveLength(1);expect(inputs[0]).toMatchObject({schema_version:1,title:"保持人工结论",kind:"decision",status:"active",session_refs:[]});
  expect(form.querySelector<HTMLInputElement>('[name="title"]')!.value).toBe("保持人工结论");
- expect(root.textContent).toContain("未保存");expect(root.textContent).not.toContain("/private/path");root.remove();
+ expect(root.textContent).toContain("保存结果未确认");expect(root.textContent).not.toContain("/private/path");root.remove();
 });
 it("edits retain exact source links and require saved decision identity/revision", async()=>{
  const p=fixture();const d={id:"decision-one",kind:"decision" as const,occurred_at:"2026-09-01T00:00:00Z",title:"旧结论",rationale:"依据",impact:"范围",reevaluate_when:"触发条件",status:"active" as const,legacy_status_text:null,supersedes:[],milestone_ids:["milestone-one"],session_refs:[{provider:"codex",session_id:"session-one",turn_unit_ids:["turn-one"]}],provenance:"human_created" as const,pinned:false,revision:2};p.decisions=[d];let saved:unknown;
@@ -24,4 +24,28 @@ it("edits retain exact source links and require saved decision identity/revision
  const form=root.querySelector<HTMLFormElement>("form")!;form.querySelector<HTMLInputElement>('[name="title"]')!.value="修订结论";
  form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await tick();
  expect(saved).toMatchObject({input:{title:"修订结论",session_refs:d.session_refs,milestone_ids:d.milestone_ids},prior:{id:d.id,revision:d.revision}});root.remove();
+});
+
+it("saves manual decisions through stdin with review and entity revisions",async()=>{
+ const {CliRunner}=await import("../src/cli/runner");let argv:readonly string[]=[];let body="";
+ const runner=new CliRunner("/bin/sr",(_file,args,options,callback)=>{argv=args;expect(options.shell).toBe(false);return{stdin:{end(input:string){body=input;callback(null,JSON.stringify({schema_version:1,project_id:"project-p",review_sha256:"b".repeat(64),decisions:[]}),"");}}};});
+ expect(typeof runner.saveDecision).toBe("function");
+ const input={schema_version:1 as const,kind:"decision" as const,occurred_at:"2026-09-01T00:00:00Z",title:"新的结论",rationale:"依据",impact:"范围",reevaluate_when:"条件",status:"active" as const,supersedes:[],milestone_ids:[],session_refs:[],pinned:false};
+ await runner.saveDecision("project-p","a".repeat(64),input,{id:"decision-one",revision:2});expect(JSON.parse(body)).toEqual(input);expect(argv).toEqual(["decisions","edit","--project-id","project-p","--expected-review-sha256","a".repeat(64),"--decision-id","decision-one","--expected-decision-revision","2","--json"]);
+});
+
+it("keeps a decision candidate private until a confirmation form is submitted",async()=>{
+ const p=fixture();let action:unknown;
+ const input={schema_version:1 as const,kind:"decision" as const,occurred_at:"2026-09-01T00:00:00Z",title:"候选建议",rationale:"依据",impact:"范围",reevaluate_when:"条件",status:"active" as const,supersedes:[],milestone_ids:[],session_refs:[],pinned:false};
+ const candidate={id:"candidate-one",project_id:p.project_id,annotation_kind:"decision_candidate" as const,status:"pending" as const,text:JSON.stringify(input),generation_id:p.generation_id,schema_version:1 as const,analysis_profile:"v1",agent_run_id:"run-1",dependencies:[],revision:1,created_at:"2026-09-01T00:00:00Z",confirmed_entity_id:null};
+ const root=renderV4Decisions(p,()=>{},{candidates:[candidate],transition:async(c,a,body)=>{action={c,a,body};}});document.body.append(root);
+ const confirm=root.querySelector<HTMLButtonElement>('[data-action="confirm-decision-candidate"]');expect(confirm).not.toBeNull();confirm!.click();expect(action).toBeUndefined();
+ const form=root.querySelector<HTMLFormElement>("form")!;form.querySelector<HTMLInputElement>('[name="title"]')!.value="人确认后的结论";form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await tick();expect(action).toMatchObject({a:"confirm",body:{title:"人确认后的结论"}});root.remove();
+});
+
+it("lists empty private candidates and sends confirm payload with both preimages",async()=>{
+ const {CliRunner}=await import("../src/cli/runner");let argv:readonly string[]=[];let body="";
+ const runner=new CliRunner("/bin/sr",(_file,args,_options,callback)=>{argv=args;if(args[1]==="candidates"){callback(null,'{"schema_version":1,"project_id":"project-p"}',"");return;}return{stdin:{end(input:string){body=input;callback(null,'{"schema_version":1,"project_id":"project-p"}',"");}}};});
+ expect(typeof runner.listDecisionCandidates).toBe("function");await expect(runner.listDecisionCandidates("project-p")).resolves.toEqual([]);
+ await runner.transitionDecisionCandidate("project-p","a".repeat(64),{id:"candidate-one",revision:2},"ignore");expect(body).toBe("");expect(argv).toContain("--expected-revision");expect(argv).toContain("2");expect(argv).toContain("--expected-review-sha256");
 });

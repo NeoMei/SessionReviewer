@@ -1,3 +1,6 @@
+import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
+import type { DecisionTransition } from "./decision-candidates";
+import type { DecisionSave } from "./decision-form";
 import type { PricingActions } from "../cli/pricing";
 import type { SessionSearchLoader } from "../cli/session-search";
 import type { Snapshot } from "../data/repository";
@@ -82,6 +85,9 @@ export function renderMarkdownV4View(
   options: {
     loadSessionSearch?: SessionSearchLoader;
     pricingActions?: PricingActions;
+    saveDecision?: DecisionSave;
+    decisionCandidates?: AgentAnnotationEntryV1[];
+    transitionDecision?: DecisionTransition;
     cliUnavailable?: boolean;
     loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
     loadConversation?: (request: ConversationRequest) => Promise<ConversationPageV1>;

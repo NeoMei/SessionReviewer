@@ -3,7 +3,7 @@ import { renderV4Usage } from "../src/view/render-v4-usage";
 import { readFileSync } from "node:fs";
 import { sha256Text } from "../src/data/hash";
 import { loadMarkdownSnapshot } from "../src/data/repository-v4";
-import { parseMachineLedgerV4 } from "../src/data/contracts-v4";
+import { parseMachineLedgerV4, parsePricingSnapshotV1 } from "../src/data/contracts-v4";
 
 function fixture() {
   const ledger = parseMachineLedgerV4(readFileSync("tests/fixtures/v4/machine-ledger-v4.valid.json", "utf8"));
@@ -63,7 +63,7 @@ it("requires an explicit supplement form confirmation and retains it on failed p
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(submitted).toMatchObject({ session_id: price.session_id, billed_model_id: price.billed_model_id, supersedes_snapshot_id: price.snapshot_id, rates: price.rates });
   expect(submitted).not.toHaveProperty("total_cost_usd");
-  expect(root.textContent).toContain("补价未保存");
+  expect(root.textContent).toContain("保存结果未确认");
   expect(root.textContent).not.toContain("private path");
   expect(form.querySelector<HTMLInputElement>('[name="audit_reason"]')!.value).toContain("已核对");
   root.remove();
@@ -76,4 +76,16 @@ it("keeps the exact serialized ledger hash for compare-and-swap writes", () => {
   expect(state.kind).toBe("public_valid");
   if (state.kind !== "public_valid") throw new Error("invalid fixture");
   expect(state.ledgerSHA256).toBe(sha256Text(input.ledger));
+});
+
+it("reads complete pricing when only zero-quantity dimensions have unknown rates",()=>{
+ const ledger=fixture();const price=ledger.pricing_snapshots[0];
+ price.billable_quantities.cache_write_input=0;price.billable_quantities.reasoning_output=0;
+ price.rates.cache_write_input=null;price.rates.reasoning_output=null;
+ price.line_costs_usd.cache_write_input=null;price.line_costs_usd.reasoning_output=null;
+ price.missing_billing_dimensions=[];price.pricing_complete=true;
+ const dimensions=["input","cached_input","output"] as const;
+ for(const d of dimensions){price.rates[d]=1;price.line_costs_usd[d]=price.billable_quantities[d]/1e6;}
+ price.known_subtotal_usd=dimensions.reduce((sum,d)=>sum+price.line_costs_usd[d]!,0);price.total_cost_usd=price.known_subtotal_usd;
+ expect(()=>parsePricingSnapshotV1(JSON.stringify(price))).not.toThrow();
 });

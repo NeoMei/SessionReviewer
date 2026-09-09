@@ -10,6 +10,7 @@ it("queries only on click and confirms a catalog entry with user supplied route 
  const open=root.querySelector<HTMLButtonElement>('[data-action="query-catalog"]');expect(open).not.toBeNull();open!.click();await tick();expect(calls).toBe(1);expect(accepted).toBeUndefined();
  const form=root.querySelector<HTMLFormElement>('[aria-label="确认目录价格"]')!;
  const select=form.querySelector<HTMLSelectElement>('select')!;select.value="vendor-model";select.dispatchEvent(new Event("change"));
+ const replace=form.querySelector<HTMLInputElement>('[aria-label="确认替换当前价格，旧快照保留"]');if(replace)replace.checked=true;
  form.querySelector<HTMLInputElement>('[name="billing_host"]')!.value="api.vendor.test";form.querySelector<HTMLInputElement>('[name="billing_mode"]')!.value="api";
  form.dispatchEvent(new Event("submit",{bubbles:true,cancelable:true}));await tick();expect(accepted).toMatchObject({modelpricewatch_listing_id:"vendor-model",billing_host:"api.vendor.test",billing_mode:"api",billed_model_id:price.billed_model_id,supersedes_snapshot_id:price.snapshot_id});expect(accepted).not.toHaveProperty("rates");root.remove();
 });
@@ -23,4 +24,10 @@ it("rejects a malformed catalog and only publishes a supplement through bounded 
  expect(typeof runner.supplementPricing).toBe("function");
  await runner.supplementPricing(input,"a".repeat(64));expect(JSON.parse(received)).toEqual(input);expect(argv).toContain("--expected-ledger-sha256");expect(argv).toContain("a".repeat(64));expect(argv).not.toContain("已核对");
  const broken=new CliRunner("/bin/sr",(_file,_args,_options,callback)=>callback(null,'{"schema_version":1,"listings":[]}',""));await expect(broken.getPricingCatalog()).rejects.toThrow("价格目录");
+});
+
+it("refuses expired catalog acceptance",async()=>{
+ const {pricingCatalogForm}=await import("../src/view/pricing-catalog-form");
+ const ledger=parseMachineLedgerV4(readFileSync("tests/fixtures/v4/machine-ledger-v4.valid.json","utf8"));const price=ledger.pricing_snapshots[0];price.status="current";
+ const root=pricingCatalogForm(price,{catalog:async()=>({schema_version:1,minimum_reader_version:"0.4.0",status:"expired",retrieved_at:"2026-01-01T00:00:00Z",model_count:0,history_count:0,refresh_error:"",listings:[]}),acceptCatalog:async()=>{throw new Error("must not accept expired");}});document.body.append(root);root.querySelector<HTMLButtonElement>('[data-action="query-catalog"]')!.click();await tick();expect(root.querySelector('form')).toBeNull();expect(root.textContent).toContain("已过期");root.remove();
 });

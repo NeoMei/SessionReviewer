@@ -1,3 +1,4 @@
+import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
 import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
@@ -40,6 +41,8 @@ export class ProjectEvolutionView extends ItemView {
   private pendingEventRecovery?: { projectId: string; provider: string; sessionId: string; ordinal: number; generationId: string; sessionViewDigest: string | null };
   private recoveredEventSelection?: { projectId: string; provider: string; sessionId: string };
   private eventRecoveryEpoch = 0;
+  private decisionCandidates: AgentAnnotationEntryV1[] = [];
+  private decisionCandidatesError?: string;
   private problemCandidates: ProblemCandidate[] = [];
   private problemUnavailableReason?: string;
 
@@ -144,6 +147,12 @@ export class ProjectEvolutionView extends ItemView {
         this.problemUnavailableReason = error instanceof Error ? error.message : "无法读取问题候选。";
       }
     }
+    this.decisionCandidates = [];
+    this.decisionCandidatesError = undefined;
+    if (selected.format === "markdown-v4" && this.runner && cli.diagnostic?.code !== "cli_unavailable" && typeof this.runner.listDecisionCandidates === "function") {
+      try { const candidates = await this.runner.listDecisionCandidates(selected.projectId); if (!current()) return; this.decisionCandidates = candidates; }
+      catch { if (!current()) return; this.decisionCandidatesError = "决策候选读取失败；请刷新项目重试。"; }
+    }
     const scanStatus = selected.format === "markdown-v4" ? undefined : options.scanStatus === false ? this.scanStatus : await this.readScanStatus(selected);
     if (!current()) return;
     // Publish one complete result set. Obsolete loads/status commands never
@@ -218,6 +227,15 @@ export class ProjectEvolutionView extends ItemView {
           recoverySelectionUnavailable: recovery?.unavailable,
           initialState: this.v4StateForRender(current),
           saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch),
+          decisionCandidates: this.decisionCandidates,
+          transitionDecision: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" ? async (candidate, action, input) => {
+            await this.runner!.transitionDecisionCandidate(current.descriptor.projectId, activeProblemState.ledger.review_sha256, candidate, action, input);
+            await this.refresh(this.projects);
+          } : undefined,
+          saveDecision: this.runner && activeProblemState && this.cliDiagnostic?.code !== "cli_unavailable" ? async (input, prior) => {
+            await this.runner!.saveDecision(current.descriptor.projectId, activeProblemState.ledger.review_sha256, input, prior);
+            await this.refresh(this.projects);
+          } : undefined,
           pricingActions: this.runner && activeProblemState?.ledgerSHA256 && this.cliDiagnostic?.code !== "cli_unavailable" ? {
             catalog: () => this.runner!.getPricingCatalog(),
             supplement: async (input) => { await this.runner!.supplementPricing(input, activeProblemState.ledgerSHA256!); await this.refresh(this.projects); },
@@ -257,6 +275,7 @@ export class ProjectEvolutionView extends ItemView {
           } : undefined
         }
       );
+      if (this.decisionCandidatesError) browser.append(element("p", { text: this.decisionCandidatesError, attrs: { role: "status" } }));
       this.v4Browser = browser;
       if (recovery) {
         this.pendingEventRecovery = undefined;

@@ -1,3 +1,8 @@
+import { parseDecisionCandidates } from "../data/contracts-v4";
+import type { AgentAnnotationEntryV1 } from "../contracts/review-v4";
+import type { DecisionCandidateAction } from "../view/decision-candidates";
+import type { DecisionInput } from "../view/decision-form";
+import type { DecisionV4 } from "../contracts/review-v4";
 import { validateCatalog, validatePricingResult, type PricingCatalog, type PricingCatalogSelection } from "./pricing";
 import type { PricingSnapshotV1, PricingSupplementV1 } from "../contracts/review-v4";
 import { parsePricingSnapshotV1, parsePricingSupplementV1 } from "../data/contracts-v4";
@@ -168,6 +173,32 @@ export class CliRunner {
     return parseScanStatus(await this.runJSON(["scan", "status", "--project-id", projectId, "--json"]), projectId);
   }
 
+  async listDecisionCandidates(projectId: string): Promise<AgentAnnotationEntryV1[]> {
+    validateProject(projectId);
+    try { return parseDecisionCandidates((await this.run(["decisions", "candidates", "list", "--project-id", projectId, "--json"])).stdout, projectId); }
+    catch { throw new Error("无法读取决策候选；请刷新项目重试。"); }
+  }
+
+  async transitionDecisionCandidate(projectId: string, expectedReviewSHA256: string, candidate: Pick<AgentAnnotationEntryV1, "id" | "revision">, action: DecisionCandidateAction, input?: DecisionInput): Promise<void> {
+    validateProject(projectId);
+    if (!/^[0-9a-f]{64}$/.test(expectedReviewSHA256) || !INSPECT_ID.test(candidate.id) || !Number.isSafeInteger(candidate.revision) || candidate.revision < 1 || !["confirm", "ignore", "not_decision", "restore"].includes(action)) throw new Error("invalid candidate transition");
+    const args = ["decisions", "candidate", "transition", "--project-id", projectId, "--candidate-id", candidate.id, "--expected-revision", String(candidate.revision), "--action", action, "--expected-review-sha256", expectedReviewSHA256, "--json"];
+    try { const result = parseJson((await this.runWithInput(args, input ? JSON.stringify(input) : "", 30_000)).stdout) as Record<string, unknown>; if (!result || result.schema_version !== 1 || result.project_id !== projectId) throw new Error("candidate result mismatch"); }
+    catch { throw new Error("保存结果未确认；请刷新项目检查。"); }
+  }
+
+  async saveDecision(projectId: string, expectedReviewSHA256: string, input: DecisionInput, prior?: Pick<DecisionV4, "id" | "revision">): Promise<void> {
+    validateProject(projectId);
+    if (!/^[0-9a-f]{64}$/.test(expectedReviewSHA256) || (prior && (!ENTITY_ID.test(prior.id) || !Number.isSafeInteger(prior.revision) || prior.revision < 1))) throw new Error("invalid decision identity");
+    const args = ["decisions", prior ? "edit" : "create", "--project-id", projectId, "--expected-review-sha256", expectedReviewSHA256];
+    if (prior) args.push("--decision-id", prior.id, "--expected-decision-revision", String(prior.revision));
+    args.push("--json");
+    try {
+      const result = parseJson((await this.runWithInput(args, JSON.stringify(input), 30_000)).stdout) as Record<string, unknown>;
+      if (!result || result.schema_version !== 1 || result.project_id !== projectId || typeof result.review_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(result.review_sha256) || Object.keys(result).some(key => !["schema_version", "project_id", "review_sha256", "decisions"].includes(key))) throw new Error("decision result mismatch");
+    } catch { throw new Error("保存结果未确认；请刷新项目检查。"); }
+  }
+
   async getPricingCatalog(): Promise<PricingCatalog> {
     try { return validateCatalog(parseJson((await this.run(["pricing", "catalog", "list", "--json"], 35_000)).stdout)); }
     catch { throw new Error("无法读取价格目录；可稍后重试或人工补充价格。"); }
@@ -188,7 +219,7 @@ export class CliRunner {
     if (!INSPECT_ID.test(input.provider) || !INSPECT_ID.test(input.session_id) || !DIGEST.test(input.usage_record_digest) || !/^[0-9a-f]{64}$/.test(expectedLedgerSHA256)) throw new Error("invalid pricing identity");
     const args = [...prefix, "--project-id", input.project_id, "--provider", input.provider, "--session-id", input.session_id, "--usage-record-digest", input.usage_record_digest, "--expected-ledger-sha256", expectedLedgerSHA256, "--json"];
     try { const result = parsePricingSnapshotV1((await this.runWithInput(args, JSON.stringify(input), 35_000)).stdout); validatePricingResult(result, input); return result; }
-    catch { throw new Error("价格未保存；请刷新账本后重试。"); }
+    catch { throw new Error("保存结果未确认；请刷新账本检查。"); }
   }
 
   async getSessionSearch(request: SessionSearchRequest): Promise<SessionSearchPage> {
@@ -445,6 +476,11 @@ export class CliRunner {
 }
 
 function allowedArgs(args: readonly string[]): boolean {
+  if (args.length === 6 && args[0] === "decisions" && args[1] === "candidates" && args[2] === "list" && args[3] === "--project-id" && PROJECT_ID.test(args[4]) && args[5] === "--json") return true;
+  if (args.length === 14 && args[0] === "decisions" && args[1] === "candidate" && args[2] === "transition" && args[3] === "--project-id" && PROJECT_ID.test(args[4]) && args[5] === "--candidate-id" && INSPECT_ID.test(args[6]) && args[7] === "--expected-revision" && validPositive(args[8]) && args[9] === "--action" && ["confirm", "ignore", "not_decision", "restore"].includes(args[10]) && args[11] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[12]) && args[13] === "--json") return true;
+  if (args[0] === "decisions" && ["create", "edit"].includes(args[1]) && args[2] === "--project-id" && PROJECT_ID.test(args[3]) && args[4] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[5])) {
+    return args[1] === "create" ? args.length === 7 && args[6] === "--json" : args.length === 11 && args[6] === "--decision-id" && ENTITY_ID.test(args[7]) && args[8] === "--expected-decision-revision" && validPositive(args[9]) && args[10] === "--json";
+  }
   if (args.join("\0") === "pricing\0catalog\0list\0--json") return true;
   if (args[0] === "pricing") {
     const offset = args[1] === "supplement" ? 2 : args[1] === "catalog" && args[2] === "accept" ? 3 : 0;
