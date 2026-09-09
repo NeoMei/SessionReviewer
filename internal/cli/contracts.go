@@ -147,16 +147,19 @@ type problemReorderInput struct {
 }
 
 type DecisionRequest struct {
-	Command              string
-	Subcommand           string
-	ProjectID            string
-	Status               string
-	ExpectedReviewSHA256 string
-	ExpectedGenerationID string
-	JobID                string
-	ExpectedRevision     int
-	Action               string
-	CandidateID          string
+	DataDir                  string
+	Command                  string
+	Subcommand               string
+	ProjectID                string
+	DecisionID               string
+	Status                   string
+	ExpectedReviewSHA256     string
+	ExpectedGenerationID     string
+	JobID                    string
+	ExpectedRevision         int
+	ExpectedDecisionRevision int
+	Action                   string
+	CandidateID              string
 }
 
 type PricingRequest struct {
@@ -894,6 +897,8 @@ func ParseDecisionContract(args []string) (DecisionRequest, error) {
 	switch args[0] {
 	case "create":
 		return parseDecisionCreateContract(args[1:])
+	case "edit":
+		return parseDecisionEditContract(args[1:])
 	case "extract":
 		return parseDecisionExtractContract(args[1:])
 	case "candidate":
@@ -907,7 +912,7 @@ func ParseDecisionContract(args []string) (DecisionRequest, error) {
 }
 
 func parseCandidateListContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "status": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "status": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -924,11 +929,14 @@ func parseCandidateListContract(args []string) (DecisionRequest, error) {
 			return DecisionRequest{}, contractError("status is invalid")
 		}
 	}
-	return DecisionRequest{Command: "candidates", Subcommand: "list", ProjectID: flags.values["project-id"], Status: flags.values["status"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "candidates", Subcommand: "list", ProjectID: flags.values["project-id"], Status: flags.values["status"]}, nil
 }
 
 func parseDecisionCreateContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "expected-review-sha256": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "expected-review-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -941,7 +949,34 @@ func parseDecisionCreateContract(args []string) (DecisionRequest, error) {
 	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{Command: "create", ProjectID: flags.values["project-id"], ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "create", ProjectID: flags.values["project-id"], ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+}
+
+func parseDecisionEditContract(args []string) (DecisionRequest, error) {
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "decision-id": true, "expected-decision-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true})
+	if err != nil {
+		return DecisionRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "decision-id", "expected-decision-revision", "expected-review-sha256"); err != nil {
+		return DecisionRequest{}, err
+	}
+	if err = requireSafeIDs(flags, "project-id", "decision-id"); err != nil {
+		return DecisionRequest{}, err
+	}
+	revision, err := requirePositiveInt(flags.values["expected-decision-revision"])
+	if err != nil {
+		return DecisionRequest{}, err
+	}
+	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "edit", ProjectID: flags.values["project-id"], DecisionID: flags.values["decision-id"], ExpectedDecisionRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
 }
 
 func parseDecisionExtractContract(args []string) (DecisionRequest, error) {
@@ -951,7 +986,7 @@ func parseDecisionExtractContract(args []string) (DecisionRequest, error) {
 	if len(args) > 0 && args[0] == "cancel" {
 		return parseExtractCancelContract(args[1:])
 	}
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "expected-generation-id": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "expected-generation-id": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -961,11 +996,14 @@ func parseDecisionExtractContract(args []string) (DecisionRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "expected-generation-id"); err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{Command: "extract", ProjectID: flags.values["project-id"], ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "extract", ProjectID: flags.values["project-id"], ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
 }
 
 func parseExtractStatusContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -975,11 +1013,14 @@ func parseExtractStatusContract(args []string) (DecisionRequest, error) {
 	if err = requireSafeIDs(flags, "job-id"); err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{Command: "extract", Subcommand: "status", JobID: flags.values["job-id"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "extract", Subcommand: "status", JobID: flags.values["job-id"]}, nil
 }
 
 func parseExtractCancelContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "expected-revision": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "expected-revision": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -993,11 +1034,14 @@ func parseExtractCancelContract(args []string) (DecisionRequest, error) {
 	if err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{Command: "extract", Subcommand: "cancel", JobID: flags.values["job-id"], ExpectedRevision: revision}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "extract", Subcommand: "cancel", JobID: flags.values["job-id"], ExpectedRevision: revision}, nil
 }
 
 func parseCandidateTransitionContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "candidate-id": true, "expected-revision": true, "action": true, "expected-review-sha256": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "candidate-id": true, "expected-revision": true, "action": true, "expected-review-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
@@ -1019,7 +1063,10 @@ func parseCandidateTransitionContract(args []string) (DecisionRequest, error) {
 	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{Command: "candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedRevision: revision, Action: flags.values["action"], ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return DecisionRequest{}, err
+	}
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedRevision: revision, Action: flags.values["action"], ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
 }
 
 func ParsePricingContract(args []string) (PricingRequest, error) {

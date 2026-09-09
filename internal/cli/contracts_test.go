@@ -96,14 +96,16 @@ func TestParseInspectContractRejectsMixedCursorAndAnchor(t *testing.T) {
 }
 
 func TestParseDecisionContractAcceptsExactAllowlist(t *testing.T) {
+	dataDir := t.TempDir()
 	tests := [][]string{
-		{"candidates", "list", "--project-id", "project-p", "--json"},
+		{"candidates", "list", "--project-id", "project-p", "--data-dir", dataDir, "--json"},
 		{"candidates", "list", "--json", "--status", "stale", "--project-id", "project-p"},
-		{"create", "--project-id", "project-p", "--expected-review-sha256", contractTestSHA, "--json"},
-		{"extract", "--project-id", "project-p", "--expected-generation-id", "generation-1", "--json"},
-		{"extract", "status", "--job-id", "job-1", "--json"},
-		{"extract", "cancel", "--job-id", "job-1", "--expected-revision", "1", "--json"},
-		{"candidate", "transition", "--project-id", "project-p", "--candidate-id", "candidate-1", "--expected-revision", "1", "--action", "confirm", "--expected-review-sha256", contractTestSHA, "--json"},
+		{"create", "--project-id", "project-p", "--expected-review-sha256", contractTestSHA, "--data-dir", dataDir, "--json"},
+		{"edit", "--project-id", "project-p", "--decision-id", "decision-1", "--expected-decision-revision", "2", "--expected-review-sha256", contractTestSHA, "--data-dir", dataDir, "--json"},
+		{"extract", "--project-id", "project-p", "--expected-generation-id", "generation-1", "--data-dir", dataDir, "--json"},
+		{"extract", "status", "--job-id", "job-1", "--data-dir", dataDir, "--json"},
+		{"extract", "cancel", "--job-id", "job-1", "--expected-revision", "1", "--data-dir", dataDir, "--json"},
+		{"candidate", "transition", "--project-id", "project-p", "--candidate-id", "candidate-1", "--expected-revision", "1", "--action", "confirm", "--expected-review-sha256", contractTestSHA, "--data-dir", dataDir, "--json"},
 		{"candidate", "transition", "--json", "--expected-review-sha256", contractTestSHA, "--action", "restore", "--expected-revision", "10", "--candidate-id", "candidate-1", "--project-id", "project-p"},
 	}
 	for _, args := range tests {
@@ -126,6 +128,8 @@ func TestParseDecisionContractRejectsExactInvalidArgv(t *testing.T) {
 		{"create", "--project-id", "p", "--expected-review-sha256", strings.Repeat("a", 63), "--json"},
 		{"create", "--project-id", "p", "--expected-review-sha256", strings.Repeat("A", 64), "--json"},
 		{"create", "--project-id", "p", "--expected-review-sha256", contractTestSHA, "--input", "file", "--json"},
+		{"edit", "--project-id", "p", "--decision-id", "d", "--expected-decision-revision", "0", "--expected-review-sha256", contractTestSHA, "--json"},
+		{"edit", "--project-id", "p", "--decision-id", "d", "--expected-decision-revision", "1", "--expected-review-sha256", contractTestSHA, "--data-dir", "relative", "--json"},
 		{"extract", "--project-id", "p", "--expected-generation-id", "g"},
 		{"extract", "--project-id", "p", "--expected-generation-id", "g", "--json", "extra"},
 		{"extract", "status", "--job-id", "job", "--json", "--project-id", "p"},
@@ -267,6 +271,18 @@ func TestContractParsersPopulateRequestsWithoutNormalizingValues(t *testing.T) {
 	wantMigration := SyncMigrationRequest{Mode: "confirm-migration", ProjectID: "project-p", DataDir: "/tmp/session-reviewer", ExpectedPreviewDigest: contractTestDigest}
 	if !reflect.DeepEqual(migration, wantMigration) {
 		t.Fatalf("migration=%+v want=%+v", migration, wantMigration)
+	}
+}
+
+func TestDecisionContractPopulatesEditAndExplicitDataRoot(t *testing.T) {
+	dataDir := t.TempDir()
+	request, err := ParseDecisionContract([]string{"edit", "--project-id", "project-p", "--decision-id", "decision-1", "--expected-decision-revision", "7", "--expected-review-sha256", contractTestSHA, "--data-dir", dataDir, "--json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := DecisionRequest{Command: "edit", ProjectID: "project-p", DecisionID: "decision-1", ExpectedDecisionRevision: 7, ExpectedReviewSHA256: contractTestSHA, DataDir: dataDir}
+	if !reflect.DeepEqual(request, want) {
+		t.Fatalf("request=%+v want=%+v", request, want)
 	}
 }
 
