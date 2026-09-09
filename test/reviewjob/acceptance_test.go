@@ -110,7 +110,31 @@ func newReviewEnv(t *testing.T) *reviewEnv {
 	}
 	output := env.run(t, 2*time.Minute, "init", "--project", env.project, "--vault", env.vault, "--write")
 	env.projectID = parseProjectID(t, output)
+	env.initializeAcceptedReview(t)
 	return env
+}
+
+func (e *reviewEnv) initializeAcceptedReview(t *testing.T) {
+	t.Helper()
+	accepted, err := reviewv2.ProjectLegacy(ledger.State{
+		ProjectID: e.projectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: e.projectID, Revision: 1, Goal: "Review pending Sessions", LastVerified: "initial scan completed", Branch: "main",
+			UncommittedChanges: []string{}, Blockers: []string{}, OpenRisks: []string{}, NextAction: "Review pending Sessions",
+			FirstInspection: "initial scan", LastUpdated: "2026-08-29T11:59:00Z", SourceSessions: []string{}, Evidence: []ledger.EvidenceRef{},
+		},
+		Timeline: []ledger.TimelineEvent{}, Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
+	})
+	if err != nil {
+		t.Fatalf("project initial accepted scan: %v", err)
+	}
+	plan, err := reviewv2.Render(e.project, accepted)
+	if err != nil {
+		t.Fatalf("render initial accepted scan: %v", err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatalf("publish initial accepted scan: %v", err)
+	}
 }
 
 func parseProjectID(t *testing.T, output string) string {
