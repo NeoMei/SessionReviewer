@@ -22,6 +22,7 @@ const EVENT_PAGE_SIZE = 25;
 const EMPTY_EXCERPT = "（该索引事件没有可用摘录）";
 
 export interface ScanRecordsOptions {
+  heading?: string;
   loadSessionSearch?: SessionSearchLoader;
   loadSessionEvents?: (request: SessionEventRequest) => Promise<SessionEventPageV1>;
   sessionLaunch?: SessionLaunchActions;
@@ -93,7 +94,7 @@ export function renderScanRecords(index: SessionIndexV1, options: ScanRecordsOpt
   let disposed = false;
   const cache = options.eventPageCache ?? new Map<string, SessionEventPageV1>();
   const heading = element("div", { className: "sr-scan-heading" }, [
-    element("h2", { text: "扫描记录" }),
+    element("h2", { text: options.heading ?? "扫描记录" }),
     element("p", { text: presentIndexCoverage(index) })
   ]);
   const browser = element("div", { className: "sr-scan-browser" });

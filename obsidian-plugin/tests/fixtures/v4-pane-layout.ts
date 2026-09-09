@@ -40,7 +40,7 @@ function conversationPage(selected: boolean): ConversationPageV1 {
     ordinal: 1,
     started_at: user.occurred_at,
     ended_at: assistant.occurred_at,
-    user_message: user,
+    user_message: { ...user, text: null },
     answer_state: "answered" as const,
     assistant_message_count: 1
   };

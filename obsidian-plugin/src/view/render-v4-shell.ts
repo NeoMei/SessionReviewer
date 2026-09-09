@@ -169,6 +169,7 @@ export function renderV4Shell(
           ...options,
           ...privateLoaders,
           ...recovery,
+          heading: "全部 Sessions",
           initialState: state.sessionBrowser,
           onStateChange: (sessionBrowser) => {
             state = { ...state, sessionBrowser };

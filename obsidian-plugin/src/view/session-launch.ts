@@ -3,8 +3,8 @@ import{button,element}from"./dom";
 export type SessionLaunchElement=HTMLElement&{dispose:()=>void};
 
 export function renderSessionLaunch(target:SessionLaunchTarget,actions:SessionLaunchActions,submitted:()=>void):SessionLaunchElement{
-	const root=element("section",{attrs:{"aria-label":"打开原 Session"}})as SessionLaunchElement;
-	const open=button("打开原 Session",{"data-action":"prepare-session-open"});const status=element("p",{attrs:{role:"status"}});const controls=element("div");
+	const root=element("section",{className:"sr-session-launch",attrs:{"aria-label":"打开原 Session"}})as SessionLaunchElement;
+	const open=button("打开原 Session",{"data-action":"prepare-session-open"});const status=element("p",{attrs:{role:"status"}});const controls=element("div",{className:"sr-form-actions"});
 	const configuration=element("details");configuration.append(element("summary",{text:"原 Session 启动器设置"}));const input=element("input",{attrs:{name:"session-launcher-executable","aria-label":`${target.provider} 可执行文件绝对路径`,placeholder:"可执行文件绝对路径"}});const verify=button("验证并保存启动器",{"data-action":"verify-session-launcher"});const info=element("p",{attrs:{role:"status"},text:"验证设置不会打开 Session，也不会发送消息。"});configuration.append(input,verify,info);
 	root.append(open,status,controls,configuration);let disposed=false,busy=false,epoch=0;
 	const setBusy=(value:boolean)=>{busy=value;open.disabled=value;verify.disabled=value};

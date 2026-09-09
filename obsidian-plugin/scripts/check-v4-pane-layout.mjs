@@ -83,7 +83,10 @@ async function assertProblemLayout(page, width, compact) {
   for (let index = 0; index < await controls.count(); index += 1) {
     const control = controls.nth(index);
     const rectangle = await control.boundingBox();
-    assert(rectangle, `problem control ${index} must be visible`);
+    if (!rectangle) {
+      assert(await control.evaluate((node) => Boolean(node.closest("details:not([open])"))), "only collapsed form controls may be hidden");
+      continue;
+    }
     inside(rectangle, shell, `problem control ${index}`);
     assert.equal(await control.evaluate((node) => node.scrollWidth <= node.clientWidth + 1), true, `problem control ${index} text must wrap inside its box`);
   }
@@ -106,6 +109,7 @@ async function assertNestedSessions(page, width) {
   await setHost(page, width);
   await page.locator('[data-v4-tab="sessions"]').click();
   await page.locator(".sr-conversation-browser").waitFor();
+  await page.getByText("已保留问题树、上下文和证据顺序。", { exact: true }).waitFor();
   await page.locator(".sr-event-browser").waitFor();
   const shell = await box(page, ".sr-v4-shell");
   for (const [containerSelector, firstSelector, secondSelector] of [
@@ -130,7 +134,7 @@ async function run() {
   const [{ chromium }, css, result] = await Promise.all([
     import(/* webpackIgnore: true */ pathToFileURL(args.playwrightModule).href), // eslint-disable-line no-unsanitized/method -- explicit CLI path supplied by the caller
     readFile(resolve(pluginRoot, "styles.css"), "utf8"),
-    build({ entryPoints: [resolve(pluginRoot, "tests/fixtures/v4-pane-layout.ts")], bundle: true, write: false, format: "iife", platform: "browser", target: "es2022", footer: { js: "V4PaneFixture.mountV4PaneLayoutFixture(document.querySelector('#pane'));" }, globalName: "V4PaneFixture" })
+    build({ entryPoints: [resolve(pluginRoot, "tests/fixtures/v4-pane-layout.ts")], bundle: true, write: false, format: "iife", platform: "browser", target: "es2022", plugins: [{ name: "unused-node-import", setup(b) { b.onResolve({ filter: /^node:crypto$/ }, (args) => ({ path: args.path, external: true, sideEffects: false })); } }], footer: { js: "V4PaneFixture.mountV4PaneLayoutFixture(document.querySelector('#pane'));" }, globalName: "V4PaneFixture" })
   ]);
   const outputDir = await mkdtemp(resolve(tmpdir(), "session-reviewer-v4-pane-"));
   let server;

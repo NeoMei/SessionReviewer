@@ -58,7 +58,7 @@ export function renderV4Answer(
       label.append(selector);
       nodes.push(label);
     } else if (choices[0]) {
-      nodes.push(element("p", { className: "sr-v4-answer-source", text: choices[0].label }));
+      nodes.push(element("details", { className: "sr-v4-answer-source" }, [element("summary", { text: `回答来源 · ${choices[0].ref.provider} · ${choices[0].ref.session_id.slice(0, 8)}` }), element("p", { text: choices[0].label })]));
     }
 
     const reason = unavailableReason(presentation, index, load, choices[selected]);

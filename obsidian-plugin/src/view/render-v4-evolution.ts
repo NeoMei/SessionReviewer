@@ -33,7 +33,7 @@ export function renderV4Evolution(
   let answer: V4AnswerElement | undefined;
   let disposed = false;
   if (presentation.timeline.length === 0) {
-    section.append(element("p", { className: "sr-empty", text: "尚无已接受的项目里程碑。扫描事实不会被伪装成项目演进。" }), openButton("查看原生项目历史", openHistory));
+    section.append(element("div", { className: "sr-page-empty" }, [element("h2", { text: "项目演进" }), element("p", { className: "sr-empty", text: "尚无已接受的项目里程碑。扫描事实不会被伪装成项目演进。" }), openButton("查看原生项目历史", openHistory)]));
     section.dispose = () => { disposed = true; section.replaceChildren(); };
     return section;
   }

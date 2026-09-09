@@ -7,6 +7,7 @@ import { presentDateTime } from "./presentation";
 
 export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSnapshotV1[], actions: PricingActions = {}): HTMLElement {
   const section = element("section", { className: "sr-v4-usage", attrs: { "data-v4-panel": "usage", role: "tabpanel" } }, [
+    element("header", { className: "sr-page-heading" }, [element("h2", { text: "用量与费用" }), element("p", { text: "查看已记录的消耗，核对模型价格与计费来源。" })]),
     element("div", { className: "sr-v4-usage-total" }, [metric("总 Token", accounting.total_tokens.toLocaleString("en-US")), metric("总费用", money(accounting.total_cost_usd)), metric("总时长", duration(accounting.total_duration_ms))])
   ]);
   if (accounting.models.length === 0) section.append(element("p", { className: "sr-empty", text: "帐本尚无可用的模型用量记录。" }));
@@ -17,9 +18,12 @@ export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSn
     ]);
     if (modelPrices.length === 0) card.append(element("p", { className: "sr-empty", text: "定价待定；不会用 Session 数量推测 Token 或成本。" }));
     for (const price of modelPrices) {
-      card.append(renderPrice(price));
-      if (actions.catalog && actions.acceptCatalog) card.append(pricingCatalogForm(price, actions));
-      if (actions.supplement) card.append(pricingSupplementForm(price, actions.supplement));
+      const entry = element("section", { className: "sr-v4-price-entry" }, [renderPrice(price)]);
+      const controls = element("div", { className: "sr-v4-pricing-actions" });
+      if (actions.catalog && actions.acceptCatalog) controls.append(pricingCatalogForm(price, actions));
+      if (actions.supplement) controls.append(pricingSupplementForm(price, actions.supplement));
+      if (controls.childElementCount) entry.append(controls);
+      card.append(entry);
     }
     section.append(card);
   }

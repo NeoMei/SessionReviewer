@@ -42,6 +42,7 @@ export function renderV4Problems(presentation: ReviewPresentationV4, state: V4Vi
   const nodes = new Map(presentation.problem_nodes.map((node) => [node.id, node]));
   const selected = nodes.get(state.selectedProblemId ?? "") ?? nodes.get(presentation.problem_root_ids[0] ?? "") ?? presentation.problem_nodes[0];
   const rail = element("aside", { className: "sr-v4-problem-tree", attrs: { "aria-label": "正式问题树", role: "tree" } });
+  rail.append(element("h2", { text: "问题脉络" }));
   for (const rootId of presentation.problem_root_ids) appendNode(rootId, 0, nodes, presentation.problem_nodes, selected, update, rail, new Set());
   const children = presentation.problem_nodes.filter((candidate) => candidate.primary_parent_id === selected.id).sort(problemOrder);
   const path = ancestorPath(selected, nodes);
@@ -107,21 +108,21 @@ function renderProblemCreate(createProblem: (question: string) => Promise<void>,
   const input = element("textarea", { attrs: { "data-v4-new-problem": "", "aria-label": "新问题原文", maxlength: "4096" } });
   const create = button("创建待确认问题", { "data-action": "create-problem-candidate" });
   create.addEventListener("click", () => { if (input.value.length > 0) void run(() => createProblem(input.value), "问题已加入待确认列表。") });
-  return element("div", { className: "sr-v4-problem-create" }, [input, create]);
+  return element("div", { className: "sr-v4-problem-create" }, [element("label", { text: "新增问题" }, [input]), create]);
 }
 
 function confirmingAction(label: string, confirmation: string, key: string, confirm: () => void): HTMLElement { const wrapper = element("span", { className: "sr-confirming-action" }); const start = button(label, { "data-action": key }); start.addEventListener("click", () => { const yes = button(confirmation, { "data-action": `confirm-${key}` }); yes.addEventListener("click", confirm); wrapper.replaceChildren(yes) }); wrapper.append(start); return wrapper; }
 function renderEdit(node: ProblemNodeV4, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
-  const form = element("div", { className: "sr-v4-problem-edit" }, [element("h3", { text: "编辑人工字段" })]);
+  const form = element("details", { className: "sr-v4-problem-edit" }, [element("summary", { text: "编辑问题与结论" })]);
   const question = element("textarea", { attrs: { "data-problem-edit-question": "", "aria-label": "问题原文", maxlength: "4096" } }); question.value = node.question;
   const conclusion = element("textarea", { attrs: { "data-problem-edit-conclusion": "", "aria-label": "当前结论", maxlength: "16384" } }); conclusion.value = node.current_conclusion;
   const criterion = element("textarea", { attrs: { "data-problem-edit-criterion": "", "aria-label": "完成标准", maxlength: "16384" } }); criterion.value = node.completion_criterion;
   const start = button("保存人工字段", { "data-action": "edit-problem" });
   start.addEventListener("click", () => { const confirm = button("确认：保存问题、结论和完成标准", { "data-action": "confirm-edit-problem" }); confirm.addEventListener("click", () => void run(actions.editProblem ? () => actions.editProblem!(node, { question: question.value, currentConclusion: conclusion.value, completionCriterion: criterion.value }) : undefined, "问题字段已发布。")); start.replaceWith(confirm); });
-  form.append(question, conclusion, criterion, start); return form;
+  form.append(element("label", { text: "问题原文" }, [question]), element("label", { text: "当前结论" }, [conclusion]), element("label", { text: "完成标准" }, [criterion]), start); return form;
 }
 function renderMove(node: ProblemNodeV4, all: ProblemNodeV4[], nodes: Map<string, ProblemNodeV4>, actions: ProblemActions, run: (op: (() => Promise<void>) | undefined, success: string) => Promise<void>): HTMLElement {
-  const box = element("div", { className: "sr-v4-problem-move" }, [element("h3", { text: "移动问题树" })]);
+  const box = element("details", { className: "sr-v4-problem-move" }, [element("summary", { text: "移动问题树" })]);
   const descendants = new Set(descendantIDs(node.id, all));
   const select = element("select", { attrs: { "data-problem-move-parent": "", "aria-label": "新父问题" } });
   const root = element("option", { text: "顶层", attrs: { value: "root" } }); root.selected = node.primary_parent_id === null; select.append(root);
@@ -149,7 +150,8 @@ function renderSources(node: ProblemNodeV4, presentation: ReviewPresentationV4, 
   const body = element("div", { className: "sr-v4-problem-source-answer" });
   if (node.source_turn_refs.length === 0) sources.append(element("p", { className: "sr-empty", text: "当前正式节点没有已绑定的可见问答来源。" }));
   for (const ref of node.source_turn_refs) {
-    const open = button(`${ref.provider} / ${ref.session_id} # ${ref.turn_unit_id}`, { "data-action": "open-problem-source" });
+    const sourceIdentity = `${ref.provider} / ${ref.session_id} # ${ref.turn_unit_id}`;
+    const open = button(`查看问答 · ${ref.provider} · ${ref.session_id.slice(0, 8)}`, { "data-action": "open-problem-source", title: sourceIdentity, "aria-label": `查看问答 ${sourceIdentity}` });
     open.disabled = !actions.loadConversation || !ref.session_view_digest;
     open.addEventListener("click", () => {
       if (!actions.loadConversation || !ref.session_view_digest) return;

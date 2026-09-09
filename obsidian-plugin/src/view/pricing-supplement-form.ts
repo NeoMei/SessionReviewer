@@ -3,7 +3,7 @@ import { parsePricingSupplementV1 } from "../data/contracts-v4";
 import { button, element } from "./dom";
 
 export function pricingSupplementForm(price: PricingSnapshotV1, save: (input: PricingSupplementV1) => Promise<unknown>): HTMLElement {
-  const container = element("div");
+  const container = element("div", { className: "sr-v4-pricing-control" });
   const open = button("补充或纠正价格", { "data-action": "supplement-price" });
   container.append(open);
   open.addEventListener("click", () => {
@@ -34,7 +34,7 @@ export function pricingSupplementForm(price: PricingSnapshotV1, save: (input: Pr
     const confirm = button("确认并保存价格", { type: "submit" });
     const cancel = button("取消", {});
     cancel.addEventListener("click", () => { form.remove(); open.disabled = false; });
-    form.append(confirm, cancel, status);
+    form.append(element("div", { className: "sr-form-actions" }, [confirm, cancel]), status);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (confirm.disabled || !form.reportValidity()) return;

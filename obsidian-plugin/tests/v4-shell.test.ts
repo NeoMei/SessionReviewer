@@ -300,7 +300,7 @@ describe("v4 five-tab shell", () => {
 
     expect(root.querySelector('[aria-label="正式问题树"]')?.textContent).toContain("深层问题？");
     expect(root.querySelector('[aria-label="当前问题与子问题"]')?.textContent).toContain("根问题？ › 子问题？ › 深层问题？");
-    expect(root.querySelector('[aria-label="问题证据与问答来源"]')?.textContent).toContain("codex / session-deep # turn-3");
+    expect(root.querySelector('[data-action="open-problem-source"]')?.getAttribute("title")).toBe("codex / session-deep # turn-3");
   });
 
   it("creates and confirms an empty-graph root without optimistic mutation", async () => {
