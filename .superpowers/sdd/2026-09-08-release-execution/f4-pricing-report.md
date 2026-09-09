@@ -65,7 +65,7 @@ Manual supplements accept only reviewed identity, effective interval, rates, HTT
 - `go vet ./internal/modelpricewatch ./internal/pricing` — PASS
 - `go vet ./internal/modelpricewatch ./internal/pricing ./internal/cli` — PASS
 - Focused CLI catalog/supplement/accounting/help tests — PASS. The catalog acceptance fixture drives the real CLI publication path through a real private cache and fixed-origin client backed by a fake HTTP server, verifies only the two fixed ModelPriceWatch URLs are requested, rejects a missing listing without ledger mutation, computes cost from captured usage, preserves immutable predecessor evidence except lifecycle status, verifies project/Vault readback, and verifies rescan retention.
-- Windows compile-only checks with `GOOS=windows GOARCH=amd64 go test -c` for both packages — PASS; both outputs are PE32+ x86-64 Windows executables.
+- Windows compile-only checks with `GOOS=windows GOARCH=amd64 go test -c` for `internal/modelpricewatch`, `internal/pricing`, and `internal/cli` — PASS; all outputs are PE32+ x86-64 Windows executables.
 - `SESSION_REVIEWER_LIVE_MODELPRICEWATCH=1 go test ./internal/modelpricewatch -run LiveCatalogSmoke -count=1 -v` — PASS.
 
 Live smoke recorded aggregate metadata only: adapter version `1`, models count `248`, history count `248`, and both catalogs updated `2026-09-06`. No response body or catalog was committed.
