@@ -163,11 +163,11 @@ func (p *execWrapperParser) jsonLiteral() (json.RawMessage, bool) {
 	}
 	decoder := json.NewDecoder(strings.NewReader(p.source[p.offset:]))
 	var raw json.RawMessage
-	if err := decoder.Decode(&raw); err != nil || len(raw) == 0 {
-		return nil, false
+	if err := decoder.Decode(&raw); err == nil && len(raw) > 0 {
+		p.offset += int(decoder.InputOffset())
+		return raw, true
 	}
-	p.offset += int(decoder.InputOffset())
-	return raw, true
+	return p.literalToolArgument()
 }
 
 func (p *execWrapperParser) keyword(value string) bool {
