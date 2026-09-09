@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
-	"github.com/neomei/SessionReviewer/internal/modelpricewatch"
+	modelpricewatch "github.com/neomei/SessionReviewer/internal/modelpricewatch/catalog"
 )
 
 type Clock interface{ Now() time.Time }

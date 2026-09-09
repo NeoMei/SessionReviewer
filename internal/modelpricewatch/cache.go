@@ -20,21 +20,6 @@ const maximumStaleAge = 7 * 24 * time.Hour
 type Fetcher interface {
 	Fetch(context.Context, Validators) (FetchResult, error)
 }
-type FreshnessStatus string
-
-const (
-	FreshCurrent FreshnessStatus = "current"
-	FreshStale   FreshnessStatus = "stale"
-	FreshExpired FreshnessStatus = "expired"
-)
-
-type Freshness struct {
-	Status           FreshnessStatus
-	RetrievedAt      time.Time
-	AttemptedAt      time.Time
-	Age              time.Duration
-	LastRefreshError string
-}
 type Cache struct {
 	root   string
 	client Fetcher

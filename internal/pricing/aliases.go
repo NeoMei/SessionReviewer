@@ -4,7 +4,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/neomei/SessionReviewer/internal/modelpricewatch"
+	modelpricewatch "github.com/neomei/SessionReviewer/internal/modelpricewatch/catalog"
 )
 
 // BillingRoute is observed request metadata. Callers must supply the actual

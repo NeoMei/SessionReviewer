@@ -51,6 +51,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neom
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/ledger
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memory
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/memorystore
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/modelpricewatch/catalog
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/pathguard
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/platform
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	PATH	github.com/neomei/SessionReviewer/internal/pricing

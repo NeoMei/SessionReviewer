@@ -95,6 +95,8 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv2/validate.go	validateCompatibilityProjection	reflect.DeepEqual	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/codec.go	RenderLedger	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/markdown_decision_update.go	RenderMarkdownDecisionOperation	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/markdown_problem_update.go	RenderMarkdownProblemOperation	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/markdown_render.go	RenderMarkdownDraft	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/markdown_render.go	samePresentationAcrossScanIdentity	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/validate.go	validateDocumentProjection	reflect.DeepEqual	occurrence=1
@@ -142,6 +144,8 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	in
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/v3.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv2/validate.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/codec.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/markdown_decision_update.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/markdown_problem_update.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/markdown_render.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/validate.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sessionindex/validate.go	reflect	alias=reflect
@@ -153,6 +157,9 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validFileURLRemote	net/url.URL	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	network	internal/projectprobe/git.go	validURLRemote	net/url.URL	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/ledger/document.go	topLevelH2Headings	method.Start receiver=first	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/resolve.go	computeCosts	method.Output receiver=s.BillableQuantities	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/resolve.go	computeCosts	method.Output receiver=s.LineCostsUSD	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/resolve.go	computeCosts	method.Output receiver=s.Rates	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/validate.go	ValidateSnapshot	method.Output receiver=snapshot.BillableQuantities	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/validate.go	ValidateSnapshot	method.Output receiver=snapshot.LineCostsUSD	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/pricing/validate.go	ValidateSnapshot	method.Output receiver=snapshot.LineCostsUSD	occurrence=2
