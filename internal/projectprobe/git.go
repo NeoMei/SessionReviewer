@@ -517,7 +517,20 @@ func parseStatus(output []byte) (int, bool) {
 	malformed := false
 	for index := 0; index < len(segments); index++ {
 		record := segments[index]
-		if len(record) < 4 || record[2] != ' ' || !validStatusCode(record[0], record[1]) || !validStatusPath(record[3:]) {
+		if len(record) < 4 || record[2] != ' ' || !validStatusCode(record[0], record[1]) {
+			malformed = true
+			continue
+		}
+		name := record[3:]
+		if len(name) > 4096 {
+			malformed = true
+			continue
+		}
+		directoryStatus := (record[0] == '?' && record[1] == '?') || (record[0] == '!' && record[1] == '!')
+		if directoryStatus && len(name) > 0 && name[len(name)-1] == '/' {
+			name = name[:len(name)-1]
+		}
+		if !validStatusPath(name) {
 			malformed = true
 			continue
 		}

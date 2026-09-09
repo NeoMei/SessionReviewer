@@ -284,6 +284,16 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 		if err := publishOverviewUpgrade(); err != nil {
 			return InitResult{}, err
 		}
+		freshBootstrap, err := initializationFragmentExists(dataDir.Root, updated.ID)
+		if err != nil {
+			return InitResult{}, err
+		}
+		if !overviewExists && !v2Exists && freshBootstrap {
+			if err := ensureExactInitializationScaffold(dataDir.Root, updated.ID, true, opts.afterStateComponent); err != nil {
+				return InitResult{}, err
+			}
+			return initializationResult(paths, updated.ID), nil
+		}
 		if err := ensureProjectSyncState(dataDir.Root, updated.ID); err != nil {
 			return InitResult{}, err
 		}
@@ -359,26 +369,24 @@ func Initialize(opts InitOptions) (result InitResult, retErr error) {
 	if stateExists {
 		return InitResult{}, fmt.Errorf("generated project state already exists")
 	}
-	if opts.beforeOverviewWrite != nil {
-		if err := opts.beforeOverviewWrite(); err != nil {
-			return InitResult{}, err
-		}
-	}
-	if err := writeInitialReviewV2(roots.project.Root, paths.projectRoot, id, opts.Now(), opts.afterReviewV2File); err != nil {
+	if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), mapping); err != nil {
 		return InitResult{}, err
-	}
-	if opts.afterOverviewWrite != nil {
-		if err := opts.afterOverviewWrite(); err != nil {
-			return InitResult{}, err
-		}
 	}
 	if err := ensureExactInitializationScaffold(dataDir.Root, mapping.ID, false, opts.afterStateComponent); err != nil {
 		return InitResult{}, err
 	}
-	if err := publishInitializationMapping(opts, dataDir.Root, paths.projectRoot, roots.project.Info(), mapping); err != nil {
-		return InitResult{}, err
-	}
 	return initializationResult(paths, id), nil
+}
+
+func initializationFragmentExists(dataRoot *os.Root, projectID string) (bool, error) {
+	info, err := dataRoot.Lstat(filepath.Join(config.ProjectFragmentsDir, projectID+".toml"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return false, errors.Join(errors.New("initialization mapping fragment is invalid"), err)
+	}
+	return true, nil
 }
 
 func publishInitializationMapping(opts InitOptions, dataRoot *os.Root, logicalProjectPath string, pinned os.FileInfo, mapping config.ProjectMapping) error {

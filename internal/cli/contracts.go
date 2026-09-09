@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -59,6 +60,7 @@ func contractError(parts ...string) error {
 
 type InspectRequest struct {
 	Command              string
+	DataDir              string
 	ProjectID            string
 	Provider             string
 	SessionID            string
@@ -71,6 +73,16 @@ type InspectRequest struct {
 	Query                string
 	TurnUnitID           string
 	MessageCursor        string
+}
+
+func validateInspectDataDir(value string) error {
+	if value == "" {
+		return nil
+	}
+	if !utf8.ValidString(value) || !filepath.IsAbs(value) || filepath.Clean(value) != value {
+		return contractError("data-dir must be a clean absolute path")
+	}
+	return nil
 }
 
 type ConversationSourceCoverage struct {
@@ -292,7 +304,7 @@ func ParseInspectContract(args []string) (InspectRequest, error) {
 }
 
 func parseConversationChainContract(args []string) (InspectRequest, error) {
-	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "session-view-digest": true, "turn-unit-id": true, "cursor": true, "message-cursor": true, "limit": true, "json": true}
+	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "session-view-digest": true, "turn-unit-id": true, "cursor": true, "message-cursor": true, "limit": true, "data-dir": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
 	if err != nil {
 		return InspectRequest{}, err
@@ -301,6 +313,9 @@ func parseConversationChainContract(args []string) (InspectRequest, error) {
 		return InspectRequest{}, err
 	}
 	if err = requireSafeIDs(flags, "project-id", "provider", "session-id", "expected-generation-id"); err != nil {
+		return InspectRequest{}, err
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 		return InspectRequest{}, err
 	}
 	if value := flags.values["session-view-digest"]; value != "" && !digestPattern.MatchString(value) {
@@ -331,7 +346,7 @@ func parseConversationChainContract(args []string) (InspectRequest, error) {
 	if err != nil || limit > 64 {
 		return InspectRequest{}, contractError("limit must be between 1 and 64")
 	}
-	return InspectRequest{Command: "conversation-chain", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], SessionViewDigest: flags.values["session-view-digest"], TurnUnitID: flags.values["turn-unit-id"], Cursor: flags.values["cursor"], MessageCursor: flags.values["message-cursor"], Limit: limit}, nil
+	return InspectRequest{Command: "conversation-chain", DataDir: flags.values["data-dir"], ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], SessionViewDigest: flags.values["session-view-digest"], TurnUnitID: flags.values["turn-unit-id"], Cursor: flags.values["cursor"], MessageCursor: flags.values["message-cursor"], Limit: limit}, nil
 }
 
 func ValidateConversationSourceCoverage(coverage ConversationSourceCoverage) error {
@@ -588,7 +603,7 @@ func ValidateCompleteSiblingOrder(current, ordered []string) error {
 }
 
 func parseSessionSummaryContract(args []string) (InspectRequest, error) {
-	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "json": true}
+	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "data-dir": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
 	if err != nil {
 		return InspectRequest{}, err
@@ -599,11 +614,14 @@ func parseSessionSummaryContract(args []string) (InspectRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "provider", "session-id", "expected-generation-id"); err != nil {
 		return InspectRequest{}, err
 	}
-	return InspectRequest{Command: "session-summary", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return InspectRequest{}, err
+	}
+	return InspectRequest{Command: "session-summary", DataDir: flags.values["data-dir"], ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
 }
 
 func parseSessionEventsContract(args []string) (InspectRequest, error) {
-	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "cursor": true, "anchor": true, "limit": true, "json": true}
+	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "cursor": true, "anchor": true, "limit": true, "data-dir": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
 	if err != nil {
 		return InspectRequest{}, err
@@ -612,6 +630,9 @@ func parseSessionEventsContract(args []string) (InspectRequest, error) {
 		return InspectRequest{}, err
 	}
 	if err = requireSafeIDs(flags, "project-id", "provider", "session-id", "expected-generation-id"); err != nil {
+		return InspectRequest{}, err
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 		return InspectRequest{}, err
 	}
 	limit, err := requirePageLimit(flags.values["limit"])
@@ -634,11 +655,11 @@ func parseSessionEventsContract(args []string) (InspectRequest, error) {
 			return InspectRequest{}, err
 		}
 	}
-	return InspectRequest{Command: "session-events", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], Cursor: cursor, Anchor: anchorValue, Limit: limit}, nil
+	return InspectRequest{Command: "session-events", DataDir: flags.values["data-dir"], ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], ExpectedGenerationID: flags.values["expected-generation-id"], Cursor: cursor, Anchor: anchorValue, Limit: limit}, nil
 }
 
 func parseSessionSearchContract(args []string) (InspectRequest, error) {
-	allowed := map[string]bool{"project-id": true, "expected-generation-id": true, "query-kind": true, "query": true, "cursor": true, "limit": true, "json": true}
+	allowed := map[string]bool{"project-id": true, "expected-generation-id": true, "query-kind": true, "query": true, "cursor": true, "limit": true, "data-dir": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
 	if err != nil {
 		return InspectRequest{}, err
@@ -647,6 +668,9 @@ func parseSessionSearchContract(args []string) (InspectRequest, error) {
 		return InspectRequest{}, err
 	}
 	if err = requireSafeIDs(flags, "project-id", "expected-generation-id"); err != nil {
+		return InspectRequest{}, err
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 		return InspectRequest{}, err
 	}
 	if kind := flags.values["query-kind"]; kind != "branch" && kind != "file" && kind != "error" {
@@ -664,7 +688,7 @@ func parseSessionSearchContract(args []string) (InspectRequest, error) {
 			return InspectRequest{}, err
 		}
 	}
-	return InspectRequest{Command: "session-search", ProjectID: flags.values["project-id"], ExpectedGenerationID: flags.values["expected-generation-id"], QueryKind: flags.values["query-kind"], Query: flags.values["query"], Cursor: flags.values["cursor"], Limit: limit}, nil
+	return InspectRequest{Command: "session-search", DataDir: flags.values["data-dir"], ProjectID: flags.values["project-id"], ExpectedGenerationID: flags.values["expected-generation-id"], QueryKind: flags.values["query-kind"], Query: flags.values["query"], Cursor: flags.values["cursor"], Limit: limit}, nil
 }
 
 func ParseDecisionContract(args []string) (DecisionRequest, error) {

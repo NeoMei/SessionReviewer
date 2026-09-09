@@ -12,6 +12,9 @@ import (
 
 const initHelp = `Preview project and Obsidian initialization before writing it.
 
+Initialization registers the project and prepares private scan state. The first
+successful scan creates the current Markdown review, history, ledger, and index.
+
 Usage:
   session-reviewer init --project PATH --vault PATH [options]
 
@@ -70,7 +73,7 @@ func runInit(args []string, stdout, stderr io.Writer) int {
 	if previewProjectID == "" {
 		previewProjectID = "(generated on write)"
 	}
-	fmt.Fprintf(stdout, "action: %s\nproject_id: %s\nledger: %s\nconfig: %s\nwritten: false\n", preview.Action, previewProjectID, preview.LedgerRoot, preview.ConfigPath)
+	fmt.Fprintf(stdout, "action: %s\nproject_id: %s\nledger: %s\nconfig: %s\nmarkdown: created by first scan\nwritten: false\n", preview.Action, previewProjectID, preview.LedgerRoot, preview.ConfigPath)
 	if !*write {
 		return 0
 	}

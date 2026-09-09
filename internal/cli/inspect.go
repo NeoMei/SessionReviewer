@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 
 	inspectapi "github.com/neomei/SessionReviewer/internal/inspect"
 )
@@ -14,14 +15,14 @@ const inspectHelp = `Read one validated page from a published Session index.
 
 Usage:
   session-reviewer inspect session-summary --project-id ID --provider ID --session-id ID
-    --expected-generation-id ID --json
+    --expected-generation-id ID [--data-dir PATH] --json
   session-reviewer inspect session-events --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--cursor TOKEN | --anchor ORDINAL]
-    --limit 1..100 --json
+    --limit 1..100 [--data-dir PATH] --json
   session-reviewer inspect conversation-chain --project-id ID --provider ID --session-id ID
     --expected-generation-id ID [--session-view-digest DIGEST]
     [--cursor TOKEN | --turn-unit-id ID [--message-cursor TOKEN]]
-    --limit 1..64 --json
+    --limit 1..64 [--data-dir PATH] --json
 `
 
 type inspectDiagnostic struct {
@@ -47,10 +48,14 @@ func runInspect(args []string, stdout, stderr io.Writer) int {
 		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "inspect subcommand is not implemented"})
 		return 2
 	}
-	dataRoot := resolveDataDir("")
+	dataRoot := resolveDataDir(request.DataDir)
 	if dataRoot == "" {
 		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "SessionReviewer data directory is unavailable"})
 		return 1
+	}
+	if request.DataDir != "" && (!filepath.IsAbs(dataRoot) || filepath.Clean(dataRoot) != dataRoot) {
+		writeInspectError(stdout, ContractError{Code: ContractCodeInvalidArgument, Message: "data-dir must be a clean absolute path"})
+		return 2
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), InspectExecutionTimeout)
 	defer cancel()

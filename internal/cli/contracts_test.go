@@ -25,12 +25,14 @@ func contractCode(err error) string {
 }
 
 func TestParseInspectContractAcceptsExactAllowlist(t *testing.T) {
+	dataDir := filepath.Join(string(filepath.Separator), "tmp", "session-reviewer-data")
 	tests := [][]string{
-		{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--json"},
-		{"session-events", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--limit", "1", "--json"},
+		{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--data-dir", dataDir, "--json"},
+		{"session-events", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--limit", "1", "--data-dir", dataDir, "--json"},
 		{"session-events", "--json", "--limit", "100", "--anchor", "2", "--expected-generation-id", "generation-1", "--session-id", "session-1", "--provider", "codex", "--project-id", "project-p"},
 		{"session-events", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--cursor", "opaque", "--limit", "100", "--json"},
-		{"session-search", "--project-id", "project-p", "--expected-generation-id", "generation-1", "--query-kind", "branch", "--query", "feature/login", "--limit", "1", "--json"},
+		{"session-search", "--project-id", "project-p", "--expected-generation-id", "generation-1", "--query-kind", "branch", "--query", "feature/login", "--limit", "1", "--data-dir", dataDir, "--json"},
+		{"conversation-chain", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--limit", "1", "--data-dir", dataDir, "--json"},
 		{"session-search", "--json", "--cursor", "opaque", "--limit", "100", "--query", "timeout", "--query-kind", "error", "--expected-generation-id", "generation-1", "--project-id", "project-p"},
 	}
 	for _, args := range tests {
@@ -59,6 +61,9 @@ func TestParseInspectContractRejectsExactInvalidArgv(t *testing.T) {
 		{"summary empty id", []string{"session-summary", "--project-id", "", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--json"}},
 		{"summary unsafe id", []string{"session-summary", "--project-id", "../project", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--json"}},
 		{"summary invalid utf8", []string{"session-summary", "--project-id", string([]byte{0xff}), "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--json"}},
+		{"summary duplicate data dir", []string{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--data-dir", filepath.Join(string(filepath.Separator), "tmp", "one"), "--data-dir", filepath.Join(string(filepath.Separator), "tmp", "two"), "--json"}},
+		{"summary relative data dir", []string{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--data-dir", "relative/data", "--json"}},
+		{"summary unclean data dir", []string{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--data-dir", filepath.Join(string(filepath.Separator), "tmp", "one") + string(filepath.Separator) + ".." + string(filepath.Separator) + "two", "--json"}},
 		{"events missing limit", []string{"session-events", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--json"}},
 		{"events zero limit", []string{"session-events", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--limit", "0", "--json"}},
 		{"events too large limit", []string{"session-events", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--expected-generation-id", "g", "--limit", "101", "--json"}},

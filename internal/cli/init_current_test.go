@@ -11,8 +11,113 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/platform"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
+
+func TestFreshInitScanRepeatLifecyclePublishesCurrentMarkdown(t *testing.T) {
+	projectRoot, vaultRoot, dataRoot, sessionsRoot := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	for _, args := range [][]string{{"init"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-m", "fixture"}} {
+		command := exec.Command("git", args...)
+		command.Dir = projectRoot
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("fixture git: %v %s", err, output)
+		}
+	}
+	const sessionID = "66666666-6666-4666-8666-666666666666"
+	var source bytes.Buffer
+	for _, record := range []map[string]any{
+		{"timestamp": "2026-09-09T00:00:00Z", "type": "session_meta", "payload": map[string]any{"id": sessionID, "cwd": projectRoot}},
+		{"timestamp": "2026-09-09T00:00:01Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": "Does first-use retain this answer?"}}}},
+		{"timestamp": "2026-09-09T00:00:02Z", "type": "response_item", "payload": map[string]any{"type": "function_call", "call_id": "verify-first-use", "name": "exec_command", "arguments": `{"cmd":"go test ./internal/cli"}`}},
+		{"timestamp": "2026-09-09T00:00:03Z", "type": "response_item", "payload": map[string]any{"type": "function_call_output", "call_id": "verify-first-use", "output": `{"exit_code":0,"output":"PASS"}`}},
+		{"timestamp": "2026-09-09T00:00:04Z", "type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "phase": "final_answer", "content": []any{map[string]any{"type": "output_text", "text": "First-use retained answer."}}}},
+	} {
+		if err := json.NewEncoder(&source).Encode(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(sessionsRoot, "rollout-2026-09-09T00-00-00-"+sessionID+".jsonl"), source.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	initOut := runCurrentInitCLI(t, []string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot, "--write"})
+	if !strings.Contains(initOut, "action: create\n") {
+		t.Fatalf("fresh init output:\n%s", initOut)
+	}
+	cfg, err := config.Load(filepath.Join(dataRoot, "config.toml"))
+	if err != nil || len(cfg.Projects) != 1 {
+		t.Fatalf("fresh mapping=%+v err=%v", cfg.Projects, err)
+	}
+	mapping := cfg.Projects[0]
+	beforeFirstScan := snapshotFreshInitPrivateState(t, mapping, dataRoot)
+	repeatBeforeScan := runCurrentInitCLI(t, []string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot, "--write"})
+	if !strings.Contains(repeatBeforeScan, "action: reuse\n") {
+		t.Fatalf("repeat init before scan did not reuse:\n%s", repeatBeforeScan)
+	}
+	if afterRepeat := snapshotFreshInitPrivateState(t, mapping, dataRoot); !equalCurrentInitCLIBytes(beforeFirstScan, afterRepeat) {
+		t.Fatal("repeat init before first scan changed bootstrap mapping or private state")
+	}
+	runCurrentInitCLI(t, []string{"scan", "--project-id", mapping.ID, "--sessions-root", sessionsRoot, "--data-dir", dataRoot, "--json"})
+
+	load := func(root string, vault bool) reviewv4.Accepted {
+		t.Helper()
+		read := func(relative string) []byte {
+			if vault {
+				relative = strings.TrimPrefix(relative, "docs/session-review/")
+			}
+			return readCurrentInitCLIFile(t, filepath.Join(root, filepath.FromSlash(relative)))
+		}
+		accepted, err := reviewv4.LoadProjection(read(reviewv2.ReviewRelativePath), read(reviewv2.HistoryRelativePath), read(reviewv2.MachineLedgerRelativePath), read("docs/session-review/.session-reviewer/session-index.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return accepted
+	}
+	accepted := load(projectRoot, false)
+	if len(accepted.SessionIndex.Sessions) != 1 || len(accepted.Review.Timeline) == 0 || !strings.Contains(accepted.Review.Timeline[0].ClosedLoop.Conclusion.Text, "First-use retained answer") {
+		t.Fatalf("first-use projection is not readable: index=%+v timeline=%+v", accepted.SessionIndex.Sessions, accepted.Review.Timeline)
+	}
+
+	reviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))
+	document, err := reviewv4.ParseMarkdownDocument("项目回顾.md", readCurrentInitCLIFile(t, reviewPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited, err := document.ReplaceFields(map[reviewv4.FieldKey]string{{Entity: "project-overview", Name: "goal"}: "Fresh lifecycle human goal"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(reviewPath, edited, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	beforeInit := snapshotCurrentInitCLIPublication(t, mapping, dataRoot)
+	runCurrentInitCLI(t, []string{"init", "--project", projectRoot, "--vault", vaultRoot, "--data-dir", dataRoot, "--write"})
+	if afterInit := snapshotCurrentInitCLIPublication(t, mapping, dataRoot); !equalCurrentInitCLIBytes(beforeInit, afterInit) {
+		t.Fatal("repeat init changed current Project/Vault/config bytes")
+	}
+	runCurrentInitCLI(t, []string{"scan", "--project-id", mapping.ID, "--sessions-root", sessionsRoot, "--data-dir", dataRoot, "--json"})
+	for _, target := range []struct {
+		root  string
+		vault bool
+	}{{root: projectRoot}, {root: filepath.Join(vaultRoot, filepath.FromSlash(mapping.VaultReviewPath)), vault: true}} {
+		if got := load(target.root, target.vault).Review.CurrentState.Goal; got != "Fresh lifecycle human goal" {
+			t.Fatalf("human goal at %s=%q", target.root, got)
+		}
+	}
+}
+
+func snapshotFreshInitPrivateState(t *testing.T, mapping config.ProjectMapping, dataRoot string) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	fragment := filepath.Join(dataRoot, config.ProjectFragmentsDir, mapping.ID+".toml")
+	result[fragment] = readCurrentInitCLIFile(t, fragment)
+	for _, relative := range []string{"locks/sync.lock"} {
+		path := filepath.Join(dataRoot, "projects", mapping.ID, filepath.FromSlash(relative))
+		result[path] = readCurrentInitCLIFile(t, path)
+	}
+	return result
+}
 
 func TestCurrentMarkdownInitReusesRealScanPublication(t *testing.T) {
 	for _, pending := range []bool{false, true} {
@@ -108,7 +213,17 @@ func snapshotCurrentInitCLIPublication(t *testing.T, mapping config.ProjectMappi
 		}
 	}
 	configPath := filepath.Join(dataRoot, "config.toml")
-	result[configPath] = readCurrentInitCLIFile(t, configPath)
+	if body, err := os.ReadFile(configPath); err == nil {
+		result[configPath] = body
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	fragmentPath := filepath.Join(dataRoot, config.ProjectFragmentsDir, mapping.ID+".toml")
+	if body, err := os.ReadFile(fragmentPath); err == nil {
+		result[fragmentPath] = body
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	return result
 }
 

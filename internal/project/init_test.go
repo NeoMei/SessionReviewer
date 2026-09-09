@@ -306,7 +306,9 @@ func TestCurrentMarkdownInitializeRejectsInvalidCurrentStateWithoutFallback(t *t
 		}},
 		{name: "current legacy splice", mutate: func(t *testing.T, fixture currentMarkdownInitializationFixture) {
 			legacy := t.TempDir()
-			if _, err := Initialize(InitOptions{ProjectRoot: legacy, VaultRoot: t.TempDir(), DataDir: t.TempDir(), Random: bytes.NewReader(bytes.Repeat([]byte{0x33}, 8))}); err != nil {
+			legacyVault, legacyData := t.TempDir(), t.TempDir()
+			seedLegacyInitializationMapping(t, legacy, legacyVault, legacyData, "project-3333333333333333")
+			if _, err := Initialize(InitOptions{ProjectRoot: legacy, VaultRoot: legacyVault, DataDir: legacyData, Random: errorReader{}}); err != nil {
 				t.Fatal(err)
 			}
 			for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath} {
@@ -571,7 +573,7 @@ func digestByteMap(values map[string][]byte) map[string]string {
 	return result
 }
 
-func TestInitCreatesReviewV2(t *testing.T) {
+func TestFreshInitDefersMarkdownUntilFirstScan(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	result, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data,
@@ -589,16 +591,38 @@ func TestInitCreatesReviewV2(t *testing.T) {
 		reviewv2.HistoryRelativePath,
 		reviewv2.MachineLedgerRelativePath,
 	} {
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); err != nil {
-			t.Fatalf("missing %s: %v", relative, err)
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("fresh init published %s before scan: %v", relative, err)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(root, "docs", "session-review", "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy overview exists after v2 init: %v", err)
 	}
-	accepted, err := reviewv2.Load(root)
-	if err != nil || accepted.State.Review.ProjectID != result.ProjectID || accepted.State.Review.Revision != 1 {
-		t.Fatalf("accepted=%+v err=%v", accepted.State.Review, err)
+	assertExactInitializationScaffold(t, data, result.ProjectID)
+	assertSingleMapping(t, data, result.ProjectID)
+}
+
+func TestFreshBootstrapRejectsMalformedMappingFragmentWithoutPublishingMarkdown(t *testing.T) {
+	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	result, err := Initialize(InitOptions{
+		ProjectRoot: root, VaultRoot: vault, DataDir: data,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fragment := filepath.Join(data, config.ProjectFragmentsDir, result.ProjectID+".toml")
+	if err := os.WriteFile(fragment, []byte("not canonical\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, Random: errorReader{}})
+	if err == nil || !errors.Is(err, ErrCorruptInitializationConfig) {
+		t.Fatalf("malformed fragment err=%v", err)
+	}
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath} {
+		if _, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(relative))); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("malformed bootstrap published %s: %v", relative, statErr)
+		}
 	}
 }
 
@@ -620,23 +644,6 @@ func TestInitializeNormalizesTrailingSpaceProjectDirectoryName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("initialize trailing-space project directory: %v", err)
 	}
-	accepted, err := reviewv2.Load(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if accepted.State.Review.Name != "AgentWiki" {
-		t.Fatalf("review name=%q want %q", accepted.State.Review.Name, "AgentWiki")
-	}
-	reviewBody, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(reviewBody, []byte("# AgentWiki\n")) {
-		t.Fatalf("review heading missing canonical name:\n%s", reviewBody)
-	}
-	if bytes.Contains(reviewBody, []byte("# AgentWiki \n")) {
-		t.Fatal("review heading retained trailing space")
-	}
 	cfg, err := config.Load(result.ConfigPath)
 	if err != nil {
 		t.Fatal(err)
@@ -652,6 +659,7 @@ func TestInitializeNormalizesTrailingSpaceProjectDirectoryName(t *testing.T) {
 
 func TestInitializeReassociatesCompleteReviewV2WithoutChangingIdentity(t *testing.T) {
 	root, vault, firstData, secondData := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	seedLegacyInitializationMapping(t, root, vault, firstData, "project-2a2a2a2a2a2a2a2a")
 	first, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: firstData,
 		Now:    func() time.Time { return time.Date(2026, 8, 26, 0, 0, 0, 0, time.UTC) },
@@ -694,6 +702,7 @@ func TestInitializeRejectsMixedOrIncompleteReviewVersions(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+			seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 			if _, err := Initialize(InitOptions{
 				ProjectRoot: root, VaultRoot: vault, DataDir: data,
 				Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 16)),
@@ -713,6 +722,7 @@ func TestInitializeRecoversInterruptionAfterEachReviewV2File(t *testing.T) {
 	for stopAfter := 1; stopAfter <= 3; stopAfter++ {
 		t.Run(fmt.Sprintf("file-%d", stopAfter), func(t *testing.T) {
 			root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+			seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 			sentinel := errors.New("interrupt review v2 initialization")
 			written := 0
 			_, err := Initialize(InitOptions{
@@ -758,6 +768,7 @@ func TestInitializeRecoversInterruptionAfterEachReviewV2File(t *testing.T) {
 
 func TestInitializePartialReviewV2NeverOverwritesForeignBytes(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 	sentinel := errors.New("interrupt review v2 initialization")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data,
@@ -786,6 +797,7 @@ func TestInitializePartialReviewV2NeverOverwritesForeignBytes(t *testing.T) {
 
 func TestInitializeConcurrentPartialReviewV2RecoveryConverges(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 	sentinel := errors.New("interrupt review v2 initialization")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data,
@@ -935,9 +947,8 @@ func TestInitializeCreatesStableProjectAndMapping(t *testing.T) {
 	if first.ProjectID != second.ProjectID {
 		t.Fatalf("ids differ: %q %q", first.ProjectID, second.ProjectID)
 	}
-	b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
-	if err != nil || !strings.Contains(string(b), "project-2a2a2a2a2a2a2a2a") {
-		t.Fatalf("review=%q err=%v", b, err)
+	if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh initialization published review before scan: %v", err)
 	}
 	cfg, err := config.Load(first.ConfigPath)
 	if err != nil {
@@ -1202,8 +1213,9 @@ func TestInitializeRejectsRedirectedSyncStateWithoutMutatingConfig(t *testing.T)
 	}
 }
 
-func TestInitializeNewReviewContainsReservedV2Identity(t *testing.T) {
+func TestInitializeExistingLegacyReviewContainsReservedV2Identity(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
+	seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
 		Now:    func() time.Time { return time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC) },
@@ -1412,6 +1424,7 @@ func TestInitializeRestoresCanonicalPrimaryFromOverviewBackup(t *testing.T) {
 func TestInitializeFailureBeforeOverviewLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	sentinel := errors.New("stop before overview")
+	seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
 		Random:              bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
@@ -1420,11 +1433,12 @@ func TestInitializeFailureBeforeOverviewLeavesNoIdentityOrState(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
-	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
+	assertPathMissing(t, filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
 }
 
 func TestInitializeRealOverviewWriteFailureLeavesNoIdentityOrState(t *testing.T) {
 	root, vault, data, outside := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	seedLegacyInitializationMapping(t, root, vault, data, "project-2a2a2a2a2a2a2a2a")
 	_, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
 		Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
@@ -1435,37 +1449,30 @@ func TestInitializeRealOverviewWriteFailureLeavesNoIdentityOrState(t *testing.T)
 	if err == nil || !strings.Contains(err.Error(), "redirect") {
 		t.Fatalf("err=%v", err)
 	}
-	assertNewInitializationAbsent(t, root, data, "project-2a2a2a2a2a2a2a2a")
+	assertPathMissing(t, filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
 	if _, err := os.Stat(filepath.Join(outside, "session-review", "project-overview.md")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("overview escaped through redirect: %v", err)
 	}
 }
 
-func TestInitializeFailureAfterOverviewBeforeStateRecoversSameIdentity(t *testing.T) {
+func TestFreshInitializeDoesNotInvokeLegacyAfterOverviewHook(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	id := "project-2a2a2a2a2a2a2a2a"
 	sentinel := errors.New("stop after overview")
-	_, err := Initialize(InitOptions{
+	result, err := Initialize(InitOptions{
 		ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows",
 		Random:             bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8)),
 		afterOverviewWrite: func() error { return sentinel },
 	})
-	if !errors.Is(err, sentinel) {
-		t.Fatalf("err=%v", err)
-	}
-	assertInitializedV2Identity(t, root, id)
-	assertPathMissing(t, filepath.Join(data, "projects", id))
-	assertPathMissing(t, filepath.Join(data, "config.toml"))
-
-	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
 	if err != nil || result.ProjectID != id {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
+	assertPathMissing(t, filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
 	assertExactInitializationScaffold(t, data, id)
 	assertSingleMapping(t, data, id)
 }
 
-func TestInitializeFailureAfterStateBeforeConfigRecoversSameIdentity(t *testing.T) {
+func TestInitializeFailureBeforeMappingLeavesNoIdentity(t *testing.T) {
 	root, vault, data := t.TempDir(), t.TempDir(), t.TempDir()
 	id := "project-2a2a2a2a2a2a2a2a"
 	sentinel := errors.New("stop before config")
@@ -1477,11 +1484,9 @@ func TestInitializeFailureAfterStateBeforeConfigRecoversSameIdentity(t *testing.
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
-	assertInitializedV2Identity(t, root, id)
-	assertExactInitializationScaffold(t, data, id)
-	assertPathMissing(t, filepath.Join(data, "config.toml"))
+	assertNewInitializationAbsent(t, root, data, id)
 
-	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
+	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: bytes.NewReader(bytes.Repeat([]byte{0x2a}, 8))})
 	if err != nil || result.ProjectID != id {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -1505,8 +1510,8 @@ func TestInitializeFailureDuringStateRecoversExactScaffold(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
-	assertInitializedV2Identity(t, root, id)
-	assertPathMissing(t, filepath.Join(data, "config.toml"))
+	assertPathMissing(t, filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
+	assertSingleMapping(t, data, id)
 
 	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
 	if err != nil || result.ProjectID != id {
@@ -1579,9 +1584,8 @@ func TestInitializeConfigPostPublicationAmbiguityRecovers(t *testing.T) {
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err=%v", err)
 	}
-	assertInitializedV2Identity(t, root, id)
-	assertExactInitializationScaffold(t, data, id)
 	assertSingleMapping(t, data, id)
+	assertPathMissing(t, filepath.Join(root, filepath.FromSlash(reviewv2.ReviewRelativePath)))
 
 	result, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: vault, DataDir: data, GOOS: "windows", Random: errorReader{}})
 	if err != nil || result.ProjectID != id {
@@ -1709,6 +1713,15 @@ func assertNewInitializationAbsent(t *testing.T, projectRoot, dataRoot, projectI
 	assertPathMissing(t, filepath.Join(projectRoot, filepath.FromSlash(reviewv2.MachineLedgerRelativePath)))
 	assertPathMissing(t, filepath.Join(dataRoot, "config.toml"))
 	assertPathMissing(t, filepath.Join(dataRoot, "config.toml.session-reviewer-backup"))
+}
+
+func seedLegacyInitializationMapping(t *testing.T, projectRoot, vaultRoot, dataRoot, projectID string) {
+	t.Helper()
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{{
+		ID: projectID, Root: projectRoot, VaultRoot: vaultRoot,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertInitializedV2Identity(t *testing.T, projectRoot, projectID string) {
@@ -2281,7 +2294,7 @@ func TestInitializeRejectsRedirectedAncestor(t *testing.T) {
 	}
 }
 
-func TestInitializeProjectRootReplacementCannotRedirectOverviewWrite(t *testing.T) {
+func TestInitializeProjectRootReplacementCannotRedirectMappingWrite(t *testing.T) {
 	base, root, moved, outside := t.TempDir(), "", "", ""
 	root = filepath.Join(base, "project")
 	moved = filepath.Join(base, "moved")
@@ -2292,7 +2305,7 @@ func TestInitializeProjectRootReplacementCannotRedirectOverviewWrite(t *testing.
 			t.Fatal(err)
 		}
 	}
-	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data, beforeOverviewWrite: func() error {
+	_, err := Initialize(InitOptions{ProjectRoot: root, VaultRoot: t.TempDir(), DataDir: data, beforeConfigWrite: func() error {
 		if err := os.Rename(root, moved); err != nil {
 			return err
 		}
@@ -2301,8 +2314,8 @@ func TestInitializeProjectRootReplacementCannotRedirectOverviewWrite(t *testing.
 	if err == nil || !errors.Is(err, ErrInitializationStateChanged) {
 		t.Fatalf("replacement returned err=%v", err)
 	}
-	if _, err := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fresh bootstrap wrote public review: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(outside, "docs")); !os.IsNotExist(err) {
 		t.Fatalf("outside write: %v", err)
@@ -2337,8 +2350,8 @@ func TestInitializeProjectRootIdentityChangeBeforeConfigPublicationFailsClosed(t
 	if loadErr != nil || len(cfg.Projects) != 0 {
 		t.Fatalf("identity replacement mapping was published: cfg=%+v err=%v", cfg, loadErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); statErr != nil {
-		t.Fatalf("pinned root did not retain recoverable v2 files: %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed bootstrap wrote public review: %v", statErr)
 	}
 }
 
@@ -2366,8 +2379,8 @@ func TestInitializeProjectRootIdentityChangeAfterFragmentCommitIsExternalChange(
 	if loadErr != nil || len(cfg.Projects) != 1 || cfg.Projects[0].ID != result.ProjectID {
 		t.Fatalf("committed mapping missing: cfg=%+v err=%v", cfg, loadErr)
 	}
-	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); statErr != nil {
-		t.Fatalf("pinned root did not retain recoverable v2 files: %v", statErr)
+	if _, statErr := os.Stat(filepath.Join(moved, filepath.FromSlash(reviewv2.ReviewRelativePath))); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("bootstrap wrote public review: %v", statErr)
 	}
 }
 

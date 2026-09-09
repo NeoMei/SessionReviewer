@@ -1335,6 +1335,9 @@ func convertCLIApplyFixtureToLegacy(t *testing.T, projectRoot string) {
 			t.Fatal(err)
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(projectRoot, "docs", "session-review"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: project-1111111111111111\nrevision: 1\nsync_status: synced\n---\n\n# Fixture\n"
 	if err := os.WriteFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"), []byte(overview), 0o644); err != nil {
 		t.Fatal(err)
