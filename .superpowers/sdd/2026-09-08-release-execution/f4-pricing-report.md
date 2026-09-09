@@ -12,6 +12,7 @@ Scope: independent callable backend only. This report does not claim the user-fa
 - `f537910 fix: price codex reported output once`
 - `b8f4728 fix: keep unknown pricing inputs nonblocking`
 - `e012dd7 fix: preserve unknown zero-quantity rates`
+- `a7d587e fix: guard pricing across rate boundaries`
 
 ## Callable API
 
@@ -30,19 +31,22 @@ The client requests only the two fixed HTTPS ModelPriceWatch endpoints, sends co
 
 - `NewService(CatalogLoader, []Alias, map[string]UsageAdapter, Clock) (*Service, error)`
 - `(*Service).Resolve(context.Context, ResolutionRequest) (Snapshot, error)`
+- `(*Service).ResolveReviewedListing(context.Context, ResolutionRequest, string) (Snapshot, error)`
 - `(*Service).Supplement(context.Context, ResolutionRequest, Supplement, *Snapshot) (Snapshot, error)`
 - `Resolve(ResolveInput) (Snapshot, error)` for deterministic pure resolution
 - `Aggregate([]Snapshot) (AggregateResult, error)`
 - `MatchListing(BillingRoute, []Alias, modelpricewatch.Catalog, time.Time) Match`
 - `CodexUsageAdapter`, `ClaudeUsageAdapter`, and `OpenCodeUsageAdapter`
 
-`ResolutionRequest` binds `ProjectID`, `Provider`, `SessionID`, authenticated `UsageRecordDigest`, actual `BillingRoute{Host, ModelID, Mode, Region}`, `accounting.ModelUsage`, and canonical UTC `PricedAt`. The caller must obtain host/model/mode/region from actual runtime/source billing evidence. Provider or display-model labels never create a route. Missing route fields produce an immutable `pending` snapshot with explicit `unknown` host/mode and retain `Usage.Model` for display; they do not contact the catalog or block scanning.
+`ResolutionRequest` binds `ProjectID`, `Provider`, `SessionID`, authenticated `UsageRecordDigest`, actual `BillingRoute{Host, ModelID, Mode, Region}`, `accounting.ModelUsage`, and canonical UTC `StartedAt` and `PricedAt` (`ended_at`). The caller must obtain host/model/mode/region from actual runtime/source billing evidence. Provider or display-model labels never create a route. Missing route fields produce an immutable `pending` snapshot with explicit `unknown` host/mode and retain `Usage.Model` for display; they do not contact the catalog or block scanning.
 
-Exact aliases use the whole route tuple. Case, whitespace, host, mode, model, or region differences do not fuzzy-match. Duplicate exact aliases, unstructured `price_note`, and uncertain promotions remain ambiguous. Historical selection uses the nearest entry no later than `PricedAt`; future-only history and unreviewed correction/backfill applicability remain pending.
+`ResolveReviewedListing` is the narrow runtime for a human-confirmed exact route and listing ID. It uses the same fixed-origin cached catalog and all temporal/quantity checks, while avoiding a persistent alias configuration for a one-time reviewed selection. It accepts no caller rates or totals. The controller can authenticate the current source usage and publish the resulting snapshot through the same ledger CAS transaction used by supplements.
+
+Exact aliases use the whole route tuple. Case, whitespace, host, mode, model, or region differences do not fuzzy-match. Duplicate exact aliases, unstructured `price_note`, and uncertain promotions remain ambiguous. Historical selection uses the nearest entry no later than `PricedAt`; future-only history and unreviewed correction/backfill applicability remain pending. If an applicable rate changes in `(StartedAt, PricedAt]`, automatic resolution returns `ambiguous_billing_period`; an unchanged catalog observation inside the interval does not create false ambiguity. A manual supplement may price the usage only when its declared effective interval covers the whole Session.
 
 Codex quantities follow the repository's established accounting semantics: input includes cache dimensions and `OutputTokens` already includes reasoning. The adapter subtracts cache input/write from input, bills reported output once, and retains reasoning only as audit metadata. Claude and OpenCode automatic quantities require their explicit reviewed normalization versions; missing proof stays unknown. Unknown rates remain `null`; numeric zero remains an explicit free rate. Zero-quantity dimensions may keep a null rate without preventing a complete known total.
 
-Manual supplements accept only reviewed identity, effective interval, rates, HTTPS source, audit reason, and optional predecessor. The service derives quantities through the versioned adapter and recomputes every line cost, subtotal, and nullable total. Snapshot IDs are deterministic over canonical JSON values. Supersession and aggregation use `(provider, session_id, usage_record_digest, billed_model_id)`, reject missing predecessors, forks, cycles, disconnected effective leaves, and model identity changes, and select only current chain leaves.
+Manual supplements accept only reviewed identity, effective interval, rates, HTTPS source, audit reason, and optional predecessor. The service derives quantities through the versioned adapter and recomputes every line cost, subtotal, and nullable total. Snapshot IDs are deterministic over canonical JSON pricing evidence and exclude only the mutable lifecycle `status`; changing rates, quantities, cost, provenance, route, time, or predecessor still changes the generated ID. Supersession and aggregation use `(provider, session_id, usage_record_digest, billed_model_id)`, reject missing predecessors, forks, cycles, disconnected effective leaves, and model identity changes, and select only current chain leaves.
 
 ## Focused verification
 
