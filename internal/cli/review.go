@@ -21,6 +21,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/agent"
 	applyengine "github.com/neomei/SessionReviewer/internal/apply"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/decisions"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/prepare"
@@ -33,6 +34,7 @@ const reviewHelp = `Control durable proposal-only Agent review jobs.
 
 Usage:
   session-reviewer review agent verify --executable ABSOLUTE_PATH --json
+  session-reviewer review agent configure --executable ABSOLUTE_PATH [--data-dir PATH] --json
   session-reviewer review start --project-id ID --agent-executable ABSOLUTE_PATH --json
   session-reviewer review status --project-id ID --json
   session-reviewer review cancel --job-id ID --json
@@ -130,14 +132,25 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		return runPrivateReviewWorker(args[1:])
 	}
 	if args[0] == "agent" {
-		if len(args) < 2 || args[1] != "verify" {
-			fmt.Fprintln(stderr, "review agent requires verify")
+		if len(args) < 2 || args[1] != "verify" && args[1] != "configure" {
+			fmt.Fprintln(stderr, "review agent requires verify or configure")
 			return 2
 		}
-		flags, ok := parseReviewFlags(args[2:], []string{"executable"})
+		optional := []string{}
+		if args[1] == "configure" {
+			optional = append(optional, "data-dir")
+		}
+		flags, ok := parseReviewFlagsAllowed(args[2:], []string{"executable"}, optional)
 		if !ok || !flags.json || !filepath.IsAbs(flags.values["executable"]) {
-			fmt.Fprintln(stderr, "review agent verify requires one absolute --executable and --json")
+			fmt.Fprintln(stderr, "review agent command requires one absolute --executable, optional absolute --data-dir, and --json")
 			return 2
+		}
+		if args[1] == "configure" {
+			if flags.values["data-dir"] != "" && (!filepath.IsAbs(flags.values["data-dir"]) || filepath.Clean(flags.values["data-dir"]) != flags.values["data-dir"]) {
+				fmt.Fprintln(stderr, "review agent configure requires a clean absolute --data-dir")
+				return 2
+			}
+			return runReviewConfigure(flags.values["executable"], resolveDataDir(flags.values["data-dir"]), stdout)
 		}
 		return runReviewVerify(flags.values["executable"], stdout)
 	}
@@ -185,6 +198,40 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 	return runReviewJobCommand(command, flags.values, stdout)
 }
 
+func runReviewConfigure(executable, dataRoot string, stdout io.Writer) int {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	verified, err := reviewVerify(ctx, executable)
+	response := reviewVerifyResponse{SchemaVersion: reviewjob.PublicStatusSchemaVersion, Kind: "codex"}
+	if err == nil {
+		configuration, measureErr := decisions.MeasureAgentConfiguration(verified.Agent.Kind, verified.Agent.Version, verified.Agent.Executable)
+		if measureErr == nil && configuration.Identity != verified.Agent.Identity {
+			measureErr = errors.New("verified Agent identity changed before configuration")
+		}
+		if measureErr == nil {
+			measureErr = decisions.SaveAgentConfiguration(dataRoot, configuration)
+		}
+		err = measureErr
+	}
+	if err == nil {
+		response.Compatible = true
+		response.Version = verified.Agent.Version
+	}
+	if err != nil {
+		response.ErrorCode = string(agent.CodeUnconfigured)
+		if safe, ok := agent.CodeOf(err); ok {
+			response.ErrorCode = string(safe)
+		}
+	}
+	if !writeReviewJSON(stdout, response) {
+		return 1
+	}
+	if err != nil {
+		return 1
+	}
+	return 0
+}
+
 func parseReviewPositiveInteger(value string) (int, bool) {
 	if value == "" || value[0] < '1' || value[0] > '9' {
 		return 0, false
@@ -202,8 +249,15 @@ func parseReviewPositiveInteger(value string) (int, bool) {
 }
 
 func parseReviewFlags(args []string, required []string) (exactReviewFlags, bool) {
-	allowed := make(map[string]bool, len(required)+1)
+	return parseReviewFlagsAllowed(args, required, nil)
+}
+
+func parseReviewFlagsAllowed(args []string, required, optional []string) (exactReviewFlags, bool) {
+	allowed := make(map[string]bool, len(required)+len(optional)+1)
 	for _, name := range required {
+		allowed[name] = true
+	}
+	for _, name := range optional {
 		allowed[name] = true
 	}
 	allowed["json"] = true

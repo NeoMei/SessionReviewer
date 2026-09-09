@@ -18,6 +18,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/agent"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/decisions"
 	"github.com/neomei/SessionReviewer/internal/pathguard"
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/reviewjob"
@@ -42,6 +43,31 @@ func TestRunReviewHelpDocumentsOnlyPublicCommands(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "review worker") || strings.Contains(out.String(), "launch-token") {
 		t.Fatalf("public help exposed private worker contract: %q", out.String())
+	}
+}
+
+func TestRunReviewAgentConfigurePersistsOnlySuccessfulVerifiedIdentity(t *testing.T) {
+	dataRoot := t.TempDir()
+	executable := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(executable, []byte("agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	resetReviewCLISeams()
+	t.Cleanup(resetReviewCLISeams)
+	reviewVerify = func(context.Context, string) (reviewVerifiedAgent, error) {
+		configuration, err := decisions.MeasureAgentConfiguration("codex", "fixture", executable)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reviewVerifiedAgent{Agent: reviewjob.VerifiedAgent{Kind: configuration.Provider, Version: configuration.Version, Executable: configuration.Executable, Identity: configuration.Identity}}, nil
+	}
+	var output bytes.Buffer
+	if code := runReview([]string{"agent", "configure", "--executable", executable, "--data-dir", dataRoot, "--json"}, &output, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("code=%d output=%s", code, output.String())
+	}
+	configuration, err := decisions.LoadAgentConfiguration(dataRoot)
+	if err != nil || configuration.Executable != executable || configuration.Version != "fixture" {
+		t.Fatalf("configuration=%+v err=%v", configuration, err)
 	}
 }
 
