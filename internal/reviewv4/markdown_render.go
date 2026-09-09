@@ -657,7 +657,7 @@ func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, 
 		start, end int
 		value      string
 	}
-	replacements := make([]bindingReplacement, 0, 2)
+	replacements := make([]bindingReplacement, 0, 4)
 	for index := 0; index < len(mapping.Content); index += 2 {
 		key, node := mapping.Content[index].Value, mapping.Content[index+1]
 		value, changed := "", false
@@ -674,6 +674,12 @@ func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, 
 				return nil, &MarkdownError{Code: MarkdownFormatInvalid}
 			}
 			value, changed = next.GenerationID, old != next.GenerationID
+		case "minimum_reader_version", "minimum_writer_version":
+			old, ok := markdownString(node)
+			if !ok {
+				return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+			}
+			value, changed = markdownCapability(next), old != markdownCapability(next)
 		default:
 			continue
 		}
@@ -689,8 +695,13 @@ func replaceMarkdownFrontmatterBindings(raw []byte, next Presentation) ([]byte, 
 	if len(replacements) == 0 {
 		return bytes.Clone(raw), nil
 	}
-	if len(replacements) > 2 || len(replacements) == 2 && replacements[0].start >= replacements[1].start {
+	if len(replacements) > 4 {
 		return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+	}
+	for index := 1; index < len(replacements); index++ {
+		if replacements[index-1].start >= replacements[index].start {
+			return nil, &MarkdownError{Code: MarkdownFormatInvalid}
+		}
 	}
 	removed, added := 0, 0
 	for _, replacement := range replacements {

@@ -20,17 +20,21 @@ const SessionIndexRelativePath = "docs/session-review/.session-reviewer/session-
 // V4RenderInput contains a fully mapped next presentation and ledger together
 // with the authenticated public preimages used to preserve human Markdown.
 type V4RenderInput struct {
-	Presentation   reviewv4.Presentation
-	Ledger         reviewv4.MachineLedger
-	Index          sessionindex.Document
-	Previous       *reviewv4.MarkdownPair
-	Pending        *reviewv4.MarkdownPair
-	PreviousLedger *reviewv4.MachineLedger
-	ExpectedFiles  map[string][]byte
+	Presentation    reviewv4.Presentation
+	MilestoneUpdate *reviewv4.ScanMilestoneUpdate
+	Ledger          reviewv4.MachineLedger
+	Index           sessionindex.Document
+	Previous        *reviewv4.MarkdownPair
+	Pending         *reviewv4.MarkdownPair
+	PreviousLedger  *reviewv4.MachineLedger
+	ExpectedFiles   map[string][]byte
 }
 
 // RenderV4 renders the four-file human Markdown projection.
 func RenderV4(in V4RenderInput) (RenderPlan, error) {
+	if in.MilestoneUpdate != nil && (len(in.ExpectedFiles) == 0 || in.Previous == nil || in.Pending == nil || in.PreviousLedger == nil) {
+		return RenderPlan{}, errors.New("generated milestone update requires an authenticated existing Markdown baseline")
+	}
 	paths := []string{
 		reviewv2.ReviewRelativePath,
 		reviewv2.HistoryRelativePath,
@@ -57,7 +61,7 @@ func RenderV4(in V4RenderInput) (RenderPlan, error) {
 		if _, err := reviewv4.LoadProjection(in.Previous.Review, in.Previous.History, in.ExpectedFiles[reviewv2.MachineLedgerRelativePath], in.ExpectedFiles[SessionIndexRelativePath]); err != nil {
 			return RenderPlan{}, errors.Join(errors.New("authenticated Markdown baseline is invalid"), err)
 		}
-		if bytes.Equal(in.Pending.Review, in.Previous.Review) && bytes.Equal(in.Pending.History, in.Previous.History) &&
+		if in.MilestoneUpdate == nil && bytes.Equal(in.Pending.Review, in.Previous.Review) && bytes.Equal(in.Pending.History, in.Previous.History) &&
 			reflect.DeepEqual(oldLedger, in.Ledger) && reflect.DeepEqual(oldLedger.DocumentProjection.PresentationBase, in.Presentation) && reflect.DeepEqual(oldIndex, in.Index) {
 			return exactV4Plan(in, paths, [][]byte{in.Previous.Review, in.Previous.History, in.ExpectedFiles[reviewv2.MachineLedgerRelativePath], in.ExpectedFiles[SessionIndexRelativePath]}), nil
 		}
@@ -80,7 +84,11 @@ func RenderV4(in V4RenderInput) (RenderPlan, error) {
 		}
 		pair, err = reviewv4.RenderMarkdown(in.Presentation, seed, nil)
 	} else {
-		pair, err = reviewv4.RenderMarkdownUpdate(in.Presentation, *in.PreviousLedger, *in.Pending)
+		if in.MilestoneUpdate == nil {
+			pair, err = reviewv4.RenderMarkdownUpdate(in.Presentation, *in.PreviousLedger, *in.Pending)
+		} else {
+			pair, err = reviewv4.RenderMarkdownMilestoneUpdate(in.Presentation, *in.PreviousLedger, *in.Pending, *in.MilestoneUpdate)
+		}
 	}
 	if err != nil {
 		return RenderPlan{}, err

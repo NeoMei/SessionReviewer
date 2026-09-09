@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
 func TestRenderV4RejectsMissingBaselineForExistingDocuments(t *testing.T) {
@@ -100,4 +102,86 @@ func TestRenderV4AcceptsPendingShellOnceAndRejectsGeneratedTamper(t *testing.T) 
 	if _, err := reviewv4.ParseMarkdownDraft(tampered, accepted.Ledger); reviewv4.MarkdownCodeOf(err) != reviewv4.MarkdownGeneratedRegionModified {
 		t.Fatalf("generated edit was not rejected: %v", err)
 	}
+}
+
+func TestRenderV4GeneratedMilestoneUsesAuthenticatedRebaseAndSkipsLegacyNoOp(t *testing.T) {
+	read := func(name string) []byte {
+		body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "v4", "markdown", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	review, history, ledgerBody, indexBody := read("review.md"), read("history.md"), read("ledger.json"), read("index.json")
+	accepted, err := reviewv4.LoadProjection(review, history, ledgerBody, indexBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const generation = "generation-2"
+	digest := "sha256:" + strings.Repeat("2", 64)
+	missing := "not_captured"
+	milestone := reviewv4.Timeline{ID: "machine:new", GenerationID: generation, OccurredAt: "2026-09-09T00:00:00Z", Kind: "machine_verification", Title: "generated", Summary: "verified", DecisionIDs: []string{}, ClosedLoop: reviewv4.ClosedLoop{
+		TriggerQuestion:   reviewv4.ClosedLoopSegment{State: "missing", MissingReason: &missing, SourceTurnRefs: []reviewv4.SourceTurnRef{}},
+		Conclusion:        reviewv4.ClosedLoopConclusion{Kind: reviewv4.ConclusionMissing, MissingReason: &missing, SourceTurnRefs: []reviewv4.SourceTurnRef{}},
+		Execution:         reviewv4.ClosedLoopSegment{State: "missing", MissingReason: &missing, SourceTurnRefs: []reviewv4.SourceTurnRef{}},
+		Verification:      reviewv4.ClosedLoopSegment{State: "missing", MissingReason: &missing, SourceTurnRefs: []reviewv4.SourceTurnRef{}},
+		ImpactAndFollowUp: reviewv4.ClosedLoopSegment{State: "missing", MissingReason: &missing, SourceTurnRefs: []reviewv4.SourceTurnRef{}},
+		SourceTurnRefs:    []reviewv4.SourceTurnRef{},
+	}}
+	update := reviewv4.ScanMilestoneUpdate{ProjectID: accepted.Review.ProjectID, GenerationID: generation, ProjectViewDigest: digest, Timeline: []reviewv4.Timeline{milestone}, ChainDependencies: []reviewv4.ChainDependency{}}
+	pending := reviewv4.MarkdownPair{Review: review, History: history}
+	next, err := reviewv4.RebaseMarkdownMilestones(accepted.Ledger, pending, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger := accepted.Ledger
+	ledger.GenerationID, ledger.ProjectViewDigest, ledger.AcceptedRevision = next.GenerationID, next.ProjectViewDigest, next.Revision
+	ledger.HumanPatches, ledger.OrphanPatches, ledger.GeneratedBaselines = next.HumanPatches, next.OrphanPatches, next.GeneratedBaselines
+	ledger.DocumentProjection = &reviewv4.DocumentProjection{SchemaVersion: 1, Format: "review-markdown-v1", PresentationBase: next}
+	index := accepted.SessionIndex
+	index.GenerationID, index.ProjectViewDigest = next.GenerationID, next.ProjectViewDigest
+	indexBodyNext, err := sessionindex.Render(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err = sessionindex.Parse(indexBodyNext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := map[string][]byte{reviewv2.ReviewRelativePath: review, reviewv2.HistoryRelativePath: history, reviewv2.MachineLedgerRelativePath: ledgerBody, SessionIndexRelativePath: indexBody}
+	plan, err := RenderV4(V4RenderInput{Presentation: next, MilestoneUpdate: &update, Ledger: ledger, Index: index, Previous: &pending, Pending: &pending, PreviousLedger: &accepted.Ledger, ExpectedFiles: expected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(plan.Files[1].Desired, history) || !bytes.Contains(plan.Files[1].Desired, []byte("machine:new")) {
+		t.Fatal("generated milestone delta was discarded by legacy no-op path")
+	}
+	tampered := next
+	tampered.CurrentState.Goal = "unauthorized"
+	if _, err := RenderV4(V4RenderInput{Presentation: tampered, MilestoneUpdate: &update, Ledger: ledger, Index: index, Previous: &pending, Pending: &pending, PreviousLedger: &accepted.Ledger, ExpectedFiles: expected}); err == nil {
+		t.Fatal("RenderV4 accepted presentation outside the generated milestone rebase")
+	}
+}
+
+func TestRenderV4GeneratedMilestoneRejectsInitialUnprovenInput(t *testing.T) {
+	accepted, err := reviewv4.LoadProjection(
+		mustRenderV4Fixture(t, "review.md"), mustRenderV4Fixture(t, "history.md"),
+		mustRenderV4Fixture(t, "ledger.json"), mustRenderV4Fixture(t, "index.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := reviewv4.ScanMilestoneUpdate{ProjectID: accepted.Review.ProjectID, GenerationID: "generation-2", ProjectViewDigest: "sha256:" + strings.Repeat("2", 64), Timeline: []reviewv4.Timeline{}, ChainDependencies: []reviewv4.ChainDependency{}}
+	if plan, err := RenderV4(V4RenderInput{Presentation: accepted.Review, MilestoneUpdate: &update, Ledger: accepted.Ledger, Index: accepted.SessionIndex}); err == nil || len(plan.Files) != 0 {
+		t.Fatalf("initial unproven generated update returned a plan: err=%v files=%d", err, len(plan.Files))
+	}
+}
+
+func mustRenderV4Fixture(t *testing.T, name string) []byte {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join("..", "..", "testdata", "contracts", "v4", "markdown", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
 }
