@@ -90,6 +90,51 @@ func TestResolveSelectsApplicableHistoricalBaselineAndRejectsFutureOnly(t *testi
 	}
 }
 
+func TestResolveRejectsSessionSpanningHistoricalPriceBoundary(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	request := resolutionFixture(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))
+	request.StartedAt = time.Date(2026, 9, 5, 23, 59, 0, 0, time.UTC)
+	input := ResolveInput{
+		Request: request,
+		Catalog: resolutionCatalog(),
+		Freshness: modelpricewatch.Freshness{
+			Status:      modelpricewatch.FreshCurrent,
+			RetrievedAt: now,
+		},
+		Aliases:   []Alias{{Route: request.Route, ListingID: "provider-model"}},
+		Adapter:   CodexUsageAdapter{},
+		CreatedAt: now,
+	}
+	got, err := Resolve(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != PriceAmbiguous || got.PricingComplete || got.TotalCostUSD != nil || got.AuditReason != "ambiguous_billing_period" {
+		t.Fatalf("spanning session was priced with one rate: %#v", got)
+	}
+
+	request.StartedAt = time.Date(2026, 9, 6, 0, 0, 0, 0, time.UTC)
+	input.Request = request
+	got, err = Resolve(input)
+	if err != nil || got.Status != PriceCurrent || got.TotalCostUSD == nil {
+		t.Fatalf("session starting at boundary should use new rate: %#v err=%v", got, err)
+	}
+}
+
+func TestResolveAllowsHistoricalRecordInsideSessionWhenRatesDoNotChange(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	request := resolutionFixture(time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC))
+	request.StartedAt = time.Date(2026, 9, 5, 23, 59, 0, 0, time.UTC)
+	catalog := resolutionCatalog()
+	history := catalog.History.Models["provider-model"]
+	history.History[1].InputPerMTok = history.History[0].InputPerMTok
+	catalog.History.Models["provider-model"] = history
+	got, err := Resolve(ResolveInput{Request: request, Catalog: catalog, Freshness: modelpricewatch.Freshness{Status: modelpricewatch.FreshCurrent, RetrievedAt: now}, Aliases: []Alias{{Route: request.Route, ListingID: "provider-model"}}, Adapter: CodexUsageAdapter{}, CreatedAt: now})
+	if err != nil || got.Status != PriceCurrent || got.TotalCostUSD == nil {
+		t.Fatalf("unchanged historical observation made billing ambiguous: %#v err=%v", got, err)
+	}
+}
+
 func TestResolveIsDeterministicAndNeverUsesCallerTotals(t *testing.T) {
 	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	request := resolutionFixture(now)
@@ -126,6 +171,73 @@ func TestServiceSupplementRecomputesFromReviewedRatesAndQuantities(t *testing.T)
 	supplement.EffectiveFrom = "2026-09-09T00:00:00Z"
 	if _, err := service.Supplement(context.Background(), request, supplement, nil); err == nil {
 		t.Fatal("accepted future supplement")
+	}
+}
+
+func TestServiceSupplementRequiresEffectiveWindowToCoverWholeSession(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	request := resolutionFixture(now)
+	request.StartedAt = now.Add(-2 * time.Hour)
+	service, err := NewService(nil, nil, map[string]UsageAdapter{"codex": CodexUsageAdapter{}}, fixedClock{now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	one := 1.0
+	from := request.StartedAt.Add(time.Hour).Format(time.RFC3339)
+	until := request.PricedAt.Add(time.Hour).Format(time.RFC3339)
+	supplement := Supplement{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: request.ProjectID, Provider: request.Provider, SessionID: request.SessionID, UsageRecordDigest: request.UsageRecordDigest, BillingHost: request.Route.Host, BilledModelID: request.Route.ModelID, BillingMode: request.Route.Mode, BillingRuleVersion: "codex-token-count-v1", EffectiveFrom: from, EffectiveUntil: &until, Rates: Rates{Input: &one, CachedInput: &one, CacheWriteInput: &one, Output: &one, ReasoningOutput: &one}, SourceURL: "https://example.test/reviewed", AuditReason: "Reviewed rate must cover the whole Session."}
+	if _, err := service.Supplement(context.Background(), request, supplement, nil); err == nil {
+		t.Fatal("accepted supplement whose rate starts after the Session")
+	}
+
+	supplement.EffectiveFrom = request.StartedAt.Add(-time.Hour).Format(time.RFC3339)
+	tooEarly := request.PricedAt.Add(-time.Second).Format(time.RFC3339)
+	supplement.EffectiveUntil = &tooEarly
+	if _, err := service.Supplement(context.Background(), request, supplement, nil); err == nil {
+		t.Fatal("accepted supplement whose rate ends before the Session")
+	}
+}
+
+func TestServiceResolveReviewedListingUsesExactHumanConfirmedBinding(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	request := resolutionFixture(now)
+	loader := catalogLoaderFunc(func(context.Context, time.Time) (modelpricewatch.CatalogSet, modelpricewatch.Freshness, error) {
+		return resolutionCatalog(), modelpricewatch.Freshness{Status: modelpricewatch.FreshCurrent, RetrievedAt: now}, nil
+	})
+	service, err := NewService(loader, nil, map[string]UsageAdapter{"codex": CodexUsageAdapter{}}, fixedClock{now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := service.ResolveReviewedListing(context.Background(), request, "provider-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != PriceCurrent || got.ModelPriceWatchListingID == nil || *got.ModelPriceWatchListingID != "provider-model" || got.AuditReason != "exact_reviewed_alias" {
+		t.Fatalf("reviewed exact binding did not resolve: %#v", got)
+	}
+	if _, err := service.ResolveReviewedListing(context.Background(), request, ""); err == nil {
+		t.Fatal("accepted empty reviewed listing ID")
+	}
+}
+
+func TestGeneratedSnapshotIDIgnoresOnlyLifecycleStatus(t *testing.T) {
+	now := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	in := ResolveInput{Request: resolutionFixture(now), Catalog: resolutionCatalog(), Freshness: modelpricewatch.Freshness{Status: modelpricewatch.FreshCurrent, RetrievedAt: now}, Aliases: []Alias{{Route: resolutionFixture(now).Route, ListingID: "provider-model"}}, Adapter: CodexUsageAdapter{}, CreatedAt: now}
+	snapshot, err := Resolve(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalID := snapshot.SnapshotID
+	snapshot.Status = PriceSuperseded
+	finalizeID(&snapshot)
+	if snapshot.SnapshotID != originalID {
+		t.Fatalf("lifecycle transition changed immutable snapshot identity: %s -> %s", originalID, snapshot.SnapshotID)
+	}
+	changed := *snapshot.Rates.Input + 1
+	snapshot.Rates.Input = &changed
+	finalizeID(&snapshot)
+	if snapshot.SnapshotID == originalID {
+		t.Fatal("pricing payload change did not change snapshot identity")
 	}
 }
 
@@ -174,7 +286,7 @@ func TestServiceResolveUnknownProviderAndRouteStaysPending(t *testing.T) {
 }
 
 func resolutionFixture(at time.Time) ResolutionRequest {
-	return ResolutionRequest{ProjectID: "project-p", Provider: "codex", SessionID: "session-s", UsageRecordDigest: "sha256:" + strings.Repeat("a", 64), Route: BillingRoute{Host: "api.example.test", ModelID: "model-exact", Mode: "api"}, Usage: accounting.ModelUsage{Model: "model-exact", TokenUsage: accounting.TokenUsage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 30, ReasoningOutputTokens: 10, TotalTokens: 130}}, PricedAt: at}
+	return ResolutionRequest{ProjectID: "project-p", Provider: "codex", SessionID: "session-s", UsageRecordDigest: "sha256:" + strings.Repeat("a", 64), Route: BillingRoute{Host: "api.example.test", ModelID: "model-exact", Mode: "api"}, Usage: accounting.ModelUsage{Model: "model-exact", TokenUsage: accounting.TokenUsage{InputTokens: 100, CachedInputTokens: 20, OutputTokens: 30, ReasoningOutputTokens: 10, TotalTokens: 130}}, StartedAt: at, PricedAt: at}
 }
 func resolutionCatalog() modelpricewatch.CatalogSet {
 	one, two, half := 1.0, 2.0, .5

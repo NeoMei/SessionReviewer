@@ -22,6 +22,7 @@ type ResolutionRequest struct {
 	ProjectID, Provider, SessionID, UsageRecordDigest string
 	Route                                             BillingRoute
 	Usage                                             accounting.ModelUsage
+	StartedAt                                         time.Time
 	PricedAt                                          time.Time
 	Prior                                             *Snapshot
 }
@@ -79,6 +80,35 @@ func (s *Service) Resolve(ctx context.Context, request ResolutionRequest) (Snaps
 	return Resolve(ResolveInput{Request: request, Catalog: catalog, Freshness: fresh, Aliases: s.aliases, Adapter: adapter, CreatedAt: s.clock.Now()})
 }
 
+// ResolveReviewedListing resolves one caller-reviewed exact billing route to an
+// explicit ModelPriceWatch listing. Callers must authenticate the human review
+// of both request.Route and listingID; this method never derives either value
+// from provider or display-model labels.
+func (s *Service) ResolveReviewedListing(ctx context.Context, request ResolutionRequest, listingID string) (Snapshot, error) {
+	if s == nil {
+		return Snapshot{}, errors.New("pricing service is required")
+	}
+	if err := validateRequest(request); err != nil {
+		return Snapshot{}, err
+	}
+	if !validID(listingID) {
+		return Snapshot{}, errors.New("reviewed listing ID is invalid")
+	}
+	adapter := s.adapters[request.Provider]
+	if adapter == nil {
+		return unresolvedFrom(request, s.clock.Now(), nil, nil, "usage_adapter_unavailable")
+	}
+	if s.loader == nil {
+		return unresolvedFrom(request, s.clock.Now(), adapter, nil, "catalog_unavailable")
+	}
+	catalog, fresh, err := s.loader.LoadOrRefresh(ctx, s.clock.Now())
+	if err != nil {
+		return unresolvedFrom(request, s.clock.Now(), adapter, nil, "catalog_unavailable")
+	}
+	aliases := []Alias{{Route: request.Route, ListingID: listingID}}
+	return Resolve(ResolveInput{Request: request, Catalog: catalog, Freshness: fresh, Aliases: aliases, Adapter: adapter, CreatedAt: s.clock.Now()})
+}
+
 func Resolve(in ResolveInput) (Snapshot, error) {
 	r := in.Request
 	if err := validateRequest(r); err != nil {
@@ -102,6 +132,13 @@ func Resolve(in ResolveInput) (Snapshot, error) {
 		return unresolvedMatched(r, in.CreatedAt, billable, match)
 	}
 	listing := in.Catalog.Models.Listings[*match.ListingID]
+	if reason := historicalPeriodReason(in.Catalog.History, *match.ListingID, r.StartedAt, r.PricedAt); reason != "" {
+		status := PricePending
+		if reason == "ambiguous_billing_period" {
+			status = PriceAmbiguous
+		}
+		return unresolvedMatched(r, in.CreatedAt, billable, Match{Status: status, ListingID: match.ListingID, Reason: reason})
+	}
 	rates, reason := ratesAt(in.Catalog.History, *match.ListingID, r.PricedAt, listing)
 	if reason != "" {
 		return unresolvedMatched(r, in.CreatedAt, billable, Match{Status: PricePending, ListingID: match.ListingID, Reason: reason})
@@ -142,13 +179,13 @@ func (s *Service) Supplement(_ context.Context, request ResolutionRequest, suppl
 		return Snapshot{}, errors.New("supplement identity does not match usage and route")
 	}
 	from, err := time.Parse(time.RFC3339, supplement.EffectiveFrom)
-	if err != nil || request.PricedAt.Before(from) {
-		return Snapshot{}, errors.New("supplement is not effective at priced time")
+	if err != nil || request.StartedAt.Before(from) {
+		return Snapshot{}, errors.New("supplement does not cover the Session billing period")
 	}
 	if supplement.EffectiveUntil != nil {
 		until, err := time.Parse(time.RFC3339, *supplement.EffectiveUntil)
 		if err != nil || request.PricedAt.After(until) {
-			return Snapshot{}, errors.New("supplement is not effective at priced time")
+			return Snapshot{}, errors.New("supplement does not cover the Session billing period")
 		}
 	}
 	adapter := s.adapters[request.Provider]
@@ -187,6 +224,9 @@ func validateRequest(r ResolutionRequest) error {
 	if err := validateRequestCore(r); err != nil {
 		return err
 	}
+	if r.StartedAt.IsZero() {
+		return errors.New("Session start time is required for pricing")
+	}
 	if !validRoute(r.Route) {
 		return errors.New("resolution billing route is invalid")
 	}
@@ -201,6 +241,9 @@ func validateRequestCore(r ResolutionRequest) error {
 func validateRequestIdentity(r ResolutionRequest) error {
 	if r.PricedAt.IsZero() || r.PricedAt.Location() != time.UTC {
 		return errors.New("priced time must be canonical UTC")
+	}
+	if !r.StartedAt.IsZero() && (r.StartedAt.Location() != time.UTC || r.StartedAt.After(r.PricedAt)) {
+		return errors.New("Session billing period must be canonical UTC and ordered")
 	}
 	if r.ProjectID == "" || r.Provider == "" || r.SessionID == "" || !digestRE.MatchString(r.UsageRecordDigest) {
 		return errors.New("resolution identity is invalid")
@@ -284,6 +327,62 @@ func ratesAt(history modelpricewatch.HistoryCatalog, id string, at time.Time, cu
 	}
 	return Rates{Input: selected.InputPerMTok, CachedInput: selected.CachedInputPerMTok, Output: selected.OutputPerMTok}, ""
 }
+
+func historicalPeriodReason(history modelpricewatch.HistoryCatalog, id string, started, ended time.Time) string {
+	model, ok := history.Models[id]
+	if !ok {
+		return "history_missing"
+	}
+	var active *modelpricewatch.HistoryEntry
+	for _, entry := range model.History {
+		boundary, err := time.Parse("2006-01-02", entry.Date)
+		if err != nil || boundary.After(started) {
+			continue
+		}
+		if active == nil || entry.Date > active.Date {
+			copy := entry
+			active = &copy
+		}
+	}
+	if active == nil {
+		return "no_applicable_historical_price"
+	}
+	if unreviewedHistoricalEntry(*active) {
+		return "historical_correction_requires_review"
+	}
+	for _, entry := range model.History {
+		boundary, err := time.Parse("2006-01-02", entry.Date)
+		if err != nil || !started.Before(boundary) || ended.Before(boundary) {
+			continue
+		}
+		if unreviewedHistoricalEntry(entry) {
+			return "historical_correction_requires_review"
+		}
+		if !historicalRatesEqual(*active, entry) {
+			return "ambiguous_billing_period"
+		}
+		copy := entry
+		active = &copy
+	}
+	return ""
+}
+
+func unreviewedHistoricalEntry(entry modelpricewatch.HistoryEntry) bool {
+	return entry.Event == "correction" || entry.Event == "backfill"
+}
+
+func historicalRatesEqual(left, right modelpricewatch.HistoryEntry) bool {
+	return optionalRateEqual(left.InputPerMTok, right.InputPerMTok) &&
+		optionalRateEqual(left.CachedInputPerMTok, right.CachedInputPerMTok) &&
+		optionalRateEqual(left.OutputPerMTok, right.OutputPerMTok)
+}
+
+func optionalRateEqual(left, right *float64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
+}
 func computeCosts(s *Snapshot) {
 	rates := []*float64{s.Rates.Input, s.Rates.CachedInput, s.Rates.CacheWriteInput, s.Rates.Output, s.Rates.ReasoningOutput}
 	q := []uint64{s.BillableQuantities.Input, s.BillableQuantities.CachedInput, s.BillableQuantities.CacheWriteInput, s.BillableQuantities.Output, s.BillableQuantities.ReasoningOutput}
@@ -313,6 +412,10 @@ func computeCosts(s *Snapshot) {
 func finalizeID(s *Snapshot) {
 	copy := *s
 	copy.SnapshotID = ""
+	// Status is the only lifecycle field. A predecessor transitions to
+	// superseded when its successor is accepted, while its immutable pricing
+	// payload and stable external identity remain unchanged.
+	copy.Status = ""
 	body, err := json.Marshal(copy)
 	if err != nil {
 		panic(fmt.Sprintf("marshal validated pricing snapshot: %v", err))
