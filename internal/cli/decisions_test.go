@@ -2,22 +2,31 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/candidatepublication"
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/decisions"
 	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/presentation"
+	"github.com/neomei/SessionReviewer/internal/publication"
+	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	syncengine "github.com/neomei/SessionReviewer/internal/sync"
+	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
 
 func TestDecisionsCreateAndEditPublishOnlyHumanDecisionFields(t *testing.T) {
@@ -151,6 +160,220 @@ func TestDecisionCandidatesListEncodesEmptyEvidenceArrayForStaleCandidate(t *tes
 	if len(response.CandidateEvidence) != 1 || string(response.CandidateEvidence[0].EvidenceRefs) != "[]" || response.CandidateEvidence[0].ErrorCode != "candidate_stale" {
 		t.Fatalf("candidate_evidence=%s", output.String())
 	}
+}
+
+func TestDecisionCandidateConfirmationRecoversPublishedResultWithoutOverwritingLaterHumanEdit(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	candidate, input := seedDecisionPublicationCandidate(t, fixture)
+	beforeReview := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)
+	preparedAt := time.Date(2026, 9, 9, 4, 0, 0, 0, time.UTC)
+
+	_, mapping, _, err := resolveSyncMapping("", fixture.projectID, fixture.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubOpts := publication.Options{ProjectID: fixture.projectID, Mapping: mapping, DataRoot: fixture.data, Now: func() time.Time { return preparedAt }}
+	if err := publication.RecoverMarkdownLocked(context.Background(), pubOpts, owner); err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	read, err := syncproject.ReadMarkdownForScan(context.Background(), syncproject.Options{ProjectID: fixture.projectID, CWD: mapping.Root, DataDir: fixture.data, GOOS: runtime.GOOS, Now: func() time.Time { return preparedAt }, Trigger: syncengine.TriggerCLI}, owner)
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	index, err := sessionindex.Parse(read.ProjectExpected[presentation.SessionIndexRelativePath])
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	next, err := decisions.ConfirmCandidateDecision(read.Pending.Presentation, *candidate.EntityID, input)
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	plan, err := presentation.RenderDecisionOperation(presentation.DecisionOperationInput{Presentation: next, Ledger: read.OldAccepted.Ledger, Index: index, Pending: read.Pending.Documents, ExpectedFiles: read.ProjectExpected})
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	fingerprint, err := publication.ExpectedMarkdownResultFingerprint(plan, mapping, read.ProjectExpected[presentation.SessionIndexRelativePath])
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	candidateDigest, err := decisions.CandidatePublicationDigest(candidate)
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	intentStore, err := candidatepublication.OpenStore(fixture.data, fixture.projectID, decisionPublicationNamespace)
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	intent, err := candidatepublication.NewIntent(candidatepublication.IntentInput{
+		ProjectID: fixture.projectID, Namespace: decisionPublicationNamespace, CandidateID: candidate.ID,
+		ExpectedCandidateRevision: candidate.Revision, CandidateDigest: candidateDigest, Action: "confirm",
+		EntityID: *candidate.EntityID, ResultFingerprint: fingerprint, TerminalStatus: "confirmed", PreparedAt: preparedAt,
+	})
+	if err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	if _, err := intentStore.Prepare(intent); err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	edit := syncproject.MarkdownSyncPlan{Plan: plan, Index: read.ProjectExpected[presentation.SessionIndexRelativePath], ExpectedGenerationID: read.ExpectedGenerationID, ExpectedIndexDigest: read.ExpectedIndexDigest, VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest}
+	if _, err := publication.PublishMarkdownEditLocked(context.Background(), pubOpts, edit, owner); err != nil {
+		_ = owner.Release()
+		t.Fatal(err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if stillPending, err := decisions.OpenStore(fixture.data, fixture.projectID); err != nil {
+		t.Fatal(err)
+	} else if value, err := stillPending.Get(candidate.ID); err != nil || value.Status != annotation.CandidatePending {
+		t.Fatalf("fault fixture crossed candidate CAS: candidate=%+v err=%v", value, err)
+	}
+
+	acceptedAfterCrash, err := readProblemProjection(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	formal := acceptedAfterCrash.Review.Decisions[len(acceptedAfterCrash.Review.Decisions)-1]
+	humanEdit := input
+	humanEdit.Title = "Human edit after candidate CAS gap"
+	humanBody, err := json.Marshal(humanEdit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if code := runDecisions([]string{"edit", "--project-id", fixture.projectID, "--decision-id", formal.ID, "--expected-decision-revision", strconv.Itoa(formal.Revision), "--expected-review-sha256", testBareSHA(readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)), "--data-dir", fixture.data, "--json"}, bytes.NewReader(humanBody), &output, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("later human edit code=%d output=%s", code, output.String())
+	}
+
+	output.Reset()
+	if code := runDecisions([]string{"candidates", "list", "--project-id", fixture.projectID, "--data-dir", fixture.data, "--json"}, strings.NewReader(""), &output, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("recovery list code=%d output=%s", code, output.String())
+	}
+	confirmed, err := decisions.OpenStore(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedCandidate, err := confirmed.Get(candidate.ID)
+	if err != nil || confirmedCandidate.Status != annotation.CandidateConfirmed || confirmedCandidate.Revision != candidate.Revision+1 {
+		t.Fatalf("candidate did not converge from receipt: candidate=%+v err=%v", confirmedCandidate, err)
+	}
+	storedIntent, err := intentStore.Get(intent.OperationID)
+	if err != nil || storedIntent.State != candidatepublication.StateCompleted {
+		t.Fatalf("intent did not converge: intent=%+v err=%v", storedIntent, err)
+	}
+
+	retryInput := input
+	retryInput.Title = "This stale retry must not replay"
+	retryBody, err := json.Marshal(retryInput)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if code := runDecisions([]string{"candidate", "transition", "--project-id", fixture.projectID, "--candidate-id", candidate.ID, "--expected-revision", strconv.Itoa(candidate.Revision), "--action", "confirm", "--expected-review-sha256", testBareSHA(beforeReview), "--data-dir", fixture.data, "--json"}, bytes.NewReader(retryBody), &output, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("terminal retry code=%d output=%s", code, output.String())
+	}
+	after, err := readProblemProjection(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after.Review.Decisions) != 1 || after.Review.Decisions[0].Title != humanEdit.Title || after.Review.Decisions[0].Revision != formal.Revision+1 {
+		t.Fatalf("retry replayed old input or duplicated decision: %+v", after.Review.Decisions)
+	}
+}
+
+func TestDecisionCandidateRecoveryAbortsUnacceptedIntentAndAllowsFreshRetry(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	candidate, _ := seedDecisionPublicationCandidate(t, fixture)
+	digest, err := decisions.CandidatePublicationDigest(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intentStore, err := candidatepublication.OpenStore(fixture.data, fixture.projectID, decisionPublicationNamespace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstAt := time.Date(2026, 9, 9, 5, 0, 0, 0, time.UTC)
+	makeIntent := func(at time.Time) candidatepublication.Intent {
+		intent, err := candidatepublication.NewIntent(candidatepublication.IntentInput{
+			ProjectID: fixture.projectID, Namespace: decisionPublicationNamespace, CandidateID: candidate.ID,
+			ExpectedCandidateRevision: candidate.Revision, CandidateDigest: digest, Action: "confirm", EntityID: *candidate.EntityID,
+			ResultFingerprint: "sha256:" + strings.Repeat("f", 64), TerminalStatus: "confirmed", PreparedAt: at,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return intent
+	}
+	first := makeIntent(firstAt)
+	if _, err := intentStore.Prepare(first); err != nil {
+		t.Fatal(err)
+	}
+	_, mapping, _, err := resolveSyncMapping("", fixture.projectID, fixture.data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := publicationlock.Acquire(fixture.data, fixture.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pubOpts := publication.Options{ProjectID: fixture.projectID, Mapping: mapping, DataRoot: fixture.data, Now: func() time.Time { return firstAt }}
+	recoverErr := recoverDecisionCandidatePublicationsLocked(context.Background(), pubOpts, owner, firstAt.Add(time.Second))
+	releaseErr := owner.Release()
+	if err := errors.Join(recoverErr, releaseErr); err != nil {
+		t.Fatal(err)
+	}
+	aborted, err := intentStore.Get(first.OperationID)
+	if err != nil || aborted.State != candidatepublication.StateAborted {
+		t.Fatalf("unaccepted intent=%+v err=%v", aborted, err)
+	}
+	retry := makeIntent(firstAt.Add(2 * time.Second))
+	if retry.OperationID == first.OperationID {
+		t.Fatal("fresh retry reused the aborted operation identity")
+	}
+	if _, err := intentStore.Prepare(retry); err != nil {
+		t.Fatalf("fresh retry after abort: %v", err)
+	}
+}
+
+func seedDecisionPublicationCandidate(t *testing.T, fixture cliSyncFixture) (annotation.Annotation, decisions.DecisionInput) {
+	t.Helper()
+	entity, field := "decision-proposed", "decision"
+	digest := "sha256:" + strings.Repeat("1", 64)
+	input := decisions.DecisionInput{SchemaVersion: 1, Kind: "decision", OccurredAt: "2026-09-09", Title: "Candidate", Rationale: "Reason", Impact: "Impact", Status: reviewv4.DecisionActive, ReevaluateWhen: "Later", Supersedes: []string{}, MilestoneIDs: []string{}, SessionRefs: []reviewv4.SessionRef{}, Pinned: false}
+	body, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := annotation.Annotation{
+		ID: "candidate-1", ProjectID: fixture.projectID, AnnotationKind: "decision_candidate", EntityID: &entity, Field: &field,
+		Status: annotation.CandidatePending, Text: string(body), GenerationID: "generation-markdown-cli", SchemaVersion: 1,
+		AnalysisProfile: decisions.ExtractorVersion, AgentRunID: "run-1",
+		Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-1111111111111111", Digest: digest}, {Kind: "source_turn", RevisionID: "revision-answer", Digest: digest}},
+		Revision:     1, CreatedAt: "2026-09-09T00:00:00Z",
+	}
+	run := annotation.Run{RunID: "run-1", ProjectID: fixture.projectID, Status: "completed", ExtractorVersion: decisions.ExtractorVersion, PromptSchemaVersion: decisions.PromptSchemaVersion, DependencyDigests: []string{digest}, CreatedAt: "2026-09-09T00:00:00Z", UpdatedAt: "2026-09-09T00:00:01Z"}
+	store, err := decisions.OpenStore(fixture.data, fixture.projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CommitExtraction(run, []annotation.Annotation{candidate}); err != nil {
+		t.Fatal(err)
+	}
+	return candidate, input
 }
 
 func TestNewDecisionExtractionDigestsPagesDeterministicallyWithoutAdvancingUnprocessedViews(t *testing.T) {

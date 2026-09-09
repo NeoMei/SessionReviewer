@@ -50,6 +50,31 @@ func TestCandidateStorePersistsCASLifecycleAndPreservesOtherKinds(t *testing.T) 
 	}
 }
 
+func TestCandidatePublicationDigestBindsImmutableFieldsAcrossConfirmation(t *testing.T) {
+	entity, field := "decision-1", "decision"
+	candidate := annotation.Annotation{
+		ID: "candidate-1", ProjectID: "project-p", AnnotationKind: "decision_candidate", EntityID: &entity, Field: &field,
+		Status: annotation.CandidatePending, Text: `{"title":"Keep proof"}`, GenerationID: "generation-1", SchemaVersion: 1,
+		AnalysisProfile: "decision-extractor-v1", AgentRunID: "run-1",
+		Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-1", Digest: "sha256:" + strings.Repeat("1", 64)}},
+		Revision:     3, CreatedAt: "2026-09-09T00:00:00Z",
+	}
+	pending, err := CandidatePublicationDigest(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate.Status, candidate.Revision, candidate.ConfirmedEntityID = annotation.CandidateConfirmed, 4, &entity
+	confirmed, err := CandidatePublicationDigest(candidate)
+	if err != nil || confirmed != pending {
+		t.Fatalf("confirmed digest=%q pending=%q err=%v", confirmed, pending, err)
+	}
+	candidate.Dependencies[0].RevisionID = "different-proof"
+	changed, err := CandidatePublicationDigest(candidate)
+	if err != nil || changed == pending {
+		t.Fatalf("immutable dependency was not bound: changed=%q pending=%q err=%v", changed, pending, err)
+	}
+}
+
 func TestCandidateStoreFiltersDecisionKindsAndRejectsStaleRevision(t *testing.T) {
 	store, err := OpenStore(privateDecisionTempDir(t), "project-p")
 	if err != nil {

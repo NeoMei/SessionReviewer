@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/project"
 )
 
@@ -23,6 +24,28 @@ var (
 type Store struct {
 	dataRoot  string
 	projectID string
+}
+
+// CandidatePublicationDigest binds an intent to the immutable candidate
+// identity and evidence while excluding lifecycle fields changed by a
+// successful confirmation.
+func CandidatePublicationDigest(candidate annotation.Annotation) (string, error) {
+	identity := struct {
+		ID, ProjectID, AnnotationKind, Text, GenerationID string
+		EntityID, Field                                   *string
+		SchemaVersion                                     int
+		AnalysisProfile, AgentRunID                       string
+		Dependencies                                      []annotation.Dependency
+		CreatedAt                                         string
+		TargetMilestoneID, PromptSchemaVersion            *string
+	}{
+		ID: candidate.ID, ProjectID: candidate.ProjectID, AnnotationKind: candidate.AnnotationKind,
+		Text: candidate.Text, GenerationID: candidate.GenerationID, EntityID: candidate.EntityID, Field: candidate.Field,
+		SchemaVersion: candidate.SchemaVersion, AnalysisProfile: candidate.AnalysisProfile, AgentRunID: candidate.AgentRunID,
+		Dependencies: candidate.Dependencies, CreatedAt: candidate.CreatedAt,
+		TargetMilestoneID: candidate.TargetMilestoneID, PromptSchemaVersion: candidate.PromptSchemaVersion,
+	}
+	return memory.Digest(identity)
 }
 
 func OpenStore(dataRoot, projectID string) (*Store, error) {

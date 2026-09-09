@@ -18,6 +18,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/agent"
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/candidatepublication"
 	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/decisions"
 	"github.com/neomei/SessionReviewer/internal/memory"
@@ -25,6 +26,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/publicationstate"
 	"github.com/neomei/SessionReviewer/internal/reviewjob"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
@@ -42,6 +44,8 @@ Usage:
   session-reviewer decisions candidate transition ... [--data-dir PATH] --json
   session-reviewer decisions extract [status|cancel] ... [--data-dir PATH] --json
 `
+
+const decisionPublicationNamespace = "decision-confirmation"
 
 type decisionResult struct {
 	SchemaVersion     int                         `json:"schema_version"`
@@ -107,6 +111,20 @@ func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	}
 	if request.Command == "candidates" {
 		dataRoot := resolveDataDir(request.DataDir)
+		_, mapping, _, resolveErr := resolveSyncMapping("", request.ProjectID, dataRoot)
+		if resolveErr != nil {
+			return writeDecisionError(stdout, resolveErr)
+		}
+		owner, lockErr := publicationlock.Acquire(dataRoot, request.ProjectID, 10*time.Second)
+		if lockErr != nil {
+			return writeDecisionError(stdout, lockErr)
+		}
+		pubOpts := publication.Options{ProjectID: request.ProjectID, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}
+		recoverErr := recoverDecisionCandidatePublicationsLocked(context.Background(), pubOpts, owner, time.Now())
+		releaseErr := owner.Release()
+		if err := errors.Join(recoverErr, releaseErr); err != nil {
+			return writeDecisionError(stdout, err)
+		}
 		store, openErr := decisions.OpenStore(dataRoot, request.ProjectID)
 		if openErr != nil {
 			return writeDecisionError(stdout, openErr)
@@ -426,6 +444,7 @@ func applyDecisionRequest(ctx context.Context, request DecisionRequest, input de
 }
 
 func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, edited *decisions.DecisionInput) (decisionResult, error) {
+	now := time.Now
 	dataRoot := resolveDataDir(request.DataDir)
 	_, mapping, _, err := resolveSyncMapping("", request.ProjectID, dataRoot)
 	if err != nil {
@@ -436,16 +455,13 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 		return decisionResult{}, err
 	}
 	defer owner.Release()
-	pubOpts := publication.Options{ProjectID: request.ProjectID, Mapping: mapping, DataRoot: dataRoot, Now: time.Now}
-	if err := publication.RecoverMarkdownLocked(ctx, pubOpts, owner); err != nil {
+	pubOpts := publication.Options{ProjectID: request.ProjectID, Mapping: mapping, DataRoot: dataRoot, Now: now}
+	if err := recoverDecisionCandidatePublicationsLocked(ctx, pubOpts, owner, now()); err != nil {
 		return decisionResult{}, err
 	}
 	read, err := syncproject.ReadMarkdownForScan(ctx, syncproject.Options{ProjectID: request.ProjectID, CWD: mapping.Root, DataDir: dataRoot, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerCLI}, owner)
 	if err != nil {
 		return decisionResult{}, err
-	}
-	if decisionBareSHA(read.ProjectExpected[reviewv2.ReviewRelativePath]) != request.ExpectedReviewSHA256 {
-		return decisionResult{}, ContractError{Code: ContractCodeReviewPreimageConflict, Message: "review preimage changed"}
 	}
 	store, err := decisions.OpenStore(dataRoot, request.ProjectID)
 	if err != nil {
@@ -454,6 +470,13 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 	candidate, err := store.Get(request.CandidateID)
 	if err != nil {
 		return decisionResult{}, err
+	}
+	if request.Action == "confirm" && candidate.Status == annotation.CandidateConfirmed && candidate.Revision == request.ExpectedRevision+1 && candidate.EntityID != nil && candidate.ConfirmedEntityID != nil && *candidate.ConfirmedEntityID == *candidate.EntityID {
+		evidence := decisionCandidateEvidenceResults(ctx, dataRoot, request.ProjectID, []annotation.Annotation{candidate})
+		return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: decisionBareSHA(read.ProjectExpected[reviewv2.ReviewRelativePath]), Decisions: read.Pending.Presentation.Decisions, Candidate: &candidate, CandidateEvidence: evidence}, nil
+	}
+	if decisionBareSHA(read.ProjectExpected[reviewv2.ReviewRelativePath]) != request.ExpectedReviewSHA256 {
+		return decisionResult{}, ContractError{Code: ContractCodeReviewPreimageConflict, Message: "review preimage changed"}
 	}
 	if candidate.Revision != request.ExpectedRevision {
 		return decisionResult{}, decisions.ErrCandidateRevisionConflict
@@ -480,7 +503,7 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 		return decisionResult{}, err
 	}
 	if request.Action != "confirm" {
-		updated, err := store.Transition(candidate.ID, candidate.Revision, request.Action, "", time.Now())
+		updated, err := store.Transition(candidate.ID, candidate.Revision, request.Action, "", now())
 		if err != nil {
 			return decisionResult{}, err
 		}
@@ -502,37 +525,114 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 	}
 	formalID := *candidate.EntityID
 	next := read.Pending.Presentation
-	alreadyPublished := false
 	for _, value := range next.Decisions {
 		if value.ID == formalID {
-			alreadyPublished = decisionMatchesCandidate(value, *input)
-			if !alreadyPublished {
-				return decisionResult{}, errors.New("candidate entity ID already belongs to another decision")
-			}
-			break
+			return decisionResult{}, errors.New("candidate entity ID already belongs to another decision")
 		}
 	}
-	resultSHA := request.ExpectedReviewSHA256
-	if !alreadyPublished {
-		next, err = decisions.ConfirmCandidateDecision(next, formalID, *input)
-		if err != nil {
-			return decisionResult{}, err
-		}
-		plan, renderErr := presentation.RenderDecisionOperation(presentation.DecisionOperationInput{Presentation: next, Ledger: read.OldAccepted.Ledger, Index: index, Pending: read.Pending.Documents, ExpectedFiles: read.ProjectExpected})
-		if renderErr != nil {
-			return decisionResult{}, renderErr
-		}
-		edit := syncproject.MarkdownSyncPlan{Plan: plan, Index: read.ProjectExpected[presentation.SessionIndexRelativePath], ExpectedGenerationID: read.ExpectedGenerationID, ExpectedIndexDigest: read.ExpectedIndexDigest, VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest}
-		if _, publishErr := publication.PublishMarkdownEditLocked(ctx, pubOpts, edit, owner); publishErr != nil {
-			return decisionResult{}, publishErr
-		}
-		resultSHA = decisionBareSHA(plan.Files[0].Desired)
-	}
-	updated, err := store.Transition(candidate.ID, candidate.Revision, "confirm", formalID, time.Now())
+	next, err = decisions.ConfirmCandidateDecision(next, formalID, *input)
 	if err != nil {
 		return decisionResult{}, err
 	}
-	return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: resultSHA, Decisions: next.Decisions, Candidate: &updated, CandidateEvidence: []decisionCandidateEvidence{{CandidateID: updated.ID, EvidenceRefs: evidenceRefs}}}, nil
+	plan, err := presentation.RenderDecisionOperation(presentation.DecisionOperationInput{Presentation: next, Ledger: read.OldAccepted.Ledger, Index: index, Pending: read.Pending.Documents, ExpectedFiles: read.ProjectExpected})
+	if err != nil {
+		return decisionResult{}, err
+	}
+	resultFingerprint, err := publication.ExpectedMarkdownResultFingerprint(plan, mapping, read.ProjectExpected[presentation.SessionIndexRelativePath])
+	if err != nil {
+		return decisionResult{}, err
+	}
+	candidateDigest, err := decisions.CandidatePublicationDigest(candidate)
+	if err != nil {
+		return decisionResult{}, err
+	}
+	intentStore, err := candidatepublication.OpenStore(dataRoot, request.ProjectID, decisionPublicationNamespace)
+	if err != nil {
+		return decisionResult{}, err
+	}
+	intent, err := candidatepublication.NewIntent(candidatepublication.IntentInput{
+		ProjectID: request.ProjectID, Namespace: decisionPublicationNamespace,
+		CandidateID: candidate.ID, ExpectedCandidateRevision: candidate.Revision, CandidateDigest: candidateDigest,
+		Action: "confirm", EntityID: formalID, ResultFingerprint: resultFingerprint,
+		TerminalStatus: string(annotation.CandidateConfirmed), PreparedAt: now(),
+	})
+	if err != nil {
+		return decisionResult{}, err
+	}
+	intent, err = intentStore.Prepare(intent)
+	if err != nil {
+		return decisionResult{}, err
+	}
+	edit := syncproject.MarkdownSyncPlan{Plan: plan, Index: read.ProjectExpected[presentation.SessionIndexRelativePath], ExpectedGenerationID: read.ExpectedGenerationID, ExpectedIndexDigest: read.ExpectedIndexDigest, VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest}
+	if _, err := publication.PublishMarkdownEditLocked(ctx, pubOpts, edit, owner); err != nil {
+		return decisionResult{}, err
+	}
+	updated, err := store.Transition(candidate.ID, candidate.Revision, "confirm", formalID, now())
+	if err != nil {
+		return decisionResult{}, err
+	}
+	if _, err := intentStore.Transition(intent.OperationID, intent.Revision, candidatepublication.StateCompleted, now()); err != nil {
+		return decisionResult{}, err
+	}
+	return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: decisionBareSHA(plan.Files[0].Desired), Decisions: next.Decisions, Candidate: &updated, CandidateEvidence: []decisionCandidateEvidence{{CandidateID: updated.ID, EvidenceRefs: evidenceRefs}}}, nil
+}
+
+func recoverDecisionCandidatePublicationsLocked(ctx context.Context, pubOpts publication.Options, owner *publicationlock.Owner, at time.Time) error {
+	if err := publication.RecoverMarkdownLocked(ctx, pubOpts, owner); err != nil {
+		return err
+	}
+	intentStore, err := candidatepublication.OpenStore(pubOpts.DataRoot, pubOpts.ProjectID, decisionPublicationNamespace)
+	if err != nil {
+		return err
+	}
+	prepared, err := intentStore.Prepared()
+	if err != nil || len(prepared) == 0 {
+		return err
+	}
+	candidateStore, err := decisions.OpenStore(pubOpts.DataRoot, pubOpts.ProjectID)
+	if err != nil {
+		return err
+	}
+	reader, err := publicationstate.OpenReadOnly(pubOpts.DataRoot, pubOpts.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer reader.Close()
+	for _, intent := range prepared {
+		if intent.Action != "confirm" || intent.TerminalStatus != string(annotation.CandidateConfirmed) {
+			return errors.New("decision candidate publication intent has an invalid transition")
+		}
+		candidate, err := candidateStore.Get(intent.CandidateID)
+		if err != nil {
+			return err
+		}
+		digest, err := decisions.CandidatePublicationDigest(candidate)
+		if err != nil || digest != intent.CandidateDigest || candidate.EntityID == nil || *candidate.EntityID != intent.EntityID {
+			return errors.Join(errors.New("decision candidate publication identity changed"), err)
+		}
+		if _, err := reader.AcceptedMarkdownResult(intent.ResultFingerprint); errors.Is(err, os.ErrNotExist) {
+			if _, err := intentStore.Transition(intent.OperationID, intent.Revision, candidatepublication.StateAborted, at); err != nil {
+				return err
+			}
+			continue
+		} else if err != nil {
+			return err
+		}
+		switch {
+		case candidate.Status == annotation.CandidatePending && candidate.Revision == intent.ExpectedCandidateRevision:
+			candidate, err = candidateStore.Transition(candidate.ID, candidate.Revision, "confirm", intent.EntityID, at)
+			if err != nil {
+				return err
+			}
+		case candidate.Status == annotation.CandidateConfirmed && candidate.Revision == intent.ExpectedCandidateRevision+1 && candidate.ConfirmedEntityID != nil && *candidate.ConfirmedEntityID == intent.EntityID:
+		default:
+			return decisions.ErrCandidateRevisionConflict
+		}
+		if _, err := intentStore.Transition(intent.OperationID, intent.Revision, candidatepublication.StateCompleted, at); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func validateDecisionCandidateFresh(index sessionindex.Document, candidate annotation.Annotation) error {
@@ -678,16 +778,6 @@ func validateDecisionCandidate(index sessionindex.Document, candidate annotation
 		}
 	}
 	return nil
-}
-
-func decisionMatchesCandidate(value reviewv4.Decision, input decisions.DecisionInput) bool {
-	if value.Provenance != "ai_candidate_confirmed" {
-		return false
-	}
-	want := decisions.DecisionInput{SchemaVersion: 1, Kind: value.Kind, OccurredAt: value.OccurredAt, Title: value.Title, Rationale: value.Rationale, Impact: value.Impact, Status: value.Status, ReevaluateWhen: value.ReevaluateWhen, Supersedes: value.Supersedes, MilestoneIDs: value.MilestoneIDs, SessionRefs: value.SessionRefs, Pinned: value.Pinned}
-	left, _ := json.Marshal(want)
-	right, _ := json.Marshal(input)
-	return string(left) == string(right)
 }
 
 func nextDecisionID(values []reviewv4.Decision) string {
