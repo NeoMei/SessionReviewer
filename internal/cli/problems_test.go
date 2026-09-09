@@ -7,11 +7,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
-	"time"
 
 	"github.com/neomei/SessionReviewer/internal/problemmap"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
-	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
 
 func TestProblemsRootCLIAtomicallyPublishesAndReadsBack(t *testing.T) {
@@ -20,19 +18,21 @@ func TestProblemsRootCLIAtomicallyPublishesAndReadsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	review := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)
+	createArgs := []string{"create", "--project-id", fixture.projectID, "--expected-problem-map-revision", strconv.Itoa(accepted.Review.ProblemMapRevision), "--expected-review-sha256", testBareSHA(review), "--data-dir", fixture.data, "--json"}
+	var createdOut bytes.Buffer
+	if code := runProblems(createArgs, bytes.NewBufferString(`{"schema_version":1,"question":"How do we create the first root?"}`), &createdOut, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("create code=%d out=%s", code, createdOut.String())
+	}
+	var created problemResult
+	if err := json.Unmarshal(createdOut.Bytes(), &created); err != nil || created.Candidate == nil {
+		t.Fatalf("created=%+v err=%v", created, err)
+	}
+	candidate := *created.Candidate
 	store, err := problemmap.OpenStore(fixture.data, fixture.projectID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs := []reviewv4.SourceTurnRef{}
-	if len(accepted.Review.ProblemNodes) > 0 {
-		refs = accepted.Review.ProblemNodes[0].SourceTurnRefs
-	}
-	candidate := completeCLIProblemCandidate(fixture.projectID, refs)
-	if err := store.CompareAndSwap(candidate, 0); err != nil {
-		t.Fatal(err)
-	}
-	review := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)
 	args := []string{"candidate", "transition", "--project-id", fixture.projectID, "--candidate-id", candidate.CandidateID, "--expected-candidate-revision", "1", "--expected-problem-map-revision", strconv.Itoa(accepted.Review.ProblemMapRevision), "--expected-review-sha256", testBareSHA(review), "--action", "apply_root", "--data-dir", fixture.data, "--json"}
 	var out, diagnostic bytes.Buffer
 	if code := runProblems(args, bytes.NewReader(nil), &out, &diagnostic); code != 0 {
@@ -60,15 +60,73 @@ func TestProblemsRootCLIAtomicallyPublishesAndReadsBack(t *testing.T) {
 	}
 }
 
-func completeCLIProblemCandidate(projectID string, refs []reviewv4.SourceTurnRef) problemmap.Candidate {
-	now := time.Date(2026, 9, 9, 1, 2, 3, 0, time.UTC).Format(time.RFC3339)
-	grounds := []problemmap.Ground{{RuleID: "no-signal", RuleVersion: "rules-v1", MatchedFactRefs: []string{}, Explanation: "继续待归类。"}}
-	dependencies := []string{"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-	if len(refs) == 0 {
-		grounds = []problemmap.Ground{{RuleID: "human-created", RuleVersion: "v1", MatchedFactRefs: []string{}, Explanation: "由用户明确创建。"}}
-		dependencies = []string{}
+func TestProblemsEditResolveAndReopenPublishExactHumanFields(t *testing.T) {
+	fixture := newCLIAuthenticatedMarkdownFixture(t)
+	accepted, err := readProblemProjection(fixture.project)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return problemmap.Candidate{CandidateID: "candidate-root", ProjectID: projectID, Question: "How do we create the first root?", SourceTurnRefs: refs, RecommendedRelation: problemmap.RelationKeepPending, AlternateTargetIDs: []string{}, RelatedNodeIDs: []string{}, Grounds: grounds, Confidence: problemmap.ConfidenceLow, Status: problemmap.CandidatePending, DependencyDigests: dependencies, AnalysisMode: problemmap.AnalysisDeterministic, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	if len(accepted.Review.ProblemNodes) == 0 {
+		review := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)
+		createArgs := []string{"create", "--project-id", fixture.projectID, "--expected-problem-map-revision", strconv.Itoa(accepted.Review.ProblemMapRevision), "--expected-review-sha256", testBareSHA(review), "--data-dir", fixture.data, "--json"}
+		var created bytes.Buffer
+		if code := runProblems(createArgs, bytes.NewBufferString(`{"schema_version":1,"question":"seed?"}`), &created, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("create=%s", created.String())
+		}
+		var candidate problemResult
+		if json.Unmarshal(created.Bytes(), &candidate) != nil || candidate.Candidate == nil {
+			t.Fatal("missing candidate")
+		}
+		applyArgs := []string{"candidate", "transition", "--project-id", fixture.projectID, "--candidate-id", candidate.Candidate.CandidateID, "--expected-candidate-revision", "1", "--expected-problem-map-revision", strconv.Itoa(accepted.Review.ProblemMapRevision), "--expected-review-sha256", testBareSHA(review), "--action", "apply_root", "--data-dir", fixture.data, "--json"}
+		if code := runProblems(applyArgs, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); code != 0 {
+			t.Fatalf("apply=%d", code)
+		}
+		accepted, err = readProblemProjection(fixture.project)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := accepted.Review.ProblemNodes[0]
+	review := readCLIProblemFile(t, fixture.project, reviewv2.ReviewRelativePath)
+	common := []string{"--project-id", fixture.projectID, "--problem-id", node.ID, "--expected-problem-revision", strconv.Itoa(node.Revision), "--expected-problem-map-revision", strconv.Itoa(accepted.Review.ProblemMapRevision), "--expected-review-sha256", testBareSHA(review), "--data-dir", fixture.data, "--json"}
+	var out bytes.Buffer
+	if code := runProblems(append([]string{"edit"}, common...), bytes.NewBufferString(`{"schema_version":1,"question":"用户原始问题？","current_conclusion":"保留此结论。","completion_criterion":"明确标准。"}`), &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("edit code=%d out=%s", code, out.String())
+	}
+	var edited problemResult
+	if err := json.Unmarshal(out.Bytes(), &edited); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readProblemProjection(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated := got.Review.ProblemNodes[0]
+	if updated.Question != "用户原始问题？" || updated.CurrentConclusion != "保留此结论。" || updated.CompletionCriterion != "明确标准。" {
+		t.Fatalf("updated=%+v", updated)
+	}
+	stateArgs := []string{"state", "--project-id", fixture.projectID, "--problem-id", updated.ID, "--expected-problem-revision", strconv.Itoa(updated.Revision), "--expected-problem-map-revision", strconv.Itoa(got.Review.ProblemMapRevision), "--expected-review-sha256", edited.ReviewSHA256, "--action", "resolve", "--data-dir", fixture.data, "--json"}
+	out.Reset()
+	if code := runProblems(stateArgs, bytes.NewReader(nil), &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("resolve code=%d out=%s", code, out.String())
+	}
+	var resolved problemResult
+	if err := json.Unmarshal(out.Bytes(), &resolved); err != nil {
+		t.Fatal(err)
+	}
+	resolvedNode := resolved.Problems[0]
+	if resolvedNode.WorkflowState != "resolved" || resolvedNode.AnswerState != updated.AnswerState {
+		t.Fatalf("resolved=%+v", resolvedNode)
+	}
+	stateArgs = []string{"state", "--project-id", fixture.projectID, "--problem-id", resolvedNode.ID, "--expected-problem-revision", strconv.Itoa(resolvedNode.Revision), "--expected-problem-map-revision", strconv.Itoa(resolved.ProblemMapRevision), "--expected-review-sha256", resolved.ReviewSHA256, "--action", "reopen", "--data-dir", fixture.data, "--json"}
+	out.Reset()
+	if code := runProblems(stateArgs, bytes.NewReader(nil), &out, &bytes.Buffer{}); code != 0 {
+		t.Fatalf("reopen code=%d out=%s args=%v", code, out.String(), stateArgs)
+	}
+	var reopened problemResult
+	if err := json.Unmarshal(out.Bytes(), &reopened); err != nil || reopened.Problems[0].WorkflowState != "in_progress" {
+		t.Fatalf("reopened=%+v err=%v", reopened, err)
+	}
 }
 
 func readCLIProblemFile(t *testing.T, root, relative string) []byte {

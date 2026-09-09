@@ -2,6 +2,7 @@ import type { ConversationRequest, SessionEventRequest, SessionSummaryRequest } 
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import type { MachineLedgerV4, ReviewPresentationV4, SessionEventPageV1, SessionIndexV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ProjectDescriptor } from "../data/repository";
+import type { ProblemCandidateV1, ProblemActions } from "./render-v4-problems";
 import type { V4Tab, V4ViewState, V4ViewStatePatch } from "../state/v4-view-state";
 import { normalizeV4ViewState } from "../state/v4-view-state";
 import { normalizeSessionBrowserState } from "../state/session-browser-state";
@@ -31,6 +32,14 @@ export interface RenderV4ShellOptions {
   recoverySelectionUnavailable?: string;
   snapshotStatus?: string;
   trustDetail?: HTMLElement;
+  problemCandidates?: ProblemCandidateV1[];
+  createProblem?: ProblemActions["createProblem"];
+  transitionCandidate?: ProblemActions["transitionCandidate"];
+  setProblemState?: ProblemActions["setProblemState"];
+  editProblem?: ProblemActions["editProblem"];
+  moveProblem?: ProblemActions["moveProblem"];
+  reorderProblems?: ProblemActions["reorderProblems"];
+  problemUnavailableReason?: string;
 }
 
 export type V4ShellElement = HTMLElement & { scanRecords?: ScanRecordsElement; dispose: () => void };
@@ -96,7 +105,14 @@ export function renderV4Shell(
     root.replaceChildren(renderHeader(descriptor, presentation, index, open, options), tablist, panel);
   };
   const renderPanel = (): HTMLElement => {
-    if (state.view === "problems") return renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`));
+    if (state.view === "problems") return renderV4Problems(presentation, state, update, () => open(`${descriptor.root}/项目回顾.md`), {
+      candidates: options.problemCandidates, unavailableReason: options.problemUnavailableReason, createProblem: options.createProblem,
+      transitionCandidate: options.transitionCandidate, setProblemState: options.setProblemState, editProblem: options.editProblem, moveProblem: options.moveProblem, reorderProblems: options.reorderProblems,
+      openTurn: options.loadConversation ? async (ref) => {
+        if (!ref.session_view_digest) throw new Error("来源缺少已认证的 Session 快照，无法精确读取。");
+        await options.loadConversation!({ projectId: descriptor.projectId, provider: ref.provider, sessionId: ref.session_id, expectedGenerationId: presentation.generation_id, expectedSessionViewDigest: ref.session_view_digest, sessionViewDigest: ref.session_view_digest, turnUnitId: ref.turn_unit_id, limit: 64 });
+      } : undefined
+    });
     if (state.view === "decisions") return renderV4Decisions(presentation, () => open(`${descriptor.root}/项目回顾.md`));
     if (state.view === "usage") {
       const currentPrices = new Set(ledger.current_pricing_snapshot_ids);

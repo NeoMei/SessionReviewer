@@ -9,8 +9,10 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/neomei/SessionReviewer/internal/atomicfile"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
 
 var ErrCandidateRevisionConflict = errors.New("candidate revision conflict")
@@ -129,4 +131,15 @@ func AnalysisIdentity(projectID, question, ruleVersion string, dependencies []st
 	normalized := strings.ToLower(strings.Join(strings.Fields(question), " "))
 	sum := sha256.Sum256([]byte(projectID + "\x00" + normalized + "\x00" + ruleVersion + "\x00" + strings.Join(values, "\x00")))
 	return "placement-" + hex.EncodeToString(sum[:16])
+}
+
+func NewHumanCandidate(projectID, question string, now time.Time) Candidate {
+	stamp := now.UTC().Round(0).Format(time.RFC3339Nano)
+	return Candidate{
+		CandidateID: AnalysisIdentity(projectID, question, "human-created-v1", nil), ProjectID: projectID, Question: question,
+		SourceTurnRefs: []reviewv4.SourceTurnRef{}, RecommendedRelation: RelationKeepPending, RecommendedTargetID: nil,
+		AlternateTargetIDs: []string{}, RelatedNodeIDs: []string{}, Grounds: []Ground{{RuleID: "human-created", RuleVersion: "v1", MatchedFactRefs: []string{}, Explanation: "由用户明确创建，等待确认正式位置。"}},
+		Confidence: ConfidenceLow, Status: CandidatePending, DependencyDigests: []string{}, AnalysisMode: AnalysisDeterministic, AgentRunID: nil,
+		Revision: 1, CreatedAt: stamp, UpdatedAt: stamp,
+	}
 }

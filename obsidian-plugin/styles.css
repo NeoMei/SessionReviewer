@@ -274,6 +274,15 @@
 .sr-v4-problem-detail h2 { font-size: 16px; }
 .sr-v4-problem-detail .sr-definition { display: block; padding: 10px 0; }
 .sr-v4-problem-detail .sr-definition p, .sr-v4-problem-sources p { margin: 4px 0; overflow-wrap: anywhere; }
+.sr-v4-problem-candidates { border-top: 1px solid var(--sr-border); display: grid; gap: 9px; grid-column: 1 / -1; padding: 15px; }
+.sr-v4-problem-candidate { background: var(--background-secondary); border: 1px solid var(--sr-border); border-radius: 9px; display: flex; flex-wrap: wrap; gap: 7px; padding: 12px; }
+.sr-v4-problem-candidate > strong, .sr-v4-problem-candidate > p { flex-basis: 100%; }
+.sr-v4-problem-create { display: grid; gap: 8px; grid-column: 1 / -1; padding: 15px; }
+.sr-v4-problem-edit, .sr-v4-problem-move, .sr-v4-problem-reorder { border-top: 1px solid var(--sr-border); display: grid; gap: 7px; margin-top: 10px; padding-top: 10px; }
+.sr-v4-problem-edit textarea, .sr-v4-problem-create textarea { min-height: 70px; resize: vertical; width: 100%; }
+.sr-v4-problem-move select { width: 100%; }
+.sr-v4-move-preview { color: var(--sr-muted); overflow-wrap: anywhere; white-space: pre-wrap; }
+.sr-confirming-action { display: inline-flex; }
 .sr-v4-decisions, .sr-v4-usage, .sr-v4-sessions { padding: 16px; }
 .sr-v4-filter { display: flex; gap: 7px; margin-bottom: 12px; }
 .sr-v4-filter button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }

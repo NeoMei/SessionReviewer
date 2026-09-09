@@ -2,7 +2,7 @@ import { ItemView, Notice, type WorkspaceLeaf } from "obsidian";
 import { VIEW_TYPE } from "../constants";
 import type { BrowserModel, EditableField, ScanStatus } from "../contracts/review-v3";
 import type { SessionEventPageV1 } from "../contracts/review-v4";
-import { SyncStatusError, type CliRunner } from "../cli/runner";
+import { SyncStatusError, type CliRunner, type ProblemCandidate } from "../cli/runner";
 import type { ReviewEditor } from "../data/editor";
 import type { Diagnostic, MarkdownSnapshotReady, ProjectDescriptor, ProjectRepository, Snapshot, SnapshotReady } from "../data/repository";
 import { ConflictModal, type ConflictAction } from "./conflict-modal";
@@ -40,6 +40,8 @@ export class ProjectEvolutionView extends ItemView {
   private pendingEventRecovery?: { projectId: string; provider: string; sessionId: string; ordinal: number; generationId: string; sessionViewDigest: string | null };
   private recoveredEventSelection?: { projectId: string; provider: string; sessionId: string };
   private eventRecoveryEpoch = 0;
+  private problemCandidates: ProblemCandidate[] = [];
+  private problemUnavailableReason?: string;
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -131,6 +133,17 @@ export class ProjectEvolutionView extends ItemView {
     }
     const cli = await this.readCliStatus(selected);
     if (!current()) return;
+    if (selected.format === "markdown-v4" && this.runner && cli.diagnostic?.code !== "cli_unavailable") {
+      try {
+        const problems = await this.runner.listProblemCandidates(selected.projectId);
+        if (!current()) return;
+        this.problemCandidates = problems.candidates ?? [];
+        this.problemUnavailableReason = undefined;
+      } catch (error) {
+        this.problemCandidates = [];
+        this.problemUnavailableReason = error instanceof Error ? error.message : "无法读取问题候选。";
+      }
+    }
     const scanStatus = selected.format === "markdown-v4" ? undefined : options.scanStatus === false ? this.scanStatus : await this.readScanStatus(selected);
     if (!current()) return;
     // Publish one complete result set. Obsolete loads/status commands never
@@ -178,6 +191,7 @@ export class ProjectEvolutionView extends ItemView {
         this.eventPageCache.clear();
         this.eventCacheGeneration = generation;
       }
+      const activeProblemState = snapshot.kind === "markdown-v4" && snapshot.state.kind === "public_valid" ? snapshot.state : undefined;
       const browser = renderMarkdownV4View(
         snapshot,
         (path) => { void this.app.workspace.openLinkText(path, "", false); },
@@ -200,7 +214,39 @@ export class ProjectEvolutionView extends ItemView {
           recoveryAlreadyAttempted: recovery !== undefined,
           recoverySelectionUnavailable: recovery?.unavailable,
           initialState: this.v4StateForRender(current),
-          saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch)
+          saveStatePatch: (patch) => this.saveV4Patch(current.descriptor.projectId, patch),
+          problemCandidates: this.problemCandidates,
+          problemUnavailableReason: this.problemUnavailableReason,
+          createProblem: this.runner && activeProblemState ? async (question) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.createProblem({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, question });
+            await this.refresh(this.projects);
+          } : undefined,
+          transitionCandidate: this.runner && activeProblemState ? async (candidate, action, targetProblemId) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.transitionProblemCandidate({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, candidate, action, targetProblemId });
+            await this.refresh(this.projects);
+          } : undefined,
+          setProblemState: this.runner && activeProblemState ? async (problem, action) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.setProblemState({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, problem, action });
+            await this.refresh(this.projects);
+          } : undefined,
+          editProblem: this.runner && activeProblemState ? async (problem, fields) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.editProblem({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, problem, ...fields });
+            await this.refresh(this.projects);
+          } : undefined,
+          moveProblem: this.runner && activeProblemState ? async (problem, newParentId) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.moveProblem({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, problem, newParentId });
+            await this.refresh(this.projects);
+          } : undefined,
+          reorderProblems: this.runner && activeProblemState ? async (parentId, orderedChildIds) => {
+            const p = activeProblemState.value.presentation;
+            await this.runner!.reorderProblemChildren({ projectId: current.descriptor.projectId, expectedProblemMapRevision: p.problem_map_revision, expectedReviewSHA256: activeProblemState.ledger.review_sha256, parentId, orderedChildIds });
+            await this.refresh(this.projects);
+          } : undefined
         }
       );
       this.v4Browser = browser;

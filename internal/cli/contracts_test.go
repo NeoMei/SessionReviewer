@@ -162,7 +162,7 @@ func TestParsePricingContractAcceptsAndRejectsDigests(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
-		{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA, "--data-dir", "/tmp/x", "--json"},
+		{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA, "--data-dir", "relative", "--json"},
 		{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA},
 	} {
 		if _, err := ParsePricingContract(args); err == nil || contractCode(err) != "invalid_argument" {
@@ -652,8 +652,8 @@ func TestProblemEntryAndPlacementContracts(t *testing.T) {
 }
 
 func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
-	move, err := ParseProblemContract([]string{"move", "--project-id", "p", "--problem-id", "child", "--new-parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
-	if err != nil || move.NewParentID != "root" {
+	move, err := ParseProblemContract([]string{"move", "--project-id", "p", "--problem-id", "child", "--new-parent-id", "root", "--expected-problem-revision", "3", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
+	if err != nil || move.NewParentID != "root" || move.ExpectedProblemRevision != 3 {
 		t.Fatalf("move = %+v err=%v", move, err)
 	}
 	reorderArgs := []string{"reorder", "--project-id", "p", "--parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"}
@@ -684,6 +684,35 @@ func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
 	}
 }
 
+func TestProblemHumanCreateEditAndStateContractsUseBoundedStdin(t *testing.T) {
+	common := []string{"--project-id", "p", "--expected-problem-map-revision", "0", "--expected-review-sha256", contractTestSHA, "--json"}
+	createArgs := append([]string{"create"}, common...)
+	create, err := ParseProblemContractWithInput(createArgs, []byte(`{"schema_version":1,"question":"用户原文？"}`), nil)
+	if err != nil || create.Command != "create" || create.Question != "用户原文？" {
+		t.Fatalf("create=%+v err=%v", create, err)
+	}
+	editArgs := append([]string{"edit", "--problem-id", "problem-a", "--expected-problem-revision", "2"}, common...)
+	edit, err := ParseProblemContractWithInput(editArgs, []byte(`{"schema_version":1,"question":"问题？","current_conclusion":"结论","completion_criterion":"标准"}`), nil)
+	if err != nil || edit.ExpectedProblemRevision != 2 || edit.Question != "问题？" || edit.CurrentConclusion != "结论" || edit.CompletionCriterion != "标准" {
+		t.Fatalf("edit=%+v err=%v", edit, err)
+	}
+	for _, action := range []string{"resolve", "reopen"} {
+		state, err := ParseProblemContract(append([]string{"state", "--problem-id", "problem-a", "--expected-problem-revision", "2", "--action", action}, common...))
+		if err != nil || state.Action != action || state.ExpectedProblemRevision != 2 {
+			t.Fatalf("state=%+v err=%v", state, err)
+		}
+	}
+	for _, body := range [][]byte{
+		[]byte(`{"schema_version":1,"question":""}`),
+		[]byte(`{"schema_version":1,"question":"x","path":"secret"}`),
+		[]byte(`{"schema_version":1,"question":"x","current_conclusion":"x"}`),
+	} {
+		if _, err := ParseProblemContractWithInput(createArgs, body, nil); err == nil {
+			t.Fatalf("accepted invalid create body %s", body)
+		}
+	}
+}
+
 func TestContractParsersRejectForbiddenInputSurfacesAndPositionals(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -694,7 +723,7 @@ func TestContractParsersRejectForbiddenInputSurfacesAndPositionals(t *testing.T)
 		{"inspect input", []string{"session-search", "--project-id", "p", "--expected-generation-id", "g", "--query-kind", "file", "--query", "x", "--input", "input.json", "--limit", "1", "--json"}, inspectContractError},
 		{"decision path", []string{"create", "--project-id", "p", "--expected-review-sha256", contractTestSHA, "--path", "input.json", "--json"}, decisionContractError},
 		{"decision positional", []string{"extract", "--project-id", "p", "--expected-generation-id", "g", "payload.md", "--json"}, decisionContractError},
-		{"pricing data dir", []string{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA, "--data-dir", "/tmp/sr", "--json"}, pricingContractError},
+		{"pricing relative data dir", []string{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA, "--data-dir", "relative", "--json"}, pricingContractError},
 		{"pricing positional", []string{"supplement", "--project-id", "p", "--provider", "codex", "--session-id", "s", "--usage-record-digest", contractTestDigest, "--expected-ledger-sha256", contractTestSHA, "payload.json", "--json"}, pricingContractError},
 	}
 	for _, test := range tests {

@@ -36,6 +36,7 @@ Commands:
   review                Control durable Agent review jobs
   scan                  Execute or monitor zero-token project scans
   inspect               Read published Session events (JSON only)
+  pricing               Refresh public price catalogs or supplement a price
   version               Print the version
 
 Options:
@@ -119,6 +120,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return runScan(args[1:], stdout, stderr)
 	case "inspect":
 		return runInspect(args[1:], stdout, stderr)
+	case "pricing":
+		return runPricing(args[1:], os.Stdin, stdout, stderr)
 	case "problems":
 		return runProblems(args[1:], os.Stdin, stdout, stderr)
 	default:

@@ -52,20 +52,24 @@ func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 0
 	}
 	request, err := ParseProblemContract(args)
-	if len(args) > 0 && args[0] == "reorder" {
+	if len(args) > 0 && (args[0] == "reorder" || args[0] == "create" || args[0] == "edit") {
 		body, readErr := io.ReadAll(io.LimitReader(stdin, MaxDecisionInputBytes+1))
 		if readErr != nil {
 			return writeProblemError(stdout, readErr)
 		}
-		base, parseErr := parseProblemReorder(args[1:])
-		if parseErr != nil {
-			return writeProblemError(stdout, parseErr)
+		var current []string
+		if args[0] == "reorder" {
+			base, parseErr := parseProblemReorder(args[1:])
+			if parseErr != nil {
+				return writeProblemError(stdout, parseErr)
+			}
+			state, loadErr := loadProblemState(base.ProjectID, base.DataDir)
+			if loadErr != nil {
+				return writeProblemError(stdout, loadErr)
+			}
+			current = directProblemChildren(state.accepted.Review.ProblemNodes, base.ParentID)
 		}
-		current, loadErr := loadProblemState(base.ProjectID)
-		if loadErr != nil {
-			return writeProblemError(stdout, loadErr)
-		}
-		request, err = ParseProblemContractWithInput(args, body, directProblemChildren(current.accepted.Review.ProblemNodes, base.ParentID))
+		request, err = ParseProblemContractWithInput(args, body, current)
 	}
 	if err != nil {
 		return writeProblemError(stdout, err)
@@ -75,6 +79,10 @@ func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if request.Command == "candidates" {
 		dataRoot := resolveDataDir(request.DataDir)
+		state, loadErr := loadProblemState(request.ProjectID, request.DataDir)
+		if loadErr != nil {
+			return writeProblemError(stdout, loadErr)
+		}
 		store, openErr := problemmap.OpenStore(dataRoot, request.ProjectID)
 		if openErr != nil {
 			return writeProblemError(stdout, openErr)
@@ -83,7 +91,7 @@ func runProblems(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		if listErr != nil {
 			return writeProblemError(stdout, listErr)
 		}
-		return writeProblemJSON(stdout, stderr, problemResult{SchemaVersion: 1, ProjectID: request.ProjectID, Problems: []reviewv4.ProblemNode{}, Candidates: values})
+		return writeProblemJSON(stdout, stderr, problemResult{SchemaVersion: 1, ProjectID: request.ProjectID, ProblemMapRevision: state.accepted.Review.ProblemMapRevision, ReviewSHA256: state.accepted.Ledger.ReviewSHA256, Problems: state.accepted.Review.ProblemNodes, Candidates: values})
 	}
 	result, applyErr := applyProblemRequest(context.Background(), request)
 	if applyErr != nil {
@@ -98,8 +106,8 @@ type problemState struct {
 	accepted    reviewv4.Accepted
 }
 
-func loadProblemState(projectID string) (problemState, error) {
-	dataRoot := resolveDataDir("")
+func loadProblemState(projectID, requestedDataRoot string) (problemState, error) {
+	dataRoot := resolveDataDir(requestedDataRoot)
 	if dataRoot == "" {
 		return problemState{}, errors.New("SessionReviewer data directory is unavailable")
 	}
@@ -116,11 +124,16 @@ func loadProblemState(projectID string) (problemState, error) {
 }
 
 func readProblemProjection(root string) (reviewv4.Accepted, error) {
-	return reviewv4.LoadProjection(readProblemFile(root, reviewv2.ReviewRelativePath), readProblemFile(root, reviewv2.HistoryRelativePath), readProblemFile(root, reviewv2.MachineLedgerRelativePath), readProblemFile(root, presentation.SessionIndexRelativePath))
-}
-func readProblemFile(root, relative string) []byte {
-	body, _ := osReadFile(problemJoin(root, relative))
-	return body
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath}
+	bodies := make([][]byte, len(paths))
+	for index, relative := range paths {
+		body, err := osReadFile(problemJoin(root, relative))
+		if err != nil {
+			return reviewv4.Accepted{}, err
+		}
+		bodies[index] = body
+	}
+	return reviewv4.LoadProjection(bodies[0], bodies[1], bodies[2], bodies[3])
 }
 
 var osReadFile = func(path string) ([]byte, error) { return os.ReadFile(path) }
@@ -156,6 +169,21 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 	graph := problemmap.Graph{ProjectID: p.ProjectID, Revision: p.ProblemMapRevision, Nodes: p.ProblemNodes}
 	var candidate *problemmap.Candidate
 	var preview *problemmap.MovePreview
+	if request.Command == "create" {
+		store, openErr := problemmap.OpenStore(dataRoot, request.ProjectID)
+		if openErr != nil {
+			return problemResult{}, openErr
+		}
+		value := problemmap.NewHumanCandidate(request.ProjectID, request.Question, time.Now())
+		if prior, getErr := store.Get(value.CandidateID); getErr == nil {
+			value = prior
+		} else if !errors.Is(getErr, os.ErrNotExist) {
+			return problemResult{}, getErr
+		} else if err := store.CompareAndSwap(value, 0); err != nil {
+			return problemResult{}, err
+		}
+		return problemResult{SchemaVersion: 1, ProjectID: p.ProjectID, ProblemMapRevision: p.ProblemMapRevision, ReviewSHA256: request.ExpectedReviewSHA256, Problems: p.ProblemNodes, Candidate: &value}, nil
+	}
 	if request.Command == "candidate" {
 		store, openErr := problemmap.OpenStore(dataRoot, request.ProjectID)
 		if openErr != nil {
@@ -205,9 +233,14 @@ func applyProblemRequest(ctx context.Context, request ProblemRequest) (problemRe
 			return problemResult{}, previewErr
 		}
 		preview = &value
-		graph, err = problemmap.Move(graph, request.ProblemID, request.NewParentID)
+		graph, err = problemmap.Move(graph, request.ProblemID, request.NewParentID, request.ExpectedProblemRevision)
 	} else if request.Command == "reorder" {
 		graph, err = problemmap.Reorder(graph, request.ParentID, request.OrderedChildIDs)
+	} else if request.Command == "edit" {
+		graph, err = problemmap.EditHumanFields(graph, request.ProblemID, request.ExpectedProblemRevision, problemmap.HumanFields{Question: request.Question, CurrentConclusion: request.CurrentConclusion, CompletionCriterion: request.CompletionCriterion})
+	} else if request.Command == "state" {
+		state := map[string]string{"resolve": "resolved", "reopen": "in_progress"}[request.Action]
+		graph, err = problemmap.SetWorkflowState(graph, request.ProblemID, request.ExpectedProblemRevision, state)
 	}
 	if err != nil {
 		return problemResult{}, err

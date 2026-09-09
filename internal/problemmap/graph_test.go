@@ -1,6 +1,7 @@
 package problemmap
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -53,11 +54,11 @@ func TestApplyRootChildMoveReorderMergeAndResolveLifecycle(t *testing.T) {
 	if root == nil || len(root.SourceTurnRefs) != 2 {
 		t.Fatalf("merge refs=%+v", root)
 	}
-	graph, err = SetWorkflowState(graph, rootID, "resolved")
+	graph, err = SetWorkflowState(graph, rootID, graph.Node(rootID).Revision, "resolved")
 	if err != nil || graph.Node(rootID).AnswerState != "answered_unverified" {
 		t.Fatalf("resolve=%+v err=%v", graph.Node(rootID), err)
 	}
-	graph, err = SetWorkflowState(graph, rootID, "in_progress")
+	graph, err = SetWorkflowState(graph, rootID, graph.Node(rootID).Revision, "in_progress")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +81,35 @@ func TestGraphRejectsCycleForeignAndIncompleteReorderBeforeMutation(t *testing.T
 	}
 	if !reflect.DeepEqual(graph, before) {
 		t.Fatal("failed operation mutated graph")
+	}
+}
+
+func TestEditHumanFieldsAndWorkflowStateRequireExactNodeRevision(t *testing.T) {
+	graph := Graph{ProjectID: "project-a", Revision: 1, Nodes: []reviewv4.ProblemNode{graphProblemNode("problem-a", nil, 0)}}
+	next, err := EditHumanFields(graph, "problem-a", 1, HumanFields{Question: "保留原始标点？", CurrentConclusion: "结论原文", CompletionCriterion: "完成标准原文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := next.Node("problem-a")
+	if got.Question != "保留原始标点？" || got.CurrentConclusion != "结论原文" || got.CompletionCriterion != "完成标准原文" || got.Revision != 2 || next.Revision != 2 {
+		t.Fatalf("edit=%+v graph_revision=%d", got, next.Revision)
+	}
+	if _, err := EditHumanFields(next, "problem-a", 1, HumanFields{Question: "stale"}); !errors.Is(err, ErrProblemRevisionConflict) {
+		t.Fatalf("stale edit err=%v", err)
+	}
+	if _, err := Move(next, "problem-a", "root", 1); !errors.Is(err, ErrProblemRevisionConflict) {
+		t.Fatalf("stale move err=%v", err)
+	}
+	resolved, err := SetWorkflowState(next, "problem-a", 2, "resolved")
+	if err != nil || resolved.Node("problem-a").WorkflowState != "resolved" || resolved.Node("problem-a").AnswerState != "no_answer" {
+		t.Fatalf("resolved=%+v err=%v", resolved.Node("problem-a"), err)
+	}
+	if _, err := SetWorkflowState(resolved, "problem-a", 2, "in_progress"); !errors.Is(err, ErrProblemRevisionConflict) {
+		t.Fatalf("stale state err=%v", err)
+	}
+	reopened, err := SetWorkflowState(resolved, "problem-a", 3, "in_progress")
+	if err != nil || reopened.Node("problem-a").WorkflowState != "in_progress" || reopened.Node("problem-a").AnswerState != "no_answer" {
+		t.Fatalf("reopened=%+v err=%v", reopened.Node("problem-a"), err)
 	}
 }
 

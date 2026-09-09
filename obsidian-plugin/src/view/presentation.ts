@@ -6,6 +6,7 @@ import { element } from "./dom";
 import type { V4ViewState, V4ViewStatePatch } from "../state/v4-view-state";
 import { renderV4Shell, type V4ShellElement } from "./render-v4-shell";
 import type { ScanRecordsElement } from "./render-scan-records";
+import type { ProblemCandidateV1, ProblemActions } from "./render-v4-problems";
 
 export type StatusTone = "success" | "warning" | "danger" | "neutral";
 
@@ -91,6 +92,14 @@ export function renderMarkdownV4View(
     initialState?: unknown;
     saveState?: (state: V4ViewState) => void | Promise<void>;
     saveStatePatch?: (patch: V4ViewStatePatch) => void | Promise<void>;
+    problemCandidates?: ProblemCandidateV1[];
+    problemUnavailableReason?: string;
+    createProblem?: ProblemActions["createProblem"];
+    transitionCandidate?: ProblemActions["transitionCandidate"];
+    setProblemState?: ProblemActions["setProblemState"];
+    editProblem?: ProblemActions["editProblem"];
+    moveProblem?: ProblemActions["moveProblem"];
+    reorderProblems?: ProblemActions["reorderProblems"];
   } = {}
 ): HTMLElement & { scanRecords?: ScanRecordsElement; dispose?: () => void } {
   const current = snapshot.kind === "markdown-v4-stale" ? snapshot.lastValid : snapshot;

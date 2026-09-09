@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ScanStatus } from "../contracts/review-v3";
-import type { SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
+import type { ProblemMapCandidateV1, ProblemNodeV4, SessionEventPageV1, SessionSummaryV1 } from "../contracts/review-v4";
 import type { ConversationPageV1 } from "../contracts/conversation-page";
 import { parseConversationPageV1 } from "../data/conversation-page";
 import { parseSessionEventPageV1, parseSessionInspectWireError, parseSessionSummaryV1 } from "../data/contracts-v4";
@@ -18,6 +18,7 @@ const SCAN_ERROR_CODE = /^[a-z][a-z0-9_]{0,127}$/;
 const SCAN_COMMAND_FAILED = "SessionReviewer scan command failed";
 const SESSION_SUMMARY_FAILED = "无法读取 Session 摘要；请刷新项目后重试，并确认 CLI 已更新。";
 const INSPECT_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/;
+const ENTITY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const SCAN_STATES = ["queued", "running", "completed", "completed_with_issues", "failed"] as const;
 const SCAN_PHASES = ["discovering", "extracting", "reducing", "rendering", "syncing"] as const;
@@ -116,6 +117,20 @@ export interface SyncStatus {
   pending_operations: SyncOperation[];
   hidden_conflict_ids: string[];
 }
+
+export type ProblemCandidate = ProblemMapCandidateV1["candidates"][number];
+export interface ProblemOperationResponse {
+  schema_version: 1;
+  project_id: string;
+  problem_map_revision: number;
+  review_sha256: string;
+  problems: ProblemNodeV4[];
+  candidates?: ProblemCandidate[];
+  candidate?: ProblemCandidate;
+}
+export interface CreateProblemRequest { projectId: string; expectedProblemMapRevision: number; expectedReviewSHA256: string; question: string }
+export interface ProblemCAS { projectId: string; expectedProblemMapRevision: number; expectedReviewSHA256: string }
+export interface EditProblemRequest extends ProblemCAS { problem: ProblemNodeV4; question: string; currentConclusion: string; completionCriterion: string }
 
 export class SyncStatusError extends Error {
   constructor(readonly code: "cli_unavailable" | "sync_status_failed") {
@@ -232,6 +247,55 @@ export class CliRunner {
     }
   }
 
+  async listProblemCandidates(projectId: string): Promise<ProblemOperationResponse> {
+    validateProject(projectId);
+    return this.problemResponse(await this.run(["problems", "candidates", "list", "--project-id", projectId, "--json"]), projectId);
+  }
+
+  async createProblem(request: CreateProblemRequest): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request);
+    if (!request.question || Buffer.byteLength(request.question, "utf8") > 65_536) throw new Error("problem question is too large");
+    const args = ["problems", "create", "--project-id", request.projectId, "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--json"];
+    return this.problemResponse(await this.runWithInput(args, JSON.stringify({ schema_version: 1, question: request.question })), request.projectId);
+  }
+
+  async transitionProblemCandidate(request: ProblemCAS & { candidate: ProblemCandidate; action: "apply_root" | "apply_child" | "apply_sibling" | "merge" | "keep_pending" | "dismiss" | "restore"; targetProblemId?: string }): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request);
+    if (!ENTITY_ID.test(request.candidate.candidate_id) || !Number.isSafeInteger(request.candidate.revision) || request.candidate.revision < 1) throw new Error("invalid candidate");
+    const args = ["problems", "candidate", "transition", "--project-id", request.projectId, "--candidate-id", request.candidate.candidate_id, "--expected-candidate-revision", String(request.candidate.revision), "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--action", request.action];
+    if (request.targetProblemId !== undefined) { if (!ENTITY_ID.test(request.targetProblemId)) throw new Error("invalid target problem"); args.push("--target-problem-id", request.targetProblemId); }
+    args.push("--json");
+    return this.problemResponse(await this.run(args), request.projectId);
+  }
+
+  async setProblemState(request: ProblemCAS & { problem: ProblemNodeV4; action: "resolve" | "reopen" }): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request);
+    const args = ["problems", "state", "--project-id", request.projectId, "--problem-id", request.problem.id, "--expected-problem-revision", String(request.problem.revision), "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--action", request.action, "--json"];
+    return this.problemResponse(await this.run(args), request.projectId);
+  }
+
+  async editProblem(request: EditProblemRequest): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request); validateProblemNodeIdentity(request.problem);
+    const input = JSON.stringify({ schema_version: 1, question: request.question, current_conclusion: request.currentConclusion, completion_criterion: request.completionCriterion });
+    const args = ["problems", "edit", "--project-id", request.projectId, "--problem-id", request.problem.id, "--expected-problem-revision", String(request.problem.revision), "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--json"];
+    return this.problemResponse(await this.runWithInput(args, input), request.projectId);
+  }
+
+  async moveProblem(request: ProblemCAS & { problem: ProblemNodeV4; newParentId: string }): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request); validateProblemNodeIdentity(request.problem);
+    if (request.newParentId !== "root" && !ENTITY_ID.test(request.newParentId)) throw new Error("invalid problem parent");
+    const args = ["problems", "move", "--project-id", request.projectId, "--problem-id", request.problem.id, "--new-parent-id", request.newParentId, "--expected-problem-revision", String(request.problem.revision), "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--json"];
+    return this.problemResponse(await this.run(args), request.projectId);
+  }
+
+  async reorderProblemChildren(request: ProblemCAS & { parentId: string; orderedChildIds: string[] }): Promise<ProblemOperationResponse> {
+    validateProblemCAS(request);
+    if (request.parentId !== "root" && !ENTITY_ID.test(request.parentId)) throw new Error("invalid reorder parent");
+    if (!Array.isArray(request.orderedChildIds) || request.orderedChildIds.some((id) => !ENTITY_ID.test(id)) || new Set(request.orderedChildIds).size !== request.orderedChildIds.length) throw new Error("invalid child order");
+    const args = ["problems", "reorder", "--project-id", request.projectId, "--parent-id", request.parentId, "--expected-problem-map-revision", String(request.expectedProblemMapRevision), "--expected-review-sha256", request.expectedReviewSHA256, "--json"];
+    return this.problemResponse(await this.runWithInput(args, JSON.stringify({ schema_version: 1, ordered_child_ids: request.orderedChildIds })), request.projectId);
+  }
+
   async syncProject(projectId: string): Promise<string> {
     validateProject(projectId);
     return (await this.run(["sync", "--project-id", projectId], 120_000)).stdout;
@@ -289,6 +353,39 @@ export class CliRunner {
     });
   }
 
+  private async runWithInput(args: readonly string[], input: string, timeout = 10_000): Promise<{ stdout: string; stderr: string }> {
+    if (!allowedArgs(args)) throw new Error("command is not allowed");
+    if (Buffer.byteLength(input, "utf8") > 65_536) throw new Error("stdin payload is too large");
+    return new Promise((resolve, reject) => {
+      const child = this.execFile(this.executable, args, { shell: false, windowsHide: true, timeout, maxBuffer: 1 << 20, encoding: "utf8" }, (error, stdout, stderr) => {
+        if (error) reject(Object.assign(new Error(`SessionReviewer CLI failed: ${stderr.trim() || error.message}`), { code: (error as { code?: unknown }).code, stdout: stdout || (error as { stdout?: unknown }).stdout }));
+        else resolve({ stdout, stderr });
+      }) as { stdin?: { end(value: string): void } } | undefined;
+      if (!child?.stdin) { reject(new Error("CLI stdin transport is unavailable")); return; }
+      child.stdin.end(input);
+    });
+  }
+
+  private problemResponse(result: { stdout: string }, projectId: string): ProblemOperationResponse {
+    const value = parseJson(result.stdout);
+    if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("problem response is invalid");
+    const row = value as Record<string, unknown>;
+    const allowed = new Set(["schema_version", "project_id", "problem_map_revision", "review_sha256", "problems", "candidates", "candidate", "move_preview"]);
+	const validNode = (value: unknown): value is ProblemNodeV4 => {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+		const node = value as Record<string, unknown>;
+		return ENTITY_ID.test(String(node.id ?? "")) && typeof node.question === "string" && node.question.length > 0 && node.question.length <= 4096 &&
+			(node.primary_parent_id === null || ENTITY_ID.test(String(node.primary_parent_id ?? ""))) && Array.isArray(node.related_node_ids) && node.related_node_ids.length <= 2 && (node.related_node_ids as unknown[]).every((id) => ENTITY_ID.test(String(id))) &&
+			["not_started", "in_progress", "paused", "resolved"].includes(String(node.workflow_state)) && ["no_answer", "answered_unverified", "execution_verified"].includes(String(node.answer_state)) &&
+			typeof node.completion_criterion === "string" && typeof node.current_conclusion === "string" && Array.isArray(node.source_turn_refs) && node.source_turn_refs.every(validProblemSourceRef) &&
+			Number.isSafeInteger(node.sibling_order) && Number(node.sibling_order) >= 0 && Number.isSafeInteger(node.revision) && Number(node.revision) >= 1;
+	};
+    if (Object.keys(row).some((key) => !allowed.has(key)) || row.schema_version !== 1 || row.project_id !== projectId || !Number.isSafeInteger(row.problem_map_revision) || Number(row.problem_map_revision) < 0 || typeof row.review_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(row.review_sha256) || !Array.isArray(row.problems) || !row.problems.every(validNode) || (row.candidates !== undefined && !Array.isArray(row.candidates))) throw new Error("problem response binding mismatch");
+	if (row.candidates !== undefined && !(row.candidates as unknown[]).every((candidate) => validCandidate(candidate, projectId))) throw new Error("problem response binding mismatch");
+	if (row.candidate !== undefined && !validCandidate(row.candidate, projectId)) throw new Error("problem response binding mismatch");
+    return row as unknown as ProblemOperationResponse;
+  }
+
   private async runJSON(args: readonly string[]): Promise<Record<string, unknown>> {
     let payload: unknown;
     try {
@@ -319,6 +416,16 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args.length === 8 && args[0] === "sync" && args[1] === "resolve" && args[2] === "--conflict" && CONFLICT_ID.test(args[3] ?? "") && args[4] === "--action" && (args[5] === "accept_project" || args[5] === "accept_obsidian") && args[6] === "--project-id") return PROJECT_ID.test(args[7] ?? "");
   if (args.length === 10 && args[0] === "sync" && args[1] === "resolve" && args[2] === "--conflict" && CONFLICT_ID.test(args[3] ?? "") && args[4] === "--action" && args[5] === "manual_merge" && args[6] === "--file" && args[8] === "--project-id") return Boolean(args[7]) && PROJECT_ID.test(args[9] ?? "");
   if (args.length === 3 && args[0] === "sync" && args[1] === "--project-id") return PROJECT_ID.test(args[2] ?? "");
+  if (args.length === 6 && args[0] === "problems" && args[1] === "candidates" && args[2] === "list" && args[3] === "--project-id" && args[5] === "--json") return PROJECT_ID.test(args[4] ?? "");
+  if (args.length === 9 && args[0] === "problems" && args[1] === "create" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--expected-problem-map-revision" && validNonnegative(args[5]) && args[6] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[7] ?? "") && args[8] === "--json") return true;
+  if (args.length === 15 && args[0] === "problems" && args[1] === "state" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--problem-id" && ENTITY_ID.test(args[5] ?? "") && args[6] === "--expected-problem-revision" && validPositive(args[7]) && args[8] === "--expected-problem-map-revision" && validNonnegative(args[9]) && args[10] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[11] ?? "") && args[12] === "--action" && (args[13] === "resolve" || args[13] === "reopen") && args[14] === "--json") return true;
+  if (args.length === 13 && args[0] === "problems" && args[1] === "edit" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--problem-id" && ENTITY_ID.test(args[5] ?? "") && args[6] === "--expected-problem-revision" && validPositive(args[7]) && args[8] === "--expected-problem-map-revision" && validNonnegative(args[9]) && args[10] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[11] ?? "") && args[12] === "--json") return true;
+  if (args.length === 15 && args[0] === "problems" && args[1] === "move" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--problem-id" && ENTITY_ID.test(args[5] ?? "") && args[6] === "--new-parent-id" && (args[7] === "root" || ENTITY_ID.test(args[7] ?? "")) && args[8] === "--expected-problem-revision" && validPositive(args[9]) && args[10] === "--expected-problem-map-revision" && validNonnegative(args[11]) && args[12] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[13] ?? "") && args[14] === "--json") return true;
+  if (args.length === 11 && args[0] === "problems" && args[1] === "reorder" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--parent-id" && (args[5] === "root" || ENTITY_ID.test(args[5] ?? "")) && args[6] === "--expected-problem-map-revision" && validNonnegative(args[7]) && args[8] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[9] ?? "") && args[10] === "--json") return true;
+  if ((args.length === 16 || args.length === 18) && args[0] === "problems" && args[1] === "candidate" && args[2] === "transition" && args[3] === "--project-id" && PROJECT_ID.test(args[4] ?? "") && args[5] === "--candidate-id" && ENTITY_ID.test(args[6] ?? "") && args[7] === "--expected-candidate-revision" && validPositive(args[8]) && args[9] === "--expected-problem-map-revision" && validNonnegative(args[10]) && args[11] === "--expected-review-sha256" && /^[0-9a-f]{64}$/.test(args[12] ?? "") && args[13] === "--action") {
+    const action = args[14]; const target = args.length === 18 && args[15] === "--target-problem-id" && ENTITY_ID.test(args[16] ?? "") && args[17] === "--json";
+    return args.length === 16 ? ["apply_root", "keep_pending", "dismiss", "restore"].includes(action ?? "") && args[15] === "--json" : target && ["apply_child", "apply_sibling", "merge"].includes(action ?? "");
+  }
   if (args.length === 5 && args[0] === "scan" && args[1] === "start" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   if (args.length === 5 && args[0] === "scan" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   if (args.length === 11 && args[0] === "inspect" && args[1] === "session-summary" &&
@@ -346,6 +453,23 @@ function allowedArgs(args: readonly string[]): boolean {
 	return index === rest.length;
   }
   return false;
+}
+
+function validateProblemCAS(request: ProblemCAS): void { validateProject(request.projectId); if (!Number.isSafeInteger(request.expectedProblemMapRevision) || request.expectedProblemMapRevision < 0) throw new Error("invalid problem map revision"); if (!/^[0-9a-f]{64}$/.test(request.expectedReviewSHA256)) throw new Error("invalid review SHA"); }
+function validateProblemNodeIdentity(problem: ProblemNodeV4): void { if (!ENTITY_ID.test(problem.id) || !Number.isSafeInteger(problem.revision) || problem.revision < 1) throw new Error("invalid problem node"); }
+function validNonnegative(value: string | undefined): boolean { return Boolean(value && /^(?:0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value))); }
+function validPositive(value: string | undefined): boolean { return Boolean(value && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value))); }
+function validProblemSourceRef(value: unknown): boolean { if (typeof value !== "object" || value === null || Array.isArray(value)) return false; const ref = value as Record<string, unknown>; return INSPECT_ID.test(String(ref.provider ?? "")) && INSPECT_ID.test(String(ref.session_id ?? "")) && INSPECT_ID.test(String(ref.turn_unit_id ?? "")) && (ref.session_view_digest === undefined || DIGEST.test(String(ref.session_view_digest))); }
+function validCandidate(value: unknown, projectId: string): value is ProblemCandidate {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const candidate = value as Record<string, unknown>;
+	const stringIDs = (item: unknown, max: number): item is string[] => Array.isArray(item) && item.length <= max && item.every((id) => ENTITY_ID.test(String(id)));
+	const grounds = Array.isArray(candidate.grounds) && candidate.grounds.length <= 256 && candidate.grounds.every((ground) => typeof ground === "object" && ground !== null && !Array.isArray(ground) && INSPECT_ID.test(String((ground as Record<string, unknown>).rule_id ?? "")) && INSPECT_ID.test(String((ground as Record<string, unknown>).rule_version ?? "")) && stringIDs((ground as Record<string, unknown>).matched_fact_refs, 256) && typeof (ground as Record<string, unknown>).explanation === "string");
+	const refs = Array.isArray(candidate.source_turn_refs) && candidate.source_turn_refs.length <= 256 && candidate.source_turn_refs.every(validProblemSourceRef);
+	const dependencies = Array.isArray(candidate.dependency_digests) && candidate.dependency_digests.length <= 256 && candidate.dependency_digests.every((digest) => DIGEST.test(String(digest)));
+	return candidate.project_id === projectId && ENTITY_ID.test(String(candidate.candidate_id ?? "")) && typeof candidate.question === "string" && candidate.question.length > 0 && candidate.question.length <= 4096 && refs &&
+		["child", "sibling", "merge", "keep_pending"].includes(String(candidate.recommended_relation)) && (candidate.recommended_target_id === null || ENTITY_ID.test(String(candidate.recommended_target_id))) && stringIDs(candidate.alternate_target_ids, 2) && stringIDs(candidate.related_node_ids, 2) && grounds &&
+		["high", "medium", "low"].includes(String(candidate.confidence)) && ["pending", "applied", "merged", "kept_pending", "stale", "dismissed"].includes(String(candidate.status)) && dependencies && ["deterministic", "agent_requested"].includes(String(candidate.analysis_mode)) && (candidate.agent_run_id === null || INSPECT_ID.test(String(candidate.agent_run_id))) && Number.isSafeInteger(candidate.revision) && Number(candidate.revision) >= 1 && typeof candidate.created_at === "string" && typeof candidate.updated_at === "string";
 }
 
 function validateSessionSummaryRequest(request: SessionSummaryRequest): void {

@@ -116,6 +116,7 @@ type ProblemRequest struct {
 	CandidateID                string
 	ExpectedCandidateRevision  int
 	ExpectedProblemMapRevision int
+	ExpectedProblemRevision    int
 	ExpectedReviewSHA256       string
 	Action                     string
 	TargetProblemID            string
@@ -123,6 +124,21 @@ type ProblemRequest struct {
 	NewParentID                string
 	ParentID                   string
 	OrderedChildIDs            []string
+	Question                   string
+	CurrentConclusion          string
+	CompletionCriterion        string
+}
+
+type problemCreateInput struct {
+	SchemaVersion int    `json:"schema_version" required:"true"`
+	Question      string `json:"question" required:"true"`
+}
+
+type problemEditInput struct {
+	SchemaVersion       int    `json:"schema_version" required:"true"`
+	Question            string `json:"question" required:"true"`
+	CurrentConclusion   string `json:"current_conclusion" required:"true"`
+	CompletionCriterion string `json:"completion_criterion" required:"true"`
 }
 
 type problemReorderInput struct {
@@ -144,6 +160,7 @@ type DecisionRequest struct {
 }
 
 type PricingRequest struct {
+	DataDir              string
 	Command              string
 	ProjectID            string
 	Provider             string
@@ -307,6 +324,75 @@ func ParseInspectContract(args []string) (InspectRequest, error) {
 	}
 }
 
+func parseProblemMutationBase(command string, args []string, requireNode bool) (ProblemRequest, error) {
+	allowed := map[string]bool{"project-id": true, "problem-id": true, "expected-problem-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true}
+	flags, err := parseContractFlags(args, allowed)
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	required := []string{"project-id", "expected-problem-map-revision", "expected-review-sha256"}
+	if requireNode {
+		required = append(required, "problem-id", "expected-problem-revision")
+	}
+	if err = requireFlags(flags, required...); err != nil {
+		return ProblemRequest{}, err
+	}
+	ids := []string{"project-id"}
+	if requireNode {
+		ids = append(ids, "problem-id")
+	}
+	if err = requireSafeIDs(flags, ids...); err != nil {
+		return ProblemRequest{}, err
+	}
+	if !requireNode && (flags.values["problem-id"] != "" || flags.values["expected-problem-revision"] != "") {
+		return ProblemRequest{}, contractError("problem create cannot name an existing node")
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return ProblemRequest{}, err
+	}
+	mapRevision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	nodeRevision := 0
+	if requireNode {
+		nodeRevision, err = requirePositiveInt(flags.values["expected-problem-revision"])
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+	}
+	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
+		return ProblemRequest{}, err
+	}
+	return ProblemRequest{Command: command, ProjectID: flags.values["project-id"], ProblemID: flags.values["problem-id"], DataDir: flags.values["data-dir"], ExpectedProblemRevision: nodeRevision, ExpectedProblemMapRevision: mapRevision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+}
+
+func parseProblemState(args []string) (ProblemRequest, error) {
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "expected-problem-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "action": true, "data-dir": true, "json": true})
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = requireFlags(flags, "project-id", "problem-id", "expected-problem-revision", "expected-problem-map-revision", "expected-review-sha256", "action"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if flags.values["action"] != "resolve" && flags.values["action"] != "reopen" {
+		return ProblemRequest{}, contractError("problem state action is invalid")
+	}
+	withoutAction := make([]string, 0, len(args)-2)
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--action" {
+			i++
+			continue
+		}
+		withoutAction = append(withoutAction, args[i])
+	}
+	request, err := parseProblemMutationBase("state", withoutAction, true)
+	if err == nil {
+		request.Action = flags.values["action"]
+	}
+	return request, err
+}
+
 func parseConversationChainContract(args []string) (InspectRequest, error) {
 	allowed := map[string]bool{"project-id": true, "provider": true, "session-id": true, "expected-generation-id": true, "session-view-digest": true, "turn-unit-id": true, "cursor": true, "message-cursor": true, "limit": true, "data-dir": true, "json": true}
 	flags, err := parseContractFlags(args, allowed)
@@ -436,6 +522,10 @@ func ParseProblemContract(args []string) (ProblemRequest, error) {
 		return ProblemRequest{}, contractError("problems command is required")
 	}
 	switch args[0] {
+	case "create", "edit":
+		return ProblemRequest{}, contractError("problem create and edit require a versioned stdin payload")
+	case "state":
+		return parseProblemState(args[1:])
 	case "candidates":
 		if len(args) < 2 || args[1] != "list" {
 			return ProblemRequest{}, contractError("unknown problems candidates command")
@@ -582,11 +672,11 @@ func parseProblemPlacement(args []string) (ProblemRequest, error) {
 }
 
 func parseProblemMove(args []string) (ProblemRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "new-parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "new-parent-id": true, "expected-problem-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return ProblemRequest{}, err
 	}
-	if err = requireFlags(flags, "project-id", "problem-id", "new-parent-id", "expected-problem-map-revision", "expected-review-sha256"); err != nil {
+	if err = requireFlags(flags, "project-id", "problem-id", "new-parent-id", "expected-problem-revision", "expected-problem-map-revision", "expected-review-sha256"); err != nil {
 		return ProblemRequest{}, err
 	}
 	if err = requireSafeIDs(flags, "project-id", "problem-id", "new-parent-id"); err != nil {
@@ -602,7 +692,11 @@ func parseProblemMove(args []string) (ProblemRequest, error) {
 	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
 		return ProblemRequest{}, err
 	}
-	return ProblemRequest{Command: "move", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], ProblemID: flags.values["problem-id"], NewParentID: flags.values["new-parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+	nodeRevision, err := requirePositiveInt(flags.values["expected-problem-revision"])
+	if err != nil {
+		return ProblemRequest{}, err
+	}
+	return ProblemRequest{Command: "move", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], ProblemID: flags.values["problem-id"], NewParentID: flags.values["new-parent-id"], ExpectedProblemRevision: nodeRevision, ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
 }
 
 func parseProblemReorder(args []string) (ProblemRequest, error) {
@@ -633,11 +727,31 @@ func parseProblemReorder(args []string) (ProblemRequest, error) {
 // body. The v1 payload is bounded, exact, and carries the complete desired
 // direct-child order; argv never accepts a path or arbitrary input flag.
 func ParseProblemContractWithInput(args []string, input []byte, currentDirectChildIDs []string) (ProblemRequest, error) {
-	if len(args) == 0 || args[0] != "reorder" {
+	if len(args) == 0 || (args[0] != "reorder" && args[0] != "create" && args[0] != "edit") {
 		return ProblemRequest{}, contractError("versioned stdin is only valid for problem reorder")
 	}
 	if len(input) > MaxDecisionInputBytes {
 		return ProblemRequest{}, contractError("problem reorder stdin exceeds its byte limit")
+	}
+	if args[0] == "create" || args[0] == "edit" {
+		request, err := parseProblemMutationBase(args[0], args[1:], args[0] == "edit")
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		if args[0] == "create" {
+			var payload problemCreateInput
+			if strictjson.Decode(input, &payload) != nil || payload.SchemaVersion != 1 || payload.Question == "" || len(payload.Question) > 4096 {
+				return ProblemRequest{}, contractError("problem create stdin is invalid")
+			}
+			request.Question = payload.Question
+			return request, nil
+		}
+		var payload problemEditInput
+		if strictjson.Decode(input, &payload) != nil || payload.SchemaVersion != 1 || payload.Question == "" || len(payload.Question) > 4096 || len(payload.CurrentConclusion) > 16384 || len(payload.CompletionCriterion) > 16384 {
+			return ProblemRequest{}, contractError("problem edit stdin is invalid")
+		}
+		request.Question, request.CurrentConclusion, request.CompletionCriterion = payload.Question, payload.CurrentConclusion, payload.CompletionCriterion
+		return request, nil
 	}
 	request, err := parseProblemReorder(args[1:])
 	if err != nil {
@@ -909,10 +1023,24 @@ func parseCandidateTransitionContract(args []string) (DecisionRequest, error) {
 }
 
 func ParsePricingContract(args []string) (PricingRequest, error) {
+	if len(args) > 0 && args[0] == "refresh" {
+		flags, err := parseContractFlags(args[1:], map[string]bool{"data-dir": true, "json": true})
+		if err != nil {
+			return PricingRequest{}, err
+		}
+		if err := requireFlags(flags); err != nil {
+			return PricingRequest{}, err
+		}
+		if err := validateInspectDataDir(flags.values["data-dir"]); err != nil {
+			return PricingRequest{}, err
+		}
+		return PricingRequest{Command: "refresh", DataDir: flags.values["data-dir"]}, nil
+	}
+
 	if len(args) == 0 || args[0] != "supplement" {
 		return PricingRequest{}, contractError("pricing supplement is required")
 	}
-	flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "provider": true, "session-id": true, "usage-record-digest": true, "expected-ledger-sha256": true, "json": true})
+	flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "provider": true, "session-id": true, "usage-record-digest": true, "expected-ledger-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return PricingRequest{}, err
 	}
@@ -928,7 +1056,10 @@ func ParsePricingContract(args []string) (PricingRequest, error) {
 	if err = requireBareSHA(flags.values["expected-ledger-sha256"]); err != nil {
 		return PricingRequest{}, err
 	}
-	return PricingRequest{Command: "supplement", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], UsageRecordDigest: flags.values["usage-record-digest"], ExpectedLedgerSHA256: flags.values["expected-ledger-sha256"]}, nil
+	if err := validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return PricingRequest{}, err
+	}
+	return PricingRequest{DataDir: flags.values["data-dir"], Command: "supplement", ProjectID: flags.values["project-id"], Provider: flags.values["provider"], SessionID: flags.values["session-id"], UsageRecordDigest: flags.values["usage-record-digest"], ExpectedLedgerSHA256: flags.values["expected-ledger-sha256"]}, nil
 }
 
 func ParseSyncMigrationContract(args []string) (SyncMigrationRequest, error) {

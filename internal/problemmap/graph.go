@@ -10,6 +10,8 @@ import (
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 )
 
+var ErrProblemRevisionConflict = errors.New("problem revision conflict")
+
 type ApplyAction string
 
 const (
@@ -93,12 +95,15 @@ func ApplyCandidate(graph Graph, candidate Candidate, action ApplyAction, target
 	return next, nil
 }
 
-func Move(graph Graph, problemID, newParentID string) (Graph, error) {
+func Move(graph Graph, problemID, newParentID string, expectedRevision ...int) (Graph, error) {
 	if _, err := PreviewMove(graph.Nodes, problemID, newParentID); err != nil {
 		return Graph{}, err
 	}
 	next := cloneGraph(graph)
 	node := next.Node(problemID)
+	if len(expectedRevision) > 0 && node.Revision != expectedRevision[0] {
+		return Graph{}, ErrProblemRevisionConflict
+	}
 	oldParent := cloneString(node.PrimaryParentID)
 	if newParentID == "root" {
 		node.PrimaryParentID = nil
@@ -153,7 +158,34 @@ func Reorder(graph Graph, parentID string, ordered []string) (Graph, error) {
 	return next, nil
 }
 
-func SetWorkflowState(graph Graph, problemID, state string) (Graph, error) {
+type HumanFields struct {
+	Question, CurrentConclusion, CompletionCriterion string
+}
+
+func EditHumanFields(graph Graph, problemID string, expectedRevision int, fields HumanFields) (Graph, error) {
+	next := cloneGraph(graph)
+	node := next.Node(problemID)
+	if node == nil {
+		return Graph{}, errors.New("problem does not exist")
+	}
+	if node.Revision != expectedRevision {
+		return Graph{}, ErrProblemRevisionConflict
+	}
+	if fields.Question == "" {
+		return Graph{}, errors.New("problem question is required")
+	}
+	node.Question = fields.Question
+	node.CurrentConclusion = fields.CurrentConclusion
+	node.CompletionCriterion = fields.CompletionCriterion
+	node.Revision++
+	next.Revision++
+	if err := ValidateGraph(next.Nodes); err != nil {
+		return Graph{}, err
+	}
+	return next, nil
+}
+
+func SetWorkflowState(graph Graph, problemID string, expectedRevision int, state string) (Graph, error) {
 	if state != "resolved" && state != "in_progress" {
 		return Graph{}, errors.New("workflow operation must resolve or reopen")
 	}
@@ -161,6 +193,9 @@ func SetWorkflowState(graph Graph, problemID, state string) (Graph, error) {
 	node := next.Node(problemID)
 	if node == nil {
 		return Graph{}, errors.New("problem does not exist")
+	}
+	if node.Revision != expectedRevision {
+		return Graph{}, ErrProblemRevisionConflict
 	}
 	if node.WorkflowState == state {
 		return Graph{}, errors.New("problem is already in requested state")

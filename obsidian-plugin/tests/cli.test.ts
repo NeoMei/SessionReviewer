@@ -354,6 +354,44 @@ describe("CLI runner", () => {
 	);
   });
 
+  it("uses fixed problem argv and bounded stdin with strict readback identity", async () => {
+	let stdin = "";
+	const response = { schema_version: 1, project_id: "project-0123456789abcdef", problem_map_revision: 0, review_sha256: "1".repeat(64), problems: [], candidates: [] };
+	const execFile = vi.fn((_file: string, args: readonly string[], options: { shell: boolean }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+		if (args[1] !== "create") { queueMicrotask(() => callback(null, JSON.stringify(response), "")); return { stdin: { end: () => undefined } }; }
+		const child = { stdin: { end: (value: string) => { stdin = value; queueMicrotask(() => callback(null, JSON.stringify(response), "")); } } };
+		expect(options.shell).toBe(false);
+		return child;
+	});
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+	await expect(runner.createProblem({ projectId: response.project_id, expectedProblemMapRevision: 0, expectedReviewSHA256: response.review_sha256, question: "保留原文？" })).resolves.toMatchObject({ project_id: response.project_id });
+	expect(JSON.parse(stdin)).toEqual({ schema_version: 1, question: "保留原文？" });
+	expect(execFile.mock.calls[0][1]).toEqual(["problems", "create", "--project-id", response.project_id, "--expected-problem-map-revision", "0", "--expected-review-sha256", response.review_sha256, "--json"]);
+	await expect(runner.createProblem({ projectId: response.project_id, expectedProblemMapRevision: 0, expectedReviewSHA256: response.review_sha256, question: "x".repeat(65_537) })).rejects.toThrow("too large");
+	response.project_id = "project-foreign";
+	await expect(runner.listProblemCandidates("project-0123456789abcdef")).rejects.toThrow("binding mismatch");
+  });
+
+  it("uses revision-bound argv for edit, move, and complete reorder", async () => {
+	let stdin = "";
+	const response = { schema_version: 1, project_id: "project-0123456789abcdef", problem_map_revision: 3, review_sha256: "2".repeat(64), problems: [] };
+	const execFile = vi.fn((_file: string, _args: readonly string[], options: { shell: boolean }, callback: (error: Error | null, stdout: string, stderr: string) => void) => {
+		const child = { stdin: { end: (value: string) => { stdin = value; queueMicrotask(() => callback(null, JSON.stringify(response), "")); } } };
+		if (_args[1] === "move") queueMicrotask(() => callback(null, JSON.stringify(response), ""));
+		expect(options.shell).toBe(false); return child;
+	});
+	const runner = new CliRunner("/usr/local/bin/session-reviewer", execFile as never);
+	const problem = { id: "problem:alpha", revision: 4 } as never;
+	const cas = { projectId: response.project_id, expectedProblemMapRevision: 2, expectedReviewSHA256: "1".repeat(64) };
+	await runner.editProblem({ ...cas, problem, question: "用户原文？", currentConclusion: "结论", completionCriterion: "完成" });
+	expect(JSON.parse(stdin)).toEqual({ schema_version: 1, question: "用户原文？", current_conclusion: "结论", completion_criterion: "完成" });
+	expect(execFile.mock.calls[0][1]).toContain("--expected-problem-revision");
+	await runner.moveProblem({ ...cas, problem, newParentId: "root" });
+	expect(execFile.mock.calls[1][1]).toEqual(expect.arrayContaining(["--new-parent-id", "root", "--expected-problem-revision", "4"]));
+	await runner.reorderProblemChildren({ ...cas, parentId: "root", orderedChildIds: ["problem:b", "problem:a"] });
+	expect(JSON.parse(stdin)).toEqual({ schema_version: 1, ordered_child_ids: ["problem:b", "problem:a"] });
+  });
+
   it("retains the bounded worker error for a failed scan", async () => {
 	const execFile = vi.fn((_file: string, _args: readonly string[], _options: unknown, callback: (error: Error | null, stdout: string, stderr: string) => void) => callback(null, JSON.stringify({
 		schema_version: 1,
