@@ -979,6 +979,26 @@ describe("pricing and optional-field semantics", () => {
     expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/aggregate|incomplete|null|current/i);
   });
 
+  it("separates two model prices within the same authenticated usage record", async () => {
+    const ledger = await fixtureObject("machine-ledger-v4.valid.json") as {
+      pricing_snapshots: JsonObject[]; current_pricing_snapshot_ids: string[];
+    };
+    const first = ledger.pricing_snapshots[0];
+    const second = clone(first);
+    second.snapshot_id = "snapshot-model-two";
+    second.billed_model_id = "model-two";
+    ledger.pricing_snapshots.push(second);
+    ledger.current_pricing_snapshot_ids.push("snapshot-model-two");
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).not.toThrow();
+    second.billed_model_id = first.billed_model_id;
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/pricing|snapshot|current/i);
+    second.billed_model_id = "model-two";
+    first.status = "superseded";
+    second.supersedes_snapshot_id = first.snapshot_id;
+    ledger.current_pricing_snapshot_ids = ["snapshot-model-two"];
+    expect(() => parseMachineLedgerV4(JSON.stringify(ledger))).toThrow(/identity/i);
+  });
+
   it("enforces a single identity-bound current leaf in each pricing history", async () => {
     const ledger = await fixtureObject("machine-ledger-v4.valid.json") as {
       pricing_snapshots: JsonObject[];

@@ -276,7 +276,7 @@ function parseMachineLedgerDocument(source: string): MachineLedgerV4 {
   }
   const currentIDs = idArray(row.current_pricing_snapshot_ids, "$.current_pricing_snapshot_ids", 65536);
   const pricingIdentity = (snapshot: PricingSnapshotV1): string =>
-    identityKey(snapshot.provider, `${snapshot.session_id}\u0000${snapshot.usage_record_digest}`);
+    JSON.stringify([snapshot.provider, snapshot.session_id, snapshot.usage_record_digest, snapshot.billed_model_id]);
   const successorCounts = new Map<string, number>();
   for (const [snapshotID, snapshot] of pricingByID) {
     const predecessorID = snapshot.supersedes_snapshot_id;

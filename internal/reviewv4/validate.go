@@ -664,7 +664,7 @@ func validateDocumentProjection(l MachineLedger) error {
 }
 
 func pricingIdentity(snapshot pricing.Snapshot) string {
-	return snapshot.Provider + "\x00" + snapshot.SessionID + "\x00" + snapshot.UsageRecordDigest
+	return snapshot.Provider + "\x00" + snapshot.SessionID + "\x00" + snapshot.UsageRecordDigest + "\x00" + snapshot.BilledModelID
 }
 
 func validatePricingSupersessionGraph(byID map[string]pricing.Snapshot) (map[string]int, error) {
