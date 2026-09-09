@@ -311,7 +311,7 @@ export class ProjectEvolutionView extends ItemView {
       if (this.cliDiagnostic && this.cliDiagnostic.code !== "cli_unavailable") browser.prepend(renderStatusBanner(this.cliDiagnostic));
       const refresh = element("button", { text: "刷新同步状态", attrs: { type: "button", "data-action": "refresh-v4-status" } });
       refresh.addEventListener("click", () => { void this.refresh(this.projects); });
-      browser.append(refresh);
+      (browser.querySelector(".sr-v4-actions") ?? browser).append(refresh);
       this.contentEl.append(browser);
       return;
     }

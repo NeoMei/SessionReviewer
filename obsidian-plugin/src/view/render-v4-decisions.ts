@@ -11,18 +11,19 @@ import { presentDateTime } from "./presentation";
 
 export function renderV4Decisions(presentation: ReviewPresentationV4, openReview: () => void, actions: { save?: DecisionSave; candidates?: AgentAnnotationEntryV1[]; evidence?: DecisionCandidateEvidence[]; loadConversation?: ConversationLoader; transition?: DecisionTransition; extraction?: DecisionExtractionActions; extracted?:()=>void } = {}): HTMLElement & {dispose:()=>void} {
   const section = element("section", { className: "sr-v4-decisions", attrs: { "data-v4-panel": "decisions", role: "tabpanel" } }) as HTMLElement & {dispose:()=>void};
-  const editor = element("div");
+  const editor = element("div", { className: "sr-decision-editor" });
   const edit = (prior?: ReviewPresentationV4["decisions"][number]): void => {
     if (!actions.save || editor.childElementCount) return;
     editor.append(decisionForm(presentation.decisions, actions.save, () => editor.replaceChildren(), prior));
     editor.querySelector<HTMLInputElement>('[name="title"]')?.focus();
   };
-  const toolbar = element("div", { className: "sr-v4-filter" });
+  const toolbar = element("div", { className: "sr-decision-toolbar" });
+  const filters = element("div", { className: "sr-v4-filter", attrs: { "aria-label": "决策状态" } });
   const active = button("生效中", { "aria-pressed": "true" });
   const historic = button("已替代 / 已归档", { "aria-pressed": "false" });
-  toolbar.append(active, historic);
-  if (actions.save) { const create = button("新建决策或约定", {"data-action":"create-decision"}); create.addEventListener("click", () => edit()); toolbar.append(create); }
-  const cards = element("div", { className: "sr-card-grid" });
+  filters.append(active, historic); toolbar.append(filters);
+  if (actions.save) { const create = button("新建决策或约定", {"data-action":"create-decision"}); create.className = "sr-decision-primary"; create.addEventListener("click", () => edit()); toolbar.append(create); }
+  const cards = element("div", { className: "sr-card-grid sr-decision-records" });
   const draw = (statuses: DecisionStatus[]): void => {
     cards.replaceChildren();
     const values = presentation.decisions.filter((decision) => statuses.includes(decision.status));
@@ -33,14 +34,14 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
       return;
     }
     for (const decision of values) {
-      const card = element("article", { className: "sr-card" }, [
+      const card = element("article", { className: "sr-card sr-decision-record" }, [
         element("span", { className: "sr-card-meta", text: `${decision.kind === "agreement" ? "约定" : "决策"} · ${presentDateTime(decision.occurred_at)}` }),
         element("h3", { text: decision.title }),
         field("理由", decision.rationale), field("影响范围", decision.impact), field("重新评估条件", decision.reevaluate_when)
       ]);
       const statuses: Record<DecisionStatus, string> = { active: "生效中", superseded: "已替代", archived: "已归档", legacy_unmapped: "旧状态待核对" };
       const sources = { human_created: "人工创建", migrated: "旧版迁移", ai_candidate_confirmed: "AI 候选经人工确认" };
-      card.append(element("p", { text: `状态：${statuses[decision.status]} · 来源：${sources[decision.provenance]}` }));
+      card.append(element("p", { className: "sr-decision-meta", text: `状态：${statuses[decision.status]} · 来源：${sources[decision.provenance]}` }));
       const titles = new Map(presentation.decisions.map(value => [value.id, value.title]));
       if (decision.supersedes.length) card.append(element("p", { text: `替代：${decision.supersedes.map(id => titles.get(id) ?? id).join("；")}` }));
       const successors = presentation.decisions.filter(value => value.supersedes.includes(decision.id));
@@ -55,7 +56,7 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
         card.append(element("p", { text: `关联里程碑：${decision.milestone_ids.map(id => milestones.get(id) ?? id).join("；")}` }));
       }
       if (actions.save && (decision.status === "active" || decision.status === "archived")) {
-        const control = button("编辑", {"data-action":"edit-decision"}); control.addEventListener("click", () => edit(decision)); card.append(control);
+        const control = button("编辑", {"data-action":"edit-decision"}); control.className = "sr-decision-secondary"; control.addEventListener("click", () => edit(decision)); card.append(control);
       }
       cards.append(card);
     }
@@ -64,13 +65,14 @@ export function renderV4Decisions(presentation: ReviewPresentationV4, openReview
   historic.addEventListener("click", () => { active.setAttribute("aria-pressed", "false"); historic.setAttribute("aria-pressed", "true"); draw(["superseded", "archived", "legacy_unmapped"]); });
   const native = button("在原生 Markdown 中新增或编辑", { "data-v4-open": "review" });
   native.addEventListener("click", openReview);
-  section.append(toolbar, editor, cards);
+  section.append(element("header", { className: "sr-decision-page-heading" }, [element("h2", { text: "决策与约定" }), element("p", { text: "保留已达成的结论，并在这里审阅新的建议。" })]), toolbar, editor, cards);
   const candidates = actions.candidates ? renderDecisionCandidates(actions.candidates, presentation.decisions, actions.transition, { projectId: presentation.project_id, generationId: presentation.generation_id, evidence: actions.evidence ?? [], loadConversation: actions.loadConversation }) : undefined;
   if (candidates) section.append(candidates);
   const extraction=actions.extraction ? renderDecisionExtraction(actions.extraction, actions.extracted ?? (()=>{})) : undefined;
   if(extraction)section.append(extraction);
   section.dispose=()=>{extraction?.dispose();candidates?.dispose();section.replaceChildren();};
-  section.append(native);
+  native.className = "sr-decision-quiet";
+  section.append(element("footer", { className: "sr-decision-page-footer" }, [native]));
   draw(["active"]);
   return section;
 }

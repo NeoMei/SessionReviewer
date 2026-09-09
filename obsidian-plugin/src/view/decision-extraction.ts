@@ -3,11 +3,12 @@ import { button, element } from "./dom";
 export type DecisionExtractionElement = HTMLElement & { dispose: () => void };
 
 export function renderDecisionExtraction(actions: DecisionExtractionActions, completed: () => void): DecisionExtractionElement {
-  const root = element("section", { attrs: { "aria-label": "提取决策建议" } }) as DecisionExtractionElement;
+  const root = element("section", { className: "sr-decision-extraction", attrs: { "aria-label": "提取决策建议" } }) as DecisionExtractionElement;
   const start = button("提取决策建议（调用 Agent）", { "data-action": "prepare-extraction" });
-  const status = element("p", { attrs: { role: "status" } });
-  const controls = element("div");
-  root.append(start, status, controls);
+  start.className = "sr-decision-secondary";
+  const status = element("p", { className: "sr-decision-extraction-status", attrs: { role: "status" } });
+  const controls = element("div", { className: "sr-decision-actions" });
+  root.append(element("div", { className: "sr-decision-extraction-heading" }, [element("div", {}, [element("h3", { text: "从会话中提取建议" }), element("p", { text: "手动触发 · 使用已配置的 Agent · 结果需逐条确认" })]), start]), status, controls);
   let disposed = false;
   let timer: number | undefined;
   let job: DecisionExtractionJob | undefined = actions.initialJob;
@@ -80,12 +81,12 @@ export function renderDecisionExtraction(actions: DecisionExtractionActions, com
     controls.append(confirm);
   });
   if (actions.configuration) {
-    const configuration = element("details");
+    const configuration = element("details", { className: "sr-decision-configuration" });
     configuration.append(element("summary", { text: "Agent 配置" }));
     const input = element("input", { attrs: { name: "agent-executable", "aria-label": "Codex 可执行文件绝对路径", placeholder: "Codex 可执行文件绝对路径" } });
     const save = button("验证并保存 Agent", { "data-action": "configure-agent" });
     const info = element("p", { attrs: { role: "status" }, text: "正在读取 Agent 配置…" });
-    configuration.append(input, save, info); root.prepend(configuration);
+    configuration.append(input, save, info); root.append(configuration);
     let configurationEpoch = 0;
     const configure = async (executable?: string) => {
       const epoch = ++configurationEpoch;

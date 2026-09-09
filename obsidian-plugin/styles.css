@@ -340,3 +340,75 @@
 @media (max-width: 860px) {
   .sr-review-banner strong { font-size: 12px; }
 }
+
+/* Decision workspace: compact reading, explicit primary actions, quiet provenance. */
+.sr-v4-decisions { display: grid; gap: 22px; padding: 24px; }
+.sr-decision-page-heading h2 { font-size: 20px; line-height: 1.4; margin: 0 0 5px; }
+.sr-decision-page-heading p, .sr-decision-description { color: var(--sr-muted); font-size: 12px; line-height: 1.6; margin: 0; }
+.sr-decision-toolbar, .sr-decision-section-heading, .sr-decision-candidate-heading, .sr-decision-candidate-footer, .sr-decision-extraction-heading { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; }
+.sr-decision-toolbar .sr-v4-filter { background: var(--background-secondary); border-radius: 8px; gap: 3px; margin: 0; padding: 3px; }
+.sr-decision-toolbar .sr-v4-filter button { background: transparent; border: 0; box-shadow: none; color: var(--sr-muted); font-size: 12px; height: auto; margin: 0; padding: 6px 10px; }
+.sr-decision-toolbar .sr-v4-filter button[aria-pressed="true"] { background: var(--background-primary); box-shadow: 0 1px 3px var(--background-modifier-border); color: var(--text-normal); }
+.sr-v4-decisions button { font-size: 12px; height: auto; line-height: 1.5; max-width: 100%; overflow-wrap: anywhere; padding: 7px 11px; white-space: normal; }
+.sr-v4-decisions button.sr-decision-primary { background: var(--interactive-accent); border: 1px solid var(--interactive-accent); box-shadow: none; color: var(--text-on-accent); font-weight: 600; }
+.sr-v4-decisions button.sr-decision-primary:hover:not(:disabled) { background: var(--interactive-accent-hover); }
+.sr-v4-decisions button.sr-decision-secondary { background: var(--background-primary); border: 1px solid var(--sr-border); box-shadow: none; color: var(--text-normal); }
+.sr-v4-decisions button.sr-decision-quiet, .sr-v4-decisions button.sr-decision-source { background: transparent; border: 1px solid transparent; box-shadow: none; color: var(--sr-muted); }
+.sr-v4-decisions button.sr-decision-source { color: var(--text-accent); padding-left: 0; text-align: left; }
+.sr-v4-decisions button.sr-decision-quiet:hover:not(:disabled), .sr-v4-decisions button.sr-decision-source:hover:not(:disabled) { background: var(--background-modifier-hover); color: var(--text-normal); }
+.sr-v4-decisions button:focus-visible, .sr-v4-decisions summary:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 3px; }
+.sr-decision-records { gap: 12px; grid-template-columns: minmax(0, 1fr); }
+.sr-v4-decisions .sr-card { background: var(--background-primary); border-radius: 10px; padding: 16px 18px; }
+.sr-v4-decisions .sr-card h3 { font-size: 15px; line-height: 1.5; margin: 5px 0 12px; }
+.sr-v4-decisions .sr-card button { margin-top: 0; }
+.sr-decision-record .sr-definition { font-size: 12px; gap: 12px; grid-template-columns: 100px minmax(0, 1fr); padding: 9px 0; }
+.sr-decision-record .sr-definition > strong { color: var(--sr-muted); font-size: 11px; font-weight: 500; }
+.sr-decision-record .sr-definition > p { line-height: 1.6; margin: 0; overflow-wrap: anywhere; }
+.sr-decision-record .sr-decision-meta, .sr-decision-record > p, .sr-decision-record details { color: var(--sr-muted); font-size: 11px; line-height: 1.6; margin: 8px 0; overflow-wrap: anywhere; }
+.sr-decision-candidates { border-top: 1px solid var(--sr-border); display: grid; gap: 12px; padding-top: 20px; }
+.sr-decision-section-heading { justify-content: flex-start; }
+.sr-decision-section-heading h3, .sr-decision-extraction h3 { font-size: 14px; line-height: 1.5; margin: 0; }
+.sr-decision-count { background: var(--background-secondary); border-radius: 5px; color: var(--sr-muted); font-size: 11px; padding: 1px 6px; }
+.sr-decision-candidate-heading { align-items: flex-start; flex-wrap: nowrap; }
+.sr-decision-candidate-heading h4 { font-size: 14px; line-height: 1.5; margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.sr-decision-badge { background: var(--background-secondary); border-radius: 5px; color: var(--sr-muted); flex-shrink: 0; font-size: 10px; line-height: 1.6; padding: 2px 7px; }
+.sr-decision-badge[data-status="pending"] { background: color-mix(in srgb, var(--color-orange) 12%, var(--background-primary)); color: var(--text-normal); }
+.sr-decision-badge[data-status="confirmed"] { background: color-mix(in srgb, var(--color-green) 12%, var(--background-primary)); color: var(--text-normal); }
+.sr-decision-rationale { color: var(--sr-muted); font-size: 12px; line-height: 1.65; margin: 8px 0 14px; overflow-wrap: anywhere; }
+.sr-decision-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; }
+.sr-decision-candidate-footer { align-items: flex-end; }
+.sr-decision-evidence { flex: 1 1 190px; min-width: 0; }
+.sr-decision-evidence > p { color: var(--sr-muted); font-size: 11px; line-height: 1.6; margin: 0; }
+.sr-decision-evidence-body:not(:empty) { background: var(--background-secondary); border-left: 2px solid var(--interactive-accent); border-radius: 0 6px 6px 0; font-size: 12px; line-height: 1.65; margin: 8px 0; max-height: 240px; overflow: auto; overflow-wrap: anywhere; padding: 10px 12px; white-space: pre-wrap; }
+.sr-decision-history { color: var(--sr-muted); font-size: 12px; }
+.sr-decision-history > summary { cursor: pointer; padding: 6px 0; }
+.sr-decision-history .sr-card { color: var(--text-normal); margin-top: 10px; }
+.sr-decision-extraction { background: var(--background-secondary); border: 1px solid var(--sr-border); border-radius: 10px; display: grid; gap: 10px; padding: 14px 16px; }
+.sr-decision-extraction-heading p, .sr-decision-extraction-status { color: var(--sr-muted); font-size: 11px; line-height: 1.6; margin: 3px 0 0; overflow-wrap: anywhere; }
+.sr-decision-configuration { border-top: 1px solid var(--sr-border); color: var(--sr-muted); font-size: 11px; padding-top: 8px; }
+.sr-decision-configuration > summary { cursor: pointer; }
+.sr-decision-configuration input { font-size: 12px; margin: 10px 8px 0 0; max-width: 100%; width: min(100%, 440px); }
+.sr-decision-page-footer { border-top: 1px solid var(--sr-border); padding-top: 12px; }
+.sr-decision-page-footer button { padding-left: 0; }
+.sr-decision-editor:empty, .sr-decision-feedback:empty, .sr-decision-extraction-status:empty, .sr-decision-extraction > .sr-decision-actions:empty { display: none; }
+.sr-decision-form { background: var(--background-secondary); border: 1px solid var(--sr-border); border-radius: 10px; display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 14px; padding: 18px; }
+.sr-decision-form > label { color: var(--sr-muted); display: grid; font-size: 11px; gap: 6px; min-width: 0; }
+.sr-decision-form input:not([type="checkbox"]), .sr-decision-form textarea, .sr-decision-form select { color: var(--text-normal); font-size: 13px; max-width: 100%; width: 100%; }
+.sr-decision-form textarea { min-height: 72px; resize: vertical; }
+.sr-decision-form .sr-decision-field-wide, .sr-decision-form > fieldset, .sr-decision-form > .sr-decision-actions, .sr-decision-form > .sr-decision-feedback { grid-column: 1 / -1; }
+.sr-decision-form > fieldset { border: 1px solid var(--sr-border); border-radius: 6px; font-size: 12px; min-width: 0; }
+.sr-decision-form > fieldset label { align-items: center; display: flex; gap: 6px; padding: 3px 0; }
+.sr-decision-feedback:not(:empty) { color: var(--sr-muted); font-size: 12px; line-height: 1.6; margin: 10px 0 0; }
+@container sr-v4-pane (max-width: 580px) {
+  .sr-v4-decisions { gap: 18px; padding: 16px; }
+  .sr-decision-toolbar { align-items: stretch; }
+  .sr-v4-decisions .sr-card { padding: 14px; }
+  .sr-decision-candidate-footer { align-items: flex-start; flex-direction: column; }
+  .sr-decision-evidence { flex-basis: auto; width: 100%; }
+  .sr-decision-form { grid-template-columns: minmax(0, 1fr); padding: 14px; }
+  .sr-decision-record .sr-definition { gap: 4px; grid-template-columns: minmax(0, 1fr); }
+  .sr-decision-extraction-heading { align-items: flex-start; flex-direction: column; }
+}
+.sr-v4-readonly > .sr-v4-actions { align-items: center; border-top: 1px solid var(--sr-border); margin-top: 16px; padding-top: 10px; }
+.sr-v4-readonly > .sr-v4-actions button { background: transparent; border: 0; box-shadow: none; color: var(--sr-muted); font-size: 11px; height: auto; line-height: 1.5; margin: 0; padding: 5px 8px; white-space: normal; }
+.sr-v4-readonly > .sr-v4-actions button:hover { background: var(--background-modifier-hover); color: var(--text-normal); }

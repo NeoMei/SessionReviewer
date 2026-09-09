@@ -4,7 +4,7 @@ import { validateConversationPage } from "../data/conversation-page-validation";
 import { button, element } from "./dom";
 export type DecisionEvidenceElement = HTMLElement & { dispose: () => void };
 export function renderDecisionEvidence(projectId: string, generationId: string, evidence: DecisionCandidateEvidence | undefined, load: ConversationLoader | undefined): DecisionEvidenceElement {
-  const root = element("section", { attrs: { "aria-label": "支持候选的事实" } }) as DecisionEvidenceElement;
+  const root = element("section", { className: "sr-decision-evidence", attrs: { "aria-label": "支持候选的事实" } }) as DecisionEvidenceElement;
   let disposed = false;
   root.dispose = () => { disposed = true; root.replaceChildren(); };
   if (!evidence || evidence.error_code || !evidence.evidence_refs.length) {
@@ -13,8 +13,9 @@ export function renderDecisionEvidence(projectId: string, generationId: string, 
   }
   for (const [index, ref] of evidence.evidence_refs.entries()) {
     const card = element("div");
-    const control = button(`查看支持事实 ${index + 1} · ${ref.provider} / ${ref.session_id}`, { "data-action": "read-decision-evidence" });
-    const body = element("div", { attrs: { role: "status" } });
+    const control = button(`查看依据 ${index + 1} · ${ref.provider}`, { "data-action": "read-decision-evidence", title: `${ref.provider} / ${ref.session_id}`, "aria-label": `查看依据 ${index + 1} · ${ref.provider} / ${ref.session_id}` });
+    control.className = "sr-decision-source";
+    const body = element("div", { className: "sr-decision-evidence-body", attrs: { role: "status" } });
     control.disabled = !load;
     if (!load) body.textContent = "CLI 不可用，暂不能读取证据。";
     control.addEventListener("click", () => {

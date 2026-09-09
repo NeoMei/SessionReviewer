@@ -4,10 +4,10 @@ export type DecisionInput = Pick<DecisionV4, "kind" | "occurred_at" | "title" | 
 export type DecisionSave = (input: DecisionInput, prior?: Pick<DecisionV4, "id" | "revision">) => Promise<unknown>;
 
 export function decisionForm(decisions: DecisionV4[], save: DecisionSave, close: () => void, prior?: DecisionV4): HTMLFormElement {
- const form=element("form",{attrs:{"aria-label":prior ? "编辑决策与约定" : "新建决策与约定"}});
+ const form=element("form",{className:"sr-decision-form",attrs:{"aria-label":prior ? "编辑决策与约定" : "新建决策与约定"}});
  const fields=new Map<string,HTMLInputElement|HTMLTextAreaElement>();
  const field=(key:string,label:string,value:string,multiline=false,required=false)=>{
-  const input=multiline?element("textarea"):element("input");input.name=key;input.value=value;input.required=required;input.setAttribute("aria-label",label);fields.set(key,input);form.append(element("label",{text:label},[input]));
+  const input=multiline?element("textarea"):element("input");input.name=key;input.value=value;input.required=required;input.setAttribute("aria-label",label);fields.set(key,input);form.append(element("label",{className:multiline||key==="title"?"sr-decision-field-wide":"",text:label},[input]));
  };
  const select=(label:string,entries:string[][],value:string)=>{const input=element("select",{attrs:{"aria-label":label}});for(const [key,text] of entries) input.append(element("option",{text,attrs:{value:key}}));input.value=value;form.append(element("label",{text:label},[input]));return input;};
  const kind=select("类型",[["decision","决策"],["agreement","约定"]],prior?.kind??"decision");
@@ -22,7 +22,7 @@ export function decisionForm(decisions: DecisionV4[], save: DecisionSave, close:
  const supersedes=new Map<string,HTMLInputElement>();
  for(const d of decisions.filter(d=>d.id!==prior?.id)){const input=element("input",{attrs:{type:"checkbox","aria-label":`替代：${d.title}`}});input.checked=prior?.supersedes.includes(d.id)??false;supersedes.set(d.id,input);replacements.append(element("label",{text:d.title},[input]));}
  if(supersedes.size)form.append(replacements);
- const feedback=element("p",{attrs:{role:"status"}});const submit=button("确认并保存",{type:"submit"});const cancel=button("取消",{});cancel.addEventListener("click",close);form.append(submit,cancel,feedback);
+ const feedback=element("p",{attrs:{role:"status"}});const submit=button("确认并保存",{type:"submit"});const cancel=button("取消",{});cancel.addEventListener("click",close);submit.className="sr-decision-primary";cancel.className="sr-decision-secondary";feedback.className="sr-decision-feedback";form.append(element("div",{className:"sr-decision-actions"},[submit,cancel]),feedback);
  form.addEventListener("submit",event=>{event.preventDefault();if(submit.disabled||!form.reportValidity())return;
   const value=(key:string)=>fields.get(key)!.value.trim();
   if(!Number.isFinite(Date.parse(value("occurred_at")))||!/(Z|[+-]\d{2}:\d{2})$/.test(value("occurred_at"))){feedback.textContent="请填写包含时区的有效时间。";return;}
