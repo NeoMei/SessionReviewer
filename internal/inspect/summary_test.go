@@ -15,6 +15,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 )
 
 func TestLoadSessionSummaryUsesPublishedIdentity(t *testing.T) {
@@ -287,6 +288,7 @@ func TestSessionSummaryReducerKeepsFailuresUnresolvedUntilExactRecovery(t *testi
 	explicitRequestFailure := summaryTestRevision(t, 4, "request", "failed", "requested check failed", nil)
 	recovery := summaryTestRevision(t, 5, "verification", "passed", "tests passed", map[string]string{"component": "runtime", "status": "test"})
 	input := summaryTestInput([]memory.ObservationRevision{bare, recoveredFailure, unresolvedFailure, explicitRequestFailure, recovery})
+	input.view.MaterializerVersion = sessionview.MaterializerVersion + "-visible-turn-v3"
 	recoveryID, _ := summaryRecoveryRecordIdentity(recoveredFailure.RevisionID, recovery.RevisionID, summaryRecoveryIdentity(recoveredFailure))
 	input.view.DerivedRecords = []memory.DerivedRecord{{
 		ID: recoveryID, Kind: "recovery_link", Subject: "test:runtime", OccurredAt: recovery.Timestamp,

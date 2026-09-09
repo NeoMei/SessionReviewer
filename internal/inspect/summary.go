@@ -8,6 +8,7 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
+	"github.com/neomei/SessionReviewer/internal/sessionview"
 )
 
 const summaryItemLimit = 32
@@ -155,7 +156,7 @@ func validatedRecoveredFailures(view memory.SessionView, revisions []memory.Obse
 	}
 	result := make(map[string]struct{})
 	for _, record := range view.DerivedRecords {
-		if record.Kind != "recovery_link" || record.RuleID != "matching-operation-component" || record.RuleVersion != view.MaterializerVersion || len(record.DependencyRevisionIDs) != 2 || record.DependencyRevisionIDs[0] == record.DependencyRevisionIDs[1] {
+		if record.Kind != "recovery_link" || record.RuleID != "matching-operation-component" || record.RuleVersion != sessionview.MaterializerVersion || len(record.DependencyRevisionIDs) != 2 || record.DependencyRevisionIDs[0] == record.DependencyRevisionIDs[1] {
 			continue
 		}
 		failure, failureFound := byID[record.DependencyRevisionIDs[0]]
