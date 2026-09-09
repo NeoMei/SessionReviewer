@@ -622,7 +622,7 @@ func parseProblemPlacement(args []string) (ProblemRequest, error) {
 	}
 	switch args[0] {
 	case "request":
-		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-generation-id": true, "json": true})
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-generation-id": true, "data-dir": true, "json": true})
 		if err != nil {
 			return ProblemRequest{}, err
 		}
@@ -630,6 +630,9 @@ func parseProblemPlacement(args []string) (ProblemRequest, error) {
 			return ProblemRequest{}, err
 		}
 		if err = requireSafeIDs(flags, "project-id", "candidate-id", "expected-generation-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 			return ProblemRequest{}, err
 		}
 		candidateRevision, err := requirePositiveInt(flags.values["expected-candidate-revision"])
@@ -640,21 +643,32 @@ func parseProblemPlacement(args []string) (ProblemRequest, error) {
 		if err != nil {
 			return ProblemRequest{}, err
 		}
-		return ProblemRequest{Command: "placement", Subcommand: "request", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
+		return ProblemRequest{Command: "placement", Subcommand: "request", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
 	case "status":
-		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "json": true})
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "candidate-id": true, "data-dir": true, "json": true})
 		if err != nil {
 			return ProblemRequest{}, err
 		}
-		if err = requireFlags(flags, "project-id", "job-id"); err != nil {
+		if err = requireFlags(flags, "project-id"); err != nil {
 			return ProblemRequest{}, err
 		}
-		if err = requireSafeIDs(flags, "project-id", "job-id"); err != nil {
+		if (flags.values["job-id"] == "") == (flags.values["candidate-id"] == "") {
+			return ProblemRequest{}, contractError("placement status requires exactly one job-id or candidate-id")
+		}
+		if err = requireSafeIDs(flags, "project-id"); err != nil {
 			return ProblemRequest{}, err
 		}
-		return ProblemRequest{Command: "placement", Subcommand: "status", ProjectID: flags.values["project-id"], JobID: flags.values["job-id"]}, nil
+		for _, name := range []string{"job-id", "candidate-id"} {
+			if flags.values[name] != "" && !safeContractID(flags.values[name]) {
+				return ProblemRequest{}, contractError("ID is empty or invalid")
+			}
+		}
+		if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+			return ProblemRequest{}, err
+		}
+		return ProblemRequest{Command: "placement", Subcommand: "status", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], JobID: flags.values["job-id"], CandidateID: flags.values["candidate-id"]}, nil
 	case "cancel":
-		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "expected-revision": true, "json": true})
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "expected-revision": true, "data-dir": true, "json": true})
 		if err != nil {
 			return ProblemRequest{}, err
 		}
@@ -664,11 +678,14 @@ func parseProblemPlacement(args []string) (ProblemRequest, error) {
 		if err = requireSafeIDs(flags, "project-id", "job-id"); err != nil {
 			return ProblemRequest{}, err
 		}
+		if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+			return ProblemRequest{}, err
+		}
 		revision, err := requirePositiveInt(flags.values["expected-revision"])
 		if err != nil {
 			return ProblemRequest{}, err
 		}
-		return ProblemRequest{Command: "placement", Subcommand: "cancel", ProjectID: flags.values["project-id"], JobID: flags.values["job-id"], ExpectedRevision: revision}, nil
+		return ProblemRequest{Command: "placement", Subcommand: "cancel", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], JobID: flags.values["job-id"], ExpectedRevision: revision}, nil
 	default:
 		return ProblemRequest{}, contractError("unknown problem placement command")
 	}
