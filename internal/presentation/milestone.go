@@ -271,7 +271,7 @@ func projectMilestoneTurn(input MilestoneInput, session MilestoneSessionInput, r
 	}
 	turn := session.Chain.TurnUnits[turnIndex]
 	ref := reviewv4.SourceTurnRef{Provider: session.View.Provider, SessionID: session.View.SessionID, TurnUnitID: turn.TurnUnitID, SessionViewDigest: session.View.Digest}
-	return reviewv4.Timeline{ID: milestoneStableID(input.ProjectID, ref), GenerationID: input.GenerationID, OccurredAt: strongest.revision.Timestamp, Kind: "machine_" + strongest.category, Title: "Machine-observed " + strongest.category, Summary: renderMilestoneFact(strongest), DecisionIDs: []string{}, ClosedLoop: milestoneClosure(session, revisionsByID, turn, ref)}, nil
+	return reviewv4.Timeline{ID: milestoneStableID(input.ProjectID, ref), GenerationID: input.GenerationID, OccurredAt: strongest.revision.Timestamp, Kind: "machine_" + strongest.category, Title: milestoneTitle(strongest.category), Summary: renderMilestoneFact(strongest), DecisionIDs: []string{}, ClosedLoop: milestoneClosure(session, revisionsByID, turn, ref)}, nil
 }
 
 func milestoneRevisionsByID(revisions []memory.ObservationRevision) map[string]memory.ObservationRevision {

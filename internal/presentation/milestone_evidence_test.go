@@ -32,10 +32,10 @@ func TestClosureEvidenceUsesExactFivePartContract(t *testing.T) {
 	if loop.TriggerQuestion.State != "present" || loop.TriggerQuestion.Text != "run verification" || loop.Conclusion.Kind != reviewv4.ConclusionVisibleAnswerExcerpt || loop.Conclusion.Text != "verification passed" {
 		t.Fatalf("trigger or last answer changed: %+v", loop)
 	}
-	if loop.Execution.State != "present" || !strings.Contains(loop.Execution.Text, "command_started") || !strings.Contains(loop.Execution.Text, "command_finished") {
+	if loop.Execution.State != "present" || !strings.Contains(loop.Execution.Text, "命令执行已开始") || !strings.Contains(loop.Execution.Text, "命令执行已结束（通过）") {
 		t.Fatalf("execution evidence missing: %+v", loop.Execution)
 	}
-	if loop.Verification.State != "present" || !strings.Contains(loop.Verification.Text, "verification (passed)") {
+	if loop.Verification.State != "present" || !strings.Contains(loop.Verification.Text, "验证记录（通过）") {
 		t.Fatalf("verification evidence missing: %+v", loop.Verification)
 	}
 	if loop.ImpactAndFollowUp.State != "missing" || loop.ImpactAndFollowUp.Text != "" || missingReason(loop.ImpactAndFollowUp.MissingReason) != "not_captured" {
@@ -108,7 +108,7 @@ func TestClosureEvidenceDoesNotRenderContradictoryVerificationAsPassed(t *testin
 				t.Fatalf("independent commit qualification missing: %+v", got)
 			}
 			verification := got.Timeline[0].ClosedLoop.Verification
-			if verification.State != "present" || !strings.Contains(verification.Text, "verification (conflict)") || strings.Contains(verification.Text, "verification (passed)") {
+			if verification.State != "present" || !strings.Contains(verification.Text, "验证记录（证据冲突）") || strings.Contains(verification.Text, "验证记录（通过）") {
 				t.Fatalf("contradictory verification was presented as passed: %+v", verification)
 			}
 		})

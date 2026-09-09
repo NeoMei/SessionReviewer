@@ -37,6 +37,7 @@ func TestProjectMilestonesQualifiesOnlyClosedMachineEvidence(t *testing.T) {
 		messages  []conversationchain.SourceMessage
 		facts     []milestoneFactSpec
 		wantKind  string
+		wantTitle string
 		wantFacts uint64
 	}{
 		{name: "user only", messages: milestoneMessages("question", "")},
@@ -51,13 +52,13 @@ func TestProjectMilestonesQualifiesOnlyClosedMachineEvidence(t *testing.T) {
 		{name: "malformed passed count", messages: milestoneMessages("test it", "unknown count"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"exit_code": "0", "passed": "many", "failed": "false"}}}},
 		{name: "noncanonical passed count", messages: milestoneMessages("test it", "noncanonical count"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"exit_code": "0", "passed": "01", "failed": "false"}}}},
 		{name: "plain command failure", messages: milestoneMessages("run it", "failed"), facts: []milestoneFactSpec{{kind: "command", operation: "command_finished", outcome: "failure", line: 2, timestamp: milestoneTime2, fields: map[string]string{"exit_code": "1"}}}},
-		{name: "passed verification", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"passed": "12", "failed": "0"}}}, wantKind: "machine_verification", wantFacts: 1},
-		{name: "real producer passed verification", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"component": "go:all", "status": "test", "exit_code": "0", "passed": "true", "failed": "false", "tool_id": "call-1"}}}, wantKind: "machine_verification", wantFacts: 1},
-		{name: "passed verification without count", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"exit_code": "0", "failed": "false"}}}, wantKind: "machine_verification", wantFacts: 1},
-		{name: "commit", messages: milestoneMessages("commit it", "committed"), facts: []milestoneFactSpec{{kind: "commit", operation: "commit_created", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"git_head": strings.Repeat("a", 40)}}}, wantKind: "machine_commit", wantFacts: 1},
-		{name: "release", messages: milestoneMessages("release it", "released"), facts: []milestoneFactSpec{{kind: "release", operation: "release_published", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"release_id": "v1"}}}, wantKind: "machine_release", wantFacts: 1},
-		{name: "deployment", messages: milestoneMessages("deploy it", "deployed"), facts: []milestoneFactSpec{{kind: "deployment", operation: "deployment", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"target": "production"}}}, wantKind: "machine_deployment", wantFacts: 1},
-		{name: "version", messages: milestoneMessages("version it", "versioned"), facts: []milestoneFactSpec{{kind: "version", operation: "version", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"version": "1.2.3"}}}, wantKind: "machine_version", wantFacts: 1},
+		{name: "passed verification", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"passed": "12", "failed": "0"}}}, wantKind: "machine_verification", wantTitle: "已记录验证通过", wantFacts: 1},
+		{name: "real producer passed verification", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"component": "go:all", "status": "test", "exit_code": "0", "passed": "true", "failed": "false", "tool_id": "call-1"}}}, wantKind: "machine_verification", wantTitle: "已记录验证通过", wantFacts: 1},
+		{name: "passed verification without count", messages: milestoneMessages("test it", "passed"), facts: []milestoneFactSpec{{kind: "verification", operation: "verification", outcome: "passed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"exit_code": "0", "failed": "false"}}}, wantKind: "machine_verification", wantTitle: "已记录验证通过", wantFacts: 1},
+		{name: "commit", messages: milestoneMessages("commit it", "committed"), facts: []milestoneFactSpec{{kind: "commit", operation: "commit_created", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"git_head": strings.Repeat("a", 40)}}}, wantKind: "machine_commit", wantTitle: "已记录提交", wantFacts: 1},
+		{name: "release", messages: milestoneMessages("release it", "released"), facts: []milestoneFactSpec{{kind: "release", operation: "release_published", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"release_id": "v1"}}}, wantKind: "machine_release", wantTitle: "已记录发布", wantFacts: 1},
+		{name: "deployment", messages: milestoneMessages("deploy it", "deployed"), facts: []milestoneFactSpec{{kind: "deployment", operation: "deployment", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"target": "production"}}}, wantKind: "machine_deployment", wantTitle: "已记录部署", wantFacts: 1},
+		{name: "version", messages: milestoneMessages("version it", "versioned"), facts: []milestoneFactSpec{{kind: "version", operation: "version", outcome: "observed", line: 2, timestamp: milestoneTime2, fields: map[string]string{"version": "1.2.3"}}}, wantKind: "machine_version", wantTitle: "已记录版本变化", wantFacts: 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -78,7 +79,7 @@ func TestProjectMilestonesQualifiesOnlyClosedMachineEvidence(t *testing.T) {
 			if len(got.Timeline) != 1 || got.Timeline[0].Kind != test.wantKind || len(got.ChainDependencies) != 1 {
 				t.Fatalf("qualified output=%+v", got)
 			}
-			if got.Timeline[0].Title != "Machine-observed "+strings.TrimPrefix(test.wantKind, "machine_") || got.Timeline[0].Summary == "" {
+			if got.Timeline[0].Title != test.wantTitle || got.Timeline[0].Summary == "" {
 				t.Fatalf("machine event was not neutrally marked: %+v", got.Timeline[0])
 			}
 		})
@@ -180,7 +181,7 @@ func TestProjectMilestonesSelectsLatestSameCategoryFactByInstantThenIdentity(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Timeline) != 1 || !strings.Contains(got.Timeline[0].Summary, "component=new") {
+	if len(got.Timeline) != 1 || !strings.Contains(got.Timeline[0].Summary, "组件：new") {
 		t.Fatalf("equal-instant strongest fact ignored canonical sequence: %+v", got.Timeline)
 	}
 }

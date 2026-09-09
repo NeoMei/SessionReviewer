@@ -112,6 +112,16 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	if len(accepted.Review.Timeline) != 1 || accepted.Review.Timeline[0].ClosedLoop.Conclusion.Text != "Original bounded Agent conclusion." || len(accepted.Review.GeneratedBaselines) != 4 {
 		t.Fatalf("qualified scan milestone was not seeded with exact baselines: timeline=%+v baselines=%+v", accepted.Review.Timeline, accepted.Review.GeneratedBaselines)
 	}
+	firstMilestone := accepted.Review.Timeline[0]
+	if firstMilestone.Title != "已记录验证通过" || !strings.Contains(firstMilestone.Summary, "验证记录（通过）") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "命令执行已开始") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "命令类型：") || !strings.Contains(firstMilestone.ClosedLoop.Execution.Text, "退出码：0") || !strings.Contains(firstMilestone.ClosedLoop.Verification.Text, "验证记录（通过）") {
+		t.Fatalf("ordinary scan milestone is not readable: %+v", firstMilestone)
+	}
+	primary := strings.Join([]string{firstMilestone.Title, firstMilestone.Summary, firstMilestone.ClosedLoop.Execution.Text, firstMilestone.ClosedLoop.Verification.Text}, "\n")
+	for _, forbidden := range []string{"Machine-observed", "command_started", "command_signature=", "exit_code=", "status=", "passed=", "failed="} {
+		if strings.Contains(primary, forbidden) {
+			t.Fatalf("ordinary scan rendered raw marker %q: %s", forbidden, primary)
+		}
+	}
 	if len(accepted.Review.ChainDependencies) != 1 || accepted.Review.ChainDependencies[0].SessionID != sessionID {
 		t.Fatalf("user-only Session created milestone evidence: dependencies=%+v", accepted.Review.ChainDependencies)
 	}
@@ -180,6 +190,9 @@ func TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable(t *testin
 	vaultAccepted := loadMilestoneProjection(t, vaultRoot, []string{vaultReviewRelative, vaultHistoryRelative, filepath.ToSlash(filepath.Join(mapping.VaultReviewPath, ".session-reviewer/ledger.json")), filepath.ToSlash(filepath.Join(mapping.VaultReviewPath, ".session-reviewer/session-index.json"))})
 	if humanAccepted.Review.CurrentState.Goal != "Human-owned scan goal" || humanAccepted.Review.Timeline[0].ID != originalMilestone.ID || humanAccepted.Review.Timeline[0].ClosedLoop.Conclusion.Text != "Human-confirmed scan conclusion" || humanAccepted.Review.Timeline[0].ClosedLoop.Conclusion.Kind != reviewv4.ConclusionHumanConfirmed {
 		t.Fatalf("scan lost human edits: %+v", humanAccepted.Review)
+	}
+	if humanAccepted.Review.Timeline[0].Title != "已记录验证通过" || strings.Contains(humanAccepted.Review.Timeline[0].Summary, "Machine-observed") || strings.Contains(humanAccepted.Review.Timeline[0].ClosedLoop.Verification.Text, "exit_code=") {
+		t.Fatalf("rescan lost readable generated text: %+v", humanAccepted.Review.Timeline[0])
 	}
 	if !bytes.Equal(mustReadMilestoneFile(t, filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))), mustReadMilestoneFile(t, vaultReviewPath)) || !bytes.Equal(mustReadMilestoneFile(t, filepath.Join(projectRoot, filepath.FromSlash(reviewv2.HistoryRelativePath))), mustReadMilestoneFile(t, vaultHistoryPath)) {
 		t.Fatal("human-edited Project/Vault Markdown did not converge byte-for-byte")

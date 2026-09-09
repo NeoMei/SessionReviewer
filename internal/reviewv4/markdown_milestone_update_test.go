@@ -237,6 +237,86 @@ func TestMarkdownMilestoneUpdateRebasesAcceptedAndPendingGeneratedFieldEdits(t *
 	}
 }
 
+func TestMarkdownMilestoneReadabilityRebaseUpdatesOnlyUntouchedGeneratedFields(t *testing.T) {
+	initial := milestoneUpdate("generation-2", "2", generatedMilestone("machine:owned", "generation-2", "2", "Machine-observed verification", "verification (passed): component=package; exit_code=0; passed=true; failed=false"))
+	ledger, accepted := milestoneUpdateLedger(t, &initial)
+	ledger, accepted = acceptMilestoneEdits(t, ledger, accepted, map[FieldKey]string{
+		{Entity: "milestone:machine:owned", Name: "title"}:      "人工标题",
+		{Entity: "milestone:machine:owned", Name: "summary"}:    "人工摘要",
+		{Entity: "milestone:machine:owned", Name: "conclusion"}: "人工结论",
+	})
+	acceptedRevision := ledger.AcceptedRevision
+	before := cloneTimeline(ledger.DocumentProjection.PresentationBase.Timeline[1])
+	pending := MarkdownPair{
+		Review:  bytes.ReplaceAll(accepted.Review, []byte("\n"), []byte("\r\n")),
+		History: bytes.ReplaceAll(accepted.History, []byte("\n"), []byte("\r\n")),
+	}
+	pending.History = append(pending.History, []byte("\r\n<!-- custom-readable-rebase -->\r\n## 自定义\r\n保留原字节。\r\n")...)
+
+	readable := generatedMilestone("machine:owned", "generation-3", "2", "已记录验证通过", "验证记录（通过）：组件：package；退出码：0")
+	readable.ClosedLoop.Conclusion.Text = "新的生成结论"
+	update := milestoneUpdate("generation-3", "2", readable)
+	next, err := RebaseMarkdownMilestones(ledger, pending, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := next.Timeline[1]
+	if got.Title != "人工标题" || got.Summary != "人工摘要" || got.ClosedLoop.Conclusion.Text != "人工结论" || got.ClosedLoop.Conclusion.Kind != ConclusionHumanConfirmed {
+		t.Fatalf("human readable fields changed: %+v", got)
+	}
+	if !reflect.DeepEqual(got.ClosedLoop.SourceTurnRefs, before.ClosedLoop.SourceTurnRefs) || !reflect.DeepEqual(got.ClosedLoop.Conclusion.SourceTurnRefs, before.ClosedLoop.Conclusion.SourceTurnRefs) {
+		t.Fatalf("source references changed: before=%+v after=%+v", before.ClosedLoop, got.ClosedLoop)
+	}
+	assertMilestoneBaselines(t, next, "machine:owned", map[string]string{
+		"title": "已记录验证通过", "summary": "验证记录（通过）：组件：package；退出码：0", "conclusion": "新的生成结论", "impact_and_follow_up": "生成影响",
+	})
+	rendered, err := RenderMarkdownMilestoneUpdate(next, ledger, pending, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered.History, []byte("<!-- custom-readable-rebase -->\r\n## 自定义\r\n保留原字节。\r\n")) {
+		t.Fatalf("custom Markdown or CRLF changed:\n%s", rendered.History)
+	}
+
+	rebasedLedger := acceptMilestonePresentation(t, ledger, rendered, next)
+	again, err := RebaseMarkdownMilestones(rebasedLedger, rendered, update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Revision != next.Revision || !reflect.DeepEqual(again, next) {
+		t.Fatalf("identical readable generation changed bytes/revision: %d -> %d", next.Revision, again.Revision)
+	}
+	againRendered, err := RenderMarkdownMilestoneUpdate(again, rebasedLedger, rendered, update)
+	if err != nil || !reflect.DeepEqual(againRendered, rendered) {
+		t.Fatalf("identical readable generation changed Markdown: err=%v", err)
+	}
+	if next.Revision != acceptedRevision+1 {
+		t.Fatalf("readable generation advanced revision incorrectly: %d -> %d", acceptedRevision, next.Revision)
+	}
+	missingSource := milestoneUpdate("generation-4", "4")
+	preserved, err := RebaseMarkdownMilestones(rebasedLedger, rendered, missingSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preservedItem := preserved.Timeline[1]
+	if preservedItem.Title != "人工标题" || preservedItem.Summary != "人工摘要" || preservedItem.ClosedLoop.Conclusion.Text != "人工结论" || !reflect.DeepEqual(preservedItem.ClosedLoop.Conclusion.SourceTurnRefs, before.ClosedLoop.Conclusion.SourceTurnRefs) {
+		t.Fatalf("missing source erased accepted human history: %+v", preservedItem)
+	}
+}
+
+func TestMarkdownMilestoneReadabilityRebaseUpdatesUntouchedGeneratedTitle(t *testing.T) {
+	initial := milestoneUpdate("generation-2", "2", generatedMilestone("machine:owned", "generation-2", "2", "Machine-observed verification", "old summary"))
+	ledger, pair := milestoneUpdateLedger(t, &initial)
+	readable := generatedMilestone("machine:owned", "generation-3", "2", "已记录验证通过", "验证记录（通过）")
+	next, err := RebaseMarkdownMilestones(ledger, pair, milestoneUpdate("generation-3", "2", readable))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Timeline[1].Title != "已记录验证通过" || next.Timeline[1].Summary != "验证记录（通过）" {
+		t.Fatalf("untouched generated fields did not advance: %+v", next.Timeline[1])
+	}
+}
+
 func TestMarkdownMilestoneUpdateRequiresAuthenticGeneratedOwnershipMetadata(t *testing.T) {
 	initial := milestoneUpdate("generation-2", "2", generatedMilestone("machine:owned", "generation-2", "2", "old title", "old summary"))
 	ledger, pair := milestoneUpdateLedger(t, &initial)

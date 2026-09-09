@@ -25,7 +25,7 @@ func milestoneClosure(session MilestoneSessionInput, revisionsByID map[string]me
 	}
 	return reviewv4.ClosedLoop{
 		TriggerQuestion: presentMilestoneSegment(turn.UserMessage.VisibleExcerpt, ref, incomplete), Conclusion: milestoneConclusion(turn, ref),
-		Execution: milestoneExecution(turn, ref, incomplete), Verification: milestoneVerification(revisionsByID, turn, ref, incomplete), ImpactAndFollowUp: missingMilestoneSegment("not_captured"),
+		Execution: milestoneExecution(revisionsByID, turn, ref, incomplete), Verification: milestoneVerification(revisionsByID, turn, ref, incomplete), ImpactAndFollowUp: missingMilestoneSegment("not_captured"),
 		SourceTurnRefs: []reviewv4.SourceTurnRef{ref}, Coverage: coverage,
 	}
 }
@@ -41,14 +41,14 @@ func milestoneConclusion(turn conversationchain.TurnUnit, ref reviewv4.SourceTur
 	return reviewv4.ClosedLoopConclusion{Kind: reviewv4.ConclusionMissing, Text: "", MissingReason: &reason, SourceTurnRefs: []reviewv4.SourceTurnRef{}}
 }
 
-func milestoneExecution(turn conversationchain.TurnUnit, ref reviewv4.SourceTurnRef, incomplete bool) reviewv4.ClosedLoopSegment {
+func milestoneExecution(revisionsByID map[string]memory.ObservationRevision, turn conversationchain.TurnUnit, ref reviewv4.SourceTurnRef, incomplete bool) reviewv4.ClosedLoopSegment {
 	parts := make([]string, 0, len(turn.Actions)+len(turn.Results))
 	for _, action := range turn.Actions {
-		parts = append(parts, renderMilestoneEvidence(action.Kind, "", action.Excerpt))
+		parts = append(parts, readableMilestoneEvidence(action.Kind, "", revisionsByID[action.RevisionID]))
 	}
 	for _, result := range turn.Results {
 		if result.Kind != "verification" {
-			parts = append(parts, renderMilestoneEvidence(result.Kind, result.VerificationState, result.Excerpt))
+			parts = append(parts, readableMilestoneEvidence(result.Kind, result.VerificationState, revisionsByID[result.RevisionID]))
 		}
 	}
 	if len(parts) == 0 {
@@ -61,7 +61,8 @@ func milestoneVerification(revisionsByID map[string]memory.ObservationRevision, 
 	parts := make([]string, 0)
 	for _, result := range turn.Results {
 		if result.Kind == "verification" {
-			parts = append(parts, renderMilestoneEvidence(result.Kind, milestoneVerificationDisplayState(revisionsByID[result.RevisionID]), result.Excerpt))
+			revision := revisionsByID[result.RevisionID]
+			parts = append(parts, readableMilestoneEvidence(result.Kind, milestoneVerificationDisplayState(revision), revision))
 		}
 	}
 	if len(parts) == 0 {
@@ -119,37 +120,11 @@ func milestoneTurnIncomplete(chain conversationchain.Document, turn conversation
 }
 
 func renderMilestoneFact(fact qualifiedMilestoneFact) string {
-	state := ""
+	state := "unknown"
 	if fact.category == "verification" {
-		state = "passed"
+		state = milestoneVerificationDisplayState(fact.revision)
 	}
-	return renderMilestoneEvidence(fact.revision.Operation, state, retainedMilestoneFields(fact))
-}
-
-func retainedMilestoneFields(fact qualifiedMilestoneFact) string {
-	allowed := map[string][]string{
-		"verification": {"component", "status", "exit_code", "passed", "failed", "tool_id"},
-		"commit":       {"git_head"}, "release": {"release_id", "tag", "version", "status", "target"},
-		"deployment": {"release_id", "version", "status", "target", "component"}, "version": {"version", "component"},
-	}
-	parts := make([]string, 0)
-	for _, key := range allowed[fact.category] {
-		if value, exists := fact.revision.Fields[key]; exists {
-			parts = append(parts, key+"="+value)
-		}
-	}
-	return strings.Join(parts, "; ")
-}
-
-func renderMilestoneEvidence(kind, state, excerpt string) string {
-	label := kind
-	if state != "" {
-		label += " (" + state + ")"
-	}
-	if excerpt != "" {
-		label += ": " + excerpt
-	}
-	return boundedMilestoneText(label, milestoneSegmentBytes)
+	return readableMilestoneEvidence(fact.revision.Operation, state, fact.revision)
 }
 
 func boundedMilestoneText(value string, limit int) string {
