@@ -104,14 +104,14 @@ func LoadConfiguration(dataRoot, provider string) (Configuration, error) {
 	if !supportedProvider(provider) {
 		return Configuration{}, errors.New("launcher provider is unsupported")
 	}
-	path := filepath.Join(dataRoot, configurationName(provider))
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
-		return Configuration{}, errors.Join(errors.New("launcher configuration is unavailable or unsafe"), err)
+	root, err := pathguard.Open(dataRoot)
+	if err != nil {
+		return Configuration{}, errors.New("launcher configuration root is unavailable or unsafe")
 	}
-	body, err := os.ReadFile(path)
-	if err != nil || len(body) > 16<<10 {
-		return Configuration{}, errors.Join(errors.New("launcher configuration is unavailable or too large"), err)
+	defer root.Close()
+	body, err := readPrivateRootFile(root, configurationName(provider), 16<<10, 0o600)
+	if err != nil {
+		return Configuration{}, errors.Join(errors.New("launcher configuration is unavailable or unsafe"), err)
 	}
 	var value Configuration
 	if err := strictjson.Decode(body, &value); err != nil {
@@ -125,6 +125,17 @@ func LoadConfiguration(dataRoot, provider string) (Configuration, error) {
 		return Configuration{}, errors.Join(errors.New("configured launcher executable changed"), err)
 	}
 	return value, nil
+}
+
+func readPrivateRootFile(root *pathguard.Directory, leaf string, maximum int64, permission os.FileMode) ([]byte, error) {
+	if root == nil || root.Root == nil {
+		return nil, errors.New("private file root is unavailable")
+	}
+	before, err := root.Root.Lstat(leaf)
+	if err != nil || !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 || runtime.GOOS != "windows" && before.Mode().Perm() != permission {
+		return nil, errors.New("private file is unavailable or unsafe")
+	}
+	return pathguard.ReadStableRegularRootFile(root.Root, leaf, before, maximum)
 }
 
 func configurationName(provider string) string { return "session-launcher-" + provider + ".json" }

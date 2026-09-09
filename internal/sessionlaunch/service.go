@@ -184,17 +184,18 @@ func Consume(ctx context.Context, token string, options WorkerOptions) (ExecPlan
 	if err := ensureRuntimeRoot(options.RuntimeRoot); err != nil {
 		return ExecPlan{}, err
 	}
-	source, claim := filepath.Join(options.RuntimeRoot, token+".json"), filepath.Join(options.RuntimeRoot, token+".claimed")
-	if err := os.Rename(source, claim); err != nil {
+	runtimeDirectory, err := pathguard.Open(options.RuntimeRoot)
+	if err != nil {
+		return ExecPlan{}, errors.New("launch runtime root is unavailable or unsafe")
+	}
+	defer runtimeDirectory.Close()
+	source, claim := token+".json", token+".claimed"
+	if err := runtimeDirectory.Root.Rename(source, claim); err != nil {
 		return ExecPlan{}, errors.New("launch token is unavailable or already consumed")
 	}
-	defer os.Remove(claim)
-	info, err := os.Lstat(claim)
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		return ExecPlan{}, errors.New("launch envelope is unsafe")
-	}
-	body, err := os.ReadFile(claim)
-	if err != nil || len(body) > 64<<10 {
+	defer runtimeDirectory.Root.Remove(claim)
+	body, err := readPrivateRootFile(runtimeDirectory, claim, 64<<10, 0o600)
+	if err != nil {
 		return ExecPlan{}, errors.New("launch envelope is unavailable or too large")
 	}
 	var value envelope

@@ -56,6 +56,42 @@ func TestLauncherConfigurationPersistsVerifiedExecutableAndRejectsReplacement(t 
 	}
 }
 
+func TestLauncherPrivateReadsRejectRedirectedRootAndOversizedEnvelope(t *testing.T) {
+	dataRoot, executable := t.TempDir(), filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(executable, []byte("verified-codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configuration, err := MeasureConfiguration("codex", "fixture-1", executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveConfiguration(dataRoot, configuration); err != nil {
+		t.Fatal(err)
+	}
+	redirectedRoot := filepath.Join(t.TempDir(), "redirected-data")
+	if err := os.Symlink(dataRoot, redirectedRoot); err != nil {
+		t.Skipf("symlink setup is unavailable: %v", err)
+	}
+	if _, err := LoadConfiguration(redirectedRoot, "codex"); err == nil {
+		t.Fatal("launcher configuration accepted a redirected data root")
+	}
+
+	runtimeRoot := t.TempDir()
+	token := strings.Repeat("a", 64)
+	if err := os.WriteFile(filepath.Join(runtimeRoot, token+".json"), make([]byte, 64<<10+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = Consume(context.Background(), token, WorkerOptions{
+		GOOS:           "darwin",
+		RuntimeRoot:    runtimeRoot,
+		SelfExecutable: executable,
+		Authenticate:   func(context.Context, Request) (BoundSession, error) { return BoundSession{}, nil },
+	})
+	if err == nil {
+		t.Fatal("launch worker accepted an oversized envelope")
+	}
+}
+
 func TestVerifyRunsOnlyPinnedVersionRouteAndPersistsResult(t *testing.T) {
 	dataRoot, executable := t.TempDir(), filepath.Join(t.TempDir(), "claude")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\n[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 19\nprintf 'claude fixture 1.2.3\\n'\n"), 0o700); err != nil {
