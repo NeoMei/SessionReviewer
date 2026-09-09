@@ -6,7 +6,10 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
+
+	"golang.org/x/sys/windows"
 )
 
 func terminateExtractionProcess(process *os.Process) error {
@@ -15,5 +18,9 @@ func terminateExtractionProcess(process *os.Process) error {
 	}
 	// Detached extraction workers may have a Codex descendant. taskkill /T is
 	// the Windows process-tree primitive available to this CLI surface.
-	return exec.Command("taskkill.exe", "/PID", strconv.Itoa(process.Pid), "/T", "/F").Run()
+	systemDirectory, err := windows.GetSystemDirectory()
+	if err != nil {
+		return err
+	}
+	return exec.Command(filepath.Join(systemDirectory, "taskkill.exe"), "/PID", strconv.Itoa(process.Pid), "/T", "/F").Run()
 }
