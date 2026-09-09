@@ -25,7 +25,7 @@ func contractCode(err error) string {
 }
 
 func TestParseInspectContractAcceptsExactAllowlist(t *testing.T) {
-	dataDir := filepath.Join(string(filepath.Separator), "tmp", "session-reviewer-data")
+	dataDir := t.TempDir()
 	tests := [][]string{
 		{"session-summary", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--data-dir", dataDir, "--json"},
 		{"session-events", "--project-id", "project-p", "--provider", "codex", "--session-id", "session-1", "--expected-generation-id", "generation-1", "--limit", "1", "--data-dir", dataDir, "--json"},
