@@ -1,6 +1,7 @@
 package contextupdate
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,11 +15,14 @@ import (
 
 	"github.com/neomei/SessionReviewer/internal/accounting"
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/publicationstate"
+	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	syncengine "github.com/neomei/SessionReviewer/internal/sync"
@@ -29,6 +33,7 @@ type v4MapInput struct {
 	Accepted   reviewv4.Accepted
 	Index      sessionindex.Document
 	Accounting accounting.ProjectSummary
+	Milestones presentation.MilestoneProjection
 }
 
 func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, error) {
@@ -45,11 +50,20 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 			ProblemRootIDs: []string{}, ProblemNodes: []reviewv4.ProblemNode{}, ChainDependencies: []reviewv4.ChainDependency{},
 			HumanPatches: []reviewv4.Patch{}, OrphanPatches: []reviewv4.Patch{}, GeneratedBaselines: []reviewv4.Baseline{},
 		}
+		presentation.Timeline = cloneV4Timeline(in.Milestones.Timeline)
+		presentation.ChainDependencies = cloneV4Dependencies(in.Milestones.ChainDependencies)
+		if len(presentation.Timeline) != 0 {
+			presentation.MinimumReaderVersion, presentation.MinimumWriterVersion = "0.4.3", "0.4.3"
+			seedV4MilestoneBaselines(&presentation)
+		}
 		ledger = reviewv4.MachineLedger{
 			SchemaVersion: 4, MinimumReaderVersion: "0.4.1", MinimumWriterVersion: "0.4.1",
 			HumanPatches: []reviewv4.Patch{}, OrphanPatches: []reviewv4.Patch{}, GeneratedBaselines: []reviewv4.Baseline{},
 			PricingSnapshots: []pricing.Snapshot{}, CurrentPricingSnapshotIDs: []string{},
 			SyncHashes: reviewv4.SyncHashes{ReviewSHA256: strings.Repeat("0", 64), HistorySHA256: strings.Repeat("0", 64), LedgerSHA256: strings.Repeat("0", 64), SessionIndexDigest: in.Index.Digest},
+		}
+		if len(presentation.Timeline) != 0 {
+			ledger.MinimumReaderVersion, ledger.MinimumWriterVersion = "0.4.3", "0.4.3"
 		}
 	} else {
 		body, err := json.Marshal(in.Accepted.Review)
@@ -97,6 +111,62 @@ func mapV4Scan(in v4MapInput) (reviewv4.Presentation, reviewv4.MachineLedger, er
 	ledger.DocumentProjection = &reviewv4.DocumentProjection{SchemaVersion: 1, Format: "review-markdown-v1", PresentationBase: presentation}
 	ledger.SyncHashes.SessionIndexDigest = in.Index.Digest
 	return presentation, ledger, nil
+}
+
+func scanMilestoneUpdate(index sessionindex.Document, projected presentation.MilestoneProjection) reviewv4.ScanMilestoneUpdate {
+	return reviewv4.ScanMilestoneUpdate{ProjectID: index.ProjectID, GenerationID: index.GenerationID, ProjectViewDigest: index.ProjectViewDigest, Timeline: cloneV4Timeline(projected.Timeline), ChainDependencies: cloneV4Dependencies(projected.ChainDependencies)}
+}
+
+func cloneV4Timeline(values []reviewv4.Timeline) []reviewv4.Timeline {
+	result := slices.Clone(values)
+	if result == nil {
+		result = []reviewv4.Timeline{}
+	}
+	for index := range result {
+		result[index].DecisionIDs = slices.Clone(result[index].DecisionIDs)
+		loop := &result[index].ClosedLoop
+		loop.SourceTurnRefs = slices.Clone(loop.SourceTurnRefs)
+		cloneV4Segment := func(segment *reviewv4.ClosedLoopSegment) {
+			segment.SourceTurnRefs = slices.Clone(segment.SourceTurnRefs)
+			if segment.MissingReason != nil {
+				copy := *segment.MissingReason
+				segment.MissingReason = &copy
+			}
+		}
+		cloneV4Segment(&loop.TriggerQuestion)
+		cloneV4Segment(&loop.Execution)
+		cloneV4Segment(&loop.Verification)
+		cloneV4Segment(&loop.ImpactAndFollowUp)
+		loop.Conclusion.SourceTurnRefs = slices.Clone(loop.Conclusion.SourceTurnRefs)
+		if loop.Conclusion.MissingReason != nil {
+			copy := *loop.Conclusion.MissingReason
+			loop.Conclusion.MissingReason = &copy
+		}
+	}
+	return result
+}
+
+func cloneV4Dependencies(values []reviewv4.ChainDependency) []reviewv4.ChainDependency {
+	result := slices.Clone(values)
+	if result == nil {
+		result = []reviewv4.ChainDependency{}
+	}
+	for index := range result {
+		result[index].TurnUnitIDs = slices.Clone(result[index].TurnUnitIDs)
+	}
+	return result
+}
+
+func seedV4MilestoneBaselines(value *reviewv4.Presentation) {
+	for _, milestone := range value.Timeline {
+		reviewv4.AddScanMilestoneBaselines(value, milestone)
+	}
+	sort.Slice(value.GeneratedBaselines, func(i, j int) bool {
+		if value.GeneratedBaselines[i].EntityID != value.GeneratedBaselines[j].EntityID {
+			return value.GeneratedBaselines[i].EntityID < value.GeneratedBaselines[j].EntityID
+		}
+		return value.GeneratedBaselines[i].Field < value.GeneratedBaselines[j].Field
+	})
 }
 
 func carryV4GeneratedBaselines(presentation *reviewv4.Presentation, generationID string) error {
@@ -223,6 +293,9 @@ type v4PublishInput struct {
 	PreparedGeneration string
 	Index              sessionindex.Document
 	Accounting         accounting.ProjectSummary
+	Milestones         presentation.MilestoneProjection
+	Store              *memorystore.Store
+	Manifest           memory.GenerationManifest
 	Now                func() time.Time
 	Existing           bool
 	AfterDestination   func(side, relative string) error
@@ -237,7 +310,7 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	}
 	pubOpts := publication.Options{ProjectID: in.ProjectID, PreparedGeneration: in.PreparedGeneration, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now, AfterDestination: in.AfterDestination}
 	if !in.Existing {
-		p, ledger, err := mapV4Scan(v4MapInput{Index: in.Index, Accounting: in.Accounting})
+		p, ledger, err := mapV4Scan(v4MapInput{Index: in.Index, Accounting: in.Accounting, Milestones: in.Milestones})
 		if err != nil {
 			return publication.Result{}, err
 		}
@@ -276,12 +349,22 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	}
 	pendingAccepted := read.OldAccepted
 	pendingAccepted.Review = read.Pending.Presentation
-	next, ledger, err := mapV4Scan(v4MapInput{Accepted: pendingAccepted, Index: in.Index, Accounting: in.Accounting})
+	_, ledger, err := mapV4Scan(v4MapInput{Accepted: pendingAccepted, Index: in.Index, Accounting: in.Accounting})
+	if err != nil {
+		return publication.Result{}, err
+	}
+	update := scanMilestoneUpdate(in.Index, in.Milestones)
+	if result, unchanged, err := unchangedV4ScanPublication(ctx, in, read, update, ledger); err != nil {
+		return publication.Result{}, err
+	} else if unchanged {
+		return result, nil
+	}
+	next, err := reviewv4.RebaseMarkdownMilestones(read.OldAccepted.Ledger, read.Pending.Documents, update)
 	if err != nil {
 		return publication.Result{}, err
 	}
 	plan, err := presentation.RenderV4(presentation.V4RenderInput{
-		Presentation: next, Ledger: ledger, Index: in.Index,
+		Presentation: next, MilestoneUpdate: &update, Ledger: ledger, Index: in.Index,
 		Previous: &read.AcceptedPair, Pending: &read.Pending.Documents,
 		PreviousLedger: &read.OldAccepted.Ledger, ExpectedFiles: read.ProjectExpected,
 	})
@@ -298,4 +381,119 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 		ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest,
 	}
 	return publication.PublishMarkdownScanLocked(ctx, pubOpts, scanPlan, owner)
+}
+
+func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syncproject.MarkdownScanRead, update reviewv4.ScanMilestoneUpdate, nextLedger reviewv4.MachineLedger) (publication.Result, bool, error) {
+	old := read.OldAccepted
+	if old.Review.ProjectViewDigest != update.ProjectViewDigest || !bytes.Equal(read.Pending.Documents.Review, read.AcceptedPair.Review) || !bytes.Equal(read.Pending.Documents.History, read.AcceptedPair.History) {
+		return publication.Result{}, false, nil
+	}
+	normalized := update
+	normalized.GenerationID, normalized.ProjectViewDigest = old.Review.GenerationID, old.Review.ProjectViewDigest
+	normalized.Timeline = cloneV4Timeline(update.Timeline)
+	for index := range normalized.Timeline {
+		normalized.Timeline[index].GenerationID = normalized.GenerationID
+	}
+	rebased, err := reviewv4.RebaseMarkdownMilestones(old.Ledger, read.Pending.Documents, normalized)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	rebasedBody, err := json.Marshal(rebased)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	oldBody, err := json.Marshal(old.Review)
+	if err != nil || !bytes.Equal(rebasedBody, oldBody) {
+		return publication.Result{}, false, err
+	}
+	nextLedger.ProjectID, nextLedger.GenerationID, nextLedger.ProjectViewDigest = old.Ledger.ProjectID, old.Ledger.GenerationID, old.Ledger.ProjectViewDigest
+	nextLedger.AcceptedRevision = old.Ledger.AcceptedRevision
+	nextLedger.HumanPatches = old.Ledger.HumanPatches
+	nextLedger.OrphanPatches = old.Ledger.OrphanPatches
+	nextLedger.GeneratedBaselines = old.Ledger.GeneratedBaselines
+	nextLedger.DocumentProjection = old.Ledger.DocumentProjection
+	nextLedger.SyncHashes = old.Ledger.SyncHashes
+	nextLedgerBody, marshalErr := json.Marshal(nextLedger)
+	if marshalErr != nil {
+		return publication.Result{}, false, marshalErr
+	}
+	oldLedgerSemantic, marshalErr := json.Marshal(old.Ledger)
+	if marshalErr != nil || !bytes.Equal(nextLedgerBody, oldLedgerSemantic) {
+		return publication.Result{}, false, marshalErr
+	}
+	normalizedIndex := in.Index
+	normalizedIndex.Sessions = slices.Clone(in.Index.Sessions)
+	for index := range normalizedIndex.Sessions {
+		normalizedIndex.Sessions[index].StateReasonCodes = slices.Clone(in.Index.Sessions[index].StateReasonCodes)
+		normalizedIndex.Sessions[index].SessionViewDigest = cloneV4String(in.Index.Sessions[index].SessionViewDigest)
+		normalizedIndex.Sessions[index].UsageRecordDigest = cloneV4String(in.Index.Sessions[index].UsageRecordDigest)
+		normalizedIndex.Sessions[index].SummaryDigest = cloneV4String(in.Index.Sessions[index].SummaryDigest)
+		normalizedIndex.Sessions[index].LastSeenGenerationID = cloneV4String(in.Index.Sessions[index].LastSeenGenerationID)
+		normalizedIndex.Sessions[index].LastSuccessfulGenerationID = cloneV4String(in.Index.Sessions[index].LastSuccessfulGenerationID)
+	}
+	normalizedIndex.Digest, normalizedIndex.GenerationID, normalizedIndex.ProjectViewDigest, normalizedIndex.GeneratedAt = old.SessionIndex.Digest, old.SessionIndex.GenerationID, old.SessionIndex.ProjectViewDigest, old.SessionIndex.GeneratedAt
+	oldEntries := make(map[string]sessionindex.Entry, len(old.SessionIndex.Sessions))
+	for _, entry := range old.SessionIndex.Sessions {
+		oldEntries[entry.Provider+"\x00"+entry.SessionID] = entry
+	}
+	for index := range normalizedIndex.Sessions {
+		if prior, exists := oldEntries[normalizedIndex.Sessions[index].Provider+"\x00"+normalizedIndex.Sessions[index].SessionID]; exists {
+			normalizedIndex.Sessions[index].LastSeenGenerationID = prior.LastSeenGenerationID
+			normalizedIndex.Sessions[index].LastSuccessfulGenerationID = prior.LastSuccessfulGenerationID
+		}
+	}
+	normalizedIndexBody, marshalErr := json.Marshal(normalizedIndex)
+	if marshalErr != nil {
+		return publication.Result{}, false, marshalErr
+	}
+	oldIndexSemantic, marshalErr := json.Marshal(old.SessionIndex)
+	if marshalErr != nil || !bytes.Equal(normalizedIndexBody, oldIndexSemantic) {
+		return publication.Result{}, false, marshalErr
+	}
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, presentation.SessionIndexRelativePath}
+	for _, relative := range paths {
+		if !bytes.Equal(read.ProjectExpected[relative], read.VaultExpected[relative]) {
+			return publication.Result{}, false, nil
+		}
+	}
+	if !bytes.Equal(read.ProjectExpected[reviewv2.ReviewRelativePath], read.AcceptedPair.Review) || !bytes.Equal(read.ProjectExpected[reviewv2.HistoryRelativePath], read.AcceptedPair.History) {
+		return publication.Result{}, false, nil
+	}
+	ledger, err := reviewv4.DecodeLedger(read.ProjectExpected[reviewv2.MachineLedgerRelativePath])
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	index, err := sessionindex.Parse(read.ProjectExpected[presentation.SessionIndexRelativePath])
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	ledgerBody, err := json.Marshal(ledger)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	oldLedgerBody, err := json.Marshal(old.Ledger)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	indexBody, err := json.Marshal(index)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	oldIndexBody, err := json.Marshal(old.SessionIndex)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	if !bytes.Equal(ledgerBody, oldLedgerBody) || !bytes.Equal(indexBody, oldIndexBody) {
+		return publication.Result{}, false, nil
+	}
+	if err := publication.VerifyPrivateChainBindings(ctx, in.Store, in.Manifest, old); err != nil {
+		return publication.Result{}, false, err
+	}
+	result := publication.Result{GenerationID: old.Review.GenerationID}
+	for _, relative := range paths {
+		digest := digestHex(read.ProjectExpected[relative])
+		result.ProjectFiles = append(result.ProjectFiles, publication.VerifiedFile{Side: "project", Relative: relative, SHA256: digest})
+		result.VaultFiles = append(result.VaultFiles, publication.VerifiedFile{Side: "vault", Relative: vaultProjectionRelative(in.Mapping.VaultReviewPath, relative), SHA256: digest})
+	}
+	return result, true, nil
 }

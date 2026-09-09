@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -23,6 +24,7 @@ type MarkdownDocument struct {
 	trustedAnchorIDs     map[string]struct{}
 	trustedAnchorSpans   []markdownAnchorSpan
 	trustedIdentitySpans []markdownIdentitySpan
+	trustedSourceRefs    map[string]struct{}
 	authenticated        bool
 }
 
@@ -111,7 +113,8 @@ func (d MarkdownDocument) SensitiveScanSource() ([]byte, error) {
 		case markerSpan:
 			out.Write(maskMarkdownMarkerIdentity(d.raw[span.start:span.end], span.key))
 		case generatedSpan:
-			out.Write(maskTrustedMarkdownAnchorIDs(d.raw[span.start:span.end], d.trustedAnchorIDs))
+			generated := maskTrustedMarkdownAnchorIDs(d.raw[span.start:span.end], d.trustedAnchorIDs)
+			out.Write(maskTrustedMarkdownSourceRefs(generated, d.trustedSourceRefs))
 		case anchorSpan:
 			out.WriteString(`<a id="validated-marker"></a>`)
 		case identitySpan:
@@ -121,6 +124,17 @@ func (d MarkdownDocument) SensitiveScanSource() ([]byte, error) {
 	}
 	out.Write(d.raw[cursor:])
 	return bytes.Clone(out.Bytes()), nil
+}
+
+var markdownSourceRefPattern = regexp.MustCompile(`[A-Za-z0-9][A-Za-z0-9._:-]{0,255}/[A-Za-z0-9][A-Za-z0-9._:-]{0,255}(?:@sha256:[0-9a-f]{64})?#[A-Za-z0-9][A-Za-z0-9._:-]{0,255}`)
+
+func maskTrustedMarkdownSourceRefs(source []byte, trusted map[string]struct{}) []byte {
+	return markdownSourceRefPattern.ReplaceAllFunc(source, func(candidate []byte) []byte {
+		if _, ok := trusted[string(candidate)]; ok {
+			return []byte("validated-source-ref")
+		}
+		return candidate
+	})
 }
 
 func maskTrustedMarkdownAnchorIDs(source []byte, trusted map[string]struct{}) []byte {
@@ -202,6 +216,15 @@ func ParseMarkdownDocumentAgainstLedger(relative string, raw []byte, ledger Mach
 	}
 	document.authenticated = true
 	document.trustedAnchorIDs = make(map[string]struct{})
+	document.trustedSourceRefs = make(map[string]struct{})
+	for _, dependency := range base.ChainDependencies {
+		for _, turnID := range dependency.TurnUnitIDs {
+			exact := dependency.Provider + "/" + dependency.SessionID + "@" + dependency.SessionViewDigest + "#" + turnID
+			legacy := dependency.Provider + "/" + dependency.SessionID + "#" + turnID
+			document.trustedSourceRefs[exact] = struct{}{}
+			document.trustedSourceRefs[legacy] = struct{}{}
+		}
+	}
 	for _, expectedDocumentInput := range []struct {
 		relative string
 		raw      []byte

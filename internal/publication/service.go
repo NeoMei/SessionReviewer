@@ -213,7 +213,7 @@ func publishWithOwnership(ctx context.Context, opts Options) (Result, error) {
 	if prepared.GenerationID != opts.PreparedGeneration {
 		return Result{}, fmt.Errorf("prepared generation ID %q does not match requested %q", prepared.GenerationID, opts.PreparedGeneration)
 	}
-	projectionVersion, err := authenticatePublicationPlan(opts, prepared, manifest)
+	projectionVersion, err := authenticatePublicationPlan(ctx, opts, prepared, manifest, store)
 	if err != nil {
 		return Result{}, fmt.Errorf("authenticate publication projection: %w", err)
 	}
@@ -773,7 +773,7 @@ func planProjectionVersion(plan presentation.RenderPlan) (int, error) {
 	return 3, nil
 }
 
-func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, manifest memory.GenerationManifest) (int, error) {
+func authenticatePublicationPlan(ctx context.Context, opts Options, prepared memorystore.Prepared, manifest memory.GenerationManifest, store *memorystore.Store) (int, error) {
 	version, err := planProjectionVersion(opts.Plan)
 	if opts.markdownIndex != nil {
 		version = 4
@@ -815,6 +815,9 @@ func authenticatePublicationPlan(opts Options, prepared memorystore.Prepared, ma
 		accepted, err := reviewv4.LoadProjection(files[reviewv2.ReviewRelativePath], files[reviewv2.HistoryRelativePath], files[reviewv2.MachineLedgerRelativePath], index)
 		if err != nil {
 			return 0, fmt.Errorf("load v4 projection: %w", err)
+		}
+		if err := VerifyPrivateChainBindings(ctx, store, manifest, accepted); err != nil {
+			return 0, err
 		}
 		projectID = accepted.Review.ProjectID
 		generationID = accepted.Review.GenerationID

@@ -198,7 +198,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if pubErr != nil && !errors.Is(pubErr, memorystore.ErrNoPublishedGeneration) {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load published generation: %w", pubErr)
 	}
-	pvBytes, err := store.LoadObject(memorystore.ObjectProjectView, manifest.ProjectViewDigest)
+	pvBytes, err := store.LoadObjectContext(ctx, memorystore.ObjectProjectView, manifest.ProjectViewDigest)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load project view object: %w", err)
 	}
@@ -206,7 +206,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if err := json.Unmarshal(pvBytes, &pv); err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("decode project view: %w", err)
 	}
-	indexBody, err := store.LoadObject(memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
+	indexBody, err := store.LoadObjectContext(ctx, memorystore.ObjectSessionIndex, manifest.SessionIndexDigest)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load session index object: %w", err)
 	}
@@ -217,6 +217,10 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	projectAccounting, sessionReports, err := loadProjectionAccounting(catalog, pv)
 	if err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load projection accounting: %w", err)
+	}
+	projectedMilestones, err := loadScanMilestones(ctx, store, manifest)
+	if err != nil {
+		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("load scan milestones: %w", err)
 	}
 
 	if err := notifyPhase(opts.PhaseObserver, "rendering"); err != nil {
@@ -233,7 +237,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 		}
-		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, AfterDestination: opts.afterDestination})
+		pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, AfterDestination: opts.afterDestination})
 		if err != nil {
 			return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 		}
@@ -245,7 +249,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 			if err := notifyPhase(opts.PhaseObserver, "syncing"); err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
 			}
-			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Now: now, Existing: true, AfterDestination: opts.afterDestination})
+			pubResult, err := publishV4Scan(ctx, v4PublishInput{ProjectID: opts.ProjectID, DataRoot: opts.DataRoot, Mapping: mapping, PreparedGeneration: prepared.GenerationID, Index: indexDocument, Accounting: projectAccounting, Milestones: projectedMilestones, Store: store, Manifest: manifest, Now: now, Existing: true, AfterDestination: opts.afterDestination})
 			if err != nil {
 				return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, fmt.Errorf("publish v4 presentation: %w", err)
 			}

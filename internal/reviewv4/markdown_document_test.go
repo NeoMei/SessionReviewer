@@ -183,6 +183,56 @@ func TestMarkdownSensitiveSourceMasksOnlyAuthenticatedIdentityValues(t *testing.
 	}
 }
 
+func TestMarkdownSensitiveSourceMasksAuthenticatedGeneratedSourceRefs(t *testing.T) {
+	ledger := sharedMarkdownLedger(t)
+	ledger.MinimumReaderVersion, ledger.MinimumWriterVersion = "0.4.3", "0.4.3"
+	ledger.DocumentProjection.PresentationBase.MinimumReaderVersion, ledger.DocumentProjection.PresentationBase.MinimumWriterVersion = "0.4.3", "0.4.3"
+	ledger.DocumentProjection.PresentationBase.ChainDependencies = []ChainDependency{{Provider: "codex", SessionID: "session-s", SessionViewDigest: "sha256:173ca58e035b5053b7c359e0605ede4574febb3fb8881db61d6bfc934ecd87ed", DependencyDigest: "sha256:" + strings.Repeat("8", 64), TurnUnitIDs: []string{"turn-cfe718b0307b34f85dd577467fe15a7d15c4cd6d32659d37c43dc3396a4202c0"}}}
+	dependency := &ledger.DocumentProjection.PresentationBase.ChainDependencies[0]
+	ref := SourceTurnRef{Provider: dependency.Provider, SessionID: dependency.SessionID, SessionViewDigest: dependency.SessionViewDigest, TurnUnitID: dependency.TurnUnitIDs[0]}
+	loop := ledger.DocumentProjection.PresentationBase.Timeline[0].ClosedLoop
+	loop.SourceTurnRefs = []SourceTurnRef{ref}
+	loop.Coverage = ClosedLoopCoverage{SourceTurns: 1, CapturedTurns: 1}
+	loop.Verification = ClosedLoopSegment{State: "present", Text: "passed", SourceTurnRefs: []SourceTurnRef{ref}}
+	ledger.DocumentProjection.PresentationBase.Timeline[0].ClosedLoop = loop
+	body, err := RenderLedger(ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger, err = DecodeLedger(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := RenderMarkdown(ledger.DocumentProjection.PresentationBase, ledger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(pair.History, []byte(dependency.SessionViewDigest)) || !bytes.Contains(pair.History, []byte(dependency.TurnUnitIDs[0])) {
+		t.Fatal("fixture did not render authenticated source references")
+	}
+	document, err := ParseMarkdownDocumentAgainstLedger("项目历史.md", pair.History, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := document.SensitiveScanSource()
+	if err != nil || len(redact.Default().Text(string(source)).Findings) != 0 {
+		t.Fatalf("authenticated source refs reached human-content scanner: err=%v source=%s", err, source)
+	}
+	human := append(bytes.Clone(pair.History), []byte("\n"+dependency.Provider+"/"+dependency.SessionID+"@"+dependency.SessionViewDigest+"#"+dependency.TurnUnitIDs[0]+"\n")...)
+	document, err = ParseMarkdownDocumentAgainstLedger("项目历史.md", human, ledger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err = document.SensitiveScanSource()
+	if err != nil || len(redact.Default().Text(string(source)).Findings) == 0 {
+		t.Fatalf("human source-ref lookalike escaped scan: err=%v source=%s", err, source)
+	}
+	tampered := bytes.Replace(pair.History, []byte(dependency.SessionViewDigest), []byte("sha256:"+strings.Repeat("f", 64)), 1)
+	if _, err := ParseMarkdownDocumentAgainstLedger("项目历史.md", tampered, ledger); MarkdownCodeOf(err) != MarkdownGeneratedRegionModified {
+		t.Fatalf("tampered generated source ref was accepted: %v", err)
+	}
+}
+
 func TestMarkdownDocumentReplaceFieldsPreservesShellAndStructure(t *testing.T) {
 	raw := validMarkdownDocument("before\r\n<!-- session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\r\nold\r\n<!-- /session-reviewer:v4-field entity=\"project-overview\" name=\"goal\" -->\r\nafter\r\n")
 	document, err := ParseMarkdownDocument("项目回顾.md", raw)

@@ -96,7 +96,7 @@ func RebaseMarkdownMilestones(oldLedger MachineLedger, pending MarkdownPair, upd
 		position, exists := byID[generated.ID]
 		if !exists {
 			next.Timeline = append(next.Timeline, cloneTimeline(generated))
-			addGeneratedMilestoneBaselines(&next, generated)
+			AddScanMilestoneBaselines(&next, generated)
 			byID[generated.ID] = len(next.Timeline) - 1
 			continue
 		}
@@ -293,7 +293,9 @@ func replaceGeneratedMilestoneBaseline(p *Presentation, oldMetadata *markdownEdi
 	return nil
 }
 
-func addGeneratedMilestoneBaselines(p *Presentation, item Timeline) {
+// AddScanMilestoneBaselines seeds the exact editable scalar baselines for one
+// generated milestone before its first Markdown render.
+func AddScanMilestoneBaselines(p *Presentation, item Timeline) {
 	entity := "milestone:" + item.ID
 	for _, field := range markdownMilestoneScalarFields {
 		value := generatedMilestoneField(item, field)
