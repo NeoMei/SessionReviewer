@@ -154,7 +154,8 @@ func validateRetainedAction(action Action, view memory.SessionView, active map[s
 		return errors.New("duplicate retained evidence revision")
 	}
 	policy, supported := retainedFactPolicyFor(revision)
-	if !supported || !policy.action || action.Kind != policy.kind || action.ToolName != nil || action.Excerpt != retainedFactExcerpt(revision, policy) {
+	toolName := retainedToolName(revision, policy)
+	if !supported || !policy.action || action.Kind != policy.kind || (action.ToolName == nil) != (toolName == nil) || action.ToolName != nil && *action.ToolName != *toolName || action.Excerpt != retainedFactExcerpt(revision, policy) {
 		return errors.New("action does not match deterministic retained projection")
 	}
 	if err := validateEvidenceRevisionSource(action.SourceRef, revision, view, start, end); err != nil {
@@ -184,13 +185,13 @@ func validateRetainedResult(result Result, view memory.SessionView, active map[s
 }
 
 func validateEvidenceRevisionSource(ref SourceRef, revision memory.ObservationRevision, view memory.SessionView, start, end uint64) error {
-	if revision.Ref.Location.Kind != memory.SourceLocationJSONL || revision.Ref.Location.JSONL == nil || revision.Ref.Location.JSONL.Line <= 0 {
+	if revision.Ref.Location.RecordOrdinal() <= 0 {
 		return errors.New("retained evidence revision lacks an exact source ordinal")
 	}
 	if err := validateEvidenceSourceRef(ref, view, start, end); err != nil {
 		return err
 	}
-	if ref.Provider != revision.Ref.Provider || ref.SessionID != revision.Ref.SessionID || ref.SourceIdentity != revision.Ref.SourceIdentity || ref.RecordOrdinal != uint64(revision.Ref.Location.JSONL.Line) || ref.SourceHash != revision.Ref.SourceHash {
+	if ref.Provider != revision.Ref.Provider || ref.SessionID != revision.Ref.SessionID || ref.SourceIdentity != revision.Ref.SourceIdentity || ref.RecordOrdinal != uint64(revision.Ref.Location.RecordOrdinal()) || ref.SourceHash != revision.Ref.SourceHash {
 		return errors.New("retained evidence source coordinate does not match active revision")
 	}
 	return nil

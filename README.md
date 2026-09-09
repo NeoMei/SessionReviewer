@@ -102,6 +102,12 @@ session-reviewer scan status --json
 
 Terminal states distinguish a complete scan (`completed`), a complete scan with isolated source issues (`completed_with_issues`), and a failed scan (`failed`). Starting the same project again while its worker is queued or running returns the existing job instead of launching a duplicate.
 
+### OpenCode source (development candidate)
+
+The read-only SQLite adapter is opt-in. Set `SESSION_REVIEWER_OPENCODE_DB` to an absolute path in the environment of the SessionReviewer CLI process. An unset value leaves OpenCode unavailable and does not inspect its default live database. In Obsidian, the CLI launched by the plugin must inherit this setting; changing a separate Terminal environment does not change an already running Obsidian process.
+
+The adapter discovers current-project root and child Sessions without the CLI listing's 100-item limit. It reads a bounded RAM snapshot of the database and committed WAL data; it does not start an Agent, write to the source, or save transcript sidecars. Currently supported: the pinned OpenCode 1.18.30 legacy `session`/`message`/`part` layout. Event-sourced Sessions, reverted history, incompatible schemas, source drift, and exceeded limits fail with an explicit error. An unfinished tail is deferred and marked incomplete. Session IDs retain native case. Missing or conflicting token totals show unavailable usage; a later correction can refresh accounting without rewriting conversation references. Native/live-store acceptance remains separate from synthetic fixture tests.
+
 ## Optional Agent-assisted review
 
 Prepare a bounded evidence packet:

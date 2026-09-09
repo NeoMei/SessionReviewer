@@ -53,7 +53,7 @@ func TestPricingCatalogContractAndBodyAreExactAndBounded(t *testing.T) {
 			t.Fatalf("accepted invalid catalog argv: %v", invalid)
 		}
 	}
-	selection := PricingCatalogSelection{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: "project-p", Provider: "codex", SessionID: "session-1", UsageRecordDigest: contractTestDigest, BillingHost: "api.example.test", BilledModelID: "model-a", BillingMode: "api", ModelPriceWatchListingID: "provider-model-test", SupersedesSnapshotID: stringPointer("pricing-old")}
+	selection := PricingCatalogSelection{SchemaVersion: 1, MinimumReaderVersion: "0.4.0", ProjectID: "project-p", Provider: "opencode", SessionID: "ses_nativeChild", UsageRecordDigest: contractTestDigest, BillingHost: "api.example.test", BilledModelID: "model-a", BillingMode: "api", ModelPriceWatchListingID: "provider-model-test", SupersedesSnapshotID: stringPointer("pricing-old")}
 	body, err := renderPricingCatalogSelection(selection)
 	if err != nil {
 		t.Fatal(err)

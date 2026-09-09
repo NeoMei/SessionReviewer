@@ -236,9 +236,20 @@ func safeContractID(value string) bool {
 	return utf8.ValidString(value) && safeReviewID(value)
 }
 
+var sessionContractIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func safeSessionContractID(value string) bool {
+	return sessionContractIDPattern.MatchString(value)
+}
+
 func requireSafeIDs(flags contractFlags, names ...string) error {
 	for _, name := range names {
-		if !safeContractID(flags.values[name]) {
+		valid := safeContractID(flags.values[name])
+		if name == "session-id" {
+			// Provider-native Session IDs preserve case; other IDs retain their contract.
+			valid = safeSessionContractID(flags.values[name])
+		}
+		if !valid {
 			return contractError("ID is empty or invalid")
 		}
 	}

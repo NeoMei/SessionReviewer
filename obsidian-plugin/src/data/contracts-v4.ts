@@ -1,3 +1,4 @@
+import { sessionIdentity } from "../contracts/session-identity";
 import type { DecisionCandidatePage, DecisionCandidateEvidence } from "../cli/decision-evidence";
 import { sha256Text } from "./hash";
 import type {
@@ -489,7 +490,7 @@ export function parseConversationChainV1(source: string): ConversationChainV1 {
     const claimedDigest = digest(row.digest, "$.digest");
     id(row.project_id, "$.project_id");
     const provider = id(row.provider, "$.provider");
-    const sessionID = id(row.session_id, "$.session_id");
+    const sessionID = sessionIdentity(row.session_id, "$.session_id");
     const sessionViewDigest = digest(row.session_view_digest, "$.session_view_digest");
     const dependencyDigest = digest(row.dependency_digest, "$.dependency_digest");
     const ruleVersion = id(row.segmentation_rule_version, "$.segmentation_rule_version");
@@ -779,7 +780,8 @@ export function parseDecisionCandidatePage(source: string, projectID: string): D
       for (const entry of refs) {
         const ref = object(entry, path);
         exact(ref, path, ["provider", "session_id", "session_view_digest", "turn_unit_id", "revision_id"]);
-        for (const key of ["provider", "session_id", "turn_unit_id"]) id(ref[key], `${path}.${key}`);
+        for (const key of ["provider", "turn_unit_id"]) id(ref[key], `${path}.${key}`);
+        sessionIdentity(ref.session_id, `${path}.session_id`);
         digest(ref.session_view_digest, `${path}.session_view_digest`);
         digest(ref.revision_id, `${path}.revision_id`);
         addUnique(seenRefs, [ref.provider, ref.session_id, ref.session_view_digest, ref.turn_unit_id, ref.revision_id].join("\0"), "evidence ref");
@@ -815,7 +817,7 @@ function parsePricingSupplementDocument(source: string): PricingSupplementV1 {
   version(row.minimum_reader_version, "$.minimum_reader_version");
   id(row.project_id, "$.project_id");
   id(row.provider, "$.provider");
-  id(row.session_id, "$.session_id");
+  sessionIdentity(row.session_id, "$.session_id");
   digest(row.usage_record_digest, "$.usage_record_digest");
   text(row.billing_host, "$.billing_host", 4096, true);
   text(row.billed_model_id, "$.billed_model_id", 4096, true);
@@ -896,7 +898,7 @@ function parseSessionReference(value: unknown, path: string): SessionReferenceV4
   const row = object(value, path);
   exact(row, path, ["provider", "session_id"]);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   return row as unknown as SessionReferenceV4;
 }
 
@@ -904,7 +906,7 @@ function parseSourceTurnRef(value: unknown, path: string): SourceTurnRefV4 {
   const row = object(value, path);
   exact(row, path, ["provider", "session_id", "turn_unit_id", "session_view_digest"], ["provider", "session_id", "turn_unit_id"]);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   id(row.turn_unit_id, `${path}.turn_unit_id`);
   if (row.session_view_digest !== undefined) digest(row.session_view_digest, `${path}.session_view_digest`);
   return row as unknown as SourceTurnRefV4;
@@ -996,7 +998,7 @@ function parseChainDependency(value: unknown, path: string): ChainDependencyV4 {
   const row = object(value, path);
   exact(row, path, ["provider", "session_id", "session_view_digest", "dependency_digest", "turn_unit_ids"]);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   digest(row.session_view_digest, `${path}.session_view_digest`);
   digest(row.dependency_digest, `${path}.dependency_digest`);
   idArray(row.turn_unit_ids, `${path}.turn_unit_ids`, 65536, true);
@@ -1159,7 +1161,7 @@ function parseLedgerSession(value: unknown, path: string): LedgerSessionV4 {
   const row = object(value, path);
   exact(row, path, ["provider", "session_id", "processing_state", "source_availability", "session_view_digest", "usage_record_digest"]);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   oneOf(row.processing_state, `${path}.processing_state`, ["complete", "partial", "error", "unprocessed"]);
   oneOf(row.source_availability, `${path}.source_availability`, ["available", "unavailable"]);
   nullableDigest(row.session_view_digest, `${path}.session_view_digest`);
@@ -1187,7 +1189,7 @@ function parseIndexEntry(value: unknown, path: string): SessionIndexEntryV1 {
     "last_successful_generation_id"
   ]);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   oneOf(row.processing_state, `${path}.processing_state`, ["complete", "partial", "error", "unprocessed"]);
   const reasons = boundedArray(row.state_reason_codes, `${path}.state_reason_codes`, 64);
   const seenReasons = new Set<string>();
@@ -1253,7 +1255,7 @@ function parseConversationSourceRef(
 ): ConversationSourceRefV1 {
   const row = object(value, path);
   exact(row, path, ["provider", "session_id", "source_identity", "record_ordinal", "source_hash"]);
-  if (id(row.provider, `${path}.provider`) !== provider || id(row.session_id, `${path}.session_id`) !== sessionID) {
+  if (id(row.provider, `${path}.provider`) !== provider || sessionIdentity(row.session_id, `${path}.session_id`) !== sessionID) {
     throw new Error(`${path} is not authenticated to the conversation identity`);
   }
   id(row.source_identity, `${path}.source_identity`);
@@ -1287,7 +1289,7 @@ function parseInspectionIdentity(row: JsonObject): void {
   version(row.minimum_reader_version, "$.minimum_reader_version");
   id(row.project_id, "$.project_id");
   id(row.provider, "$.provider");
-  id(row.session_id, "$.session_id");
+  sessionIdentity(row.session_id, "$.session_id");
   id(row.generation_id, "$.generation_id");
   digest(row.session_view_digest, "$.session_view_digest");
 }
@@ -1480,7 +1482,7 @@ function validatePricingSnapshot(value: unknown, path: string): PricingSnapshotV
   id(row.snapshot_id, `${path}.snapshot_id`);
   id(row.project_id, `${path}.project_id`);
   id(row.provider, `${path}.provider`);
-  id(row.session_id, `${path}.session_id`);
+  sessionIdentity(row.session_id, `${path}.session_id`);
   digest(row.usage_record_digest, `${path}.usage_record_digest`);
   text(row.billing_host, `${path}.billing_host`, 4096, true);
   text(row.billed_model_id, `${path}.billed_model_id`, 4096, true);

@@ -1,3 +1,4 @@
+import { sessionIdentity } from "../contracts/session-identity";
 import type { ConversationActionV1, ConversationPageV1, ConversationResultV1, VisibleCoverageV1, VisibleMessageV1, VisibleTurnV1 } from "../contracts/conversation-page";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
@@ -25,7 +26,7 @@ export function validateConversationPage(value: unknown): ConversationPageV1 {
   const projectId = id(row.project_id, "$.project_id");
   void projectId;
   const provider = id(row.provider, "$.provider");
-  const sessionId = id(row.session_id, "$.session_id");
+  const sessionId = sessionIdentity(row.session_id, "$.session_id");
   id(row.generation_id, "$.generation_id");
   digest(row.session_view_digest, "$.session_view_digest");
   digest(row.dependency_digest, "$.dependency_digest");
@@ -189,7 +190,7 @@ function parseSourceRef(value: unknown, path: string, provider: string, sessionI
 	const source = object(value, path);
 	exact(source, SOURCE_KEYS, path);
 	if (id(source.provider, `${path}.provider`) !== provider) throw new Error(`${path} crosses provider`);
-	if (id(source.session_id, `${path}.session_id`) !== sessionId) throw new Error(`${path} crosses Session`);
+	if (sessionIdentity(source.session_id, `${path}.session_id`) !== sessionId) throw new Error(`${path} crosses Session`);
 	id(source.source_identity, `${path}.source_identity`);
 	positive(source.record_ordinal, `${path}.record_ordinal`);
 	if (typeof source.source_hash !== "string" || !SHA256.test(source.source_hash)) throw new Error(`${path}.source_hash is invalid`);

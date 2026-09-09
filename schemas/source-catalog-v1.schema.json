@@ -8,7 +8,7 @@
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
     "provider": { "$ref": "#/$defs/safe_id" },
-    "session_id": { "$ref": "#/$defs/safe_id" },
+    "session_id": { "$ref": "#/$defs/session_id" },
     "source_identity": { "$ref": "#/$defs/safe_id" },
     "started_at": { "$ref": "#/$defs/timestamp" },
     "ended_at": { "$ref": "#/$defs/timestamp" },
@@ -23,6 +23,12 @@
     }
   },
   "$defs": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
     "safe_id": {
       "type": "string",
       "minLength": 1,
@@ -54,12 +60,33 @@
       }
     },
     "source_location": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "jsonl"],
+          "properties": {
+            "kind": { "type": "string", "const": "jsonl" },
+            "jsonl": { "$ref": "#/$defs/jsonl_location" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "canonical"],
+          "properties": {
+            "kind": { "type": "string", "const": "canonical" },
+            "canonical": { "$ref": "#/$defs/canonical_location" }
+          }
+        }
+      ]
+    },
+    "canonical_location": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "jsonl"],
+      "required": ["record"],
       "properties": {
-        "kind": { "type": "string", "const": "jsonl" },
-        "jsonl": { "$ref": "#/$defs/jsonl_location" }
+        "record": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "jsonl_location": {

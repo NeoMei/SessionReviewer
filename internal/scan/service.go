@@ -901,7 +901,7 @@ func collectTerminals(ctx context.Context, options Options, decoded []decodedTas
 			diagnostics = append(diagnostics, memory.Diagnostic{Code: quarantineDiagnosticCode(quarantined.ReasonCode)})
 		}
 		switch item.report.BoundaryRelation {
-		case source.BoundaryInitial, source.BoundaryUnchanged, source.BoundaryAppend, source.BoundaryReplacement:
+		case source.BoundaryInitial, source.BoundaryUnchanged, source.BoundaryUsageRefresh, source.BoundaryAppend, source.BoundaryReplacement:
 		default:
 			return nil, fmt.Errorf("decoded source %s/%s has invalid boundary relation %q", record.Provider, record.SessionID, item.report.BoundaryRelation)
 		}

@@ -1,3 +1,4 @@
+import { SESSION_ID } from "../contracts/session-identity";
 import { parseSessionLaunchResponse, parseSessionLauncherConfiguration, type SessionLaunchTarget, type SessionLaunchResponse, type SessionLaunchProvider, type SessionLauncherConfiguration } from "./session-launch";
 import type { DecisionCandidatePage } from "./decision-evidence";
 import { parseProblemPlacementJob, type ProblemPlacementJob } from "./problem-placement";
@@ -265,7 +266,7 @@ export class CliRunner {
 
   async openNativeSession(target: SessionLaunchTarget): Promise<SessionLaunchResponse> {
     validateProject(target.project_id);
-    if (!["codex", "claude", "opencode"].includes(target.provider) || !INSPECT_ID.test(target.session_id) || !INSPECT_ID.test(target.generation_id) || !DIGEST.test(target.session_view_digest)) throw new Error("invalid Session launch target");
+    if (!["codex", "claude", "opencode"].includes(target.provider) || !SESSION_ID.test(target.session_id) || !INSPECT_ID.test(target.generation_id) || !DIGEST.test(target.session_view_digest)) throw new Error("invalid Session launch target");
     const args = ["sessions", "open", "--project-id", target.project_id, "--provider", target.provider, "--session-id", target.session_id, "--expected-generation-id", target.generation_id, "--expected-session-view-digest", target.session_view_digest, "--json"];
     return parseSessionLaunchResponse(parseJson((await this.run(args, 15_000)).stdout), target);
   }
@@ -292,7 +293,7 @@ export class CliRunner {
 
   private async publishPrice(prefix: string[], input: PricingSupplementV1 | PricingCatalogSelection, expectedLedgerSHA256: string): Promise<PricingSnapshotV1> {
     validateProject(input.project_id);
-    if (!INSPECT_ID.test(input.provider) || !INSPECT_ID.test(input.session_id) || !DIGEST.test(input.usage_record_digest) || !/^[0-9a-f]{64}$/.test(expectedLedgerSHA256)) throw new Error("invalid pricing identity");
+    if (!INSPECT_ID.test(input.provider) || !SESSION_ID.test(input.session_id) || !DIGEST.test(input.usage_record_digest) || !/^[0-9a-f]{64}$/.test(expectedLedgerSHA256)) throw new Error("invalid pricing identity");
     const args = [...prefix, "--project-id", input.project_id, "--provider", input.provider, "--session-id", input.session_id, "--usage-record-digest", input.usage_record_digest, "--expected-ledger-sha256", expectedLedgerSHA256, "--json"];
     try { const result = parsePricingSnapshotV1((await this.runWithInput(args, JSON.stringify(input), 35_000)).stdout); validatePricingResult(result, input); return result; }
     catch { throw new Error("保存结果未确认；请刷新账本检查。"); }
@@ -552,7 +553,7 @@ export class CliRunner {
 }
 
 function allowedArgs(args: readonly string[]): boolean {
-  if (args[0] === "sessions" && args[1] === "open") return args.length === 13 && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && ["codex", "claude", "opencode"].includes(args[5] ?? "") && args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") && args[10] === "--expected-session-view-digest" && DIGEST.test(args[11] ?? "") && args[12] === "--json";
+  if (args[0] === "sessions" && args[1] === "open") return args.length === 13 && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && ["codex", "claude", "opencode"].includes(args[5] ?? "") && args[6] === "--session-id" && SESSION_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") && args[10] === "--expected-session-view-digest" && DIGEST.test(args[11] ?? "") && args[12] === "--json";
   if (args[0] === "sessions" && args[1] === "launcher") return args.length === 8 && args[2] === "verify" && args[3] === "--provider" && ["codex", "claude", "opencode"].includes(args[4] ?? "") && args[5] === "--executable" && absoluteExecutable(args[6]) && args[7] === "--json";
   if (args[0] === "problems" && args[1] === "placement" && args[3] === "--project-id" && PROJECT_ID.test(args[4] ?? "")) {
     if (args[2] === "request") return args.length === 14 && args[5] === "--candidate-id" && INSPECT_ID.test(args[6]) && args[7] === "--expected-candidate-revision" && validPositive(args[8]) && args[9] === "--expected-problem-map-revision" && validNonnegative(args[10]) && args[11] === "--expected-generation-id" && SCAN_GENERATION_ID.test(args[12]) && args[13] === "--json";
@@ -575,7 +576,7 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args[0] === "pricing") {
     const offset = args[1] === "supplement" ? 2 : args[1] === "catalog" && args[2] === "accept" ? 3 : 0;
     const rest = args.slice(offset);
-    return offset > 0 && rest.length === 11 && rest[0] === "--project-id" && PROJECT_ID.test(rest[1]) && rest[2] === "--provider" && INSPECT_ID.test(rest[3]) && rest[4] === "--session-id" && INSPECT_ID.test(rest[5]) && rest[6] === "--usage-record-digest" && DIGEST.test(rest[7]) && rest[8] === "--expected-ledger-sha256" && /^[0-9a-f]{64}$/.test(rest[9]) && rest[10] === "--json";
+    return offset > 0 && rest.length === 11 && rest[0] === "--project-id" && PROJECT_ID.test(rest[1]) && rest[2] === "--provider" && INSPECT_ID.test(rest[3]) && rest[4] === "--session-id" && SESSION_ID.test(rest[5]) && rest[6] === "--usage-record-digest" && DIGEST.test(rest[7]) && rest[8] === "--expected-ledger-sha256" && /^[0-9a-f]{64}$/.test(rest[9]) && rest[10] === "--json";
   }
   if ((args.length === 13 || args.length === 15) && args[0] === "inspect" && args[1] === "session-search" && args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--expected-generation-id" && INSPECT_ID.test(args[5] ?? "") && args[6] === "--query-kind" && ["branch", "file", "error"].includes(args[7]) && args[8] === "--query" && Boolean(args[9]) && args[10] === "--limit" && /^(?:[1-9][0-9]?|100)$/.test(args[11]) && args[12] === "--json") return args.length === 13 || (args[13] === "--cursor" && boundedCursor(args[14]));
   if (args.length === 2 && args[0] === "version" && args[1] === "--json") return true;
@@ -599,11 +600,11 @@ function allowedArgs(args: readonly string[]): boolean {
   if (args.length === 5 && args[0] === "scan" && args[1] === "status" && args[2] === "--project-id" && args[4] === "--json") return PROJECT_ID.test(args[3] ?? "");
   if (args.length === 11 && args[0] === "inspect" && args[1] === "session-summary" &&
       args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
-      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[6] === "--session-id" && SESSION_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
       args[10] === "--json") return true;
   if ((args.length === 13 || args.length === 15) && args[0] === "inspect" && args[1] === "session-events" &&
       args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
-      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[6] === "--session-id" && SESSION_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
       args[10] === "--limit" && validInspectLimit(args[11]) && args[12] === "--json") {
     if (args.length === 13) return true;
     if (args[13] === "--cursor") return boundedCursor(args[14]);
@@ -611,7 +612,7 @@ function allowedArgs(args: readonly string[]): boolean {
   }
   if (args.length >= 13 && args.length <= 19 && args[0] === "inspect" && args[1] === "conversation-chain" &&
       args[2] === "--project-id" && PROJECT_ID.test(args[3] ?? "") && args[4] === "--provider" && INSPECT_ID.test(args[5] ?? "") &&
-      args[6] === "--session-id" && INSPECT_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
+      args[6] === "--session-id" && SESSION_ID.test(args[7] ?? "") && args[8] === "--expected-generation-id" && INSPECT_ID.test(args[9] ?? "") &&
       args[10] === "--limit" && validConversationLimit(args[11]) && args[12] === "--json") {
 	const rest = args.slice(13);
 	let index = 0;
@@ -628,7 +629,7 @@ function validateProblemCAS(request: ProblemCAS): void { validateProject(request
 function validateProblemNodeIdentity(problem: ProblemNodeV4): void { if (!ENTITY_ID.test(problem.id) || !Number.isSafeInteger(problem.revision) || problem.revision < 1) throw new Error("invalid problem node"); }
 function validNonnegative(value: string | undefined): boolean { return Boolean(value && /^(?:0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value))); }
 function validPositive(value: string | undefined): boolean { return Boolean(value && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value))); }
-function validProblemSourceRef(value: unknown): boolean { if (typeof value !== "object" || value === null || Array.isArray(value)) return false; const ref = value as Record<string, unknown>; return matchesString(INSPECT_ID, ref.provider ?? "") && matchesString(INSPECT_ID, ref.session_id ?? "") && matchesString(INSPECT_ID, ref.turn_unit_id ?? "") && (ref.session_view_digest === undefined || matchesString(DIGEST, ref.session_view_digest)); }
+function validProblemSourceRef(value: unknown): boolean { if (typeof value !== "object" || value === null || Array.isArray(value)) return false; const ref = value as Record<string, unknown>; return matchesString(INSPECT_ID, ref.provider ?? "") && matchesString(SESSION_ID, ref.session_id ?? "") && matchesString(INSPECT_ID, ref.turn_unit_id ?? "") && (ref.session_view_digest === undefined || matchesString(DIGEST, ref.session_view_digest)); }
 function validCandidate(value: unknown, projectId: string): value is ProblemCandidate {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const candidate = value as Record<string, unknown>;
@@ -644,7 +645,7 @@ function validCandidate(value: unknown, projectId: string): value is ProblemCand
 function validateSessionSummaryRequest(request: SessionSummaryRequest): void {
   validateProject(request.projectId);
   if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
-  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!SESSION_ID.test(request.sessionId)) throw new Error("invalid Session ID");
   if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
   if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
 }
@@ -652,7 +653,7 @@ function validateSessionSummaryRequest(request: SessionSummaryRequest): void {
 function validateSessionEventRequest(request: SessionEventRequest): void {
   validateProject(request.projectId);
   if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
-  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!SESSION_ID.test(request.sessionId)) throw new Error("invalid Session ID");
   if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
   if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
   if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 100) throw new Error("invalid event page limit");
@@ -682,7 +683,7 @@ function sessionInspectErrorCode(error: unknown): SessionInspectErrorCode {
 function validateConversationRequest(request: ConversationRequest): void {
   validateProject(request.projectId);
   if (!INSPECT_ID.test(request.provider)) throw new Error("invalid provider");
-  if (!INSPECT_ID.test(request.sessionId)) throw new Error("invalid Session ID");
+  if (!SESSION_ID.test(request.sessionId)) throw new Error("invalid Session ID");
   if (!INSPECT_ID.test(request.expectedGenerationId)) throw new Error("invalid generation ID");
   if (!DIGEST.test(request.expectedSessionViewDigest)) throw new Error("invalid Session view digest");
 	if (request.sessionViewDigest !== undefined && !DIGEST.test(request.sessionViewDigest)) throw new Error("invalid selected Session view digest");

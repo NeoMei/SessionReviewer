@@ -20,6 +20,12 @@
     "adapter_version": { "$ref": "#/$defs/safe_id" }
   },
   "$defs": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
     "safe_id": {
       "type": "string",
       "minLength": 1,
@@ -52,7 +58,7 @@
       "required": ["provider", "session_id", "source_identity", "sequence", "project_id", "kind", "subject"],
       "properties": {
         "provider": { "$ref": "#/$defs/safe_id" },
-        "session_id": { "$ref": "#/$defs/safe_id" },
+        "session_id": { "$ref": "#/$defs/session_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
         "sequence": { "$ref": "#/$defs/nonnegative_integer" },
         "project_id": { "$ref": "#/$defs/safe_id" },
@@ -66,19 +72,40 @@
       "required": ["provider", "session_id", "source_identity", "source_location", "source_hash"],
       "properties": {
         "provider": { "$ref": "#/$defs/safe_id" },
-        "session_id": { "$ref": "#/$defs/safe_id" },
+        "session_id": { "$ref": "#/$defs/session_id" },
         "source_identity": { "$ref": "#/$defs/safe_id" },
         "source_location": { "$ref": "#/$defs/source_location" },
         "source_hash": { "$ref": "#/$defs/sha256" }
       }
     },
     "source_location": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "jsonl"],
+          "properties": {
+            "kind": { "type": "string", "const": "jsonl" },
+            "jsonl": { "$ref": "#/$defs/jsonl_location" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "canonical"],
+          "properties": {
+            "kind": { "type": "string", "const": "canonical" },
+            "canonical": { "$ref": "#/$defs/canonical_location" }
+          }
+        }
+      ]
+    },
+    "canonical_location": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "jsonl"],
+      "required": ["record"],
       "properties": {
-        "kind": { "type": "string", "const": "jsonl" },
-        "jsonl": { "$ref": "#/$defs/jsonl_location" }
+        "record": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }
       }
     },
     "jsonl_location": {
@@ -115,6 +142,7 @@
         "tag": { "$ref": "#/$defs/bounded_text" },
         "target": { "$ref": "#/$defs/bounded_text" },
         "tool_id": { "$ref": "#/$defs/bounded_text" },
+        "tool_name": { "$ref": "#/$defs/bounded_text" },
         "version": { "$ref": "#/$defs/bounded_text" }
       }
     }

@@ -77,7 +77,7 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 	revisions := append([]memory.ObservationRevision(nil), input.Revisions...)
 	sort.Slice(revisions, func(i, j int) bool {
 		left, right := revisions[i], revisions[j]
-		leftLine, rightLine := left.Ref.Location.JSONL.Line, right.Ref.Location.JSONL.Line
+		leftLine, rightLine := left.Ref.Location.RecordOrdinal(), right.Ref.Location.RecordOrdinal()
 		if leftLine != rightLine {
 			return leftLine < rightLine
 		}
@@ -88,7 +88,7 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 	})
 	var turnCursor retainedTurnCursor
 	for _, revision := range revisions {
-		turnIndex := turnCursor.locate(document.TurnUnits, uint64(revision.Ref.Location.JSONL.Line))
+		turnIndex := turnCursor.locate(document.TurnUnits, uint64(revision.Ref.Location.RecordOrdinal()))
 		policy, supported := retainedFactPolicyFor(revision)
 		if !supported {
 			report.UnsupportedFacts++
@@ -100,11 +100,11 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 		}
 		ref := SourceRef{
 			Provider: revision.Ref.Provider, SessionID: revision.Ref.SessionID, SourceIdentity: revision.Ref.SourceIdentity,
-			RecordOrdinal: uint64(revision.Ref.Location.JSONL.Line), SourceHash: revision.Ref.SourceHash,
+			RecordOrdinal: uint64(revision.Ref.Location.RecordOrdinal()), SourceHash: revision.Ref.SourceHash,
 		}
 		excerpt := retainedFactExcerpt(revision, policy)
 		if policy.action {
-			document.TurnUnits[turnIndex].Actions = append(document.TurnUnits[turnIndex].Actions, Action{RevisionID: revision.RevisionID, SourceRef: ref, Kind: policy.kind, ToolName: nil, Excerpt: excerpt})
+			document.TurnUnits[turnIndex].Actions = append(document.TurnUnits[turnIndex].Actions, Action{RevisionID: revision.RevisionID, SourceRef: ref, Kind: policy.kind, ToolName: retainedToolName(revision, policy), Excerpt: excerpt})
 		} else {
 			document.TurnUnits[turnIndex].Results = append(document.TurnUnits[turnIndex].Results, Result{RevisionID: revision.RevisionID, SourceRef: ref, Kind: policy.kind, VerificationState: policy.state, Excerpt: excerpt})
 		}
@@ -218,7 +218,7 @@ func validateMaterializeInput(input MaterializeInput) error {
 		if revision.Key.Provider != input.View.Provider || revision.Key.SessionID != input.View.SessionID || revision.Key.SourceIdentity != input.View.SourceIdentity || revision.Key.ProjectID != input.View.ProjectID {
 			return errors.New("observation revision belongs to another SessionView")
 		}
-		if revision.Ref.Location.Kind != memory.SourceLocationJSONL || revision.Ref.Location.JSONL == nil || revision.Ref.Location.JSONL.Line < 1 || uint64(revision.Ref.Location.JSONL.Line) > MaxWireInteger || uint64(revision.Ref.Location.JSONL.Line) > input.SourceCoverage.SourceRecords {
+		if revision.Ref.Location.RecordOrdinal() < 1 || uint64(revision.Ref.Location.RecordOrdinal()) > MaxWireInteger || uint64(revision.Ref.Location.RecordOrdinal()) > input.SourceCoverage.SourceRecords {
 			return errors.New("observation revision has invalid source ordinal")
 		}
 		summary, active := summaries[revision.RevisionID]
@@ -301,6 +301,10 @@ type retainedFactPolicy struct {
 
 func retainedFactPolicyFor(revision memory.ObservationRevision) (retainedFactPolicy, bool) {
 	switch {
+	case revision.Key.Kind == "tool" && revision.Operation == "tool_call" && revision.Fields["tool_id"] != "" && revision.Fields["tool_name"] != "":
+		return retainedFactPolicy{kind: "tool_call", action: true, allowedFields: []string{"tool_id", "tool_name"}}, true
+	case revision.Key.Kind == "tool" && revision.Operation == "tool_result" && revision.Fields["tool_id"] != "" && revision.Fields["tool_name"] != "" && (revision.Fields["status"] == "completed" || revision.Fields["status"] == "error"):
+		return retainedFactPolicy{kind: "tool_result", state: "unknown", allowedFields: []string{"tool_id", "tool_name", "status"}}, true
 	case revision.Key.Kind == "command" && revision.Operation == "command_started":
 		return retainedFactPolicy{kind: "command_started", action: true, allowedFields: []string{"command_signature", "tool_id"}}, true
 	case revision.Key.Kind == "command" && revision.Operation == "command_finished":
@@ -326,6 +330,14 @@ func retainedFactPolicyFor(revision memory.ObservationRevision) (retainedFactPol
 	default:
 		return retainedFactPolicy{}, false
 	}
+}
+
+func retainedToolName(revision memory.ObservationRevision, policy retainedFactPolicy) *string {
+	name := revision.Fields["tool_name"]
+	if policy.kind != "tool_call" || !validID(name) {
+		return nil
+	}
+	return &name
 }
 
 func authoritativeState(outcome string) string {

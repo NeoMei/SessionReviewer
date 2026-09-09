@@ -179,7 +179,7 @@ func qualifyingFactsByTurn(session MilestoneSessionInput) (map[int][]qualifiedMi
 			continue
 		}
 		total++
-		turnIndex := milestoneTurnForOrdinal(session.Chain.TurnUnits, uint64(revision.Ref.Location.JSONL.Line))
+		turnIndex := milestoneTurnForOrdinal(session.Chain.TurnUnits, uint64(revision.Ref.Location.RecordOrdinal()))
 		if turnIndex < 0 {
 			if _, incorrectlyRetained := retained[revision.RevisionID]; incorrectlyRetained {
 				return nil, 0, 0, errors.New("pre-user qualifying fact was attached to a turn")

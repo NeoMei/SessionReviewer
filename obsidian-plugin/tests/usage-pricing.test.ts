@@ -29,6 +29,32 @@ describe("pricing evidence in usage cards", () => {
     expect(root.querySelector('a[href="https://modelpricewatch.com/"]')?.textContent).toContain("ModelPriceWatch");
   });
 
+  it("does not display unresolved billing placeholders as measured zero usage or a zero bill", () => {
+    const ledger = fixture();
+    const price = ledger.pricing_snapshots[0];
+    price.billing_rule_version = "unresolved-v1";
+    price.source_kind = "unresolved";
+    price.status = "pending";
+    price.pricing_complete = false;
+    price.known_subtotal_usd = 0;
+    price.total_cost_usd = null;
+    for (const key of ["input", "cached_input", "cache_write_input", "output", "reasoning_output"] as const) {
+      price.billable_quantities[key] = 0;
+      price.rates[key] = null;
+      price.line_costs_usd[key] = null;
+    }
+    const root = renderV4Usage(ledger.accounting, [price]);
+    expect(root.textContent).toContain("小计 待定");
+    expect(root.textContent).not.toContain("小计 $0");
+    expect([...root.querySelectorAll(".sr-v4-price-line")].map(line => line.querySelector("dd")?.textContent)).toEqual(Array(5).fill("待定"));
+    // A reviewed normalization can record genuine zero even while prices are missing.
+    price.billing_rule_version = "codex-token-count-v1";
+    price.line_costs_usd.input = 0;
+    const known = renderV4Usage(ledger.accounting, [price]);
+    expect(known.textContent).toContain("小计 $0");
+    expect(known.querySelector(".sr-v4-price-line dd")?.textContent).toBe("0");
+  });
+
   it("labels an unknown route and missing total without pretending a zero bill", () => {
     const ledger = fixture();
     const price = ledger.pricing_snapshots[0];

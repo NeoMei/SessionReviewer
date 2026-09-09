@@ -18,6 +18,7 @@ it("queries only on click and confirms a catalog entry with user supplied route 
 it("rejects a malformed catalog and only publishes a supplement through bounded stdin with ledger preimage", async()=>{
  const {CliRunner}=await import("../src/cli/runner");
  const ledger=parseMachineLedgerV4(readFileSync("tests/fixtures/v4/machine-ledger-v4.valid.json","utf8"));const price=ledger.pricing_snapshots[0];
+ price.provider="opencode";price.session_id="ses_nativeChild";
  const input={schema_version:1 as const,minimum_reader_version:"0.4.0" as const,project_id:price.project_id,provider:price.provider,session_id:price.session_id,usage_record_digest:price.usage_record_digest,billing_host:price.billing_host,billed_model_id:price.billed_model_id,billing_mode:price.billing_mode,billing_rule_version:price.billing_rule_version,region:price.region,effective_from:"2026-01-01T00:00:00Z",effective_until:null,rates:price.rates,source_url:price.source_url!,detail_url:price.detail_url,audit_reason:"已核对",supersedes_snapshot_id:price.snapshot_id};
  let received="";let argv:readonly string[]=[];
  const runner=new CliRunner("/bin/sr",(_file,args,options,callback)=>{argv=args;expect(options.shell).toBe(false);return {stdin:{end(body:string){received=body;callback(null,JSON.stringify(price),"");}}};});

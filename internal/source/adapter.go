@@ -135,10 +135,13 @@ type DecodeReport struct {
 type BoundaryRelation string
 
 const (
-	BoundaryInitial     BoundaryRelation = "initial"
-	BoundaryUnchanged   BoundaryRelation = "unchanged"
-	BoundaryAppend      BoundaryRelation = "append"
-	BoundaryReplacement BoundaryRelation = "replacement"
+	BoundaryInitial   BoundaryRelation = "initial"
+	BoundaryUnchanged BoundaryRelation = "unchanged"
+	// BoundaryUsageRefresh changes accounting only, under exact catalog CAS,
+	// without changing frozen source content or any other SourceRecord field.
+	BoundaryUsageRefresh BoundaryRelation = "usage_refresh"
+	BoundaryAppend       BoundaryRelation = "append"
+	BoundaryReplacement  BoundaryRelation = "replacement"
 )
 
 func ValidateReadLimit(limit int64) error {

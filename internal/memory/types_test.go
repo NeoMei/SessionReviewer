@@ -1047,6 +1047,24 @@ func validateSchemaValue(root, schema map[string]any, value any, path string) er
 		}
 		return validateSchemaValue(root, target, value, path)
 	}
+	if alternatives, ok := schema["oneOf"].([]any); ok {
+		matches := 0
+		for _, raw := range alternatives {
+			branch, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%s invalid oneOf branch", path)
+			}
+			if err := validateSchemaValue(root, branch, value, path); err == nil {
+				matches++
+			}
+		}
+		if matches != 1 {
+			return fmt.Errorf("%s matches %d oneOf branches", path, matches)
+		}
+		if schema["type"] == nil {
+			return nil
+		}
+	}
 	if alternatives, ok := schema["type"].([]any); ok {
 		for _, alternative := range alternatives {
 			candidate := make(map[string]any, len(schema))

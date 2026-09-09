@@ -37,7 +37,7 @@ func validateConversationChainDependencies(value GenerationManifest, checkpoints
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if !safeIDPattern.MatchString(dependency.Provider) || !safeIDPattern.MatchString(dependency.SessionID) || !validDigest(dependency.SessionViewDigest) || !validDigest(dependency.Digest) {
+		if !safeIDPattern.MatchString(dependency.Provider) || !sessionIDPattern.MatchString(dependency.SessionID) || !validDigest(dependency.SessionViewDigest) || !validDigest(dependency.Digest) {
 			return errors.New("invalid conversation chain dependency")
 		}
 		identity := dependency.Provider + "\x00" + dependency.SessionID

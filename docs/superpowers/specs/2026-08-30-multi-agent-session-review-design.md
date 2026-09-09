@@ -25,7 +25,7 @@ The product goal is equal experience, not a Codex-shaped export of other logs. A
 ## 3. Non-goals
 
 - A sidecar copy of Claude or OpenCode sessions rewritten as Codex JSONL.
-- Direct reads of OpenCode's private SQLite schema.
+- Writes or migrations to OpenCode's private SQLite store; unsupported schemas remain closed. Read-only access is permitted by the 2026-09-10 amendment in §8.3.
 - An OpenCode Obsidian worker before it can prove the proposal-only contract.
 - A per-source worker split inside one click.
 - Changing the evolution, decision, usage, risk, or resume layout.
@@ -43,7 +43,7 @@ The product goal is equal experience, not a Codex-shaped export of other logs. A
 - Missing source roots are skipped. Corrupt data that may belong to the current project fails the whole freeze.
 - In-agent review owns one durable review run from freeze through the final sync. Kernel leases protect each command; the durable owner record prevents an Obsidian job from starting between commands.
 - Source usage keeps exact token counts even when public pricing is unavailable. Unknown prices are represented as incomplete pricing, never as zero cost and never as a failed semantic review.
-- OpenCode collection uses its documented local CLI JSON interfaces. SessionReviewer does not depend on OpenCode database tables.
+- OpenCode collection prefers documented local CLI JSON interfaces when they establish complete project discovery. The 2026-09-10 approved amendment permits the bounded read-only SQLite adapter in §8.3 when that contract cannot be met.
 
 ## 5. Selected approach
 
@@ -102,19 +102,23 @@ Included evidence: `user` / `assistant` text as messages, `tool_use` as tool cal
 
 ### 8.3 OpenCode
 
-The source is the installed OpenCode CLI. SessionReviewer resolves and authenticates an absolute executable from `--opencode-executable`, `SESSION_REVIEWER_OPENCODE_EXECUTABLE`, or `PATH`, then invokes only `opencode session list --format json --pure` and `opencode export SESSION_ID --pure` with the project root as the child working directory. Stdout and stderr have fixed byte budgets and timeouts. A successful empty `session list` means no sessions; empty `export`, non-UTF-8, truncated, or schema-invalid output fails the source. Session `directory` must match the current physical project identity. The JSON is consumed in memory; no sidecar export is written.
+**Amendment approved 2026-09-10.** The user confirmed the proposed read-only SQLite supplement after being shown the CLI-only completeness blocker. This supersedes the original direct-SQLite exclusion, not the zero-Agent, project-isolation, provenance, or human-preservation rules. No live database read or release is implied by implementation approval.
 
-Canonical order is exported messages by `(info.time.created, info.id)`, then exported parts in their array order. Hashes cover a SessionReviewer-defined compact canonical payload. `text` parts become messages; a finalized `tool` part becomes a tool call followed by a tool result. `step-start`, `step-finish`, and `reasoning` advance the sequence only.
+The installed CLI remains preferred where its documented interface proves complete project discovery. OpenCode 1.18.30's roots-only limited listing cannot do so; the adapter may therefore use an explicitly configured absolute SQLite path (`SESSION_REVIEWER_OPENCODE_DB`). Absence of that opt-in reports provider unavailable, without opening the default live database. No shell or OpenCode process runs during scan/read. Once a path is configured, missing/corrupt/incompatible data fails closed rather than reporting an empty complete source.
 
-OpenCode exposes a mutable active tail. The adapter streams only a stable prefix ending at a finished assistant message. Every tool part through that boundary must be `completed` or `error`; `pending` or `running` stops the prefix before its owning user/assistant turn. A user turn without a finished assistant response is deferred. Every finalized part has fixed expansion cardinality, so normal tool completion cannot renumber an accepted prefix. A later export that changes an already accepted canonical payload is genuine source drift.
+Only the authenticated physical project directory is selected; include root and child Sessions. Support the pinned 1.18.30 legacy `session` / `message` / `part` schema using explicit required-column checks. Reject unsupported storage layouts or malformed identity/data; never guess a new schema. Read main/WAL files with read-only handles into a bounded, verified RAM snapshot and include committed WAL frames. Use two matching captures with physical-file and metadata checks; this detects observed writes but is an optimistic snapshot, not a source-locked transaction or an adversarial ABA guarantee. A changing store is rejected for retry. SQLite queries operate on the immutable RAM view, never the original store, so there are no source writes, migrations, checkpoints, SHM changes, or raw transcript sidecars. Reject hot rollback journals, source mutation during capture, invalid checksums, unsupported headers, or exceeded budgets. Snapshot input is capped at512MiB; selected canonical content at128MiB, 65,536 Sessions and 100,000 messages/parts per Session. Context cancellation, a10-second acquisition/validation budget and a30-second source-operation timeout apply.
 
-If OpenCode rewrites history or inserts an earlier finalized message, the sequence drifts. Report source drift; do not reorder or guess. An unexpected export schema fails closed. A missing or incompatible executable skips OpenCode only when no explicit OpenCode executable was configured; an explicitly configured but invalid executable fails preflight.
+Canonical order is messages by `(time_created, id)` and parts by `id`, matching the pinned upstream reader. One canonical record binds Session ID, physical directory, start time, message row identity/time/data and ordered part row identity/data. JSON objects are normalized deterministically. Coordinates use the `canonical` record ordinal, not invented JSONL offsets. A tool part yields separate typed call/result observations referencing the same authenticated record. Reasoning is not exposed as visible text or retained excerpts.
+
+The adapter streams only the stable prefix ending at a completed assistant response with a final finish reason. Every tool part in its turn must be `completed` or `error`; pending/running tools defer their entire owning user turn. An unanswered user tail is deferred. Later content changing any already accepted canonical record is source drift and fails; ordinary finalized append preserves identity and accepted ordinals. The reader authenticates published prefix hashes before showing source-full answers; if the source is removed or changes, existing retained evidence remains readable.
+
+Usage comes from assistant message token records, once per message, grouped by `providerID/modelID`. Missing or inconsistent totals remain explicit diagnostics; no estimated price or completion is fabricated. Optional Session totals reconcile only when the whole Session is finalized. If mutable totals change with the canonical prefix unchanged, an explicit `usage_refresh` mutation may replace only Usage: current catalog CAS and exact equality of all other source fields, including identity, boundary/hash, timestamps, availability and project associations, are required. Ordinary `unchanged` retains its stricter contract. Usage-dependent views are regenerated; conversation coordinates and hashes remain unchanged. All existing index, problem, decision and usage presentation contracts remain shared across providers.
 
 ### 8.4 Freeze and prepare
 
 Freeze becomes a project-identity merge across the three adapters, sorted by `StartedAt`. One review is still one run/job, one worker, and one ledger. A missing or uninstalled source is skipped. A configured source with corrupt data narrowed to the current project fails the whole freeze.
 
-Tests use trimmed Claude JSONL fixtures and captured synthetic OpenCode `session list` / `export` JSON fixtures behind a fake executable. Tests never scan the live local database or depend on a user's session history.
+Tests use trimmed Claude JSONL fixtures and synthetic OpenCode SQLite stores (including WAL and unsupported schemas). Tests never scan the live local database or depend on a user's session history.
 
 ## 9. Invocation paths
 

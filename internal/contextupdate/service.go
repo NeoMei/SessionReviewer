@@ -36,6 +36,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/claude"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
+	"github.com/neomei/SessionReviewer/internal/source/opencode"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
 )
@@ -432,9 +433,18 @@ func productionSourceAdapters(codexSessionsRoot, claudeSessionsRoot string, bind
 	if err != nil {
 		return nil, fmt.Errorf("open Claude source adapter: %w", err)
 	}
+	databasePath, err := opencode.DatabasePath()
+	if err != nil {
+		return nil, fmt.Errorf("resolve OpenCode database: %w", err)
+	}
+	openCodeAdapter, err := opencode.New(opencode.AdapterOptions{DatabasePath: databasePath, Bindings: bindings, Catalog: catalog, Redactor: redactor})
+	if err != nil {
+		return nil, fmt.Errorf("open OpenCode source adapter: %w", err)
+	}
 	return []source.NamedAdapter{
 		{Provider: "codex", Adapter: codexAdapter},
 		{Provider: "claude", Adapter: claudeAdapter},
+		{Provider: "opencode", Adapter: openCodeAdapter, Required: databasePath != ""},
 	}, nil
 }
 

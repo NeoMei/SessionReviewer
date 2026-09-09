@@ -154,7 +154,7 @@ func parsePricingCatalogSelection(body []byte) (PricingCatalogSelection, error) 
 		return selection, err
 	}
 	if selection.SchemaVersion != 1 || selection.MinimumReaderVersion != "0.4.0" ||
-		!safeContractID(selection.ProjectID) || !safeContractID(selection.Provider) || !safeContractID(selection.SessionID) ||
+		!safeContractID(selection.ProjectID) || !safeContractID(selection.Provider) || !safeSessionContractID(selection.SessionID) ||
 		requireDigest(selection.UsageRecordDigest) != nil || !exactCatalogValue(selection.BillingHost) ||
 		!exactCatalogValue(selection.BilledModelID) || !exactCatalogValue(selection.BillingMode) ||
 		(selection.Region != nil && (!exactCatalogValue(*selection.Region) || len(*selection.Region) > 128)) || !safeContractID(selection.ModelPriceWatchListingID) ||

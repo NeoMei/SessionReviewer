@@ -1,3 +1,4 @@
+import { SESSION_ID } from "../contracts/session-identity";
 export interface SessionSearchRequest {
   projectId: string;
   expectedGenerationId: string;
@@ -20,7 +21,7 @@ export function validateSearchPage(page: SessionSearchPage, request: SessionSear
   if (!page || Object.keys(page).sort().join(",") !== "generation_id,items,next_cursor,previous_cursor,project_id,schema_version,total" || page.schema_version !== 1 || page.project_id !== request.projectId || page.generation_id !== request.expectedGenerationId || !Number.isSafeInteger(page.total) || page.total < 0 || !Array.isArray(page.items) || page.items.length > request.limit || page.items.length > page.total) throw new Error("search response mismatch");
   const seen = new Set<string>();
   for (const item of page.items) {
-    if (!item || Object.keys(item).sort().join(",") !== "match_kind,provider,session_id" || item.match_kind !== request.queryKind || !safeId(item.provider) || !safeId(item.session_id)) throw new Error("search result identity mismatch");
+    if (!item || Object.keys(item).sort().join(",") !== "match_kind,provider,session_id" || item.match_kind !== request.queryKind || !safeId(item.provider) || (typeof item.session_id !== "string" || !SESSION_ID.test(item.session_id))) throw new Error("search result identity mismatch");
     const key = `${item.provider}\0${item.session_id}`;
     if (seen.has(key)) throw new Error("duplicate search result");
     seen.add(key);

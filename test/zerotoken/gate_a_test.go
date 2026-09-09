@@ -1044,7 +1044,7 @@ var gateProductionTargets = []gateTarget{
 const gateModulePath = "github.com/neomei/SessionReviewer"
 
 func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDependencyClosure {
-	return loadGateImportClosure(t, repositoryRoot, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
+	return loadGateImportClosure(t, repositoryRoot, "./internal/scan", "./internal/source/codex", "./internal/source/claude", "./internal/source/opencode", "./internal/projectprobe")
 }
 
 func loadGateImportClosure(t *testing.T, repositoryRoot string, roots ...string) gateDependencyClosure {

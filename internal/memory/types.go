@@ -19,7 +19,9 @@ const (
 )
 
 var (
-	safeIDPattern     = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	safeIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
+	// Native Session IDs are case-sensitive; other memory identities remain lower-case.
+	sessionIDPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	fieldNamePattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	sha256Pattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	digestPattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
@@ -40,7 +42,7 @@ var (
 		"duration_ms": {}, "error_signature": {}, "exit_code": {}, "failed": {},
 		"file_hash": {}, "git_head": {}, "model": {}, "passed": {},
 		"path": {}, "remote_hash": {}, "release_id": {}, "skipped": {},
-		"status": {}, "tag": {}, "target": {}, "tool_id": {}, "version": {},
+		"status": {}, "tag": {}, "target": {}, "tool_id": {}, "tool_name": {}, "version": {},
 	}
 	rawConversationFields = map[string]struct{}{
 		"analysis": {}, "assistant_message": {}, "decision": {}, "full_transcript": {},
@@ -69,16 +71,38 @@ const (
 
 type SourceLocationKind string
 
-const SourceLocationJSONL SourceLocationKind = "jsonl"
+const (
+	SourceLocationJSONL     SourceLocationKind = "jsonl"
+	SourceLocationCanonical SourceLocationKind = "canonical"
+)
 
 type JSONLSourceLocation struct {
 	Line       int   `json:"line"`
 	ByteOffset int64 `json:"byte_offset"`
 }
 
+// CanonicalSourceLocation identifies an ordered logical record, independent of
+// its physical storage format.
+type CanonicalSourceLocation struct {
+	Record int `json:"record"`
+}
+
 type SourceLocation struct {
-	Kind  SourceLocationKind   `json:"kind"`
-	JSONL *JSONLSourceLocation `json:"jsonl,omitempty"`
+	Kind      SourceLocationKind       `json:"kind"`
+	JSONL     *JSONLSourceLocation     `json:"jsonl,omitempty"`
+	Canonical *CanonicalSourceLocation `json:"canonical,omitempty"`
+}
+
+// RecordOrdinal returns the source's logical record number, or zero for an
+// invalid location or an empty JSONL boundary.
+func (value SourceLocation) RecordOrdinal() int {
+	if err := validateSourceLocation("source", value); err != nil {
+		return 0
+	}
+	if value.Kind == SourceLocationCanonical {
+		return value.Canonical.Record
+	}
+	return value.JSONL.Line
 }
 
 type FrozenBoundary struct {
@@ -1072,7 +1096,7 @@ func validateSourceRef(value SourceRef) error {
 }
 
 func validateSourceIdentity(provider, sessionID, sourceIdentity string) error {
-	if !safeIDPattern.MatchString(provider) || !safeIDPattern.MatchString(sessionID) || !safeIDPattern.MatchString(sourceIdentity) {
+	if !safeIDPattern.MatchString(provider) || !sessionIDPattern.MatchString(sessionID) || !safeIDPattern.MatchString(sourceIdentity) {
 		return errors.New("invalid provider/session/source identity")
 	}
 	return nil
@@ -1082,11 +1106,23 @@ func validateSourceLocation(provider string, value SourceLocation) error {
 	if !safeIDPattern.MatchString(provider) {
 		return errors.New("invalid provider for source location v1")
 	}
-	if value.Kind != SourceLocationJSONL || value.JSONL == nil {
-		return errors.New("private schema v1 requires an exact JSONL source location")
-	}
-	if value.JSONL.Line < 0 || value.JSONL.Line > maxSafeInteger || value.JSONL.ByteOffset < 0 || value.JSONL.ByteOffset > maxSafeInteger {
-		return errors.New("invalid JSONL source coordinates")
+	switch value.Kind {
+	case SourceLocationJSONL:
+		if value.JSONL == nil || value.Canonical != nil {
+			return errors.New("source location requires exclusively JSONL coordinates")
+		}
+		if value.JSONL.Line < 0 || value.JSONL.Line > maxSafeInteger || value.JSONL.ByteOffset < 0 || value.JSONL.ByteOffset > maxSafeInteger {
+			return errors.New("invalid JSONL source coordinates")
+		}
+	case SourceLocationCanonical:
+		if value.Canonical == nil || value.JSONL != nil {
+			return errors.New("source location requires exclusively canonical coordinates")
+		}
+		if value.Canonical.Record <= 0 || value.Canonical.Record > maxSafeInteger {
+			return errors.New("invalid canonical source coordinates")
+		}
+	default:
+		return errors.New("unsupported source location kind")
 	}
 	return nil
 }
@@ -1268,7 +1304,7 @@ func validateSessionDependencies(values []SessionViewDependency, maximum int, ch
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+		if !safeIDPattern.MatchString(value.Provider) || !sessionIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid SessionView dependency")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -1293,7 +1329,7 @@ func validateLineageDependencies(values []SessionLineageDependency, sessions []S
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
+		if !safeIDPattern.MatchString(value.Provider) || !sessionIDPattern.MatchString(value.SessionID) || !validDigest(value.Digest) {
 			return errors.New("invalid Session lineage dependency")
 		}
 		key := value.Provider + "\x00" + value.SessionID
@@ -1330,7 +1366,7 @@ func validateAssociatedUsage(values []AssociatedUsage, checkpoints ...func() err
 		if err := digestCheckpoint(checkpoints); err != nil {
 			return err
 		}
-		if !safeIDPattern.MatchString(value.Provider) || !safeIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
+		if !safeIDPattern.MatchString(value.Provider) || !sessionIDPattern.MatchString(value.SessionID) || !validDigest(value.UsageRecordDigest) {
 			return errors.New("invalid associated usage row")
 		}
 		key := value.Provider + "\x00" + value.SessionID

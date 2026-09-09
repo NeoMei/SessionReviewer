@@ -11,7 +11,7 @@
     "digest": { "$ref": "#/$defs/digest" },
     "project_id": { "$ref": "#/$defs/safe_id" },
     "provider": { "$ref": "#/$defs/safe_id" },
-    "session_id": { "$ref": "#/$defs/safe_id" },
+    "session_id": { "$ref": "#/$defs/session_id" },
     "source_identity": { "$ref": "#/$defs/safe_id" },
     "active_revisions": { "$ref": "#/$defs/digest_map" },
     "superseded_revisions": { "$ref": "#/$defs/digest_map" },
@@ -19,6 +19,12 @@
     "previous_lineage_digest": { "$ref": "#/$defs/digest" }
   },
   "$defs": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
     "safe_id": {
       "type": "string",
       "minLength": 1,

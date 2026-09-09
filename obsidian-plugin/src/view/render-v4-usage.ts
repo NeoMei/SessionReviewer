@@ -33,9 +33,11 @@ export function renderV4Usage(accounting: LedgerAccountingV4, pricing: PricingSn
 }
 
 function renderPrice(price: PricingSnapshotV1): HTMLElement {
+  const quantitiesKnown = price.billing_rule_version !== "unresolved-v1";
+  const subtotalKnown = price.pricing_complete || Object.values(price.line_costs_usd).some(value => value !== null);
   const block = element("div", { className: "sr-v4-pricing" }, [
     element("p", { text: `${price.billing_host === "unknown" ? "计费服务商未知" : price.billing_host} · ${priceStatuses[price.status]}` }),
-    element("p", { text: `计价 ${presentDateTime(price.priced_at)} · 小计 ${money(price.known_subtotal_usd)} · ${price.pricing_complete ? "已完整定价" : "定价不完整"}` })
+    element("p", { text: `计价 ${presentDateTime(price.priced_at)} · 小计 ${money(subtotalKnown ? price.known_subtotal_usd : null)} · ${price.pricing_complete ? "已完整定价" : "定价不完整"}` })
   ]);
   if (price.retrieved_at) block.append(metric("目录查询时间", presentDateTime(price.retrieved_at)));
   if (price.source_last_updated) block.append(metric("价格来源更新", price.source_last_updated));
@@ -52,7 +54,7 @@ function renderPrice(price: PricingSnapshotV1): HTMLElement {
   const usage = element("div", { className: "sr-v4-price-lines" });
   for (const [label, key] of dimensions) {
     usage.append(element("div", { className: "sr-v4-price-line" }, [
-      metric(`${label} Token`, price.billable_quantities[key].toLocaleString("en-US")),
+      metric(`${label} Token`, quantitiesKnown ? price.billable_quantities[key].toLocaleString("en-US") : "待定"),
       metric("每百万 Token", rate(price.rates[key])),
       metric("估算费用", money(price.line_costs_usd[key]))
     ]));

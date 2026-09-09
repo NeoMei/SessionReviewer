@@ -305,9 +305,11 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 		if existing.Provider != desired.Provider || existing.SessionID != desired.SessionID || existing.SourceIdentity != desired.SourceIdentity || existing.StartedAt != desired.StartedAt {
 			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: immutable source identity changed", projectidentity.ErrAssociationRequired)
 		}
-		desired.ProjectIDs = append(desired.ProjectIDs, existing.ProjectIDs...)
-		sort.Strings(desired.ProjectIDs)
-		desired.ProjectIDs = distinct(desired.ProjectIDs)
+		if mutation.Relation != source.BoundaryUsageRefresh {
+			desired.ProjectIDs = append(desired.ProjectIDs, existing.ProjectIDs...)
+			sort.Strings(desired.ProjectIDs)
+			desired.ProjectIDs = distinct(desired.ProjectIDs)
+		}
 	}
 	desiredDigest, err := memory.Digest(desired)
 	if err != nil {
@@ -332,6 +334,15 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 		if existing.EndedAt != desired.EndedAt || !reflect.DeepEqual(existing.Usage, desired.Usage) {
 			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: unchanged source metadata changed", projectidentity.ErrAssociationRequired)
 		}
+	case source.BoundaryUsageRefresh:
+		if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
+			return memory.SourceRecord{}, "", "", false, ErrCASConflict
+		}
+		accountingOnly := existing
+		accountingOnly.Usage = desired.Usage
+		if !reflect.DeepEqual(accountingOnly, desired) {
+			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: usage refresh changed non-usage source fields", projectidentity.ErrAssociationRequired)
+		}
 	case source.BoundaryAppend:
 		if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
 			return memory.SourceRecord{}, "", "", false, ErrCASConflict
@@ -349,8 +360,7 @@ func validateMutation(existing memory.SourceRecord, found bool, mutation BatchMu
 		if !found || mutation.ExpectedDigest == "" || mutation.ExpectedDigest != currentDigest {
 			return memory.SourceRecord{}, "", "", false, ErrCASConflict
 		}
-		oldLoc, newLoc := existing.FrozenBoundary.Location.JSONL, desired.FrozenBoundary.Location.JSONL
-		if oldLoc == nil || newLoc == nil || newLoc.Line > oldLoc.Line || newLoc.ByteOffset > oldLoc.ByteOffset {
+		if !replacementBoundaryFits(existing.FrozenBoundary.Location, desired.FrozenBoundary.Location) {
 			return memory.SourceRecord{}, "", "", false, fmt.Errorf("%w: replacement source boundary advanced", projectidentity.ErrAssociationRequired)
 		}
 	default:
@@ -795,8 +805,7 @@ func (c *Catalog) ReplaceSource(expectedDigest string, record memory.SourceRecor
 			existing.SourceIdentity != record.SourceIdentity || existing.StartedAt != record.StartedAt {
 			return projectidentity.ErrAssociationRequired
 		}
-		existingLocation, replacementLocation := existing.FrozenBoundary.Location.JSONL, record.FrozenBoundary.Location.JSONL
-		if existingLocation == nil || replacementLocation == nil || replacementLocation.Line > existingLocation.Line || replacementLocation.ByteOffset > existingLocation.ByteOffset {
+		if !replacementBoundaryFits(existing.FrozenBoundary.Location, record.FrozenBoundary.Location) {
 			return projectidentity.ErrAssociationRequired
 		}
 		newBody, err := marshalCanonical(record)
@@ -933,16 +942,52 @@ func mergeSource(existing, incoming memory.SourceRecord) (memory.SourceRecord, e
 	return merged, nil
 }
 
-func compareBoundary(first, second memory.FrozenBoundary) (int, error) {
-	if first.Location.Kind != memory.SourceLocationJSONL || second.Location.Kind != memory.SourceLocationJSONL || first.Location.JSONL == nil || second.Location.JSONL == nil {
-		return 0, errors.New("unsupported source boundary")
+// replacementBoundaryFits preserves the coordinate kind and forbids advancing
+// any physical or logical boundary during a source replacement.
+func replacementBoundaryFits(existing, replacement memory.SourceLocation) bool {
+	if existing.Kind != replacement.Kind {
+		return false
 	}
-	a, b := first.Location.JSONL, second.Location.JSONL
+	switch existing.Kind {
+	case memory.SourceLocationCanonical:
+		oldOrdinal, newOrdinal := existing.RecordOrdinal(), replacement.RecordOrdinal()
+		return oldOrdinal > 0 && newOrdinal > 0 && newOrdinal <= oldOrdinal
+	case memory.SourceLocationJSONL:
+		a, b := existing.JSONL, replacement.JSONL
+		return a != nil && b != nil && existing.Canonical == nil && replacement.Canonical == nil && b.Line <= a.Line && b.ByteOffset <= a.ByteOffset
+	default:
+		return false
+	}
+}
+
+func compareBoundary(first, second memory.FrozenBoundary) (int, error) {
+	if first.Location.Kind != second.Location.Kind {
+		return 0, errors.New("incomparable source boundary kinds")
+	}
 	comparison := 0
-	if a.Line < b.Line || (a.Line == b.Line && a.ByteOffset < b.ByteOffset) {
-		comparison = -1
-	} else if a.Line > b.Line || (a.Line == b.Line && a.ByteOffset > b.ByteOffset) {
-		comparison = 1
+	switch first.Location.Kind {
+	case memory.SourceLocationJSONL:
+		a, b := first.Location.JSONL, second.Location.JSONL
+		if a == nil || b == nil || first.Location.Canonical != nil || second.Location.Canonical != nil {
+			return 0, errors.New("invalid JSONL source boundary")
+		}
+		if a.Line < b.Line || (a.Line == b.Line && a.ByteOffset < b.ByteOffset) {
+			comparison = -1
+		} else if a.Line > b.Line || (a.Line == b.Line && a.ByteOffset > b.ByteOffset) {
+			comparison = 1
+		}
+	case memory.SourceLocationCanonical:
+		a, b := first.Location.RecordOrdinal(), second.Location.RecordOrdinal()
+		if a <= 0 || b <= 0 {
+			return 0, errors.New("invalid canonical source boundary")
+		}
+		if a < b {
+			comparison = -1
+		} else if a > b {
+			comparison = 1
+		}
+	default:
+		return 0, errors.New("unsupported source boundary")
 	}
 	if comparison == 0 && first.SourceHash != second.SourceHash {
 		return 0, errors.New("same boundary has different source hash")

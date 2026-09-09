@@ -43,6 +43,12 @@
     "reducer_version": { "$ref": "#/$defs/safe_id" }
   },
   "$defs": {
+    "session_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+    },
     "safe_id": {
       "type": "string",
       "minLength": 1,
@@ -113,7 +119,7 @@
       "required": ["provider", "session_id", "digest"],
       "properties": {
         "provider": { "$ref": "#/$defs/safe_id" },
-        "session_id": { "$ref": "#/$defs/safe_id" },
+        "session_id": { "$ref": "#/$defs/session_id" },
         "digest": { "$ref": "#/$defs/digest" }
       }
     },
@@ -148,7 +154,7 @@
       "required": ["provider", "session_id", "usage_record_digest", "shared"],
       "properties": {
         "provider": { "$ref": "#/$defs/safe_id" },
-        "session_id": { "$ref": "#/$defs/safe_id" },
+        "session_id": { "$ref": "#/$defs/session_id" },
         "usage_record_digest": { "$ref": "#/$defs/digest" },
         "shared": { "type": "boolean" }
       }

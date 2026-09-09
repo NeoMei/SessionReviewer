@@ -103,7 +103,18 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/validate.go	validateDocumentProjection	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/reviewv4/validate.go	validateDocumentProjection	reflect.DeepEqual	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sessionindex/validate.go	Render	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/claude/adapter.go	sameBoundary	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/claude/adapter.go	sameBoundary	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/claude/adapter.go	sameCandidate	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/claude/visible.go	(*adapter).ReadVisiblePrefix.func1	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/codex/adapter.go	sameCatalogBaseline	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).AbandonBoundary	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).AbandonCandidate	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).Decode	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).Decode	reflect.DeepEqual	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).Freeze	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).ReadVisiblePrefix	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/source/opencode/adapter.go	(*adapter).ReadVisiblePrefix	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).ReplaceSource.func1	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).UpsertSource.func1	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).WithBatchSnapshot.func1	reflect.DeepEqual	occurrence=1
@@ -112,6 +123,7 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	inte
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	(*Catalog).validateJournalUnlocked	reflect.DeepEqual	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	mergeSource	reflect.DeepEqual	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	validateMutation	reflect.DeepEqual	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/sourcecatalog/catalog.go	validateMutation	reflect.DeepEqual	occurrence=2
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/strictjson/codec.go	Decode	reflect.ValueOf	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/strictjson/codec.go	Encode	reflect.ValueOf	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	CALL	reflection	internal/strictjson/codec.go	fieldByIndex	reflect.New	occurrence=1
@@ -149,7 +161,10 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	in
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/markdown_render.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/reviewv4/validate.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sessionindex/validate.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/claude/adapter.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/claude/visible.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/codex/adapter.go	reflect	alias=reflect
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/source/opencode/adapter.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/sourcecatalog/catalog.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	IMPORT	reflection	internal/strictjson/codec.go	reflect	alias=reflect
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	git-fallback	internal/projectprobe/probe.go	Run	identifier.defaultGitRunner branch=runner == nil	occurrence=1
@@ -177,6 +192,9 @@ targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-r
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv4/markdown_document.go	(MarkdownDocument).SensitiveScanSource	method.Start receiver=block	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/reviewv4/markdown_render.go	newEntityAnchorStart	method.Start receiver=block	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/codex/decode.go	(*recordDecoder).addToolOutput	method.Output receiver=payload	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/opencode/records.go	recordUsage	method.Output receiver=v	occurrence=1
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/opencode/records.go	recordUsage	method.Output receiver=v	occurrence=2
+targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/source/opencode/records.go	recordUsage	method.Output receiver=v	occurrence=3
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/body.go	topLevelHeadings	method.Start receiver=first	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=1
 targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64	REF	process-method-ref	internal/syncdoc/v2_units.go	(Document).SensitiveScanSource	method.Start receiver=span	occurrence=2

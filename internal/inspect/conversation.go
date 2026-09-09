@@ -13,6 +13,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/source"
 	"github.com/neomei/SessionReviewer/internal/source/claude"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
+	"github.com/neomei/SessionReviewer/internal/source/opencode"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 	"unicode/utf8"
 )
@@ -215,6 +216,15 @@ func readPublishedVisible(ctx context.Context, record memory.SourceRecord) ([]co
 			return nil, conversationchain.VisibleCoverage{}, err
 		}
 		return claude.ReadPublishedVisible(ctx, root, record)
+	case "opencode":
+		databasePath, err := opencode.DatabasePath()
+		if err != nil {
+			return nil, conversationchain.VisibleCoverage{}, err
+		}
+		if databasePath == "" {
+			return nil, conversationchain.VisibleCoverage{}, source.ErrProviderUnavailable
+		}
+		return opencode.ReadPublishedVisible(ctx, databasePath, record)
 	default:
 		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
 	}
