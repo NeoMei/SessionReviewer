@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationPageV1 } from "../src/contracts/conversation-page";
-import type { ConversationRequest } from "../src/cli/runner";
+import { ConversationQueryError, type ConversationRequest } from "../src/cli/runner";
+import { parseConversationPageV1 } from "../src/data/conversation-page";
 import { renderConversation } from "../src/view/render-conversation";
 import { conversationPage, selectedConversationPage } from "./fixtures/conversation";
 
 function page(value: Record<string, unknown>): ConversationPageV1 {
-  return value as unknown as ConversationPageV1;
+  return parseConversationPageV1(JSON.stringify(value));
 }
 
 function deferred<T>() {
@@ -77,15 +78,16 @@ describe("selected Session conversation", () => {
   });
 
   it("renders loading, user/Agent labels, safe full bodies, phases, truncation and honest coverage", async () => {
+    const firstTurn = (conversationPage().turn_units as Record<string, unknown>[])[0];
     const index = page(conversationPage({
       turn_units: [
-        (conversationPage().turn_units as Record<string, unknown>[])[0],
+        { ...firstTurn, assistant_message_count: 2 },
         { ...(conversationPage().turn_units as Record<string, unknown>[])[0], turn_unit_id: "turn-2", ordinal: 2, answer_state: "partial", assistant_message_count: 1 },
         { ...(conversationPage().turn_units as Record<string, unknown>[])[0], turn_unit_id: "turn-3", ordinal: 3, answer_state: "no_answer", assistant_message_count: 0 }
       ],
       total: 3,
       range_end: 3,
-      coverage: { ...(conversationPage().coverage as Record<string, unknown>), oversized_records: 2, complete: false }
+      coverage: { ...(conversationPage().coverage as Record<string, unknown>), source_records: 5, visible_messages: 3, captured_messages: 3, oversized_records: 2, complete: false }
     }));
     const selected = page(selectedConversationPage({
       messages: [
@@ -94,7 +96,8 @@ describe("selected Session conversation", () => {
       ],
       total: 3,
       range_end: 3,
-      coverage: { ...(selectedConversationPage().coverage as Record<string, unknown>), source_records: 3, visible_messages: 3, captured_messages: 3, truncated_bodies: 1, oversized_records: 2, complete: false }
+      turn_units: [{ ...firstTurn, assistant_message_count: 2 }],
+      coverage: { ...(selectedConversationPage().coverage as Record<string, unknown>), source_records: 5, visible_messages: 3, captured_messages: 3, truncated_bodies: 1, oversized_records: 2, complete: false }
     }));
     const pending = deferred<ConversationPageV1>();
     const load = vi.fn((request: ConversationRequest) => request.turnUnitId ? Promise.resolve(selected) : pending.promise);
@@ -122,10 +125,11 @@ describe("selected Session conversation", () => {
 
   it("retries the same failed index page and provides first/middle/last controls for turns and messages", async () => {
 	const first = page(conversationPage({ next_cursor: "next-index", total: 60 }));
-	const middle = page(conversationPage({ previous_cursor: "previous-index", next_cursor: "next-index-2", range_start: 1, range_end: 2, total: 60 }));
-	const selectedMiddle = page(selectedConversationPage({ next_cursor: "next-message", range_end: 2, total: 60 }));
+	const middleTurn = { ...(conversationPage().turn_units as Record<string, unknown>[])[0], turn_unit_id: "turn-2", ordinal: 2, assistant_message_count: 59 };
+	const middle = page(conversationPage({ previous_cursor: "previous-index", next_cursor: "next-index-2", range_start: 1, range_end: 2, total: 60, turn_units: [middleTurn] }));
+	const selectedMiddle = page(selectedConversationPage({ turn_unit_id: "turn-2", next_cursor: "next-message", range_end: 2, total: 60, turn_units: [middleTurn] }));
     const load = vi.fn()
-      .mockRejectedValueOnce(new Error("问答暂不可用"))
+      .mockRejectedValueOnce(new ConversationQueryError("source_unavailable", "问答来源暂不可用；现有执行事实仍可阅读。"))
 	  .mockResolvedValueOnce(first)
 	  .mockResolvedValueOnce(page(selectedConversationPage()))
 	  .mockResolvedValueOnce(middle)
@@ -133,7 +137,7 @@ describe("selected Session conversation", () => {
       .mockResolvedValue(page(conversationPage()));
     const root = renderConversation(identity, load);
     await settle();
-    expect(root.textContent).toContain("问答暂不可用");
+    expect(root.textContent).toContain("问答来源暂不可用");
     root.querySelector<HTMLButtonElement>('[data-action="retry-conversation-page"]')?.click();
     await settle();
 	await settle();
@@ -150,7 +154,7 @@ describe("selected Session conversation", () => {
     }
     root.querySelector<HTMLButtonElement>('[data-action="next-message-page"]')?.click();
     await settle();
-    expect(load).toHaveBeenLastCalledWith(expect.objectContaining({ turnUnitId: "turn-1", messageCursor: "next-message" }));
+    expect(load).toHaveBeenLastCalledWith(expect.objectContaining({ turnUnitId: "turn-2", messageCursor: "next-message" }));
   });
 
   it("suppresses stale responses after identity replacement and disposal", async () => {
@@ -265,8 +269,8 @@ describe("selected Session conversation", () => {
   });
 
 	it("rejects supplied pages with another identity or mode before following their turns", async () => {
-		for (const response of [conversationPage({ session_id: "session-other" }), selectedConversationPage()]) {
-			const load = vi.fn().mockResolvedValue(page(response));
+		for (const response of [page(conversationPage({ project_id: "project-other" })), page(selectedConversationPage())]) {
+			const load = vi.fn().mockResolvedValue(response);
 			const root = renderConversation(identity, load);
 			await settle();
 			expect(root.textContent).toContain("绑定不一致");

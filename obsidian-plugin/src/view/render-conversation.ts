@@ -1,5 +1,6 @@
 import type { ConversationPageV1, VisibleMessageV1, VisibleTurnV1 } from "../contracts/conversation-page";
 import type { ConversationRequest } from "../cli/runner";
+import { validateConversationPage } from "../data/conversation-page-validation";
 import { button, element } from "./dom";
 
 const PAGE_SIZE = 20;
@@ -19,8 +20,17 @@ export type ConversationElement = HTMLElement & {
   dispose: () => void;
 };
 
-export function renderConversation(initialIdentity: ConversationIdentity, load: ConversationLoader): ConversationElement {
+export interface ConversationViewOptions {
+  turnUnitId?: string;
+}
+
+export function renderConversation(
+  initialIdentity: ConversationIdentity,
+  load: ConversationLoader,
+  options: ConversationViewOptions = {}
+): ConversationElement {
   const root = element("section", { className: "sr-conversation", attrs: { "aria-label": "问答记录" } }) as ConversationElement;
+  const fixedTurnUnitId = options.turnUnitId;
   let identity = initialIdentity;
   let indexPage: ConversationPageV1 | undefined;
   let messagePage: ConversationPageV1 | undefined;
@@ -35,6 +45,16 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
   const base = (): ConversationIdentity => ({ ...identity });
   const current = (requestEpoch: number, identityKey: string): boolean =>
     !disposed && requestEpoch === epoch && identityKey === key(identity);
+  const focusAction = (): string | undefined => {
+    const active = root.ownerDocument.activeElement;
+    return active instanceof HTMLElement && root.contains(active) ? active.dataset.action : undefined;
+  };
+  const restoreFocus = (action: string | undefined): void => {
+    if (!action) return;
+    const target = root.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+    if (target && !target.disabled) target.focus();
+    else root.querySelector<HTMLButtonElement>(".sr-conversation-navigation button:not(:disabled)")?.focus();
+  };
 
   const loadIndex = async (navigation?: ConversationNavigation): Promise<void> => {
     const requestEpoch = ++epoch;
@@ -49,7 +69,7 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
     }
     draw();
     try {
-      const page = await load({ ...base(), limit: PAGE_SIZE, ...(navigation === undefined ? {} : { cursor: navigation.cursor }) });
+      const page = validateConversationPage(await load({ ...base(), limit: PAGE_SIZE, ...(navigation === undefined ? {} : { cursor: navigation.cursor }) }));
       if (!current(requestEpoch, identityKey)) return;
 	  assertBoundPage(page, identity, "turn_index", navigation);
       indexPage = page;
@@ -66,33 +86,39 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
     }
   };
 
-  const loadMessages = async (turn: VisibleTurnV1, navigation?: ConversationNavigation): Promise<void> => {
+  const loadMessages = async (turn: VisibleTurnV1 | string, navigation?: ConversationNavigation): Promise<void> => {
     const requestEpoch = ++epoch;
     const identityKey = key(identity);
-    selectedTurn = turn;
+    const turnUnitId = typeof turn === "string" ? turn : turn.turn_unit_id;
+    const acceptedTurn = typeof turn === "string" ? undefined : turn;
+    const restoreAction = focusAction();
+    if (acceptedTurn) selectedTurn = acceptedTurn;
     if (navigation === undefined) messagePage = undefined;
     loadingMessages = true;
     error = "";
     retry = () => { void loadMessages(turn, navigation); };
     draw();
     try {
-      const page = await load({
+      const page = validateConversationPage(await load({
         ...base(),
         limit: PAGE_SIZE,
-        turnUnitId: turn.turn_unit_id,
+        turnUnitId,
         ...(navigation === undefined ? {} : { messageCursor: navigation.cursor })
-      });
-      if (!current(requestEpoch, identityKey) || selectedTurn?.turn_unit_id !== turn.turn_unit_id) return;
-	  assertBoundPage(page, identity, "turn_messages", navigation, turn.turn_unit_id, turn);
+      }));
+      if (!current(requestEpoch, identityKey) || (acceptedTurn !== undefined && selectedTurn?.turn_unit_id !== turnUnitId)) return;
+	  assertBoundPage(page, identity, "turn_messages", navigation, turnUnitId, acceptedTurn);
+      if (acceptedTurn === undefined) selectedTurn = page.turn_units[0];
       messagePage = page;
       loadingMessages = false;
       retry = undefined;
       draw();
+      restoreFocus(restoreAction);
     } catch (reason) {
-      if (!current(requestEpoch, identityKey) || selectedTurn?.turn_unit_id !== turn.turn_unit_id) return;
+      if (!current(requestEpoch, identityKey) || (acceptedTurn !== undefined && selectedTurn?.turn_unit_id !== turnUnitId)) return;
       loadingMessages = false;
       error = safeMessage(reason);
       draw();
+      restoreFocus(restoreAction);
     }
   };
 
@@ -101,12 +127,19 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
     const nodes: Node[] = [
       element("div", { className: "sr-conversation-heading" }, [
         element("h3", { text: "问答记录" }),
-        element("p", { text: "仅显示用户与 Agent 的可见消息；与下方已索引执行事实分开。" })
+        element("p", { text: fixedTurnUnitId === undefined
+          ? "仅显示用户与 Agent 的可见消息；与下方已索引执行事实分开。"
+          : "仅显示本问答中用户与 Agent 的可见消息；不包含原始工具输出。" })
       ])
     ];
-    if (loadingIndex) nodes.push(element("p", { className: "sr-loading", text: "正在读取问答记录…" }));
+    if (fixedTurnUnitId !== undefined) {
+      const statusText = loadingMessages ? "正在读取问答记录…" : error || (messagePage ? "已读取问答记录。" : "");
+      nodes.push(element("p", { className: error ? "sr-conversation-error" : "sr-loading", text: statusText, attrs: { role: "status", "aria-live": "polite" } }));
+    } else {
+      if (loadingIndex) nodes.push(element("p", { className: "sr-loading", text: "正在读取问答记录…" }));
+      if (error) nodes.push(element("p", { className: "sr-conversation-error", text: error }));
+    }
     if (error) {
-      nodes.push(element("p", { className: "sr-conversation-error", text: error }));
       const retryButton = button("重试", { "data-action": "retry-conversation-page" });
       retryButton.addEventListener("click", () => retry?.());
       nodes.push(retryButton);
@@ -130,6 +163,9 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
       if (indexPage.turn_units.length === 0) list.append(element("p", { className: "sr-empty", text: "这个 Session 没有可见的用户问题。" }));
       browser.append(list, renderDetail(selectedTurn, messagePage, loadingMessages, (turn, cursor) => { void loadMessages(turn, cursor); }));
       nodes.push(browser);
+    } else if (fixedTurnUnitId !== undefined && selectedTurn !== undefined) {
+      nodes.push(renderCoverage(messagePage!));
+      nodes.push(renderDetail(selectedTurn, messagePage, loadingMessages, (turn, cursor) => { void loadMessages(turn, cursor); }));
     }
     root.replaceChildren(...nodes);
   };
@@ -145,15 +181,22 @@ export function renderConversation(initialIdentity: ConversationIdentity, load: 
     loadingMessages = false;
     error = "";
     retry = undefined;
-    void loadIndex();
+    if (fixedTurnUnitId === undefined) void loadIndex();
+    else void loadMessages(fixedTurnUnitId);
   };
   root.dispose = () => {
     disposed = true;
     epoch += 1;
+    indexPage = undefined;
+    messagePage = undefined;
+    selectedTurn = undefined;
+    error = "";
+    retry = undefined;
     root.replaceChildren();
   };
   draw();
-  void loadIndex();
+  if (fixedTurnUnitId === undefined) void loadIndex();
+  else void loadMessages(fixedTurnUnitId);
   return root;
 }
 
@@ -297,5 +340,15 @@ function messageLabel(message: VisibleMessageV1): string {
 }
 
 function safeMessage(reason: unknown): string {
-  return reason instanceof Error && reason.message.length <= 512 ? reason.message : "无法读取问答记录；请刷新项目后重试。";
+  if (reason instanceof Error && reason.message === "问答响应与当前 Session 绑定不一致。") return reason.message;
+  const code = typeof reason === "object" && reason !== null && "code" in reason ? (reason as { code?: unknown }).code : undefined;
+  return {
+    source_unavailable: "问答来源暂不可用；现有执行事实仍可阅读。",
+    retained_evidence_unavailable: "未找到与当前 Session 一致的保留问答证据。",
+    retained_evidence_ambiguous: "找到多份无法自动区分的保留问答证据。",
+    visible_reader_unsupported: "当前来源的问答读取器不可用；这不表示 Session 没有 Agent 回答。",
+    generation_mismatch: "项目已更新；请刷新后重新读取问答。",
+    stale_cursor: "问答分页已失效；请从首页重新读取。",
+    unsupported_provider: "当前来源暂不支持问答读取。"
+  }[typeof code === "string" ? code : ""] ?? "无法读取问答记录；请刷新项目后重试。";
 }
