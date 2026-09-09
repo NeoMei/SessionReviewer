@@ -108,6 +108,10 @@ type ProblemRequest struct {
 	Command                    string
 	Subcommand                 string
 	ProjectID                  string
+	DataDir                    string
+	ExpectedGenerationID       string
+	JobID                      string
+	ExpectedRevision           int
 	Status                     string
 	CandidateID                string
 	ExpectedCandidateRevision  int
@@ -436,7 +440,7 @@ func ParseProblemContract(args []string) (ProblemRequest, error) {
 		if len(args) < 2 || args[1] != "list" {
 			return ProblemRequest{}, contractError("unknown problems candidates command")
 		}
-		flags, err := parseContractFlags(args[2:], map[string]bool{"project-id": true, "status": true, "json": true})
+		flags, err := parseContractFlags(args[2:], map[string]bool{"project-id": true, "status": true, "data-dir": true, "json": true})
 		if err != nil {
 			return ProblemRequest{}, err
 		}
@@ -453,9 +457,14 @@ func ParseProblemContract(args []string) (ProblemRequest, error) {
 				return ProblemRequest{}, contractError("status is invalid")
 			}
 		}
-		return ProblemRequest{Command: "candidates", Subcommand: "list", ProjectID: flags.values["project-id"], Status: flags.values["status"]}, nil
+		if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+			return ProblemRequest{}, err
+		}
+		return ProblemRequest{Command: "candidates", Subcommand: "list", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], Status: flags.values["status"]}, nil
 	case "candidate":
 		return parseProblemTransition(args[1:])
+	case "placement":
+		return parseProblemPlacement(args[1:])
 	case "move":
 		return parseProblemMove(args[1:])
 	case "reorder":
@@ -469,7 +478,7 @@ func parseProblemTransition(args []string) (ProblemRequest, error) {
 	if len(args) == 0 || args[0] != "transition" {
 		return ProblemRequest{}, contractError("unknown problem candidate command")
 	}
-	flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "action": true, "target-problem-id": true, "json": true})
+	flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "action": true, "target-problem-id": true, "data-dir": true, "json": true})
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -477,6 +486,9 @@ func parseProblemTransition(args []string) (ProblemRequest, error) {
 		return ProblemRequest{}, err
 	}
 	if err = requireSafeIDs(flags, "project-id", "candidate-id"); err != nil {
+		return ProblemRequest{}, err
+	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 		return ProblemRequest{}, err
 	}
 	if flags.values["target-problem-id"] != "" {
@@ -501,18 +513,76 @@ func parseProblemTransition(args []string) (ProblemRequest, error) {
 		if target == "" {
 			return ProblemRequest{}, contractError("target problem ID is required for apply or merge")
 		}
-	case "keep_pending", "dismiss", "restore":
+	case "apply_root", "keep_pending", "dismiss", "restore":
 		if target != "" {
 			return ProblemRequest{}, contractError("target problem ID is forbidden for this action")
 		}
 	default:
 		return ProblemRequest{}, contractError("action is invalid")
 	}
-	return ProblemRequest{Command: "candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedReviewSHA256: flags.values["expected-review-sha256"], Action: flags.values["action"], TargetProblemID: target}, nil
+	return ProblemRequest{Command: "candidate", Subcommand: "transition", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedReviewSHA256: flags.values["expected-review-sha256"], Action: flags.values["action"], TargetProblemID: target}, nil
+}
+
+func parseProblemPlacement(args []string) (ProblemRequest, error) {
+	if len(args) == 0 {
+		return ProblemRequest{}, contractError("problem placement command is required")
+	}
+	switch args[0] {
+	case "request":
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "candidate-id": true, "expected-candidate-revision": true, "expected-problem-map-revision": true, "expected-generation-id": true, "json": true})
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "candidate-id", "expected-candidate-revision", "expected-problem-map-revision", "expected-generation-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "candidate-id", "expected-generation-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		candidateRevision, err := requirePositiveInt(flags.values["expected-candidate-revision"])
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		mapRevision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		return ProblemRequest{Command: "placement", Subcommand: "request", ProjectID: flags.values["project-id"], CandidateID: flags.values["candidate-id"], ExpectedCandidateRevision: candidateRevision, ExpectedProblemMapRevision: mapRevision, ExpectedGenerationID: flags.values["expected-generation-id"]}, nil
+	case "status":
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "json": true})
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "job-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "job-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		return ProblemRequest{Command: "placement", Subcommand: "status", ProjectID: flags.values["project-id"], JobID: flags.values["job-id"]}, nil
+	case "cancel":
+		flags, err := parseContractFlags(args[1:], map[string]bool{"project-id": true, "job-id": true, "expected-revision": true, "json": true})
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireFlags(flags, "project-id", "job-id", "expected-revision"); err != nil {
+			return ProblemRequest{}, err
+		}
+		if err = requireSafeIDs(flags, "project-id", "job-id"); err != nil {
+			return ProblemRequest{}, err
+		}
+		revision, err := requirePositiveInt(flags.values["expected-revision"])
+		if err != nil {
+			return ProblemRequest{}, err
+		}
+		return ProblemRequest{Command: "placement", Subcommand: "cancel", ProjectID: flags.values["project-id"], JobID: flags.values["job-id"], ExpectedRevision: revision}, nil
+	default:
+		return ProblemRequest{}, contractError("unknown problem placement command")
+	}
 }
 
 func parseProblemMove(args []string) (ProblemRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "new-parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "problem-id": true, "new-parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -522,6 +592,9 @@ func parseProblemMove(args []string) (ProblemRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "problem-id", "new-parent-id"); err != nil {
 		return ProblemRequest{}, err
 	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return ProblemRequest{}, err
+	}
 	revision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
 	if err != nil {
 		return ProblemRequest{}, err
@@ -529,11 +602,11 @@ func parseProblemMove(args []string) (ProblemRequest, error) {
 	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
 		return ProblemRequest{}, err
 	}
-	return ProblemRequest{Command: "move", ProjectID: flags.values["project-id"], ProblemID: flags.values["problem-id"], NewParentID: flags.values["new-parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+	return ProblemRequest{Command: "move", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], ProblemID: flags.values["problem-id"], NewParentID: flags.values["new-parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
 }
 
 func parseProblemReorder(args []string) (ProblemRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"project-id": true, "parent-id": true, "expected-problem-map-revision": true, "expected-review-sha256": true, "data-dir": true, "json": true})
 	if err != nil {
 		return ProblemRequest{}, err
 	}
@@ -543,6 +616,9 @@ func parseProblemReorder(args []string) (ProblemRequest, error) {
 	if err = requireSafeIDs(flags, "project-id", "parent-id"); err != nil {
 		return ProblemRequest{}, err
 	}
+	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
+		return ProblemRequest{}, err
+	}
 	revision, err := requireNonnegativeInt(flags.values["expected-problem-map-revision"])
 	if err != nil {
 		return ProblemRequest{}, err
@@ -550,7 +626,7 @@ func parseProblemReorder(args []string) (ProblemRequest, error) {
 	if err = requireBareSHA(flags.values["expected-review-sha256"]); err != nil {
 		return ProblemRequest{}, err
 	}
-	return ProblemRequest{Command: "reorder", ProjectID: flags.values["project-id"], ParentID: flags.values["parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
+	return ProblemRequest{Command: "reorder", ProjectID: flags.values["project-id"], DataDir: flags.values["data-dir"], ParentID: flags.values["parent-id"], ExpectedProblemMapRevision: revision, ExpectedReviewSHA256: flags.values["expected-review-sha256"]}, nil
 }
 
 // ParseProblemContractWithInput parses the only problem command with a stdin

@@ -617,6 +617,40 @@ func TestProblemContractsEnforceTargetAndCASGrammar(t *testing.T) {
 	}
 }
 
+func TestProblemEntryAndPlacementContracts(t *testing.T) {
+	root := []string{"candidate", "transition", "--project-id", "p", "--candidate-id", "c", "--expected-candidate-revision", "1", "--expected-problem-map-revision", "0", "--expected-review-sha256", contractTestSHA, "--action", "apply_root", "--json"}
+	request, err := ParseProblemContract(root)
+	if err != nil || request.Action != "apply_root" || request.TargetProblemID != "" {
+		t.Fatalf("explicit root request=%+v err=%v", request, err)
+	}
+	withTarget := append(append([]string(nil), root[:len(root)-1]...), "--target-problem-id", "target", "--json")
+	if _, err := ParseProblemContract(withTarget); err == nil {
+		t.Fatal("apply_root accepted a target")
+	}
+
+	request, err = ParseProblemContract([]string{"placement", "request", "--project-id", "p", "--candidate-id", "c", "--expected-candidate-revision", "2", "--expected-problem-map-revision", "3", "--expected-generation-id", "generation-1", "--json"})
+	if err != nil || request.Command != "placement" || request.Subcommand != "request" || request.ExpectedGenerationID != "generation-1" || request.ExpectedCandidateRevision != 2 || request.ExpectedProblemMapRevision != 3 {
+		t.Fatalf("placement request=%+v err=%v", request, err)
+	}
+	request, err = ParseProblemContract([]string{"placement", "status", "--project-id", "p", "--job-id", "job-1", "--json"})
+	if err != nil || request.JobID != "job-1" {
+		t.Fatalf("placement status=%+v err=%v", request, err)
+	}
+	request, err = ParseProblemContract([]string{"placement", "cancel", "--project-id", "p", "--job-id", "job-1", "--expected-revision", "4", "--json"})
+	if err != nil || request.ExpectedRevision != 4 {
+		t.Fatalf("placement cancel=%+v err=%v", request, err)
+	}
+	for _, args := range [][]string{
+		{"placement", "request", "--project-id", "p", "--candidate-id", "c", "--expected-candidate-revision", "2", "--expected-problem-map-revision", "3", "--expected-generation-id", "generation-1", "--target-problem-id", "x", "--json"},
+		{"placement", "status", "--project-id", "p", "--job-id", "job-1", "--expected-revision", "1", "--json"},
+		{"placement", "cancel", "--project-id", "p", "--job-id", "job-1", "--expected-revision", "0", "--json"},
+	} {
+		if _, err := ParseProblemContract(args); err == nil {
+			t.Fatalf("accepted invalid placement args: %v", args)
+		}
+	}
+}
+
 func TestProblemMoveAndReorderRequireCompleteSiblingSet(t *testing.T) {
 	move, err := ParseProblemContract([]string{"move", "--project-id", "p", "--problem-id", "child", "--new-parent-id", "root", "--expected-problem-map-revision", "2", "--expected-review-sha256", contractTestSHA, "--json"})
 	if err != nil || move.NewParentID != "root" {
