@@ -110,8 +110,9 @@ func Resolve(in ResolveInput) (Snapshot, error) {
 		zero := 0.0
 		rates.CacheWriteInput = &zero
 	}
-	if rates.ReasoningOutput == nil && billable.Quantities.ReasoningOutput > 0 && rates.Output != nil {
-		rates.ReasoningOutput = rates.Output
+	if rates.ReasoningOutput == nil && billable.Quantities.ReasoningOutput == 0 {
+		zero := 0.0
+		rates.ReasoningOutput = &zero
 	}
 	status := match.Status
 	if in.Freshness.Status == modelpricewatch.FreshStale {

@@ -13,12 +13,24 @@ func TestInclusiveUsageAdapterProducesMutuallyExclusiveQuantities(t *testing.T) 
 		if err != nil || len(missing) != 0 {
 			t.Fatalf("%T got=%#v missing=%v err=%v", adapter, got, missing, err)
 		}
-		if got.Quantities != (Quantities{Input: 75, CachedInput: 20, CacheWriteInput: 5, Output: 23, ReasoningOutput: 7}) {
+		if got.Quantities != (Quantities{Input: 75, CachedInput: 20, CacheWriteInput: 5, Output: 30}) {
 			t.Fatalf("%T quantities=%#v", adapter, got.Quantities)
 		}
 		if got.RuleVersion == "" {
 			t.Fatalf("%T missing rule version", adapter)
 		}
+	}
+}
+
+func TestCodexUsageBillsReportedOutputOnceWhenReasoningExceedsIt(t *testing.T) {
+	usage := accounting.ModelUsage{Model: "m", TokenUsage: accounting.TokenUsage{InputTokens: 36483, CachedInputTokens: 128, OutputTokens: 210, ReasoningOutputTokens: 376, TotalTokens: 36693}}
+	got, missing, err := (CodexUsageAdapter{}).Billable(usage)
+	if err != nil || len(missing) != 0 {
+		t.Fatalf("got=%#v missing=%v err=%v", got, missing, err)
+	}
+	want := Quantities{Input: 36355, CachedInput: 128, Output: 210}
+	if got.Quantities != want {
+		t.Fatalf("got=%#v want=%#v", got.Quantities, want)
 	}
 }
 

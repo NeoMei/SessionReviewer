@@ -55,10 +55,9 @@ func inclusiveBillable(v accounting.ModelUsage, rule string) (BillableQuantities
 	if v.InputTokens < v.CachedInputTokens+v.CacheWriteInputTokens {
 		return BillableQuantities{}, nil, errors.New("inclusive input is smaller than cached/cache-write components")
 	}
-	if v.OutputTokens < v.ReasoningOutputTokens {
-		return BillableQuantities{}, nil, errors.New("inclusive output is smaller than reasoning component")
-	}
-	q := Quantities{Input: uint64(v.InputTokens - v.CachedInputTokens - v.CacheWriteInputTokens), CachedInput: uint64(v.CachedInputTokens), CacheWriteInput: uint64(v.CacheWriteInputTokens), Output: uint64(v.OutputTokens - v.ReasoningOutputTokens), ReasoningOutput: uint64(v.ReasoningOutputTokens)}
+	// accounting.TokenUsage defines OutputTokens as already including reasoning.
+	// Keep ReasoningOutputTokens as audit metadata and charge reported output once.
+	q := Quantities{Input: uint64(v.InputTokens - v.CachedInputTokens - v.CacheWriteInputTokens), CachedInput: uint64(v.CachedInputTokens), CacheWriteInput: uint64(v.CacheWriteInputTokens), Output: uint64(v.OutputTokens)}
 	return BillableQuantities{Quantities: q, RuleVersion: rule}, nil, nil
 }
 func unresolvedBillable() BillableQuantities { return BillableQuantities{} }
