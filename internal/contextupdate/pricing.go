@@ -30,12 +30,16 @@ func scanPricingRequests(projectID string, index sessionindex.Document, reports 
 		if !ok || entry.UsageRecordDigest == nil || report.Accounting == nil {
 			return nil, errors.New("pricing requires authenticated source usage identity")
 		}
-		at, err := time.Parse(time.RFC3339Nano, report.Accounting.StartedAt)
+		at, err := time.Parse(time.RFC3339Nano, report.Accounting.EndedAt)
+		if err != nil {
+			return nil, err
+		}
+		start, err := time.Parse(time.RFC3339Nano, report.Accounting.StartedAt)
 		if err != nil {
 			return nil, err
 		}
 		for _, model := range report.Accounting.Models {
-			result = append(result, pricing.ResolutionRequest{ProjectID: projectID, Provider: entry.Provider, SessionID: entry.SessionID, UsageRecordDigest: *entry.UsageRecordDigest, Route: pricing.BillingRoute{ModelID: model.Model}, Usage: model.ModelUsage, PricedAt: at.UTC()})
+			result = append(result, pricing.ResolutionRequest{ProjectID: projectID, Provider: entry.Provider, SessionID: entry.SessionID, UsageRecordDigest: *entry.UsageRecordDigest, Route: pricing.BillingRoute{ModelID: model.Model}, Usage: model.ModelUsage, StartedAt: start.UTC(), PricedAt: at.UTC()})
 		}
 	}
 	return result, nil

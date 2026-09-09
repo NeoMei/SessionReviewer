@@ -3,8 +3,10 @@ package contextupdate
 import (
 	"context"
 	"github.com/neomei/SessionReviewer/internal/accounting"
+	"github.com/neomei/SessionReviewer/internal/ledger"
 	"github.com/neomei/SessionReviewer/internal/pricing"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
+	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"reflect"
 	"strings"
 	"testing"
@@ -42,5 +44,15 @@ func TestScanPricingMissingRouteIsPendingAndStable(t *testing.T) {
 	}
 	if len(ledger.PricingSnapshots) != 3 || len(ledger.CurrentPricingSnapshotIDs) != 2 {
 		t.Fatal("changed usage did not retain old snapshot and replace current selection")
+	}
+}
+
+func TestScanPricingUsesSessionEndTime(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	index := sessionindex.Document{Sessions: []sessionindex.Entry{{Provider: "codex", SessionID: "s", UsageRecordDigest: &digest}}}
+	reports := []ledger.SessionReport{{SessionID: "codex/s", Accounting: &accounting.SessionAccounting{StartedAt: "2026-09-08T23:59:00Z", EndedAt: "2026-09-09T00:01:00Z", Models: []accounting.ModelAccounting{{ModelUsage: accounting.ModelUsage{Model: "model-a"}}}}}}
+	requests, err := scanPricingRequests("p", index, reports)
+	if err != nil || len(requests) != 1 || requests[0].PricedAt.Format(time.RFC3339) != "2026-09-09T00:01:00Z" {
+		t.Fatalf("wrong price-effective time: %+v %v", requests, err)
 	}
 }
