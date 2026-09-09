@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	LegacySegmentationRuleVersion  = "visible-turn-v1"
-	CurrentSegmentationRuleVersion = "visible-turn-v2"
+	LegacySegmentationRuleVersion       = "visible-turn-v1"
+	NotificationSegmentationRuleVersion = "visible-turn-v2"
+	CurrentSegmentationRuleVersion      = "visible-turn-v3"
 )
 
 // SourceMessage contains only an authenticated, explicitly visible source
@@ -79,7 +80,7 @@ func ApplyVisibleCoverage(turns []VisibleTurn, coverage VisibleCoverage) {
 // code blocks and quoted user content are preserved. A source-only ambient
 // message must not split a real question from its answer.
 func VisibleUserText(text string) string {
-	return visibleUserText(text, true)
+	return visibleUserText(text, true, true)
 }
 
 // VisibleUserTextVersion normalizes source-only ambient envelopes under the
@@ -87,15 +88,17 @@ func VisibleUserText(text string) string {
 func VisibleUserTextVersion(text, ruleVersion string) (string, error) {
 	switch ruleVersion {
 	case LegacySegmentationRuleVersion:
-		return visibleUserText(text, false), nil
+		return visibleUserText(text, false, false), nil
+	case NotificationSegmentationRuleVersion:
+		return visibleUserText(text, true, false), nil
 	case CurrentSegmentationRuleVersion:
-		return visibleUserText(text, true), nil
+		return visibleUserText(text, true, true), nil
 	default:
 		return "", errors.New("unsupported visible conversation segmentation rule")
 	}
 }
 
-func visibleUserText(text string, classifySubagentNotifications bool) string {
+func visibleUserText(text string, classifySubagentNotifications, classifyInterruptions bool) string {
 	value := strings.TrimSpace(text)
 	ambient := false
 	for {
@@ -113,6 +116,13 @@ func visibleUserText(text string, classifySubagentNotifications bool) string {
 		if strings.HasPrefix(value, `<in-app-browser-context source="ambient-ui-state">`) {
 			if at := strings.Index(value, "</in-app-browser-context>"); at >= 0 {
 				value = strings.TrimSpace(value[at+len("</in-app-browser-context>"):])
+				changed = true
+				ambient = true
+			}
+		}
+		if classifyInterruptions {
+			if rest, ok := stripLeadingInterruption(value); ok {
+				value = rest
 				changed = true
 				ambient = true
 			}
@@ -148,6 +158,25 @@ func visibleUserText(text string, classifySubagentNotifications bool) string {
 		}
 	}
 	return value
+}
+
+// Only the exact generated interruption notice is ambient. Arbitrary tags and
+// quoted/code examples remain visible user content.
+func stripLeadingInterruption(value string) (string, bool) {
+	const start, end = "<turn_aborted>", "</turn_aborted>"
+	const known = "The user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed."
+	if !strings.HasPrefix(value, start) {
+		return value, false
+	}
+	at := strings.Index(value[len(start):], end)
+	if at < 0 {
+		return value, false
+	}
+	at += len(start)
+	if strings.TrimSpace(value[len(start):at]) != known {
+		return value, false
+	}
+	return strings.TrimSpace(value[at+len(end):]), true
 }
 
 func stripLeadingSubagentNotification(value string) (string, bool) {
@@ -193,23 +222,23 @@ func MaterializeVisible(provider, sessionID, sourceIdentity string, messages []S
 }
 
 // MaterializeVisibleVersion preserves the accepted v1 interpretation for
-// historical retained chains while applying the current v2 classification to
+// historical retained chains while applying current envelope classification to
 // newly materialized source.
 func MaterializeVisibleVersion(provider, sessionID, sourceIdentity, ruleVersion string, messages []SourceMessage) ([]VisibleTurn, VisibleCoverage, error) {
-	if ruleVersion != LegacySegmentationRuleVersion && ruleVersion != CurrentSegmentationRuleVersion {
+	if ruleVersion != LegacySegmentationRuleVersion && ruleVersion != NotificationSegmentationRuleVersion && ruleVersion != CurrentSegmentationRuleVersion {
 		return nil, VisibleCoverage{}, errors.New("unsupported visible conversation segmentation rule")
 	}
-	turns, coverage := materializeVisible(provider, sessionID, sourceIdentity, messages, ruleVersion == CurrentSegmentationRuleVersion)
+	turns, coverage := materializeVisible(provider, sessionID, sourceIdentity, messages, ruleVersion != LegacySegmentationRuleVersion, ruleVersion == CurrentSegmentationRuleVersion)
 	return turns, coverage, nil
 }
 
-func materializeVisible(provider, sessionID, sourceIdentity string, messages []SourceMessage, classifySubagentNotifications bool) ([]VisibleTurn, VisibleCoverage) {
+func materializeVisible(provider, sessionID, sourceIdentity string, messages []SourceMessage, classifySubagentNotifications, classifyInterruptions bool) ([]VisibleTurn, VisibleCoverage) {
 	turns := []VisibleTurn{}
 	coverage := VisibleCoverage{Complete: true}
 	for _, source := range messages {
 		coverage.VisibleMessages++
 		if source.Role == RoleUser {
-			source.Text = visibleUserText(source.Text, classifySubagentNotifications)
+			source.Text = visibleUserText(source.Text, classifySubagentNotifications, classifyInterruptions)
 			if source.Text == "" {
 				coverage.ContextMessages++
 				continue

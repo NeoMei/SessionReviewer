@@ -82,9 +82,9 @@ func TestMaterializeVisibleVersionPreservesHistoricalV1NotificationTurn(t *testi
 	}
 	current, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", CurrentSegmentationRuleVersion, messages)
 	if err != nil || len(current) != 1 || current[0].UserMessage.SourceRef.RecordOrdinal != 7 || current[0].AnswerState != AnswerAnswered {
-		t.Fatalf("current v2 interpretation=%+v err=%v", current, err)
+		t.Fatalf("current interpretation=%+v err=%v", current, err)
 	}
-	if _, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", "visible-turn-v3", messages); err == nil {
+	if _, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", "visible-turn-unknown", messages); err == nil {
 		t.Fatal("unsupported historical segmentation rule was reinterpreted")
 	}
 }
@@ -148,5 +148,36 @@ func TestApplyVisibleCoverageDowngradesAnsweredTurnWhenSourceHasGaps(t *testing.
 	ApplyVisibleCoverage(turns, VisibleCoverage{SourceRecords: 3, VisibleMessages: 2, CapturedMessages: 2, MalformedRecords: 1, Complete: false})
 	if turns[0].AnswerState != AnswerPartial {
 		t.Fatalf("source gap erased by later coverage assignment: %+v", turns)
+	}
+}
+
+func TestKnownInterruptionEnvelopeDoesNotBecomeUserQuestion(t *testing.T) {
+	const notice = "<turn_aborted>\nThe user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed.\n</turn_aborted>"
+	for _, tc := range []struct{ input, want string }{
+		{notice, ""}, {notice + "\n继续检查结果", "继续检查结果"},
+		{"> " + notice, "> " + notice}, {"```xml\n" + notice + "\n```", "```xml\n" + notice + "\n```"},
+		{"<turn_aborted>这是用户提供的示例</turn_aborted>", "<turn_aborted>这是用户提供的示例</turn_aborted>"},
+	} {
+		if got := VisibleUserText(tc.input); got != tc.want {
+			t.Errorf("got %q, want %q", got, tc.want)
+		}
+	}
+	messages := []SourceMessage{
+		{Role: RoleUser, Text: "原问题", RecordOrdinal: 1, RecordHash: strings.Repeat("a", 64)},
+		{Role: RoleUser, Text: notice, RecordOrdinal: 2, RecordHash: strings.Repeat("b", 64)},
+		{Role: RoleAssistant, Text: "继续后的回答", RecordOrdinal: 3, RecordHash: strings.Repeat("c", 64)},
+	}
+	current, coverage, err := MaterializeVisibleVersion("codex", "s", "source", CurrentSegmentationRuleVersion, messages)
+	if err != nil || len(current) != 1 || coverage.ContextMessages != 1 || len(current[0].Messages) != 2 {
+		t.Fatalf("current turns=%d coverage=%+v err=%v", len(current), coverage, err)
+	}
+	for _, version := range []string{"visible-turn-v1", "visible-turn-v2"} {
+		old, _, err := MaterializeVisibleVersion("codex", "s", "source", version, messages)
+		if err != nil || len(old) != 2 {
+			t.Fatalf("historical %s changed: %d %v", version, len(old), err)
+		}
+		if old[0].TurnUnitID != current[0].TurnUnitID || old[0].UserMessage.RevisionID != current[0].UserMessage.RevisionID {
+			t.Fatal("source identities changed")
+		}
 	}
 }
