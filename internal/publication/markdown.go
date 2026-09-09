@@ -87,6 +87,98 @@ func PublishMarkdownScanLocked(ctx context.Context, opts Options, scan syncproje
 	return PublishMarkdownEditLocked(ctx, opts, scan, owner)
 }
 
+// VerifyMarkdownScanNoOpLocked performs the final compare-and-swap for an
+// already accepted four-file scan projection. The returned hashes come only
+// from live Project and Vault reads made while publication ownership is held.
+func VerifyMarkdownScanNoOpLocked(ctx context.Context, opts Options, scan syncproject.MarkdownSyncPlan, owner *publicationlock.Owner) (Result, error) {
+	var result Result
+	if ctx == nil || owner == nil || len(scan.Plan.Files) != 4 || scan.ExpectedGenerationID == "" || scan.ExpectedIndexDigest == "" || len(scan.Index) == 0 || scan.ExpectedReceiptRevision == "" || scan.ExpectedBaseDigest == "" || len(scan.VaultExpected) != 4 {
+		return Result{}, errors.New("Markdown scan no-op requires publication ownership and complete authenticated preimages")
+	}
+	if scan.Plan.ProjectID != opts.ProjectID || opts.Mapping.ID != opts.ProjectID || scan.Plan.GenerationID != scan.ExpectedGenerationID || scan.Plan.ProjectViewDigest == "" {
+		return Result{}, errors.New("Markdown scan no-op identity mismatch")
+	}
+	parsedIndex, err := sessionindex.Parse(scan.Index)
+	if err != nil || parsedIndex.ProjectID != opts.ProjectID || parsedIndex.GenerationID != scan.ExpectedGenerationID || parsedIndex.ProjectViewDigest != scan.Plan.ProjectViewDigest || parsedIndex.Digest != scan.ExpectedIndexDigest {
+		return Result{}, errors.Join(errors.New("Markdown scan no-op index identity mismatch"), err)
+	}
+	required := map[string]bool{reviewv2.ReviewRelativePath: false, reviewv2.HistoryRelativePath: false, reviewv2.MachineLedgerRelativePath: false, sessionIndexRelativePath: false}
+	for _, file := range scan.Plan.Files {
+		if _, exists := required[file.Relative]; !exists || required[file.Relative] {
+			return Result{}, errors.New("Markdown scan no-op requires four distinct canonical destinations")
+		}
+		required[file.Relative] = true
+		if file.Relative == sessionIndexRelativePath && (!bytes.Equal(scan.Index, file.Expected) || !bytes.Equal(scan.Index, file.Desired)) {
+			return Result{}, errors.New("Markdown scan no-op canonical index bytes mismatch")
+		}
+	}
+	err = owner.Use(opts.DataRoot, opts.ProjectID, func() (operationErr error) {
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		journal, err := OpenJournal(opts.DataRoot, opts.ProjectID)
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errors.Join(operationErr, journal.Close()) }()
+		receipt, err := journal.LoadAcceptedMarkdown()
+		if err != nil || receipt.RevisionID != scan.ExpectedReceiptRevision || receipt.BaseDigest != scan.ExpectedBaseDigest || receipt.GenerationID != scan.ExpectedGenerationID || receipt.ProjectID != opts.ProjectID || receipt.ProjectViewDigest != scan.Plan.ProjectViewDigest || receipt.IndexGuard == nil || receipt.IndexGuard.Digest != scan.ExpectedIndexDigest || receipt.IndexGuard.GenerationID != scan.ExpectedGenerationID {
+			return errors.Join(errors.New("accepted Markdown receipt changed before no-op confirmation"), err)
+		}
+		baseStore, closeBase, err := markdownBaseStore(opts)
+		if err != nil {
+			return err
+		}
+		base, found, loadErr := baseStore.Load(syncengine.MarkdownBaseEntityID)
+		closeErr := closeBase()
+		if loadErr != nil || closeErr != nil || !found || base.ContentHash != scan.ExpectedBaseDigest {
+			return errors.Join(errors.New("accepted Markdown Base changed before no-op confirmation"), loadErr, closeErr)
+		}
+		projectDir, err := pathguard.Open(opts.Mapping.Root)
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errors.Join(operationErr, projectDir.Close()) }()
+		vaultDir, err := pathguard.Open(opts.Mapping.VaultRoot)
+		if err != nil {
+			return err
+		}
+		defer func() { operationErr = errors.Join(operationErr, vaultDir.Close()) }()
+		for _, file := range scan.Plan.Files {
+			if cause := context.Cause(ctx); cause != nil {
+				return cause
+			}
+			vaultExpected, exists := scan.VaultExpected[file.Relative]
+			if !file.ExpectedExists || !exists || vaultExpected == nil || !bytes.Equal(file.Expected, file.Desired) || !bytes.Equal(vaultExpected, file.Desired) {
+				return errors.New("Markdown scan no-op preimages do not describe one unchanged Project/Vault projection")
+			}
+			projectBody, projectFound, err := projectDir.ReadRegularOptional(file.Relative, 64<<20)
+			if err != nil || !projectFound || !bytes.Equal(projectBody, file.Expected) {
+				return errors.Join(fmt.Errorf("%w: Project Markdown no-op preimage changed", ErrPublicationConflict), err)
+			}
+			vaultRelative := vaultRelativePath(opts.Mapping.VaultReviewPath, file.Relative)
+			vaultBody, vaultFound, err := vaultDir.ReadRegularOptional(vaultRelative, 64<<20)
+			if err != nil || !vaultFound || !bytes.Equal(vaultBody, vaultExpected) {
+				return errors.Join(fmt.Errorf("%w: Vault Markdown no-op preimage changed", ErrPublicationConflict), err)
+			}
+			result.ProjectFiles = append(result.ProjectFiles, VerifiedFile{Side: "project", Relative: file.Relative, SHA256: sha256Hex(projectBody)})
+			result.VaultFiles = append(result.VaultFiles, VerifiedFile{Side: "vault", Relative: vaultRelative, SHA256: sha256Hex(vaultBody)})
+		}
+		if err := runPublishCheckpoint(opts, checkpointAfterPublicValidate, "", ""); err != nil {
+			return err
+		}
+		if cause := context.Cause(ctx); cause != nil {
+			return cause
+		}
+		result.GenerationID = receipt.GenerationID
+		return nil
+	})
+	if err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
 // PublishMarkdownScan acquires publication ownership for an initial four-file
 // Markdown scan. Nil VaultExpected entries mean the corresponding file must
 // not exist on the Vault side.

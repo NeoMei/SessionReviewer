@@ -349,6 +349,251 @@ func TestMarkdownScanNoOpStillChecksReceiptBaseAndVaultPreimages(t *testing.T) {
 	}
 }
 
+func TestMarkdownScanNoOpRevalidatesEveryLivePreimageAfterScanRead(t *testing.T) {
+	for mutationIndex, mutation := range append([]string{"receipt", "base"}, func() []string {
+		var values []string
+		for _, side := range []string{"project", "vault"} {
+			for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath} {
+				values = append(values, side+"/"+relative)
+			}
+		}
+		return values
+	}()...) {
+		t.Run(strings.ReplaceAll(mutation, "/", "_"), func(t *testing.T) {
+			env := setupMarkdownPublication(t, fmt.Sprintf("project-markdown-final-noop-cas-%02d", mutationIndex))
+			if err := config.Save(filepath.Join(env.dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{env.mapping}}); err != nil {
+				t.Fatal(err)
+			}
+			owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			read, err := syncproject.ReadMarkdownForScan(t.Context(), syncproject.Options{ProjectID: env.projectID, CWD: env.projectRoot, DataDir: env.dataRoot, GOOS: runtime.GOOS, Now: time.Now, Trigger: syncengine.TriggerPeriodic}, owner)
+			if err != nil {
+				_ = owner.Release()
+				t.Fatal(err)
+			}
+			scan := markdownNoOpPlanFromRead(read)
+			before := captureMarkdownPublicBytesForTest(t, env)
+			switch mutation {
+			case "receipt":
+				state, err := publicationstate.OpenReadOnly(env.dataRoot, env.projectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				intent, intentErr := state.Intent()
+				closeErr := state.Close()
+				if intentErr != nil || closeErr != nil {
+					t.Fatal(errors.Join(intentErr, closeErr))
+				}
+				intent.Stage, intent.Outcome = StageBaseCommitted, ""
+				intent.BaseDesiredDigest = strings.Repeat("f", 64)
+				intent.RevisionID = MarkdownRevisionID(intent)
+				journal, err := OpenJournal(env.dataRoot, env.projectID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := publicationstate.WriteAccepted(journal.dir.Root, intent); err != nil {
+					_ = journal.Close()
+					t.Fatal(err)
+				}
+				if err := journal.Close(); err != nil {
+					t.Fatal(err)
+				}
+			case "base":
+				root, err := os.OpenRoot(filepath.Join(env.dataRoot, "projects", env.projectID))
+				if err != nil {
+					t.Fatal(err)
+				}
+				current := loadMarkdownBaseForTest(t, env)
+				pair := acceptedMarkdownPairForTest(t, env, current)
+				foreign, err := syncengine.NewMarkdownBaseRecord(append(bytes.Clone(pair.Review), []byte("\nlate base\n")...), pair.History, time.Now().UTC())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := (syncengine.BaseStore{Root: root}).Commit(current.ContentHash, foreign); err != nil {
+					_ = root.Close()
+					t.Fatal(err)
+				}
+				if err := root.Close(); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				parts := strings.SplitN(mutation, "/", 2)
+				root, relative := env.projectRoot, parts[1]
+				if parts[0] == "vault" {
+					root, relative = env.vaultRoot, vaultRelativePath(env.mapping.VaultReviewPath, relative)
+				}
+				path := filepath.Join(root, filepath.FromSlash(relative))
+				if err := os.WriteFile(path, append(readTestFile(t, path), []byte("\nlate human bytes\n")...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, publishErr := VerifyMarkdownScanNoOpLocked(context.Background(), env.publishOptions(), scan, owner)
+			if releaseErr := owner.Release(); releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			if publishErr == nil {
+				t.Fatal("no-op publication reported success after a final preimage changed")
+			}
+			after := captureMarkdownPublicBytesForTest(t, env)
+			for key, body := range before {
+				if mutation == key {
+					if bytes.Equal(after[key], body) || !bytes.HasSuffix(after[key], []byte("\nlate human bytes\n")) {
+						t.Fatalf("changed human bytes were overwritten: %s", key)
+					}
+					continue
+				}
+				if !bytes.Equal(after[key], body) {
+					t.Fatalf("failed no-op CAS changed unrelated destination %s", key)
+				}
+			}
+		})
+	}
+}
+
+func markdownNoOpPlanFromRead(read syncproject.MarkdownScanRead) syncproject.MarkdownSyncPlan {
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
+	files := make([]presentation.FilePlan, 0, len(paths))
+	for _, relative := range paths {
+		body := bytes.Clone(read.ProjectExpected[relative])
+		files = append(files, presentation.FilePlan{Relative: relative, Expected: body, ExpectedExists: true, Desired: bytes.Clone(body), Mode: 0o600})
+	}
+	return syncproject.MarkdownSyncPlan{
+		Plan:  presentation.RenderPlan{ProjectID: read.OldAccepted.Review.ProjectID, GenerationID: read.ExpectedGenerationID, ProjectViewDigest: read.OldAccepted.Review.ProjectViewDigest, Files: files},
+		Index: bytes.Clone(read.ProjectExpected[sessionIndexRelativePath]), ExpectedGenerationID: read.ExpectedGenerationID, ExpectedIndexDigest: read.ExpectedIndexDigest,
+		VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest,
+	}
+}
+
+func TestMarkdownScanNoOpRejectsIncompleteOrMismatchedIdentity(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-final-noop-identity")
+	tests := []struct {
+		name string
+		edit func(*syncproject.MarkdownSyncPlan)
+	}{
+		{"duplicate destination", func(scan *syncproject.MarkdownSyncPlan) { scan.Plan.Files[3] = scan.Plan.Files[2] }},
+		{"unrelated index digest", func(scan *syncproject.MarkdownSyncPlan) {
+			scan.ExpectedIndexDigest = "sha256:" + strings.Repeat("f", 64)
+		}},
+		{"mismatched plan generation", func(scan *syncproject.MarkdownSyncPlan) { scan.Plan.GenerationID = "generation-foreign" }},
+		{"separate index bytes", func(scan *syncproject.MarkdownSyncPlan) {
+			scan.Plan.Files[3].Expected = bytes.Clone(scan.Plan.Files[2].Expected)
+			scan.Plan.Files[3].Desired = bytes.Clone(scan.Plan.Files[2].Desired)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scan := currentMarkdownNoOpPlanForTest(t, env)
+			test.edit(&scan)
+			owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, verifyErr := VerifyMarkdownScanNoOpLocked(t.Context(), env.publishOptions(), scan, owner)
+			if releaseErr := owner.Release(); releaseErr != nil {
+				t.Fatal(releaseErr)
+			}
+			if verifyErr == nil {
+				t.Fatal("incomplete or mismatched no-op identity was accepted")
+			}
+		})
+	}
+}
+
+func TestMarkdownScanNoOpIsReadOnlyAndHonorsCancellationAndOwnership(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-final-noop-boundaries")
+	scan := currentMarkdownNoOpPlanForTest(t, env)
+	before := captureMarkdownPublicBytesForTest(t, env)
+	owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := VerifyMarkdownScanNoOpLocked(t.Context(), env.publishOptions(), scan, owner)
+	if err != nil || result.GenerationID != env.manifest.GenerationID || len(result.ProjectFiles) != 4 || len(result.VaultFiles) != 4 {
+		t.Fatalf("positive final no-op result=%+v err=%v", result, err)
+	}
+	if after := captureMarkdownPublicBytesForTest(t, env); !reflect.DeepEqual(after, before) {
+		t.Fatal("successful final no-op verification changed public bytes")
+	}
+	cancelled, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("cancel final no-op")
+	cancel(cause)
+	if _, err := VerifyMarkdownScanNoOpLocked(cancelled, env.publishOptions(), scan, owner); !errors.Is(err, cause) {
+		t.Fatalf("final no-op ignored cancellation: %v", err)
+	}
+	if err := owner.Release(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyMarkdownScanNoOpLocked(t.Context(), env.publishOptions(), scan, owner); err == nil {
+		t.Fatal("final no-op accepted released publication ownership")
+	}
+	if after := captureMarkdownPublicBytesForTest(t, env); !reflect.DeepEqual(after, before) {
+		t.Fatal("cancelled/released final no-op changed public bytes")
+	}
+}
+
+func TestMarkdownScanNoOpReturnsCancellationThatArrivesDuringFinalRead(t *testing.T) {
+	env := setupMarkdownPublication(t, "project-markdown-final-noop-late-cancel")
+	scan := currentMarkdownNoOpPlanForTest(t, env)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cause := errors.New("cancel while final no-op read is blocked")
+	owner, err := publicationlock.Acquire(env.dataRoot, env.projectID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceled := make(chan struct{})
+	opts := env.publishOptions()
+	opts.checkpoint = func(stage publishCheckpoint, _, _ string) error {
+		if stage == checkpointAfterPublicValidate {
+			cancel(cause)
+			close(canceled)
+		}
+		return nil
+	}
+	_, verifyErr := VerifyMarkdownScanNoOpLocked(ctx, opts, scan, owner)
+	if releaseErr := owner.Release(); releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("late-cancellation fixture did not reach publication ownership")
+	}
+	if !errors.Is(verifyErr, cause) {
+		t.Fatalf("final no-op lost late cancellation: %v", verifyErr)
+	}
+}
+
+func currentMarkdownNoOpPlanForTest(t *testing.T, env markdownPublicationTestEnv) syncproject.MarkdownSyncPlan {
+	t.Helper()
+	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}
+	files := make([]presentation.FilePlan, 0, len(paths))
+	vaultExpected := make(map[string][]byte, len(paths))
+	for _, relative := range paths {
+		body := readTestFile(t, filepath.Join(env.projectRoot, filepath.FromSlash(relative)))
+		files = append(files, presentation.FilePlan{Relative: relative, Expected: bytes.Clone(body), ExpectedExists: true, Desired: bytes.Clone(body), Mode: 0o600})
+		vaultExpected[relative] = readTestFile(t, filepath.Join(env.vaultRoot, filepath.FromSlash(vaultRelativePath(env.mapping.VaultReviewPath, relative))))
+	}
+	receipt, base := loadAcceptedReceiptForTest(t, env), loadMarkdownBaseForTest(t, env)
+	return syncproject.MarkdownSyncPlan{Plan: presentation.RenderPlan{ProjectID: env.projectID, GenerationID: env.manifest.GenerationID, ProjectViewDigest: env.manifest.ProjectViewDigest, Files: files}, Index: bytes.Clone(files[3].Desired), ExpectedGenerationID: env.manifest.GenerationID, ExpectedIndexDigest: env.manifest.SessionIndexDigest, VaultExpected: vaultExpected, ExpectedReceiptRevision: receipt.RevisionID, ExpectedBaseDigest: base.ContentHash}
+}
+
+func captureMarkdownPublicBytesForTest(t *testing.T, env markdownPublicationTestEnv) map[string][]byte {
+	t.Helper()
+	result := map[string][]byte{}
+	for _, side := range []string{"project", "vault"} {
+		for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath} {
+			root, path := env.projectRoot, relative
+			if side == "vault" {
+				root, path = env.vaultRoot, vaultRelativePath(env.mapping.VaultReviewPath, relative)
+			}
+			result[side+"/"+relative] = readTestFile(t, filepath.Join(root, filepath.FromSlash(path)))
+		}
+	}
+	return result
+}
+
 func TestInitialMarkdownScanRejectsAcceptedHistoryEvenWhenPublicFilesAreGone(t *testing.T) {
 	env := setupMarkdownPublication(t, "project-markdown-scan-history")
 	paths := []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath, sessionIndexRelativePath}

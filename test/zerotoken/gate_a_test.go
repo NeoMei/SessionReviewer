@@ -1044,7 +1044,14 @@ var gateProductionTargets = []gateTarget{
 const gateModulePath = "github.com/neomei/SessionReviewer"
 
 func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDependencyClosure {
+	return loadGateImportClosure(t, repositoryRoot, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
+}
+
+func loadGateImportClosure(t *testing.T, repositoryRoot string, roots ...string) gateDependencyClosure {
 	t.Helper()
+	if len(roots) == 0 {
+		t.Fatal("Gate import closure requires roots")
+	}
 	goExecutable, err := exec.LookPath("go")
 	if err != nil {
 		t.Fatal(err)
@@ -1066,7 +1073,8 @@ func loadGateProductionImportClosure(t *testing.T, repositoryRoot string) gateDe
 	localPackages := make(map[string]bool)
 	format := gateGoListTemplate()
 	for _, target := range gateProductionTargets {
-		command := exec.Command(goExecutable, "list", "-deps", "-f", format, "./internal/scan", "./internal/source/codex", "./internal/projectprobe")
+		arguments := append([]string{"list", "-deps", "-f", format}, roots...)
+		command := exec.Command(goExecutable, arguments...)
 		command.Dir = repositoryRoot
 		command.Env = gateGoListEnvironment(os.Environ(), commandRoot, target.goos, target.goarch)
 		output, err := command.Output()

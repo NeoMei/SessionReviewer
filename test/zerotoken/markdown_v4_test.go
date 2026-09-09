@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/config"
 	"github.com/neomei/SessionReviewer/internal/contextupdate"
 	"github.com/neomei/SessionReviewer/internal/memorystore"
+	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
@@ -49,6 +51,145 @@ func TestMarkdownV4ContextUpdateUsesProvidedProcessRecorder(t *testing.T) {
 	if calls != 1 || !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "probe project state") {
 		t.Fatalf("context update bypassed provided process recorder: calls=%d err=%v", calls, err)
 	}
+}
+
+func TestMarkdownV4OrdinaryScanPublishesMilestoneWithoutAgentStart(t *testing.T) {
+	repositoryRoot := gateRepositoryRoot(t)
+	closure := loadGateImportClosure(t, repositoryRoot,
+		"./internal/contextupdate", "./internal/presentation", "./internal/reviewv4",
+		"./internal/publication", "./internal/syncproject",
+	)
+	for _, record := range closure.paths {
+		if strings.Contains(record, "\t"+gateModulePath+"/internal/agent") || strings.Contains(record, "\t"+gateModulePath+"/internal/reviewjob") {
+			t.Fatalf("ordinary scan/renderer/publication closure can start an Agent: %s", record)
+		}
+	}
+	assertTask2ProcessLaunchSites(t, loadGateDangerousCapabilityRecords(t, repositoryRoot, closure))
+
+	fixture := newTask2ZeroAgentFixture(t)
+	sourceBefore := snapshotGateTree(t, fixture.sessionsRoot)
+	recorder := newGateGitRecorder(t, fixture.gitExecutable, fixture.projectRoot)
+	result, err := contextupdate.Run(t.Context(), contextupdate.Options{
+		ProjectID: fixture.projectID, SessionsRoot: fixture.sessionsRoot, DataRoot: fixture.dataRoot,
+		Now: func() time.Time { return fixture.scanNow }, RunGit: recorder.run,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ReviewRunTokens != 0 {
+		t.Fatalf("ordinary scan reported Agent/model usage: %+v", result)
+	}
+	recorder.assertApprovedCalls(t, len(gateApprovedGitCalls))
+	if sourceAfter := snapshotGateTree(t, fixture.sessionsRoot); !equalGateSnapshots(sourceBefore, sourceAfter) {
+		t.Fatal("ordinary scan mutated its authenticated source-prefix tree")
+	}
+	accepted := loadGateBV4(t, filepath.Join(fixture.projectRoot, "docs", "session-review"))
+	if len(accepted.Review.Timeline) != 1 || len(accepted.Review.ChainDependencies) != 1 {
+		t.Fatalf("ordinary renderer/publication path omitted qualified milestone: timeline=%+v dependencies=%+v", accepted.Review.Timeline, accepted.Review.ChainDependencies)
+	}
+}
+
+func newTask2ZeroAgentFixture(t *testing.T) gateBFixture {
+	t.Helper()
+	root := t.TempDir()
+	dataRoot, projectRoot := filepath.Join(root, "data"), filepath.Join(root, "Project")
+	vaultRoot, sessionsRoot := filepath.Join(root, "Vault"), filepath.Join(root, "sessions")
+	for _, directory := range []string{dataRoot, projectRoot, vaultRoot, sessionsRoot} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, ".gitignore"), []byte("docs/session-review/\n.session-reviewer-directory.lock\n**/.session-reviewer-directory.lock\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "README.md"), []byte("# zero Agent fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "VERSION"), []byte("v1.0.0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectRoot, "project-fixture.md"), []byte("# fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitExecutable := initializeGateRepository(t, projectRoot)
+	const projectID = "project-task2-zero-agent"
+	mapping := config.ProjectMapping{ID: projectID, Root: projectRoot, VaultRoot: vaultRoot, VaultReviewPath: "Projects/Zero Agent/Session Review", VaultCaseMode: platform.CaseSensitive}
+	if err := config.Save(filepath.Join(dataRoot, "config.toml"), config.Config{Version: 1, Projects: []config.ProjectMapping{mapping}}); err != nil {
+		t.Fatal(err)
+	}
+	const sessionID = "77777777-7777-4777-8777-777777777777"
+	sourceBody := strings.Join([]string{
+		`{"timestamp":"2026-09-09T03:00:00Z","type":"session_meta","payload":{"id":"` + sessionID + `","cwd":"` + filepath.ToSlash(projectRoot) + `"}}`,
+		`{"timestamp":"2026-09-09T03:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Verify the ordinary zero-Agent publication path."}]}}`,
+		`{"timestamp":"2026-09-09T03:00:02Z","type":"response_item","payload":{"type":"function_call","call_id":"zero-agent-check","name":"exec_command","arguments":"{\"cmd\":\"go test ./internal/...\"}"}}`,
+		`{"timestamp":"2026-09-09T03:00:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"zero-agent-check","output":"{\"exit_code\":0,\"output\":\"PASS\"}"}}`,
+		`{"timestamp":"2026-09-09T03:00:04Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Ordinary zero-Agent publication completed."}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(sessionsRoot, "rollout-2026-09-09T03-00-00-"+sessionID+".jsonl"), []byte(sourceBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 9, 3, 1, 0, 0, time.UTC)
+	return gateBFixture{root: root, dataRoot: dataRoot, projectRoot: projectRoot, vaultRoot: vaultRoot, sessionsRoot: sessionsRoot, projectID: projectID, gitExecutable: gitExecutable, mapping: mapping, scanNow: now}
+}
+
+func assertTask2ProcessLaunchSites(t *testing.T, records []string) {
+	t.Helper()
+	qualifier := "targets=darwin/amd64,darwin/arm64,linux/amd64,windows/amd64"
+	wantLaunches := []string{
+		qualifier + "\tCALL\tprocess\tinternal/contextupdate/service.go\tresolveGitExecutable\tos/exec.LookPath\toccurrence=1",
+		qualifier + "\tCALL\tprocess\tinternal/projectprobe/git.go\tdefaultGitRunner.func1\tmethod.Run receiver=command\toccurrence=1",
+		qualifier + "\tCALL\tprocess\tinternal/projectprobe/git.go\tdefaultGitRunner.func1\tos/exec.CommandContext\toccurrence=1",
+	}
+	wantImports := []string{
+		qualifier + "\tIMPORT\tprocess\tinternal/contextupdate/service.go\tos/exec\talias=exec",
+		qualifier + "\tIMPORT\tprocess\tinternal/projectprobe/git.go\tos/exec\talias=exec",
+	}
+	var launches, imports []string
+	directPackages := []string{"internal/contextupdate/", "internal/presentation/", "internal/reviewv4/", "internal/publication/", "internal/syncproject/", "internal/projectprobe/"}
+	for _, record := range records {
+		fields := strings.Split(record, "\t")
+		if len(fields) < 3 || fields[2] != "process" && fields[2] != "process-method-ref" {
+			continue
+		}
+		direct := false
+		for _, prefix := range directPackages {
+			direct = direct || strings.HasPrefix(fields[3], prefix)
+		}
+		if !direct {
+			continue
+		}
+		if fields[1] == "IMPORT" {
+			imports = append(imports, record)
+		} else {
+			launches = append(launches, record)
+		}
+	}
+	// The visitor conservatively calls interface methods named Run process-like.
+	// These three are typed scan/publication operations, not launch sites.
+	nonLaunches := []string{
+		qualifier + "\tCALL\tprocess\tinternal/contextupdate/service.go\tRun\tmethod.Run receiver=scan\toccurrence=1",
+		qualifier + "\tCALL\tprocess\tinternal/publication/service.go\tpublishLegacyV3\tmethod.Run receiver=syncproject\toccurrence=1",
+		qualifier + "\tCALL\tprocess\tinternal/publication/service.go\tpublishLegacyV3\tmethod.Run receiver=syncproject\toccurrence=2",
+		qualifier + "\tREF\tprocess-method-ref\tinternal/contextupdate/service.go\tRun\tmethod.Run receiver=projectprobe\toccurrence=1",
+		qualifier + "\tREF\tprocess-method-ref\tinternal/reviewv4/markdown_document.go\t(MarkdownDocument).SensitiveScanSource\tmethod.Start receiver=block\toccurrence=1",
+		qualifier + "\tREF\tprocess-method-ref\tinternal/reviewv4/markdown_render.go\tnewEntityAnchorStart\tmethod.Start receiver=block\toccurrence=1",
+	}
+	for _, known := range nonLaunches {
+		launches = removeExactString(launches, known)
+	}
+	if !reflect.DeepEqual(launches, wantLaunches) || !reflect.DeepEqual(imports, wantImports) {
+		t.Fatalf("Task 2 process launch-site bound changed: launches=%v want=%v imports=%v want=%v", launches, wantLaunches, imports, wantImports)
+	}
+}
+
+func removeExactString(values []string, target string) []string {
+	result := values[:0]
+	for _, value := range values {
+		if value != target {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func TestMarkdownV4PersistentFixtureRefusesNonemptyAndSymlinkedRoots(t *testing.T) {

@@ -85,3 +85,31 @@ The no-op path returns the old accepted generation and exact bytes only when the
 - Controller found that the pre-existing Git status parser rejects a valid `?? docs/` directory record as `git_status_malformed`. This is tracked as a separate scoped fix and was not hidden by the Task 2 no-op logic.
 - Source producers for commit/release/deployment/version milestones and typed rollback remain out of scope; this task publishes only fact kinds already produced and accepted by the reviewed projector.
 - Plugin/browser/controller overlays are independent acceptance evidence supplied by the controller; this worker did not modify or commit controller planning/progress/release documents.
+
+## Review fix round 1 (2026-09-09)
+
+### Findings closed
+
+- Moved the existing-v4 semantic no-op result behind `VerifyMarkdownScanNoOpLocked`. Under the already-held publication owner it now revalidates the accepted receipt, Markdown Base, and all four Project plus four Vault live destinations, returns hashes only from those live reads, and performs no writes. It rejects duplicate/foreign destinations, detached or re-signed index bytes, project/generation/view/index mismatches, released ownership, and cancellation before or after the final reads.
+- Added task-owned zero-Agent coverage for the ordinary `contextupdate.Run` -> renderer -> four-file publication route. The test publishes one real qualified milestone, asserts zero review tokens, exact five-call allowlisted Git runtime accounting, unchanged authenticated source-prefix bytes, absence of Agent/reviewjob packages from the orchestration closure, and the exact current process launch/import inventory. The shared Gate A AST visitor remains the authority; only four typed `Run` and two Markdown-span `Start` false positives in the directly audited packages are explicitly removed. New `os.StartProcess`, `Command.Start`, method-value, import, or other process records therefore fail the inventory.
+- Added a self-contained two-provider scan fixture with the same native Session ID. Synthetic named adapters drive actual `scan.Run`, `loadScanMilestones`, and `publishV4Scan`; both Project and Vault retain distinct provider-qualified SessionView digests, chain dependency digests, source refs, and milestone IDs. No production provider registration or test-only exported hook was added.
+
+### TDD / regression evidence
+
+- RED before the no-op API hardening: controller overlay accepted duplicate final destinations, unrelated `ExpectedIndexDigest`, mismatched `Plan.GenerationID`, and a separately re-signed `Index` detached from the canonical live plan index (`PASS` was therefore false behavior; overlay exit 1, `1.862s`). The prior review also demonstrated that the synthesized no-op branch never re-read receipt/Base/live destinations. The controller's after-read late Vault edit positive boundary was retained as an independent reproduction.
+- GREEN: `go test ./internal/publication -run 'TestMarkdownScanNoOp(RevalidatesEveryLivePreimageAfterScanRead|RejectsIncompleteOrMismatchedIdentity|IsReadOnlyAndHonorsCancellationAndOwnership|ReturnsCancellationThatArrivesDuringFinalRead)' -count=1 -v` -> PASS, `14.561s`. The first test builds its preimages through actual `ReadMarkdownForScan`, then independently mutates receipt, Base, each of four Project files, and each of four Vault files; every case conflicts without overwriting the changed bytes or touching unrelated destinations. The other tests cover positive read-only hashes, API identity binding, pre-cancel, late cancel, and released owner.
+- GREEN additional integration coverage: `go test ./internal/contextupdate -run 'TestScanPublicationKeepsEqualNativeSessionIDsProviderQualified|TestRunPublishesQualifiedMilestoneAndKeepsIdenticalScanByteStable' -count=1 -v` -> PASS, `8.234s`.
+- GREEN additional capability coverage: `go test ./test/zerotoken -run 'TestMarkdownV4(OrdinaryScanPublishesMilestoneWithoutAgentStart|ContextUpdateUsesProvidedProcessRecorder)' -count=1 -v` -> PASS, `3.666s`.
+- GREEN affected suites after freeze: `go test ./internal/contextupdate ./internal/publication ./internal/syncproject ./internal/reviewv4 ./test/zerotoken -count=1` -> PASS: contextupdate `32.022s`, publication `181.043s`, syncproject `75.140s`, reviewv4 `3.573s`, zerotoken `157.449s`.
+- GREEN race/API gate: `go test -race ./internal/publication -run 'TestMarkdownScanNoOp(RevalidatesEveryLivePreimageAfterScanRead|RejectsIncompleteOrMismatchedIdentity|IsReadOnlyAndHonorsCancellationAndOwnership|ReturnsCancellationThatArrivesDuringFinalRead)' -count=1` -> PASS, `23.401s`.
+- GREEN static/final checks: `go vet ./...` -> exit 0/no output; `git diff --check` -> exit 0/no output.
+- Controller independent frozen evidence, not rerun by this worker: final no-op overlay `PASS 3.329s`, actual CLI lifecycle with final no-op path `PASS 7.048s`, and plugin `484` tests plus lint/typecheck/build PASS.
+
+### Files and self-review
+
+- Production: `internal/contextupdate/v4.go`, `internal/publication/markdown.go`.
+- Tests: `internal/contextupdate/provider_collision_test.go`, `internal/publication/markdown_test.go`, `test/zerotoken/gate_a_test.go`, `test/zerotoken/markdown_v4_test.go`.
+- Report: this file. Final commit subject: `fix: close scan publication review findings` (SHA reported in the immutable handoff).
+- The no-op verifier consumes the existing `MarkdownSyncPlan` rather than adding another preimage type. It narrows that interface by requiring exactly the four canonical files and binds the supplied index bytes to the canonical index file, parsed project/generation/view/digest, accepted receipt index guard, and live bytes. `ProjectViewDigest` remains an exact equality gate; changed Git facts still publish normally.
+- No capability baseline was relaxed: the new process assertion derives current records with the existing cross-platform visitor and fails on additions. No model/network/provider capability, public configuration seam, production adapter registration, pricing path, Vault outside the temporary fixtures, release, merge, or push was added.
+- Concern boundary unchanged: native Claude/OpenCode discovery/acceptance and full-product release acceptance remain separate controller tasks.

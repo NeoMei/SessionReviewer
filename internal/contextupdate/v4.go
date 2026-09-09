@@ -354,7 +354,7 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 		return publication.Result{}, err
 	}
 	update := scanMilestoneUpdate(in.Index, in.Milestones)
-	if result, unchanged, err := unchangedV4ScanPublication(ctx, in, read, update, ledger); err != nil {
+	if result, unchanged, err := unchangedV4ScanPublication(ctx, in, read, update, ledger, owner); err != nil {
 		return publication.Result{}, err
 	} else if unchanged {
 		return result, nil
@@ -383,7 +383,7 @@ func publishV4Scan(ctx context.Context, in v4PublishInput) (_ publication.Result
 	return publication.PublishMarkdownScanLocked(ctx, pubOpts, scanPlan, owner)
 }
 
-func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syncproject.MarkdownScanRead, update reviewv4.ScanMilestoneUpdate, nextLedger reviewv4.MachineLedger) (publication.Result, bool, error) {
+func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syncproject.MarkdownScanRead, update reviewv4.ScanMilestoneUpdate, nextLedger reviewv4.MachineLedger, owner *publicationlock.Owner) (publication.Result, bool, error) {
 	old := read.OldAccepted
 	if old.Review.ProjectViewDigest != update.ProjectViewDigest || !bytes.Equal(read.Pending.Documents.Review, read.AcceptedPair.Review) || !bytes.Equal(read.Pending.Documents.History, read.AcceptedPair.History) {
 		return publication.Result{}, false, nil
@@ -489,11 +489,16 @@ func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syn
 	if err := publication.VerifyPrivateChainBindings(ctx, in.Store, in.Manifest, old); err != nil {
 		return publication.Result{}, false, err
 	}
-	result := publication.Result{GenerationID: old.Review.GenerationID}
+	files := make([]presentation.FilePlan, 0, len(paths))
 	for _, relative := range paths {
-		digest := digestHex(read.ProjectExpected[relative])
-		result.ProjectFiles = append(result.ProjectFiles, publication.VerifiedFile{Side: "project", Relative: relative, SHA256: digest})
-		result.VaultFiles = append(result.VaultFiles, publication.VerifiedFile{Side: "vault", Relative: vaultProjectionRelative(in.Mapping.VaultReviewPath, relative), SHA256: digest})
+		files = append(files, presentation.FilePlan{Relative: relative, Expected: bytes.Clone(read.ProjectExpected[relative]), ExpectedExists: true, Desired: bytes.Clone(read.ProjectExpected[relative])})
 	}
-	return result, true, nil
+	noOpIndexBody := bytes.Clone(read.ProjectExpected[presentation.SessionIndexRelativePath])
+	plan := syncproject.MarkdownSyncPlan{
+		Plan:  presentation.RenderPlan{ProjectID: in.ProjectID, GenerationID: old.Review.GenerationID, ProjectViewDigest: old.Review.ProjectViewDigest, Files: files},
+		Index: noOpIndexBody, ExpectedGenerationID: old.Review.GenerationID, ExpectedIndexDigest: old.SessionIndex.Digest,
+		VaultExpected: read.VaultExpected, ExpectedReceiptRevision: read.ExpectedReceiptRevision, ExpectedBaseDigest: read.ExpectedBaseDigest,
+	}
+	result, err := publication.VerifyMarkdownScanNoOpLocked(ctx, publication.Options{ProjectID: in.ProjectID, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now}, plan, owner)
+	return result, true, err
 }
