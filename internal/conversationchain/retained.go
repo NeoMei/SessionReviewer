@@ -41,9 +41,19 @@ func Materialize(input MaterializeInput) (Document, MaterializeReport, error) {
 	sanitizedMessages := make([]SourceMessage, len(input.Messages))
 	copy(sanitizedMessages, input.Messages)
 	for index := range sanitizedMessages {
+		if sanitizedMessages[index].Role == RoleUser {
+			text, err := VisibleUserTextVersion(sanitizedMessages[index].Text, input.RuleVersion)
+			if err != nil {
+				return Document{}, report, err
+			}
+			sanitizedMessages[index].Text = text
+		}
 		sanitizedMessages[index].Text = sanitizeRetainedText(sanitizedMessages[index].Text)
 	}
-	visibleTurns, visibleCoverage := MaterializeVisible(input.View.Provider, input.View.SessionID, input.View.SourceIdentity, sanitizedMessages)
+	visibleTurns, visibleCoverage, err := MaterializeVisibleVersion(input.View.Provider, input.View.SessionID, input.View.SourceIdentity, input.RuleVersion, sanitizedMessages)
+	if err != nil {
+		return Document{}, report, err
+	}
 	report.SourceIncomplete = sourceCoverageIncomplete(input.SourceCoverage)
 	document := Document{
 		SchemaVersion: 1, MinimumReaderVersion: "0.4.0", Digest: zeroDigest(),

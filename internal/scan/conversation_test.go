@@ -115,6 +115,9 @@ func TestScanConversationPersistsCanonicalPrivateChainBeforePreparation(t *testi
 	if err != nil || len(chain.TurnUnits) != 1 || chain.TurnUnits[0].AnswerState != conversationchain.AnswerAnswered || len(chain.TurnUnits[0].Results) != 1 || chain.TurnUnits[0].Results[0].VerificationState != "passed" {
 		t.Fatalf("retained causal evidence=%+v err=%v", chain, err)
 	}
+	if chain.SegmentationRuleVersion != conversationchain.CurrentSegmentationRuleVersion || chain.DependencyProofV1 == nil || chain.DependencyProofV1.RuleVersion != conversationchain.CurrentSegmentationRuleVersion {
+		t.Fatalf("current segmentation version was not bound: document=%q proof=%+v", chain.SegmentationRuleVersion, chain.DependencyProofV1)
+	}
 	if chain.DependencyProofV1 == nil || chain.DependencyProofV1.SourceRecordDigest == "" || !strings.HasPrefix(chain.Digest, "sha256:") {
 		t.Fatalf("retained dependency proof=%+v", chain.DependencyProofV1)
 	}
@@ -251,6 +254,25 @@ func TestScanConversationLifecycleRetainsHistoryAndRestoresCurrentRoot(t *testin
 	_, restoredManifest, err := harness.store.LoadPrepared()
 	if err != nil || len(restoredManifest.ConversationChains) != 1 || restoredManifest.ConversationChains[0] != secondRoot || len(restoredManifest.RetainedConversationChains) != 1 || restoredManifest.RetainedConversationChains[0] != firstRoot {
 		t.Fatalf("restored roots current=%+v retained=%+v err=%v", restoredManifest.ConversationChains, restoredManifest.RetainedConversationChains, err)
+	}
+}
+
+func TestReconcileConversationChainsReplacesSameSessionViewRuleSuccessorWithoutAmbiguity(t *testing.T) {
+	viewDigest := "sha256:" + strings.Repeat("a", 64)
+	legacy := memory.ConversationChainDependency{Provider: "codex", SessionID: "session-1", SessionViewDigest: viewDigest, Digest: "sha256:" + strings.Repeat("b", 64)}
+	current := memory.ConversationChainDependency{Provider: "codex", SessionID: "session-1", SessionViewDigest: viewDigest, Digest: "sha256:" + strings.Repeat("c", 64)}
+	previous := baseline{manifest: memory.GenerationManifest{ConversationChains: []memory.ConversationChainDependency{legacy}}}
+	manifest := memory.GenerationManifest{
+		SessionViews:       []memory.SessionViewDependency{{Provider: "codex", SessionID: "session-1", Digest: viewDigest}},
+		ConversationChains: []memory.ConversationChainDependency{current},
+	}
+
+	reconcileConversationChains(previous, &manifest)
+	if !reflect.DeepEqual(manifest.ConversationChains, []memory.ConversationChainDependency{current}) || len(manifest.RetainedConversationChains) != 0 {
+		t.Fatalf("same-view rule successor became ambiguous: current=%+v retained=%+v", manifest.ConversationChains, manifest.RetainedConversationChains)
+	}
+	if previous.manifest.ConversationChains[0] != legacy {
+		t.Fatal("reconciliation mutated the immutable prior generation reference")
 	}
 }
 

@@ -3,9 +3,16 @@ package conversationchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+)
+
+const (
+	LegacySegmentationRuleVersion  = "visible-turn-v1"
+	CurrentSegmentationRuleVersion = "visible-turn-v2"
 )
 
 // SourceMessage contains only an authenticated, explicitly visible source
@@ -69,9 +76,26 @@ func ApplyVisibleCoverage(turns []VisibleTurn, coverage VisibleCoverage) {
 }
 
 // VisibleUserText removes only known leading ambient envelopes. Arbitrary XML,
-// code blocks and quoted user content are preserved. A source-only environment
+// code blocks and quoted user content are preserved. A source-only ambient
 // message must not split a real question from its answer.
 func VisibleUserText(text string) string {
+	return visibleUserText(text, true)
+}
+
+// VisibleUserTextVersion normalizes source-only ambient envelopes under the
+// requested segmentation rule before callers redact the surviving user text.
+func VisibleUserTextVersion(text, ruleVersion string) (string, error) {
+	switch ruleVersion {
+	case LegacySegmentationRuleVersion:
+		return visibleUserText(text, false), nil
+	case CurrentSegmentationRuleVersion:
+		return visibleUserText(text, true), nil
+	default:
+		return "", errors.New("unsupported visible conversation segmentation rule")
+	}
+}
+
+func visibleUserText(text string, classifySubagentNotifications bool) string {
 	value := strings.TrimSpace(text)
 	ambient := false
 	for {
@@ -89,6 +113,13 @@ func VisibleUserText(text string) string {
 		if strings.HasPrefix(value, `<in-app-browser-context source="ambient-ui-state">`) {
 			if at := strings.Index(value, "</in-app-browser-context>"); at >= 0 {
 				value = strings.TrimSpace(value[at+len("</in-app-browser-context>"):])
+				changed = true
+				ambient = true
+			}
+		}
+		if classifySubagentNotifications {
+			if rest, ok := stripLeadingSubagentNotification(value); ok {
+				value = rest
 				changed = true
 				ambient = true
 			}
@@ -119,15 +150,66 @@ func VisibleUserText(text string) string {
 	return value
 }
 
+func stripLeadingSubagentNotification(value string) (string, bool) {
+	const start = "<subagent_notification>"
+	const end = "</subagent_notification>"
+	if !strings.HasPrefix(value, start) {
+		return value, false
+	}
+	closeAt := strings.Index(value[len(start):], end)
+	if closeAt < 0 {
+		return value, false
+	}
+	closeAt += len(start)
+	payload := strings.TrimSpace(value[len(start):closeAt])
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(payload), &fields) != nil || len(fields) != 2 {
+		return value, false
+	}
+	var agentPath string
+	if json.Unmarshal(fields["agent_path"], &agentPath) != nil || strings.TrimSpace(agentPath) == "" {
+		return value, false
+	}
+	if !validSubagentNotificationStatus(fields["status"]) {
+		return value, false
+	}
+	return strings.TrimSpace(value[closeAt+len(end):]), true
+}
+
+func validSubagentNotificationStatus(raw json.RawMessage) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) == nil && fields != nil {
+		return true
+	}
+	var value string
+	return json.Unmarshal(raw, &value) == nil && strings.TrimSpace(value) != ""
+}
+
 // MaterializeVisible starts each unit at a real visible user request. An
 // assistant final_answer completes it; commentary alone remains partial.
 func MaterializeVisible(provider, sessionID, sourceIdentity string, messages []SourceMessage) ([]VisibleTurn, VisibleCoverage) {
+	turns, coverage, _ := MaterializeVisibleVersion(provider, sessionID, sourceIdentity, CurrentSegmentationRuleVersion, messages)
+	return turns, coverage
+}
+
+// MaterializeVisibleVersion preserves the accepted v1 interpretation for
+// historical retained chains while applying the current v2 classification to
+// newly materialized source.
+func MaterializeVisibleVersion(provider, sessionID, sourceIdentity, ruleVersion string, messages []SourceMessage) ([]VisibleTurn, VisibleCoverage, error) {
+	if ruleVersion != LegacySegmentationRuleVersion && ruleVersion != CurrentSegmentationRuleVersion {
+		return nil, VisibleCoverage{}, errors.New("unsupported visible conversation segmentation rule")
+	}
+	turns, coverage := materializeVisible(provider, sessionID, sourceIdentity, messages, ruleVersion == CurrentSegmentationRuleVersion)
+	return turns, coverage, nil
+}
+
+func materializeVisible(provider, sessionID, sourceIdentity string, messages []SourceMessage, classifySubagentNotifications bool) ([]VisibleTurn, VisibleCoverage) {
 	turns := []VisibleTurn{}
 	coverage := VisibleCoverage{Complete: true}
 	for _, source := range messages {
 		coverage.VisibleMessages++
 		if source.Role == RoleUser {
-			source.Text = VisibleUserText(source.Text)
+			source.Text = visibleUserText(source.Text, classifySubagentNotifications)
 			if source.Text == "" {
 				coverage.ContextMessages++
 				continue

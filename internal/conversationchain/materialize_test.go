@@ -17,10 +17,75 @@ func TestVisibleUserTextPreservesRequestAndArbitraryMarkup(t *testing.T) {
 		{"Discuss # AGENTS.md instructions <INSTRUCTIONS>example</INSTRUCTIONS>", "Discuss # AGENTS.md instructions <INSTRUCTIONS>example</INSTRUCTIONS>"},
 		{"Explain <root>/my/path</root>", "Explain <root>/my/path</root>"},
 		{"```xml\n<environment_context>example</environment_context>\n```", "```xml\n<environment_context>example</environment_context>\n```"},
+		{"<subagent_notification>\n{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>", ""},
+		{"<subagent_notification>{\"agent_path\":\"worker-1\",\"status\":\"shutdown\"}</subagent_notification>", ""},
+		{"<subagent_notification>\n{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>\nWhat should I do next?", "What should I do next?"},
+		{"<subagent_notification>{\"agent_path\":\"example\",\"status\":true}</subagent_notification>", "<subagent_notification>{\"agent_path\":\"example\",\"status\":true}</subagent_notification>"},
+		{"<subagent_notification>{\"agent_path\":\"example\",\"status\":{},\"note\":\"quoted example\"}</subagent_notification>", "<subagent_notification>{\"agent_path\":\"example\",\"status\":{},\"note\":\"quoted example\"}</subagent_notification>"},
+		{"> <subagent_notification>{\"agent_path\":\"example\"}</subagent_notification>", "> <subagent_notification>{\"agent_path\":\"example\"}</subagent_notification>"},
+		{"```xml\n<subagent_notification>{\"agent_path\":\"example\"}</subagent_notification>\n```", "```xml\n<subagent_notification>{\"agent_path\":\"example\"}</subagent_notification>\n```"},
 	} {
 		if got := VisibleUserText(test.input); got != test.want {
 			t.Fatalf("input=%q got=%q want=%q", test.input, got, test.want)
 		}
+	}
+}
+
+func TestMaterializeVisibleIgnoresOrchestrationNotificationWithoutSplittingQuestionAnswer(t *testing.T) {
+	question := SourceMessage{Role: RoleUser, Text: "How do we finish F1?", OccurredAt: testTime1, RecordOrdinal: 7, RecordHash: strings.Repeat("a", 64)}
+	working := SourceMessage{Role: RoleAssistant, Phase: "commentary", Text: "Checking.", OccurredAt: testTime2, RecordOrdinal: 8, RecordHash: strings.Repeat("b", 64)}
+	notification := SourceMessage{Role: RoleUser, Text: "<subagent_notification>\n{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}\n</subagent_notification>", OccurredAt: testTime2, RecordOrdinal: 9, RecordHash: strings.Repeat("c", 64)}
+	answer := SourceMessage{Role: RoleAssistant, Phase: "final_answer", Text: "F1 is complete.", OccurredAt: testTime3, RecordOrdinal: 10, RecordHash: strings.Repeat("d", 64)}
+
+	turns, coverage := MaterializeVisible("codex", "session-1", "source-1", []SourceMessage{question, working, notification, answer})
+	control, _ := MaterializeVisible("codex", "session-1", "source-1", []SourceMessage{question, working, answer})
+	if len(turns) != 1 || len(control) != 1 || turns[0].AnswerState != AnswerAnswered || turns[0].AssistantMessageCount != 2 {
+		t.Fatalf("notification split real question/answer: turns=%+v", turns)
+	}
+	if coverage.VisibleMessages != 4 || coverage.CapturedMessages != 3 || coverage.ContextMessages != 1 {
+		t.Fatalf("notification coverage=%+v", coverage)
+	}
+	if turns[0].TurnUnitID != control[0].TurnUnitID || turns[0].UserMessage.RevisionID != control[0].UserMessage.RevisionID || turns[0].UserMessage.SourceRef != control[0].UserMessage.SourceRef {
+		t.Fatalf("notification changed authenticated question identity: got=%+v control=%+v", turns[0].UserMessage, control[0].UserMessage)
+	}
+	for index := range turns[0].Messages[1:] {
+		if turns[0].Messages[index+1].RevisionID != control[0].Messages[index+1].RevisionID || turns[0].Messages[index+1].SourceRef != control[0].Messages[index+1].SourceRef {
+			t.Fatalf("notification changed assistant identity at %d", index)
+		}
+	}
+}
+
+func TestMaterializeVisibleKeepsRealSuffixOnNotificationRecord(t *testing.T) {
+	wrapped := SourceMessage{Role: RoleUser, Text: "<subagent_notification>{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}</subagent_notification>\nWhat changed?", OccurredAt: testTime1, RecordOrdinal: 11, RecordHash: strings.Repeat("e", 64)}
+	plain := wrapped
+	plain.Text = "What changed?"
+
+	turns, _ := MaterializeVisible("codex", "session-1", "source-1", []SourceMessage{wrapped})
+	control, _ := MaterializeVisible("codex", "session-1", "source-1", []SourceMessage{plain})
+	if len(turns) != 1 || turns[0].UserMessage.VisibleExcerpt != "What changed?" || turns[0].UserMessage.SourceRef.RecordOrdinal != 11 || turns[0].UserMessage.SourceRef.SourceHash != strings.Repeat("e", 64) {
+		t.Fatalf("mixed notification/request=%+v", turns)
+	}
+	if turns[0].TurnUnitID != control[0].TurnUnitID || turns[0].UserMessage.RevisionID != control[0].UserMessage.RevisionID {
+		t.Fatal("stripping notification prefix changed source-derived IDs")
+	}
+}
+
+func TestMaterializeVisibleVersionPreservesHistoricalV1NotificationTurn(t *testing.T) {
+	messages := []SourceMessage{
+		{Role: RoleUser, Text: "How do we finish F1?", OccurredAt: testTime1, RecordOrdinal: 7, RecordHash: strings.Repeat("a", 64)},
+		{Role: RoleUser, Text: "<subagent_notification>{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}</subagent_notification>", OccurredAt: testTime2, RecordOrdinal: 9, RecordHash: strings.Repeat("c", 64)},
+		{Role: RoleAssistant, Phase: "final_answer", Text: "F1 is complete.", OccurredAt: testTime3, RecordOrdinal: 10, RecordHash: strings.Repeat("d", 64)},
+	}
+	legacy, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", LegacySegmentationRuleVersion, messages)
+	if err != nil || len(legacy) != 2 || legacy[1].UserMessage.SourceRef.RecordOrdinal != 9 || legacy[1].AnswerState != AnswerAnswered {
+		t.Fatalf("historical v1 interpretation changed: turns=%+v err=%v", legacy, err)
+	}
+	current, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", CurrentSegmentationRuleVersion, messages)
+	if err != nil || len(current) != 1 || current[0].UserMessage.SourceRef.RecordOrdinal != 7 || current[0].AnswerState != AnswerAnswered {
+		t.Fatalf("current v2 interpretation=%+v err=%v", current, err)
+	}
+	if _, _, err := MaterializeVisibleVersion("codex", "session-1", "source-1", "visible-turn-v3", messages); err == nil {
+		t.Fatal("unsupported historical segmentation rule was reinterpreted")
 	}
 }
 

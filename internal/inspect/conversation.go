@@ -79,7 +79,7 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 			}
 			bodyAvailability := conversationBodyRetained
 			if record, available := selectedSourceRecord(ctx, request, selected.view); available && record.Availability == memory.SourceAvailable {
-				sourceTurns, sourceCoverage, sourceLoaded, _, readErr := loadConversationSource(ctx, request, selected.view, record)
+				sourceTurns, sourceCoverage, sourceLoaded, _, readErr := loadConversationSource(ctx, request, selected.view, record, selected.document.SegmentationRuleVersion)
 				if readErr != nil {
 					return readErr
 				}
@@ -120,7 +120,11 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 		var coverage conversationchain.VisibleCoverage
 		bodyAvailability := ""
 		evidenceView := view.Digest
-		turns, coverage, sourceLoaded, visibleReaderUnsupported, err := loadConversationSource(ctx, request, view, record)
+		ruleVersion := conversationchain.CurrentSegmentationRuleVersion
+		if retained != nil {
+			ruleVersion = retained.document.SegmentationRuleVersion
+		}
+		turns, coverage, sourceLoaded, visibleReaderUnsupported, err := loadConversationSource(ctx, request, view, record, ruleVersion)
 		if err != nil {
 			return err
 		}
@@ -148,7 +152,7 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 			}
 			return publicError("source_unavailable", "authenticated source prefix is unavailable")
 		}
-		page, err = conversationPage(request, view, record, turns, coverage, evidenceView, bodyAvailability)
+		page, err = conversationPageWithRule(request, view, record, turns, coverage, evidenceView, bodyAvailability, ruleVersion)
 		return err
 	})
 	if err != nil {
@@ -157,7 +161,7 @@ func LoadConversationPage(ctx context.Context, request ConversationRequest) (Con
 	return page, nil
 }
 
-func loadConversationSource(ctx context.Context, request ConversationRequest, view memory.SessionView, record memory.SourceRecord) ([]conversationchain.VisibleTurn, conversationchain.VisibleCoverage, bool, bool, error) {
+func loadConversationSource(ctx context.Context, request ConversationRequest, view memory.SessionView, record memory.SourceRecord, ruleVersion string) ([]conversationchain.VisibleTurn, conversationchain.VisibleCoverage, bool, bool, error) {
 	if record.Availability != memory.SourceAvailable {
 		return nil, conversationchain.VisibleCoverage{}, false, false, nil
 	}
@@ -176,9 +180,18 @@ func loadConversationSource(ctx context.Context, request ConversationRequest, vi
 		if err := inspectionCheckpoint(ctx, "conversation_message"); err != nil {
 			return nil, conversationchain.VisibleCoverage{}, false, false, publicError(CodeInvalidArgument, "inspection timed out")
 		}
+		if visible[i].Role == conversationchain.RoleUser {
+			visible[i].Text, err = conversationchain.VisibleUserTextVersion(visible[i].Text, ruleVersion)
+			if err != nil {
+				return nil, conversationchain.VisibleCoverage{}, false, false, err
+			}
+		}
 		visible[i].Text = redactAbsolutePaths(redactor.Text(visible[i].Text).Text)
 	}
-	turns, coverage := conversationchain.MaterializeVisible(request.Provider, request.SessionID, view.SourceIdentity, visible)
+	turns, coverage, err := conversationchain.MaterializeVisibleVersion(request.Provider, request.SessionID, view.SourceIdentity, ruleVersion, visible)
+	if err != nil {
+		return nil, conversationchain.VisibleCoverage{}, false, false, err
+	}
 	coverage.SourceRecords = sourceCoverage.SourceRecords
 	coverage.OversizedRecords = sourceCoverage.OversizedRecords
 	coverage.MalformedRecords = sourceCoverage.MalformedRecords
@@ -297,7 +310,11 @@ func validateVisibleMessage(message conversationchain.VisibleMessage) error {
 }
 
 func conversationPage(request ConversationRequest, view memory.SessionView, source memory.SourceRecord, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, evidenceView, bodyAvailability string) (ConversationPage, error) {
-	dependency, err := memory.Digest([]string{view.Digest, evidenceView, view.SourceRecordDigest, source.FrozenBoundary.SourceHash, bodyAvailability, "visible-turn-v1", conversationRedactionVersion})
+	return conversationPageWithRule(request, view, source, turns, coverage, evidenceView, bodyAvailability, conversationchain.CurrentSegmentationRuleVersion)
+}
+
+func conversationPageWithRule(request ConversationRequest, view memory.SessionView, source memory.SourceRecord, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, evidenceView, bodyAvailability, ruleVersion string) (ConversationPage, error) {
+	dependency, err := memory.Digest([]string{view.Digest, evidenceView, view.SourceRecordDigest, source.FrozenBoundary.SourceHash, bodyAvailability, ruleVersion, conversationRedactionVersion})
 	if err != nil {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation dependencies are invalid")
 	}
@@ -305,7 +322,7 @@ func conversationPage(request ConversationRequest, view memory.SessionView, sour
 }
 
 func selectedSnapshotConversationPage(request ConversationRequest, selected retainedConversation, turns []conversationchain.VisibleTurn, coverage conversationchain.VisibleCoverage, bodyAvailability string) (ConversationPage, error) {
-	dependency, err := memory.Digest([]string{selected.view.Digest, selected.document.Digest, selected.document.DependencyDigest, bodyAvailability, "visible-turn-v1", conversationRedactionVersion})
+	dependency, err := memory.Digest([]string{selected.view.Digest, selected.document.Digest, selected.document.DependencyDigest, bodyAvailability, selected.document.SegmentationRuleVersion, conversationRedactionVersion})
 	if err != nil {
 		return ConversationPage{}, publicError(CodeInvalidArgument, "conversation dependencies are invalid")
 	}

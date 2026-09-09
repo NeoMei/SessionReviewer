@@ -570,7 +570,7 @@ func TestRetainedConversationPublishedGraphTamperingFailsClosed(t *testing.T) {
 	}{
 		{"chain document digest", func(t *testing.T, fixture removedRetainedFixture) {
 			dependency := fixture.generation.RetainedConversationChains[0]
-			mutateRetainedFile(t, filepath.Join(fixture.memoryRoot, "conversation-chains", strings.TrimPrefix(dependency.Digest, "sha256:")+".json"), []byte(`"segmentation_rule_version":"visible-turn-v1"`), []byte(`"segmentation_rule_version":"visible-turn-v2"`))
+			mutateRetainedFile(t, filepath.Join(fixture.memoryRoot, "conversation-chains", strings.TrimPrefix(dependency.Digest, "sha256:")+".json"), []byte(`"segmentation_rule_version":"`+conversationchain.CurrentSegmentationRuleVersion+`"`), []byte(`"segmentation_rule_version":"`+conversationchain.LegacySegmentationRuleVersion+`"`))
 		}},
 		{"evidence view identity", func(t *testing.T, fixture removedRetainedFixture) {
 			dependency := fixture.generation.RetainedConversationChains[0]

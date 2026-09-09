@@ -229,6 +229,46 @@ func TestConversationSourceBackedAnswerStatesAreConservative(t *testing.T) {
 	}
 }
 
+func TestConversationSourceCanReplayHistoricalV1SegmentationWithoutReinterpretation(t *testing.T) {
+	notification := "<subagent_notification>{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"done\"}}</subagent_notification>"
+	fixture := newConversationFixture(t,
+		visibleRecord("user", "", "real question")+
+			visibleRecord("user", "", notification)+
+			visibleRecord("assistant", "final_answer", "answer"),
+	)
+	view := memory.SessionView{Provider: "codex", SessionID: conversationSession, SourceIdentity: fixture.record.SourceIdentity}
+
+	legacy, _, loaded, unsupported, err := loadConversationSource(context.Background(), fixture.request, view, fixture.record, conversationchain.LegacySegmentationRuleVersion)
+	if err != nil || !loaded || unsupported || len(legacy) != 2 || legacy[1].UserMessage.SourceRef.RecordOrdinal != 3 || legacy[1].AnswerState != conversationchain.AnswerAnswered {
+		t.Fatalf("historical v1 source replay=%+v loaded=%v unsupported=%v err=%v", legacy, loaded, unsupported, err)
+	}
+	current, _, loaded, unsupported, err := loadConversationSource(context.Background(), fixture.request, view, fixture.record, conversationchain.CurrentSegmentationRuleVersion)
+	if err != nil || !loaded || unsupported || len(current) != 1 || current[0].UserMessage.SourceRef.RecordOrdinal != 2 || current[0].AnswerState != conversationchain.AnswerAnswered {
+		t.Fatalf("current v2 source replay=%+v loaded=%v unsupported=%v err=%v", current, loaded, unsupported, err)
+	}
+	if legacy[0].TurnUnitID != current[0].TurnUnitID || legacy[0].UserMessage.RevisionID != current[0].UserMessage.RevisionID || legacy[0].UserMessage.SourceRef != current[0].UserMessage.SourceRef {
+		t.Fatal("rule successor changed the real question's source-derived identity")
+	}
+}
+
+func TestConversationV2ClassifiesNotificationBeforeRedaction(t *testing.T) {
+	notification := "<subagent_notification>{\"agent_path\":\"worker-1\",\"status\":{\"completed\":\"read /Users/neomei/private/result.md\"}}</subagent_notification>"
+	fixture := newConversationFixture(t,
+		visibleRecord("user", "", "real question")+
+			visibleRecord("user", "", notification)+
+			visibleRecord("assistant", "final_answer", "answer"),
+	)
+	view := memory.SessionView{Provider: "codex", SessionID: conversationSession, SourceIdentity: fixture.record.SourceIdentity}
+
+	turns, coverage, loaded, unsupported, err := loadConversationSource(context.Background(), fixture.request, view, fixture.record, conversationchain.CurrentSegmentationRuleVersion)
+	if err != nil || !loaded || unsupported || len(turns) != 1 || turns[0].UserMessage.SourceRef.RecordOrdinal != 2 || turns[0].AnswerState != conversationchain.AnswerAnswered {
+		t.Fatalf("pre-redaction classification=%+v coverage=%+v loaded=%v unsupported=%v err=%v", turns, coverage, loaded, unsupported, err)
+	}
+	if coverage.CapturedMessages != 2 || coverage.ContextMessages != 1 {
+		t.Fatalf("pre-redaction coverage=%+v", coverage)
+	}
+}
+
 // TestConversationEmitsProductionExpansionWireForFrontend is also invoked by
 // the TypeScript contract suite. The optional output is a real
 // LoadConversationPage -> RenderConversationPage index response, not a

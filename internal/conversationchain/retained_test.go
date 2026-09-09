@@ -86,6 +86,37 @@ func TestMaterializeRetainedBuildsCausalTurnsAndTypedEvidence(t *testing.T) {
 	}
 }
 
+func TestMaterializeRetainedV2KeepsIgnoredNotificationInDependencyProof(t *testing.T) {
+	messages := []SourceMessage{
+		retainedMessage(RoleUser, "", "real question", testTime1, 1, 'a'),
+		retainedMessage(RoleUser, "", `<subagent_notification>{"agent_path":"worker-1","status":{"completed":"read /Users/neomei/private/result.md"}}</subagent_notification>`, testTime2, 2, 'b'),
+		retainedMessage(RoleAssistant, "final_answer", "answer", testTime3, 3, 'c'),
+	}
+	view := retainedView("codex", "session-1", "source-1", nil)
+	doc, _, err := Materialize(MaterializeInput{
+		View: view, Messages: messages,
+		SourceCoverage:   VisibleCoverage{SourceRecords: 3, VisibleMessages: 3, CapturedMessages: 2, ContextMessages: 1, Complete: true},
+		RuleVersion:      CurrentSegmentationRuleVersion,
+		RedactionVersion: "redaction-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.TurnUnits) != 1 || doc.TurnUnits[0].UserMessage.SourceRef.RecordOrdinal != 1 || doc.TurnUnits[0].AnswerState != AnswerAnswered {
+		t.Fatalf("notification changed retained turn: %+v", doc.TurnUnits)
+	}
+	if doc.DependencyProofV1 == nil || len(doc.DependencyProofV1.VisibleRecords) != 3 {
+		t.Fatalf("notification source proof missing: %+v", doc.DependencyProofV1)
+	}
+	if doc.MaterializationCoverageV1 == nil || doc.MaterializationCoverageV1.CapturedMessages != 2 || doc.MaterializationCoverageV1.ContextMessages != 1 {
+		t.Fatalf("v2 classification coverage was not retained: %+v", doc.MaterializationCoverageV1)
+	}
+	ignored := doc.DependencyProofV1.VisibleRecords[1]
+	if ignored.RecordOrdinal != 2 || ignored.SourceHash != strings.Repeat("b", 64) {
+		t.Fatalf("ignored notification proof changed: %+v", ignored)
+	}
+}
+
 func TestMaterializeRetainedAnswerStates(t *testing.T) {
 	tests := []struct {
 		name     string

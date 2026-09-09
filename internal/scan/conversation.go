@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	conversationRuleVersion      = "visible-turn-v1"
+	conversationRuleVersion      = conversationchain.CurrentSegmentationRuleVersion
 	conversationRedactionVersion = "redaction-v1"
 )
 
