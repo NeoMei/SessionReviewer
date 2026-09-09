@@ -106,14 +106,6 @@ func Resolve(in ResolveInput) (Snapshot, error) {
 	if reason != "" {
 		return unresolvedMatched(r, in.CreatedAt, billable, Match{Status: PricePending, ListingID: match.ListingID, Reason: reason})
 	}
-	if rates.CacheWriteInput == nil && billable.Quantities.CacheWriteInput == 0 {
-		zero := 0.0
-		rates.CacheWriteInput = &zero
-	}
-	if rates.ReasoningOutput == nil && billable.Quantities.ReasoningOutput == 0 {
-		zero := 0.0
-		rates.ReasoningOutput = &zero
-	}
 	status := match.Status
 	if in.Freshness.Status == modelpricewatch.FreshStale {
 		status = PriceStaleEstimate

@@ -147,6 +147,23 @@ func TestValidatePricingURLRejectsAllJSONSchemaWhitespace(t *testing.T) {
 	}
 }
 
+func TestValidateSnapshotAllowsUnknownRateOnlyForZeroQuantity(t *testing.T) {
+	snapshot := completeSnapshot()
+	snapshot.BillableQuantities.CacheWriteInput = 0
+	snapshot.Rates.CacheWriteInput = nil
+	snapshot.LineCostsUSD.CacheWriteInput = nil
+	snapshot.KnownSubtotalUSD = 4
+	total := 4.0
+	snapshot.TotalCostUSD = &total
+	if err := ValidateSnapshot(snapshot); err != nil {
+		t.Fatalf("zero-quantity unknown rate rejected: %v", err)
+	}
+	snapshot.BillableQuantities.CacheWriteInput = 1
+	if err := ValidateSnapshot(snapshot); err == nil {
+		t.Fatal("nonzero quantity accepted without rate")
+	}
+}
+
 func completeSnapshot() Snapshot {
 	v := 1.0
 	five := 5.0

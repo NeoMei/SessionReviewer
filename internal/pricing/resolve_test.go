@@ -57,6 +57,9 @@ func TestServiceResolveUsesCurrentStaleAndExpiredCatalogTruthfully(t *testing.T)
 			if test.complete && math.Abs(got.KnownSubtotalUSD-0.00015) > 1e-15 {
 				t.Fatalf("cost=%v", got.KnownSubtotalUSD)
 			}
+			if test.complete && (got.Rates.CacheWriteInput != nil || got.LineCostsUSD.CacheWriteInput != nil || got.Rates.ReasoningOutput != nil || got.LineCostsUSD.ReasoningOutput != nil) {
+				t.Fatalf("unknown zero-quantity dimensions became numeric zero: %#v", got)
+			}
 		})
 	}
 }

@@ -126,9 +126,9 @@ func ValidateSnapshot(snapshot Snapshot) error {
 		return errors.New("known subtotal does not equal known line costs")
 	}
 	if snapshot.PricingComplete {
-		for _, value := range append(rates, costs...) {
-			if value == nil {
-				return errors.New("complete pricing contains an unknown amount")
+		for index := range rates {
+			if quantities[index] > 0 && (rates[index] == nil || costs[index] == nil) {
+				return errors.New("complete pricing contains an unknown billed amount")
 			}
 		}
 		if snapshot.TotalCostUSD == nil || len(snapshot.MissingBillingDimensions) != 0 || !nearlyEqual(*snapshot.TotalCostUSD, snapshot.KnownSubtotalUSD) {
