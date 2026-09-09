@@ -69,6 +69,10 @@ func TestRunReviewAgentConfigurePersistsOnlySuccessfulVerifiedIdentity(t *testin
 	if err != nil || configuration.Executable != executable || configuration.Version != "fixture" {
 		t.Fatalf("configuration=%+v err=%v", configuration, err)
 	}
+	output.Reset()
+	if code := runReview([]string{"agent", "status", "--data-dir", dataRoot, "--json"}, &output, &bytes.Buffer{}); code != 0 || !strings.Contains(output.String(), executable) {
+		t.Fatalf("status code=%d output=%s", code, output.String())
+	}
 }
 
 func TestRunReviewRejectsInvalidPublicArgvWithoutJSON(t *testing.T) {

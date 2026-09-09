@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"sort"
@@ -95,6 +96,62 @@ func (s *Store) Get(id string) (annotation.Annotation, error) {
 	return annotation.Annotation{}, os.ErrNotExist
 }
 
+func (s *Store) CommitExtraction(run annotation.Run, candidates []annotation.Annotation) error {
+	return s.mutate(func(record *annotation.StoreRecord, _ bool) error {
+		return applyExtraction(record, s.projectID, run, candidates)
+	})
+}
+
+func applyExtraction(record *annotation.StoreRecord, projectID string, run annotation.Run, candidates []annotation.Annotation) error {
+	for _, existing := range record.ExtractionRuns {
+		if existing.RunID != run.RunID {
+			continue
+		}
+		if !reflect.DeepEqual(existing, run) {
+			return ErrCandidateRevisionConflict
+		}
+		byID := map[string]annotation.Annotation{}
+		for _, value := range record.Annotations {
+			byID[value.ID] = value
+		}
+		for _, candidate := range candidates {
+			if !reflect.DeepEqual(byID[candidate.ID], candidate) {
+				return ErrCandidateRevisionConflict
+			}
+		}
+		return nil
+	}
+	if run.Status != "completed" || run.ProjectID != projectID {
+		return errors.New("only a completed extraction run can advance candidates")
+	}
+	existingIDs := map[string]bool{}
+	for _, candidate := range record.Annotations {
+		existingIDs[candidate.ID] = true
+	}
+	for _, candidate := range candidates {
+		if candidate.AgentRunID != run.RunID || existingIDs[candidate.ID] {
+			return ErrCandidateRevisionConflict
+		}
+		existingIDs[candidate.ID] = true
+	}
+	record.ExtractionRuns = append(record.ExtractionRuns, run)
+	record.Annotations = append(record.Annotations, candidates...)
+	return nil
+}
+
+func SuccessfulExtractionDependencies(record annotation.StoreRecord) map[string]bool {
+	result := map[string]bool{}
+	for _, run := range record.ExtractionRuns {
+		if run.Status != "completed" || run.ExtractorVersion != ExtractorVersion || run.PromptSchemaVersion != PromptSchemaVersion {
+			continue
+		}
+		for _, digest := range run.DependencyDigests {
+			result[digest] = true
+		}
+	}
+	return result
+}
+
 func (s *Store) Transition(id string, expectedRevision int, action, confirmedEntityID string, at time.Time) (annotation.Annotation, error) {
 	var result annotation.Annotation
 	err := s.mutate(func(record *annotation.StoreRecord, _ bool) error {
@@ -163,6 +220,10 @@ func (s *Store) Transition(id string, expectedRevision int, action, confirmedEnt
 }
 
 func (s *Store) mutate(change func(*annotation.StoreRecord, bool) error) (retErr error) {
+	return withDecisionControlLock(s.dataRoot, func() error { return s.mutateUnlocked(change) })
+}
+
+func (s *Store) mutateUnlocked(change func(*annotation.StoreRecord, bool) error) error {
 	projectDir := filepath.Dir(s.path)
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		return err
@@ -172,16 +233,6 @@ func (s *Store) mutate(change func(*annotation.StoreRecord, bool) error) (retErr
 			return err
 		}
 	}
-	root, err := os.OpenRoot(s.dataRoot)
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, root.Close()) }()
-	lock, err := project.AcquireProjectLock(root, filepath.ToSlash(filepath.Join("projects", s.projectID, "agent-annotations.lock")), 10*time.Second)
-	if err != nil {
-		return err
-	}
-	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
 	_, statErr := os.Lstat(s.path)
 	existed := statErr == nil
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
@@ -202,6 +253,29 @@ func (s *Store) mutate(change func(*annotation.StoreRecord, bool) error) (retErr
 		return err
 	}
 	return atomicfile.Write(s.path, body, 0o600)
+}
+
+func withDecisionControlLock(dataRoot string, operation func() error) (retErr error) {
+	lockDir := filepath.Join(dataRoot, "decision-extraction-jobs")
+	if err := os.MkdirAll(lockDir, 0o700); err != nil {
+		return err
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(lockDir, 0o700); err != nil {
+			return err
+		}
+	}
+	root, err := os.OpenRoot(dataRoot)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, root.Close()) }()
+	lock, err := project.AcquireProjectLock(root, "decision-extraction-jobs/control.lock", 10*time.Second)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, lock.Release()) }()
+	return operation()
 }
 
 func validateStoredSemantics(record annotation.StoreRecord, projectID string) error {

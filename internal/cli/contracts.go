@@ -1020,20 +1020,22 @@ func parseDecisionExtractContract(args []string) (DecisionRequest, error) {
 }
 
 func parseExtractStatusContract(args []string) (DecisionRequest, error) {
-	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "data-dir": true, "json": true})
+	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "project-id": true, "data-dir": true, "json": true})
 	if err != nil {
 		return DecisionRequest{}, err
 	}
-	if err = requireFlags(flags, "job-id"); err != nil {
-		return DecisionRequest{}, err
+	if (flags.values["job-id"] == "") == (flags.values["project-id"] == "") {
+		return DecisionRequest{}, contractError("extract status requires exactly one job-id or project-id")
 	}
-	if err = requireSafeIDs(flags, "job-id"); err != nil {
-		return DecisionRequest{}, err
+	for _, name := range []string{"job-id", "project-id"} {
+		if flags.values[name] != "" && !safeContractID(flags.values[name]) {
+			return DecisionRequest{}, contractError("ID is empty or invalid")
+		}
 	}
 	if err = validateInspectDataDir(flags.values["data-dir"]); err != nil {
 		return DecisionRequest{}, err
 	}
-	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "extract", Subcommand: "status", JobID: flags.values["job-id"]}, nil
+	return DecisionRequest{DataDir: flags.values["data-dir"], Command: "extract", Subcommand: "status", JobID: flags.values["job-id"], ProjectID: flags.values["project-id"]}, nil
 }
 
 func parseExtractCancelContract(args []string) (DecisionRequest, error) {

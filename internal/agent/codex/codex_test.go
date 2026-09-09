@@ -419,6 +419,47 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 	}
 }
 
+func TestGenerateProposalAllowsBoundedHostValidatedGenericJSON(t *testing.T) {
+	adapter := containedRunnerForTest(t)
+	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(proposalPath, []byte(`{"schema_version":1,"contract":"decision-candidate-proposal-v1","candidates":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SESSIONREVIEWER_FAKE_PROPOSAL_PATH", proposalPath)
+	request := validRequest(t, []byte("prompt"))
+	request.ProposalContract = agent.ProposalContractGenericJSON
+	result, err := adapter.GenerateProposal(context.Background(), request)
+	if err != nil || !bytes.Contains(result.Proposal, []byte("decision-candidate-proposal-v1")) {
+		t.Fatalf("result=%s err=%v", result.Proposal, err)
+	}
+}
+
+func TestGenerateProposalAllowsJSONNullInHostValidatedGenericJSON(t *testing.T) {
+	adapter := containedRunnerForTest(t)
+	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
+	if err := os.WriteFile(proposalPath, []byte(`{"schema_version":1,"recommended_target_id":null}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SESSIONREVIEWER_FAKE_PROPOSAL_PATH", proposalPath)
+	request := validRequest(t, []byte("prompt"))
+	request.ProposalContract = agent.ProposalContractGenericJSON
+	result, err := adapter.GenerateProposal(context.Background(), request)
+	if err != nil || !bytes.Contains(result.Proposal, []byte(`"recommended_target_id":null`)) {
+		t.Fatalf("result=%s err=%v", result.Proposal, err)
+	}
+}
+
+func TestGenerateProposalControlledDecisionModeBindsPromptSession(t *testing.T) {
+	adapter := containedRunnerForTest(t)
+	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "decision-success")
+	request := validRequest(t, []byte(`{"sessions":[{"provider":"codex","session_id":"session-a","session_view_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`))
+	request.ProposalContract = agent.ProposalContractGenericJSON
+	result, err := adapter.GenerateProposal(context.Background(), request)
+	if err != nil || !bytes.Contains(result.Proposal, []byte(`"session_id":"session-a"`)) || !bytes.Contains(result.Proposal, []byte(`sha256:aaaaaaaa`)) {
+		t.Fatalf("result=%s err=%v", result.Proposal, err)
+	}
+}
+
 func TestGenerateProposalAvoidsCodexDiagnosticItemsFromRedundantDisableFlags(t *testing.T) {
 	adapter := containedRunnerForTest(t)
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "noisy-disable-diagnostics")

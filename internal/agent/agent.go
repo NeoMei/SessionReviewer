@@ -63,9 +63,14 @@ type Request struct {
 	// ForbiddenRoots are canonical physical roots used only by the Adapter's
 	// process boundary. They are never prompt content. Generation requires one
 	// Project and one Vault root and rejects any overlap with WorkingDirectory.
-	ForbiddenRoots []ForbiddenRoot
-	Deadline       time.Time
+	ForbiddenRoots   []ForbiddenRoot
+	Deadline         time.Time
+	ProposalContract ProposalContract
 }
+
+type ProposalContract string
+
+const ProposalContractGenericJSON ProposalContract = "generic_json"
 
 // ForbiddenRootKind names a host-owned root that an Agent run must not enter.
 type ForbiddenRootKind string

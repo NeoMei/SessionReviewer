@@ -8,14 +8,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 	"time"
 
+	"github.com/neomei/SessionReviewer/internal/agent"
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/decisions"
+	"github.com/neomei/SessionReviewer/internal/memory"
+	"github.com/neomei/SessionReviewer/internal/memorystore"
 	"github.com/neomei/SessionReviewer/internal/presentation"
 	"github.com/neomei/SessionReviewer/internal/publication"
 	"github.com/neomei/SessionReviewer/internal/publicationlock"
+	"github.com/neomei/SessionReviewer/internal/reviewjob"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -46,6 +55,9 @@ func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if len(args) == 1 && isHelpToken(args[0]) {
 		fmt.Fprint(stdout, decisionsHelp)
 		return 0
+	}
+	if len(args) > 0 && args[0] == "worker" {
+		return runDecisionWorker(args[1:])
 	}
 	request, err := ParseDecisionContract(args)
 	if err != nil {
@@ -96,7 +108,206 @@ func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		}
 		return writeDecisionJSON(stdout, stderr, decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, Candidates: values})
 	}
-	return writeDecisionError(stdout, ContractError{Code: "agent_unconfigured", Message: "decision extraction requires a configured proposal-only Agent"})
+	if request.Command == "extract" {
+		return runDecisionExtraction(request, stdout, stderr)
+	}
+	return writeDecisionError(stdout, errors.New("decision command is not implemented"))
+}
+
+func runDecisionExtraction(request DecisionRequest, stdout, stderr io.Writer) int {
+	dataRoot := resolveDataDir(request.DataDir)
+	store, err := decisions.OpenExtractionJobStore(dataRoot)
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	if request.Subcommand == "status" {
+		var job any
+		if request.JobID != "" {
+			job, err = store.Load(request.JobID)
+		} else {
+			job, err = store.Latest(request.ProjectID)
+		}
+		if err != nil {
+			return writeDecisionError(stdout, err)
+		}
+		return writeDecisionJSON(stdout, stderr, job)
+	}
+	if request.Subcommand == "cancel" {
+		job, err := store.Cancel(request.JobID, request.ExpectedRevision, time.Now())
+		if err != nil {
+			return writeDecisionError(stdout, err)
+		}
+		return writeDecisionJSON(stdout, stderr, job)
+	}
+	if _, err := decisions.LoadAgentConfiguration(dataRoot); err != nil {
+		return writeDecisionError(stdout, ContractError{Code: "agent_unconfigured", Message: "decision extraction requires a configured proposal-only Agent"})
+	}
+	memoryStore, err := memorystore.OpenReadOnly(dataRoot, request.ProjectID)
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	defer memoryStore.Close()
+	generationID, manifest, err := memoryStore.LoadPublished()
+	if err != nil || generationID != request.ExpectedGenerationID {
+		return writeDecisionError(stdout, errors.Join(ContractError{Code: ContractCodeGenerationMismatch, Message: "published generation changed"}, err))
+	}
+	candidateStore, err := decisions.OpenStore(dataRoot, request.ProjectID)
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	record, err := candidateStore.Load()
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	watermark := decisions.SuccessfulExtractionDependencies(record)
+	newDigests := []string{}
+	for _, dependency := range manifest.ConversationChains {
+		if !watermark[dependency.SessionViewDigest] {
+			newDigests = append(newDigests, dependency.SessionViewDigest)
+		}
+	}
+	job, err := decisions.StartExtraction(decisions.StartExtractionOptions{DataRoot: dataRoot, ProjectID: request.ProjectID, GenerationID: generationID, NewDependencyDigests: newDigests, Launch: func(job decisions.ExtractionJob) (int, error) { return launchDecisionExtractionWorker(job, dataRoot) }})
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	return writeDecisionJSON(stdout, stderr, job)
+}
+
+func runDecisionWorker(args []string) int {
+	flags, err := parseContractFlags(args, map[string]bool{"job-id": true, "project-id": true, "data-dir": true, "json": true})
+	if err != nil || requireFlags(flags, "job-id", "project-id", "data-dir") != nil || validateInspectDataDir(flags.values["data-dir"]) != nil {
+		return 2
+	}
+	if err := executeDecisionWorker(context.Background(), flags.values["data-dir"], flags.values["project-id"], flags.values["job-id"]); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID string) error {
+	jobStore, err := decisions.OpenExtractionJobStore(dataRoot)
+	if err != nil {
+		return err
+	}
+	var job decisions.ExtractionJob
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		job, err = jobStore.Load(jobID)
+		if err == nil && job.State == decisions.ExtractionRunning && job.PID == os.Getpid() {
+			break
+		}
+		if err == nil && job.State == decisions.ExtractionQueued {
+			job, err = jobStore.AuthorizeWorker(jobID, os.Getpid(), job.Revision, time.Now())
+			if err == nil {
+				break
+			}
+		}
+	}
+	if err != nil || job.State != decisions.ExtractionRunning || job.PID != os.Getpid() || job.ProjectID != projectID {
+		return errors.New("decision extraction worker is not authorized")
+	}
+	configuration, err := decisions.LoadAgentConfiguration(dataRoot)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "agent_unconfigured")
+	}
+	handle, err := reviewjob.VerifyAgent(ctx, configuration.Provider, configuration.Executable)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "agent_unconfigured")
+	}
+	memoryStore, err := memorystore.OpenReadOnly(dataRoot, projectID)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "source_unavailable")
+	}
+	defer memoryStore.Close()
+	generationID, manifest, err := memoryStore.LoadPublishedContext(ctx)
+	if err != nil || generationID != job.GenerationID {
+		return failDecisionWorker(jobStore, job, "generation_changed")
+	}
+	requested := map[string]bool{}
+	for _, digest := range job.DependencyDigests {
+		requested[digest] = true
+	}
+	dependencies := make([]memory.ConversationChainDependency, 0, len(requested))
+	chains := map[string]conversationchain.Document{}
+	for _, dependency := range manifest.ConversationChains {
+		if !requested[dependency.SessionViewDigest] {
+			continue
+		}
+		body, loadErr := memoryStore.LoadObjectContext(ctx, memorystore.ObjectConversationChain, dependency.Digest)
+		if loadErr != nil {
+			return failDecisionWorker(jobStore, job, "source_unavailable")
+		}
+		chain, parseErr := conversationchain.Parse(body)
+		if parseErr != nil {
+			return failDecisionWorker(jobStore, job, "source_invalid")
+		}
+		dependencies = append(dependencies, dependency)
+		chains[dependency.SessionViewDigest] = chain
+	}
+	if len(dependencies) != len(requested) {
+		return failDecisionWorker(jobStore, job, "generation_changed")
+	}
+	batches, schema, err := decisions.BuildExtractionBatches(projectID, dependencies, chains)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "proposal_rejected")
+	}
+	_, mapping, _, err := resolveSyncMapping("", projectID, dataRoot)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "mapping_changed")
+	}
+	workRoot, err := os.MkdirTemp(filepath.Join(dataRoot, "decision-extraction-jobs"), ".work-")
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "worker_failed")
+	}
+	defer os.RemoveAll(workRoot)
+	candidateAt := time.Now()
+	candidates := []annotation.Annotation{}
+	candidatesByID := map[string]annotation.Annotation{}
+	for _, batch := range batches {
+		deadline := time.Now().Add(5 * time.Minute)
+		result, runErr := reviewjob.GenerateProposal(ctx, handle, agent.Request{Prompt: batch.Prompt, OutputSchema: schema, WorkingDirectory: workRoot, ForbiddenRoots: []agent.ForbiddenRoot{{Kind: agent.ForbiddenRootProject, CanonicalPath: mapping.Root}, {Kind: agent.ForbiddenRootVault, CanonicalPath: mapping.VaultRoot}}, Deadline: deadline, ProposalContract: agent.ProposalContractGenericJSON})
+		if runErr != nil {
+			return failDecisionWorker(jobStore, job, "agent_failed")
+		}
+		parsed, parseErr := decisions.ParseExtractionProposal(result.Proposal, projectID, generationID, job.JobID, batch.Dependencies, candidateAt)
+		if parseErr != nil {
+			return failDecisionWorker(jobStore, job, "proposal_rejected")
+		}
+		for _, candidate := range parsed {
+			if existing, ok := candidatesByID[candidate.ID]; ok {
+				if !reflect.DeepEqual(existing, candidate) {
+					return failDecisionWorker(jobStore, job, "proposal_rejected")
+				}
+				continue
+			}
+			candidatesByID[candidate.ID] = candidate
+			candidates = append(candidates, candidate)
+			if len(candidates) > 128 {
+				return failDecisionWorker(jobStore, job, "proposal_rejected")
+			}
+		}
+	}
+	candidateStore, err := decisions.OpenStore(dataRoot, projectID)
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "store_failed")
+	}
+	run := annotation.Run{RunID: job.JobID, ProjectID: projectID, Status: "completed", ExtractorVersion: decisions.ExtractorVersion, PromptSchemaVersion: decisions.PromptSchemaVersion, DependencyDigests: append([]string(nil), job.DependencyDigests...), CreatedAt: job.CreatedAt, UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+	_, err = jobStore.CompleteExtraction(job.JobID, job.Revision, candidateStore, run, candidates, time.Now())
+	if errors.Is(err, decisions.ErrExtractionJobRevisionConflict) {
+		return errors.New("decision extraction was cancelled before candidate commit")
+	}
+	if err != nil {
+		return failDecisionWorker(jobStore, job, "store_failed")
+	}
+	return nil
+}
+
+func failDecisionWorker(store *decisions.ExtractionJobStore, job decisions.ExtractionJob, code string) error {
+	prior := job.Revision
+	job.State, job.PID, job.ErrorCode, job.Revision, job.UpdatedAt = decisions.ExtractionFailed, 0, code, prior+1, time.Now().UTC().Format(time.RFC3339Nano)
+	if err := store.CompareAndSwap(job, prior); err != nil {
+		return err
+	}
+	return errors.New(code)
 }
 
 func applyDecisionRequest(ctx context.Context, request DecisionRequest, input decisions.DecisionInput) (decisionResult, error) {
@@ -183,7 +394,7 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 	if err != nil {
 		return decisionResult{}, err
 	}
-	if err := validateDecisionCandidate(index, candidate); err != nil {
+	if err := validateDecisionCandidateFresh(index, candidate); err != nil {
 		if candidate.Status == annotation.CandidatePending || candidate.Status == annotation.CandidateIgnored {
 			_, _ = store.Transition(candidate.ID, candidate.Revision, "stale", "", time.Now())
 		}
@@ -206,6 +417,9 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 			return decisionResult{}, parseErr
 		}
 		input = &parsed
+	}
+	if err := validateDecisionCandidate(index, candidate, *input); err != nil {
+		return decisionResult{}, err
 	}
 	formalID := *candidate.EntityID
 	next := read.Pending.Presentation
@@ -242,27 +456,58 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 	return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: resultSHA, Decisions: next.Decisions, Candidate: &updated}, nil
 }
 
-func validateDecisionCandidate(index sessionindex.Document, candidate annotation.Annotation) error {
+func validateDecisionCandidateFresh(index sessionindex.Document, candidate annotation.Annotation) error {
 	if candidate.GenerationID != index.GenerationID {
 		return errors.New("candidate generation is stale")
 	}
-	active := map[string]bool{}
+	active := map[string]sessionindex.Entry{}
 	for _, entry := range index.Sessions {
 		if entry.SessionViewDigest != nil {
-			active[*entry.SessionViewDigest] = true
+			active[*entry.SessionViewDigest] = entry
 		}
 	}
 	seenView := false
 	for _, dependency := range candidate.Dependencies {
 		if dependency.Kind == "session_view" {
 			seenView = true
-			if !active[dependency.Digest] {
+			if _, ok := active[dependency.Digest]; !ok || dependency.RevisionID != "view-"+strings.TrimPrefix(dependency.Digest, "sha256:")[:16] {
 				return errors.New("candidate SessionView dependency is stale")
 			}
 		}
 	}
 	if !seenView {
 		return errors.New("candidate has no SessionView dependency")
+	}
+	return nil
+}
+
+func validateDecisionCandidate(index sessionindex.Document, candidate annotation.Annotation, input decisions.DecisionInput) error {
+	if err := validateDecisionCandidateFresh(index, candidate); err != nil {
+		return err
+	}
+	wantKind := strings.TrimSuffix(candidate.AnnotationKind, "_candidate")
+	if wantKind != input.Kind || wantKind != "decision" && wantKind != "agreement" {
+		return errors.New("candidate kind does not match the confirmed decision")
+	}
+	activeByDigest := map[string]sessionindex.Entry{}
+	for _, entry := range index.Sessions {
+		if entry.SessionViewDigest != nil {
+			activeByDigest[*entry.SessionViewDigest] = entry
+		}
+	}
+	bound := map[string]bool{}
+	for _, dependency := range candidate.Dependencies {
+		if entry, ok := activeByDigest[dependency.Digest]; ok {
+			bound[entry.Provider+"\x00"+entry.SessionID] = true
+		}
+	}
+	if len(input.SessionRefs) == 0 {
+		return errors.New("confirmed candidate has no Session reference")
+	}
+	for _, ref := range input.SessionRefs {
+		if !bound[ref.Provider+"\x00"+ref.SessionID] {
+			return errors.New("confirmed candidate cites a Session outside its authenticated dependencies")
+		}
 	}
 	return nil
 }

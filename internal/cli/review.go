@@ -35,6 +35,7 @@ const reviewHelp = `Control durable proposal-only Agent review jobs.
 Usage:
   session-reviewer review agent verify --executable ABSOLUTE_PATH --json
   session-reviewer review agent configure --executable ABSOLUTE_PATH [--data-dir PATH] --json
+  session-reviewer review agent status [--data-dir PATH] --json
   session-reviewer review start --project-id ID --agent-executable ABSOLUTE_PATH --json
   session-reviewer review status --project-id ID --json
   session-reviewer review cancel --job-id ID --json
@@ -48,6 +49,7 @@ type reviewVerifyResponse struct {
 	Kind          string `json:"kind"`
 	Compatible    bool   `json:"compatible"`
 	Version       string `json:"version,omitempty"`
+	Executable    string `json:"executable,omitempty"`
 	ErrorCode     string `json:"error_code,omitempty"`
 }
 
@@ -132,16 +134,20 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		return runPrivateReviewWorker(args[1:])
 	}
 	if args[0] == "agent" {
-		if len(args) < 2 || args[1] != "verify" && args[1] != "configure" {
-			fmt.Fprintln(stderr, "review agent requires verify or configure")
+		if len(args) < 2 || args[1] != "verify" && args[1] != "configure" && args[1] != "status" {
+			fmt.Fprintln(stderr, "review agent requires verify, configure, or status")
 			return 2
 		}
+		required := []string{"executable"}
 		optional := []string{}
 		if args[1] == "configure" {
 			optional = append(optional, "data-dir")
+		} else if args[1] == "status" {
+			required = nil
+			optional = append(optional, "data-dir")
 		}
-		flags, ok := parseReviewFlagsAllowed(args[2:], []string{"executable"}, optional)
-		if !ok || !flags.json || !filepath.IsAbs(flags.values["executable"]) {
+		flags, ok := parseReviewFlagsAllowed(args[2:], required, optional)
+		if !ok || !flags.json || args[1] != "status" && !filepath.IsAbs(flags.values["executable"]) {
 			fmt.Fprintln(stderr, "review agent command requires one absolute --executable, optional absolute --data-dir, and --json")
 			return 2
 		}
@@ -151,6 +157,9 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 				return 2
 			}
 			return runReviewConfigure(flags.values["executable"], resolveDataDir(flags.values["data-dir"]), stdout)
+		}
+		if args[1] == "status" {
+			return runReviewAgentStatus(resolveDataDir(flags.values["data-dir"]), stdout)
 		}
 		return runReviewVerify(flags.values["executable"], stdout)
 	}
@@ -196,6 +205,23 @@ func runReview(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	return runReviewJobCommand(command, flags.values, stdout)
+}
+
+func runReviewAgentStatus(dataRoot string, stdout io.Writer) int {
+	response := reviewVerifyResponse{SchemaVersion: reviewjob.PublicStatusSchemaVersion, Kind: "codex"}
+	configuration, err := decisions.LoadAgentConfiguration(dataRoot)
+	if err == nil {
+		response.Compatible, response.Version, response.Executable = true, configuration.Version, configuration.Executable
+	} else {
+		response.ErrorCode = string(agent.CodeUnconfigured)
+	}
+	if !writeReviewJSON(stdout, response) {
+		return 1
+	}
+	if err != nil {
+		return 1
+	}
+	return 0
 }
 
 func runReviewConfigure(executable, dataRoot string, stdout io.Writer) int {

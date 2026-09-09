@@ -73,7 +73,7 @@ func TestCandidateStoreNotDecisionAndRestoreStateTable(t *testing.T) {
 		action string
 		want   annotation.CandidateStatus
 		ok     bool
-	}{{annotation.CandidatePending, "not_decision", annotation.CandidateNotDecision, true}, {annotation.CandidatePending, "restore", "", false}, {annotation.CandidateIgnored, "restore", annotation.CandidatePending, true}, {annotation.CandidateIgnored, "not_decision", "", false}, {annotation.CandidateStale, "restore", "", false}}
+	}{{annotation.CandidatePending, "not_decision", annotation.CandidateNotDecision, true}, {annotation.CandidatePending, "restore", "", false}, {annotation.CandidateIgnored, "restore", annotation.CandidatePending, true}, {annotation.CandidateIgnored, "not_decision", "", false}, {annotation.CandidateNotDecision, "restore", "", false}, {annotation.CandidateStale, "restore", "", false}}
 	for _, test := range tests {
 		t.Run(string(test.start)+"_"+test.action, func(t *testing.T) {
 			store, _ := OpenStore(t.TempDir(), "project-p")
@@ -90,6 +90,35 @@ func TestCandidateStoreNotDecisionAndRestoreStateTable(t *testing.T) {
 				t.Fatalf("invalid transition succeeded: %+v", got)
 			}
 		})
+	}
+}
+
+func TestCandidateStoreCommitsCompletedExtractionAndWatermarkAtomically(t *testing.T) {
+	store, err := OpenStore(t.TempDir(), "project-p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := candidateStoreRecord("project-p")
+	if err := store.ReplaceAbsent(record); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("2", 64)
+	run := annotation.Run{RunID: "run-2", ProjectID: "project-p", Status: "completed", ExtractorVersion: ExtractorVersion, PromptSchemaVersion: PromptSchemaVersion, DependencyDigests: []string{digest}, CreatedAt: "2026-09-09T01:00:00Z", UpdatedAt: "2026-09-09T01:00:01Z"}
+	entity, field := "decision-2", "decision"
+	candidate := annotation.Annotation{ID: "candidate-2", ProjectID: "project-p", AnnotationKind: "decision_candidate", EntityID: &entity, Field: &field, Status: annotation.CandidatePending, Text: record.Annotations[0].Text, GenerationID: "generation-2", SchemaVersion: 1, AnalysisProfile: ExtractorVersion, AgentRunID: run.RunID, Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-" + strings.Repeat("2", 16), Digest: digest}}, Revision: 1, CreatedAt: run.UpdatedAt}
+	if err := store.CommitExtraction(run, []annotation.Annotation{candidate}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.Load()
+	if err != nil || len(loaded.ExtractionRuns) != 2 || len(loaded.Annotations) != 3 || loaded.Annotations[1].Text != record.Annotations[1].Text {
+		t.Fatalf("loaded=%+v err=%v", loaded, err)
+	}
+	watermark := SuccessfulExtractionDependencies(loaded)
+	if !watermark[record.ExtractionRuns[0].DependencyDigests[0]] || !watermark[digest] {
+		t.Fatalf("watermark=%v", watermark)
+	}
+	if err := store.CommitExtraction(run, []annotation.Annotation{candidate}); err != nil {
+		t.Fatalf("idempotent completion err=%v", err)
 	}
 }
 

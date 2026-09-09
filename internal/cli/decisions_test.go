@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/decisions"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
+	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
@@ -56,14 +58,25 @@ func TestDecisionsCreateAndEditPublishOnlyHumanDecisionFields(t *testing.T) {
 
 func TestDecisionCandidateDependenciesRequireCurrentSessionView(t *testing.T) {
 	active := "sha256:" + strings.Repeat("1", 64)
-	index := sessionindex.Document{GenerationID: "generation-1", Sessions: []sessionindex.Entry{{SessionViewDigest: &active}}}
-	candidate := annotation.Annotation{GenerationID: "generation-1", Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-1", Digest: active}}}
-	if err := validateDecisionCandidate(index, candidate); err != nil {
+	index := sessionindex.Document{GenerationID: "generation-1", Sessions: []sessionindex.Entry{{Provider: "codex", SessionID: "session-1", SessionViewDigest: &active}}}
+	candidate := annotation.Annotation{AnnotationKind: "decision_candidate", GenerationID: "generation-1", Dependencies: []annotation.Dependency{{Kind: "session_view", RevisionID: "view-" + strings.Repeat("1", 16), Digest: active}}}
+	input := decisions.DecisionInput{Kind: "decision", SessionRefs: []reviewv4.SessionRef{{Provider: "codex", SessionID: "session-1"}}}
+	if err := validateDecisionCandidate(index, candidate, input); err != nil {
 		t.Fatal(err)
 	}
 	candidate.Dependencies[0].Digest = "sha256:" + strings.Repeat("2", 64)
-	if err := validateDecisionCandidate(index, candidate); err == nil {
+	if err := validateDecisionCandidate(index, candidate, input); err == nil {
 		t.Fatal("inactive candidate dependency accepted")
+	}
+	candidate.Dependencies[0].Digest = active
+	input.SessionRefs[0].SessionID = "invented"
+	if err := validateDecisionCandidate(index, candidate, input); err == nil {
+		t.Fatal("unbound Session reference accepted")
+	}
+	input.SessionRefs[0].SessionID = "session-1"
+	input.Kind = "agreement"
+	if err := validateDecisionCandidate(index, candidate, input); err == nil {
+		t.Fatal("candidate kind mismatch accepted")
 	}
 }
 

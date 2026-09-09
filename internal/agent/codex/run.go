@@ -244,7 +244,7 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, errors.New("Codex output exceeded a reviewed bound"))
 	}
 
-	parsed, parseErr := parseJSONL(stdout.Bytes())
+	parsed, parseErr := parseJSONL(stdout.Bytes(), request.ProposalContract)
 	if errors.Is(parseErr, errToolEvent) {
 		return agent.Result{}, agent.NewError(agent.CodeToolForbidden, parseErr)
 	}
@@ -311,6 +311,9 @@ func validateRequest(request agent.Request) error {
 	if err := validateJSONNoDuplicates(request.OutputSchema); err != nil {
 		return errors.New("invalid Codex output schema")
 	}
+	if request.ProposalContract != "" && request.ProposalContract != agent.ProposalContractGenericJSON {
+		return errors.New("invalid proposal contract")
+	}
 	if request.WorkingDirectory == "" || !filepath.IsAbs(request.WorkingDirectory) {
 		return errors.New("private Codex working directory must be absolute")
 	}
@@ -348,7 +351,11 @@ type parsedStream struct {
 	failure  string
 }
 
-func parseJSONL(output []byte) (parsedStream, error) {
+func parseJSONL(output []byte, contracts ...agent.ProposalContract) (parsedStream, error) {
+	contract := agent.ProposalContract("")
+	if len(contracts) > 0 {
+		contract = contracts[0]
+	}
 	if len(output) == 0 || !utf8.Valid(output) || output[len(output)-1] != '\n' {
 		return parsedStream{}, errInvalidStream
 	}
@@ -449,7 +456,7 @@ func parseJSONL(output []byte) (parsedStream, error) {
 	if result.failure != "" {
 		return result, nil
 	}
-	proposalBytes, err := decodeCodexTransportProposal(result.proposal)
+	proposalBytes, err := decodeCodexTransportProposal(result.proposal, contract)
 	if err != nil {
 		return parsedStream{}, fmt.Errorf("%w: invalid final proposal", errors.Join(errInvalidStream, err))
 	}
@@ -467,7 +474,7 @@ func codexTransportPrompt(prompt []byte) ([]byte, error) {
 	return result, nil
 }
 
-func decodeCodexTransportProposal(data []byte) ([]byte, error) {
+func decodeCodexTransportProposal(data []byte, contract agent.ProposalContract) ([]byte, error) {
 	var envelope struct {
 		Proposal string `json:"proposal"`
 	}
@@ -475,7 +482,7 @@ func decodeCodexTransportProposal(data []byte) ([]byte, error) {
 		return nil, errInvalidStream
 	}
 	proposalBytes := []byte(envelope.Proposal)
-	if err := validateProposal(proposalBytes); err != nil {
+	if err := validateProposal(proposalBytes, contract); err != nil {
 		return nil, err
 	}
 	return proposalBytes, nil
@@ -559,12 +566,15 @@ func parseFailureEvent(line []byte, eventType string) (string, error) {
 	return message, nil
 }
 
-func validateProposal(data []byte) error {
+func validateProposal(data []byte, contract agent.ProposalContract) error {
 	if len(data) == 0 {
 		return errInvalidStream
 	}
 	if err := validateJSONNoDuplicates(data); err != nil {
 		return err
+	}
+	if contract == agent.ProposalContractGenericJSON {
+		return nil
 	}
 	decoded, err := proposal.Decode(bytes.NewReader(data))
 	if err != nil {
@@ -607,8 +617,12 @@ func validateJSONNoDuplicates(data []byte) error {
 
 func inspectJSONValue(decoder *json.Decoder, depth int) error {
 	token, err := decoder.Token()
-	if err != nil || token == nil {
+	if err != nil {
 		return errors.New("invalid JSON value")
+	}
+	// encoding/json represents the valid JSON literal null as a nil token.
+	if token == nil {
+		return nil
 	}
 	delimiter, ok := token.(json.Delim)
 	if !ok {

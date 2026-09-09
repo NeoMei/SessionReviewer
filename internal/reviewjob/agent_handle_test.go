@@ -29,6 +29,9 @@ func TestAgentHandleHasNoExportedForgeableState(t *testing.T) {
 	if _, err := (&AgentHandle{}).VerifiedAgent(); err == nil {
 		t.Fatal("zero caller-constructible AgentHandle was accepted")
 	}
+	if _, err := GenerateProposal(context.Background(), &AgentHandle{}, agent.Request{}); err == nil {
+		t.Fatal("zero caller-constructible AgentHandle generated a proposal")
+	}
 }
 
 func TestRestrictedCapabilityDoesNotClaimOrRequireAnEmptyToolRegistry(t *testing.T) {

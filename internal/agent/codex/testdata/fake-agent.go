@@ -237,6 +237,14 @@ func main() {
 	case len(os.Args) >= 2 && os.Args[1] == "exec" && hasArg("session_reviewer_unknown_config_canary=true"):
 		return
 	case len(os.Args) >= 2 && os.Args[1] == "exec":
+		if mode == "decision-success" {
+			stdin, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(3)
+			}
+			writeSuccess(decisionProposal(stdin), validUsage())
+			return
+		}
 		captureExec()
 		runExecMode(mode)
 		return
@@ -244,6 +252,44 @@ func main() {
 		fmt.Fprintln(os.Stderr, "unsupported fake invocation")
 		os.Exit(2)
 	}
+}
+
+func decisionProposal(stdin []byte) string {
+	prompt := stdin
+	if marker := bytes.Index(prompt, []byte("\n\nCODEX TRANSPORT ENVELOPE")); marker >= 0 {
+		prompt = prompt[:marker]
+	}
+	var input struct {
+		Sessions []struct {
+			Provider          string `json:"provider"`
+			SessionID         string `json:"session_id"`
+			SessionViewDigest string `json:"session_view_digest"`
+		} `json:"sessions"`
+	}
+	if json.Unmarshal(prompt, &input) != nil || len(input.Sessions) == 0 {
+		fmt.Fprintln(os.Stderr, "decision prompt unavailable")
+		os.Exit(4)
+	}
+	session := input.Sessions[0]
+	proposal := map[string]any{
+		"schema_version": 1,
+		"contract":       "decision-candidate-proposal-v1",
+		"candidates": []map[string]any{{
+			"kind":                 "decision",
+			"occurred_at":          "2026-09-09",
+			"title":                "Candidate from " + session.SessionID,
+			"rationale":            "Controlled proposal-only test adapter output.",
+			"impact":               "Decision extraction acceptance",
+			"reevaluate_when":      "The authenticated SessionView changes",
+			"session_refs":         []map[string]string{{"provider": session.Provider, "session_id": session.SessionID}},
+			"session_view_digests": []string{session.SessionViewDigest},
+		}},
+	}
+	body, err := json.Marshal(proposal)
+	if err != nil {
+		os.Exit(4)
+	}
+	return string(body)
 }
 
 func writeExecHelp(mode string) {
