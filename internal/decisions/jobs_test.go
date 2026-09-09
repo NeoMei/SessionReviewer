@@ -55,6 +55,38 @@ func TestExtractionJobStartIsIdempotentForSameNewDependencies(t *testing.T) {
 	}
 }
 
+func TestExtractionJobStartRetriesFailedAndCancelledAttempts(t *testing.T) {
+	for _, terminal := range []ExtractionState{ExtractionFailed, ExtractionCancelled} {
+		t.Run(string(terminal), func(t *testing.T) {
+			root := t.TempDir()
+			digest := "sha256:" + strings.Repeat("1", 64)
+			now := time.Date(2026, 9, 9, 2, 0, 0, 0, time.UTC)
+			store, err := OpenExtractionJobStore(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := ExtractionJob{SchemaVersion: 1, JobID: ExtractionIdentity("project-p", []string{digest}), ProjectID: "project-p", GenerationID: "generation-old", State: terminal, Revision: 3, DependencyDigests: []string{digest}, CreatedAt: now.Format(time.RFC3339Nano), UpdatedAt: now.Format(time.RFC3339Nano)}
+			if terminal == ExtractionFailed {
+				job.ErrorCode = "agent_failed"
+			}
+			if err := store.Create(job); err != nil {
+				t.Fatal(err)
+			}
+			launches := 0
+			got, err := StartExtraction(StartExtractionOptions{DataRoot: root, ProjectID: "project-p", GenerationID: "generation-new", NewDependencyDigests: []string{digest}, Now: func() time.Time { return now.Add(time.Second) }, Launch: func(queued ExtractionJob) (int, error) {
+				launches++
+				if queued.State != ExtractionQueued || queued.Revision != 4 || queued.GenerationID != "generation-new" {
+					t.Fatalf("queued=%+v", queued)
+				}
+				return 42, nil
+			}})
+			if err != nil || launches != 1 || got.State != ExtractionRunning || got.Revision != 5 || got.GenerationID != "generation-new" || got.ErrorCode != "" {
+				t.Fatalf("got=%+v launches=%d err=%v", got, launches, err)
+			}
+		})
+	}
+}
+
 func TestExtractionJobStartWithNoNewDependenciesCompletesWithoutLaunch(t *testing.T) {
 	root := t.TempDir()
 	launches := 0

@@ -3,12 +3,15 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/neomei/SessionReviewer/internal/annotation"
+	"github.com/neomei/SessionReviewer/internal/conversationchain"
 	"github.com/neomei/SessionReviewer/internal/decisions"
+	"github.com/neomei/SessionReviewer/internal/memory"
 	"github.com/neomei/SessionReviewer/internal/reviewv2"
 	"github.com/neomei/SessionReviewer/internal/reviewv4"
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
@@ -69,6 +72,10 @@ func TestDecisionCandidateDependenciesRequireCurrentSessionView(t *testing.T) {
 		t.Fatal("inactive candidate dependency accepted")
 	}
 	candidate.Dependencies[0].Digest = active
+	candidate.GenerationID = "generation-previous"
+	if err := validateDecisionCandidate(index, candidate, input); err != nil {
+		t.Fatalf("unchanged authenticated SessionView was rejected after ordinary rescan: %v", err)
+	}
 	input.SessionRefs[0].SessionID = "invented"
 	if err := validateDecisionCandidate(index, candidate, input); err == nil {
 		t.Fatal("unbound Session reference accepted")
@@ -77,6 +84,42 @@ func TestDecisionCandidateDependenciesRequireCurrentSessionView(t *testing.T) {
 	input.Kind = "agreement"
 	if err := validateDecisionCandidate(index, candidate, input); err == nil {
 		t.Fatal("candidate kind mismatch accepted")
+	}
+}
+
+func TestResolveDecisionCandidateEvidenceReturnsExactAuthenticatedCoordinates(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("1", 64)
+	candidate := annotation.Annotation{ID: "candidate-1", Dependencies: []annotation.Dependency{
+		{Kind: "session_view", RevisionID: "view-" + strings.Repeat("1", 16), Digest: digest},
+		{Kind: "source_turn", RevisionID: "revision-answer", Digest: digest},
+	}}
+	chain := conversationchain.Document{Provider: "codex", SessionID: "session-1", SessionViewDigest: digest, TurnUnits: []conversationchain.TurnUnit{{TurnUnitID: "turn-7", UserMessage: conversationchain.Message{RevisionID: "revision-question"}, AssistantMessages: []conversationchain.Message{{RevisionID: "revision-answer"}}}}}
+	refs, err := resolveDecisionCandidateEvidence(candidate, map[string]conversationchain.Document{digest: chain})
+	if err != nil || len(refs) != 1 || refs[0].Provider != "codex" || refs[0].SessionID != "session-1" || refs[0].TurnUnitID != "turn-7" || refs[0].RevisionID != "revision-answer" {
+		t.Fatalf("refs=%+v err=%v", refs, err)
+	}
+	candidate.Dependencies[1].RevisionID = "invented"
+	if _, err := resolveDecisionCandidateEvidence(candidate, map[string]conversationchain.Document{digest: chain}); err == nil {
+		t.Fatal("invented source-turn revision was accepted")
+	}
+}
+
+func TestNewDecisionExtractionDigestsPagesDeterministicallyWithoutAdvancingUnprocessedViews(t *testing.T) {
+	manifest := memory.GenerationManifest{ConversationChains: make([]memory.ConversationChainDependency, decisions.MaxExtractionDependencies+2)}
+	for index := range manifest.ConversationChains {
+		manifest.ConversationChains[index].SessionViewDigest = fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies+1-index)
+	}
+	first := newDecisionExtractionDigests(manifest, map[string]bool{})
+	if len(first) != decisions.MaxExtractionDependencies || first[0] != fmt.Sprintf("sha256:%064x", 0) || first[len(first)-1] != fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies-1) {
+		t.Fatalf("first page count=%d bounds=%q..%q", len(first), first[0], first[len(first)-1])
+	}
+	watermark := map[string]bool{}
+	for _, digest := range first {
+		watermark[digest] = true
+	}
+	second := newDecisionExtractionDigests(manifest, watermark)
+	if len(second) != 2 || second[0] != fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies) || second[1] != fmt.Sprintf("sha256:%064x", decisions.MaxExtractionDependencies+1) {
+		t.Fatalf("second page=%v", second)
 	}
 }
 

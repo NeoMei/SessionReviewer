@@ -137,6 +137,26 @@ func (s *ExtractionJobStore) CompareAndSwap(job ExtractionJob, expectedRevision 
 	return s.withLock(func() error { return s.compareAndSwapUnlocked(job, expectedRevision) })
 }
 
+func (s *ExtractionJobStore) Retry(jobID string, expectedRevision int, generationID string, now time.Time) (ExtractionJob, error) {
+	var current ExtractionJob
+	err := s.withLock(func() error {
+		var err error
+		current, err = s.Load(jobID)
+		if err != nil {
+			return err
+		}
+		if current.Revision != expectedRevision || current.State != ExtractionFailed && current.State != ExtractionCancelled || !extractionID.MatchString(generationID) {
+			return ErrExtractionJobRevisionConflict
+		}
+		current.GenerationID = generationID
+		current.State, current.PID, current.CandidateCount, current.ErrorCode = ExtractionQueued, 0, 0, ""
+		current.Revision++
+		current.UpdatedAt = now.UTC().Format(time.RFC3339Nano)
+		return s.write(current)
+	})
+	return current, err
+}
+
 func (s *ExtractionJobStore) compareAndSwapUnlocked(job ExtractionJob, expectedRevision int) error {
 	current, err := s.Load(job.JobID)
 	if err != nil {
@@ -276,45 +296,57 @@ func StartExtraction(options StartExtractionOptions) (ExtractionJob, error) {
 	if err != nil {
 		return ExtractionJob{}, err
 	}
-	id := ExtractionIdentity(options.ProjectID, options.NewDependencyDigests)
-	if existing, err := store.Load(id); err == nil {
-		return existing, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return ExtractionJob{}, err
-	}
 	now := time.Now
 	if options.Now != nil {
 		now = options.Now
 	}
-	createdAt := now().UTC()
-	job := ExtractionJob{SchemaVersion: 1, JobID: id, ProjectID: options.ProjectID, GenerationID: options.GenerationID, State: ExtractionQueued, Revision: 1, DependencyDigests: append([]string{}, options.NewDependencyDigests...), CreatedAt: createdAt.Format(time.RFC3339Nano), UpdatedAt: createdAt.Format(time.RFC3339Nano)}
-	if len(job.DependencyDigests) == 0 {
-		job.State = ExtractionCompleted
+	id := ExtractionIdentity(options.ProjectID, options.NewDependencyDigests)
+	var job ExtractionJob
+	if existing, loadErr := store.Load(id); loadErr == nil {
+		if existing.State != ExtractionFailed && existing.State != ExtractionCancelled {
+			return existing, nil
+		}
+		job, err = store.Retry(id, existing.Revision, options.GenerationID, now())
+		if err != nil {
+			if errors.Is(err, ErrExtractionJobRevisionConflict) {
+				return store.Load(id)
+			}
+			return ExtractionJob{}, err
+		}
+	} else if !errors.Is(loadErr, os.ErrNotExist) {
+		return ExtractionJob{}, loadErr
+	} else {
+		createdAt := now().UTC()
+		job = ExtractionJob{SchemaVersion: 1, JobID: id, ProjectID: options.ProjectID, GenerationID: options.GenerationID, State: ExtractionQueued, Revision: 1, DependencyDigests: append([]string{}, options.NewDependencyDigests...), CreatedAt: createdAt.Format(time.RFC3339Nano), UpdatedAt: createdAt.Format(time.RFC3339Nano)}
+		if len(job.DependencyDigests) == 0 {
+			job.State = ExtractionCompleted
+			if err := store.Create(job); err != nil {
+				if errors.Is(err, ErrExtractionJobRevisionConflict) {
+					return store.Load(id)
+				}
+				return ExtractionJob{}, err
+			}
+			return job, nil
+		}
 		if err := store.Create(job); err != nil {
 			if errors.Is(err, ErrExtractionJobRevisionConflict) {
 				return store.Load(id)
 			}
 			return ExtractionJob{}, err
 		}
-		return job, nil
 	}
-	if err := store.Create(job); err != nil {
-		if errors.Is(err, ErrExtractionJobRevisionConflict) {
-			return store.Load(id)
-		}
-		return ExtractionJob{}, err
-	}
+	queuedRevision := job.Revision
 	pid, err := options.Launch(job)
 	if err != nil || pid <= 0 {
 		job.Revision++
 		job.UpdatedAt = now().UTC().Format(time.RFC3339Nano)
 		job.State, job.ErrorCode = ExtractionFailed, "worker_spawn_failed"
-		if saveErr := store.CompareAndSwap(job, 1); saveErr != nil {
+		if saveErr := store.CompareAndSwap(job, queuedRevision); saveErr != nil {
 			return ExtractionJob{}, errors.Join(err, saveErr)
 		}
 		return job, err
 	}
-	return store.AuthorizeWorker(job.JobID, pid, 1, now())
+	return store.AuthorizeWorker(job.JobID, pid, queuedRevision, now())
 }
 
 func validateExtractionJob(job ExtractionJob) error {

@@ -421,6 +421,8 @@ func TestGenerateProposalUsesTheFixedRestrictedReadOnlyInvocationAndStdinPrompt(
 
 func TestGenerateProposalAllowsBoundedHostValidatedGenericJSON(t *testing.T) {
 	adapter := containedRunnerForTest(t)
+	capturePath := filepath.Join(t.TempDir(), "capture.json")
+	t.Setenv("SESSIONREVIEWER_FAKE_CAPTURE_PATH", capturePath)
 	proposalPath := filepath.Join(t.TempDir(), "proposal.json")
 	if err := os.WriteFile(proposalPath, []byte(`{"schema_version":1,"contract":"decision-candidate-proposal-v1","candidates":[]}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -428,9 +430,24 @@ func TestGenerateProposalAllowsBoundedHostValidatedGenericJSON(t *testing.T) {
 	t.Setenv("SESSIONREVIEWER_FAKE_PROPOSAL_PATH", proposalPath)
 	request := validRequest(t, []byte("prompt"))
 	request.ProposalContract = agent.ProposalContractGenericJSON
+	request.OutputSchema = []byte(`{"type":"object","required":["candidates"],"properties":{"candidates":{"type":"array"}}}`)
 	result, err := adapter.GenerateProposal(context.Background(), request)
 	if err != nil || !bytes.Contains(result.Proposal, []byte("decision-candidate-proposal-v1")) {
 		t.Fatalf("result=%s err=%v", result.Proposal, err)
+	}
+	var capture struct {
+		Stdin string `json:"stdin"`
+	}
+	if err := json.Unmarshal(mustRead(t, capturePath), &capture); err != nil || !strings.Contains(capture.Stdin, "INNER_PROPOSAL_JSON_SCHEMA") || !strings.Contains(capture.Stdin, `"required":["candidates"]`) {
+		t.Fatalf("generic JSON inner schema was not sent to Codex: capture=%+v err=%v", capture, err)
+	}
+}
+
+func TestCodexTransportPromptKeepsReviewContractBytes(t *testing.T) {
+	got, err := codexTransportPrompt([]byte("prompt"), schemaFixture, "")
+	want := append([]byte("prompt"), codexTransportInstructions...)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("review transport prompt changed: err=%v got=%q", err, got)
 	}
 }
 
@@ -452,10 +469,10 @@ func TestGenerateProposalAllowsJSONNullInHostValidatedGenericJSON(t *testing.T) 
 func TestGenerateProposalControlledDecisionModeBindsPromptSession(t *testing.T) {
 	adapter := containedRunnerForTest(t)
 	t.Setenv("SESSIONREVIEWER_FAKE_MODE", "decision-success")
-	request := validRequest(t, []byte(`{"sessions":[{"provider":"codex","session_id":"session-a","session_view_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}`))
+	request := validRequest(t, []byte(`{"sessions":[{"provider":"codex","session_id":"session-a","session_view_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","turns":[{"turn_unit_id":"turn-1","question_revision_id":"revision-user-1","answers":[]}]}]}`))
 	request.ProposalContract = agent.ProposalContractGenericJSON
 	result, err := adapter.GenerateProposal(context.Background(), request)
-	if err != nil || !bytes.Contains(result.Proposal, []byte(`"session_id":"session-a"`)) || !bytes.Contains(result.Proposal, []byte(`sha256:aaaaaaaa`)) {
+	if err != nil || !bytes.Contains(result.Proposal, []byte(`"session_id":"session-a"`)) || !bytes.Contains(result.Proposal, []byte(`sha256:aaaaaaaa`)) || !bytes.Contains(result.Proposal, []byte(`"revision_id":"revision-user-1"`)) {
 		t.Fatalf("result=%s err=%v", result.Proposal, err)
 	}
 }

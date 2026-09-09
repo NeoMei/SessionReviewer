@@ -176,7 +176,7 @@ func (adapter *Adapter) GenerateProposal(ctx context.Context, request agent.Requ
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeIncompatible, err)
 	}
-	transportPrompt, err := codexTransportPrompt(request.Prompt)
+	transportPrompt, err := codexTransportPrompt(request.Prompt, request.OutputSchema, request.ProposalContract)
 	if err != nil {
 		run.setProcess(nil)
 		return agent.Result{}, agent.NewError(agent.CodeUnconfigured, err)
@@ -464,13 +464,20 @@ func parseJSONL(output []byte, contracts ...agent.ProposalContract) (parsedStrea
 	return result, nil
 }
 
-func codexTransportPrompt(prompt []byte) ([]byte, error) {
-	if len(prompt)+len(codexTransportInstructions) > maxPromptBytes {
+func codexTransportPrompt(prompt, outputSchema []byte, contract agent.ProposalContract) ([]byte, error) {
+	instructions := []byte{}
+	if contract == agent.ProposalContractGenericJSON {
+		instructions = append(instructions, []byte("\n\nINNER_PROPOSAL_JSON_SCHEMA\n")...)
+		instructions = append(instructions, outputSchema...)
+		instructions = append(instructions, []byte("\nEND_INNER_PROPOSAL_JSON_SCHEMA\nThe decoded proposal string must satisfy INNER_PROPOSAL_JSON_SCHEMA exactly.")...)
+	}
+	instructions = append(instructions, codexTransportInstructions...)
+	if len(prompt)+len(instructions) > maxPromptBytes {
 		return nil, errors.New("Codex transport prompt exceeds reviewed bound")
 	}
-	result := make([]byte, 0, len(prompt)+len(codexTransportInstructions))
+	result := make([]byte, 0, len(prompt)+len(instructions))
 	result = append(result, prompt...)
-	result = append(result, codexTransportInstructions...)
+	result = append(result, instructions...)
 	return result, nil
 }
 

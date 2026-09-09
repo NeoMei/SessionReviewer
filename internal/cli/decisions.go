@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -43,12 +44,19 @@ Usage:
 `
 
 type decisionResult struct {
-	SchemaVersion int                     `json:"schema_version"`
-	ProjectID     string                  `json:"project_id"`
-	ReviewSHA256  string                  `json:"review_sha256,omitempty"`
-	Decisions     []reviewv4.Decision     `json:"decisions,omitempty"`
-	Candidates    []annotation.Annotation `json:"candidates,omitempty"`
-	Candidate     *annotation.Annotation  `json:"candidate,omitempty"`
+	SchemaVersion     int                         `json:"schema_version"`
+	ProjectID         string                      `json:"project_id"`
+	ReviewSHA256      string                      `json:"review_sha256,omitempty"`
+	Decisions         []reviewv4.Decision         `json:"decisions,omitempty"`
+	Candidates        []annotation.Annotation     `json:"candidates,omitempty"`
+	Candidate         *annotation.Annotation      `json:"candidate,omitempty"`
+	CandidateEvidence []decisionCandidateEvidence `json:"candidate_evidence,omitempty"`
+}
+
+type decisionCandidateEvidence struct {
+	CandidateID  string                            `json:"candidate_id"`
+	EvidenceRefs []decisions.ExtractionEvidenceRef `json:"evidence_refs"`
+	ErrorCode    string                            `json:"error_code"`
 }
 
 func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
@@ -98,7 +106,8 @@ func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		return writeDecisionJSON(stdout, stderr, result)
 	}
 	if request.Command == "candidates" {
-		store, openErr := decisions.OpenStore(resolveDataDir(request.DataDir), request.ProjectID)
+		dataRoot := resolveDataDir(request.DataDir)
+		store, openErr := decisions.OpenStore(dataRoot, request.ProjectID)
 		if openErr != nil {
 			return writeDecisionError(stdout, openErr)
 		}
@@ -106,7 +115,8 @@ func runDecisions(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 		if listErr != nil {
 			return writeDecisionError(stdout, listErr)
 		}
-		return writeDecisionJSON(stdout, stderr, decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, Candidates: values})
+		evidence := decisionCandidateEvidenceResults(context.Background(), dataRoot, request.ProjectID, values)
+		return writeDecisionJSON(stdout, stderr, decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, Candidates: values, CandidateEvidence: evidence})
 	}
 	if request.Command == "extract" {
 		return runDecisionExtraction(request, stdout, stderr)
@@ -160,17 +170,26 @@ func runDecisionExtraction(request DecisionRequest, stdout, stderr io.Writer) in
 		return writeDecisionError(stdout, err)
 	}
 	watermark := decisions.SuccessfulExtractionDependencies(record)
+	newDigests := newDecisionExtractionDigests(manifest, watermark)
+	job, err := decisions.StartExtraction(decisions.StartExtractionOptions{DataRoot: dataRoot, ProjectID: request.ProjectID, GenerationID: generationID, NewDependencyDigests: newDigests, Launch: func(job decisions.ExtractionJob) (int, error) { return launchDecisionExtractionWorker(job, dataRoot) }})
+	if err != nil {
+		return writeDecisionError(stdout, err)
+	}
+	return writeDecisionJSON(stdout, stderr, job)
+}
+
+func newDecisionExtractionDigests(manifest memory.GenerationManifest, watermark map[string]bool) []string {
 	newDigests := []string{}
 	for _, dependency := range manifest.ConversationChains {
 		if !watermark[dependency.SessionViewDigest] {
 			newDigests = append(newDigests, dependency.SessionViewDigest)
 		}
 	}
-	job, err := decisions.StartExtraction(decisions.StartExtractionOptions{DataRoot: dataRoot, ProjectID: request.ProjectID, GenerationID: generationID, NewDependencyDigests: newDigests, Launch: func(job decisions.ExtractionJob) (int, error) { return launchDecisionExtractionWorker(job, dataRoot) }})
-	if err != nil {
-		return writeDecisionError(stdout, err)
+	sort.Strings(newDigests)
+	if len(newDigests) > decisions.MaxExtractionDependencies {
+		newDigests = newDigests[:decisions.MaxExtractionDependencies]
 	}
-	return writeDecisionJSON(stdout, stderr, job)
+	return newDigests
 }
 
 func runDecisionWorker(args []string) int {
@@ -268,14 +287,22 @@ func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID strin
 		if runErr != nil {
 			return failDecisionWorker(jobStore, job, "agent_failed")
 		}
-		parsed, parseErr := decisions.ParseExtractionProposal(result.Proposal, projectID, generationID, job.JobID, batch.Dependencies, candidateAt)
+		parsed, parseErr := decisions.ParseExtractionProposal(result.Proposal, projectID, generationID, job.JobID, batch.Dependencies, batch.Evidence, candidateAt)
 		if parseErr != nil {
 			return failDecisionWorker(jobStore, job, "proposal_rejected")
 		}
 		for _, candidate := range parsed {
 			if existing, ok := candidatesByID[candidate.ID]; ok {
-				if !reflect.DeepEqual(existing, candidate) {
+				merged, mergeErr := mergeDecisionCandidateEvidence(existing, candidate)
+				if mergeErr != nil {
 					return failDecisionWorker(jobStore, job, "proposal_rejected")
+				}
+				candidatesByID[candidate.ID] = merged
+				for index := range candidates {
+					if candidates[index].ID == candidate.ID {
+						candidates[index] = merged
+						break
+					}
 				}
 				continue
 			}
@@ -299,6 +326,31 @@ func executeDecisionWorker(ctx context.Context, dataRoot, projectID, jobID strin
 		return failDecisionWorker(jobStore, job, "store_failed")
 	}
 	return nil
+}
+
+func mergeDecisionCandidateEvidence(left, right annotation.Annotation) (annotation.Annotation, error) {
+	leftBase, rightBase := left, right
+	leftBase.Dependencies, rightBase.Dependencies = nil, nil
+	if !reflect.DeepEqual(leftBase, rightBase) {
+		return annotation.Annotation{}, errors.New("candidate changed across prompt batches")
+	}
+	seen := map[string]bool{}
+	merged := left
+	merged.Dependencies = append([]annotation.Dependency{}, left.Dependencies...)
+	for _, dependency := range merged.Dependencies {
+		seen[dependency.Kind+"\x00"+dependency.RevisionID+"\x00"+dependency.Digest] = true
+	}
+	for _, dependency := range right.Dependencies {
+		key := dependency.Kind + "\x00" + dependency.RevisionID + "\x00" + dependency.Digest
+		if !seen[key] {
+			seen[key] = true
+			merged.Dependencies = append(merged.Dependencies, dependency)
+		}
+	}
+	if len(merged.Dependencies) > 256 {
+		return annotation.Annotation{}, errors.New("candidate evidence exceeds bound")
+	}
+	return merged, nil
 }
 
 func failDecisionWorker(store *decisions.ExtractionJobStore, job decisions.ExtractionJob, code string) error {
@@ -400,12 +452,23 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 		}
 		return decisionResult{}, err
 	}
+	chains, err := loadDecisionCandidateChains(ctx, dataRoot, request.ProjectID, []annotation.Annotation{candidate})
+	if err != nil {
+		return decisionResult{}, err
+	}
+	evidenceRefs, err := resolveDecisionCandidateEvidence(candidate, chains)
+	if err != nil {
+		if candidate.Status == annotation.CandidatePending || candidate.Status == annotation.CandidateIgnored {
+			_, _ = store.Transition(candidate.ID, candidate.Revision, "stale", "", time.Now())
+		}
+		return decisionResult{}, err
+	}
 	if request.Action != "confirm" {
 		updated, err := store.Transition(candidate.ID, candidate.Revision, request.Action, "", time.Now())
 		if err != nil {
 			return decisionResult{}, err
 		}
-		return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: request.ExpectedReviewSHA256, Candidate: &updated}, nil
+		return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: request.ExpectedReviewSHA256, Candidate: &updated, CandidateEvidence: []decisionCandidateEvidence{{CandidateID: updated.ID, EvidenceRefs: evidenceRefs}}}, nil
 	}
 	if candidate.Status != annotation.CandidatePending || candidate.EntityID == nil {
 		return decisionResult{}, errors.New("only a pending decision candidate can be confirmed")
@@ -453,13 +516,10 @@ func transitionDecisionCandidate(ctx context.Context, request DecisionRequest, e
 	if err != nil {
 		return decisionResult{}, err
 	}
-	return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: resultSHA, Decisions: next.Decisions, Candidate: &updated}, nil
+	return decisionResult{SchemaVersion: 1, ProjectID: request.ProjectID, ReviewSHA256: resultSHA, Decisions: next.Decisions, Candidate: &updated, CandidateEvidence: []decisionCandidateEvidence{{CandidateID: updated.ID, EvidenceRefs: evidenceRefs}}}, nil
 }
 
 func validateDecisionCandidateFresh(index sessionindex.Document, candidate annotation.Annotation) error {
-	if candidate.GenerationID != index.GenerationID {
-		return errors.New("candidate generation is stale")
-	}
 	active := map[string]sessionindex.Entry{}
 	for _, entry := range index.Sessions {
 		if entry.SessionViewDigest != nil {
@@ -479,6 +539,98 @@ func validateDecisionCandidateFresh(index sessionindex.Document, candidate annot
 		return errors.New("candidate has no SessionView dependency")
 	}
 	return nil
+}
+
+func decisionCandidateEvidenceResults(ctx context.Context, dataRoot, projectID string, candidates []annotation.Annotation) []decisionCandidateEvidence {
+	result := make([]decisionCandidateEvidence, 0, len(candidates))
+	chains, err := loadDecisionCandidateChains(ctx, dataRoot, projectID, candidates)
+	for _, candidate := range candidates {
+		entry := decisionCandidateEvidence{CandidateID: candidate.ID, EvidenceRefs: []decisions.ExtractionEvidenceRef{}}
+		if err == nil {
+			entry.EvidenceRefs, err = resolveDecisionCandidateEvidence(candidate, chains)
+		}
+		if err != nil {
+			entry.ErrorCode = "candidate_stale"
+			err = nil
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+func loadDecisionCandidateChains(ctx context.Context, dataRoot, projectID string, candidates []annotation.Annotation) (map[string]conversationchain.Document, error) {
+	store, err := memorystore.OpenReadOnly(dataRoot, projectID)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	_, manifest, err := store.LoadPublishedContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	wanted := map[string]bool{}
+	for _, candidate := range candidates {
+		for _, dependency := range candidate.Dependencies {
+			if dependency.Kind == "session_view" || dependency.Kind == "source_turn" {
+				wanted[dependency.Digest] = true
+			}
+		}
+	}
+	chains := make(map[string]conversationchain.Document, len(wanted))
+	for _, dependency := range manifest.ConversationChains {
+		if !wanted[dependency.SessionViewDigest] {
+			continue
+		}
+		body, loadErr := store.LoadObjectContext(ctx, memorystore.ObjectConversationChain, dependency.Digest)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		chain, parseErr := conversationchain.Parse(body)
+		if parseErr != nil || chain.Provider != dependency.Provider || chain.SessionID != dependency.SessionID || chain.SessionViewDigest != dependency.SessionViewDigest {
+			return nil, errors.Join(errors.New("candidate conversation chain is not authenticated"), parseErr)
+		}
+		chains[dependency.SessionViewDigest] = chain
+	}
+	return chains, nil
+}
+
+func resolveDecisionCandidateEvidence(candidate annotation.Annotation, chains map[string]conversationchain.Document) ([]decisions.ExtractionEvidenceRef, error) {
+	views := map[string]bool{}
+	for _, dependency := range candidate.Dependencies {
+		if dependency.Kind == "session_view" {
+			views[dependency.Digest] = true
+		}
+	}
+	result := []decisions.ExtractionEvidenceRef{}
+	for _, dependency := range candidate.Dependencies {
+		if dependency.Kind != "source_turn" {
+			continue
+		}
+		chain, ok := chains[dependency.Digest]
+		if !ok || !views[dependency.Digest] {
+			return nil, errors.New("candidate source-turn dependency is stale")
+		}
+		found := false
+		for _, turn := range chain.TurnUnits {
+			if turn.UserMessage.RevisionID == dependency.RevisionID {
+				result = append(result, decisions.ExtractionEvidenceRef{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, TurnUnitID: turn.TurnUnitID, RevisionID: dependency.RevisionID})
+				found = true
+			}
+			for _, answer := range turn.AssistantMessages {
+				if answer.RevisionID == dependency.RevisionID {
+					result = append(result, decisions.ExtractionEvidenceRef{Provider: chain.Provider, SessionID: chain.SessionID, SessionViewDigest: chain.SessionViewDigest, TurnUnitID: turn.TurnUnitID, RevisionID: dependency.RevisionID})
+					found = true
+				}
+			}
+		}
+		if !found {
+			return nil, errors.New("candidate source-turn revision is absent from its authenticated chain")
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("candidate has no source-turn evidence")
+	}
+	return result, nil
 }
 
 func validateDecisionCandidate(index sessionindex.Document, candidate annotation.Annotation, input decisions.DecisionInput) error {

@@ -242,6 +242,7 @@ func main() {
 			if err != nil {
 				os.Exit(3)
 			}
+			captureExecInput(stdin)
 			writeSuccess(decisionProposal(stdin), validUsage())
 			return
 		}
@@ -256,7 +257,9 @@ func main() {
 
 func decisionProposal(stdin []byte) string {
 	prompt := stdin
-	if marker := bytes.Index(prompt, []byte("\n\nCODEX TRANSPORT ENVELOPE")); marker >= 0 {
+	if marker := bytes.Index(prompt, []byte("\n\nINNER_PROPOSAL_JSON_SCHEMA")); marker >= 0 {
+		prompt = prompt[:marker]
+	} else if marker := bytes.Index(prompt, []byte("\n\nCODEX TRANSPORT ENVELOPE")); marker >= 0 {
 		prompt = prompt[:marker]
 	}
 	var input struct {
@@ -264,6 +267,13 @@ func decisionProposal(stdin []byte) string {
 			Provider          string `json:"provider"`
 			SessionID         string `json:"session_id"`
 			SessionViewDigest string `json:"session_view_digest"`
+			Turns             []struct {
+				TurnUnitID         string `json:"turn_unit_id"`
+				QuestionRevisionID string `json:"question_revision_id"`
+				Answers            []struct {
+					RevisionID string `json:"revision_id"`
+				} `json:"answers"`
+			} `json:"turns"`
 		} `json:"sessions"`
 	}
 	if json.Unmarshal(prompt, &input) != nil || len(input.Sessions) == 0 {
@@ -271,6 +281,15 @@ func decisionProposal(stdin []byte) string {
 		os.Exit(4)
 	}
 	session := input.Sessions[0]
+	if len(session.Turns) == 0 {
+		body, _ := json.Marshal(map[string]any{"schema_version": 1, "contract": "decision-candidate-proposal-v1", "candidates": []any{}})
+		return string(body)
+	}
+	turn := session.Turns[0]
+	revisionID := turn.QuestionRevisionID
+	if len(turn.Answers) > 0 {
+		revisionID = turn.Answers[0].RevisionID
+	}
 	proposal := map[string]any{
 		"schema_version": 1,
 		"contract":       "decision-candidate-proposal-v1",
@@ -283,6 +302,7 @@ func decisionProposal(stdin []byte) string {
 			"reevaluate_when":      "The authenticated SessionView changes",
 			"session_refs":         []map[string]string{{"provider": session.Provider, "session_id": session.SessionID}},
 			"session_view_digests": []string{session.SessionViewDigest},
+			"evidence_refs":        []map[string]string{{"provider": session.Provider, "session_id": session.SessionID, "session_view_digest": session.SessionViewDigest, "turn_unit_id": turn.TurnUnitID, "revision_id": revisionID}},
 		}},
 	}
 	body, err := json.Marshal(proposal)
@@ -700,6 +720,15 @@ func captureExec() {
 	}
 	data, _ := json.Marshal(capture)
 	_ = os.WriteFile(path, data, 0o600)
+}
+
+func captureExecInput(stdin []byte) {
+	path := os.Getenv("SESSIONREVIEWER_FAKE_CAPTURE_PATH")
+	if path == "" {
+		return
+	}
+	value, _ := json.Marshal(map[string]any{"stdin": string(stdin)})
+	_ = os.WriteFile(path, value, 0o600)
 }
 
 func mustGetwd() string {
