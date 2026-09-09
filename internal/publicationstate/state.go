@@ -181,6 +181,9 @@ func WriteAccepted(root *os.Root, intent Intent) (AcceptedReceipt, error) {
 	if err != nil || loaded.RevisionID != receipt.RevisionID {
 		return AcceptedReceipt{}, errors.Join(errors.New("accepted Markdown receipt re-read failed"), err)
 	}
+	if err := writeAcceptedResult(root, loaded); err != nil {
+		return AcceptedReceipt{}, fmt.Errorf("archive accepted Markdown result: %w", err)
+	}
 	return loaded, nil
 }
 
