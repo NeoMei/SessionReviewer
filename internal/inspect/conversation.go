@@ -11,6 +11,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/platform"
 	"github.com/neomei/SessionReviewer/internal/redact"
 	"github.com/neomei/SessionReviewer/internal/source"
+	"github.com/neomei/SessionReviewer/internal/source/claude"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 	"unicode/utf8"
@@ -201,14 +202,22 @@ func loadConversationSource(ctx context.Context, request ConversationRequest, vi
 }
 
 func readPublishedVisible(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
-	if record.Provider != "codex" {
+	switch record.Provider {
+	case "codex":
+		resolved, err := platform.ResolveSessionsRoot("", platform.CurrentEnv())
+		if err != nil {
+			return nil, conversationchain.VisibleCoverage{}, err
+		}
+		return codex.ReadPublishedVisible(ctx, resolved.Path, record)
+	case "claude":
+		root, err := claude.SessionsRoot()
+		if err != nil {
+			return nil, conversationchain.VisibleCoverage{}, err
+		}
+		return claude.ReadPublishedVisible(ctx, root, record)
+	default:
 		return nil, conversationchain.VisibleCoverage{}, &source.UnsupportedCapabilityError{Provider: record.Provider}
 	}
-	resolved, err := platform.ResolveSessionsRoot("", platform.CurrentEnv())
-	if err != nil {
-		return nil, conversationchain.VisibleCoverage{}, err
-	}
-	return codex.ReadPublishedVisible(ctx, resolved.Path, record)
 }
 
 func hasSessionDiagnostic(view memory.SessionView, code string) bool {

@@ -34,6 +34,7 @@ import (
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 	"github.com/neomei/SessionReviewer/internal/sessionview"
 	"github.com/neomei/SessionReviewer/internal/source"
+	"github.com/neomei/SessionReviewer/internal/source/claude"
 	"github.com/neomei/SessionReviewer/internal/source/codex"
 	"github.com/neomei/SessionReviewer/internal/sourcecatalog"
 	"github.com/neomei/SessionReviewer/internal/syncproject"
@@ -41,10 +42,11 @@ import (
 
 // Options configures foreground or worker context updates.
 type Options struct {
-	ProjectID    string
-	SessionsRoot string
-	DataRoot     string
-	Now          func() time.Time
+	ProjectID          string
+	SessionsRoot       string
+	ClaudeSessionsRoot string
+	DataRoot           string
+	Now                func() time.Time
 	// RunGit is an optional observation seam for the existing allowlisted
 	// project probe. Nil preserves the authenticated production runner.
 	RunGit             func(context.Context, string, ...string) ([]byte, error)
@@ -153,6 +155,18 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("open source adapter: %w", err)
 	}
+	adapters := []source.NamedAdapter{{Provider: "codex", Adapter: adapter, Required: true}}
+	claudeSessionsRoot := opts.ClaudeSessionsRoot
+	if claudeSessionsRoot == "" {
+		claudeSessionsRoot, _ = claude.SessionsRoot()
+	}
+	if claudeSessionsRoot != "" {
+		claudeAdapter, claudeErr := claude.New(productionClaudeAdapterOptions(claudeSessionsRoot, []projectidentity.Binding{binding}, catalog, &r))
+		if claudeErr != nil {
+			return Result{}, fmt.Errorf("open Claude source adapter: %w", claudeErr)
+		}
+		adapters = append(adapters, source.NamedAdapter{Provider: "claude", Adapter: claudeAdapter, Required: false})
+	}
 
 	if err := notifyPhase(opts.PhaseObserver, "discovering"); err != nil {
 		return Result{SchemaVersion: 1, ProjectID: opts.ProjectID, State: scan.Failed}, err
@@ -162,7 +176,7 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		Binding:      binding,
 		SessionsRoot: sessionsRoot,
 		DataRoot:     opts.DataRoot,
-		Adapters:     []source.NamedAdapter{{Provider: "codex", Adapter: adapter, Required: true}},
+		Adapters:     adapters,
 		Catalog:      catalog,
 		Workers:      4,
 		Store:        store,
@@ -393,6 +407,16 @@ func productionCodexAdapterOptions(sessionsRoot string, bindings []projectidenti
 		Redactor:                  redactor,
 		AdapterVersion:            "codex-jsonl-v3",
 		SupersedesAdapterVersions: []string{"codex-jsonl-v1", "codex-jsonl-v2"},
+	}
+}
+
+func productionClaudeAdapterOptions(sessionsRoot string, bindings []projectidentity.Binding, catalog *sourcecatalog.Catalog, redactor *redact.Redactor) claude.AdapterOptions {
+	return claude.AdapterOptions{
+		SessionsRoot:   sessionsRoot,
+		Bindings:       bindings,
+		Catalog:        catalog,
+		Redactor:       redactor,
+		AdapterVersion: "claude-jsonl-v1",
 	}
 }
 

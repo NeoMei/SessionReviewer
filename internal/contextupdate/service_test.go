@@ -325,6 +325,13 @@ func TestProductionCodexDecoderRegistrationSupersedesPreviousEvidenceVersion(t *
 	}
 }
 
+func TestProductionClaudeDecoderRegistrationUsesNativeProjectsRoot(t *testing.T) {
+	options := productionClaudeAdapterOptions("/claude/projects", nil, nil, nil)
+	if options.SessionsRoot != "/claude/projects" || options.AdapterVersion != "claude-jsonl-v1" || len(options.SupersedesAdapterVersions) != 0 {
+		t.Fatalf("production Claude decoder options=%+v", options)
+	}
+}
+
 func TestLoadCurrentProjectFilesRejectsUnreadableExistingFile(t *testing.T) {
 	projectRoot := t.TempDir()
 	reviewPath := filepath.Join(projectRoot, filepath.FromSlash(reviewv2.ReviewRelativePath))

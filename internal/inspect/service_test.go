@@ -600,14 +600,14 @@ func fixtureSourceIdentity(provider, sessionID string) string {
 	return "source-" + provider + "-" + sessionID
 }
 
-func TestConversationAvailableProviderWithoutReaderOrRetainedChainIsUnsupported(t *testing.T) {
+func TestConversationAvailableClaudeProviderWithoutLocalSourceOrRetainedChainIsUnavailable(t *testing.T) {
 	const nativeID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 	fixture := buildEventFixtureIdentitiesAt(t, t.TempDir(), "project-conversation-unsupported", "generation-conversation-unsupported", []eventFixtureIdentity{{provider: "claude", sessionID: nativeID}}, nil, nil, func(memory.SessionView, []memory.ObservationRevision) *conversationchain.Document {
 		return nil
 	})
 	request := ConversationRequest{DataRoot: fixture.dataRoot, ProjectID: fixture.projectID, Provider: "claude", SessionID: nativeID, ExpectedGenerationID: fixture.generationID, Limit: 20}
-	if _, err := LoadConversationPage(context.Background(), request); eventErrorCode(err) != "visible_reader_unsupported" {
-		t.Fatalf("available provider without reader/retained chain error=%v", err)
+	if _, err := LoadConversationPage(context.Background(), request); eventErrorCode(err) != "source_unavailable" {
+		t.Fatalf("available Claude provider without local source or retained chain error=%v", err)
 	}
 }
 
