@@ -411,6 +411,13 @@ func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syn
 	if old.Review.ProjectViewDigest != update.ProjectViewDigest || !bytes.Equal(read.Pending.Documents.Review, read.AcceptedPair.Review) || !bytes.Equal(read.Pending.Documents.History, read.AcceptedPair.History) {
 		return publication.Result{}, false, nil
 	}
+	_, publishedManifest, err := in.Store.LoadPublishedContext(ctx)
+	if err != nil {
+		return publication.Result{}, false, err
+	}
+	if !sameV4ConversationGraph(in.Manifest, publishedManifest) {
+		return publication.Result{}, false, nil
+	}
 	normalized := update
 	normalized.GenerationID, normalized.ProjectViewDigest = old.Review.GenerationID, old.Review.ProjectViewDigest
 	normalized.Timeline = cloneV4Timeline(update.Timeline)
@@ -524,4 +531,26 @@ func unchangedV4ScanPublication(ctx context.Context, in v4PublishInput, read syn
 	}
 	result, err := publication.VerifyMarkdownScanNoOpLocked(ctx, publication.Options{ProjectID: in.ProjectID, Mapping: in.Mapping, DataRoot: in.DataRoot, Now: in.Now}, plan, owner)
 	return result, true, err
+}
+
+func sameV4ConversationGraph(left, right memory.GenerationManifest) bool {
+	return sameV4ConversationDependencies(left.ConversationChains, right.ConversationChains) &&
+		sameV4ConversationDependencies(left.RetainedConversationChains, right.RetainedConversationChains)
+}
+
+func sameV4ConversationDependencies(left, right []memory.ConversationChainDependency) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	counts := make(map[memory.ConversationChainDependency]int, len(left))
+	for _, dependency := range left {
+		counts[dependency]++
+	}
+	for _, dependency := range right {
+		if counts[dependency] == 0 {
+			return false
+		}
+		counts[dependency]--
+	}
+	return true
 }
