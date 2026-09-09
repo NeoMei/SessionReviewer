@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -100,6 +101,85 @@ func TestAdapterLifecycleProducesClaudeUsageAndVisibleConversation(t *testing.T)
 	body, err := adapter.Read(context.Background(), observations[0].Ref, source.MaxReadBytes)
 	if err != nil || !strings.Contains(string(body), "How do I verify the build?") {
 		t.Fatalf("Read() body=%q err=%v", body, err)
+	}
+}
+
+func TestAdapterCountsRepeatedStreamingUsageOncePerMessageID(t *testing.T) {
+	fixture := newFixture(t)
+	lines := []map[string]any{{
+		"type": "user", "sessionId": testSessionID, "cwd": fixture.projectRoot,
+		"uuid": "user-1", "timestamp": "2026-09-09T01:00:00Z",
+		"message": map[string]any{"role": "user", "content": "stream the answer"},
+	}}
+	for index, content := range []any{
+		[]any{map[string]any{"type": "thinking", "thinking": "private"}},
+		[]any{map[string]any{"type": "text", "text": "visible"}},
+		[]any{map[string]any{"type": "tool_use", "id": "tool-1", "name": "Read", "input": map[string]any{}}},
+	} {
+		lines = append(lines, map[string]any{
+			"type": "assistant", "sessionId": testSessionID, "cwd": fixture.projectRoot,
+			"uuid": fmt.Sprintf("assistant-%d", index), "timestamp": fmt.Sprintf("2026-09-09T01:00:0%dZ", index+1),
+			"message": map[string]any{
+				"id": "message-streamed", "role": "assistant", "model": "claude-sonnet-4-6", "content": content,
+				"usage": map[string]any{"input_tokens": 100, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30, "output_tokens": 12},
+			},
+		})
+	}
+	var body strings.Builder
+	for _, line := range lines {
+		body.WriteString(claudeLine(t, line))
+	}
+	writeSession(t, fixture, body.String())
+	report := decodeFixtureReport(t, fixture)
+	want := accounting.TokenUsage{InputTokens: 150, CachedInputTokens: 20, CacheWriteInputTokens: 30, OutputTokens: 12, TotalTokens: 162}
+	if report.TerminalState != memory.Indexed || len(report.ProposedSource.Usage.Models) != 1 || report.ProposedSource.Usage.Models[0].TokenUsage != want || report.ProposedSource.Usage.TotalTokens != 162 {
+		t.Fatalf("streamed usage was not deduplicated: report=%+v", report)
+	}
+}
+
+func TestAdapterRejectsConflictingUsageForOneMessageID(t *testing.T) {
+	fixture := newFixture(t)
+	body := claudeLine(t, map[string]any{
+		"type": "user", "sessionId": testSessionID, "cwd": fixture.projectRoot, "uuid": "user-1", "timestamp": "2026-09-09T01:00:00Z",
+		"message": map[string]any{"role": "user", "content": "question"},
+	})
+	for index, input := range []int{10, 11} {
+		body += claudeLine(t, map[string]any{
+			"type": "assistant", "sessionId": testSessionID, "cwd": fixture.projectRoot, "uuid": fmt.Sprintf("assistant-%d", index), "timestamp": fmt.Sprintf("2026-09-09T01:00:0%dZ", index+1),
+			"message": map[string]any{"id": "message-conflict", "role": "assistant", "model": "claude-sonnet-4-6", "content": "answer", "usage": map[string]any{"input_tokens": input, "output_tokens": 1}},
+		})
+	}
+	writeSession(t, fixture, body)
+	report := decodeFixtureReport(t, fixture)
+	if report.TerminalState != memory.Unreadable || report.UndecodableRecords != 1 || len(report.ProposedSource.Usage.Models) != 0 || report.ProposedSource.Usage.TotalTokens != 0 {
+		t.Fatalf("conflicting usage identity was accepted: report=%+v", report)
+	}
+	found := false
+	for _, diagnostic := range report.Diagnostics {
+		found = found || diagnostic.Code == "conflicting_accounting_identity"
+	}
+	if !found {
+		t.Fatalf("missing explicit accounting conflict diagnostic: %+v", report.Diagnostics)
+	}
+}
+
+func TestAdapterFallsBackToEnvelopeUUIDForUsageIdentity(t *testing.T) {
+	fixture := newFixture(t)
+	body := claudeLine(t, map[string]any{
+		"type": "user", "sessionId": testSessionID, "cwd": fixture.projectRoot, "uuid": "user-1", "timestamp": "2026-09-09T01:00:00Z",
+		"message": map[string]any{"role": "user", "content": "question"},
+	})
+	for index := 0; index < 2; index++ {
+		body += claudeLine(t, map[string]any{
+			"type": "assistant", "sessionId": testSessionID, "cwd": fixture.projectRoot, "uuid": "assistant-shared", "timestamp": fmt.Sprintf("2026-09-09T01:00:0%dZ", index+1),
+			"message": map[string]any{"role": "assistant", "model": "claude-sonnet-4-6", "content": "answer", "usage": map[string]any{"input_tokens": 10, "output_tokens": 1}},
+		})
+	}
+	writeSession(t, fixture, body)
+	report := decodeFixtureReport(t, fixture)
+	want := accounting.TokenUsage{InputTokens: 10, OutputTokens: 1, TotalTokens: 11}
+	if report.TerminalState != memory.Indexed || len(report.ProposedSource.Usage.Models) != 1 || report.ProposedSource.Usage.Models[0].TokenUsage != want {
+		t.Fatalf("envelope UUID did not deduplicate usage: report=%+v", report)
 	}
 }
 
@@ -243,6 +323,24 @@ func claudeLine(t *testing.T, value any) string {
 		t.Fatal(err)
 	}
 	return string(body) + "\n"
+}
+
+func decodeFixtureReport(t *testing.T, fixture fixture) source.DecodeReport {
+	t.Helper()
+	adapter := fixture.adapter(t)
+	discovery, err := adapter.Discover(context.Background())
+	if err != nil || len(discovery.Candidates) != 1 {
+		t.Fatalf("discover fixture: candidates=%+v err=%v", discovery.Candidates, err)
+	}
+	boundary, err := adapter.Freeze(context.Background(), discovery.Candidates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := adapter.Decode(context.Background(), boundary, func(memory.ObservationRevision) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
 }
 
 func mustTime(t *testing.T, value string) time.Time {

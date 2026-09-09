@@ -187,6 +187,24 @@ func TestNewValidatesDependenciesAndDiscoveryClaimsOnlyCodex(t *testing.T) {
 	}
 }
 
+func TestAdapterReportsMissingSessionsRootAsProviderUnavailable(t *testing.T) {
+	fixture := newAdapterFixture(t)
+	redactor := redact.Default()
+	adapter, err := New(AdapterOptions{
+		SessionsRoot:   filepath.Join(fixture.sessions, "missing"),
+		Bindings:       fixture.bindings,
+		Catalog:        fixture.catalog,
+		Redactor:       &redactor,
+		AdapterVersion: "v1",
+	})
+	if err != nil {
+		t.Fatalf("construct optional Codex adapter: %v", err)
+	}
+	if _, err := adapter.Discover(context.Background()); !errors.Is(err, source.ErrProviderUnavailable) {
+		t.Fatalf("Discover() error=%v, want provider unavailable", err)
+	}
+}
+
 func TestReadVisiblePrefixAuthenticatesProjectAndReadsOnlyFrozenPrefix(t *testing.T) {
 	fixture := newAdapterFixture(t)
 	const sessionID = "12345678-1234-4234-8234-123456789abc"

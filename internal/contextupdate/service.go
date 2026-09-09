@@ -151,21 +151,13 @@ func Run(ctx context.Context, opts Options) (Result, error) {
 		return Result{}, errors.New("sessions root must be an absolute path")
 	}
 	r := redact.Default()
-	adapter, err := codex.New(productionCodexAdapterOptions(sessionsRoot, []projectidentity.Binding{binding}, catalog, &r))
+	claudeSessionsRoot, err := resolveClaudeSessionsRoot(opts.ClaudeSessionsRoot)
 	if err != nil {
-		return Result{}, fmt.Errorf("open source adapter: %w", err)
+		return Result{}, err
 	}
-	adapters := []source.NamedAdapter{{Provider: "codex", Adapter: adapter, Required: true}}
-	claudeSessionsRoot := opts.ClaudeSessionsRoot
-	if claudeSessionsRoot == "" {
-		claudeSessionsRoot, _ = claude.SessionsRoot()
-	}
-	if claudeSessionsRoot != "" {
-		claudeAdapter, claudeErr := claude.New(productionClaudeAdapterOptions(claudeSessionsRoot, []projectidentity.Binding{binding}, catalog, &r))
-		if claudeErr != nil {
-			return Result{}, fmt.Errorf("open Claude source adapter: %w", claudeErr)
-		}
-		adapters = append(adapters, source.NamedAdapter{Provider: "claude", Adapter: claudeAdapter, Required: false})
+	adapters, err := productionSourceAdapters(sessionsRoot, claudeSessionsRoot, []projectidentity.Binding{binding}, catalog, &r)
+	if err != nil {
+		return Result{}, err
 	}
 
 	if err := notifyPhase(opts.PhaseObserver, "discovering"); err != nil {
@@ -418,6 +410,32 @@ func productionClaudeAdapterOptions(sessionsRoot string, bindings []projectident
 		Redactor:       redactor,
 		AdapterVersion: "claude-jsonl-v1",
 	}
+}
+
+func resolveClaudeSessionsRoot(configured string) (string, error) {
+	if configured != "" {
+		return configured, nil
+	}
+	root, err := claude.SessionsRoot()
+	if err != nil {
+		return "", fmt.Errorf("resolve Claude sessions root: %w", err)
+	}
+	return root, nil
+}
+
+func productionSourceAdapters(codexSessionsRoot, claudeSessionsRoot string, bindings []projectidentity.Binding, catalog *sourcecatalog.Catalog, redactor *redact.Redactor) ([]source.NamedAdapter, error) {
+	codexAdapter, err := codex.New(productionCodexAdapterOptions(codexSessionsRoot, bindings, catalog, redactor))
+	if err != nil {
+		return nil, fmt.Errorf("open Codex source adapter: %w", err)
+	}
+	claudeAdapter, err := claude.New(productionClaudeAdapterOptions(claudeSessionsRoot, bindings, catalog, redactor))
+	if err != nil {
+		return nil, fmt.Errorf("open Claude source adapter: %w", err)
+	}
+	return []source.NamedAdapter{
+		{Provider: "codex", Adapter: codexAdapter},
+		{Provider: "claude", Adapter: claudeAdapter},
+	}, nil
 }
 
 func validateCurrentProjectionProject(accepted reviewv2.AcceptedV3, projectID string) error {

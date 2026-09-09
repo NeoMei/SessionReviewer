@@ -32,6 +32,11 @@ type decodedLine struct {
 	time     time.Time
 }
 
+type accountingSample struct {
+	model string
+	usage accounting.TokenUsage
+}
+
 func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit func(memory.ObservationRevision) error) (source.DecodeReport, error) {
 	report := source.DecodeReport{TerminalState: boundary.TerminalState}
 	a.mu.RLock()
@@ -67,6 +72,8 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	}
 	ended := started
 	models := make(map[string]accounting.TokenUsage)
+	accountingByMessage := make(map[string]accountingSample)
+	conflictingAccounting := make(map[string]struct{})
 	projectIDs := make(map[string]struct{})
 	var observations []memory.ObservationRevision
 	var firstConversation *decodedLine
@@ -156,15 +163,26 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		projectIDs[frozen.stored.binding.ProjectID] = struct{}{}
 		if message.Usage != nil {
 			usage, usageErr := tokenUsage(*message.Usage)
-			if usageErr != nil || strings.TrimSpace(message.Model) == "" {
+			identity := message.ID
+			if identity == "" {
+				identity = envelope.UUID
+			}
+			model := strings.TrimSpace(message.Model)
+			if usageErr != nil || model == "" || strings.TrimSpace(identity) == "" {
 				report.UndecodableRecords++
 				report.Diagnostics = appendDiagnostic(report.Diagnostics, "invalid_accounting")
-			} else {
-				current := models[message.Model]
-				if err := addTokenUsage(&current, usage); err != nil {
-					return report, err
+			} else if _, conflicted := conflictingAccounting[identity]; !conflicted {
+				sample := accountingSample{model: model, usage: usage}
+				if prior, exists := accountingByMessage[identity]; exists {
+					if prior != sample {
+						delete(accountingByMessage, identity)
+						conflictingAccounting[identity] = struct{}{}
+						report.UndecodableRecords++
+						report.Diagnostics = appendDiagnostic(report.Diagnostics, "conflicting_accounting_identity")
+					}
+				} else {
+					accountingByMessage[identity] = sample
 				}
-				models[message.Model] = current
 			}
 		}
 		if _, unsupported, contentErr := visibleMessage(decoded); contentErr != nil {
@@ -186,6 +204,19 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 	if firstConversation == nil || len(projectIDs) == 0 {
 		return report, errors.New("Claude boundary has no authenticated conversation records")
 	}
+	accountingIdentities := make([]string, 0, len(accountingByMessage))
+	for identity := range accountingByMessage {
+		accountingIdentities = append(accountingIdentities, identity)
+	}
+	sort.Strings(accountingIdentities)
+	for _, identity := range accountingIdentities {
+		sample := accountingByMessage[identity]
+		current := models[sample.model]
+		if err := addTokenUsage(&current, sample.usage); err != nil {
+			return report, err
+		}
+		models[sample.model] = current
+	}
 	observation := a.sessionStartedObservation(frozen, *firstConversation)
 	if err := memory.ValidateObservationRevision(observation); err != nil {
 		return report, err
@@ -197,7 +228,7 @@ func (a *adapter) Decode(ctx context.Context, boundary source.Boundary, visit fu
 		modelNames = append(modelNames, model)
 	}
 	sort.Strings(modelNames)
-	usage := accounting.SessionUsage{StartedAt: started.Format(time.RFC3339Nano), EndedAt: ended.Format(time.RFC3339Nano), DurationMS: ended.Sub(started).Milliseconds()}
+	usage := accounting.SessionUsage{StartedAt: started.Format(time.RFC3339Nano), EndedAt: ended.Format(time.RFC3339Nano), DurationMS: ended.Sub(started).Milliseconds(), Models: []accounting.ModelUsage{}}
 	for _, model := range modelNames {
 		item := accounting.ModelUsage{Model: model, TokenUsage: models[model]}
 		usage.Models = append(usage.Models, item)

@@ -113,11 +113,13 @@ func New(options AdapterOptions) (source.Adapter, error) {
 		return nil, errors.New("Codex sessions root must be an absolute clean path")
 	}
 	sessionsRoot, err := pathguard.Open(options.SessionsRoot)
-	if err != nil {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("authenticate Codex sessions root: %w", err)
 	}
-	if err := sessionsRoot.Close(); err != nil {
-		return nil, fmt.Errorf("close authenticated Codex sessions root: %w", err)
+	if sessionsRoot != nil {
+		if err := sessionsRoot.Close(); err != nil {
+			return nil, fmt.Errorf("close authenticated Codex sessions root: %w", err)
+		}
 	}
 	if len(options.Bindings) == 0 {
 		return nil, errors.New("at least one authenticated project binding is required")
@@ -185,6 +187,9 @@ func (a *adapter) Discover(ctx context.Context) (source.Discovery, error) {
 	// after metadata in each candidate. Malformed later records remain decoder
 	// diagnostics instead of hiding an otherwise identifiable Session.
 	raw, err := session.Discover(a.sessionsRoot, metadataOnlySelection)
+	if errors.Is(err, os.ErrNotExist) {
+		return source.Discovery{}, source.ErrProviderUnavailable
+	}
 	if err != nil {
 		return source.Discovery{}, err
 	}
