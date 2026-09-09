@@ -2390,6 +2390,10 @@ func convertLegacyApplyRootToV2(t *testing.T, projectRoot string) {
 
 func convertApplyFixtureToLegacy(t *testing.T, projectRoot string) {
 	t.Helper()
+	legacyRoot := filepath.Join(projectRoot, "docs", "session-review")
+	if err := os.MkdirAll(legacyRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	for _, relative := range []string{
 		reviewv2.ReviewRelativePath,
 		reviewv2.HistoryRelativePath,
@@ -2400,7 +2404,7 @@ func convertApplyFixtureToLegacy(t *testing.T, projectRoot string) {
 		}
 	}
 	overview := "---\nid: project-overview\nentity_type: project_overview\nproject_id: " + testProjectID + "\nrevision: 1\nsync_status: synced\n---\n\n# Fixture\n"
-	if err := os.WriteFile(filepath.Join(projectRoot, "docs", "session-review", "project-overview.md"), []byte(overview), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(legacyRoot, "project-overview.md"), []byte(overview), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

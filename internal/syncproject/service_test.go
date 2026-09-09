@@ -747,6 +747,7 @@ func TestSyncProjectServiceAuthenticatesMappingAndReconciles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	writeSyncProjectLegacyFixture(t, projectRoot, "project-1111111111111111")
 	now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
 	initialized, err := project.Initialize(project.InitOptions{
 		ProjectRoot: projectRoot,
@@ -876,6 +877,7 @@ func TestSyncProjectRunNeverAdoptsReviewTargetAtPinToEngineHandoff(t *testing.T)
 					t.Fatal(err)
 				}
 			}
+			writeSyncProjectLegacyFixture(t, projectRoot, "project-6161616161616161")
 			now := time.Date(2026, 8, 29, 8, 0, 0, 0, time.UTC)
 			initialized, err := project.Initialize(project.InitOptions{
 				ProjectRoot: projectRoot, VaultRoot: vaultRoot, DataDir: dataRoot,
@@ -928,6 +930,28 @@ func TestSyncProjectRunNeverAdoptsReviewTargetAtPinToEngineHandoff(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func writeSyncProjectLegacyFixture(t *testing.T, projectRoot, projectID string) {
+	t.Helper()
+	state, err := reviewv2.ProjectLegacy(ledger.State{
+		ProjectID: projectID,
+		CurrentState: ledger.CurrentState{
+			ProjectID: projectID, Revision: 1, Goal: "Fixture", Branch: "main", NextAction: "Sync",
+			LastVerified: "2026-08-29T08:00:00Z", LastUpdated: "2026-08-29T08:00:00Z",
+		},
+		Decisions: map[string]ledger.Decision{}, OpenLoops: map[string]ledger.OpenLoop{}, Sessions: map[string]ledger.SessionReport{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := reviewv2.Render(projectRoot, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ledger.Apply(plan); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/neomei/SessionReviewer/internal/config"
+	"github.com/neomei/SessionReviewer/internal/contextupdate"
 	"github.com/neomei/SessionReviewer/internal/cursor"
 	"github.com/neomei/SessionReviewer/internal/evidence"
 	"github.com/neomei/SessionReviewer/internal/project"
@@ -457,6 +459,63 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, relative := range []string{reviewv2.ReviewRelativePath, reviewv2.HistoryRelativePath, reviewv2.MachineLedgerRelativePath} {
+		if _, statErr := os.Stat(filepath.Join(projectRoot, filepath.FromSlash(relative))); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("fresh init created public review file %s: %v", relative, statErr)
+		}
+	}
+	for _, relative := range []string{"merge-bases", "queue", "transactions", "locks"} {
+		info, statErr := os.Stat(filepath.Join(dataRoot, "projects", first.ProjectID, relative))
+		if statErr != nil || !info.IsDir() {
+			t.Fatalf("fresh init omitted private scaffold %s: %v", relative, statErr)
+		}
+	}
+	second, err := project.Initialize(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configAfter, err := os.ReadFile(fragmentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(loaded.Projects) != 1 || !bytes.Equal(configBefore, configAfter) {
+		t.Fatalf("pre-scan initialization is not idempotent: first=%+v second=%+v projects=%d", first, second, len(loaded.Projects))
+	}
+
+	if err := os.WriteFile(filepath.Join(projectRoot, "README.md"), []byte("# initialized fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"init"}, {"config", "user.email", "fixture@example.invalid"}, {"config", "user.name", "Fixture"}, {"add", "README.md"}, {"commit", "-m", "fixture"}} {
+		command := exec.Command("git", args...)
+		command.Dir = projectRoot
+		if output, runErr := command.CombinedOutput(); runErr != nil {
+			t.Fatalf("git %v: %v: %s", args, runErr, output)
+		}
+	}
+	sessionsRoot, claudeRoot := filepath.Join(t.TempDir(), "sessions"), filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(sessionsRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(claudeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	session := strings.Join([]string{
+		`{"timestamp":"2026-08-22T12:00:00Z","type":"session_meta","payload":{"id":"foundation-init-session","cwd":"` + filepath.ToSlash(projectRoot) + `","source":"codex"}}`,
+		`{"timestamp":"2026-08-22T12:00:01Z","type":"turn_context","payload":{"cwd":"` + filepath.ToSlash(projectRoot) + `","model":"gpt-5"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(sessionsRoot, "foundation-init.jsonl"), []byte(session), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := contextupdate.Run(t.Context(), contextupdate.Options{
+		ProjectID: first.ProjectID, SessionsRoot: sessionsRoot, ClaudeSessionsRoot: claudeRoot, DataRoot: dataRoot,
+		Now: func() time.Time { return time.Date(2026, 8, 22, 12, 1, 0, 0, time.UTC) },
+	}); err != nil {
+		t.Fatal(err)
+	}
 	reviewPaths := []string{
 		reviewv2.ReviewRelativePath,
 		reviewv2.HistoryRelativePath,
@@ -469,23 +528,18 @@ func TestFoundationInitializeIsIdempotentAndRejectsNestedRoots(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	second, err := project.Initialize(opts)
+	third, err := project.Initialize(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	configAfter, _ := os.ReadFile(fragmentPath)
 	for _, relative := range reviewPaths {
 		reviewAfter, readErr := os.ReadFile(filepath.Join(projectRoot, filepath.FromSlash(relative)))
 		if readErr != nil || !bytes.Equal(reviewBefore[relative], reviewAfter) {
 			t.Fatalf("initialization changed %s: %v", relative, readErr)
 		}
 	}
-	loaded, err := config.Load(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first != second || len(loaded.Projects) != 1 || !bytes.Equal(configBefore, configAfter) {
-		t.Fatalf("initialization is not idempotent: first=%+v second=%+v projects=%d", first, second, len(loaded.Projects))
+	if first != third {
+		t.Fatalf("post-scan initialization changed identity: first=%+v third=%+v", first, third)
 	}
 
 	for _, test := range []struct {
