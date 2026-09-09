@@ -10,7 +10,21 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 
 **Overall status: NOT COMPLETE. No merge, release, or completion claim until every applicable requirement below has evidence.** A completed subtask is not product acceptance. No fabricated milestones, problem parents, verification, or price values may fill an empty page.
 
-Authorization update2026-09-08: the user subsequently requested completing all remaining tasks and publishing the code to GitHub, then explicitly requested repeated comprehensive task, code and system/UI review rounds. GitHub integration/release is now authorized only after those gates; earlier checkpoint statements limiting publication authority describe their historical state. The live execution queue and convergence protocol are `2026-09-08-release-execution.md`.
+## Current delivery state — 2026-09-09 resumed
+
+The user approved the functional-package convergence proposal in the current task: “好的，按照你建议的方式继续推进项目”. This supersedes the pause and the former microtask/repeated-full-review execution order. The accepted product requirements remain binding except the previously cancelled new cross-platform expansion and old-project migration. Historical authorization/checkpoints below and in `2026-09-08-release-execution.md` are evidence, not dispatch instructions.
+
+This table is the only current work queue. Update rows in place; put detailed implementation/review outputs in the existing ignored SDD workspace and link durable evidence here. No new plan per small correction.
+
+| Package | User acceptance | State | Current blocker / evidence |
+|---|---|---|---|
+| F1 First use and real-data reading | Fresh init → scan → native Obsidian full Session/history/Q&A/evolution reading; human edit survives rescan | IN PROGRESS | Resume base f3a9a54. Fresh init emits legacy files incompatible with first v4 scan; paused Git directory parser diff retained for this package. Native candidate setup follows CLI fix. |
+| F2 Problem operations | First root, split/placement confirmation, child/sibling/merge/move/reorder, resolve/reopen, reload/rescan preservation | PENDING | Existing types/read-only tree retained; implement complete UI→CLI→publication→readback paths. |
+| F3 Decisions and agreements | Create/edit, explicit extract/status/cancel, confirm/ignore/not-decision/restore, readback and rescan preservation | PENDING | Reuse trusted human publication protections; no automatic Agent calls. |
+| F4 Usage and pricing | ModelPriceWatch fetch/cache/exact route, immutable pricing/supplement and honest offline/unknown UI | PENDING | Validate external input capability early; existing validated snapshot display is not runtime completion. |
+| F5 Completeness and release | Private search, supported event producers, provider parity/source navigation, full regression/review/native acceptance and release targets | PENDING | OpenCode CLI/no-SQLite contract feasibility must be resolved early; no implicit source-contract amendment. All S01–S12 remain applicable. |
+
+Execution rules: one implementation owner per package/shared state; targeted tests during implementation; independent package review and scoped finding re-review; full regressions at integration/release boundaries or justified shared-core changes. Early native actions use the authorized test Vault and real scanned data. Data loss/wrong source/security/implicit-model calls block immediately; current-package flow failures block that package; other spec requirements stay in their package and nonblocking improvements do not preempt the active package. Main human files, prototypes and paused diffs are preserved. Publishing and installation remain separately verified final outcomes after complete acceptance.
 
 ## Binding acceptance matrix
 
@@ -33,7 +47,7 @@ Authorization update2026-09-08: the user subsequently requested completing all r
 
 - UI-only shell restoration does not close S02–S12.
 - Existing subsystem plans remain requirements; any outdated file names/interfaces are adapted to current code, never used to omit behavior.
-- Save RED/GREEN evidence and independent review per task. Final whole-branch review plus actual Obsidian screenshots and action outcomes are separate gates.
+- Save focused RED/GREEN evidence and independent review per functional package. Final whole-branch review plus actual Obsidian screenshots and action outcomes are separate gates.
 - Model calls required for optional-candidate acceptance use controlled test adapters unless the user explicitly requests real model execution; do not spend user tokens as part of routine scanning.
 - Do not auto-install into the real vault before candidate verification and backup; do not publish based on this repair authorization alone.
 

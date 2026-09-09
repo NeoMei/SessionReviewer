@@ -1,3 +1,5 @@
+> HISTORICAL EXECUTION EVIDENCE — superseded on 2026-09-09 by the user-approved functional-package queue in `2026-09-07-spec-restoration.md`. Old current/latest/active labels and checkboxes below are retained for evidence only. Do not dispatch or repeat tests from them. Open requirements and source-contract constraints remain binding unless explicitly adjudicated in the current matrix.
+
 # Remaining spec implementation and GitHub release execution
 
 User authorization2026-09-08: “做完剩下的任务，让代码发布到 github”. Implement all remaining applicable requirements, then integrate and publish a verified release. Do not stop after one bounded task. No release before the spec matrix is satisfied.
