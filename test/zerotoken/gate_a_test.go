@@ -1077,9 +1077,9 @@ func loadGateImportClosure(t *testing.T, repositoryRoot string, roots ...string)
 		command := exec.Command(goExecutable, arguments...)
 		command.Dir = repositoryRoot
 		command.Env = gateGoListEnvironment(os.Environ(), commandRoot, target.goos, target.goarch)
-		output, err := command.Output()
+		output, err := command.CombinedOutput()
 		if err != nil {
-			t.Fatalf("load Gate A production imports for %s: %v", target.label, err)
+			t.Fatalf("load Gate A production imports for %s: %v\n%s", target.label, err, output)
 		}
 		for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
 			fields := strings.Split(line, "\t")

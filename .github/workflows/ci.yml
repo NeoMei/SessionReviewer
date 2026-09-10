@@ -44,6 +44,10 @@ jobs:
           npm run check
       - name: Verify release publisher behavior
         run: node --test scripts/publish-release.test.mjs
+      # The offline import gate inspects every target, including dependencies
+      # that the native Windows build does not otherwise download.
+      - name: Cache complete module graph for offline cross-platform gates
+        run: go mod download
       # Large authenticated scan fixtures need a bounded budget on slower runners.
       - run: go test -timeout 30m ./...
       - name: Repeat review v2 migration and CLI contract tests
