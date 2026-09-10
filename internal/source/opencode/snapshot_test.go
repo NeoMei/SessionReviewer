@@ -33,8 +33,24 @@ func TestSnapshotCommittedWALAndUncommittedTailAreReadOnly(t *testing.T) {
 	if err != nil || afterWAL.Size() <= beforeWAL.Size() {
 		t.Fatalf("fixture did not spill uncommitted WAL frames: %v", err)
 	}
-	before := snapshotDirectoryHashes(t, filepath.Dir(path))
-	err = withSnapshot(context.Background(), path, func(db *sql.DB) error {
+	// Windows enforces SQLite's byte-range locks on the live SHM file, so a
+	// whole-directory hash cannot read it during this write transaction. Keep
+	// the live-writer read below and check every source byte on a detached copy
+	// of the actual DB/WAL (including the uncommitted tail), with a SHM sentinel.
+	copyPath := filepath.Join(t.TempDir(), "opencode.db")
+	for _, suffix := range []string{"", "-wal"} {
+		data, err := os.ReadFile(path + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(copyPath+suffix, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(copyPath+"-shm", []byte("SHM must not be read or changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(db *sql.DB) error {
 		var count int
 		if err := db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil {
 			return err
@@ -46,11 +62,26 @@ func TestSnapshotCommittedWALAndUncommittedTailAreReadOnly(t *testing.T) {
 			t.Error("snapshot allowed write")
 		}
 		return nil
-	})
-	if err != nil {
+	}
+	if err := withSnapshot(context.Background(), path, check); err != nil {
 		t.Fatal(err)
 	}
-	if after := snapshotDirectoryHashes(t, filepath.Dir(path)); !reflect.DeepEqual(before, after) {
+	// The live read must leave the captured main DB and WAL unchanged too.
+	for _, suffix := range []string{"", "-wal"} {
+		before, err := os.ReadFile(copyPath + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		after, err := os.ReadFile(path + suffix)
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("snapshot changed live source %q: %v", suffix, err)
+		}
+	}
+	before := snapshotDirectoryHashes(t, filepath.Dir(copyPath))
+	if err := withSnapshot(context.Background(), copyPath, check); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshotDirectoryHashes(t, filepath.Dir(copyPath)); !reflect.DeepEqual(before, after) {
 		t.Fatal("snapshot changed source contents or directory entries")
 	}
 }
@@ -358,7 +389,13 @@ func TestSnapshotSQLiteWALResetRetainsStaleSuffix(t *testing.T) {
 func TestSnapshotCaptureVerificationRejectsObservedChanges(t *testing.T) {
 	for _, mutation := range []string{"append", "replace", "symlink", "new_sidecar", "remove"} {
 		t.Run(mutation, func(t *testing.T) {
-			path, _ := snapshotWALFixture(t)
+			path, writer := snapshotWALFixture(t)
+			// This test mutates the captured namespace, not an active SQLite
+			// writer. Release SQLite's Windows delete-sharing restriction before
+			// capture; keep the pathguard capture handle open during mutation.
+			if err := writer.Close(); err != nil {
+				t.Fatal(err)
+			}
 			dir, err := pathguard.Open(filepath.Dir(path))
 			if err != nil {
 				t.Fatal(err)
