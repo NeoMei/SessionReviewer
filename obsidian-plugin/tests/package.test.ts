@@ -23,7 +23,9 @@ describe("Obsidian plugin package", () => {
     const manifest = JSON.parse(await readFile(rootManifest, "utf8")) as { description: string };
     expect(manifest).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/manifest.json"), "utf8")));
     expect(manifest.description).not.toMatch(/\bObsidian\b/i);
-    expect(JSON.parse(await readFile(rootVersions, "utf8"))).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/versions.json"), "utf8")));
+    const versions = JSON.parse(await readFile(rootVersions, "utf8")) as Record<string, string>;
+    expect(versions).toEqual(JSON.parse(await readFile(resolve(repository, "obsidian-plugin/versions.json"), "utf8")));
+    expect(versions).toMatchObject({ "0.3.0": "1.8.7", "0.3.1": "1.8.7" });
   });
 
   it.skipIf(process.platform === "win32")("packages only installable assets with matching versions reproducibly", async () => {

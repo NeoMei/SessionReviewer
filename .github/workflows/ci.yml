@@ -42,6 +42,8 @@ jobs:
         run: |
           npm ci
           npm run check
+      - name: Verify release publisher behavior
+        run: node --test scripts/publish-release.test.mjs
       # Large authenticated scan fixtures need a bounded budget on slower runners.
       - run: go test -timeout 30m ./...
       - name: Repeat review v2 migration and CLI contract tests
@@ -152,6 +154,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: test
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
       id-token: write
@@ -208,8 +213,13 @@ jobs:
             dist/main.js
             dist/styles.css
             dist/manifest.json
-      - name: Publish GitHub Release
+      - name: Publish independently verified GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        run: |
+          node scripts/publish-release.mjs \
+            --repo "$GITHUB_REPOSITORY" \
+            --version "$GITHUB_REF_NAME" \
+            --commit "$(git rev-parse HEAD)" \
+            --dist dist

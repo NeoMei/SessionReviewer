@@ -117,6 +117,33 @@ func TestCIExecutesBothReleaseWrappersTwiceAndVerifiesArtifacts(t *testing.T) {
 	}
 }
 
+func TestCIRunsVerifiedReleasePublisherOnlyAfterBuildAndAttestation(t *testing.T) {
+	body, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"node --test scripts/publish-release.test.mjs",
+		"node scripts/publish-release.mjs",
+		`--repo "$GITHUB_REPOSITORY"`,
+		`--version "$GITHUB_REF_NAME"`,
+		`--commit "$(git rev-parse HEAD)"`,
+		"--dist dist",
+		"cancel-in-progress: false",
+	} {
+		if !strings.Contains(text, required) {
+			t.Errorf("CI verified publisher gate missing %q", required)
+		}
+	}
+	build := strings.Index(text, "Build deterministic release archives")
+	attest := strings.Index(text, "Attest build provenance")
+	publish := strings.Index(text, "node scripts/publish-release.mjs")
+	if build < 0 || attest < 0 || publish < 0 || !(build < attest && attest < publish) {
+		t.Fatalf("verified publisher must run after release build and attestation")
+	}
+}
+
 func currentReleaseVersion(t *testing.T) string {
 	t.Helper()
 	body, err := os.ReadFile("../../manifest.json")
