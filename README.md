@@ -26,27 +26,18 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
-### 0.4.2: Session scan records and visible Q/A
+### 0.4.3 candidate: five-page project workflow
 
-The v4 view now includes project switching, paged Session facts, and authenticated
-user/Agent conversations. Long Sessions offer question and message pagination;
-final answers are distinguished from progress updates, without model calls.
-Known Codex usage metadata no longer produces false decode errors. Conversation
-coverage and truncation are explicit; an Agent answer is not execution proof.
+The source candidate restores evolution, problem operations, decision candidates,
+Session search and exact Q/A, and explicit pricing in a responsive five-page view.
+Scanning and reading invoke no Agent; candidate extraction requires an explicit
+request. Codex image attachments retain bounded user text, while incomplete
+source coverage and unknown prices remain visible.
 
-This release adds v4 human-editable Markdown, a cumulative Session index and
-complete accepted history alongside a concise project review. The v4 plugin
-view is read-only: use its native review/history buttons to read or edit allowed
-human fields, then use the CLI for scan/sync. Public-file validation is not private
-acceptance proof; without a CLI, native reading remains available but validation
-and synchronization do not. Legacy inline editors and update buttons described
-below apply only to their supported older formats, not to the v4 Markdown view.
-
-Back up existing review files and accepted local state before upgrading. A rescan
-must be explicitly initiated; it is not permission to delete or overwrite human
-content. This release does not claim real legacy-project migration acceptance or
-the still-planned problem-placement and further Session-summary features.
-See [0.4.2 release notes](https://github.com/NeoMei/SessionReviewer/blob/0.4.2/docs/release/0.4.2.md) for the delivered scope.
+This is a local candidate pending final acceptance, not a public release claim.
+See [0.4.3 candidate notes](docs/release/0.4.3.md) for features, source limits,
+upgrade guidance, and the remaining client/publication gates. The latest public
+release download remains independent of this source version.
 
 Download `main.js`, `manifest.json`, and `styles.css` from the [latest GitHub Release](https://github.com/NeoMei/SessionReviewer/releases/latest). Place the three files in:
 
