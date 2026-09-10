@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -71,7 +72,11 @@ func TestCachePublishesValidatedPairAndUsesStaleFallback(t *testing.T) {
 		if statErr != nil {
 			t.Fatal(statErr)
 		}
-		if info.Mode().Perm()&0o077 != 0 {
+		if (name == "sets" && !info.IsDir()) || (name == "active.json" && !info.Mode().IsRegular()) {
+			t.Fatalf("%s type=%v", name, info.Mode())
+		}
+		// Windows FileMode does not describe access-control permissions.
+		if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("%s mode=%o", name, info.Mode().Perm())
 		}
 	}

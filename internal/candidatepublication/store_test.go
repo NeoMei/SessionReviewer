@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -58,7 +59,11 @@ func TestIntentStoreRetainsPreparedIntentAndUsesRevisionCAS(t *testing.T) {
 		t.Fatalf("terminal rewrite err=%v", err)
 	}
 	info, err := os.Stat(filepath.Join(root, "projects", "project-p", "candidate-publication-problems.json"))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows FileMode does not describe access-control permissions.
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("intent file mode=%v err=%v", info.Mode(), err)
 	}
 }

@@ -35,7 +35,7 @@ func TestExecWrapperSingletonLiteralCommandUsesAttributedStructuredResult(t *tes
 
 func TestExecWrapperBoundLiteralPatchUsesInputTargetsOnly(t *testing.T) {
 	fixture := newAdapterFixture(t)
-	target := filepath.ToSlash(filepath.Join(fixture.projectA, "internal", "wrapped.go"))
+	target := filepath.Join(fixture.projectA, "internal", "wrapped.go")
 	patch := "*** Begin Patch\n*** Add File: internal/wrapped.go\n+package wrapped\n*** End Patch"
 	input := "const r = await tools.apply_patch(" + quotedJSON(t, patch) + ");\ntext(r);"
 	observations, report := decodeToolEnvelopeSessionWithFixture(t, fixture, []map[string]any{

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,11 @@ func TestCandidateStorePersistsCASLifecycleAndPreservesOtherKinds(t *testing.T) 
 		t.Fatalf("unrelated milestone candidate changed: before=%+v after=%+v", beforeMilestone, loaded.Annotations[1])
 	}
 	info, err := os.Stat(filepath.Join(dataRoot, "projects", "project-p", "annotations", "head.json"))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows FileMode does not describe access-control permissions.
+	if !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("private store mode=%v err=%v", info.Mode(), err)
 	}
 }

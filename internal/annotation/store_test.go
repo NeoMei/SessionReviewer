@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
@@ -572,14 +574,50 @@ func TestCandidateStoreRejectsNamespaceReplacementAfterOpen(t *testing.T) {
 	next := cloneStoreFixture(first.Record)
 	next.Annotations[0].Status, next.Annotations[0].Revision = CandidateIgnored, 2
 	annotationPath := filepath.Join(dataRoot, "projects", "project-p", "annotations")
+	headPath := filepath.Join(annotationPath, "head.json")
+	oldHead, err := os.ReadFile(headPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var renameErr error
+	replacementCreated := false
 	store.testHooks.afterImmutableWrite = func() error {
-		if err := os.Rename(annotationPath, annotationPath+"-replaced"); err != nil {
+		renameErr = os.Rename(annotationPath, annotationPath+"-replaced")
+		if renameErr != nil {
+			return renameErr
+		}
+		if err := os.Mkdir(annotationPath, 0o700); err != nil {
 			return err
 		}
-		return os.Mkdir(annotationPath, 0o700)
+		replacementCreated = true
+		return nil
 	}
 	if _, err := store.CompareAndSwap(context.Background(), first.Revision, first.Digest, next); err == nil {
 		t.Fatal("namespace replacement after open was reported as a successful CAS")
+	}
+	if renameErr != nil {
+		// Windows can prevent renaming an open pinned directory. That rejection
+		// must leave the original head authoritative, with no replacement path.
+		const windowsSharingViolation = syscall.Errno(32)
+		if runtime.GOOS != "windows" || (!errors.Is(renameErr, os.ErrPermission) && !errors.Is(renameErr, windowsSharingViolation)) {
+			t.Fatalf("unexpected namespace replacement failure: %v", renameErr)
+		}
+		if _, err := os.Stat(annotationPath + "-replaced"); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("blocked rename created replacement path: %v", err)
+		}
+		currentHead, err := os.ReadFile(headPath)
+		if err != nil || string(currentHead) != string(oldHead) {
+			t.Fatalf("blocked namespace replacement changed head: %v", err)
+		}
+		store.testHooks.afterImmutableWrite = nil
+		loaded, err := store.Load(context.Background())
+		if err != nil || loaded.Revision != first.Revision || loaded.Digest != first.Digest {
+			t.Fatalf("original head lost authority: loaded=%+v err=%v", loaded, err)
+		}
+		return
+	}
+	if !replacementCreated {
+		t.Fatal("replacement namespace was not created")
 	}
 	if _, err := os.Stat(filepath.Join(annotationPath, "head.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("replacement namespace was mutated: %v", err)

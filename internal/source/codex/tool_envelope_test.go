@@ -148,8 +148,8 @@ func TestToolEnvelopeDuplicateIDAcrossLegacyAndModernInvalidatesResults(t *testi
 
 func TestNativePatchRawInputUsesOnlyInputTargetsOnSuccess(t *testing.T) {
 	fixture := newAdapterFixture(t)
-	target := filepath.ToSlash(filepath.Join(fixture.projectA, "internal", "safe.go"))
-	other := filepath.ToSlash(filepath.Join(fixture.projectA, "internal", "stdout-only.go"))
+	target := filepath.Join(fixture.projectA, "internal", "safe.go")
+	other := filepath.Join(fixture.projectA, "internal", "stdout-only.go")
 	patch := "*** Begin Patch\n*** Add File: internal/safe.go\n+package safe\n*** End Patch"
 	observations, _ := decodeToolEnvelopeSessionWithFixture(t, fixture, []map[string]any{
 		{"type": "custom_tool_call", "call_id": "native-patch", "name": "apply_patch", "input": patch},

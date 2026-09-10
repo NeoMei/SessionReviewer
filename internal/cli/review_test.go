@@ -70,8 +70,14 @@ func TestRunReviewAgentConfigurePersistsOnlySuccessfulVerifiedIdentity(t *testin
 		t.Fatalf("configuration=%+v err=%v", configuration, err)
 	}
 	output.Reset()
-	if code := runReview([]string{"agent", "status", "--data-dir", dataRoot, "--json"}, &output, &bytes.Buffer{}); code != 0 || !strings.Contains(output.String(), executable) {
+	if code := runReview([]string{"agent", "status", "--data-dir", dataRoot, "--json"}, &output, &bytes.Buffer{}); code != 0 {
 		t.Fatalf("status code=%d output=%s", code, output.String())
+	}
+	var status struct {
+		Executable string `json:"executable"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &status); err != nil || status.Executable != executable {
+		t.Fatalf("status=%+v err=%v output=%s", status, err, output.String())
 	}
 }
 
