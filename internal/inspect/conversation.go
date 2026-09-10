@@ -167,7 +167,7 @@ func loadConversationSource(ctx context.Context, request ConversationRequest, vi
 	if record.Availability != memory.SourceAvailable {
 		return nil, conversationchain.VisibleCoverage{}, false, false, nil
 	}
-	visible, sourceCoverage, err := readPublishedVisible(ctx, record)
+	visible, sourceCoverage, err := readPublishedVisibleVersion(ctx, record, ruleVersion)
 	if context.Cause(ctx) != nil {
 		return nil, conversationchain.VisibleCoverage{}, false, false, publicError(CodeInvalidArgument, "inspection timed out")
 	}
@@ -203,13 +203,17 @@ func loadConversationSource(ctx context.Context, request ConversationRequest, vi
 }
 
 func readPublishedVisible(ctx context.Context, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
+	return readPublishedVisibleVersion(ctx, record, conversationchain.CurrentSegmentationRuleVersion)
+}
+
+func readPublishedVisibleVersion(ctx context.Context, record memory.SourceRecord, ruleVersion string) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
 	switch record.Provider {
 	case "codex":
 		resolved, err := platform.ResolveSessionsRoot("", platform.CurrentEnv())
 		if err != nil {
 			return nil, conversationchain.VisibleCoverage{}, err
 		}
-		return codex.ReadPublishedVisible(ctx, resolved.Path, record)
+		return codex.ReadPublishedVisibleVersion(ctx, resolved.Path, record, ruleVersion)
 	case "claude":
 		root, err := claude.SessionsRoot()
 		if err != nil {

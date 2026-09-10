@@ -61,7 +61,7 @@ func conversationRuleVersionForSessionView(materializerVersion string) (string, 
 		return "", errors.New("SessionView materializer version is not bound to conversation segmentation")
 	}
 	switch ruleVersion {
-	case conversationchain.LegacySegmentationRuleVersion, conversationchain.NotificationSegmentationRuleVersion, conversationchain.CurrentSegmentationRuleVersion:
+	case conversationchain.LegacySegmentationRuleVersion, conversationchain.NotificationSegmentationRuleVersion, conversationchain.InterruptionSegmentationRuleVersion, conversationchain.CurrentSegmentationRuleVersion:
 		return ruleVersion, nil
 	default:
 		return "", errors.New("SessionView materializer version binds unsupported conversation segmentation")

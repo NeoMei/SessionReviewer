@@ -13,7 +13,8 @@ import (
 const (
 	LegacySegmentationRuleVersion       = "visible-turn-v1"
 	NotificationSegmentationRuleVersion = "visible-turn-v2"
-	CurrentSegmentationRuleVersion      = "visible-turn-v3"
+	InterruptionSegmentationRuleVersion = "visible-turn-v3"
+	CurrentSegmentationRuleVersion      = "visible-turn-v4"
 )
 
 // SourceMessage contains only an authenticated, explicitly visible source
@@ -91,7 +92,7 @@ func VisibleUserTextVersion(text, ruleVersion string) (string, error) {
 		return visibleUserText(text, false, false), nil
 	case NotificationSegmentationRuleVersion:
 		return visibleUserText(text, true, false), nil
-	case CurrentSegmentationRuleVersion:
+	case InterruptionSegmentationRuleVersion, CurrentSegmentationRuleVersion:
 		return visibleUserText(text, true, true), nil
 	default:
 		return "", errors.New("unsupported visible conversation segmentation rule")
@@ -225,10 +226,10 @@ func MaterializeVisible(provider, sessionID, sourceIdentity string, messages []S
 // historical retained chains while applying current envelope classification to
 // newly materialized source.
 func MaterializeVisibleVersion(provider, sessionID, sourceIdentity, ruleVersion string, messages []SourceMessage) ([]VisibleTurn, VisibleCoverage, error) {
-	if ruleVersion != LegacySegmentationRuleVersion && ruleVersion != NotificationSegmentationRuleVersion && ruleVersion != CurrentSegmentationRuleVersion {
+	if ruleVersion != LegacySegmentationRuleVersion && ruleVersion != NotificationSegmentationRuleVersion && ruleVersion != InterruptionSegmentationRuleVersion && ruleVersion != CurrentSegmentationRuleVersion {
 		return nil, VisibleCoverage{}, errors.New("unsupported visible conversation segmentation rule")
 	}
-	turns, coverage := materializeVisible(provider, sessionID, sourceIdentity, messages, ruleVersion != LegacySegmentationRuleVersion, ruleVersion == CurrentSegmentationRuleVersion)
+	turns, coverage := materializeVisible(provider, sessionID, sourceIdentity, messages, ruleVersion != LegacySegmentationRuleVersion, (ruleVersion == InterruptionSegmentationRuleVersion || ruleVersion == CurrentSegmentationRuleVersion))
 	return turns, coverage, nil
 }
 

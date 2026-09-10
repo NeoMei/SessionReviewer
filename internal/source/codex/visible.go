@@ -25,6 +25,10 @@ import (
 
 const maxVisibleRecordBytes = 64 << 10
 
+// Attachment envelopes get a separate bounded admission limit. The extracted
+// visible text retains the normal 64 KiB limit; no image data enters a message.
+const maxVisibleAttachmentBytes = 4 << 20
+
 type visibleSegment struct {
 	relative string
 	file     *os.File
@@ -47,7 +51,19 @@ func (r contextReader) Read(p []byte) (int, error) {
 // logical Session. It hashes exactly the accepted logical prefix while
 // decoding bounded records, never reading newer content into the result.
 func ReadPublishedVisible(ctx context.Context, root string, record memory.SourceRecord) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
+	return ReadPublishedVisibleVersion(ctx, root, record, conversationchain.CurrentSegmentationRuleVersion)
+}
+
+// Historical reads must retain their accepted record-admission policy.
+func ReadPublishedVisibleVersion(ctx context.Context, root string, record memory.SourceRecord, ruleVersion string) ([]conversationchain.SourceMessage, conversationchain.VisibleCoverage, error) {
 	var coverage conversationchain.VisibleCoverage
+	if _, err := conversationchain.VisibleUserTextVersion("", ruleVersion); err != nil {
+		return nil, coverage, err
+	}
+	lineLimit := maxVisibleRecordBytes
+	if ruleVersion == conversationchain.CurrentSegmentationRuleVersion {
+		lineLimit = maxVisibleAttachmentBytes
+	}
 	if ctx == nil || record.Provider != "codex" || record.FrozenBoundary.Location.JSONL == nil {
 		return nil, coverage, errors.New("invalid visible source boundary")
 	}
@@ -104,7 +120,7 @@ func ReadPublishedVisible(ctx context.Context, root string, record memory.Source
 		if err := ctx.Err(); err != nil {
 			return nil, coverage, err
 		}
-		raw, oversized, readErr := readVisibleLine(reader)
+		raw, oversized, readErr := readVisibleLineLimit(reader, lineLimit)
 		if len(raw) == 0 && !oversized && readErr == io.EOF {
 			break
 		}
@@ -124,7 +140,18 @@ func ReadPublishedVisible(ctx context.Context, root string, record memory.Source
 			coverage.MalformedRecords++
 			continue
 		}
+		// Only user messages with image attachments can exceed the normal envelope
+		// limit. Other large records retain their previous incomplete coverage.
+		largeAttachment := len(raw) > maxVisibleRecordBytes
+		if largeAttachment && !isVisibleImageEnvelope(raw) {
+			coverage.OversizedRecords++
+			continue
+		}
 		message, visible, malformed := decodeVisibleRecord(raw)
+		if largeAttachment && len(message.Text) > maxVisibleRecordBytes {
+			coverage.OversizedRecords++
+			continue
+		}
 		if malformed {
 			coverage.MalformedRecords++
 			continue
@@ -278,12 +305,16 @@ func selectedVisibleSegments(ctx context.Context, directory *pathguard.Directory
 }
 
 func readVisibleLine(reader *bufio.Reader) ([]byte, bool, error) {
+	return readVisibleLineLimit(reader, maxVisibleRecordBytes)
+}
+
+func readVisibleLineLimit(reader *bufio.Reader, limit int) ([]byte, bool, error) {
 	var line []byte
 	oversized := false
 	for {
 		chunk, err := reader.ReadSlice('\n')
 		if !oversized {
-			if len(line)+len(chunk) > maxVisibleRecordBytes {
+			if len(line)+len(chunk) > limit {
 				oversized = true
 				line = nil
 			} else {
@@ -295,6 +326,28 @@ func readVisibleLine(reader *bufio.Reader) ([]byte, bool, error) {
 		}
 		return line, oversized, err
 	}
+}
+
+func isVisibleImageEnvelope(raw []byte) bool {
+	var env struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+			} `json:"content"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(raw, &env) != nil || env.Type != "response_item" || env.Payload.Type != "message" || env.Payload.Role != "user" {
+		return false
+	}
+	for _, part := range env.Payload.Content {
+		if part.Type == "input_image" {
+			return true
+		}
+	}
+	return false
 }
 
 func decodeVisibleRecord(raw []byte) (conversationchain.SourceMessage, bool, bool) {
