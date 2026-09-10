@@ -8,7 +8,18 @@ The user explicitly removed cross-platform expansion and old-project migration f
 
 Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`, branch `codex/spec-ui-restoration`. Baseline plugin tests: 22 files, 322 tests pass, 2026-09-07. Main's human review files and brainstorm prototypes are untouched.
 
-**Overall status: 0.4.5 FINAL USER ACCEPTANCE CONFIRMED; REMOTE RELEASE IN PROGRESS.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
+**Overall status: FINAL USER ACCEPTANCE CONFIRMED; WINDOWS RELEASE REPAIR UNDER REMOTE CI.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
+
+## Windows release repair — 2026-09-10
+
+Tag0.4.5 run34487576305 passed all three plugin suites but Windows Go tests failed; no public0.4.5 Release was created. Preserve tags0.4.3–0.4.5. Fix branch4d85ce2 is under three-platform CI run34491856784 before any new release tag.
+
+- ee25c87 fixes a real Windows init reuse defect: pass canonical slash-relative Markdown paths to pathguard rather than converting to Windows separators. Reader safety is unchanged. A focused regression reproduces the Windows path-form rejection and passes after correction.
+- 969dabe corrects native path/JSON/permission assertions, checks authenticated physical root identity, explicitly tests the existing Windows unsupported-launch boundary, and verifies unchanged annotation head when Windows denies namespace replacement.
+- b9563e1 preserves live SQLite writer snapshot checks while moving whole-directory SHM hashing to a detached source copy; capture-mutation fixtures release SQLite's delete-sharing restriction before capture.
+- 4d85ce2 preloads the complete Go module graph before the existing offline four-target dependency gate. An isolated Windows-only module cache reproduced missing Darwin github.com/google/uuid; preload followed by the same offline lookup passes. Dependency allowlists and offline gate remain unchanged.
+
+Affected local tests and Windows cross-compilation passed; these do not certify native Windows execution. Independent scoped review of6af634f..4d85ce2 is CLEAN; native CI remains pending. Main's17 protected human files remain byte-identical. This correction supersedes earlier0.4.5 in-progress statements below.
 
 ## Current delivery state — 2026-09-10 convergence
 
