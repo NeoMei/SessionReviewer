@@ -10,6 +10,12 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 
 **Overall status: FINAL USER ACCEPTANCE CONFIRMED; WINDOWS RELEASE REPAIR UNDER REMOTE CI.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
 
+## CI cost correction — 2026-09-10
+
+The first repair branch34491856784 exposed Intel child build timeouts (Go120s and package60s). 17609cd serializes Vitest files without reducing601 assertions or increasing timeouts; da59ae1 moves dependency prefetch before the real Go frontend producer. Full local plugin passes601tests in16.48s; native Intel remains required.
+
+Old0.4.5 ARM race log shows internal/scan package exhausting30minutes in bulk fixture materialization; no data race was reported. The original65,538-observation integration fixture passed normal native ARM tests (scan263.414s). A bounded race profile confirmed costly materialization rather than deadlock. Replace repeated bulk integration data with lower-only private test budget8 (5+5 success,9 failure) and direct real65536/65537 spool boundary/sticky rejection checks. Production default and public options remain unchanged. Focused race checks pass10tests in6.204s; native full gate remains required. Preserve original failures and profiling evidence. Old failed tag run34487576305 was cancelled after Windows and ARM failure logs were saved.
+
 ## Windows release repair — 2026-09-10
 
 Tag0.4.5 run34487576305 passed all three plugin suites but Windows Go tests failed; no public0.4.5 Release was created. Preserve tags0.4.3–0.4.5. Fix branch4d85ce2 is under three-platform CI run34491856784 before any new release tag.
