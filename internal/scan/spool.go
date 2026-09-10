@@ -36,6 +36,7 @@ type observationSpools struct {
 	run      *pathguard.Directory
 	runLeaf  string
 	maxBytes int64
+	maxCount int
 	observer func(observationSpoolStats)
 
 	mu       sync.Mutex
@@ -102,7 +103,7 @@ func openObservationSpools(ctx context.Context, dataRoot, projectID string, obse
 	}
 	closeProject = false
 	return &observationSpools{
-		project: project, run: run, runLeaf: runLeaf, maxBytes: maxObservationSpoolBytes,
+		project: project, run: run, runLeaf: runLeaf, maxBytes: maxObservationSpoolBytes, maxCount: maxSourceRevisions,
 		observer: observer, spools: make(map[string]*observationSpool),
 	}, nil
 }
@@ -287,7 +288,7 @@ func (spool *observationSpool) append(ctx context.Context, value memory.Observat
 		spool.appendErr = errors.New("spooled observation belongs to a different source")
 		return spool.appendErr
 	}
-	if spool.count >= maxSourceRevisions {
+	if spool.count >= spool.owner.maxCount {
 		spool.appendErr = ErrObservationBudget
 		return spool.appendErr
 	}

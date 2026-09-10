@@ -85,6 +85,7 @@ type Options struct {
 	spoolObserver                func(observationSpoolStats)
 	buildIndex                   func(sessionindex.BuildInput) (sessionindex.Document, error)
 	conversationChainBudgetBytes int64
+	sourceRevisionLimit          int
 }
 
 type frozenTask struct {
@@ -180,6 +181,10 @@ func Run(ctx context.Context, options Options) (result Result, returnedErr error
 	spools, err := openObservationSpools(ctx, options.DataRoot, options.ProjectID, options.spoolObserver)
 	if err != nil {
 		return result, err
+	}
+	// Internal callers may tighten the per-source budget, never raise its default.
+	if options.sourceRevisionLimit > 0 && options.sourceRevisionLimit < maxSourceRevisions {
+		spools.maxCount = options.sourceRevisionLimit
 	}
 	defer func() {
 		if spools != nil {

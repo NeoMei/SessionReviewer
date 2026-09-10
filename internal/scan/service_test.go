@@ -1223,12 +1223,13 @@ func TestRunFreezesOneReferenceTimeForProbeReductionAndManifest(t *testing.T) {
 	}
 }
 
-func TestRunMoreThanGlobalObservationBudgetAcrossSourcesSucceeds(t *testing.T) {
+func TestRunMoreThanPerSourceObservationBudgetAcrossSourcesSucceeds(t *testing.T) {
 	harness := newScanHarness(t)
+	harness.options.sourceRevisionLimit = 8
 	for sourceIndex := 1; sourceIndex <= 2; sourceIndex++ {
 		spec := harness.addSource(sourceIndex, memory.Indexed, scanTestProject)
 		base := spec.observations[0]
-		spec.observations = make([]memory.ObservationRevision, 32769)
+		spec.observations = make([]memory.ObservationRevision, 5)
 		for index := range spec.observations {
 			observation := base
 			observation.Key.Sequence = sourceIndex*100000 + index
@@ -1259,16 +1260,17 @@ func TestRunMoreThanGlobalObservationBudgetAcrossSourcesSucceeds(t *testing.T) {
 		}
 		coverage += len(lineage.ActiveRevisions)
 	}
-	if loadErr != nil || len(manifest.SessionLineages) != 2 || coverage != 65538 {
+	if loadErr != nil || len(manifest.SessionLineages) != 2 || coverage != 10 {
 		t.Fatalf("multi-source observation coverage=%d lineages=%d err=%v", coverage, len(manifest.SessionLineages), loadErr)
 	}
 }
 
 func TestRunSingleSourceObservationBudgetStillFailsClosed(t *testing.T) {
 	harness := newScanHarness(t)
+	harness.options.sourceRevisionLimit = 8
 	spec := harness.addSource(1, memory.Indexed, scanTestProject)
 	base := spec.observations[0]
-	spec.observations = make([]memory.ObservationRevision, maxSourceRevisions+1)
+	spec.observations = make([]memory.ObservationRevision, 9)
 	for index := range spec.observations {
 		observation := base
 		observation.Key.Sequence = index + 1
@@ -1284,6 +1286,13 @@ func TestRunSingleSourceObservationBudgetStillFailsClosed(t *testing.T) {
 	if !errors.Is(err, ErrObservationBudget) || result.Prepared || result.State != Failed {
 		t.Fatalf("single-source budget result=%+v err=%v", result, err)
 	}
+	if _, _, err := harness.store.LoadPrepared(); !errors.Is(err, memorystore.ErrNoPreparedGeneration) {
+		t.Fatalf("budget overflow prepared a generation: %v", err)
+	}
+	if _, found, err := harness.catalog.GetSource("codex", spec.record.SessionID); err != nil || found {
+		t.Fatalf("budget overflow applied source catalog: found=%v err=%v", found, err)
+	}
+	assertNoObservationSpools(t, harness.options.DataRoot, scanTestProject)
 }
 
 func TestRunLaterClockIdenticalScanReusesGenerationAndIndexBytes(t *testing.T) {

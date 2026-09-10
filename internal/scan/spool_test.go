@@ -15,6 +15,52 @@ import (
 	"github.com/neomei/SessionReviewer/internal/projectview"
 )
 
+func TestObservationSpoolDefaultRevisionBoundaryIsPerSourceAndSticky(t *testing.T) {
+	harness := newScanHarness(t)
+	observation := harness.addSource(1, memory.Indexed, scanTestProject).observations[0]
+	spools, err := openObservationSpools(context.Background(), harness.options.DataRoot, scanTestProject, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spools.close()
+	spool, err := spools.create(context.Background(), "codex", "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reach the real default boundary without serializing 65,535 unrelated records.
+	spool.count = 65535
+	if err := spool.append(context.Background(), observation); err != nil {
+		t.Fatalf("65,536th observation was refused: %v", err)
+	}
+	if spool.count != 65536 {
+		t.Fatalf("successful append did not advance boundary count: %d", spool.count)
+	}
+	before, err := os.ReadFile(filepath.Join(spools.run.Path, spool.leaf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := spool.append(context.Background(), observation); !errors.Is(err, ErrObservationBudget) {
+		t.Fatalf("65,537th observation error=%v", err)
+	}
+	spool.count = 0
+	if err := spool.append(context.Background(), observation); !errors.Is(err, ErrObservationBudget) {
+		t.Fatalf("overflow refusal was not sticky: %v", err)
+	}
+	if after, err := os.ReadFile(filepath.Join(spools.run.Path, spool.leaf)); err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("overflow changed spooled bytes: %v", err)
+	}
+	spool.count = 65536
+	other, err := spools.create(context.Background(), "codex", "session-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherObservation := harness.addSource(2, memory.Indexed, scanTestProject).observations[0]
+	other.count = 65535
+	if err := other.append(context.Background(), otherObservation); err != nil {
+		t.Fatalf("one source overflow blocked another source: %v", err)
+	}
+}
+
 func TestObservationSpoolIsPrivateCanonicalBoundedAndCleaned(t *testing.T) {
 	harness := newScanHarness(t)
 	observation := harness.addSource(1, memory.Indexed, scanTestProject).observations[0]
