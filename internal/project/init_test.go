@@ -26,6 +26,35 @@ import (
 	"github.com/neomei/SessionReviewer/internal/sessionindex"
 )
 
+func TestReadCurrentMarkdownProjectionPreservesNestedSlashPaths(t *testing.T) {
+	fixture := seedCurrentMarkdownInitialization(t, true, false)
+	root, err := os.OpenRoot(fixture.project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	before := snapshotCurrentMarkdownPublic(t, fixture)
+
+	projection, found, err := readCurrentMarkdownProjection(root)
+	if err != nil || !found || projection == nil {
+		t.Fatalf("read nested Unicode Markdown projection: found=%v err=%v", found, err)
+	}
+	if projection.projectID != fixture.projectID || len(projection.files) != 4 {
+		t.Fatalf("unexpected projection identity or file count: %+v", projection)
+	}
+	for _, file := range projection.files {
+		if strings.Contains(file.relative, "\\") {
+			t.Fatalf("projection path is not slash-relative: %q", file.relative)
+		}
+		if want, ok := before[filepath.Join(fixture.project, filepath.FromSlash(file.relative))]; !ok || !bytes.Equal(file.body, want) {
+			t.Fatalf("projection snapshot changed bytes for %q", file.relative)
+		}
+	}
+	if after := snapshotCurrentMarkdownPublic(t, fixture); !reflect.DeepEqual(after, before) {
+		t.Fatal("reading current projection changed public files")
+	}
+}
+
 func TestCurrentMarkdownInitializeReusesAcceptedAndPendingDraftWithoutMutation(t *testing.T) {
 	for _, pending := range []bool{false, true} {
 		name := "accepted"

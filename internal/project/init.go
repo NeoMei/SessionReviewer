@@ -1109,7 +1109,8 @@ func readCurrentMarkdownProjection(root *os.Root) (*currentMarkdownProjection, b
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > currentProjectionMax {
 			return nil, true, fmt.Errorf("current Markdown projection file %q is redirected, nonregular, or exceeds its byte limit", relative)
 		}
-		body, err := pathguard.ReadStableRegularRootFile(root, filepath.FromSlash(relative), info, currentProjectionMax)
+		// pathguard accepts canonical slash paths on every platform, including Windows.
+		body, err := pathguard.ReadStableRegularRootFile(root, relative, info, currentProjectionMax)
 		if err != nil {
 			return nil, true, fmt.Errorf("read current Markdown projection file %q: %w", relative, err)
 		}
