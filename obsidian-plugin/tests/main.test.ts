@@ -63,17 +63,19 @@ describe("plugin lifecycle", () => {
     pickerA.dispatchEvent(new Event("change"));
     await new Promise((resolve) => setTimeout(resolve, 0));
     leafA.contentEl.querySelector<HTMLButtonElement>('[data-v4-tab="decisions"]')!.click();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Reload only after the serialized writes have persisted both leaves' final state.
+    await vi.waitFor(() => {
+      expect(stored).toMatchObject({
+        v4ViewStates: {
+          "project-a": { projectId: "project-a", view: "decisions" },
+          "project-b": { projectId: "project-b", view: "usage" }
+        }
+      });
+    });
     await leafA.onClose();
     await leafB.onClose();
 
     expect(maxInFlight).toBe(1);
-    expect(stored).toMatchObject({
-      v4ViewStates: {
-        "project-a": { projectId: "project-a", view: "decisions" },
-        "project-b": { projectId: "project-b", view: "usage" }
-      }
-    });
 
     let createReloaded: ((leaf: WorkspaceLeaf) => ProjectEvolutionView) | undefined;
     const reloaded = new SessionReviewerPlugin({ workspace: {} } as never, {} as never);
