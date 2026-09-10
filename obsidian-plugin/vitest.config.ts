@@ -3,6 +3,9 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    // Real Go wire and TypeScript package builds share the runner CPU/memory.
+    // Keep test files sequential so their compiler children cannot overlap.
+    fileParallelism: false,
     environment: "jsdom",
     clearMocks: true,
     setupFiles: ["./tests/setup.ts"]
