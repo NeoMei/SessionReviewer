@@ -26,7 +26,7 @@ The desktop plugin is marked desktop-only because it invokes the local SessionRe
 
 ## Install the desktop plugin
 
-### 0.4.3: five-page project workflow
+### 0.4.4: five-page project workflow
 
 The source candidate restores evolution, problem operations, decision candidates,
 Session search and exact Q/A, and explicit pricing in a responsive five-page view.
@@ -35,7 +35,7 @@ request. Codex image attachments retain bounded user text, while incomplete
 source coverage and unknown prices remain visible.
 
 Final user acceptance is complete; publication is verified separately through the tag workflow.
-See [0.4.3 release notes](docs/release/0.4.3.md) for features, source limits,
+See [0.4.4 release notes](docs/release/0.4.4.md) for features, source limits,
 upgrade guidance, and the remaining client/publication gates. The latest public
 release download remains independent of this source version.
 

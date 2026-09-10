@@ -676,9 +676,10 @@ describe("v4 scanned Session renderer", () => {
   });
 
   it("applies every local rail filter without CLI, reports invalid dates and clears filters", () => {
+    // The filter uses the viewer's calendar day, including on UTC CI runners.
     const sessions = [
-      sessionFixture({ provider: "codex", session_id: "known-complete", processing_state: "complete", state_reason_codes: [], started_at: "2026-09-07T16:30:00Z", indexed_event_count: 0, session_view_digest: null }),
-      sessionFixture({ provider: "claude", session_id: "known-error", processing_state: "error", source_availability: "unavailable", state_reason_codes: ["source_unavailable"], started_at: "2026-09-06T00:00:00Z", indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "codex", session_id: "known-complete", processing_state: "complete", state_reason_codes: [], started_at: new Date(2026, 8, 8, 0, 30).toISOString(), indexed_event_count: 0, session_view_digest: null }),
+      sessionFixture({ provider: "claude", session_id: "known-error", processing_state: "error", source_availability: "unavailable", state_reason_codes: ["source_unavailable"], started_at: new Date(2026, 8, 6, 12).toISOString(), indexed_event_count: 0, session_view_digest: null }),
       sessionFixture({ provider: "opencode", session_id: "unknown-partial", processing_state: "partial", started_at: null, indexed_event_count: 0, session_view_digest: null })
     ];
     const saveStatePatch = vi.fn<(patch: V4ViewStatePatch) => void>();

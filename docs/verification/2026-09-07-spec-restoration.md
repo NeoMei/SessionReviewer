@@ -8,9 +8,12 @@ The user explicitly removed cross-platform expansion and old-project migration f
 
 Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`, branch `codex/spec-ui-restoration`. Baseline plugin tests: 22 files, 322 tests pass, 2026-09-07. Main's human review files and brainstorm prototypes are untouched.
 
-**Overall status: 0.4.3 FINAL USER ACCEPTANCE CONFIRMED; REMOTE RELEASE IN PROGRESS.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
+**Overall status: 0.4.4 FINAL USER ACCEPTANCE CONFIRMED; REMOTE RELEASE IN PROGRESS.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
 
 ## Current delivery state — 2026-09-10 convergence
+
+**Tag CI correction.** The accepted source1c29c55 was fast-forwarded to main and tagged0.4.3. Tag run34482773599 exposed a test fixture tied to Asia/Shanghai: `2026-09-07T16:30Z` is September8 locally but September7 in UTC, so the local-day filter correctly returned0 rather than the test's1. Reproduced underTZ=UTC; corrected only the two test timestamps to explicit local-calendar dates. UTC and Asia/Shanghai affected2files/56tests both pass, with existing filters/invalid-range assertions unchanged. No product runtime changed. Preserve the failed0.4.3 tag/run; corrected release uses0.4.4 instead of moving an existing tag. Main's17human files retained exact pre-merge hashes. The duplicate same-commit main run was cancelled; the full tag run remains the release gate.
+
 
 The user approved the functional-package convergence proposal in the current task: “好的，按照你建议的方式继续推进项目”. This supersedes the pause and the former microtask/repeated-full-review execution order. The accepted product requirements remain binding except the previously cancelled new cross-platform expansion and old-project migration. Historical authorization/checkpoints below and in `2026-09-08-release-execution.md` are evidence, not dispatch instructions.
 
