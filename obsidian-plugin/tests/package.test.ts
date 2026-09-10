@@ -38,6 +38,7 @@ describe("Obsidian plugin package", () => {
       execFileSync("bash", ["scripts/build-obsidian-plugin.sh", version, dist], {
         cwd: repository,
         env: { ...process.env, SESSION_REVIEWER_PACKAGE_SKIP_CHECK: "1", SOURCE_DATE_EPOCH: "315532800" },
+        timeout: 60_000,
         stdio: "pipe"
       });
     };
@@ -57,5 +58,7 @@ describe("Obsidian plugin package", () => {
     expect(mainJs).not.toMatch(/\/Users\/|AppData|private_error/);
     expect(await readFile(firstArchive)).toEqual(await readFile(join(second, archiveName)));
     expect(await readFile(join(first, "SHA256SUMS"), "utf8")).toEqual(await readFile(join(second, "SHA256SUMS"), "utf8"));
-  }, 30_000);
+  // Two real TypeScript builds can exceed 30 seconds on hosted Intel runners.
+  // Each child remains bounded; allow both builds plus archive verification.
+  }, 150_000);
 });

@@ -12,6 +12,9 @@ Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`,
 
 ## Current delivery state — 2026-09-10 convergence
 
+**0.4.4 CI stability correction.** Tag34483726951 passed the repaired date-filter checks. Intel then exceeded the plugin packaging test's30-second budget; the test invokes two actual TypeScript builds. The correction sets a60-second bound per build and150seconds for the whole test, preserving exact archive/metadata/reproducibility assertions. Windows exposed a fixed20ms wait in the two-leaf save test: the last queued save had not completed. Commit4ad89d6 waits for the existing final persisted-state assertion before reloading, preserving maxInFlight=1 and reload assertions. A15ms-per-save probe reproduced the old failure and passes after correction; original1ms fixture restored. These are test-only changes, not product behavior changes. The failed tag/run is retained in evidence; any retargeting of the not-yet-released0.4.4tag requires explicit user authorization.
+
+
 **Tag CI correction.** The accepted source1c29c55 was fast-forwarded to main and tagged0.4.3. Tag run34482773599 exposed a test fixture tied to Asia/Shanghai: `2026-09-07T16:30Z` is September8 locally but September7 in UTC, so the local-day filter correctly returned0 rather than the test's1. Reproduced underTZ=UTC; corrected only the two test timestamps to explicit local-calendar dates. UTC and Asia/Shanghai affected2files/56tests both pass, with existing filters/invalid-range assertions unchanged. No product runtime changed. Preserve the failed0.4.3 tag/run; corrected release uses0.4.4 instead of moving an existing tag. Main's17human files retained exact pre-merge hashes. The duplicate same-commit main run was cancelled; the full tag run remains the release gate.
 
 
