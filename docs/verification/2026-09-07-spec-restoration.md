@@ -8,9 +8,12 @@ The user explicitly removed cross-platform expansion and old-project migration f
 
 Baseline: `5c5cb7a`; clean isolated worktree `.worktrees/codex-v4-scan-display`, branch `codex/spec-ui-restoration`. Baseline plugin tests: 22 files, 322 tests pass, 2026-09-07. Main's human review files and brainstorm prototypes are untouched.
 
-**Overall status: 0.4.4 FINAL USER ACCEPTANCE CONFIRMED; REMOTE RELEASE IN PROGRESS.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
+**Overall status: 0.4.5 FINAL USER ACCEPTANCE CONFIRMED; REMOTE RELEASE IN PROGRESS.** The user replied “确认” to the concrete final UI and exact Codex Session resume checks in this task. This is user-provided acceptance, not newly observed Terminal automation. OpenCode live-content acceptance remains deferred; known partial-source limits remain explicit. Remote CI/provenance/download/upgrade are separate gates and are not yet claimed complete.
 
 ## Current delivery state — 2026-09-10 convergence
+
+**Current release target:0.4.5.** The user asked to proceed to release and confirmed final acceptance. Instead of awaiting extra permission to rewrite0.4.4, retain both failed tags and publish a new0.4.5. Test-only corrections4ad89d6/7b6683d passed57affected tests and independent scoped review; no product runtime changed. Version/compatibility/release notes are updated together. This supersedes the pending retag question; no existing tag is moved. Full tag CI and official-asset verification still gate publication.
+
 
 **0.4.4 CI stability correction.** Tag34483726951 passed the repaired date-filter checks. Intel then exceeded the plugin packaging test's30-second budget; the test invokes two actual TypeScript builds. The correction sets a60-second bound per build and150seconds for the whole test, preserving exact archive/metadata/reproducibility assertions. Windows exposed a fixed20ms wait in the two-leaf save test: the last queued save had not completed. Commit4ad89d6 waits for the existing final persisted-state assertion before reloading, preserving maxInFlight=1 and reload assertions. A15ms-per-save probe reproduced the old failure and passes after correction; original1ms fixture restored. These are test-only changes, not product behavior changes. The failed tag/run is retained in evidence; any retargeting of the not-yet-released0.4.4tag requires explicit user authorization.
 
